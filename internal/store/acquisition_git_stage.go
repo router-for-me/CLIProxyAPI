@@ -19,11 +19,9 @@ func (s *GitTokenStore) commitAuthSourceLocked(ctx context.Context, message, rel
 	if err := prepareGitPublication(repoDir, relPath, source); err != nil {
 		return err
 	}
-	if err := s.commitSourcesAndPushLocked(ctx, message, false, map[string]string{filepath.ToSlash(relPath): source}, relPath); err != nil {
-		clearGitPublication(repoDir, relPath)
-		return err
-	}
-	return nil
+	// A failed save may also have failed to restore HEAD or the index. Keep the
+	// journal until recovery has inspected the actual Git state.
+	return s.commitSourcesAndPushLocked(ctx, message, false, map[string]string{filepath.ToSlash(relPath): source}, relPath)
 }
 
 // Insert the private staged content directly into Git's index. Worktree.Add
