@@ -109,12 +109,21 @@ type GeminiThoughtSignatureEnvelope string
 
 const (
 	GeminiThoughtSignatureEnvelopeUnknown GeminiThoughtSignatureEnvelope = "unknown"
-	// GeminiThoughtSignatureEnvelopeProtobufField2 is the only replay-safe Gemini
+	// GeminiThoughtSignatureEnvelopeProtobufField2 is a replay-safe Gemini
 	// envelope. The repeated field-1 form emitted by Gemini 2.5 is no longer
 	// recognized: those models are out of scope, and their signatures now fall
 	// through to the bypass sentinel like any other unknown envelope.
 	GeminiThoughtSignatureEnvelopeProtobufField2 GeminiThoughtSignatureEnvelope = "protobuf_field_2"
-	GeminiThoughtSignatureEnvelopeASCIIUUID      GeminiThoughtSignatureEnvelope = "ascii_uuid"
+	// GeminiThoughtSignatureEnvelopeBareTink is the envelope emitted by the
+	// Vertex AI serve path (observed on gemini-4-argon and gemini-3.8-flash via
+	// the Vertex channel, 2026-10-26): the Tink primitive output is carried directly
+	// in the thoughtSignature field with no protobuf wrapper. The decoded payload is
+	// byte 0 = 0x01 (TINK prefix-type), bytes 1..4 = big-endian key id, remainder
+	// ciphertext. Only Vertex accepts it; Antigravity and AI Studio reject it, so
+	// non-Vertex callers must treat it as incompatible
+	// (see IsGeminiVertexBareTinkSignature).
+	GeminiThoughtSignatureEnvelopeBareTink  GeminiThoughtSignatureEnvelope = "bare_tink"
+	GeminiThoughtSignatureEnvelopeASCIIUUID GeminiThoughtSignatureEnvelope = "ascii_uuid"
 )
 
 // GeminiThoughtSignatureInfo describes the locally inspectable properties of an
@@ -450,6 +459,9 @@ func classifyGeminiThoughtSignatureEnvelope(decoded []byte) (GeminiThoughtSignat
 	if isGeminiField2Envelope(decoded) {
 		return GeminiThoughtSignatureEnvelopeProtobufField2, true
 	}
+	if isGeminiBareTinkEnvelope(decoded) {
+		return GeminiThoughtSignatureEnvelopeBareTink, true
+	}
 	return GeminiThoughtSignatureEnvelopeUnknown, false
 }
 
@@ -459,12 +471,62 @@ func isGeminiField2Envelope(decoded []byte) bool {
 }
 
 func inspectGeminiEnvelope(decoded []byte, envelope GeminiThoughtSignatureEnvelope) (recordCount int, opaquePayloadLen int) {
-	if envelope == GeminiThoughtSignatureEnvelopeProtobufField2 {
+	switch envelope {
+	case GeminiThoughtSignatureEnvelopeProtobufField2:
 		if info, ok := inspectGeminiField2Envelope(decoded); ok {
 			return info.RecordCount, info.OpaquePayloadLen
 		}
+	case GeminiThoughtSignatureEnvelopeBareTink:
+		// The whole decoded payload is the Tink primitive output; there is no
+		// inner record separator, so the single record spans the full blob.
+		if isGeminiBareTinkEnvelope(decoded) {
+			return 1, len(decoded)
+		}
 	}
 	return 0, 0
+}
+
+// geminiBareTinkMinLen is the structural floor for a bare Tink payload:
+// one prefix-type byte, a four-byte key id, and at least a 16-byte
+// authentication tag.
+const geminiBareTinkMinLen = 1 + 4 + 16
+
+// geminiVertexBareTinkKeyIDs are the Tink key ids observed on the Vertex AI
+// serve path. Without a protobuf wrapper the ciphertext is indistinguishable
+// from uniform random bytes, so the prefix byte alone would claim about 1/256
+// of any unenveloped payload (xAI encrypted_content, Kimi signatures). Matching
+// the key id as well raises that to 40 fixed bits. A rotated key is simply not
+// recognized and falls back to the bypass sentinel, which is the behavior
+// before bare-Tink recognition existed; add the new id when it is observed.
+var geminiVertexBareTinkKeyIDs = [][4]byte{
+	{0x8f, 0x3d, 0x6b, 0x5f},
+}
+
+// isGeminiBareTinkEnvelope reports whether decoded is the unwrapped Tink
+// primitive output that the Vertex serve path emits as the whole thought
+// signature.
+func isGeminiBareTinkEnvelope(decoded []byte) bool {
+	if len(decoded) < geminiBareTinkMinLen || decoded[0] != 0x01 {
+		return false
+	}
+	keyID := [4]byte(decoded[1:5])
+	for _, known := range geminiVertexBareTinkKeyIDs {
+		if keyID == known {
+			return true
+		}
+	}
+	return false
+}
+
+// IsGeminiVertexBareTinkSignature reports whether rawSignature is a Vertex AI
+// bare-Tink thought signature. Callers sending to Gemini endpoints other than
+// Vertex AI must treat such signatures as incompatible.
+func IsGeminiVertexBareTinkSignature(rawSignature string) bool {
+	info, err := InspectGeminiThoughtSignature(
+		SignaturePayloadWithoutProviderPrefix(rawSignature),
+		GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true},
+	)
+	return err == nil && info.Envelope == GeminiThoughtSignatureEnvelopeBareTink
 }
 
 type geminiEnvelopeInfo struct {
