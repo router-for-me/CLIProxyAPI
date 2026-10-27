@@ -83,10 +83,16 @@ func (s *GitTokenStore) recoverUnpushedPublications(ctx context.Context, repo *g
 			if publicationHash([]byte(content)) != record.SHA256 {
 				return nil
 			}
-			if err := validateManagedTreeChanges(repo, remote.Hash(), head.Hash(), []string{record.Path}); err != nil {
-				return fmt.Errorf("pending credential commit includes other remote differences: %w", err)
+			// Remote can advance after the interrupted save. Its original base defines
+			// which local changes belong to this acquisition.
+			base := remote.Hash()
+			if record.Base != "" {
+				base = plumbing.NewHash(record.Base)
 			}
-			return restoreHeadAndIndex(repo, worktree, plumbing.NewHashReference(head.Name(), remote.Hash()))
+			if err := validateManagedTreeChanges(repo, base, head.Hash(), []string{record.Path}); err != nil {
+				return fmt.Errorf("pending credential commit includes changes outside its recorded path: %w", err)
+			}
+			return restoreHeadAndIndex(repo, worktree, plumbing.NewHashReference(head.Name(), base))
 		}); err != nil {
 			return err
 		}

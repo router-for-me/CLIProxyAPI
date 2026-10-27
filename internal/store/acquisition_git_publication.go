@@ -22,6 +22,7 @@ type gitPublication struct {
 	Path    string `json:"path"`
 	SHA256  string `json:"sha256"`
 	Staging string `json:"staging"`
+	Base    string `json:"base_commit,omitempty"`
 }
 
 func publicationHash(data []byte) string {
@@ -40,11 +41,19 @@ func prepareGitPublication(repoDir, relPath, source string) error {
 	if err != nil {
 		return err
 	}
+	repo, err := git.PlainOpen(repoDir)
+	if err != nil {
+		return err
+	}
+	head, errHead := repo.Head()
+	if err := errors.Join(errHead, repo.Close()); err != nil {
+		return err
+	}
 	path := gitPublicationPath(repoDir, relPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return codex.WriteJSONFileAtomic(path, map[string]any{"path": filepath.ToSlash(relPath), "sha256": publicationHash(data), "staging": source})
+	return codex.WriteJSONFileAtomic(path, map[string]any{"path": filepath.ToSlash(relPath), "sha256": publicationHash(data), "staging": source, "base_commit": head.Hash().String()})
 }
 
 func clearGitPublication(repoDir, relPath string) {
@@ -155,6 +164,9 @@ func readGitPublication(marker, repoDir, authDir string) (gitPublication, error)
 	}
 	if marker != gitPublicationPath(repoDir, record.Path) {
 		return record, fmt.Errorf("credential publication record does not match path")
+	}
+	if record.Base != "" && !plumbing.IsHash(record.Base) {
+		return record, fmt.Errorf("invalid credential publication base")
 	}
 	hash, err := hex.DecodeString(record.SHA256)
 	if err != nil || len(hash) != sha256.Size {
