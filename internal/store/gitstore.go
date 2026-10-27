@@ -1729,9 +1729,14 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	if err != nil {
 		return fmt.Errorf("git token store: open repo: %w", err)
 	}
+	pushed := false
 	defer func() {
 		if errClose := repo.Close(); errClose != nil {
 			errCloseWrap := fmt.Errorf("git token store: close repo: %w", errClose)
+			if pushed {
+				log.Warnf("git token store: push succeeded but repository cleanup failed: %v", errClose)
+				return
+			}
 			if errResult == nil {
 				errResult = errCloseWrap
 			} else {
@@ -1835,6 +1840,7 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 		}
 		return errPush
 	}
+	pushed = true
 	return nil
 }
 
@@ -1956,8 +1962,9 @@ func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repo
 			return fmt.Errorf("git token store: push: %w", errPush)
 		}
 	}
+	// Origin has accepted the commit. A local bookkeeping error cannot undo it.
 	if errReference := repo.Storer.SetReference(plumbing.NewHashReference(remoteName, headRef.Hash())); errReference != nil {
-		return fmt.Errorf("git token store: update remote tracking branch %s: %w", remoteName, errReference)
+		log.Warnf("git token store: push succeeded but updating remote tracking branch %s failed: %v", remoteName, errReference)
 	}
 	s.maybeRunGC(repoDir)
 	return nil
