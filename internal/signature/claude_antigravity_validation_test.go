@@ -16,40 +16,42 @@ func antigravityCAQSFixture(t *testing.T) string {
 }
 
 func TestAntigravityCAQSRecognitionAndReplay(t *testing.T) {
-	sig := antigravityCAQSFixture(t)
-	info, errInspect := InspectAntigravityClaudeCAQSSignature(sig)
-	if errInspect != nil {
-		t.Fatal(errInspect)
-	}
-	if info.EnvelopeVersion != 4 || info.ChannelID != 18 || info.Infrastructure == nil || *info.Infrastructure != 2 || info.BlockKind != "thinking" || info.ModelText != "" || info.SignatureLen != 1020 || !info.SignatureInContainer {
-		t.Fatalf("unexpected envelope: %+v", info)
-	}
-	if !maybeSelfDescribingSignatureEnvelope(sig) || DetectSignatureProvider(sig) != SignatureProviderClaude {
-		t.Fatal("double CAQS must be detected as Claude")
-	}
-	for _, opts := range []ClaudeSignatureValidationOptions{{}, {Strict: true}, {PrefixOnly: true}, {Base64Only: true}} {
-		if !IsValidClaudeThinkingSignature(sig, opts) {
-			t.Fatalf("signature rejected in mode %+v", opts)
+	for _, channelID := range []uint64{16, 17, 18, 19, 20} {
+		sig := signaturetest.AntigravityCAQSWithChannel(channelID)
+		info, errInspect := InspectAntigravityClaudeCAQSSignature(sig)
+		if errInspect != nil {
+			t.Fatalf("channel %d: %v", channelID, errInspect)
 		}
-		normalized, errNormalize := NormalizeClaudeThinkingSignature(sig, opts)
-		if errNormalize != nil || normalized != sig {
-			t.Fatalf("normalization changed the wrapper: %v", errNormalize)
+		if info.EnvelopeVersion != 4 || info.ChannelID != channelID || info.Infrastructure == nil || *info.Infrastructure != 2 || info.BlockKind != "thinking" || info.ModelText != "" || info.SignatureLen != 1020 || !info.SignatureInContainer {
+			t.Fatalf("channel %d: unexpected envelope: %+v", channelID, info)
 		}
-	}
-	if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(sig); !ok || normalized != sig {
-		t.Fatal("Antigravity replay must preserve the original bytes")
-	}
-	for _, target := range []SignatureProvider{SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT, SignatureProviderKimi, SignatureProviderGrok} {
-		if d := DecideSignatureCompatibility(target, sig, SignatureBlockKindClaudeThinking); d.Compatible {
-			t.Errorf("Google wrapper must not be replayed directly to %s", target)
+		if !maybeSelfDescribingSignatureEnvelope(sig) || DetectSignatureProvider(sig) != SignatureProviderClaude {
+			t.Fatalf("channel %d: double CAQS must be detected as Claude", channelID)
 		}
-	}
-	inner, _ := base64.StdEncoding.DecodeString(sig)
-	if !IsValidClaudeCAISSignature(string(inner)) {
-		t.Fatal("inner CAQS is invalid")
-	}
-	if _, ok := CompatibleAntigravityClaudeThinkingSignature(string(inner)); ok {
-		t.Fatal("bare CAQS must not be promoted to Antigravity wire format")
+		for _, opts := range []ClaudeSignatureValidationOptions{{}, {Strict: true}, {PrefixOnly: true}, {Base64Only: true}} {
+			if !IsValidClaudeThinkingSignature(sig, opts) {
+				t.Fatalf("channel %d: signature rejected in mode %+v", channelID, opts)
+			}
+			normalized, errNormalize := NormalizeClaudeThinkingSignature(sig, opts)
+			if errNormalize != nil || normalized != sig {
+				t.Fatalf("channel %d: normalization changed the wrapper: %v", channelID, errNormalize)
+			}
+		}
+		if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(sig); !ok || normalized != sig {
+			t.Fatalf("channel %d: Antigravity replay must preserve the original bytes", channelID)
+		}
+		for _, target := range []SignatureProvider{SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT, SignatureProviderKimi, SignatureProviderGrok} {
+			if d := DecideSignatureCompatibility(target, sig, SignatureBlockKindClaudeThinking); d.Compatible {
+				t.Errorf("channel %d: Google wrapper must not be replayed directly to %s", channelID, target)
+			}
+		}
+		inner, _ := base64.StdEncoding.DecodeString(sig)
+		if !IsValidClaudeCAISSignature(string(inner)) {
+			t.Fatalf("channel %d: inner CAQS is invalid", channelID)
+		}
+		if _, ok := CompatibleAntigravityClaudeThinkingSignature(string(inner)); ok {
+			t.Fatalf("channel %d: bare CAQS must not be promoted to Antigravity wire format", channelID)
+		}
 	}
 }
 
@@ -73,8 +75,14 @@ func TestAntigravityCAQSRejectsMalformedWrappers(t *testing.T) {
 	badField[index+2] = 18
 	futureVersion := append([]byte(nil), raw...)
 	futureVersion[1] = 5
-	wrongChannel := append([]byte(nil), raw...)
-	wrongChannel[index+1] = 16
+	noChannelContainer, _ := extractClaudeBytesField(raw, 2, "container")
+	noChannelBlock, _ := extractClaudeBytesField(noChannelContainer, 1, "channel")
+	// Strip the leading channel_id field (tag 0x08, varint 18) from the channel block.
+	noChannel := protowire.AppendTag(nil, 1, protowire.BytesType)
+	noChannel = protowire.AppendBytes(noChannel, noChannelBlock[2:])
+	noChannel = append(noChannel, noChannelContainer[2+len(noChannelBlock):]...)
+	wrongChannel := protowire.AppendTag([]byte{8, 4}, 2, protowire.BytesType)
+	wrongChannel = protowire.AppendBytes(wrongChannel, noChannel)
 	// Build an otherwise valid CAQS with its signature in the old channel slot.
 	misplaced := defaultClaudeCAISParts("claude-opus-5-5")
 	misplaced.topEnvelope = 4
