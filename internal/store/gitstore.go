@@ -431,7 +431,7 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 }
 
 // Save persists token storage and metadata to the resolved auth file path.
-func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -472,6 +472,12 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
+
+	mirror, errSnapshot := snapshotAcquisitionMirror(ctx, path)
+	if errSnapshot != nil {
+		return "", errSnapshot
+	}
+	defer func() { errResult = mirror.restore(errResult) }()
 
 	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 		if errCodex != nil {
@@ -514,6 +520,10 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		default:
 			return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 		}
+	}
+
+	if errRemember := mirror.rememberWrite(); errRemember != nil {
+		return "", errRemember
 	}
 
 	if auth.Attributes == nil {

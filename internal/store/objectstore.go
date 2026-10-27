@@ -157,7 +157,7 @@ func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath stri
 }
 
 // Save persists authentication metadata to disk and uploads it to the object storage backend.
-func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
 	if auth == nil {
 		return "", fmt.Errorf("object store: auth is nil")
 	}
@@ -191,6 +191,12 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
+
+	mirror, errSnapshot := snapshotAcquisitionMirror(ctx, path)
+	if errSnapshot != nil {
+		return "", errSnapshot
+	}
+	defer func() { errResult = mirror.restore(errResult) }()
 
 	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 		if errCodex != nil {
@@ -233,6 +239,10 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		default:
 			return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
 		}
+	}
+
+	if errRemember := mirror.rememberWrite(); errRemember != nil {
+		return "", errRemember
 	}
 
 	if auth.Attributes == nil {

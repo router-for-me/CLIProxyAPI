@@ -208,7 +208,7 @@ func (s *PostgresStore) WorkDir() string {
 func (s *PostgresStore) SetBaseDir(string) {}
 
 // Save persists authentication metadata to disk and PostgreSQL.
-func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, errResult error) {
 	if auth == nil {
 		return "", fmt.Errorf("postgres store: auth is nil")
 	}
@@ -242,6 +242,12 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
+
+	mirror, errSnapshot := snapshotAcquisitionMirror(ctx, path)
+	if errSnapshot != nil {
+		return "", errSnapshot
+	}
+	defer func() { errResult = mirror.restore(errResult) }()
 
 	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
 		if errCodex != nil {
@@ -284,6 +290,10 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		default:
 			return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
 		}
+	}
+
+	if errRemember := mirror.rememberWrite(); errRemember != nil {
+		return "", errRemember
 	}
 
 	if auth.Attributes == nil {
