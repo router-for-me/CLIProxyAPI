@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -711,6 +713,13 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 	}
 
+	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
+	if errMsg != nil && errors.As(errMsg.Error, &turnErr) && turnErr.EventID != "" {
+		payload, errSet = sjson.SetBytes(payload, "error.event_id", turnErr.EventID)
+		if errSet != nil {
+			return nil, errSet
+		}
+	}
 	return payload, nil
 }
 
