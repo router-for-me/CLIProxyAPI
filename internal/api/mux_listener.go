@@ -3,6 +3,7 @@ package api
 import (
 	"net"
 	"sync"
+	"time"
 )
 
 type muxListener struct {
@@ -45,6 +46,44 @@ func (l *muxListener) Put(conn net.Conn) error {
 	case l.connCh <- conn:
 		return nil
 	}
+}
+
+func (l *muxListener) putWithTimeout(conn net.Conn, timeout time.Duration) error {
+	if conn == nil {
+		return nil
+	}
+	if timeout <= 0 {
+		return l.Put(conn)
+	}
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return net.ErrClosed
+	}
+	l.inFlight.Add(1)
+	l.mu.Unlock()
+	defer l.inFlight.Done()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-l.closeCh:
+		return net.ErrClosed
+	case l.connCh <- conn:
+		return nil
+	case <-timer.C:
+		return net.ErrClosed
+	}
+}
+
+func (l *muxListener) isClosed() bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
 }
 
 func (l *muxListener) Accept() (net.Conn, error) {

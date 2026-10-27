@@ -3,11 +3,13 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -111,14 +113,14 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:          "small known size json in error-only mode",
+			name:          "small known size json skipped for eager capture in error-only mode",
 			loggerEnabled: false,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("{}")),
 				ContentLength: 2,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name:          "large known size skipped in error-only mode",
@@ -712,5 +714,107 @@ func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing
 	}
 	if parsed.Version() != 7 {
 		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
+	}
+}
+
+// streamingZstdBomb is a small zstd body (a stream frame with a 1 MiB window, as zstd makes from a pipe) that expands to
+// size bytes of zeros.
+func streamingZstdBomb(t *testing.T, size int) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	encoder, errNewWriter := zstd.NewWriter(&out, zstd.WithEncoderLevel(zstd.SpeedBestCompression), zstd.WithWindowSize(1<<20))
+	if errNewWriter != nil {
+		t.Fatal(errNewWriter)
+	}
+	chunk := make([]byte, 1<<20)
+	for written := 0; written < size; written += len(chunk) {
+		if _, errWrite := encoder.Write(chunk); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	return out.Bytes()
+}
+
+func captureOf(t *testing.T, body []byte, limit int64) (captured, restored []byte) {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Encoding", "zstd")
+	if limit != 0 {
+		c.Set("maxRequestBodyBytes", limit)
+	}
+	info, errCapture := captureRequestInfo(c, true)
+	if errCapture != nil {
+		t.Fatal(errCapture)
+	}
+	restored, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	return info.Body, restored
+}
+
+// A small zstd body that expands past the capture bound is decoded to at most the bound when no max-request-body-bytes is
+// configured (the capture runs before authentication), or to the configured limit when that is smaller; the request body is
+// restored for the handler either way. 40 MiB is enough to pass the 32 MiB bound without a heavy fixture.
+func TestCaptureRequestInfoBoundsZstdExpansionWithoutAConfiguredLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	bomb := streamingZstdBomb(t, 40<<20)
+	if int64(len(bomb)) > maxErrorOnlyCapturedRequestBodyBytes {
+		t.Fatalf("the probe body is %d bytes, over the 1 MiB capture bound", len(bomb))
+	}
+	marker := int64(len("\n[DECOMPRESSED REQUEST BODY TRUNCATED]"))
+	for _, c := range []struct{ limit, bound int64 }{{0, maxDeferredErrorRequestBodyBytes}, {-1, maxDeferredErrorRequestBodyBytes}, {1 << 40, maxDeferredErrorRequestBodyBytes}, {4096, 4096}} {
+		captured, restored := captureOf(t, bomb, c.limit)
+		if int64(len(captured)) > c.bound+marker || int64(len(captured)) < c.bound {
+			t.Fatalf("limit %d: captured %d bytes, want the bound %d plus the marker", c.limit, len(captured), c.bound)
+		}
+		if !bytes.HasSuffix(captured, []byte("[DECOMPRESSED REQUEST BODY TRUNCATED]")) {
+			t.Fatalf("limit %d: no truncation marker", c.limit)
+		}
+		if !bytes.Equal(restored, bomb) {
+			t.Fatalf("limit %d: the request body was not restored for the handler (%d bytes)", c.limit, len(restored))
+		}
+	}
+}
+
+// The classic bomb (one segment frame that declares its whole content as its window, 49 KB for 512 MiB) is not decoded at all: its
+// window is past the bound, so the raw bytes are logged and nothing large is allocated.
+func TestCaptureRequestInfoDoesNotDecodeASingleSegmentBomb(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if errNewWriter != nil {
+		t.Fatal(errNewWriter)
+	}
+	bomb := encoder.EncodeAll(make([]byte, 64<<20), nil)
+	if int64(len(bomb)) > maxErrorOnlyCapturedRequestBodyBytes {
+		t.Fatalf("the probe body is %d bytes", len(bomb))
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	captured, restored := captureOf(t, bomb, 0)
+	runtime.ReadMemStats(&after)
+	if !bytes.Equal(captured, bomb) || !bytes.Equal(restored, bomb) {
+		t.Fatalf("the raw bytes must be logged and restored, captured %d restored %d", len(captured), len(restored))
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 16<<20 {
+		t.Fatalf("decoding a window-bomb allocated %d MiB", grown>>20)
+	}
+}
+
+// A frame that declares a window past the bound is not decoded: the raw bytes are logged and nothing large is allocated.
+func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
+	// `printf '{"model":"gpt-5"}' | zstd --long=24`-style frame declaring a 16 MiB window.
+	raw, errDecode := hex.DecodeString("28b52ffd0470b900007b226d6f64656c223a226770742d362e312d736f6c227d2a82afeb")
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	got := decodeCapturedRequestBodyForLogWithLimit(raw, "zstd", 1<<20)
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("an oversized window must leave the raw bytes, got %q", got)
 	}
 }

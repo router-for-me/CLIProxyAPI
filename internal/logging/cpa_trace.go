@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,13 @@ func CPATraceIDMiddleware() gin.HandlerFunc {
 type cpaTraceResponseWriter struct {
 	gin.ResponseWriter
 	state *cpaTraceState
+}
+
+func (w *cpaTraceResponseWriter) Unwrap() http.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
 }
 
 func (w *cpaTraceResponseWriter) WriteHeader(statusCode int) {

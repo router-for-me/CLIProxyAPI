@@ -112,10 +112,28 @@ observability:
 		}
 	})
 
-	t.Run("unauthenticated chunked body with request-log enabled is bounded and returns 413", func(t *testing.T) {
+	t.Run("unauthenticated chunked body with request-log enabled returns 401 without reading body", func(t *testing.T) {
 		counter := &countingBodyReader{reader: strings.NewReader(strings.Repeat("b", 1024))}
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", io.NopCloser(counter))
 		req.ContentLength = -1
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+		if got := counter.read.Load(); got != 0 {
+			t.Fatalf("bytes read before auth rejection = %d, want 0", got)
+		}
+	})
+
+	t.Run("authenticated chunked body with request-log enabled is bounded and returns 413", func(t *testing.T) {
+		counter := &countingBodyReader{reader: strings.NewReader(strings.Repeat("b", 1024))}
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", io.NopCloser(counter))
+		req.ContentLength = -1
+		req.Header.Set("Authorization", "Bearer test-key")
 		req.Header.Set("Content-Type", "application/json")
 		rr := httptest.NewRecorder()
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	log "github.com/sirupsen/logrus"
@@ -45,6 +46,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	if reader == nil {
 		reader = bufio.NewReader(conn)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(muxSniffDeadline))
 
 	clientIP, localClient := resolveRemoteIP(conn.RemoteAddr())
 	authed := false
@@ -148,6 +150,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				continue
 			}
 			authed = true
+			_ = conn.SetReadDeadline(time.Time{})
 			_ = writeRedisSimpleString(writer, "OK")
 			if !flush() {
 				return

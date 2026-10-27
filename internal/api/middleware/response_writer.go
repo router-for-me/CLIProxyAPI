@@ -4,9 +4,11 @@
 package middleware
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -48,6 +50,7 @@ type ResponseWriterWrapper struct {
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	hijacked            bool                       // hijacked reports whether the underlying connection was hijacked.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
 }
 
@@ -61,6 +64,21 @@ type ResponseWriterWrapper struct {
 //
 // Returns:
 //   - A pointer to a new ResponseWriterWrapper.
+func (w *ResponseWriterWrapper) Unwrap() http.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
+}
+
+func (w *ResponseWriterWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, errHijack := w.ResponseWriter.Hijack()
+	if errHijack == nil {
+		w.hijacked = true
+	}
+	return conn, rw, errHijack
+}
+
 func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger, requestInfo *RequestInfo) *ResponseWriterWrapper {
 	return &ResponseWriterWrapper{
 		ResponseWriter: w,
@@ -77,6 +95,7 @@ func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger
 // CRITICAL: This method prioritizes writing to the client to ensure zero latency,
 // handling logging operations subsequently.
 func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
+	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	// Ensure headers are captured before first write
 	// This is critical because Write() may trigger WriteHeader() internally
 	w.ensureHeadersCaptured()
@@ -110,13 +129,7 @@ func (w *ResponseWriterWrapper) FlushError() error {
 	return httpwire.FlushResponse(w.ResponseWriter)
 }
 
-func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
-	if w.logger != nil && w.logger.IsEnabled() {
-		return true
-	}
-	if !w.logOnErrorOnly {
-		return false
-	}
+func (w *ResponseWriterWrapper) effectiveStatusCode() int {
 	status := w.statusCode
 	if status == 0 {
 		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
@@ -125,6 +138,37 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 			status = http.StatusOK
 		}
 	}
+	return status
+}
+
+func (w *ResponseWriterWrapper) hasUnconsumedRequestBody() bool {
+	if w == nil || w.requestInfo == nil {
+		return false
+	}
+	if len(w.requestInfo.Body) > 0 {
+		return false
+	}
+	if w.requestInfo.deferredBodyCapture != nil {
+		return !w.requestInfo.deferredBodyCapture.isComplete()
+	}
+	return false
+}
+
+func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCode int) {
+	if !w.hijacked && statusCode >= http.StatusOK && w.hasUnconsumedRequestBody() {
+		w.ResponseWriter.Header().Set("Connection", "close")
+		_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
+func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
+	if w.logger != nil && w.logger.IsEnabled() {
+		return true
+	}
+	if !w.logOnErrorOnly {
+		return false
+	}
+	status := w.effectiveStatusCode()
 	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
 }
 
@@ -132,6 +176,7 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 // Some handlers (and fmt/io helpers) write via io.StringWriter; without this override, those writes
 // bypass Write() and would be missing from request logs.
 func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
+	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	w.ensureHeadersCaptured()
 
 	// CRITICAL: Write to client first (zero latency)
@@ -161,6 +206,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 // and initializes the appropriate logging mechanism (standard or streaming).
 func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
+	w.closeConnectionIfRequestBodyUnconsumed(statusCode)
 
 	// Capture response headers using the new method
 	w.captureCurrentHeaders()
@@ -175,7 +221,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 			w.requestInfo.URL,
 			w.requestInfo.Method,
 			w.requestInfo.Headers,
-			w.requestInfo.Body,
+			w.currentCapturedRequestBody(),
 			w.requestInfo.RequestID,
 		)
 		if err == nil {
@@ -237,12 +283,37 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 	}
 
 	// Only fall back to request payload hints when Content-Type is not set yet.
-	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return bytes.Contains(w.requestInfo.Body, []byte(`"stream": true`)) ||
-			bytes.Contains(w.requestInfo.Body, []byte(`"stream":true`))
+	if body := w.currentCapturedRequestBody(); len(body) > 0 {
+		return bytes.Contains(body, []byte(`"stream": true`)) ||
+			bytes.Contains(body, []byte(`"stream":true`))
 	}
 
 	return false
+}
+
+func (w *ResponseWriterWrapper) currentCapturedRequestBody() []byte {
+	if w == nil || w.requestInfo == nil {
+		return nil
+	}
+	if len(w.requestInfo.Body) > 0 {
+		return w.requestInfo.Body
+	}
+	if w.requestInfo.deferredBodyCapture == nil || w.requestInfo.deferredBodyCapture.bytesRead == 0 {
+		return nil
+	}
+	body, _, errRead := w.requestInfo.deferredBodyCapture.Bytes()
+	if errRead != nil || len(body) == 0 {
+		return nil
+	}
+	encoding := ""
+	for key, values := range w.requestInfo.Headers {
+		if strings.EqualFold(key, "Content-Encoding") && len(values) > 0 {
+			encoding = values[0]
+			break
+		}
+	}
+	w.requestInfo.Body = decodeCapturedRequestBodyForLogWithLimit(body, encoding, maxDeferredErrorRequestBodyBytes)
+	return w.requestInfo.Body
 }
 
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
