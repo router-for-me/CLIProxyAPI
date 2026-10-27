@@ -509,6 +509,11 @@ func TestAdvertiserAndBrowser_Integration(t *testing.T) {
 	browser := NewZeroconfBrowser(ifaces...)
 	results, err := browser.Browse(browseCtx, DefaultServiceType, DefaultDomain)
 	if err != nil {
+		// Some platforms (notably windows/amd64) cannot open mDNS sockets;
+		// the live browse cannot run there, only outside such environments.
+		if strings.Contains(err.Error(), "open mDNS sockets") {
+			t.Skipf("skipping live multicast browse: %v", err)
+		}
 		t.Fatalf("browse failed: %v", err)
 	}
 
