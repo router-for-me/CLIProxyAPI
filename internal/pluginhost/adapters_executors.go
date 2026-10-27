@@ -499,24 +499,6 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
 	nativeOpts.ResponseFormat = outputFormat
-	usageObservation := helps.NewPluginUsageObservation(outputFormat.String())
-	if a.pluginID == "cursor-next" && requestedFormat == sdktranslator.FormatOpenAIResponse && usageObservation != nil {
-		// Counting is read-only and happens after outbound payload finalization.
-		// Native Responses input is normalized separately so instructions and
-		// input history participate without changing the provider's actual body.
-		prompt := nativeReq.Payload
-		if inputFormat != sdktranslator.FormatOpenAI {
-			translated := sdktranslator.TranslateRequestEnvelope(context.Background(), inputFormat, sdktranslator.FormatOpenAI, sdktranslator.RequestEnvelope{
-				Format: inputFormat, Model: baseModel, Stream: opts.Stream, Body: prompt,
-			})
-			if translated.Err != nil {
-				prompt = nil
-			} else {
-				prompt = translated.Body
-			}
-		}
-		usageObservation.ConfigureClientContextEstimate(prompt)
-	}
 
 	return preparedExecutorCall{
 		req:              nativeReq,
@@ -525,7 +507,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		requestedFormat:  requestedFormat,
 		inputFormat:      inputFormat,
 		outputFormat:     outputFormat,
-		usageObservation: usageObservation,
+		usageObservation: helps.NewPluginUsageObservation(outputFormat.String()),
 	}, nil
 }
 
