@@ -165,7 +165,7 @@ func writeBytes(path string, data []byte) error {
 // ReconciledDirectory retires publication records after startup has loaded an
 // authoritative backend snapshot. Callers must exclude concurrent saves.
 func ReconciledDirectory(dir string) error {
-	return filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+	return fs.WalkDir(os.DirFS(dir), ".", func(relative string, entry fs.DirEntry, err error) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -173,10 +173,10 @@ func ReconciledDirectory(dir string) error {
 			return err
 		}
 		if entry.IsDir() && entry.Name() == DirectoryName {
-			if err := os.RemoveAll(path); err != nil {
+			if err := os.RemoveAll(filepath.Join(dir, filepath.FromSlash(relative))); err != nil {
 				return err
 			}
-			return filepath.SkipDir
+			return fs.SkipDir
 		}
 		return nil
 	})

@@ -467,7 +467,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	// was deliberately removed. Login and migration callers explicitly mark the
 	// save when creating a missing disabled credential is intentional.
 	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
-		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		if _, statErr := authpublication.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
 	}
