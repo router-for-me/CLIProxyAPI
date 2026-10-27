@@ -48,6 +48,7 @@ type GitTokenStore struct {
 	lastGC    time.Time
 	pullFn    func(ctx context.Context, worktree *git.Worktree, pullOpts *git.PullOptions) error
 	pushFn    func(ctx context.Context, repo *git.Repository, pushOpts *git.PushOptions) error
+	openFn    func(path string) (*git.Repository, error)
 }
 
 type resolvedRemoteBranch struct {
@@ -1725,7 +1726,11 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	if repoDir == "" {
 		return fmt.Errorf("git token store: repository path not configured")
 	}
-	repo, err := git.PlainOpen(repoDir)
+	openRepo := git.PlainOpen
+	if s.openFn != nil {
+		openRepo = s.openFn
+	}
+	repo, err := openRepo(repoDir)
 	if err != nil {
 		return fmt.Errorf("git token store: open repo: %w", err)
 	}
@@ -1760,6 +1765,27 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	if errHead != nil && !errors.Is(errHead, plumbing.ErrReferenceNotFound) {
 		return fmt.Errorf("git token store: get base head: %w", errHead)
 	}
+	var unbornBranch plumbing.ReferenceName
+	if baseRef == nil {
+		head, errReference := repo.Reference(plumbing.HEAD, false)
+		if errReference != nil {
+			return fmt.Errorf("git token store: inspect unborn HEAD: %w", errReference)
+		}
+		if head.Type() != plumbing.SymbolicReference || !head.Target().IsBranch() {
+			return fmt.Errorf("git token store: unborn HEAD does not name a branch")
+		}
+		unbornBranch = head.Target()
+	}
+	// Every unpublished mutation belongs to this attempt, including index changes
+	// made before Commit and failures while inspecting or rewriting its result.
+	defer func() {
+		if errResult == nil || pushed {
+			return
+		}
+		if errRestore := restoreUnpublishedGitState(repo, worktree, baseRef, unbornBranch); errRestore != nil {
+			errResult = errors.Join(errResult, fmt.Errorf("git token store: restore unpublished state: %w", errRestore))
+		}
+	}()
 	if errHead == nil {
 		if errReset := resetIndexToHead(repo, worktree); errReset != nil {
 			return fmt.Errorf("git token store: reset index before commit: %w", errReset)
@@ -1814,13 +1840,6 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	}
 	if baseRef != nil {
 		if errValidate := validateManagedTreeChanges(repo, baseRef.Hash(), commitHash, managedPaths); errValidate != nil {
-			errRestore := restoreHeadAndIndex(repo, worktree, baseRef)
-			if errRestore != nil {
-				return errors.Join(
-					fmt.Errorf("git token store: validate commit tree: %w", errValidate),
-					fmt.Errorf("git token store: restore head after rejected commit: %w", errRestore),
-				)
-			}
 			return fmt.Errorf("git token store: validate commit tree: %w", errValidate)
 		}
 	}
@@ -1832,12 +1851,6 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 		return errRewrite
 	}
 	if errPush := s.pushRepositoryLocked(ctx, repo, repoDir, allowMissingRemote); errPush != nil {
-		if baseRef == nil {
-			return errPush
-		}
-		if errRestore := restoreHeadAndIndex(repo, worktree, baseRef); errRestore != nil {
-			return errors.Join(errPush, fmt.Errorf("git token store: restore head after rejected push: %w", errRestore))
-		}
 		return errPush
 	}
 	pushed = true
@@ -1917,6 +1930,17 @@ func restoreHeadAndIndex(repo *git.Repository, worktree *git.Worktree, head *plu
 	return worktree.Reset(&git.ResetOptions{Mode: git.MixedReset, Commit: head.Hash()})
 }
 
+func restoreUnpublishedGitState(repo *git.Repository, worktree *git.Worktree, base *plumbing.Reference, unbornBranch plumbing.ReferenceName) error {
+	if base != nil {
+		return restoreHeadAndIndex(repo, worktree, base)
+	}
+	errRemove := repo.Storer.RemoveReference(unbornBranch)
+	if errors.Is(errRemove, plumbing.ErrReferenceNotFound) {
+		errRemove = nil
+	}
+	return errors.Join(errRemove, repo.Storer.SetIndex(&gitindex.Index{Version: 2}))
+}
+
 func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repository, repoDir string, allowMissingRemote bool) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1926,9 +1950,6 @@ func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repo
 	}
 	headRef, errHead := repo.Head()
 	if errHead != nil {
-		if errors.Is(errHead, plumbing.ErrReferenceNotFound) {
-			return nil
-		}
 		return fmt.Errorf("git token store: get head for push: %w", errHead)
 	}
 	if !headRef.Name().IsBranch() {
