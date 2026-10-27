@@ -44,6 +44,8 @@ const (
 	SelectedAuthIndexMetadataKey = "selected_auth_index"
 	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
+	// FinalizedResponseFormatCallbackMetadataKey carries an optional callback invoked with the effective response_format after payload rules.
+	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.

@@ -2,9 +2,11 @@ package helps
 
 import (
 	"context"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/tidwall/gjson"
 )
 
 // PayloadFinalizer applies user rules to a fully prepared business payload.
@@ -17,8 +19,16 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 	requestPath := PayloadRequestPath(opts)
 	headers := opts.Headers.Clone()
 	source := append([]byte(nil), original...)
+	var formatCallback func(string)
+	if opts.Metadata != nil {
+		formatCallback, _ = opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string))
+	}
 	return func(body []byte) []byte {
-		return ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		if formatCallback != nil {
+			formatCallback(strings.TrimSpace(gjson.GetBytes(out, buildPayloadPath(root, "response_format")).String()))
+		}
+		return out
 	}
 }
 

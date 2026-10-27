@@ -422,10 +422,16 @@ func xaiImagesRef(imageURL string) []byte {
 }
 
 func buildXAIImagesBaseRequest(model string, prompt string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
+	return buildXAIImagesOriginalBaseRequest(model, prompt, normalizeImagesResponseFormat(responseFormat), aspectRatio, resolution, quality, n)
+}
+
+func buildXAIImagesOriginalBaseRequest(model string, prompt string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
 	req := []byte(`{}`)
 	req, _ = sjson.SetBytes(req, "model", canonicalXAIImagesModel(model))
 	req, _ = sjson.SetBytes(req, "prompt", strings.TrimSpace(prompt))
-	req, _ = sjson.SetBytes(req, "response_format", normalizeImagesResponseFormat(responseFormat))
+	if rf := strings.TrimSpace(responseFormat); rf != "" {
+		req, _ = sjson.SetBytes(req, "response_format", normalizeImagesResponseFormat(rf))
+	}
 	if aspectRatio != "" {
 		req, _ = sjson.SetBytes(req, "aspect_ratio", aspectRatio)
 	}
@@ -458,8 +464,22 @@ func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, responseForm
 	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
 }
 
-func buildXAIImagesEditRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
-	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
+func buildXAIImagesGenerationsOriginalRequest(rawJSON []byte, model string) []byte {
+	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
+	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
+	aspectRatio := xaiImagesAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
+	aspectRatio = xaiImagesAspectRatioFromSize(size, aspectRatio)
+	resolution := xaiImagesResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, "")
+	quality := strings.TrimSpace(gjson.GetBytes(rawJSON, "quality").String())
+	n := int64(0)
+	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
+		n = v.Int()
+	}
+	return buildXAIImagesOriginalBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
+}
+
+func appendXAIImagesEditRefs(req []byte, images []string) []byte {
 	trimmedImages := make([]string, 0, len(images))
 	for _, img := range images {
 		if strings.TrimSpace(img) != "" {
@@ -474,6 +494,16 @@ func buildXAIImagesEditRequest(model string, prompt string, images []string, res
 		req, _ = sjson.SetRawBytes(req, "images.-1", xaiImagesRef(img))
 	}
 	return req
+}
+
+func buildXAIImagesEditRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
+	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
+	return appendXAIImagesEditRefs(req, images)
+}
+
+func buildXAIImagesEditOriginalRequest(model string, prompt string, images []string, responseFormat string, aspectRatio string, resolution string, quality string, n int64) []byte {
+	req := buildXAIImagesOriginalBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
+	return appendXAIImagesEditRefs(req, images)
 }
 
 func collectXAIImagesFromJSON(rawJSON []byte) []string {
@@ -742,7 +772,8 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	if isXAIImagesModel(imageModel) {
 		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
-		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_generation", stream)
+		originalReq := buildXAIImagesGenerationsOriginalRequest(rawJSON, imageModel)
+		h.handleXAIImages(c, xaiReq, originalReq, imageModel, responseFormat, "image_generation", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -876,7 +907,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		images = append(images, dataURL)
 	}
 
-	responseFormat := strings.TrimSpace(c.PostForm("response_format"))
+	rawResponseFormat := strings.TrimSpace(c.PostForm("response_format"))
+	responseFormat := rawResponseFormat
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
@@ -904,7 +936,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		quality := strings.TrimSpace(c.PostForm("quality"))
 		n := parseIntField(c.PostForm("n"), 0)
 		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, quality, n)
-		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
+		originalReq := buildXAIImagesEditOriginalRequest(imageModel, prompt, images, rawResponseFormat, aspectRatio, resolution, quality, n)
+		h.handleXAIImages(c, xaiReq, originalReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -1019,7 +1052,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+	rawResponseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
+	responseFormat := rawResponseFormat
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
@@ -1043,7 +1077,8 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		}
 		aspectRatio, resolution, quality, n := xaiImagesEditOptionsFromJSON(rawJSON)
 		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, quality, n)
-		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
+		originalReq := buildXAIImagesEditOriginalRequest(imageModel, prompt, images, rawResponseFormat, aspectRatio, resolution, quality, n)
+		h.handleXAIImages(c, xaiReq, originalReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}
 	if isOpenAICompatImagesModel(imageModel) {
@@ -1230,12 +1265,12 @@ func buildImagesAPIResponseFromXAI(payload []byte, responseFormat string) ([]byt
 	return out, nil
 }
 
-func (h *OpenAIAPIHandler) handleXAIImages(c *gin.Context, xaiReq []byte, imageModel string, responseFormat string, streamPrefix string, stream bool) {
+func (h *OpenAIAPIHandler) handleXAIImages(c *gin.Context, xaiReq []byte, originalReq []byte, imageModel string, responseFormat string, streamPrefix string, stream bool) {
 	if stream {
-		h.streamXAIImages(c, xaiReq, imageModel, responseFormat, streamPrefix)
+		h.streamXAIImages(c, xaiReq, originalReq, imageModel, responseFormat, streamPrefix)
 		return
 	}
-	h.collectXAIImages(c, xaiReq, imageModel, responseFormat)
+	h.collectXAIImages(c, xaiReq, originalReq, imageModel, responseFormat)
 }
 
 func (h *OpenAIAPIHandler) handleOpenAICompatImages(c *gin.Context, compatReq []byte, imageModel string, responseFormat string, streamPrefix string, stream bool) {
@@ -1522,18 +1557,28 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 	}
 }
 
-func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, imageModel string, responseFormat string) {
+func (h *OpenAIAPIHandler) collectXAIImages(c *gin.Context, xaiReq []byte, originalReq []byte, imageModel string, responseFormat string) {
 	model := strings.TrimSpace(imageModel)
 	if model == "" {
 		model = strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
 	}
-	h.collectImagesWithModel(c, xaiReq, h.routingXAIImagesModel(model), responseFormat)
+	h.collectImagesWithModelAndOriginal(c, xaiReq, originalReq, h.routingXAIImagesModel(model), responseFormat)
 }
 
 func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string) {
+	h.collectImagesWithModelAndOriginal(c, imageReq, nil, model, responseFormat)
+}
+
+func (h *OpenAIAPIHandler) collectImagesWithModelAndOriginal(c *gin.Context, imageReq []byte, originalReq []byte, model string, responseFormat string) {
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if len(originalReq) > 0 {
+		cliCtx = handlers.WithOriginalRequest(cliCtx, originalReq)
+	}
+	cliCtx = handlers.WithFinalizedResponseFormatCallback(cliCtx, func(finalizedFormat string) {
+		responseFormat = finalizedFormat
+	})
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	model = strings.TrimSpace(model)
@@ -1562,15 +1607,15 @@ func (h *OpenAIAPIHandler) collectImagesWithModel(c *gin.Context, imageReq []byt
 	cliCancel(nil)
 }
 
-func (h *OpenAIAPIHandler) streamXAIImages(c *gin.Context, xaiReq []byte, imageModel string, responseFormat string, streamPrefix string) {
+func (h *OpenAIAPIHandler) streamXAIImages(c *gin.Context, xaiReq []byte, originalReq []byte, imageModel string, responseFormat string, streamPrefix string) {
 	model := strings.TrimSpace(imageModel)
 	if model == "" {
 		model = strings.TrimSpace(gjson.GetBytes(xaiReq, "model").String())
 	}
-	h.streamImagesWithModel(c, xaiReq, h.routingXAIImagesModel(model), responseFormat, streamPrefix)
+	h.streamImagesWithModel(c, xaiReq, originalReq, h.routingXAIImagesModel(model), responseFormat, streamPrefix)
 }
 
-func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte, model string, responseFormat string, streamPrefix string) {
+func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte, originalReq []byte, model string, responseFormat string, streamPrefix string) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
@@ -1583,16 +1628,24 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	if len(originalReq) > 0 {
+		cliCtx = handlers.WithOriginalRequest(cliCtx, originalReq)
+	}
 	model = strings.TrimSpace(model)
 	type imageStreamResult struct {
 		resp            []byte
 		upstreamHeaders http.Header
 		errMsg          *interfaces.ErrorMessage
+		responseFormat  string
 	}
 	resultChan := make(chan imageStreamResult, 1)
 	go func() {
-		resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(cliCtx, xaiImagesHandlerType, model, imageReq, "")
-		resultChan <- imageStreamResult{resp: resp, upstreamHeaders: upstreamHeaders, errMsg: errMsg}
+		effectiveFormat := responseFormat
+		execCtx := handlers.WithFinalizedResponseFormatCallback(cliCtx, func(finalizedFormat string) {
+			effectiveFormat = finalizedFormat
+		})
+		resp, upstreamHeaders, errMsg := h.ExecuteImageWithAuthManager(execCtx, xaiImagesHandlerType, model, imageReq, "")
+		resultChan <- imageStreamResult{resp: resp, upstreamHeaders: upstreamHeaders, errMsg: errMsg, responseFormat: effectiveFormat}
 	}()
 
 	rawStopKeepAlive, keepAliveC := h.newImagesPreFirstTokenKeepAliveTicker()
@@ -1646,7 +1699,7 @@ func (h *OpenAIAPIHandler) streamImagesWithModel(c *gin.Context, imageReq []byte
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), result.upstreamHeaders)
 
 			eventName := streamPrefix + ".completed"
-			responseFormat = normalizeImagesResponseFormat(responseFormat)
+			responseFormat = normalizeImagesResponseFormat(result.responseFormat)
 			for _, img := range results {
 				data := []byte(`{"type":""}`)
 				data, _ = sjson.SetBytes(data, "type", eventName)
