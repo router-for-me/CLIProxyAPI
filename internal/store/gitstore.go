@@ -404,6 +404,10 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 			}
 		}
 		if !repositoryRecovered {
+			if errReplay := recoverGitPublications(ctx, repo, repoDir, s.baseDir); errReplay != nil {
+				s.dirLock.Unlock()
+				return fmt.Errorf("git token store: replay acquired credentials: %w", errReplay)
+			}
 			if errRestore := restoreMissingTrackedFiles(repo, repoDir); errRestore != nil {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: restore tracked worktree files: %w", errRestore)
@@ -539,7 +543,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		}
 
 		return nil
-	})
+	}, func() { clearGitPublication(s.repoDirSnapshot(), relPath) })
 	if errPersist != nil {
 		return "", errPersist
 	}

@@ -307,7 +307,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			return err
 		}
 		return nil
-	})
+	}, nil)
 	if errPersist != nil {
 		return "", errPersist
 	}

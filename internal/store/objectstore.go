@@ -252,7 +252,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 			return err
 		}
 		return nil
-	})
+	}, nil)
 	if errPersist != nil {
 		return "", errPersist
 	}

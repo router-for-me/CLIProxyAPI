@@ -15,7 +15,15 @@ func (s *GitTokenStore) commitAuthSourceLocked(ctx context.Context, message, rel
 	if source == path {
 		return s.commitAndPushContextLocked(ctx, message, relPath)
 	}
-	return s.commitSourcesAndPushLocked(ctx, message, false, map[string]string{filepath.ToSlash(relPath): source}, relPath)
+	repoDir := s.repoDirSnapshot()
+	if err := prepareGitPublication(repoDir, relPath, source); err != nil {
+		return err
+	}
+	if err := s.commitSourcesAndPushLocked(ctx, message, false, map[string]string{filepath.ToSlash(relPath): source}, relPath); err != nil {
+		clearGitPublication(repoDir, relPath)
+		return err
+	}
+	return nil
 }
 
 // Insert the private staged content directly into Git's index. Worktree.Add
