@@ -314,7 +314,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, st
 // cannot receive when it leaves a user turn with nothing to send.
 func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	enableThoughtTranslate := true
-	rawJSON := inputRawJSON
+	// The internal commentary marker must be restored as assistant text before
+	// any thinking handling, so it is never dropped or treated as reasoning.
+	rawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
 	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
 		return buildAntigravityWebSearchRequest(modelName, rawJSON), nil
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,7 @@ type homeSubscriberSupervisor struct {
 
 	publisherMu   sync.Mutex
 	publisherDone <-chan struct{}
+	publishedAt   atomic.Pointer[time.Time]
 }
 
 func (s *homeSubscriberSupervisor) setPublisherCompletion(done <-chan struct{}) {
@@ -490,6 +492,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 	}()
 
 	var previousClient *home.Client
+	var retryBackoff homeSubscriberRetryBackoff
 	registry := executionregistry.New()
 	cancelBound := atomic.Int64{}
 	cancelBound.Store(int64(internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound))
@@ -511,6 +514,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 	}()
 	for homeCtx.Err() == nil {
 		supervisor.setPublisherCompletion(nil)
+		supervisor.publishedAt.Store(nil)
 		client := previousClient
 		if client == nil {
 			client = home.New(homeCfg)
@@ -559,6 +563,8 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 		}, func() {
 			readyOnce.Do(func() { close(ready) })
 		})
+		// Exclude draining and retry waits from the successful subscription lifetime.
+		endedAt := time.Now()
 		plannedRebalance := errors.Is(errRun, home.ErrRebalanceRequested)
 		settleBound := time.Duration(cancelBound.Load())
 		var errPending error
@@ -610,12 +616,17 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 				releaseFlusher = home.NewReleaseFlusher(nil, nil)
 				registry.SetReleaseSink(releaseFlusher.MarkDirty)
 			}
-			if errors.Is(errRun, home.ErrRebalanceRequested) {
+			var healthyFor time.Duration
+			if publishedAt := supervisor.publishedAt.Load(); publishedAt != nil {
+				healthyFor = endedAt.Sub(*publishedAt)
+			}
+			retryDelay := retryBackoff.next(healthyFor, plannedRebalance, rand.Float64())
+			if plannedRebalance {
 				log.Info("home config subscription reconnecting for load balance")
 			} else {
-				log.WithError(errRun).Warn("home config subscription lifetime ended")
+				log.Warnf("home config subscription lifetime ended; retrying in %s: %v", retryDelay, errRun)
 			}
-			if !published.Load() && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
+			if retryDelay > 0 && !waitForHomeSubscriberRetry(homeCtx, retryDelay) {
 				return
 			}
 			previousClient = client
@@ -718,6 +729,10 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 				}
 				s.homeLogForwarder.Bind(client)
 				s.homeLogForwarderClient = client
+				if supervisor != nil {
+					now := time.Now()
+					supervisor.publishedAt.Store(&now)
+				}
 				published.Store(true)
 				return true
 			}

@@ -34,9 +34,10 @@ func InspectAntigravityClaudeCAQSSignature(rawSignature string) (*ClaudeCAISSign
 	if errInspect != nil {
 		return nil, fmt.Errorf("invalid Antigravity CAQS payload: %w", errInspect)
 	}
-	// Scope this new replay shape to the observed Google thinking channel.
-	// Other versions/channels require their own capture and replay verification.
-	if info.EnvelopeVersion != 4 || info.ChannelID != 18 ||
+	// Scope this replay shape to the Google thinking envelope schema.
+	// ChannelID rotates across upstream key/channel generations (e.g. 18 -> 19)
+	// and is already required to be present as a varint by inspectClaudeCAISPayload.
+	if info.EnvelopeVersion != 4 ||
 		info.Infrastructure == nil || *info.Infrastructure != 2 ||
 		info.BlockKind != "thinking" || !info.SignatureInContainer {
 		return nil, fmt.Errorf("unsupported Antigravity CAQS envelope or channel schema")

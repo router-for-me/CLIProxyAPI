@@ -34,6 +34,15 @@ server:
   # Default is 0 (disabled / no limit).
   max-request-body-bytes: 0
 
+  # Negotiated compression of downstream HTTP responses (including SSE streams).
+  # Responses are compressed only when the client advertises zstd or gzip in
+  # Accept-Encoding; WebSocket upgrades are never wrapped.
+  response-compression:
+    # Default: true.
+    enabled: true
+    # Non-streaming responses smaller than this many bytes are sent uncompressed.
+    min-bytes: 1024
+
   # Global token for GitHub requests (for example, release and asset downloads).
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
@@ -58,6 +67,9 @@ server:
 
   # Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
   # When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
+  # TXT records follow draft-su-ai-gateway-discovery-00:
+  #   txtvers, path, tls, auth, protocols, auth_type, product, id, role
+  # The TXT protocols list mirrors the advertised subtypes. Management endpoints are never advertised.
   # NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.
   # To broadcast across the physical LAN, run the container with host networking (--net=host / network_mode: host).
   discovery:
@@ -70,12 +82,12 @@ server:
     #   - "_messages"
     #   - "_generate-content"
     #   - "_interactions"
+    #   # Optional extended subtypes: _completions, _responses-ws, _realtime, _images,
+    #   # _videos, _audio, _count-tokens, _search
     # interfaces:
     #   include: []                     # White-listed interfaces (empty: auto-detect physical interfaces)
     #   exclude: []                     # Additional interface patterns to exclude
-    # auth-required: true               # Advertise that credentials are required
-
-    # advertise-management: false      # Advertise management availability
+    # auth-required: true               # Advertise auth=1 (credentials required)
 
 # Management API settings
 management:
@@ -342,6 +354,17 @@ upstream:
     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
     # Keeps one upstream account/model per socket; accepted input is never replayed.
     response-steering: false
+    # Compress request bodies sent to the ChatGPT Codex backend with zstd,
+    # mirroring the official Codex client. Applies only to OAuth credentials
+    # targeting https://chatgpt.com/backend-api/codex (API-key credentials,
+    # custom base URLs, and SIWC requests are never compressed). A 400/415
+    # rejection is retried once with an uncompressed body. Default: false.
+    upstream-request-compression: false
+    # Request bodies smaller than this many bytes are sent uncompressed.
+    upstream-request-compression-min-bytes: 1024
+    # Enable permessage-deflate compression on Codex WebSocket connections
+    # (upstream and downstream) after negotiation. Default: true.
+    websocket-compression: true
     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
     disable-codex-cloaking: false
     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,

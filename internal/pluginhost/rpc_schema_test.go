@@ -162,6 +162,116 @@ func TestRPCCapabilitiesIncludeModelRouter(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeRequestInterceptorOmitBody(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{}, nil
+			}),
+			RequestInterceptorOmitBodyBefore: true,
+			RequestInterceptorOmitBodyAfter:  true,
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.RequestInterceptor {
+		t.Fatal("RequestInterceptor = false, want true")
+	}
+	if !caps.RequestInterceptorOmitBodyBefore || !caps.RequestInterceptorOmitBodyAfter {
+		t.Fatal("RequestInterceptorOmitBody flags not propagated")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["request_interceptor_omit_body_before"] != true {
+		t.Fatalf("request_interceptor_omit_body_before = %#v, want true", decoded["request_interceptor_omit_body_before"])
+	}
+	if decoded["request_interceptor_omit_body_after"] != true {
+		t.Fatalf("request_interceptor_omit_body_after = %#v, want true", decoded["request_interceptor_omit_body_after"])
+	}
+}
+
+func TestRPCRequestInterceptorOmitsBodyOnTheWireForSchema7(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		omitBefore bool
+		omitAfter  bool
+		wantBefore int
+		wantAfter  int
+	}{
+		{name: "both phases", omitBefore: true, omitAfter: true, wantBefore: 0, wantAfter: 0},
+		{name: "before only", omitBefore: true, wantBefore: 0, wantAfter: len("request")},
+		{name: "after only", omitAfter: true, wantBefore: len("request"), wantAfter: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &phaseRecordingInterceptor{}
+			plugin := validTestPlugin("omit-wire")
+			plugin.Capabilities.RequestInterceptor = recorder
+			plugin.Capabilities.RequestInterceptorOmitBodyBefore = tc.omitBefore
+			plugin.Capabilities.RequestInterceptorOmitBodyAfter = tc.omitAfter
+			lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+			lookup.schemaVersion = pluginabi.SchemaVersionRequestInterceptorOmitBody
+
+			registered, errRegister := registerRPCPlugin(context.Background(), nil, "omit-wire", lookup, pluginabi.MethodPluginRegister, nil)
+			if errRegister != nil {
+				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+			}
+			if registered.SchemaVersion != pluginabi.SchemaVersionRequestInterceptorOmitBody {
+				t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersionRequestInterceptorOmitBody)
+			}
+			if registered.Capabilities.RequestInterceptorOmitBodyBefore != tc.omitBefore || registered.Capabilities.RequestInterceptorOmitBodyAfter != tc.omitAfter {
+				t.Fatalf("registered omit flags = before:%v after:%v, want before:%v after:%v", registered.Capabilities.RequestInterceptorOmitBodyBefore, registered.Capabilities.RequestInterceptorOmitBodyAfter, tc.omitBefore, tc.omitAfter)
+			}
+			host := newHostWithRecords(capabilityRecord{id: "omit-wire", plugin: registered})
+			_ = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-before", Body: []byte("request")})
+			if recorder.beforeCalls != 1 {
+				t.Fatalf("wire before calls = %d, want 1", recorder.beforeCalls)
+			}
+			if recorder.beforeGot.RequestID != "req-before" {
+				t.Fatalf("wire before RequestID = %q, want req-before", recorder.beforeGot.RequestID)
+			}
+			if len(recorder.beforeGot.Body) != tc.wantBefore {
+				t.Fatalf("wire before body len = %d, want %d", len(recorder.beforeGot.Body), tc.wantBefore)
+			}
+			_ = host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-after", Body: []byte("request")})
+			if recorder.afterCalls != 1 {
+				t.Fatalf("wire after calls = %d, want 1", recorder.afterCalls)
+			}
+			if recorder.afterGot.RequestID != "req-after" {
+				t.Fatalf("wire after RequestID = %q, want req-after", recorder.afterGot.RequestID)
+			}
+			if len(recorder.afterGot.Body) != tc.wantAfter {
+				t.Fatalf("wire after body len = %d, want %d", len(recorder.afterGot.Body), tc.wantAfter)
+			}
+		})
+	}
+}
+
+type phaseRecordingInterceptor struct {
+	beforeGot   pluginapi.RequestInterceptRequest
+	afterGot    pluginapi.RequestInterceptRequest
+	beforeCalls int
+	afterCalls  int
+}
+
+func (p *phaseRecordingInterceptor) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	p.beforeCalls++
+	p.beforeGot = req
+	return pluginapi.RequestInterceptResponse{}, nil
+}
+
+func (p *phaseRecordingInterceptor) InterceptRequestAfterAuth(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	p.afterCalls++
+	p.afterGot = req
+	return pluginapi.RequestInterceptResponse{}, nil
+}
+
 func TestRPCCapabilitiesIncludeQuotaProvider(t *testing.T) {
 	plugin := pluginapi.Plugin{
 		Capabilities: pluginapi.Capabilities{
@@ -469,5 +579,62 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 	}
 	if _, ok := gotCandidate.Metadata["drop"]; ok {
 		t.Fatalf("scheduler candidate metadata drop survived sanitize: %#v", gotCandidate.Metadata)
+	}
+}
+
+func TestRPCSchedulerAndUsageSelectionIDCompatibility(t *testing.T) {
+	pickReq := pluginapi.SchedulerPickRequest{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+		Options: pluginapi.SchedulerOptions{
+			Metadata: map[string]any{
+				pluginapi.SelectionIDMetadataKey: "sel-rpc-123",
+			},
+		},
+	}
+	rawPick, errMarshalPick := json.Marshal(sanitizePluginRequest(pickReq))
+	if errMarshalPick != nil {
+		t.Fatalf("Marshal(SchedulerPickRequest) error = %v", errMarshalPick)
+	}
+	var decodedPick pluginapi.SchedulerPickRequest
+	if errUnmarshalPick := json.Unmarshal(rawPick, &decodedPick); errUnmarshalPick != nil {
+		t.Fatalf("Unmarshal(SchedulerPickRequest) error = %v", errUnmarshalPick)
+	}
+	if got := decodedPick.Options.Metadata[pluginapi.SelectionIDMetadataKey]; got != "sel-rpc-123" {
+		t.Fatalf("decodedPick selection_id = %#v, want %q", got, "sel-rpc-123")
+	}
+
+	usageRec := pluginapi.UsageRecord{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		RequestID:   "req-1",
+		TraceID:     "trace-1",
+		SelectionID: "sel-rpc-123",
+	}
+	rawUsage, errMarshalUsage := json.Marshal(usageRec)
+	if errMarshalUsage != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshalUsage)
+	}
+	var decodedUsage pluginapi.UsageRecord
+	if errUnmarshalUsage := json.Unmarshal(rawUsage, &decodedUsage); errUnmarshalUsage != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshalUsage)
+	}
+	if decodedUsage.SelectionID != "sel-rpc-123" {
+		t.Fatalf("decodedUsage.SelectionID = %q, want %q", decodedUsage.SelectionID, "sel-rpc-123")
+	}
+
+	// Old plugins compiled against a legacy UsageRecord without SelectionID must still unmarshal cleanly.
+	type legacyUsageRecord struct {
+		Provider  string
+		Model     string
+		RequestID string
+		TraceID   string
+	}
+	var legacy legacyUsageRecord
+	if errLegacy := json.Unmarshal(rawUsage, &legacy); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecord) error = %v", errLegacy)
+	}
+	if legacy.Provider != "openai" || legacy.RequestID != "req-1" || legacy.TraceID != "trace-1" {
+		t.Fatalf("legacyUsageRecord = %+v", legacy)
 	}
 }

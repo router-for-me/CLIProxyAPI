@@ -30,6 +30,11 @@ func TestKimiThinkingReplayModelFamily(t *testing.T) {
 		{model: "kimi-k3", want: "k3"},
 		{model: "k3-256k", want: "k3"},
 		{model: "kimi-k3-256k(high)", want: "k3"},
+		{model: "k3.1-pro", want: "k3.1-pro"},
+		{model: "k3.1-pro-highspeed", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro-highspeed(max)", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro[1m](high)", want: "k3.1-pro"},
 		{model: "kimi-k2.7-code", want: "kimi-for-coding"},
 		{model: "kimi-k2.7-code-highspeed", want: "kimi-for-coding-highspeed"},
 		{model: "kimi-k2.8", want: "kimi-for-coding"},
@@ -121,6 +126,44 @@ func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 	}
 	if gjson.GetBytes(preparedK27.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("K2.7 variants must remain isolated: %s", preparedK27.Payload)
+	}
+}
+
+func TestPrepareKimiThinkingReplayRequestSharesK31Variants(t *testing.T) {
+	for _, models := range [][2]string{
+		{"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"},
+		{"kimi-k3.1-pro-highspeed", "kimi-k3.1-pro"},
+	} {
+		t.Run(models[0]+"_to_"+models[1], func(t *testing.T) {
+			internalcache.ClearKimiThinkingReplayCache()
+			t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
+
+			const cached = `[{"type":"thinking","thinking":"reasoning","signature":"kimi-signature"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]`
+			payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]}]}`)
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "k31-family-switch",
+				},
+			}
+			ctx := context.Background()
+			_, sourceScope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: models[0], Payload: payload}, opts)
+			cacheKimiThinkingReplayContent(ctx, sourceScope, []byte(cached))
+
+			prepared, scope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: models[1], Payload: payload}, opts)
+			if scope.modelFamily != "k3.1-pro" || !scope.replayApplied {
+				t.Fatalf("variant switch scope = %+v, want shared K3.1 replay", scope)
+			}
+			if !kimiJSONEqual([]byte(gjson.GetBytes(prepared.Payload, "messages.0.content").Raw), []byte(cached)) {
+				t.Fatalf("variant switch did not preserve complete cached content: %s", prepared.Payload)
+			}
+			for _, isolatedModel := range []string{"kimi-k3", "kimi-k3-256k", "kimi-k2.8"} {
+				_, isolatedScope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: isolatedModel, Payload: payload}, opts)
+				if isolatedScope.replayApplied {
+					t.Fatalf("%s received K3.1 replay", isolatedModel)
+				}
+			}
+		})
 	}
 }
 

@@ -865,3 +865,45 @@ func TestUsageQueuePluginPayloadDistinguishesNativeKey(t *testing.T) {
 		})
 	})
 }
+
+func TestUsageQueuePluginEmitsFailCode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "gemini",
+			Model:       "gemini-3.1-pro-preview",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Failed:      true,
+			Fail: coreusage.Failure{
+				StatusCode: http.StatusBadGateway,
+				Body:       "upstream stream closed before finishReason",
+				Code:       coreusage.FailureStreamTruncatedCode,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		raw, ok := payload["fail"]
+		if !ok {
+			t.Fatal("payload missing fail")
+		}
+		var got struct {
+			StatusCode int    `json:"status_code"`
+			Body       string `json:"body"`
+			Code       string `json:"code"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &got); errUnmarshal != nil {
+			t.Fatalf("unmarshal fail: %v", errUnmarshal)
+		}
+		if got.Code != coreusage.FailureStreamTruncatedCode {
+			t.Fatalf("fail.code = %q, want %q", got.Code, coreusage.FailureStreamTruncatedCode)
+		}
+		if got.StatusCode != http.StatusBadGateway {
+			t.Fatalf("fail.status_code = %d, want %d", got.StatusCode, http.StatusBadGateway)
+		}
+	})
+}

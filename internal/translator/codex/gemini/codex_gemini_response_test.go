@@ -344,3 +344,12 @@ func TestConvertCodexResponseToGeminiNonStreamPreservesFunctionCallID(t *testing
 		t.Fatalf("expected functionCall.id %q, got %q; chunk=%s", "call_gateway", got, string(out))
 	}
 }
+
+func TestConvertCodexResponseToGemini_CompletedTerminalSetsStop(t *testing.T) {
+	var param any
+	terminal := []byte(`{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}`)
+	out := ConvertCodexResponseToGemini(context.Background(), "gpt-test", nil, nil, append([]byte("data: "), terminal...), &param)
+	if len(out) != 1 || gjson.GetBytes(out[0], "candidates.0.finishReason").String() != "STOP" {
+		t.Fatalf("want one chunk with finishReason STOP, got %q", out)
+	}
+}

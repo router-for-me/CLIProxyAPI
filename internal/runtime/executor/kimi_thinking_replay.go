@@ -37,6 +37,8 @@ func kimiThinkingReplayModelFamily(model string) string {
 	switch normalized {
 	case "k3", "k3-256k":
 		return "k3"
+	case "k3.1-pro", "k3.1-pro-highspeed":
+		return "k3.1-pro"
 	default:
 		return normalized
 	}

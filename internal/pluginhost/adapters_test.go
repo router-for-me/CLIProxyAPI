@@ -1981,6 +1981,209 @@ func TestStreamChunkHistoryPolicyBySchemaVersion(t *testing.T) {
 	}
 }
 
+func TestRequestInterceptorBodyOmittedForSchema7PluginsThatOptOut(t *testing.T) {
+	var omitGot, bodyGot, legacyGot pluginapi.RequestInterceptRequest
+	var omitCalls, bodyCalls, legacyCalls int
+	newInterceptor := func(got *pluginapi.RequestInterceptRequest, calls *int) requestInterceptorFunc {
+		return requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+			*calls++
+			*got = req
+			return pluginapi.RequestInterceptResponse{}, nil
+		})
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "omit",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor:               newInterceptor(&omitGot, &omitCalls),
+					RequestInterceptorOmitBodyBefore: true,
+					RequestInterceptorOmitBodyAfter:  true,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "body",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: newInterceptor(&bodyGot, &bodyCalls),
+				},
+			},
+		},
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 6,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor:               newInterceptor(&legacyGot, &legacyCalls),
+					RequestInterceptorOmitBodyBefore: true,
+					RequestInterceptorOmitBodyAfter:  true,
+				},
+			},
+		},
+	)
+
+	_ = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if omitCalls != 1 || bodyCalls != 1 || legacyCalls != 1 {
+		t.Fatalf("before calls = omit:%d body:%d legacy:%d, want 1 each", omitCalls, bodyCalls, legacyCalls)
+	}
+	if len(omitGot.Body) != 0 {
+		t.Fatalf("omit plugin before body = %q, want omitted", omitGot.Body)
+	}
+	if string(bodyGot.Body) != "request" {
+		t.Fatalf("body plugin before body = %q, want preserved", bodyGot.Body)
+	}
+	if string(legacyGot.Body) != "request" {
+		t.Fatalf("legacy plugin before body = %q, want preserved on schema < 7", legacyGot.Body)
+	}
+
+	omitGot = pluginapi.RequestInterceptRequest{}
+	bodyGot = pluginapi.RequestInterceptRequest{}
+	legacyGot = pluginapi.RequestInterceptRequest{}
+	_ = host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if omitCalls != 2 || bodyCalls != 2 || legacyCalls != 2 {
+		t.Fatalf("after calls = omit:%d body:%d legacy:%d, want 2 each", omitCalls, bodyCalls, legacyCalls)
+	}
+	if len(omitGot.Body) != 0 {
+		t.Fatalf("omit plugin after body = %q, want omitted", omitGot.Body)
+	}
+	if string(bodyGot.Body) != "request" {
+		t.Fatalf("body plugin after body = %q, want preserved", bodyGot.Body)
+	}
+	if string(legacyGot.Body) != "request" {
+		t.Fatalf("legacy plugin after body = %q, want preserved on schema < 7", legacyGot.Body)
+	}
+}
+
+func TestRequestInterceptorBodyOmitIsPerPhase(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		before     bool
+		after      bool
+		wantBefore int
+		wantAfter  int
+	}{
+		{name: "before only", before: true, wantBefore: 0, wantAfter: len("request")},
+		{name: "after only", after: true, wantBefore: len("request"), wantAfter: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got pluginapi.RequestInterceptRequest
+			calls := 0
+			host := newHostWithRecords(capabilityRecord{
+				id: "phase",
+				plugin: pluginapi.Plugin{
+					SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+					Capabilities: pluginapi.Capabilities{
+						RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+							calls++
+							got = req
+							return pluginapi.RequestInterceptResponse{}, nil
+						}),
+						RequestInterceptorOmitBodyBefore: tc.before,
+						RequestInterceptorOmitBodyAfter:  tc.after,
+					},
+				},
+			})
+			_ = host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+			if calls != 1 {
+				t.Fatalf("before calls = %d, want 1", calls)
+			}
+			if len(got.Body) != tc.wantBefore {
+				t.Fatalf("before body len = %d, want %d", len(got.Body), tc.wantBefore)
+			}
+			got = pluginapi.RequestInterceptRequest{}
+			_ = host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+			if calls != 2 {
+				t.Fatalf("after calls = %d, want 2", calls)
+			}
+			if len(got.Body) != tc.wantAfter {
+				t.Fatalf("after body len = %d, want %d", len(got.Body), tc.wantAfter)
+			}
+		})
+	}
+}
+
+func TestRequestInterceptorOmitPluginCanReplaceBodyBlindly(t *testing.T) {
+	var readerGot pluginapi.RequestInterceptRequest
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "a-omit",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+						if len(req.Body) != 0 {
+							t.Errorf("omit plugin body = %q, want omitted", req.Body)
+						}
+						return pluginapi.RequestInterceptResponse{Body: []byte("replaced")}, nil
+					}),
+					RequestInterceptorOmitBodyBefore: true,
+					RequestInterceptorOmitBodyAfter:  true,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "b-reader",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+						readerGot = req
+						return pluginapi.RequestInterceptResponse{}, nil
+					}),
+				},
+			},
+		},
+	)
+	resp := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if string(readerGot.Body) != "replaced" {
+		t.Fatalf("reader body = %q, want replaced body from omit plugin", readerGot.Body)
+	}
+	if string(resp.Body) != "replaced" {
+		t.Fatalf("host response body = %q, want replaced", resp.Body)
+	}
+}
+
+func TestRequestInterceptorOmitPluginCanTerminate(t *testing.T) {
+	readerCalls := 0
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "a-omit",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+						return pluginapi.RequestInterceptResponse{Terminate: true, StatusCode: 403}, nil
+					}),
+					RequestInterceptorOmitBodyBefore: true,
+					RequestInterceptorOmitBodyAfter:  true,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "b-reader",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionRequestInterceptorOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+						readerCalls++
+						return pluginapi.RequestInterceptResponse{}, nil
+					}),
+				},
+			},
+		},
+	)
+	resp := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Body: []byte("request")})
+	if !resp.Terminate || resp.StatusCode != 403 {
+		t.Fatalf("resp = %#v, want terminated with 403", resp)
+	}
+	if readerCalls != 0 {
+		t.Fatalf("reader calls = %d, want 0 after termination", readerCalls)
+	}
+}
+
 func TestHasRequestInterceptorsReflectsActiveRequestInterceptors(t *testing.T) {
 	responseOnly := newHostWithRecords(capabilityRecord{
 		id: "response",
@@ -4274,5 +4477,48 @@ func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *te
 	}
 	if got := refreshed.Attributes["priority"]; got != "2" {
 		t.Errorf("refreshed priority attribute = %q, want 2", got)
+	}
+}
+
+func TestUsageAdapterPropagatesRequestIDTraceIDAndSelectionID(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	record := normalizeTestCapabilityRecord(capabilityRecord{
+		id: "usage-selection-test",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				UsagePlugin: usagePluginFunc(func(ctx context.Context, rec pluginapi.UsageRecord) {
+					captured = rec
+				}),
+			},
+		},
+	})
+	host := newHostWithRecords(record)
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: record.id,
+		plugin:   record.plugin.Capabilities.UsagePlugin,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		RequestID:   "attempt-req-1",
+		TraceID:     "trace-1",
+		SelectionID: "sel-explicit-1",
+	})
+	if captured.SelectionID != "sel-explicit-1" {
+		t.Fatalf("captured.SelectionID = %q, want %q", captured.SelectionID, "sel-explicit-1")
+	}
+	if captured.RequestID != "attempt-req-1" || captured.TraceID != "trace-1" {
+		t.Fatalf("captured RequestID=%q TraceID=%q, want attempt-req-1 / trace-1", captured.RequestID, captured.TraceID)
+	}
+
+	ctxWithSel := coreusage.WithSelectionID(context.Background(), "sel-from-ctx")
+	adapter.HandleUsage(ctxWithSel, coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-5.4",
+	})
+	if captured.SelectionID != "sel-from-ctx" {
+		t.Fatalf("captured.SelectionID from context fallback = %q, want %q", captured.SelectionID, "sel-from-ctx")
 	}
 }

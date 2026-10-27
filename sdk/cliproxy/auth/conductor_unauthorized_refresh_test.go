@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -713,4 +715,83 @@ func TestManager_Execute_UnauthorizedRefreshThenRetryStillFailsFallsBackOnce(t *
 	if got := executor.ExecuteCalls(); len(got) != 3 || got[0] != primary.ID || got[1] != primary.ID || got[2] != backup.ID {
 		t.Fatalf("Execute calls = %v, want [primary, primary, backup]", got)
 	}
+}
+
+func TestManagerReloginAfterRefreshFailureRestoresAccount(t *testing.T) {
+	invalidGrant := errors.New(`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}`)
+	outage := errors.New("token refresh failed with status 503: upstream connect error")
+	for _, tc := range []struct {
+		name        string
+		refreshErr  error
+		rateLimited bool
+	}{
+		{"invalid grant", invalidGrant, false},
+		{"token endpoint 503", outage, false},
+		{"active 429 cooldown", outage, true},
+		{"active 429 cooldown with invalid grant", invalidGrant, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := WithSkipPersist(context.Background())
+			path := filepath.Join(t.TempDir(), "claude-a.json")
+			m := NewManager(nil, nil, nil)
+			m.RegisterExecutor(&unauthorizedRefreshExecutor{id: "claude", refreshErr: tc.refreshErr})
+			if _, errRegister := m.Register(ctx, reloginSnapshot(t, path, "old", time.Now().Add(-time.Hour))); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			if tc.rateLimited {
+				retryAfter := time.Hour
+				m.MarkResult(ctx, Result{AuthID: "claude-a.json", Provider: "claude", RetryAfter: &retryAfter, Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}})
+			}
+			m.refreshAuth(ctx, "claude-a.json") // expired token, refresh fails
+			if !tc.rateLimited {
+				unchanged := reloginSnapshot(t, path, "old", time.Now().Add(-time.Hour))
+				unchanged.Prefix = "kept"
+				if _, errUpdate := m.Update(ctx, unchanged); errUpdate != nil {
+					t.Fatal(errUpdate)
+				}
+				carried, _ := m.GetByID("claude-a.json")
+				if !carried.Unavailable || carried.Status != StatusError || carried.LastError == nil {
+					t.Fatalf("unchanged-credential snapshot dropped refresh failure state: status=%s unavailable=%v last_error=%v",
+						carried.Status, carried.Unavailable, carried.LastError)
+				}
+			}
+			if _, errUpdate := m.Update(ctx, reloginSnapshot(t, path, "new", time.Now().Add(8*time.Hour))); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			after, _ := m.GetByID("claude-a.json")
+			if tc.rateLimited {
+				if !after.Unavailable || !after.NextRetryAfter.After(time.Now()) {
+					t.Fatalf("re-login released a live 429 cooldown")
+				}
+				if after.RefreshFailures != 0 || !after.NextRefreshAfter.IsZero() {
+					t.Fatalf("re-login kept stale refresh backoff: refresh_failures=%d next_refresh_after=%v", after.RefreshFailures, after.NextRefreshAfter)
+				}
+				return
+			}
+			if after.Unavailable || after.Status != StatusActive || after.LastError != nil || after.RefreshFailures != 0 || !after.NextRefreshAfter.IsZero() {
+				t.Fatalf("re-logged account still out of rotation: status=%s msg=%q unavailable=%v refresh_failures=%d next_refresh_after=%v",
+					after.Status, after.StatusMessage, after.Unavailable, after.RefreshFailures, after.NextRefreshAfter)
+			}
+		})
+	}
+}
+
+// reloginSnapshot writes a Claude auth file and returns it as the watcher reads it.
+func reloginSnapshot(t *testing.T, path, token string, expiry time.Time) *Auth {
+	t.Helper()
+	expired := expiry.Format(time.RFC3339)
+	data := []byte(`{"type":"claude","access_token":"` + token + `-at","refresh_token":"` + token + `-rt","expired":"` + expired + `"}`)
+	if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	a := &Auth{
+		ID:         filepath.Base(path),
+		Provider:   "claude",
+		FileName:   filepath.Base(path),
+		Status:     StatusActive,
+		Attributes: map[string]string{"path": path, "source": path},
+		Metadata:   map[string]any{"type": "claude", "access_token": token + "-at", "refresh_token": token + "-rt", "expired": expired},
+	}
+	a.BindFileSnapshot(path, data)
+	return a
 }

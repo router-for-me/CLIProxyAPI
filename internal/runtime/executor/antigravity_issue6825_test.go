@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -102,15 +103,18 @@ func issue6825ToolResponse(signature, prefix string) string {
 	return `{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[` + prefix + `{"functionCall":{"name":"get_time","args":{"tz":"UTC"}},"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}}`
 }
 
-func (c *issue6825Conversation) call(payload []byte, opts cliproxyexecutor.Options, enrich bool, reqMetadata map[string]any) ([]byte, issue6825UpstreamRequest) {
+func (c *issue6825Conversation) callWithContext(ctx context.Context, payload []byte, opts cliproxyexecutor.Options, enrich bool, reqMetadata map[string]any) ([]byte, issue6825UpstreamRequest) {
 	c.t.Helper()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	opts.SourceFormat = sdktranslator.FormatOpenAI
 	req := cliproxyexecutor.Request{Model: "gemini-3-flash", Payload: payload, Metadata: reqMetadata}
 	if enrich {
 		req, opts = session.Enrich(req, opts)
 	}
 	if !opts.Stream {
-		response, errExecute := c.executor.Execute(context.Background(), c.auth, req, opts)
+		response, errExecute := c.executor.Execute(ctx, c.auth, req, opts)
 		if errExecute != nil {
 			c.t.Fatalf("Execute: %v", errExecute)
 		}
@@ -120,7 +124,7 @@ func (c *issue6825Conversation) call(payload []byte, opts cliproxyexecutor.Optio
 		}
 		return []byte(message.Raw), <-c.requests
 	}
-	response, errExecute := c.executor.ExecuteStream(context.Background(), c.auth, req, opts)
+	response, errExecute := c.executor.ExecuteStream(ctx, c.auth, req, opts)
 	if errExecute != nil {
 		c.t.Fatalf("ExecuteStream: %v", errExecute)
 	}
@@ -155,6 +159,10 @@ func (c *issue6825Conversation) call(payload []byte, opts cliproxyexecutor.Optio
 		message, _ = sjson.SetBytes(message, "reasoning_content", reasoning)
 	}
 	return message, <-c.requests
+}
+
+func (c *issue6825Conversation) call(payload []byte, opts cliproxyexecutor.Options, enrich bool, reqMetadata map[string]any) ([]byte, issue6825UpstreamRequest) {
+	return c.callWithContext(context.Background(), payload, opts, enrich, reqMetadata)
 }
 
 func issue6825Followup(t *testing.T, assistant []byte) []byte {
@@ -222,18 +230,49 @@ func TestIssue6825ToolPolicyKeepsHistoricalSignature(t *testing.T) {
 }
 
 func TestIssue6825NonStreamTwoTurnSignatureReplay(t *testing.T) {
-	for _, fixture := range []struct{ name, prefix string }{
-		{"tool_only", ""},
-		{"thought_before_tool", `{"thought":true,"text":"Check the current time."},`},
-		{"visible_text_before_tool", `{"text":"I will check."},`},
+	signature := issue4959GeminiThoughtSignature()
+	for _, fixture := range []struct {
+		name           string
+		response       string
+		stripReasoning bool
+		wantCallID     string
+	}{
+		{name: "tool_only", response: issue6825ToolResponse(signature, "")},
+		{name: "thought_before_tool", response: issue6825ToolResponse(signature, `{"thought":true,"text":"Check the current time."},`)},
+		{name: "visible_text_before_tool", response: issue6825ToolResponse(signature, `{"text":"I will check."},`)},
+		{
+			name:     "thought_carries_signature_before_unsigned_tool",
+			response: `{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Check the current time.","thoughtSignature":"` + signature + `"},{"functionCall":{"name":"get_time","args":{"tz":"UTC"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}}`,
+		},
+		{
+			name:           "thought_carries_signature_client_omits_reasoning_content",
+			response:       `{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Check the current time.","thoughtSignature":"` + signature + `"},{"functionCall":{"name":"get_time","args":{"tz":"UTC"}}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}}`,
+			stripReasoning: true,
+		},
+		{
+			name:     "tool_response_without_finish_reason",
+			response: `{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"get_time","args":{"tz":"UTC"}},"thoughtSignature":"` + signature + `"}]}}],"modelVersion":"gemini-3-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}}`,
+		},
+		{
+			name:       "upstream_tool_call_id_preserved",
+			response:   `{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_upstream_6825","name":"get_time","args":{"tz":"UTC"}},"thoughtSignature":"` + signature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"thoughtsTokenCount":2,"totalTokenCount":17}}}`,
+			wantCallID: "call_upstream_6825",
+		},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
-			signature := issue4959GeminiThoughtSignature()
-			conversation := newIssue6825Conversation(t, issue6825ToolResponse(signature, fixture.prefix))
+			conversation := newIssue6825Conversation(t, fixture.response)
 			opts := cliproxyexecutor.Options{Headers: http.Header{"Session-Id": {t.Name()}}}
 			assistant, first := conversation.call([]byte(issue6825FirstRequest), opts, false, nil)
 			if !strings.HasSuffix(first.path, ":generateContent") {
 				t.Fatalf("first upstream path = %q, want generateContent", first.path)
+			}
+			if fixture.wantCallID != "" {
+				if gotID := gjson.GetBytes(assistant, "tool_calls.0.id").String(); gotID != fixture.wantCallID {
+					t.Errorf("round 1 tool_calls[0].id = %q, want %q", gotID, fixture.wantCallID)
+				}
+			}
+			if fixture.stripReasoning {
+				assistant, _ = sjson.DeleteBytes(assistant, "reasoning_content")
 			}
 			_, second := conversation.call(issue6825Followup(t, assistant), opts, false, nil)
 			if !strings.HasSuffix(second.path, ":generateContent") {
@@ -313,6 +352,7 @@ func TestIssue6825SDKCallerReplayIsolation(t *testing.T) {
 		header      string
 		shared      bool
 		derived     bool
+		ginContext  bool
 	}{
 		{name: "direct_options_caller"},
 		{name: "direct_request_caller", reqMetadata: true},
@@ -322,6 +362,7 @@ func TestIssue6825SDKCallerReplayIsolation(t *testing.T) {
 		{name: "shared_derived_id_different_callers", enrich: true, derived: true},
 		{name: "shared_session_id_different_callers", enrich: true, header: "Session-Id", shared: true},
 		{name: "shared_x_session_id_different_callers", enrich: true, header: "X-Session-Id", shared: true},
+		{name: "gin_context_user_api_key_without_metadata", ginContext: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			sigA, sigB := issue4959GeminiThoughtSignature(), testGeminiSignaturePayload()
@@ -347,13 +388,26 @@ func TestIssue6825SDKCallerReplayIsolation(t *testing.T) {
 			}
 			optsA, metadataA := options("A")
 			optsB, metadataB := options("B")
-			assistantA, _ := conversation.call([]byte(issue6825FirstRequest), optsA, scenario.enrich, metadataA)
-			assistantB, _ := conversation.call([]byte(issue6825FirstRequest), optsB, scenario.enrich, metadataB)
-			_, secondA := conversation.call(issue6825Followup(t, assistantA), optsA, scenario.enrich, metadataA)
+			ctxA := context.Background()
+			ctxB := context.Background()
+			if scenario.ginContext {
+				optsA.Metadata = nil
+				optsB.Metadata = nil
+				gin.SetMode(gin.TestMode)
+				ginCtxA, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ginCtxA.Set("userApiKey", "downstream-api-key-A")
+				ctxA = context.WithValue(context.Background(), "gin", ginCtxA) //nolint:staticcheck -- "gin" is the shared Gin context key contract.
+				ginCtxB, _ := gin.CreateTestContext(httptest.NewRecorder())
+				ginCtxB.Set("userApiKey", "downstream-api-key-B")
+				ctxB = context.WithValue(context.Background(), "gin", ginCtxB) //nolint:staticcheck -- "gin" is the shared Gin context key contract.
+			}
+			assistantA, _ := conversation.callWithContext(ctxA, []byte(issue6825FirstRequest), optsA, scenario.enrich, metadataA)
+			assistantB, _ := conversation.callWithContext(ctxB, []byte(issue6825FirstRequest), optsB, scenario.enrich, metadataB)
+			_, secondA := conversation.callWithContext(ctxA, issue6825Followup(t, assistantA), optsA, scenario.enrich, metadataA)
 			if got := issue6825FirstToolSignature(t, secondA.body); got != sigA {
 				t.Errorf("caller A historical signature = %q, want its own %q (caller B = %q)", got, sigA, sigB)
 			}
-			_, secondB := conversation.call(issue6825Followup(t, assistantB), optsB, scenario.enrich, metadataB)
+			_, secondB := conversation.callWithContext(ctxB, issue6825Followup(t, assistantB), optsB, scenario.enrich, metadataB)
 			if got := issue6825FirstToolSignature(t, secondB.body); got != sigB {
 				t.Errorf("caller B historical signature = %q, want its own %q", got, sigB)
 			}

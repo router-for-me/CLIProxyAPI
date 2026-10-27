@@ -167,6 +167,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if traceID == "" {
 		traceID = strings.TrimSpace(logging.GetRequestID(ctx))
 	}
+	selectionID := strings.TrimSpace(record.SelectionID)
+	if selectionID == "" {
+		selectionID = strings.TrimSpace(coreusage.SelectionIDFromContext(ctx))
+	}
 	accessProvider := strings.TrimSpace(record.AccessProvider)
 	if accessProvider == "" {
 		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
@@ -186,6 +190,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
 		RequestID:            requestID,
 		TraceID:              traceID,
+		SelectionID:          selectionID,
 		Provider:             record.Provider,
 		BaseURL:              record.BaseURL,
 		ExecutorType:         record.ExecutorType,

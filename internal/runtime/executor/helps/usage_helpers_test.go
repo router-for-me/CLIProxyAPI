@@ -1465,3 +1465,39 @@ func TestUsageReporter_DistinguishesNativeKey(t *testing.T) {
 		}
 	})
 }
+
+func TestUsageReporterCapturesSelectionIDForDelayedPublish(t *testing.T) {
+	ctx := usage.WithSelectionID(context.Background(), "sel-delayed-123")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	if got := reporter.SelectionID(); got != "sel-delayed-123" {
+		t.Fatalf("reporter.SelectionID() = %q, want %q", got, "sel-delayed-123")
+	}
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 42}, false, usage.Failure{})
+	if record.SelectionID != "sel-delayed-123" {
+		t.Fatalf("record.SelectionID = %q, want %q", record.SelectionID, "sel-delayed-123")
+	}
+}
+
+type streamTruncatedTestError struct {
+	msg string
+}
+
+func (e *streamTruncatedTestError) Error() string           { return e.msg }
+func (e *streamTruncatedTestError) StatusCode() int         { return 502 }
+func (e *streamTruncatedTestError) IsStreamTruncated() bool { return true }
+
+func TestFailFromErrorsCarriesStreamTruncatedCode(t *testing.T) {
+	fail := failFromErrors(&streamTruncatedTestError{msg: "upstream stream closed before finishReason"})
+	if fail.Code != usage.FailureStreamTruncatedCode {
+		t.Fatalf("fail.Code = %q, want %q", fail.Code, usage.FailureStreamTruncatedCode)
+	}
+	if fail.StatusCode != 502 {
+		t.Fatalf("fail.StatusCode = %d, want 502", fail.StatusCode)
+	}
+
+	plain := failFromErrors(errors.New("upstream stream closed before finishReason"))
+	if plain.Code != "" {
+		t.Fatalf("plain error must not gain truncated classification, got code %q", plain.Code)
+	}
+}

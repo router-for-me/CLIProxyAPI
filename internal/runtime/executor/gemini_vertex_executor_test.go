@@ -519,7 +519,8 @@ func TestVertexBaseURL(t *testing.T) {
 		location string
 		want     string
 	}{
-		{"", "https://us-central1-aiplatform.googleapis.com"},
+		{"", "https://aiplatform.googleapis.com"},
+		{"   ", "https://aiplatform.googleapis.com"},
 		{"global", "https://aiplatform.googleapis.com"},
 		{"us-central1", "https://us-central1-aiplatform.googleapis.com"},
 		{"us", "https://aiplatform.us.rep.googleapis.com"},

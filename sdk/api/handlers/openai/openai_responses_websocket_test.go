@@ -7781,6 +7781,7 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
 
 type revocableWebsocketAccessProvider struct {
 	revoked      atomic.Bool
+	rotated      atomic.Bool
 	deniedModel  string
 	mu           sync.Mutex
 	seenRequests []*http.Request
@@ -7811,7 +7812,43 @@ func (p *revocableWebsocketAccessProvider) Authenticate(_ context.Context, r *ht
 	if p.deniedModel != "" && strings.TrimSpace(gjson.GetBytes(body, "model").String()) == p.deniedModel {
 		return nil, sdkaccess.NewDeniedError("quota exhausted for model", http.StatusTooManyRequests)
 	}
-	return &sdkaccess.Result{Principal: "key-1", Provider: p.Identifier()}, nil
+	principal := "key-1"
+	if p.rotated.Load() {
+		principal = "key-2"
+	}
+	return &sdkaccess.Result{Principal: principal, Provider: p.Identifier()}, nil
+}
+
+func TestResponsesWebsocketDuplexTurnAuthLeavesContextIdentity(t *testing.T) {
+	access := sdkaccess.NewManager()
+	access.SetProviders([]sdkaccess.Provider{&revocableWebsocketAccessProvider{}})
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	h.AccessManager = access
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/ping", nil)
+	c.Set("userApiKey", "other-request")
+	c.Set("accessProvider", "other-provider")
+	c.Set("accessMetadata", map[string]string{"source": "other"})
+	turn := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	turn.Header.Set("Authorization", "Bearer key-1")
+
+	principal, errAuth := h.authenticateResponsesWebsocketTurn(c, turn, []byte(`{"type":"response.create"}`), "gpt-5.5", false)
+	if errAuth != nil {
+		t.Fatalf("turn auth: %v", errAuth.Error)
+	}
+	if principal != "key-1" {
+		t.Fatalf("principal = %q, want %q", principal, "key-1")
+	}
+	if got := c.GetString("userApiKey"); got != "other-request" {
+		t.Fatalf("userApiKey = %q, want the context's own identity", got)
+	}
+	if got := c.GetString("accessProvider"); got != "other-provider" {
+		t.Fatalf("accessProvider = %q, want the context's own provider", got)
+	}
+	if got, _ := c.Get("accessMetadata"); !maps.Equal(got.(map[string]string), map[string]string{"source": "other"}) {
+		t.Fatalf("accessMetadata = %#v, want the context's own metadata", got)
+	}
 }
 
 func TestResponsesWebsocketReauthorizesEachTurnAndKeepsSocketOpen(t *testing.T) {
@@ -7973,6 +8010,42 @@ func TestResponsesWebsocketReauthorizesEachTurnAndKeepsSocketOpen(t *testing.T) 
 	for _, dropped := range []string{"Upgrade", "Connection", "Sec-Websocket-Key", "Sec-Websocket-Version", "Sec-Websocket-Extensions", "Sec-Websocket-Protocol", "Content-Length"} {
 		if val := turnReq.Header.Get(dropped); val != "" {
 			t.Fatalf("per-turn auth request kept handshake header %s = %q", dropped, val)
+		}
+	}
+}
+
+// The stream producers buffer a terminal error, then close errs and data. forwardResponsesWebsocket
+// must report that error, not "stream closed before response.completed", whichever channel its
+// select reads first; otherwise a pinned-auth failure loses its replay close.
+func TestForwardResponsesWebsocketPrefersBufferedErrorOverClosedData(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	want := &interfaces.ErrorMessage{StatusCode: http.StatusUnauthorized, Error: errors.New("credential failed")}
+	for _, duplex := range []bool{false, true} {
+		for i := 0; i < 200; i++ {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses/ws", nil)
+			data := make(chan []byte)
+			errCh := make(chan *interfaces.ErrorMessage, 1)
+			errCh <- want
+			close(errCh)
+			close(data)
+			_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
+				ctx,
+				newResponsesWebsocketWriter(nil),
+				func(...interface{}) {},
+				data,
+				errCh,
+				nil,
+				"session-1",
+				responsesWebsocketForwardOptions{
+					suppressError: func(*interfaces.ErrorMessage) bool { return true },
+					duplexStream:  func() bool { return duplex },
+				},
+			)
+			if errMsg != want || errForward != nil {
+				t.Fatalf("duplex=%v iteration %d: errMsg = %v, err = %v; want the buffered credential error", duplex, i, errMsg, errForward)
+			}
 		}
 	}
 }

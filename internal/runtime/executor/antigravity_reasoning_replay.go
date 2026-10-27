@@ -118,6 +118,9 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 	if callerScope == "" {
 		callerScope = metadataString(req.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	}
+	if callerScope == "" {
+		callerScope = session.CallerScope(helps.APIKeyFromContext(ctx))
+	}
 	if scope.valid() && callerScope != "" {
 		sum := sha256.Sum256([]byte(callerScope))
 		scope.sessionKey = "caller:" + hex.EncodeToString(sum[:]) + ":" + scope.sessionKey
@@ -2484,11 +2487,42 @@ func (a *antigravityReasoningReplayAccumulator) ObserveSSELine(line []byte) {
 	a.observeResponsePayload(payload)
 }
 
+func (a *antigravityReasoningReplayAccumulator) claimPrecedingTurnThoughtSignature() string {
+	if a == nil {
+		return ""
+	}
+	for itemIndex := range a.items {
+		item := gjson.ParseBytes(a.items[itemIndex])
+		if item.Get("type").String() == "function_call_part" &&
+			int(item.Get("contentIndex").Int()) == a.contentIndex &&
+			strings.TrimSpace(item.Get("thoughtSignature").String()) != "" {
+			return ""
+		}
+	}
+	for itemIndex := len(a.items) - 1; itemIndex >= 0; itemIndex-- {
+		item := gjson.ParseBytes(a.items[itemIndex])
+		if item.Get("type").String() != "thought_signature" ||
+			int(item.Get("contentIndex").Int()) != a.contentIndex ||
+			item.Get("targetKind").String() != "thought" {
+			continue
+		}
+		if sig := strings.TrimSpace(item.Get("thoughtSignature").String()); sig != "" {
+			return sig
+		}
+	}
+	return ""
+}
+
 func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload []byte) {
 	if finishReason := strings.TrimSpace(gjson.GetBytes(payload, "response.candidates.0.finishReason").String()); finishReason != "" {
 		a.terminal = true
+	} else if finishReason := strings.TrimSpace(gjson.GetBytes(payload, "candidates.0.finishReason").String()); finishReason != "" {
+		a.terminal = true
 	}
 	parts := gjson.GetBytes(payload, "response.candidates.0.content.parts")
+	if !parts.IsArray() {
+		parts = gjson.GetBytes(payload, "candidates.0.content.parts")
+	}
 	if !parts.IsArray() {
 		return
 	}
@@ -2520,6 +2554,9 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 						break
 					}
 				}
+			}
+			if signature == "" {
+				signature = a.claimPrecedingTurnThoughtSignature()
 			}
 			keys := antigravityReplayToolCallKeysFromPart(fc)
 			for _, key := range keys {
@@ -2775,7 +2812,13 @@ func cacheAntigravityReasoningReplayFromResponse(ctx context.Context, scope anti
 		return
 	}
 	acc := newAntigravityReasoningReplayAccumulator(scope, requestPayload)
+	if acc == nil {
+		return
+	}
 	acc.observeResponsePayload(body)
+	if !acc.terminal && (gjson.GetBytes(body, "response.candidates.0").Exists() || gjson.GetBytes(body, "candidates.0").Exists()) {
+		acc.terminal = true
+	}
 	acc.Commit(ctx)
 }
 

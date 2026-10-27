@@ -51,6 +51,26 @@ func GetProviderApplier(provider string) ProviderApplier {
 	return pluginProviderAppliers[provider].applier
 }
 
+func getPluginProviderApplier(provider string) ProviderApplier {
+	provider = normalizedProviderName(provider)
+	if provider == "" {
+		return nil
+	}
+	providerAppliersMu.RLock()
+	defer providerAppliersMu.RUnlock()
+	return pluginProviderAppliers[provider].applier
+}
+
+func resolveProviderApplier(providerFormat, providerKey string) (ProviderApplier, bool) {
+	if applier := getPluginProviderApplier(providerKey); applier != nil {
+		return applier, true
+	}
+	if applier := getPluginProviderApplier(providerFormat); applier != nil {
+		return applier, true
+	}
+	return GetProviderApplier(providerFormat), false
+}
+
 // RegisterProvider registers a provider applier by name.
 func RegisterProvider(name string, applier ProviderApplier) {
 	name = normalizedProviderName(name)
@@ -186,6 +206,13 @@ func ApplyThinkingWithSourceAndSummary(body, sourceBody []byte, model, fromForma
 	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, nil, false, summaryConfig, normalizedUpdatesChanged...)
 }
 
+// ApplyThinkingWithFallbackModelInfoAndSummary applies thinking using the global
+// registry first and falls back to fallbackModelInfo when the registry has no
+// entry for the model.
+func ApplyThinkingWithFallbackModelInfoAndSummary(body, sourceBody []byte, model, fromFormat, toFormat, providerKey string, fallbackModelInfo *registry.ModelInfo, summaryConfig SummaryConfig, normalizedUpdatesChanged ...bool) ([]byte, error) {
+	return applyThinking(body, sourceBody, model, fromFormat, toFormat, providerKey, fallbackModelInfo, false, summaryConfig, normalizedUpdatesChanged...)
+}
+
 // ApplyThinkingWithModelInfo applies thinking with the exact configured model
 // definition selected for an API-key execution attempt while preserving summary
 // visibility from the original source body.
@@ -226,7 +253,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	// Use provider-specific lookup to handle capability differences across providers.
 	modelInfo := resolvedModelInfo
 	if !modelInfoResolved {
-		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
+		if lookedUp := registry.LookupModelInfo(baseModel, providerKey); lookedUp != nil {
+			modelInfo = lookedUp
+		}
 	}
 
 	// Resolve source intent before stripping unsupported target input items.
@@ -249,7 +278,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	nativeResponses := responseTarget && isResponsesFormat(fromFormat) && supportsUpdates
 
 	// 2. Route check: Get provider applier after target cleanup.
-	applier := GetProviderApplier(providerFormat)
+	applier, isPluginApplier := resolveProviderApplier(providerFormat, providerKey)
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -287,12 +316,12 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		return body, nil
 	}
-	if fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && !gjson.GetBytes(body, "thinking").Exists() {
+	if !isPluginApplier && fromFormat == "claude" && providerFormat == "claude" && !suffixResult.HasSuffix && !gjson.GetBytes(body, "thinking").Exists() {
 		// Native Claude effort is independent of thinking activation. Preserve the
 		// model's thinking default unless a suffix or explicit summary changes it.
 		return applySummaryConfigForProvider(body, providerFormat, baseModel, providerKey, modelInfo, summaryConfig), nil
 	}
-	if IsUserDefinedModel(modelInfo) {
+	if IsUserDefinedModel(modelInfo) || (isPluginApplier && modelInfo.Thinking == nil) {
 		return applyUserDefinedModel(body, modelInfo, fromFormat, providerFormat, providerKey, suffixResult, sourceConfig, nativeResponses, summaryConfig)
 	}
 	if modelInfo.Thinking == nil {
@@ -318,6 +347,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	var config ThinkingConfig
 	if suffixResult.HasSuffix {
 		config = parseSuffixToConfig(suffixResult.RawSuffix, providerFormat, model)
+		if !hasThinkingConfig(config) && !nativeResponses && strings.TrimSpace(suffixResult.RawSuffix) != "" && !strings.EqualFold(strings.TrimSpace(modelInfo.ID), strings.TrimSpace(model)) {
+			config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(strings.TrimSpace(suffixResult.RawSuffix))}
+		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
 			"model":    model,
@@ -332,6 +364,9 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 		}
 		if !hasThinkingConfig(config) {
 			config = extractThinkingConfig(body, providerFormat)
+		}
+		if !hasThinkingConfig(config) && fromFormat != providerFormat {
+			config = extractThinkingConfig(body, fromFormat)
 		}
 		if hasThinkingConfig(config) {
 			log.WithFields(log.Fields{
@@ -563,7 +598,7 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return applySummaryConfigForProvider(body, toFormat, modelID, providerKey, modelInfo, summaryConfig), nil
 	}
 
-	applier := GetProviderApplier(toFormat)
+	applier, isPluginApplier := resolveProviderApplier(toFormat, providerKey)
 	if applier == nil {
 		log.WithFields(log.Fields{
 			"model":    modelID,
@@ -572,7 +607,9 @@ func applyUserDefinedModel(body []byte, modelInfo *registry.ModelInfo, fromForma
 		return body, nil
 	}
 
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	if !isPluginApplier {
+		config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	}
 	log.WithFields(log.Fields{
 		"provider": toFormat,
 		"model":    modelID,

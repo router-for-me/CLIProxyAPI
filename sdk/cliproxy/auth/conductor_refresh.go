@@ -771,11 +771,11 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		}
 		isUnauth := false
 		if state.LastError != nil {
-			if state.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(state.LastError.Code, "unauthorized") || isUnauthorizedError(state.LastError) {
+			if state.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(state.LastError.Code, "unauthorized") || isUnauthorizedError(state.LastError) || isInvalidGrantResultError(state.LastError) {
 				isUnauth = true
 			}
 		}
-		if !isUnauth && strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+		if !isUnauth && (strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") || isInvalidGrantErrorMessage(state.StatusMessage)) {
 			isUnauth = true
 		}
 		if !isUnauth {
@@ -784,7 +784,7 @@ func clearUnauthorizedModelStates(auth *Auth, now time.Time) []string {
 		anyChanged = true
 		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			state.LastError = nil
-			if strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") {
+			if strings.Contains(strings.ToLower(state.StatusMessage), "unauthorized") || isInvalidGrantErrorMessage(state.StatusMessage) {
 				state.StatusMessage = state.Quota.Reason
 			}
 			state.UpdatedAt = now
