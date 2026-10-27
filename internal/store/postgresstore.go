@@ -243,58 +243,56 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		return "", fmt.Errorf("postgres store: create auth directory: %w", err)
 	}
 
-	mirror, errSnapshot := snapshotAcquisitionMirror(ctx, path)
-	if errSnapshot != nil {
-		return "", errSnapshot
+	mirror, errWrite := writeAcquisitionMirror(ctx, path, func(path string) error {
+		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+			if errCodex != nil {
+				return errCodex
+			}
+		} else {
+			switch {
+			case auth.Storage != nil:
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
+				}
+				auth.Metadata["disabled"] = auth.Disabled
+				if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+					setter.SetMetadata(auth.Metadata)
+				}
+				if err = auth.Storage.SaveTokenToFile(path); err != nil {
+					return err
+				}
+			case auth.Metadata != nil:
+				auth.Metadata["disabled"] = auth.Disabled
+				raw, errMarshal := json.Marshal(auth.Metadata)
+				if errMarshal != nil {
+					return fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
+				}
+				contentsMatch := false
+				if existing, errRead := os.ReadFile(path); errRead == nil {
+					contentsMatch = jsonEqual(existing, raw)
+				} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+					return fmt.Errorf("postgres store: read existing metadata: %w", errRead)
+				}
+				if !contentsMatch {
+					tmp := path + ".tmp"
+					if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+						return fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
+					}
+					if errRename := os.Rename(tmp, path); errRename != nil {
+						return fmt.Errorf("postgres store: rename auth file: %w", errRename)
+					}
+				}
+			default:
+				return fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
+			}
+		}
+
+		return nil
+	})
+	if errWrite != nil {
+		return "", errWrite
 	}
 	defer func() { errResult = mirror.restore(errResult) }()
-
-	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
-		if errCodex != nil {
-			return "", errCodex
-		}
-	} else {
-		switch {
-		case auth.Storage != nil:
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
-			}
-			auth.Metadata["disabled"] = auth.Disabled
-			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-				setter.SetMetadata(auth.Metadata)
-			}
-			if err = auth.Storage.SaveTokenToFile(path); err != nil {
-				return "", err
-			}
-		case auth.Metadata != nil:
-			auth.Metadata["disabled"] = auth.Disabled
-			raw, errMarshal := json.Marshal(auth.Metadata)
-			if errMarshal != nil {
-				return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
-			}
-			contentsMatch := false
-			if existing, errRead := os.ReadFile(path); errRead == nil {
-				contentsMatch = jsonEqual(existing, raw)
-			} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-				return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
-			}
-			if !contentsMatch {
-				tmp := path + ".tmp"
-				if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-					return "", fmt.Errorf("postgres store: write temp auth file: %w", errWrite)
-				}
-				if errRename := os.Rename(tmp, path); errRename != nil {
-					return "", fmt.Errorf("postgres store: rename auth file: %w", errRename)
-				}
-			}
-		default:
-			return "", fmt.Errorf("postgres store: nothing to persist for %s", auth.ID)
-		}
-	}
-
-	if errRemember := mirror.rememberWrite(); errRemember != nil {
-		return "", errRemember
-	}
 
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
