@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -17,6 +18,9 @@ import (
 func persistAcquisitionMirror(ctx context.Context, path string, auth *cliproxyauth.Auth, write func(string) error, persist func(string) error, published func()) error {
 	auth.BindCommittedAuthFile("", nil)
 	if !cliproxyauth.HasAuthCreationIntent(ctx) {
+		if err := codex.WithFileLockContext(ctx, path, func() error { return authpublication.Repair(path) }); err != nil {
+			return err
+		}
 		if errWrite := write(path); errWrite != nil {
 			return errWrite
 		}
@@ -33,7 +37,7 @@ func persistAcquisitionMirror(ctx context.Context, path string, auth *cliproxyau
 		}
 		var original []byte
 		if existed {
-			original, err = os.ReadFile(path)
+			original, err = authpublication.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("snapshot auth mirror: %w", err)
 			}
@@ -66,16 +70,30 @@ func persistAcquisitionMirror(ctx context.Context, path string, auth *cliproxyau
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := persist(stagedPath); err != nil {
+		pending, err := authpublication.Prepare(path, data)
+		if err != nil {
 			return err
+		}
+		if err := persist(stagedPath); err != nil {
+			return errors.Join(err, pending.Abort())
+		}
+		if err := pending.Commit(); err != nil {
+			log.Warnf("auth store: remote credential committed but publication confirmation failed: %v", err)
 		}
 		// The remote commit is authoritative. Reconcile the mirror without turning a
 		// saved login into an OAuth failure if local publication is unavailable.
 		if err := os.Rename(stagedPath, path); err != nil {
 			auth.BindCommittedAuthFile(path, data)
 			log.Warnf("auth store: remote credential commit succeeded but local publication failed: %v", err)
-		} else if published != nil {
-			published()
+		} else {
+			if err := authpublication.Clear(path); err != nil {
+				auth.BindCommittedAuthFile(path, data)
+				log.Warnf("auth store: could not clear publication overlay: %v", err)
+				return nil
+			}
+			if published != nil {
+				published()
+			}
 		}
 		return nil
 	})

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -113,7 +114,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						continue
 					}
 					fullPath := filepath.Join(resolvedAuthDir, name)
-					data, errReadFile := os.ReadFile(fullPath)
+					data, errReadFile := authpublication.ReadFile(fullPath)
 					if errReadFile != nil {
 						if !errors.Is(errReadFile, fs.ErrNotExist) {
 							if incompleteRescanPaths == nil {
@@ -313,7 +314,7 @@ func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
-	data, errRead := os.ReadFile(path)
+	data, errRead := authpublication.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
 		return
@@ -411,7 +412,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
 	w.clientsMutex.Unlock()
 
-	if errSynthesize == nil {
+	if errSynthesize == nil && !authpublication.HasPending(path) {
 		w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 	}
 	w.dispatchAuthUpdates(updates)
@@ -426,6 +427,10 @@ func (w *Watcher) removeClient(path string) {
 }
 
 func (w *Watcher) removeClientLocked(path string) {
+	if authpublication.HasPending(path) {
+		w.addOrUpdateClientLocked(path)
+		return
+	}
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
@@ -533,7 +538,7 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		authFileCount++
 		log.Debugf("processing auth file %d: %s", authFileCount, name)
 		fullPath := filepath.Join(authDir, name)
-		if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+		if data, errReadFile := authpublication.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 			successfulAuthCount++
 		}
 	}

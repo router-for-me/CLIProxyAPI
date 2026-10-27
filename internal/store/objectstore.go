@@ -16,6 +16,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -271,6 +272,9 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 			return walkErr
 		}
 		if d.IsDir() {
+			if d.Name() == authpublication.DirectoryName {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
@@ -289,7 +293,7 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 	if err != nil {
 		return nil, fmt.Errorf("object store: walk auth directory: %w", err)
 	}
-	return entries, nil
+	return appendPendingAuthFiles(dir, entries, s.readAuthFile)
 }
 
 // Delete removes an auth file locally and remotely.
@@ -312,7 +316,7 @@ func (s *ObjectTokenStore) Delete(ctx context.Context, id string) error {
 	if err = s.deleteAuthObject(ctx, path); err != nil {
 		return err
 	}
-	return nil
+	return authpublication.Clear(path)
 }
 
 // PersistAuthFiles uploads the provided auth files to the object storage backend.
@@ -474,7 +478,7 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 			return fmt.Errorf("object store: write auth %s: %w", local, errWrite)
 		}
 	}
-	return nil
+	return authpublication.ReconciledDirectory(s.authDir)
 }
 
 func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
@@ -489,7 +493,7 @@ func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source stri
 	if err != nil {
 		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
-	data, err := os.ReadFile(source)
+	data, err := authpublication.ReadFile(source)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthObject(ctx, path)
@@ -604,7 +608,7 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
@@ -623,7 +627,7 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if provider == "" {
 		provider = "unknown"
 	}
-	info, err := os.Stat(path)
+	info, err := authpublication.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat auth file: %w", err)
 	}

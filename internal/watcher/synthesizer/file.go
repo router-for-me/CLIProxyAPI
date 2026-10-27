@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -45,6 +47,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		return out, nil
 	}
 
+	paths := make(map[string]struct{}, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -53,8 +56,22 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		if !strings.HasSuffix(strings.ToLower(name), ".json") {
 			continue
 		}
-		full := filepath.Join(ctx.AuthDir, name)
-		data, errRead := os.ReadFile(full)
+		paths[filepath.Join(ctx.AuthDir, name)] = struct{}{}
+	}
+	pending, err := authpublication.Paths(ctx.AuthDir)
+	if err != nil {
+		ctx.RecordIncompleteFile(ctx.AuthDir)
+	}
+	for _, path := range pending {
+		paths[path] = struct{}{}
+	}
+	ordered := make([]string, 0, len(paths))
+	for path := range paths {
+		ordered = append(ordered, path)
+	}
+	sort.Strings(ordered)
+	for _, full := range ordered {
+		data, errRead := authpublication.ReadFile(full)
 		if errRead != nil {
 			if !errors.Is(errRead, fs.ErrNotExist) {
 				ctx.RecordIncompleteFile(full)
@@ -67,7 +84,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		auths, errSynthesize := synthesizeFileAuths(ctx, full, data)
 		if errSynthesize != nil {
-			log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
+			log.WithError(errSynthesize).Warnf("skipping auth file %s", filepath.Base(full))
 			continue
 		}
 		if len(auths) == 0 {

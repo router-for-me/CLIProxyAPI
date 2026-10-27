@@ -11,11 +11,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/store"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -104,6 +106,20 @@ func TestAcquisitionRuntimeSyncUsesCommittedCredential(t *testing.T) {
 			if !ok || active.Metadata["access_token"] != "committed" || active.Metadata["refresh_token"] != "committed-refresh" {
 				t.Fatalf("manager discarded remotely committed credentials: %#v", active)
 			}
+			rescanned, err := synthesizer.NewFileSynthesizer().Synthesize(&synthesizer.SynthesisContext{
+				Config: h.cfg, AuthDir: authDir, Now: time.Now(), IDGenerator: synthesizer.NewStableIDGenerator(),
+			})
+			if err != nil || len(rescanned) != 1 {
+				t.Fatalf("watcher rescan: %v, %v", rescanned, err)
+			}
+			if _, err := manager.Update(coreauth.WithSkipPersist(context.Background()), rescanned[0]); err != nil {
+				t.Fatal(err)
+			}
+			active, ok = manager.GetByID(record.ID)
+			if !ok || active.Metadata["access_token"] != "committed" || active.Metadata["refresh_token"] != "committed-refresh" {
+				t.Fatalf("watcher rescan reactivated the stale mirror: %#v", active)
+			}
+
 		})
 	}
 	t.Run("file_snapshot_remains_fenced", func(t *testing.T) {

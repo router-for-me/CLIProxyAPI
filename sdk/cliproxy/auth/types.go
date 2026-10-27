@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -135,7 +135,7 @@ type Auth struct {
 	fileSnapshotDigest string `json:"-"`
 }
 
-var readAuthSnapshotFileFunc = os.ReadFile
+var readAuthSnapshotFileFunc = authpublication.ReadFile
 
 func canonicalAuthFileDigest(data []byte) string {
 	trimmed := bytes.TrimSpace(data)
@@ -226,9 +226,8 @@ func (a *Auth) SameFileSnapshot(other *Auth) bool {
 	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
 }
 
-// FileSnapshotMatchesDisk reports whether the backing file on disk still
-// exists, is readable, and matches the canonical digest observed when this
-// snapshot was synthesized.
+// FileSnapshotMatchesDisk compares the observation with the published credential.
+// A confirmed remote commit supersedes a mirror awaiting local publication.
 func (a *Auth) FileSnapshotMatchesDisk() bool {
 	if !a.HasFileSnapshot() {
 		return true

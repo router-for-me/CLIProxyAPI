@@ -13,6 +13,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -407,7 +408,10 @@ func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return s.deleteAuthRecord(ctx, relID)
+	if err := s.deleteAuthRecord(ctx, relID); err != nil {
+		return err
+	}
+	return authpublication.Clear(path)
 }
 
 // PersistAuthFiles stores the provided auth file changes in PostgreSQL.
@@ -546,11 +550,11 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 	if err = rows.Err(); err != nil {
 		return fmt.Errorf("postgres store: iterate auth rows: %w", err)
 	}
-	return nil
+	return authpublication.ReconciledDirectory(s.authDir)
 }
 
 func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) error {
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthRecord(ctx, relID)
@@ -564,7 +568,7 @@ func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) er
 }
 
 func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string) error {
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("postgres store: read auth file: %w", err)
 	}

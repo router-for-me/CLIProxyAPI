@@ -15,6 +15,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -66,7 +67,7 @@ func recoverGitPublications(ctx context.Context, repo *git.Repository, repoDir, 
 	dir := filepath.Join(repoDir, ".git", "auth-publications")
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return discardUnjournaledPublicationBarriers(ctx, repoDir, authDir)
 	}
 	if err != nil {
 		return err
@@ -110,8 +111,7 @@ func recoverGitPublications(ctx context.Context, repo *git.Repository, repoDir, 
 			}
 			file, err := commit.File(record.Path)
 			if errors.Is(err, object.ErrFileNotFound) {
-				finishGitPublicationReplay(repoDir, destination, record)
-				return nil
+				return finishGitPublicationReplay(repoDir, destination, record)
 			}
 			if err != nil {
 				return err
@@ -126,16 +126,18 @@ func recoverGitPublications(ctx context.Context, repo *git.Repository, repoDir, 
 				}
 			}
 			// A different remote version must not activate the uncommitted staged one.
-			finishGitPublicationReplay(repoDir, destination, record)
-			return nil
+			return finishGitPublicationReplay(repoDir, destination, record)
 		}); err != nil {
 			return err
 		}
 	}
-	return nil
+	return discardUnjournaledPublicationBarriers(ctx, repoDir, authDir)
 }
 
-func finishGitPublicationReplay(repoDir, destination string, record gitPublication) {
+func finishGitPublicationReplay(repoDir, destination string, record gitPublication) error {
+	if err := authpublication.Clear(destination); err != nil {
+		return fmt.Errorf("clear publication overlay: %w", err)
+	}
 	clearGitPublication(repoDir, record.Path)
 	stagingDir := filepath.Dir(record.Staging)
 	if filepath.Base(record.Staging) == "credential" && filepath.Dir(stagingDir) == filepath.Dir(destination) && strings.HasPrefix(filepath.Base(stagingDir), ".auth-acquisition-") {
@@ -143,6 +145,7 @@ func finishGitPublicationReplay(repoDir, destination string, record gitPublicati
 			log.Warnf("git token store: could not clean credential staging directory: %v", err)
 		}
 	}
+	return nil
 }
 
 func readGitPublication(marker, repoDir, authDir string) (gitPublication, error) {

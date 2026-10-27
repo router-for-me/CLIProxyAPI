@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -106,6 +107,9 @@ func TestAcquisitionRemoteCommitSurvivesMirrorConflict(t *testing.T) {
 					}
 				}
 				expected := `{"access_token":"committed","disabled":false,"type":"codex"}`
+				if got, err := authpublication.ReadFile(saved); err != nil || string(got) != expected {
+					t.Errorf("published reader lost remote commit: %q, %v", got, err)
+				}
 				if mutation == "directory" || mutation == "staging-lost" {
 					if got := record.CommittedAuthFile(saved); string(got) != expected {
 						t.Errorf("notification snapshot = %q, want remotely committed bytes %q", got, expected)
