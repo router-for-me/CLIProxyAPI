@@ -210,6 +210,86 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 
 "login?" means installed but whether it is signed in on that device is unverified. Omarchy done 26 Oct 22:30: Claude Code, Codex, OMP, pi, opencode on the hub (all answered or list 25 hub models); Herdr there is the Arch package 0.9.1-2 in /usr/bin (update with the package manager, not `herdr update`); auto-vps saved in its machines. The GPU box is one machine: wasnewpc is unreachable while omarchy is booted and vice versa.
 
+## auto-vps cut-over (t8306)
+
+Waseem's ruling (28 Oct 2026, through the chair): the auto-vps cut-over runs last, with him watching and
+not mid-session, after the home lanes finish. Nothing in it restarts bb; the account-pin release reloads
+only that plugin. Confirm with the chair before step 5 all the same. Every step is verified before the next.
+
+What each step installs is a draft PR, unmerged until its step (an hourly sweep merges green non-draft PRs):
+
+| Piece | PR |
+|---|---|
+| `estate-hub-route`, `estate-hub-key`, codex-seat hub pins | Automancer-Ltd/automancer-bin#104 |
+| allowances / sysdash read the hub | Automancer-Ltd/automancer-ops#1335 |
+| account-pin plugin pins through the hub | Automancer-Ltd/bb-plugin-account-pin (see t8306) |
+| Gandalf's Executor hub usage tool | see t8306 |
+| ROUTES.md and capacity.md | Automancer-Ltd/automancer-skills#133 |
+
+Already done on 28 Oct: hub groups (Claude `1`-`10` = the old cswap slots, Codex `pro`, `pro-gmail`,
+`pro-personal` = the old cxswap names) and notes (the allowances names) on every Claude and Codex login;
+`~/.config/estate-hub/env` (mode 600) on auto-vps; `~/.codex/config.toml` carries the `cliproxy` provider
+with its `model_provider` line commented out (the route is off). Backups of both harness configs from
+before the 18:23 trial: `~/.claude/settings.json.pre-hub-20261028`, `~/.codex/config.toml.pre-hub-20261028`.
+
+**Flip-back at any point:** `estate-hub-route off` (step 1 installs it; before that,
+`/opt/automancer/worktrees/bin-t8306-hub/estate-hub-route off`). New Claude Code and Codex sessions use
+the local fallback login; running ones keep the route they started with.
+
+0. **Pre-flight, read-only.** `estate-hub-route status` says the hub answers; `/hub` shows no poll errors;
+   save `bb account-pin list --json` to scratch (172 Codex pins, no Claude pins on 28 Oct).
+1. **bin.** Merge #104. `umask 022; git -C /opt/automancer/bin pull --ff-only`; check `stat -c %a` is 755 on
+   `estate-hub-route`, `estate-hub-key`, `codex-seat`; `ln -s /opt/automancer/bin/estate-hub-{route,key}
+   ~/.local/bin/`. Verify: `estate-hub-route status` reads local/local and the hub answers. codex-seat's
+   change is inert while the route is off (its test proves the local path is unchanged).
+2. **pi, OMP, opencode** (adds a provider called `hub`; nothing defaults to it). Copy m6's `hub` provider
+   block (25 non-Claude models) into `~/.pi/agent/models.json` and `~/.omp/agent/models.yml` with
+   `apiKey: "!/home/ubuntu/.local/bin/estate-hub-key"`, and into `~/.config/opencode/opencode.jsonc` under
+   `provider.hub` (that file is mode 600; opencode takes the key literally). Verify: `pi --list-models | grep
+   hub`; one pong each through `pi --provider hub`, `omp`, `opencode run -m hub/gpt-6.1-terra`; the hub log
+   (`ssh m6 tail ~/Library/Logs/hub.log`) shows them.
+3. **Claude Code and Codex.** `estate-hub-route on`. Verify one pong each: `claude -p --model
+   claude-opus-5-5`, `codex exec -m gpt-6.1-terra`; then pins: `ANTHROPIC_CUSTOM_HEADERS="X-CPA-Account: 3"`
+   lands on group 3, `CODEX_HUB_ACCOUNT=pro-personal` on pro-personal (hub log `session-affinity ... auth=`
+   lines; the per-account counters mix in other devices' traffic, so read the log). Codex needs
+   `supports_websockets = true`: over plain HTTP streaming it hangs against the hub (seen 28 Oct).
+4. **allowances.** Merge #1335, `git -C /opt/automancer/ops pull --ff-only`. Verify `allowances` and
+   `allowances --json` show hub figures with the hub as rotation owner; the bb allowances panel renders.
+5. **bb pins.** Merge the account-pin PR and run its `scripts/release.sh` (reloads that plugin only, prints
+   the rollback path). Verify: `bb account-pin list` reads hub usage; spawn two throwaway lanes,
+   `claude-code` titled `[pin:3]` and `codex` titled `[pin:pro-personal]`, each answering one word; the hub
+   log shows those accounts. Archive them.
+6. **Docs and Gandalf.** Merge #133 (skills sync carries it). Deploy the Gandalf tool per its PR and run its
+   one-line `executor-tool call`.
+7. **Fallback logins and rotation off.** Keep one local login per harness, Automancer's own and least used
+   this week, and separate OAuth grants from the hub's (the hub signed in fresh on m6):
+   Claude slot 1 (`waseem@automancer.uk`, Claude Auto Max 20): `cswap switch 1`; Codex `pro-personal`
+   (`waseem@automancer.uk`, Codex Pro Auto): `cxswap switch pro-personal` (check the verb with `cxswap
+   --help`). The GDP team seats that cswap and cxswap hold out were not chosen: they belong to a client
+   organisation and Waseem held them out. Then stop and disable `cswap-auto.service`,
+   `cswap-auto-refresh.timer`, `cswap-auto-upgrade.path` and `cxswap-auto.service` (`systemctl --user`;
+   the bin AGENTS.md asks for operator approval before touching cxswap-auto: Waseem watching is that).
+   Leave the binaries; put `RETIRED-<date>.md` beside `~/.local/share/uv/tools/claude-swap` and a line in
+   `/opt/automancer/bin/README.md`, and file a tracker task dated seven days out to remove them.
+8. **Muse tunnel.** Repoint pi's `muse` provider to the hub's Muse models first and verify one pong; then
+   stop and disable `muse-uk-proxy.service` and `muse-uk-tunnel.service`. The `muse` CLI on auto-vps uses
+   the same CONNECT proxy for its own login: run `muse exec` once after; if Meta geo-gates it, keep the
+   two units and record that.
+9. **Callers to repoint or retire** (each read before changing; most are ops PRs):
+   Gandalf's voice bridge (`~/.local/share/cos-voice-bridge/bridge.mjs`, chief-of-staff `src/codex-voice.ts`)
+   runs `cxswap run active` and a ChatGPT login of its own (the hub cannot carry realtime voice): pin it with
+   `COS_VOICE_ACCOUNT=pro-personal`, the fallback login. Ops: `guardian/checks.d/codex-shared-account.sh`,
+   `scripts/codex-shared-account-gate.mjs`, `codex-account-pool.mjs`, `codex-account-rollouts.mjs` (Codex
+   lane admission and forecasts read cxswap); `scripts/auth-token-expiry.py`, `automancer-auth-health.sh`,
+   `auth-liveness-probe.sh`, `guardian-probe.sh`, `guardian-respond.sh` (local login health, which will
+   alert on the retired logins); `automancer-nightly-reaper.sh` and the worktree-housekeeping drop-in (stale
+   Codex process sweep; comments only). `~/.claude/hooks/fable-subagent-guard.py` mentions cswap in a
+   comment. `bb-plugin-codex-voice` (bb's voice plugin) reads cxswap accounts too.
+10. **Close.** The brief's checks: Claude Code, Codex, pi, OMP and opencode on auto-vps answer through the
+    hub (hub log); `allowances` prints hub figures; a pinned bb lane lands on its account; Gandalf's tool
+    returns the list; `systemctl --user list-units 'cswap*' 'cxswap*' 'muse-uk*'` shows nothing active.
+    Update the device matrix and close t8306.
+
 ## Cursor
 
 - 2026-10-26: hub installed on m6 (brew `cliproxyapi` 8.0.40, bound to 127.0.0.1:8317, Tailscale
@@ -249,3 +329,4 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 - 2026-10-26 22:55: L3 build (estate-278f7e18, PR #3 d6abbc05) live on m6. First real run: 23 credentials, no poll errors; CommandCode (USD left of monthly grant, 5h, week), OpenCode Go (5h, week, month), GLM (5h, week) and DeepSeek balance all show. Codex banked resets not visible yet on the page (allowances on auto-vps shows 7); re-check after the next poll. Screenshots: Notes/Reports/assets/26-10-26-hub-dashboard-v3-{desktop,phone}.png. t8318 closed.
 - 2026-10-28: hub credentials are in the nightly encrypted backup (ops PR #1332, merged): `estate-extra-stage`'s `hub` part streams m6's `~/.cli-proxy-api` (auth files, `usage-snapshot.cache`) and `~/.local/hub/config.yaml` over ssh into age; the estate-extra tiers carry it to naz and B2. Restore steps: ops `runbooks/vps-ops.md` "Restore the estate hub's credentials (m6)". A dry-run restore matched all 20 files byte for byte. A new state file on m6 outside those two paths needs adding to that part.
 - 2026-10-28: t8314. Both flaky interrupt tests were symptoms of one handler race that upstream fixed the same day (9717e325, issue #7065: a late interrupt after a terminal event got a fake `response.incomplete` or was dropped). Cherry-picked here; `TestResponsesInterruptStopsHTTPUpstream` also waits on a channel for the upstream cancel instead of reading a flag once (fork PR #4; the test half went upstream as router-for-me/CLIProxyAPI#7086 to `dev`). m6 needs a rebuild from `main` to carry it.
+- 2026-10-28 18:23-18:36: auto-vps Claude Code and Codex trialled on the hub (Fable, Opus, Sonnet, Terra answered; Claude and Codex pins landed on the named accounts; an unknown pin got 400). The chair stopped the lane because bb was unreliable (it was already slow at 18:00, before any change) and ran `estate-hub-route off`; the cut-over waits for Waseem ("auto-vps cut-over" above). Hub groups and notes set. PRs open as drafts.
