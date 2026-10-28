@@ -212,6 +212,39 @@ func HasPlaintextSecretKey(data []byte) bool {
 	return false
 }
 
+// PlaintextManagementSecrets returns the plaintext management secrets config YAML
+// holds: the effective one and the values at both secret paths, with aliases and
+// merge keys resolved. Hashing replaces only the effective key, so a caller that
+// must keep the plaintext out of a remote mirror records these before the hashed
+// write-back and checks the rewritten file with HoldsAnyScalarValue. YAML that does
+// not decode as a Config returns none.
+func PlaintextManagementSecrets(data []byte) []string {
+	var cfg Config
+	if yaml.Unmarshal(data, &cfg) != nil {
+		return nil
+	}
+	return plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey)
+}
+
+// HoldsAnyScalarValue reports whether config YAML holds any of values as a scalar
+// value anywhere, such as at a YAML anchor a hashed key no longer refers to. YAML
+// that does not parse reports true, so unreadable bytes never count as clean.
+func HoldsAnyScalarValue(data []byte, values []string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil {
+		return true
+	}
+	for _, value := range values {
+		if yamlScalarExists(&doc, value) {
+			return true
+		}
+	}
+	return false
+}
+
 // yamlKeyValues returns the values key has in mapping, its own and those merged
 // in, each resolved through aliases to the node that defines it. seen stops a
 // merge that refers back to a mapping being searched.

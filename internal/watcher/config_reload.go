@@ -101,10 +101,19 @@ func (w *Watcher) reloadConfigIfChanged() {
 		// mirroring now could publish the plaintext to a remote store. If the file
 		// could not be written, the reload finds it unchanged and stops.
 		if config.HasPlaintextSecretKey(data) {
+			// Hashing replaces only the effective key: a YAML anchor or merge source
+			// keeps the plaintext, and the hashed key no longer shows it, so remember
+			// the values for the reload of the write-back.
+			w.plaintextSecrets = append(w.plaintextSecrets, config.PlaintextManagementSecrets(data)...)
 			log.Info("config holds a plaintext management secret, not mirroring it until it is hashed")
 			w.scheduleConfigReload()
 			return
 		}
+		if config.HoldsAnyScalarValue(data, w.plaintextSecrets) {
+			log.Warn("config still holds a plaintext management secret outside its secret key, for example at a YAML anchor or merge source; not mirroring it until the plaintext is removed")
+			return
+		}
+		w.plaintextSecrets = nil
 		w.persistConfigAsync()
 	}
 }

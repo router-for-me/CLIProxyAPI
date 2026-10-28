@@ -2224,3 +2224,67 @@ func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
 		t.Fatal("the hashed write-back was never reloaded and mirrored")
 	}
 }
+
+// Hashing replaces only the effective secret key, so when the secret comes through a
+// YAML anchor or merge key the source keeps the plaintext after the write-back, and
+// the hashed key alone no longer shows it. The reload of the write-back must not
+// mirror that file; once the plaintext is gone, the next reload mirrors.
+func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	for name, references := range map[string]string{
+		"scalar anchor": "password: &password " + secret + "\nremote-management:\n  secret-key: *password\n",
+		"merge key":     "defaults: &management\n  secret-key: " + secret + "\nmanagement:\n  <<: *management\n  allow-remote: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			authDir := filepath.Join(tmpDir, "auth")
+			if err := os.MkdirAll(authDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(references+"auth-dir: "+authDir+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			original := runConfigPersist
+			t.Cleanup(func() { runConfigPersist = original })
+			runConfigPersist = func(persist func()) { persist() }
+			persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+			w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+			t.Cleanup(w.stopConfigReloadTimer)
+
+			// The first reload hashes the effective key into the file; the second
+			// reloads that write-back.
+			w.reloadConfigIfChanged()
+			w.stopConfigReloadTimer()
+			w.reloadConfigIfChanged()
+			w.stopConfigReloadTimer()
+			saved, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if config.HasPlaintextSecretKey(saved) || !strings.Contains(string(saved), secret) {
+				t.Fatalf("want the key hashed and the plaintext left at its source, got %q", saved)
+			}
+			select {
+			case mirrored := <-persister.mirrored:
+				t.Fatalf("mirrored a plaintext secret kept by a reference: %q", mirrored)
+			default:
+			}
+
+			// Removing the plaintext lets the next reload mirror.
+			cleaned := strings.ReplaceAll(string(saved), secret, "unrelated-value")
+			if err := os.WriteFile(configPath, []byte(cleaned), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w.reloadConfigIfChanged()
+			select {
+			case mirrored := <-persister.mirrored:
+				if strings.Contains(string(mirrored), secret) {
+					t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+				}
+			default:
+				t.Fatal("the config was not mirrored once the plaintext was gone")
+			}
+		})
+	}
+}

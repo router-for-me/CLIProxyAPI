@@ -280,3 +280,33 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 		})
 	}
 }
+
+// The plaintext a hashed write-back leaves at an anchor is found by value once the
+// secret key no longer refers to it.
+func TestHoldsAnyScalarValueFindsPlaintextLeftByWriteBack(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	before := []byte("password: &password " + secret + "\nmanagement:\n  secret-key: *password\n")
+	secrets := PlaintextManagementSecrets(before)
+	if len(secrets) == 0 || secrets[0] != secret {
+		t.Fatalf("PlaintextManagementSecrets() = %q, want %q first", secrets, secret)
+	}
+	after := []byte("password: " + secret + "\nmanagement:\n  secret-key: '" + uploadTestBcrypt(t) + "'\n")
+	if HasPlaintextSecretKey(after) {
+		t.Fatal("HasPlaintextSecretKey() = true for a hashed key")
+	}
+	if !HoldsAnyScalarValue(after, secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left at the anchor")
+	}
+	if HoldsAnyScalarValue([]byte("password: other\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() = true without the plaintext")
+	}
+	if HoldsAnyScalarValue([]byte(secret+": key-only\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() counted a mapping key")
+	}
+	if !HoldsAnyScalarValue([]byte("a: [unclosed\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() = false for YAML that does not parse")
+	}
+	if HoldsAnyScalarValue([]byte("a: [unclosed\n"), nil) {
+		t.Fatal("HoldsAnyScalarValue() = true with no values to look for")
+	}
+}
