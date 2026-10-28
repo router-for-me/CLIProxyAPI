@@ -303,6 +303,10 @@ Cloudflare ベースの LLM ゲートウェイ兼プロキシサーバー。CLIP
 
 CLIProxyAPI のアカウントプール向けのネイティブ macOS メニューバーアプリ。プール全体で Claude、Codex などの 5 時間枠と週間枠がどれだけ残っているか、いつ戻るかを表示し、Management API で各ログインのルーティング重みを設定してアカウントを均等に消費させます。
 
+### [Nia Live Demo](https://github.com/nia-teams/nia-live-demo)
+
+話しながらリアルタイムで描画・操作できるインタラクティブな SVG/HTML キャンバスを備えた、全二重音声コンパニオン。CLIProxyAPI の 2 つの機能を組み合わせています：音声対話と即時割り込みを担う Codex GPT-Live 1.1 メディアリレー（`gpt-live-1-codex`、WebRTC + Sideband）と、会話中にキャンバスをリアルタイムで生成・編集する `ultrafast` Responses（`gpt-6.1-sol` / `gpt-6-astra`）です。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 
