@@ -617,8 +617,9 @@ func isAnthropicModelsRequest(c *gin.Context) bool {
 
 // unifiedModelsHandler creates a unified handler for the /v1/models endpoint
 // that routes to different handlers based on the request.
-// Anthropic API requests (Anthropic-Version header, or a claude-cli User-Agent)
-// route to the Claude handler, otherwise they route to the OpenAI handler.
+// Codex catalog requests (?client_version or an official Codex User-Agent) return
+// the Codex client catalog. Anthropic API requests (Anthropic-Version header, or a
+// claude-cli User-Agent) route to the Claude handler; otherwise OpenAI format.
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
@@ -627,8 +628,8 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		}
 
 		cfg := s.getConfig()
-		if _, ok := c.Request.URL.Query()["client_version"]; ok {
-			clientVersion := c.Query("client_version")
+		if openai.IsCodexModelsCatalogRequest(c) {
+			clientVersion := openai.CodexModelsCatalogClientVersion(c)
 			if cfg != nil && cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c, clientVersion)
 				return

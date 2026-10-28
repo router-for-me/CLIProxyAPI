@@ -2298,6 +2298,87 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 }
 
+func TestModelsWithCodexUserAgentReturnsCodexCatalog(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-codex-ua-catalog"
+	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
+		{
+			ID:          "gpt-5.5",
+			Object:      "model",
+			OwnedBy:     "openai",
+			Type:        "openai",
+			DisplayName: "GPT 5.5",
+			Description: "Frontier model for complex coding, research, and real-world work.",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	server := newTestServer(t)
+
+	t.Run("codex user agent without client_version returns codex shape", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var resp struct {
+			Models []map[string]any `json:"models"`
+			Object string           `json:"object"`
+			Data   []map[string]any `json:"data"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to parse response JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if resp.Object == "list" || len(resp.Data) > 0 {
+			t.Fatalf("expected Codex catalog shape, got OpenAI list: %s", rr.Body.String())
+		}
+		if len(resp.Models) == 0 {
+			t.Fatalf("expected non-empty Codex models array, got %s", rr.Body.String())
+		}
+		var gpt55 map[string]any
+		for _, model := range resp.Models {
+			if slug, _ := model["slug"].(string); slug == "gpt-5.5" {
+				gpt55 = model
+				break
+			}
+		}
+		if gpt55 == nil {
+			t.Fatalf("expected gpt-5.5 in Codex catalog, got %s", rr.Body.String())
+		}
+		if _, ok := gpt55["display_name"]; !ok {
+			t.Fatalf("expected display_name on Codex model entry, got %#v", gpt55)
+		}
+		if _, ok := gpt55["id"]; ok {
+			t.Fatalf("did not expect OpenAI id field on Codex catalog entry, got %#v", gpt55)
+		}
+	})
+
+	t.Run("plain request without codex signals stays openai shape", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "curl/8.0")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), `"object":"list"`) {
+			t.Fatalf("expected OpenAI list shape, got %s", rr.Body.String())
+		}
+		if strings.Contains(rr.Body.String(), `"slug"`) {
+			t.Fatalf("did not expect Codex slug fields on plain /v1/models, got %s", rr.Body.String())
+		}
+	})
+}
+
 func TestModelsWithClientVersion_DevinDisplayName(t *testing.T) {
 	devinClientID := "test-devin-client-version-models"
 	openaiClientID := "test-openai-client-version-models"
