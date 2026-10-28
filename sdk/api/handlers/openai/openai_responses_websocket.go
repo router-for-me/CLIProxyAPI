@@ -798,7 +798,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			observedCompaction.clear()
 			lastResponseID = ""
 			lastResponsePendingToolCallIDs = nil
-			prewarmID, errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID)
+			prewarmID, errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID, localInterrupt)
 			if errWrite != nil {
 				wsTerminateErr = errWrite
 				return
