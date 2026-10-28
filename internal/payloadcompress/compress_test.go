@@ -382,3 +382,23 @@ func TestApplyCoversAllThreeProtocols(t *testing.T) {
 		}
 	}
 }
+
+func TestStatsReport(t *testing.T) {
+	stats := Stats{
+		BytesIn:  1000,
+		BytesOut: 320,
+		Saved:    map[string]int{"rtk": 300, "lite": 380},
+	}
+	if got := stats.Engines(); got != "lite=380,rtk=300" {
+		t.Fatalf("engines = %q", got)
+	}
+	if got := stats.SavedPct(); got != 68 {
+		t.Fatalf("saved pct = %d", got)
+	}
+	if got := (Stats{}).Engines(); got != "" {
+		t.Fatalf("empty stats reported engines %q", got)
+	}
+	if got := (Stats{}).SavedPct(); got != 0 {
+		t.Fatalf("empty stats reported %d%%", got)
+	}
+}
