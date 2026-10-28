@@ -2377,6 +2377,35 @@ func TestModelsWithCodexUserAgentReturnsCodexCatalog(t *testing.T) {
 			t.Fatalf("did not expect Codex slug fields on plain /v1/models, got %s", rr.Body.String())
 		}
 	})
+
+	t.Run("codex user agent on model detail keeps openai detail shape", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models/gpt-5.5", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("User-Agent", "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+
+		var detail map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+			t.Fatalf("failed to parse detail JSON: %v; body=%s", err, rr.Body.String())
+		}
+		if id, _ := detail["id"].(string); id != "gpt-5.5" {
+			t.Fatalf("detail id = %v, want gpt-5.5 body=%s", detail["id"], rr.Body.String())
+		}
+		if _, ok := detail["slug"]; ok {
+			t.Fatalf("did not expect Codex slug on model detail, got %s", rr.Body.String())
+		}
+		if _, ok := detail["models"]; ok {
+			t.Fatalf("did not expect Codex catalog envelope on model detail, got %s", rr.Body.String())
+		}
+		if obj, _ := detail["object"].(string); obj != "model" {
+			t.Fatalf("detail object = %v, want model body=%s", detail["object"], rr.Body.String())
+		}
+	})
 }
 
 func TestModelsWithClientVersion_DevinDisplayName(t *testing.T) {

@@ -13,14 +13,28 @@ import (
 // Real Codex clients append ?client_version=... when fetching model_catalog_url.
 // They also send an official Codex User-Agent (codex_cli_rs/..., Codex Desktop/,
 // etc.). Either signal is enough so a bare catalog URL still works for Codex.
+//
+// Detection is limited to the models list route. GET /v1/models/{id} must keep
+// OpenAI-shaped detail fields even when a Codex User-Agent is present, because
+// unifiedModelsHandler forwards the wildcard detail route through OpenAIModels.
 func IsCodexModelsCatalogRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
+		return false
+	}
+	if !isModelsListPath(c.Request.URL.Path) {
 		return false
 	}
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		return true
 	}
 	return multiagentv2.IsCodexClientUserAgent(c.GetHeader("User-Agent"))
+}
+
+// isModelsListPath reports whether path is the models list endpoint (not a
+// model-detail path such as /v1/models/{id}).
+func isModelsListPath(path string) bool {
+	path = strings.TrimSuffix(path, "/")
+	return path == "/v1/models" || path == "/models"
 }
 
 // CodexModelsCatalogClientVersion returns the client version used to filter and

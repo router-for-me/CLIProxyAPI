@@ -12,10 +12,10 @@ func TestIsCodexModelsCatalogRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	cases := []struct {
-		name   string
-		path   string
-		ua     string
-		want   bool
+		name    string
+		path    string
+		ua      string
+		want    bool
 		wantVer string
 	}{
 		{
@@ -57,6 +57,31 @@ func TestIsCodexModelsCatalogRequest(t *testing.T) {
 			ua:      "claude-cli/1.0",
 			want:    false,
 			wantVer: "",
+		},
+		{
+			name: "codex user agent on model detail is not catalog",
+			path: "/v1/models/gpt-5.5",
+			ua:   "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9",
+			want: false,
+		},
+		{
+			name: "client_version on model detail is not catalog",
+			path: "/v1/models/gpt-5.5?client_version=0.159.0",
+			ua:   "codex_cli_rs/0.159.0",
+			want: false,
+		},
+		{
+			name:    "legacy /models list path still catalog",
+			path:    "/models",
+			ua:      "codex_cli_rs/0.159.0",
+			want:    true,
+			wantVer: "0.159.0",
+		},
+		{
+			name: "legacy /models detail path is not catalog",
+			path: "/models/gpt-5.5",
+			ua:   "codex_cli_rs/0.159.0",
+			want: false,
 		},
 	}
 
