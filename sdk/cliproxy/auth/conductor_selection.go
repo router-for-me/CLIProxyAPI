@@ -131,6 +131,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if e.accountPin != "" && !authMatchesAccountPin(auth, e.accountPin) {
 		return false
 	}
+	if e.accountPin == "" && AuthPinOnly(auth) {
+		return false
+	}
 	if _, held := authHoldUntil(auth, time.Now()); held {
 		return false
 	}

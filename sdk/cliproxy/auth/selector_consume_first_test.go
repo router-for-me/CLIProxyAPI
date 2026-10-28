@@ -178,3 +178,63 @@ func TestAccountPinServesOrRefusesNamedAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestPinOnlyAccountServesPinsAndNeverUnpinnedTraffic(t *testing.T) {
+	const model = "claude-pin-only-test-model"
+	const day = 24 * time.Hour
+	now := time.Now()
+	// The pin-only account resets soonest, so consume-first would pick it first.
+	team := claudeQuotaAuth("pin-only-team", 0.1, day, 0.1)
+	team.Metadata = map[string]any{MetadataGroup: "team", MetadataPinOnly: true}
+	pro := claudeQuotaAuth("pin-only-pro", 0.1, 5*day, 0.1)
+
+	m := NewManager(nil, &ConsumeFirstSelector{}, nil)
+	m.RegisterExecutor(&authFallbackExecutor{id: "claude"})
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range []*Auth{team, pro} {
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+	}
+	execute := func(pin string) (string, error) {
+		opts := cliproxyexecutor.Options{}
+		if pin != "" {
+			opts.Metadata = map[string]any{cliproxyexecutor.AccountPinMetadataKey: pin}
+		}
+		resp, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, opts)
+		return string(resp.Payload), errExec
+	}
+
+	if got, errExec := execute(""); errExec != nil || got != pro.ID {
+		t.Fatalf("unpinned Execute = %q, %v; want %q (pin-only accounts are skipped)", got, errExec, pro.ID)
+	}
+	if got, errExec := execute("team"); errExec != nil || got != team.ID {
+		t.Fatalf("Execute(pin=team) = %q, %v; want %q", got, errExec, team.ID)
+	}
+
+	// With every other account unusable, unpinned traffic is refused rather than
+	// falling through to the pin-only account.
+	pro.Disabled = true
+	if _, errUpdate := m.Update(context.Background(), pro); errUpdate != nil {
+		t.Fatalf("update pro: %v", errUpdate)
+	}
+	if got, errExec := execute(""); errExec == nil {
+		t.Fatalf("unpinned Execute = %q with only a pin-only account left; want an error", got)
+	}
+	if got, errExec := execute("team"); errExec != nil || got != team.ID {
+		t.Fatalf("Execute(pin=team) = %q, %v; want %q", got, errExec, team.ID)
+	}
+
+	// A hold still applies to a pin-only account.
+	team.Metadata[MetadataHoldUntil] = now.Add(time.Hour).UTC().Format(time.RFC3339)
+	if _, errUpdate := m.Update(context.Background(), team); errUpdate != nil {
+		t.Fatalf("update team: %v", errUpdate)
+	}
+	_, errExec := execute("team")
+	var refusal *accountPinError
+	if !errors.As(errExec, &refusal) || refusal.StatusCode() != http.StatusTooManyRequests || !strings.Contains(refusal.Error(), "held until") {
+		t.Fatalf("Execute(pin=team) on a held pin-only account = %v; want 429 held until", errExec)
+	}
+}

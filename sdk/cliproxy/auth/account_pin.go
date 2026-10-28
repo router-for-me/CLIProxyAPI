@@ -21,7 +21,24 @@ const (
 	// MetadataGroup names the credential groups an account pin can select.
 	// The value is a comma-separated string, for example "personal,pro".
 	MetadataGroup = "group"
+	// MetadataPinOnly keeps a credential out of unpinned routing: only a request
+	// whose account pin matches it can use it. Holds and disabled still apply.
+	MetadataPinOnly = "pin_only"
 )
+
+// AuthPinOnly reports whether the credential serves pinned requests only.
+func AuthPinOnly(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	switch value := auth.Metadata[MetadataPinOnly].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	}
+	return false
+}
 
 func accountPinFromMetadata(meta map[string]any) string {
 	value, _ := meta[cliproxyexecutor.AccountPinMetadataKey].(string)

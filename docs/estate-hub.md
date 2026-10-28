@@ -178,6 +178,13 @@ comma-separated string in the auth JSON:
 { "group": "personal,pro" }
 ```
 
+**Pin-only accounts.** `"pin_only": true` in an account's auth JSON (or `PATCH
+/v8/management/credentials/fields` with `{"name": "...", "pin_only": true}`, live) keeps it out of
+unpinned routing entirely: no strategy, fallback or session binding of an unpinned request reaches
+it, even when every other account is unusable. A pin that matches it is served as usual. Holds and
+`disabled` still apply on top. This is cxswap's "disabled but `cxswap run` still works" seat
+(Codex Team GDP on the estate hub). The credential listing shows `"pin_only": true`.
+
 With a pin, only matching accounts are considered (consume-first still orders them). The hub
 refuses the request immediately, without trying another account, when:
 

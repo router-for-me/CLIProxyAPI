@@ -282,6 +282,8 @@ Before the cut-over, 28 Oct: Waseem signed Codex Team GDP into the hub on m6 (`~
 note "Codex Team GDP" and `priority: -1`, the nearest hub form of cxswap's held-but-pinnable seat: a pin
 always reaches it, and unpinned Codex traffic reaches it only when all three Pro accounts are refused (cxswap
 never rotated into it at all). A pinned one-word request returned 200 from that login (hub log).
+At the hub restart in the cut-over, deploy the `pin_only` build and set `pin_only: true` on Codex Team GDP
+(and clear its priority): unpinned traffic then never reaches it, even when every Pro account is refused.
 Already done on 28 Oct: hub groups (Claude `1`-`10` = the old cswap slots, Codex `pro`, `pro-gmail`,
 `pro-personal` = the old cxswap names) and notes (the allowances names) on every Claude and Codex login;
 `~/.config/estate-hub/env` (mode 600) on auto-vps; `~/.codex/config.toml` carries the `cliproxy` provider
@@ -309,8 +311,7 @@ the local fallback login; running ones keep the route they started with.
    lands on group 3, `CODEX_HUB_ACCOUNT=pro-personal` on pro-personal (hub log `session-affinity ... auth=`
    lines; the per-account counters mix in other devices' traffic, so read the log). Codex needs
    `supports_websockets = true`: over plain HTTP streaming it hangs against the hub (seen 28 Oct).
-4. **allowances.** Known differences, accepted: Codex Team GDP and its banked resets drop out (not on the
-   hub); Claude 5h shows only for accounts used in the current window; CommandCode stays STALE until the
+4. **allowances.** Known differences, accepted: Claude 5h shows only for accounts used in the current window; CommandCode stays STALE until the
    hub's CommandCode key passes its usage endpoint (HTTP 401 today). Merge #1335, `git -C /opt/automancer/ops pull --ff-only`. Verify `allowances` and
    `allowances --json` show hub figures with the hub as rotation owner; the bb allowances panel renders.
 5. **bb pins.** The 23 Codex threads pinned to `team` resolve to the hub's Codex Team GDP login. Merge #16
