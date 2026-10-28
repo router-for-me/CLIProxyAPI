@@ -9,8 +9,8 @@
 :root {
   --ground: oklch(0.985 0.004 85); --ink: oklch(0.27 0.012 260); --strong: oklch(0.17 0.012 260); --muted: oklch(0.49 0.012 260);
   --rule: oklch(0.91 0.006 260); --hover: oklch(0.955 0.006 260); --track: oklch(0.9 0.008 260);
-  --accent: oklch(0.5 0.16 255); --ok: oklch(0.64 0.15 155); --warn: oklch(0.76 0.15 70); --bad: oklch(0.6 0.2 25);
-  --warn-ink: oklch(0.52 0.13 60); --bad-ink: oklch(0.52 0.19 25);
+  --accent: oklch(0.5 0.16 255); --warn: oklch(0.76 0.15 70); --bad: oklch(0.6 0.2 25);
+  --warn-ink: oklch(0.52 0.13 60); --bad-ink: oklch(0.52 0.19 25); --bar-l: 0.66; --bar-c: 0.17;
   color-scheme: light;
   font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -18,8 +18,8 @@
   :root {
     --ground: oklch(0.18 0.012 260); --ink: oklch(0.9 0.008 260); --strong: oklch(0.98 0.004 260); --muted: oklch(0.68 0.012 260);
     --rule: oklch(0.27 0.012 260); --hover: oklch(0.22 0.012 260); --track: oklch(0.36 0.012 260);
-    --accent: oklch(0.74 0.12 250); --ok: oklch(0.72 0.15 155); --warn: oklch(0.8 0.14 75); --bad: oklch(0.68 0.18 25);
-    --warn-ink: var(--warn); --bad-ink: var(--bad);
+    --accent: oklch(0.74 0.12 250); --warn: oklch(0.8 0.14 75); --bad: oklch(0.68 0.18 25);
+    --warn-ink: var(--warn); --bad-ink: var(--bad); --bar-l: 0.74; --bar-c: 0.16;
     color-scheme: dark;
   }
 }
@@ -39,18 +39,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button:disabled { opacity: .55; cursor: progress; }
 select, input { border: 1px solid var(--rule); background: var(--ground); border-radius: 6px; padding: 6px 8px; min-height: 36px; min-width: 0; }
 @media (hover: hover) and (pointer: fine) {
-  button:not(.primary):hover, details.acct > summary:hover, .chip:hover { background: var(--hover); }
+  button:not(.primary):hover, details.acct > summary:hover { background: var(--hover); }
 }
-header { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; white-space: nowrap; }
+header { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
 header button { padding: 4px 12px; font-size: .85rem; }
 
-/* Spend next: the router's next account per provider. */
-#chips { display: flex; align-items: center; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; }
-#chips > span { flex: none; font-size: .8rem; color: var(--muted); margin-right: 2px; }
-.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 10px 4px 8px; border: 1px solid var(--rule); border-radius: 999px; color: var(--ink); text-decoration: none; font-size: .85rem; white-space: nowrap; }
-.chip:active { background: var(--track); }
-.chip b { color: var(--strong); font-weight: 650; }
-.chip .logo { width: 16px; height: 16px; }
 
 .logo { width: 24px; height: 24px; flex: none; color: var(--strong); }
 .logo.initial { display: inline-grid; place-items: center; border-radius: 6px; background: var(--track); font: 700 .75rem/1 system-ui, sans-serif; }
@@ -73,13 +66,12 @@ button.danger { border-color: var(--bad-ink); color: var(--bad-ink); }
 .fig.warn, .when.warn, .warn { color: var(--warn-ink); }
 .fig.bad, .when.bad, .bad { color: var(--bad-ink); }
 
-/* The gauge: twenty blocks, like sysdash's bar, filled by what is left. */
-.gauge { height: 10px; background: var(--track); -webkit-mask: repeating-linear-gradient(90deg, #000 0 calc(5% - 2px), transparent calc(5% - 2px) 5%); mask: repeating-linear-gradient(90deg, #000 0 calc(5% - 2px), transparent calc(5% - 2px) 5%); }
-.gauge i, .thin i { display: block; height: 100%; background: var(--ok); }
-.gauge i.warn, .thin i.warn { background: var(--warn); }
-.gauge i.bad, .thin i.bad { background: var(--bad); }
+/* Bars fill with what is left; --h, set per bar, runs from red (spent) to green (full). */
+.gauge, .thin { display: block; background: var(--track); border-radius: 999px; overflow: clip; }
+.gauge { height: 8px; }
+.gauge i, .thin i { --c: oklch(var(--bar-l) var(--bar-c) var(--h)); display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, oklch(calc(var(--bar-l) - 0.07) var(--bar-c) calc(var(--h) - 22)), var(--c)); }
 .sub { display: flex; align-items: center; gap: 8px; font-size: .75rem; color: var(--muted); line-height: 1; }
-.thin { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: clip; }
+.thin { flex: 1; height: 4px; }
 .sub .cap { flex: none; }
 .none { font-size: .8rem; color: var(--muted); }
 
@@ -102,7 +94,7 @@ details.acct.out .name { color: var(--muted); }
 .win .top, .win .bottom { display: flex; justify-content: space-between; gap: 8px; }
 .win .top { font-size: .9rem; }
 .win .bottom { font-size: .8rem; color: var(--muted); }
-.win .thin { display: block; height: 5px; margin: 4px 0 3px; }
+.win .thin { height: 6px; margin: 4px 0 3px; }
 dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 14px; margin: 8px 0 0; font-size: .85rem; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
@@ -118,7 +110,6 @@ code { font-size: .95em; }
 
 @media (min-width: 760px) {
   main { padding: 18px 28px 48px; }
-  #chips { flex-wrap: wrap; }
   .row { grid-template-columns: 24px minmax(12rem, 17rem) minmax(0, 1fr) 4.5rem 9rem; grid-template-areas: "logo name bars fig when"; column-gap: 18px; padding: 9px 8px; }
   .row > .logo { align-self: center; margin-top: 0; }
   .when { align-self: center; justify-self: start; }
@@ -160,7 +151,6 @@ code { font-size: .95em; }
     <span id="updated" class="muted"></span>
     <button id="reload">Refresh</button>
   </header>
-  <nav id="chips" aria-label="Spend next" hidden></nav>
   <p id="error" class="error" role="alert"></p>
   <div id="accounts"></div>
   <footer>
@@ -251,6 +241,8 @@ function windowsOf(a) {
   return ((a.usage && a.usage.windows) || []).filter((w) => !w.reset_at || future(time(w.reset_at)));
 }
 const left = (w) => Math.max(0, Math.min(100, 100 - (w.used_percent || 0)));
+// hue follows sysdash's bands smoothly: red at LOW or less, amber at WARN, green from 70% left.
+const hue = (l) => Math.round(l <= LOW ? 25 : l < WARN ? 25 + ((l - LOW) / (WARN - LOW)) * 45 : l < 70 ? 70 + ((l - WARN) / 30) * 80 : 150);
 const tone = (l) => (l <= LOW ? "bad" : l < WARN ? "warn" : "");
 const shortName = (w) => [w.label && w.label.replace(/ only$/, ""), cadence(w.window_minutes, true)].filter(Boolean).join(" ") || "allowance";
 const longName = (w) => [w.label, cadence(w.window_minutes)].filter(Boolean).join(" · ");
@@ -342,7 +334,7 @@ function logoHTML(provider, cls) {
 }
 function meter(w, cls, label) {
   const l = Math.round(left(w));
-  return `<span class="${cls}" role="meter" aria-label="${esc(label)}" aria-valuenow="${l}" aria-valuemin="0" aria-valuemax="100"><i class="${tone(l)}" style="width:${l}%"></i></span>`;
+  return `<span class="${cls}" role="meter" aria-label="${esc(label)}" aria-valuenow="${l}" aria-valuemin="0" aria-valuemax="100"><i style="width:${l}%;--h:${hue(l)}"></i></span>`;
 }
 function balanceText(b) {
   return b.total ? `${money(b)} of ${money({ left: b.total, currency: b.currency })} left` : `${money(b)} balance`;
@@ -417,7 +409,7 @@ function barsHTML(r) {
   else if (r.main && !isWeek(r.main)) parts.push(`<span class="sub"><span class="cap">${esc(cap(r.main))}</span></span>`);
   const early = [r.main, r.second].filter((w) => w && runsOut(w)).map((w) => `${cap(w)} out ${clock(pace(w).emptyAt)}`);
   if (early.length && !r.spent) parts.push(`<span class="sub"><span class="out-early" title="On course to run out before it resets">${esc(early.join(" · "))}</span></span>`);
-  if (!parts.length) parts.push(`<span class="none">${r.balance ? "Prepaid balance" : r.a.source === "config" ? "No figures for this API" : "No figures yet"}</span>`);
+  if (!parts.length) parts.push(`<span class="none">${r.balance ? "Prepaid balance" : r.provider === "local" ? "Own GPUs, no allowance" : r.a.source === "config" ? "No figures for this API" : "No figures yet"}</span>`);
   return `<span class="bars">${parts.join("")}</span>`;
 }
 
@@ -431,12 +423,6 @@ function rowHTML(r, isNext) {
   return `<details class="acct${b ? " out" : err ? " stale" : ""}" id="r-${esc(r.id)}" data-id="${esc(r.id)}"><summary class="row">` +
     `${logoHTML(r.provider)}<span class="name"><span class="n">${esc(rowName(r))}</span>${tags}</span>${barsHTML(r)}${figure(r)}${whenHTML(r)}</summary>` +
     `<div class="body">${r.wins.map(windowHTML).join("")}${factsHTML(r)}${manageHTML(a)}</div></details>`;
-}
-
-function chipHTML(r, many) {
-  const who = many ? rowName(r).replace(new RegExp("^" + providerName(r.provider) + " ", "i"), "") : "";
-  const fig = r.balance ? money(r.balance) : Math.round(left(r.main)) + "%";
-  return `<a class="chip" href="#r-${esc(r.id)}" title="Spend next on ${esc(providerName(r.provider))}: ${esc(rowName(r))}">${logoHTML(r.provider)}${who ? `<span>${esc(who)}</span>` : ""}<b>${esc(fig)}</b>${r.reset ? `<span class="muted">${until(r.reset)}</span>` : ""}</a>`;
 }
 
 function render() {
@@ -453,10 +439,6 @@ function render() {
   // The router's next account per provider: its first usable, unspent row.
   const next = new Map();
   if (consumeFirst) for (const r of rows) if (!r.blocker && !r.spent && !next.has(r.provider)) next.set(r.provider, r);
-  const chips = [...next.values()].filter((r) => r.main || r.balance);
-  const several = new Set(rows.map((r) => r.provider).filter((p, i, all) => all.indexOf(p) !== i));
-  $("chips").innerHTML = chips.length ? "<span>Spend next</span>" + chips.map((r) => chipHTML(r, several.has(r.provider))).join("") : "";
-  $("chips").hidden = !chips.length;
   const open = new Set([...document.querySelectorAll("details.acct[open]")].map((d) => d.dataset.id));
   const accounts = (p) => new Set(rows.filter((r) => r.provider === p).map((r) => r.a.id)).size;
   const many = new Set([...next.keys()].filter((p) => accounts(p) > 1));
@@ -525,11 +507,6 @@ $("logout").addEventListener("click", () => signOut());
 $("accounts").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-act]");
   if (button) act(button);
-});
-// A spend-next chip opens the row it points at.
-$("chips").addEventListener("click", (e) => {
-  const chip = e.target.closest("a.chip"), row = chip && document.getElementById(chip.hash.slice(1));
-  if (row) row.open = true;
 });
 // Refresh every 30 s while visible, but never under a half-typed name or an open select.
 setInterval(() => { if (!document.hidden && data && !document.activeElement.closest(".actions")) load(); }, 30000);

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	devinauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
@@ -109,6 +110,8 @@ func TestUsageParsersReadProviderShapes(t *testing.T) {
 		{"antigravity", parseAntigravityUsage(gjson.Parse(`{"response":{"groups":[{"displayName":"Gemini","buckets":[
 			{"bucketId":"gemini-5h","remainingFraction":0.75},{"window":"weekly","remaining":{"remainingFraction":1}},{"bucketId":"x","disabled":true,"remainingFraction":0}]}]}}`)),
 			"", []coreauth.UsageWindow{{Label: "Gemini", UsedPercent: 25, WindowMinutes: 300}, {Label: "Gemini", WindowMinutes: 10080}}},
+		{"devin", devinUsage(&devinauth.DevinUserStatus{Plan: "Max", DailyQuotaRemainingPercent: 75, DailyQuotaResetAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC), WeeklyQuotaRemainingPercent: 0}),
+			"Max", []coreauth.UsageWindow{{UsedPercent: 25, WindowMinutes: 1440, ResetAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)}}},
 		{"muse", parseMetaUsage(gjson.Parse(`{"subs_tier_name":"Muse Max","subs_usage":{
 			"window":{"used_percent":96,"window_duration_mins":300,"resets_at":4102444800},"weekly":{"used_percent":40}}}`)),
 			"Muse Max", []coreauth.UsageWindow{{UsedPercent: 96, WindowMinutes: 300, ResetAt: time.Unix(4102444800, 0).UTC()}, {UsedPercent: 40, WindowMinutes: 10080}}},

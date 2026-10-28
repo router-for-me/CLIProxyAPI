@@ -15,6 +15,7 @@ import (
 	"time"
 
 	antigravityauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	devinauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
@@ -151,6 +152,16 @@ var usageFetchers = map[string]usageFetcher{
 			"User-Agent":    "muse-code/1.0.2",
 		})
 		return parseMetaUsage(body), err
+	},
+	// Devin reports its daily and weekly quota on the seat-management status
+	// call its executor makes, with the CLI login's own session token.
+	"devin": func(ctx context.Context, client *http.Client, auth *coreauth.Auth, token string) (usageResult, error) {
+		seed, _ := auth.Metadata["device_seed"].(string)
+		status, err := devinauth.NewDevinAuthService(client).FetchUserStatus(ctx, token, seed)
+		if err != nil {
+			return usageResult{}, err
+		}
+		return devinUsage(status), nil
 	},
 	"deepseek": func(ctx context.Context, client *http.Client, _ *coreauth.Auth, token string) (usageResult, error) {
 		body, err := usageRequest(ctx, client, http.MethodGet, "https://api.deepseek.com/user/balance", nil, map[string]string{"Authorization": "Bearer " + token})
@@ -463,6 +474,25 @@ func parseCodexResetCredits(body gjson.Result, now time.Time) []usageCredit {
 		return !a.IsZero() && (b.IsZero() || a.Before(b))
 	})
 	return credits
+}
+
+// devinUsage turns Devin's remaining percentages into windows. A window with no
+// reset time was not reported: its remaining 0 is protobuf's default, not spent.
+func devinUsage(status *devinauth.DevinUserStatus) usageResult {
+	result := usageResult{plan: status.Plan}
+	for _, window := range []struct {
+		left    int64
+		minutes float64
+		reset   time.Time
+	}{
+		{status.DailyQuotaRemainingPercent, 24 * 60, status.DailyQuotaResetAt},
+		{status.WeeklyQuotaRemainingPercent, usageWeekMinutes, status.WeeklyQuotaResetAt},
+	} {
+		if !window.reset.IsZero() {
+			result.windows = append(result.windows, coreauth.UsageWindow{UsedPercent: float64(100 - window.left), WindowMinutes: window.minutes, ResetAt: window.reset})
+		}
+	}
+	return result
 }
 
 // parseDeepSeekBalance reads /user/balance: a prepaid balance per currency.
