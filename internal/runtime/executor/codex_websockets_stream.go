@@ -778,6 +778,14 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 			}
 
+			// The turn stops taking interrupts before its terminal event reaches the
+			// client: once the client has read it, an interrupt must not be written
+			// upstream for a response that already ended. The deferred teardown
+			// clears the same state and is a no-op after this.
+			if isTerminalEvent && sess != nil {
+				sess.clearActive(conn, readCh)
+			}
+
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 					payload = completedPayload
