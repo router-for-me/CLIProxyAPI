@@ -1,6 +1,8 @@
 package payloadcompress
 
 import (
+	"sort"
+	"strconv"
 	"strings"
 	"unsafe"
 )
@@ -20,6 +22,38 @@ type Stats struct {
 	Style string
 	// StyleBytes is the byte delta of the system prompt injection.
 	StyleBytes int
+}
+
+// Engines renders the engines that actually saved bytes, as "lite=130,rtk=2610"
+// in name order. Engines that matched nothing are omitted, so the string answers
+// "what ran" rather than "what was configured".
+func (s Stats) Engines() string {
+	if len(s.Saved) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(s.Saved))
+	for name := range s.Saved {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(strconv.Itoa(s.Saved[name]))
+	}
+	return b.String()
+}
+
+// SavedPct is the percentage of the payload removed, rounded down.
+func (s Stats) SavedPct() int {
+	if s.BytesIn <= 0 || s.BytesOut <= 0 {
+		return 0
+	}
+	return 100 * (s.BytesIn - s.BytesOut) / s.BytesIn
 }
 
 // engine is the identity every pipeline step shares.

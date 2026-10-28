@@ -19,32 +19,40 @@ import (
 // applyRequestCompression runs the configured compression combo over the final
 // business payload. Rooted payloads (envelope formats) are left alone because
 // their offsets are not the conversation itself.
+// compressionFields is the one-line answer to "what did compression do": which
+// combo and engines fired, how many bytes they removed, and the style prefix.
+func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
+	return log.Fields{
+		"model":     model,
+		"combo":     stats.Combo,
+		"engines":   stats.Engines(),
+		"segments":  stats.Segments,
+		"style":     stats.Style,
+		"style_len": stats.StyleBytes,
+		"bytes_in":  stats.BytesIn,
+		"bytes_out": stats.BytesOut,
+		"saved_pct": stats.SavedPct(),
+	}
+}
+
 func applyRequestCompression(cfg *config.Config, model, root string, body []byte) []byte {
 	if cfg == nil || root != "" || (!cfg.Compression.Enabled && len(cfg.Compression.OutputStyles) == 0) {
 		return body
 	}
 	out, stats := payloadcompress.ApplyAll(cfg.Compression, model, body)
+	// Info level: "what did this do to my request" is the only question the log has
+	// to answer, and it is invisible at debug. shortcut: one line per compressed
+	// request, quiet it with the log level if the volume is unwelcome.
 	if !stats.Applied {
-		if cfg.Compression.Shadow && (stats.Combo != "" || stats.Style != "") && log.IsLevelEnabled(log.DebugLevel) {
-			log.WithFields(log.Fields{
-				"combo":    stats.Combo,
-				"style":    stats.Style,
-				"bytes_in": stats.BytesIn,
-				"bytes_to": stats.BytesOut,
-				"saved":    stats.Saved,
-			}).Debug("payload compression shadow")
+		if cfg.Compression.Shadow && (stats.Combo != "" || stats.Style != "") && log.IsLevelEnabled(log.InfoLevel) {
+			log.WithFields(compressionFields(model, stats)).
+				Info("payload compression shadow")
 		}
 		return body
 	}
-	if log.IsLevelEnabled(log.DebugLevel) {
-		log.WithFields(log.Fields{
-			"combo":    stats.Combo,
-			"bytes_in": stats.BytesIn,
-			"bytes_to": stats.BytesOut,
-			"segments": stats.Segments,
-			"style":    stats.Style,
-			"saved":    stats.Saved,
-		}).Debug("payload compression applied")
+	if log.IsLevelEnabled(log.InfoLevel) {
+		log.WithFields(compressionFields(model, stats)).
+			Info("payload compression applied")
 	}
 	return out
 }
