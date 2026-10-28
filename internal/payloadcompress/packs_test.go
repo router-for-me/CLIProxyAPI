@@ -228,25 +228,46 @@ func TestRTKDefaultCapsMatchUpstream(t *testing.T) {
 	}
 }
 
+// TestRTKMaxLinesCap pins the line pass: head and tail survive and the middle is
+// reported as dropped lines. Upstream keeps preserveHead/preserveTail lines
+// whatever max-lines says, so a tiny cap still yields 48 body lines.
 func TestRTKMaxLinesCap(t *testing.T) {
 	var lines []string
 	for i := 0; i < 500; i++ {
 		lines = append(lines, "distinct output line number "+itoaDecimal(i))
 	}
-	text := strings.Join(lines, "\n") + "\n"
-
-	out, ok := rtkEngine{opts: StepOptions{MaxLines: 40}}.compress(text)
+	out, ok := rtkEngine{opts: StepOptions{MaxLines: 40}}.compress(strings.Join(lines, "\n"))
 	if !ok {
 		t.Fatal("expected the line cap to fire")
 	}
-	if got := strings.Count(out, "\n"); got > 42 {
-		t.Fatalf("max-lines ignored: %d newlines", got)
+	if !strings.Contains(out, "[rtk:truncated 452 lines]") {
+		t.Fatalf("missing dropped-line marker: %q", out)
 	}
-	if !strings.Contains(out, "lines omitted") {
-		t.Fatalf("missing omission marker")
+	if !strings.Contains(out, "line number 0") || !strings.Contains(out, "line number 499") {
+		t.Fatal("head and tail must survive")
 	}
-	if !strings.Contains(out, "line number 499") {
-		t.Fatalf("tail lines must survive:\n%s", out[len(out)-200:])
+	if strings.Contains(out, "line number 250") {
+		t.Fatal("the middle must be dropped")
+	}
+}
+
+// TestRTKKeepsMiddleDiagnostics pins the reason this port exists: an error line
+// buried in the middle of dropped output must survive the cap.
+func TestRTKKeepsMiddleDiagnostics(t *testing.T) {
+	var lines []string
+	for i := 0; i < 500; i++ {
+		if i == 250 {
+			lines = append(lines, "FATAL: rollback required")
+			continue
+		}
+		lines = append(lines, "chatter "+itoaDecimal(i))
+	}
+	out, ok := rtkEngine{opts: StepOptions{MaxLines: 40}}.compress(strings.Join(lines, "\n"))
+	if !ok {
+		t.Fatal("expected the line cap to fire")
+	}
+	if !strings.Contains(out, "FATAL: rollback required") {
+		t.Fatal("a diagnostic line from the middle must survive")
 	}
 }
 
@@ -312,7 +333,7 @@ func TestDefaultKnobsMatchUpstream(t *testing.T) {
 	if !li.keepToolResults() {
 		t.Fatal("lite compress-tool-results must default to true")
 	}
-	if limits := (rtkEngine{}).limits(); limits != (rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000}) {
+	if limits := (rtkEngine{}).limits(); limits != (rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000, preserveHead: 24, preserveTail: 24}) {
 		t.Fatalf("rtk defaults = %+v", limits)
 	}
 	if got := (cavemanEngine{}).pack("  "); got != "en" {
@@ -323,27 +344,38 @@ func TestDefaultKnobsMatchUpstream(t *testing.T) {
 	}
 }
 
-// TestRTKCharCapKeepsWholeLines pins the max-chars cap to line boundaries. A
+// TestRTKCharPassKeepsWholeLines pins the char pass to line boundaries. A
 // mid-line cut leaves fragments that read like real output, so every surviving
 // line must exist verbatim in the input.
-func TestRTKCharCapKeepsWholeLines(t *testing.T) {
+func TestRTKCharPassKeepsWholeLines(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 300; i++ {
-		b.WriteString("line " + strconv.Itoa(i) + " " + strings.Repeat("x", 40) + "\n")
+		if i == 150 {
+			b.WriteString("FATAL: rollback required\n")
+			continue
+		}
+		b.WriteString("line " + strconv.Itoa(i) + " " + strings.Repeat("漢", 40) + "\n")
 	}
 	in := b.String()
-	out, ok := rtkEngine{opts: StepOptions{MaxChars: 3000}}.compress(in)
+	const limit = 1200
+	out, ok := rtkEngine{opts: StepOptions{MaxChars: limit}}.compress(in)
 	if !ok {
 		t.Fatal("expected a rewrite")
 	}
-	if n := charLen(out); n > 3000 {
+	if !strings.Contains(out, "[rtk:truncated by chars]") {
+		t.Fatalf("missing char marker: %q", out)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("cut split a multi-byte rune")
+	}
+	if n := charLen(out); n > limit {
 		t.Fatalf("char cap exceeded: %d chars", n)
 	}
-	if !strings.Contains(out, "chars omitted") {
-		t.Fatalf("missing char marker: %q", out[:80])
+	if !strings.Contains(out, "FATAL: rollback required") {
+		t.Fatal("a diagnostic line must survive the char pass")
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
-		if strings.Contains(line, "chars omitted") {
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" || strings.HasPrefix(line, "[rtk:") {
 			continue
 		}
 		if !strings.Contains(in, line+"\n") {
