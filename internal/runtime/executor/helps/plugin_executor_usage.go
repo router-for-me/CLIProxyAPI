@@ -2,6 +2,7 @@ package helps
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -70,9 +71,7 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		})
 	case "interactions", "interactions-response":
 		IterateStreamLines(payload, func(line []byte) {
-			if detail, ok := ParseInteractionsStreamUsage(line); ok {
-				ObserveMergedStreamUsage(buffer, detail)
-			}
+			observeInteractionsPluginStreamUsage(line, buffer)
 		})
 	case "antigravity":
 		IterateStreamLines(payload, func(line []byte) {
@@ -96,6 +95,61 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		IterateStreamLines(payload, func(line []byte) {
 			buffer.ObserveOpenAIStream(line)
 		})
+	}
+}
+
+// observeInteractionsPluginStreamUsage retains omitted counters while allowing explicit
+// zeroes to replace them. Merge raw counters before normalization so tool input and
+// separate reasoning are counted once, even when they arrive in different events.
+func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer) {
+	payload := ExtractStreamJSONPayload(line)
+	if !gjson.ValidBytes(payload) {
+		return
+	}
+	node := interactionsUsageNode(gjson.ParseBytes(payload))
+	if !node.IsObject() {
+		return
+	}
+	total := firstExistingUsageNode(node, "total_tokens", "totalTokenCount")
+	if total.Exists() && total.Int() == 0 {
+		// An explicit zero total resets omitted counters from earlier snapshots.
+		clear(buffer.interactionsUsage)
+	}
+	updated := false
+	for _, paths := range [][]string{
+		{"input_tokens", "prompt_tokens", "total_input_tokens", "promptTokenCount"},
+		{"tool_use_tokens", "total_tool_use_tokens", "toolUseTokens", "totalToolUseTokens", "toolUsePromptTokenCount", "tool_use_prompt_token_count"},
+		{"output_tokens", "completion_tokens", "total_output_tokens", "candidatesTokenCount"},
+		{"reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens"},
+		{"cached_tokens", "cachedContentTokenCount", "total_cached_tokens"},
+		{"cache_read_tokens", "cacheReadTokens"},
+		{"cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens"},
+		{"total_tokens", "totalTokenCount"},
+	} {
+		if value := firstExistingUsageNode(node, paths...); value.Exists() {
+			if buffer.interactionsUsage == nil {
+				buffer.interactionsUsage = make(map[string]int64)
+			}
+			buffer.interactionsUsage[paths[0]] = value.Int()
+			updated = true
+		}
+	}
+	if !updated {
+		return
+	}
+	// A previous total can be stale after a partial update. Without a new total,
+	// let the parser derive it from all accumulated counters.
+	if !total.Exists() {
+		delete(buffer.interactionsUsage, "total_tokens")
+	}
+	merged, err := json.Marshal(buffer.interactionsUsage)
+	if err != nil {
+		return
+	}
+	detail := parseInteractionsUsageDetail(gjson.ParseBytes(merged))
+	buffer.Observe(detail, true)
+	if tier := extractResponseServiceTier(payload); tier != "" {
+		buffer.detail.ResponseServiceTier = tier
 	}
 }
 
