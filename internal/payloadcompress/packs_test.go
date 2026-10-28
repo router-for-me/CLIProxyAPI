@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -256,8 +257,9 @@ func TestLiteToolResultCap(t *testing.T) {
 	if !ok {
 		t.Fatal("expected truncation")
 	}
-	if len(out) > 560 {
-		t.Fatalf("not truncated: %d", len(out))
+	// The cap is characters: 500 kept plus the marker, never 500 bytes.
+	if n := charLen(out); n > 500+charLen(toolTruncationMarker) {
+		t.Fatalf("not truncated: %d chars", n)
 	}
 	if !strings.Contains(out, "...[truncated]") {
 		t.Fatalf("missing marker: %q", out)
@@ -356,13 +358,16 @@ func TestRTKCharCapKeepsWholeLines(t *testing.T) {
 func TestLiteToolResultCapElidesLines(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 60; i++ {
-		b.WriteString("row " + strconv.Itoa(i) + " " + strings.Repeat("y", 60) + "\n")
+		b.WriteString("row " + strconv.Itoa(i) + " " + strings.Repeat("漢", 60) + "\n")
 	}
 	in := b.String()
 	const limit = 1000
 	out, ok := liteEngine{opts: StepOptions{MaxToolLength: limit}}.compressKind(kindToolOutput, in)
 	if !ok {
 		t.Fatal("expected truncation")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("cut split a multi-byte rune")
 	}
 	marker := strings.Index(out, "\n... [")
 	if marker < 0 || !strings.Contains(out, "lines elided]") {
@@ -373,7 +378,7 @@ func TestLiteToolResultCapElidesLines(t *testing.T) {
 		t.Fatalf("head is not a prefix of the input: %q", head)
 	}
 	// The head ends on a word boundary: a hard cut would leave a partial word.
-	if next := in[len(head)]; next != ' ' && next != '\n' {
+	if next, _ := utf8.DecodeRuneInString(in[len(head):]); !unicode.IsSpace(next) {
 		t.Fatalf("head ends mid-word: %q", head[len(head)-20:])
 	}
 	// Everything after the elision marker is the tail, which must start on a line.
