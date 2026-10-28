@@ -1255,6 +1255,17 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 		CacheReadTokens:     cacheReadTokens,
 		CacheCreationTokens: cacheCreationTokens,
 	}
+	if cacheCreation := usageNode.Get("cache_creation"); cacheCreation.IsObject() {
+		detail.CacheCreation = &usage.CacheCreationUsage{
+			Ephemeral5mInputTokens: max(cacheCreation.Get("ephemeral_5m_input_tokens").Int(), 0),
+			Ephemeral1hInputTokens: max(cacheCreation.Get("ephemeral_1h_input_tokens").Int(), 0),
+		}
+		if detail.CacheCreationTokens == 0 {
+			if total, ok := safeUsageTokenSum(detail.CacheCreation.Ephemeral5mInputTokens, detail.CacheCreation.Ephemeral1hInputTokens); ok {
+				detail.CacheCreationTokens = total
+			}
+		}
+	}
 	// Anthropic reports the speed a response was served and billed at in
 	// usage.speed ("fast" or "standard"): fast mode costs more, and a
 	// fast request on a model without it runs, and is billed, at standard.

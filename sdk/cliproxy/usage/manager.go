@@ -105,6 +105,13 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	CacheCreation       *CacheCreationUsage
+}
+
+// CacheCreationUsage contains Claude cache-write token counts by retention period.
+type CacheCreationUsage struct {
+	Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
 }
 
 type requestedModelAliasContextKey struct{}

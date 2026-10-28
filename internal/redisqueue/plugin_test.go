@@ -81,6 +81,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
+		requireMissingField(t, requireTokensPayload(t, payload), "cache_creation")
 		requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 		requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 		requireBoolField(t, payload, "failed", false)
@@ -117,6 +118,66 @@ func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
 				payload := popSinglePayload(t)
 				requireIntField(t, requireTokensPayload(t, payload), "total_tokens", tt.wantTotal)
 				requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, int64(tt.wantTotal))
+			})
+		})
+	}
+}
+
+func TestUsageQueuePluginDefaultsClaudeCacheCreationTo5m(t *testing.T) {
+	withEnabledQueue(t, func() {
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			Provider: "claude",
+			Detail:   coreusage.Detail{CacheCreationTokens: 1000},
+		})
+
+		tokens := requireTokensPayload(t, popSinglePayload(t))
+		requireIntField(t, tokens, "cache_creation_tokens", 1000)
+		var split map[string]json.RawMessage
+		if err := json.Unmarshal(tokens["cache_creation"], &split); err != nil {
+			t.Fatalf("decode cache creation TTLs: %v", err)
+		}
+		requireIntField(t, split, "ephemeral_5m_input_tokens", 1000)
+		requireIntField(t, split, "ephemeral_1h_input_tokens", 0)
+	})
+}
+
+func TestUsageQueuePluginPreservesClaudeCacheCreationTTLs(t *testing.T) {
+	tests := []struct {
+		name     string
+		split    coreusage.CacheCreationUsage
+		tokens5m int
+		tokens1h int
+	}{
+		{"mixed", coreusage.CacheCreationUsage{Ephemeral5mInputTokens: 600, Ephemeral1hInputTokens: 400}, 600, 400},
+		{"partial", coreusage.CacheCreationUsage{Ephemeral5mInputTokens: 200, Ephemeral1hInputTokens: 300}, 700, 300},
+		{"one hour", coreusage.CacheCreationUsage{Ephemeral1hInputTokens: 1000}, 0, 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				split := tt.split
+				(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+					Provider: "claude",
+					Detail: coreusage.Detail{
+						InputTokens: 10, OutputTokens: 20, CacheCreationTokens: 1000,
+						CacheCreation: &split,
+					},
+				})
+
+				payload := popSinglePayload(t)
+				tokens := requireTokensPayload(t, payload)
+				requireIntField(t, tokens, "cache_creation_tokens", 1000)
+				requireIntField(t, tokens, "total_tokens", 1030)
+				requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 1030)
+				var creation map[string]json.RawMessage
+				if err := json.Unmarshal(tokens["cache_creation"], &creation); err != nil {
+					t.Fatalf("decode cache creation TTLs: %v", err)
+				}
+				requireIntField(t, creation, "ephemeral_5m_input_tokens", tt.tokens5m)
+				requireIntField(t, creation, "ephemeral_1h_input_tokens", tt.tokens1h)
+				if split != tt.split {
+					t.Fatalf("original cache creation mutated: %+v", split)
+				}
 			})
 		})
 	}
