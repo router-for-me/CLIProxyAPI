@@ -97,6 +97,26 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errIntercept
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestPatchBodyBefore:
+		patcher := requestRecordBodyPatcher(capabilityRecord{plugin: l.active}, true)
+		if patcher == nil {
+			return nil, fmt.Errorf("missing request body patcher before")
+		}
+		resp, errPatch := patcher.PatchRequestBody(ctx, request)
+		if errPatch != nil {
+			return nil, errPatch
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestPatchBodyAfter:
+		patcher := requestRecordBodyPatcher(capabilityRecord{plugin: l.active}, false)
+		if patcher == nil {
+			return nil, fmt.Errorf("missing request body patcher after")
+		}
+		resp, errPatch := patcher.PatchRequestBody(ctx, request)
+		if errPatch != nil {
+			return nil, errPatch
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodRequestComplete:
 		if l.active.Capabilities.RequestLifecyclePlugin == nil {
 			return nil, fmt.Errorf("missing request lifecycle plugin")
@@ -140,6 +160,24 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, fmt.Errorf("missing auth provider")
 		}
 		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.AuthProvider.Identifier()})
+	case pluginabi.MethodFrontendAuthIdentifier:
+		if l.active.Capabilities.FrontendAuthProvider == nil {
+			return nil, fmt.Errorf("missing frontend auth provider")
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.FrontendAuthProvider.Identifier()})
+	case pluginabi.MethodFrontendAuthAuthenticate:
+		if l.active.Capabilities.FrontendAuthProvider == nil {
+			return nil, fmt.Errorf("missing frontend auth provider")
+		}
+		var req pluginapi.FrontendAuthRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errAuth := l.active.Capabilities.FrontendAuthProvider.Authenticate(ctx, req)
+		if errAuth != nil {
+			return nil, errAuth
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodSchedulerPick:
 		if l.active.Capabilities.Scheduler == nil {
 			return nil, fmt.Errorf("missing scheduler")

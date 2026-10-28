@@ -12,6 +12,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -113,6 +114,7 @@ func (h *Host) RegisterFrontendAuthProviders() {
 			path:     record.path,
 			version:  record.version,
 			provider: provider,
+			omitBody: frontendAuthOmitsBody(record),
 		}
 		key := strings.TrimSpace(adapter.Identifier())
 		if key == "" {
@@ -168,6 +170,28 @@ type accessAdapter struct {
 	path     string
 	version  string
 	provider pluginapi.FrontendAuthProvider
+	omitBody bool
+}
+
+func frontendAuthOmitsBody(record capabilityRecord) bool {
+	if record.plugin.SchemaVersion < pluginabi.SchemaVersionFrontendAuthOmitBody {
+		return false
+	}
+	caps := record.plugin.Capabilities
+	if caps.FrontendAuthProvider == nil {
+		return false
+	}
+	return frontendAuthProviderWantsOmitBody(caps)
+}
+
+func frontendAuthRequestBody(provider pluginapi.FrontendAuthProvider, body []byte) []byte {
+	if len(body) == 0 {
+		return nil
+	}
+	if _, isRPC := provider.(rpcFrontendAuthProvider); isRPC {
+		return body
+	}
+	return bytes.Clone(body)
 }
 
 func (a *accessAdapter) Identifier() (identifier string) {
@@ -202,55 +226,59 @@ func (a *accessAdapter) Authenticate(ctx context.Context, r *http.Request) (resu
 		}
 	}()
 
-	body, errReadAll := readAndRestoreRequestBody(r)
-	if errReadAll != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(errReadAll, &maxBytesErr) {
-			return nil, sdkaccess.NewRequestEntityTooLargeError(errReadAll)
-		}
-		return nil, sdkaccess.NewInternalAuthError("failed to read plugin auth request body", errReadAll)
-	}
 	headers := cloneHeader(r.Header)
+	var authBody []byte
 	var decodedBody []byte
-	cfg := a.host.currentRuntimeConfig()
-	// With image generation disabled the image handlers answer 404 before reading the body.
-	imagesOff := cfg != nil && cfg.DisableImageGeneration == config.DisableImageGenerationAll && strings.HasPrefix(r.URL.Path, "/v1/images/")
-	if encoding := strings.TrimSpace(headers.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") && strings.Count(encoding, ",") < maxAuthContentCodings && !imagesOff && handlerDecodesBody(r) {
-		// Decoding runs before authentication, so it is bounded; a slot is held until the plugin call finishes.
-		var releaseSlot func()
-		select {
-		case authDecodeSlots <- struct{}{}:
-			ctx, releaseSlot = withPluginCallFinish(ctx, func() { <-authDecodeSlots })
-			defer releaseSlot()
-		case <-ctx.Done():
-			return nil, sdkaccess.NewInternalAuthError("plugin auth request canceled", ctx.Err())
+	if !a.omitBody {
+		body, errReadAll := readAndRestoreRequestBody(r)
+		if errReadAll != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(errReadAll, &maxBytesErr) {
+				return nil, sdkaccess.NewRequestEntityTooLargeError(errReadAll)
+			}
+			return nil, sdkaccess.NewInternalAuthError("failed to read plugin auth request body", errReadAll)
 		}
-		// The server middleware limits only compressed bytes; ReadRequestBody applies the configured
-		// limit to decoded bytes after authentication, so apply it here too.
-		limit := int64(maxAuthDecodedBodyBytes)
-		if cfg != nil && cfg.MaxRequestBodyBytes > 0 && cfg.MaxRequestBodyBytes < limit {
-			limit = cfg.MaxRequestBodyBytes
+		cfg := a.host.currentRuntimeConfig()
+		// With image generation disabled the image handlers answer 404 before reading the body.
+		imagesOff := cfg != nil && cfg.DisableImageGeneration == config.DisableImageGenerationAll && strings.HasPrefix(r.URL.Path, "/v1/images/")
+		if encoding := strings.TrimSpace(headers.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") && strings.Count(encoding, ",") < maxAuthContentCodings && !imagesOff && handlerDecodesBody(r) {
+			// Decoding runs before authentication, so it is bounded; a slot is held until the plugin call finishes.
+			var releaseSlot func()
+			select {
+			case authDecodeSlots <- struct{}{}:
+				ctx, releaseSlot = withPluginCallFinish(ctx, func() { <-authDecodeSlots })
+				defer releaseSlot()
+			case <-ctx.Done():
+				return nil, sdkaccess.NewInternalAuthError("plugin auth request canceled", ctx.Err())
+			}
+			// The server middleware limits only compressed bytes; ReadRequestBody applies the configured
+			// limit to decoded bytes after authentication, so apply it here too.
+			limit := int64(maxAuthDecodedBodyBytes)
+			if cfg != nil && cfg.MaxRequestBodyBytes > 0 && cfg.MaxRequestBodyBytes < limit {
+				limit = cfg.MaxRequestBodyBytes
+			}
+			if (r.URL.Path == "/v1/audio/speech" || r.URL.Path == "/v1/tts") && limit > maxAuthSpeechBodyBytes {
+				limit = maxAuthSpeechBodyBytes
+			}
+			decoded, errDecode := decodeAuthBody(body, encoding, limit)
+			if errors.Is(errDecode, errAuthBodyTooLarge) {
+				return nil, sdkaccess.NewRequestEntityTooLargeError(errDecode)
+			}
+			// Any other failure leaves DecodedBody unset; the handler falls back to the raw body or rejects it.
+			if errDecode == nil {
+				decodedBody = decoded
+			} else {
+				releaseSlot()
+			}
 		}
-		if (r.URL.Path == "/v1/audio/speech" || r.URL.Path == "/v1/tts") && limit > maxAuthSpeechBodyBytes {
-			limit = maxAuthSpeechBodyBytes
-		}
-		decoded, errDecode := decodeAuthBody(body, encoding, limit)
-		if errors.Is(errDecode, errAuthBodyTooLarge) {
-			return nil, sdkaccess.NewRequestEntityTooLargeError(errDecode)
-		}
-		// Any other failure leaves DecodedBody unset; the handler falls back to the raw body or rejects it.
-		if errDecode == nil {
-			decodedBody = decoded
-		} else {
-			releaseSlot()
-		}
+		authBody = frontendAuthRequestBody(a.provider, body)
 	}
 	resp, errAuthenticate := a.provider.Authenticate(ctx, pluginapi.FrontendAuthRequest{
 		Method:      r.Method,
 		Path:        r.URL.Path,
 		Headers:     headers,
 		Query:       cloneValues(r.URL.Query()),
-		Body:        bytes.Clone(body),
+		Body:        authBody,
 		DecodedBody: decodedBody,
 	})
 	if errAuthenticate != nil {

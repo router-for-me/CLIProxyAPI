@@ -82,6 +82,13 @@ type Capabilities struct {
 	FrontendAuthProvider FrontendAuthProvider
 	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
 	FrontendAuthProviderExclusive bool
+	// FrontendAuthProviderOmitBody opts out of receiving FrontendAuthRequest.Body and
+	// FrontendAuthRequest.DecodedBody in FrontendAuthProvider.Authenticate. It is honored
+	// only on schema version 7+; the host then skips reading, decoding, and cloning the
+	// request body during authentication.
+	FrontendAuthProviderOmitBody bool
+	// FrontendAuthOmitBody is an alias for FrontendAuthProviderOmitBody.
+	FrontendAuthOmitBody bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
 	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
@@ -120,6 +127,20 @@ type Capabilities struct {
 	// in InterceptRequestAfterAuth. It is honored only on schema version 7+; the plugin
 	// may still replace the body blindly via RequestInterceptResponse.Body.
 	RequestInterceptorOmitBodyAfter bool
+	// RequestBodyPatcherBefore scans raw request bodies in the before-auth phase and
+	// returns localized byte-range edits via request.patch_body_before (schema v8+).
+	RequestBodyPatcherBefore RequestBodyPatcher
+	// RequestBodyPatcherAfter scans raw request bodies in the after-auth phase and
+	// returns localized byte-range edits via request.patch_body_after (schema v8+).
+	RequestBodyPatcherAfter RequestBodyPatcher
+	// RequestInterceptorPatchBodyBefore opts into raw request body delivery and byte-range
+	// patching in the before-auth phase via request.patch_body_before. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyBefore bool
+	// RequestInterceptorPatchBodyAfter opts into raw request body delivery and byte-range
+	// patching in the after-auth phase via request.patch_body_after. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
@@ -1218,6 +1239,10 @@ type RequestInterceptResponse struct {
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.
 	Body []byte
+	// BodyEdits applies localized byte-range replacements to the current request body when Body is empty.
+	BodyEdits []RequestBodyEdit `json:"body_edits,omitempty"`
+	// Edits is an alias for BodyEdits.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
 	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
@@ -1228,6 +1253,31 @@ type RequestInterceptResponse struct {
 	ResponseHeaders http.Header
 	// ResponseBody contains the downstream response body used when Terminate is true.
 	ResponseBody []byte
+}
+
+// RequestBodyPatcher scans a raw request body and returns localized byte-range edits
+// without JSON/Base64 request body wrapping.
+type RequestBodyPatcher interface {
+	PatchRequestBody(context.Context, []byte) (RequestBodyPatchResponse, error)
+}
+
+// RequestBodyEdit describes a 0-based [Start:End] byte-range replacement in a UTF-8 JSON request body.
+type RequestBodyEdit struct {
+	// Start is the inclusive 0-based start byte offset in the input body.
+	Start int `json:"start"`
+	// End is the exclusive 0-based end byte offset in the input body.
+	End int `json:"end"`
+	// Replacement is the UTF-8 replacement text spliced into [Start:End].
+	Replacement string `json:"replacement,omitempty"`
+	// ReplacementBytes optionally carries raw replacement bytes when non-empty.
+	ReplacementBytes []byte `json:"replacement_bytes,omitempty"`
+}
+
+// RequestBodyPatchResponse returns localized byte-range edits for a request body.
+type RequestBodyPatchResponse struct {
+	// Edits lists byte-range replacements relative to the input body received by this plugin.
+	// When empty, the host reuses the input body without copying.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 }
 
 // RequestCompletionOutcome identifies how an intercepted request ended.

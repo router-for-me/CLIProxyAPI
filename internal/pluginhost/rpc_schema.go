@@ -19,35 +19,41 @@ type rpcRegistration struct {
 }
 
 type rpcCapabilities struct {
-	ModelRegistrar                   bool                         `json:"model_registrar"`
-	ModelProvider                    bool                         `json:"model_provider"`
-	AuthProvider                     bool                         `json:"auth_provider"`
-	FrontendAuthProvider             bool                         `json:"frontend_auth_provider"`
-	FrontendAuthProviderExclusive    bool                         `json:"frontend_auth_provider_exclusive"`
-	Scheduler                        bool                         `json:"scheduler"`
-	SchedulerAcrossPriorities        bool                         `json:"scheduler_across_priorities,omitempty"`
-	ModelRouter                      bool                         `json:"model_router"`
-	Executor                         bool                         `json:"executor"`
-	ExecutorModelScope               pluginapi.ExecutorModelScope `json:"executor_model_scope"`
-	ExecutorInputFormats             []string                     `json:"executor_input_formats,omitempty"`
-	ExecutorOutputFormats            []string                     `json:"executor_output_formats,omitempty"`
-	RequestTranslator                bool                         `json:"request_translator"`
-	RequestNormalizer                bool                         `json:"request_normalizer"`
-	RequestInterceptor               bool                         `json:"request_interceptor"`
-	RequestInterceptorOmitBodyBefore bool                         `json:"request_interceptor_omit_body_before,omitempty"`
-	RequestInterceptorOmitBodyAfter  bool                         `json:"request_interceptor_omit_body_after,omitempty"`
-	RequestLifecyclePlugin           bool                         `json:"request_lifecycle_plugin"`
-	ResponseTranslator               bool                         `json:"response_translator"`
-	ResponseBeforeTranslator         bool                         `json:"response_before_translator"`
-	ResponseAfterTranslator          bool                         `json:"response_after_translator"`
-	ResponseInterceptor              bool                         `json:"response_interceptor"`
-	StreamChunkInterceptor           bool                         `json:"response_stream_interceptor"`
-	WebSocketResponseObserver        bool                         `json:"websocket_response_observer"`
-	ThinkingApplier                  bool                         `json:"thinking_applier"`
-	UsagePlugin                      bool                         `json:"usage_plugin"`
-	CommandLinePlugin                bool                         `json:"command_line_plugin"`
-	ManagementAPI                    bool                         `json:"management_api"`
-	QuotaProvider                    bool                         `json:"quota_provider"`
+	ModelRegistrar                    bool                         `json:"model_registrar"`
+	ModelProvider                     bool                         `json:"model_provider"`
+	AuthProvider                      bool                         `json:"auth_provider"`
+	FrontendAuthProvider              bool                         `json:"frontend_auth_provider"`
+	FrontendAuthProviderExclusive     bool                         `json:"frontend_auth_provider_exclusive"`
+	FrontendAuthProviderOmitBody      bool                         `json:"frontend_auth_provider_omit_body,omitempty"`
+	FrontendAuthOmitBody              bool                         `json:"frontend_auth_omit_body,omitempty"`
+	Scheduler                         bool                         `json:"scheduler"`
+	SchedulerAcrossPriorities         bool                         `json:"scheduler_across_priorities,omitempty"`
+	ModelRouter                       bool                         `json:"model_router"`
+	Executor                          bool                         `json:"executor"`
+	ExecutorModelScope                pluginapi.ExecutorModelScope `json:"executor_model_scope"`
+	ExecutorInputFormats              []string                     `json:"executor_input_formats,omitempty"`
+	ExecutorOutputFormats             []string                     `json:"executor_output_formats,omitempty"`
+	RequestTranslator                 bool                         `json:"request_translator"`
+	RequestNormalizer                 bool                         `json:"request_normalizer"`
+	RequestInterceptor                bool                         `json:"request_interceptor"`
+	RequestInterceptorOmitBodyBefore  bool                         `json:"request_interceptor_omit_body_before,omitempty"`
+	RequestInterceptorOmitBodyAfter   bool                         `json:"request_interceptor_omit_body_after,omitempty"`
+	RequestBodyPatcherBefore          bool                         `json:"request_body_patcher_before,omitempty"`
+	RequestBodyPatcherAfter           bool                         `json:"request_body_patcher_after,omitempty"`
+	RequestInterceptorPatchBodyBefore bool                         `json:"request_interceptor_patch_body_before,omitempty"`
+	RequestInterceptorPatchBodyAfter  bool                         `json:"request_interceptor_patch_body_after,omitempty"`
+	RequestLifecyclePlugin            bool                         `json:"request_lifecycle_plugin"`
+	ResponseTranslator                bool                         `json:"response_translator"`
+	ResponseBeforeTranslator          bool                         `json:"response_before_translator"`
+	ResponseAfterTranslator           bool                         `json:"response_after_translator"`
+	ResponseInterceptor               bool                         `json:"response_interceptor"`
+	StreamChunkInterceptor            bool                         `json:"response_stream_interceptor"`
+	WebSocketResponseObserver         bool                         `json:"websocket_response_observer"`
+	ThinkingApplier                   bool                         `json:"thinking_applier"`
+	UsagePlugin                       bool                         `json:"usage_plugin"`
+	CommandLinePlugin                 bool                         `json:"command_line_plugin"`
+	ManagementAPI                     bool                         `json:"management_api"`
+	QuotaProvider                     bool                         `json:"quota_provider"`
 }
 
 type rpcIdentifierResponse struct {
@@ -147,6 +153,22 @@ type rpcQuotaResetRequest struct {
 
 type rpcEmptyResponse struct{}
 
+func frontendAuthProviderWantsOmitBody(caps pluginapi.Capabilities) bool {
+	if caps.FrontendAuthProvider == nil {
+		return false
+	}
+	if caps.FrontendAuthProviderOmitBody || caps.FrontendAuthOmitBody {
+		return true
+	}
+	if opt, ok := caps.FrontendAuthProvider.(interface{ FrontendAuthProviderWantsOmitBody() bool }); ok && opt != nil {
+		return opt.FrontendAuthProviderWantsOmitBody()
+	}
+	if opt, ok := caps.FrontendAuthProvider.(interface{ FrontendAuthWantsOmitBody() bool }); ok && opt != nil {
+		return opt.FrontendAuthWantsOmitBody()
+	}
+	return false
+}
+
 func requestInterceptorWantsOmitBody(caps pluginapi.Capabilities, before bool) bool {
 	if caps.RequestInterceptor == nil {
 		return false
@@ -159,6 +181,22 @@ func requestInterceptorWantsOmitBody(caps pluginapi.Capabilities, before bool) b
 	}
 	if opt, ok := caps.RequestInterceptor.(interface{ RequestInterceptorWantsOmitBody(bool) bool }); ok && opt != nil {
 		return opt.RequestInterceptorWantsOmitBody(before)
+	}
+	return false
+}
+
+func requestInterceptorWantsPatchBody(caps pluginapi.Capabilities, before bool) bool {
+	if before {
+		if caps.RequestBodyPatcherBefore != nil || caps.RequestInterceptorPatchBodyBefore {
+			return true
+		}
+	} else {
+		if caps.RequestBodyPatcherAfter != nil || caps.RequestInterceptorPatchBodyAfter {
+			return true
+		}
+	}
+	if opt, ok := caps.RequestInterceptor.(interface{ RequestInterceptorWantsPatchBody(bool) bool }); ok && opt != nil {
+		return opt.RequestInterceptorWantsPatchBody(before)
 	}
 	return false
 }
@@ -179,35 +217,41 @@ func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
 func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	caps := plugin.Capabilities
 	return rpcCapabilities{
-		ModelRegistrar:                   caps.ModelRegistrar != nil,
-		ModelProvider:                    caps.ModelProvider != nil,
-		AuthProvider:                     caps.AuthProvider != nil,
-		FrontendAuthProvider:             caps.FrontendAuthProvider != nil,
-		FrontendAuthProviderExclusive:    caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
-		Scheduler:                        caps.Scheduler != nil,
-		SchedulerAcrossPriorities:        schedulerWantsAcrossPriorities(caps),
-		ModelRouter:                      caps.ModelRouter != nil,
-		Executor:                         caps.Executor != nil,
-		ExecutorModelScope:               normalizedExecutorModelScope(caps),
-		ExecutorInputFormats:             append([]string(nil), caps.ExecutorInputFormats...),
-		ExecutorOutputFormats:            append([]string(nil), caps.ExecutorOutputFormats...),
-		RequestTranslator:                caps.RequestTranslator != nil,
-		RequestNormalizer:                caps.RequestNormalizer != nil,
-		RequestInterceptor:               caps.RequestInterceptor != nil,
-		RequestInterceptorOmitBodyBefore: requestInterceptorWantsOmitBody(caps, true),
-		RequestInterceptorOmitBodyAfter:  requestInterceptorWantsOmitBody(caps, false),
-		RequestLifecyclePlugin:           caps.RequestLifecyclePlugin != nil,
-		ResponseTranslator:               caps.ResponseTranslator != nil,
-		ResponseBeforeTranslator:         caps.ResponseBeforeTranslator != nil,
-		ResponseAfterTranslator:          caps.ResponseAfterTranslator != nil,
-		ResponseInterceptor:              caps.ResponseInterceptor != nil,
-		StreamChunkInterceptor:           caps.StreamChunkInterceptor != nil,
-		WebSocketResponseObserver:        caps.WebSocketResponseObserver != nil,
-		ThinkingApplier:                  caps.ThinkingApplier != nil,
-		UsagePlugin:                      caps.UsagePlugin != nil,
-		CommandLinePlugin:                caps.CommandLinePlugin != nil,
-		ManagementAPI:                    caps.ManagementAPI != nil,
-		QuotaProvider:                    caps.QuotaProvider != nil,
+		ModelRegistrar:                    caps.ModelRegistrar != nil,
+		ModelProvider:                     caps.ModelProvider != nil,
+		AuthProvider:                      caps.AuthProvider != nil,
+		FrontendAuthProvider:              caps.FrontendAuthProvider != nil,
+		FrontendAuthProviderExclusive:     caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
+		FrontendAuthProviderOmitBody:      frontendAuthProviderWantsOmitBody(caps),
+		FrontendAuthOmitBody:              frontendAuthProviderWantsOmitBody(caps),
+		Scheduler:                         caps.Scheduler != nil,
+		SchedulerAcrossPriorities:         schedulerWantsAcrossPriorities(caps),
+		ModelRouter:                       caps.ModelRouter != nil,
+		Executor:                          caps.Executor != nil,
+		ExecutorModelScope:                normalizedExecutorModelScope(caps),
+		ExecutorInputFormats:              append([]string(nil), caps.ExecutorInputFormats...),
+		ExecutorOutputFormats:             append([]string(nil), caps.ExecutorOutputFormats...),
+		RequestTranslator:                 caps.RequestTranslator != nil,
+		RequestNormalizer:                 caps.RequestNormalizer != nil,
+		RequestInterceptor:                caps.RequestInterceptor != nil,
+		RequestInterceptorOmitBodyBefore:  requestInterceptorWantsOmitBody(caps, true),
+		RequestInterceptorOmitBodyAfter:   requestInterceptorWantsOmitBody(caps, false),
+		RequestBodyPatcherBefore:          requestInterceptorWantsPatchBody(caps, true),
+		RequestBodyPatcherAfter:           requestInterceptorWantsPatchBody(caps, false),
+		RequestInterceptorPatchBodyBefore: requestInterceptorWantsPatchBody(caps, true),
+		RequestInterceptorPatchBodyAfter:  requestInterceptorWantsPatchBody(caps, false),
+		RequestLifecyclePlugin:            caps.RequestLifecyclePlugin != nil,
+		ResponseTranslator:                caps.ResponseTranslator != nil,
+		ResponseBeforeTranslator:          caps.ResponseBeforeTranslator != nil,
+		ResponseAfterTranslator:           caps.ResponseAfterTranslator != nil,
+		ResponseInterceptor:               caps.ResponseInterceptor != nil,
+		StreamChunkInterceptor:            caps.StreamChunkInterceptor != nil,
+		WebSocketResponseObserver:         caps.WebSocketResponseObserver != nil,
+		ThinkingApplier:                   caps.ThinkingApplier != nil,
+		UsagePlugin:                       caps.UsagePlugin != nil,
+		CommandLinePlugin:                 caps.CommandLinePlugin != nil,
+		ManagementAPI:                     caps.ManagementAPI != nil,
+		QuotaProvider:                     caps.QuotaProvider != nil,
 	}
 }
 

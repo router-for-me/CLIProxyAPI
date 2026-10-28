@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -182,6 +183,117 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			return true, true
 		}
+		finalBeforeHeaders := func(current, intercepted http.Header, clear []string) http.Header {
+			if intercepted != nil {
+				if len(intercepted) == 0 {
+					return nil
+				}
+				return intercepted.Clone()
+			}
+			if len(current) == 0 {
+				return nil
+			}
+			out := current.Clone()
+			for _, key := range clear {
+				out.Del(key)
+			}
+			if len(out) == 0 {
+				return nil
+			}
+			return out
+		}
+		mergeAfterHeaders := func(current, updates http.Header, clear []string) http.Header {
+			if updates == nil && len(clear) == 0 {
+				if len(current) == 0 {
+					return nil
+				}
+				return current.Clone()
+			}
+			out := http.Header{}
+			if len(current) > 0 {
+				out = current.Clone()
+			}
+			for _, key := range clear {
+				out.Del(key)
+			}
+			for key, values := range updates {
+				out.Del(key)
+				for _, value := range values {
+					out.Add(key, value)
+				}
+			}
+			if len(out) == 0 {
+				return nil
+			}
+			return out
+		}
+		rejectTerminated := func(resp cliproxyexecutor.RequestAfterAuthInterceptResponse) bool {
+			status := resp.StatusCode
+			if status < 400 || status > 599 {
+				status = http.StatusForbidden
+			}
+			msg := "request terminated by plugin"
+			if len(resp.ResponseBody) > 0 {
+				if parsed := strings.TrimSpace(gjson.GetBytes(resp.ResponseBody, "error.message").String()); parsed != "" {
+					msg = parsed
+				} else if trimmed := strings.TrimSpace(string(resp.ResponseBody)); trimmed != "" {
+					msg = trimmed
+				}
+			}
+			payload, _ := json.Marshal(map[string]any{
+				"type": "error", "status": status,
+				"error": map[string]string{"type": "invalid_request_error", "message": msg},
+			})
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+				consumedPayload = nil
+				return true
+			case <-streamCtx.Done():
+				return false
+			}
+		}
+		interceptTurnPayload := func(payload []byte, baseHeaders http.Header) ([]byte, http.Header, bool, bool) {
+			if opts.RequestBeforeAuthInterceptor == nil && opts.RequestAfterAuthInterceptor == nil {
+				return payload, baseHeaders, true, true
+			}
+			curHeaders := baseHeaders
+			if curHeaders != nil {
+				curHeaders = curHeaders.Clone()
+			}
+			interceptReq := cliproxyexecutor.RequestAfterAuthInterceptRequest{
+				SourceFormat:   opts.SourceFormat,
+				Model:          req.Model,
+				RequestedModel: boundModel,
+				Stream:         true,
+				Headers:        curHeaders,
+				Body:           payload,
+				Metadata:       opts.Metadata,
+			}
+			if opts.RequestBeforeAuthInterceptor != nil {
+				resp := opts.RequestBeforeAuthInterceptor(streamCtx, interceptReq)
+				curHeaders = finalBeforeHeaders(curHeaders, resp.Headers, resp.ClearHeaders)
+				if len(resp.Body) > 0 {
+					payload = resp.Body
+					interceptReq.Body = payload
+				}
+				interceptReq.Headers = curHeaders
+				if resp.Terminate {
+					return payload, curHeaders, false, rejectTerminated(resp)
+				}
+			}
+			if opts.RequestAfterAuthInterceptor != nil {
+				interceptReq.ToFormat = sdktranslator.FromString("codex")
+				resp := opts.RequestAfterAuthInterceptor(streamCtx, interceptReq)
+				curHeaders = mergeAfterHeaders(curHeaders, resp.Headers, resp.ClearHeaders)
+				if len(resp.Body) > 0 {
+					payload = resp.Body
+				}
+				if resp.Terminate {
+					return payload, curHeaders, false, rejectTerminated(resp)
+				}
+			}
+			return payload, curHeaders, true, true
+		}
 		processCreatePayload := func(payload []byte) bool {
 			consumedPayload = payload
 			if allowed, keepOpen := authorizePayload(payload, false); !allowed {
@@ -212,13 +324,19 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
+			var turnHeaders http.Header
+			var allowed, keepOpen bool
+			payload, turnHeaders, allowed, keepOpen = interceptTurnPayload(payload, opts.Headers)
+			if !allowed {
+				return keepOpen
+			}
 			if model == "" {
 				model = req.Model
 				if model == "" {
 					model = boundModel
 				}
-				payload, _ = sjson.SetBytes(payload, "model", model)
 			}
+			payload, _ = sjson.SetBytes(payload, "model", model)
 			if isAppend && !gjson.GetBytes(payload, "instructions").Exists() {
 				metadataMu.Lock()
 				parentSettings := responseSettings[prevID]
@@ -247,6 +365,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			nextReq, nextOpts := req, opts
 			nextReq.Payload = payload
 			nextOpts.OriginalRequest = payload
+			nextOpts.Headers = turnHeaders
 			prepared, errPrepare := e.prepareCodexWebsocketStream(streamCtx, auth, nextReq, nextOpts)
 			if errPrepare != nil {
 				fail(errPrepare)
@@ -342,13 +461,24 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						}
 						continue
 					}
+					var steerHeaders http.Header
+					var allowed, keepOpen bool
+					payload, steerHeaders, allowed, keepOpen = interceptTurnPayload(payload, opts.Headers)
+					if !allowed {
+						if !keepOpen {
+							return
+						}
+						continue
+					}
 					// Steering carries business input but must not inherit response.create defaults.
 					steerReq := req
 					steerReq.Payload = payload
-					if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
+					steerOpts := opts
+					steerOpts.Headers = steerHeaders
+					if codexUseSIWCForRequest(ctx, auth, steerHeaders) {
 						payload = thinking.StripConfigurationUpdates(payload)
 					}
-					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, opts)(payload)
+					payload = helps.NewPayloadFinalizer(e.cfg, "codex-websockets", thinking.ParseSuffix(req.Model).ModelName, "codex", "", payload, steerReq, steerOpts)(payload)
 					payload, _ = sjson.SetBytes(payload, "type", "response.steer")
 					parent := gjson.GetBytes(payload, "previous_response_id").String()
 					metadataMu.Lock()

@@ -4522,3 +4522,114 @@ func TestUsageAdapterPropagatesRequestIDTraceIDAndSelectionID(t *testing.T) {
 		t.Fatalf("captured.SelectionID from context fallback = %q, want %q", captured.SelectionID, "sel-from-ctx")
 	}
 }
+
+type funcRequestBodyPatcher func(context.Context, []byte) (pluginapi.RequestBodyPatchResponse, error)
+
+func (f funcRequestBodyPatcher) PatchRequestBody(ctx context.Context, body []byte) (pluginapi.RequestBodyPatchResponse, error) {
+	return f(ctx, body)
+}
+
+func TestInterceptRequestBodyPatchValidationAndSequentialChaining(t *testing.T) {
+	rawInput := []byte(`{"model":"gpt-5","input":[{"role":"developer","content":[{"type":"input_text","text":"<environment_context>\n  <timezone>UTC</timezone>\n  <current_date>2026-04-19</current_date>\n</environment_context>"}]}]}`)
+
+	// Plugin 1: replaces <timezone>UTC</timezone> -> <timezone>Asia/Shanghai</timezone> (+10 bytes),
+	// shifting the byte offset of <current_date>2026-04-19</current_date> in the resulting body.
+	plugin1 := normalizeTestCapabilityRecord(capabilityRecord{
+		id: "01-tz-plugin",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionRequestInterceptorBodyPatch,
+			Capabilities: pluginapi.Capabilities{
+				RequestBodyPatcherBefore: funcRequestBodyPatcher(func(_ context.Context, body []byte) (pluginapi.RequestBodyPatchResponse, error) {
+					target := []byte("<timezone>UTC</timezone>")
+					idx := bytes.Index(body, target)
+					if idx < 0 {
+						return pluginapi.RequestBodyPatchResponse{}, nil
+					}
+					return pluginapi.RequestBodyPatchResponse{
+						Edits: []pluginapi.RequestBodyEdit{
+							{
+								Start:       idx,
+								End:         idx + len(target),
+								Replacement: "<timezone>Asia/Shanghai</timezone>",
+							},
+						},
+					}, nil
+				}),
+			},
+		},
+	})
+
+	// Plugin 2: receives Plugin 1's patched body and returns byte-range edits relative to the body it received.
+	plugin2 := normalizeTestCapabilityRecord(capabilityRecord{
+		id: "02-date-plugin",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionRequestInterceptorBodyPatch,
+			Capabilities: pluginapi.Capabilities{
+				RequestBodyPatcherBefore: funcRequestBodyPatcher(func(_ context.Context, body []byte) (pluginapi.RequestBodyPatchResponse, error) {
+					if !bytes.Contains(body, []byte("<timezone>Asia/Shanghai</timezone>")) {
+						t.Fatalf("plugin2 did not receive plugin1's patched body: %s", body)
+					}
+					target := []byte("<current_date>2026-04-19</current_date>")
+					idx := bytes.Index(body, target)
+					if idx < 0 {
+						return pluginapi.RequestBodyPatchResponse{}, nil
+					}
+					return pluginapi.RequestBodyPatchResponse{
+						Edits: []pluginapi.RequestBodyEdit{
+							{
+								Start:       idx,
+								End:         idx + len(target),
+								Replacement: "<current_date>2026-04-20</current_date>",
+							},
+						},
+					}, nil
+				}),
+			},
+		},
+	})
+
+	// Plugin 3: returns invalid/overlapping/out-of-bounds edits or invalid JSON; host must reject and preserve Plugin 2's valid body.
+	var invalidCase int
+	plugin3 := normalizeTestCapabilityRecord(capabilityRecord{
+		id: "03-invalid-edits-plugin",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionRequestInterceptorBodyPatch,
+			Capabilities: pluginapi.Capabilities{
+				RequestBodyPatcherBefore: funcRequestBodyPatcher(func(_ context.Context, body []byte) (pluginapi.RequestBodyPatchResponse, error) {
+					switch invalidCase {
+					case 0: // Out of bounds
+						return pluginapi.RequestBodyPatchResponse{
+							Edits: []pluginapi.RequestBodyEdit{{Start: 0, End: len(body) + 5, Replacement: "{}"}},
+						}, nil
+					case 1: // Overlapping ranges
+						return pluginapi.RequestBodyPatchResponse{
+							Edits: []pluginapi.RequestBodyEdit{
+								{Start: 2, End: 8, Replacement: `"a"`},
+								{Start: 5, End: 10, Replacement: `"b"`},
+							},
+						}, nil
+					case 2: // Invalid JSON after splice
+						return pluginapi.RequestBodyPatchResponse{
+							Edits: []pluginapi.RequestBodyEdit{{Start: 0, End: 1, Replacement: "not-json"}},
+						}, nil
+					default:
+						return pluginapi.RequestBodyPatchResponse{}, nil
+					}
+				}),
+			},
+		},
+	})
+
+	host := newHostWithRecords(plugin1, plugin2, plugin3)
+	wantChained := `{"model":"gpt-5","input":[{"role":"developer","content":[{"type":"input_text","text":"<environment_context>\n  <timezone>Asia/Shanghai</timezone>\n  <current_date>2026-04-20</current_date>\n</environment_context>"}]}]}`
+
+	for invalidCase = 0; invalidCase <= 2; invalidCase++ {
+		resp := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+			Model: "gpt-5",
+			Body:  rawInput,
+		})
+		if string(resp.Body) != wantChained {
+			t.Fatalf("case %d: chained patched body = %s, want %s", invalidCase, resp.Body, wantChained)
+		}
+	}
+}

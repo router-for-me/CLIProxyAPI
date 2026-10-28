@@ -102,6 +102,9 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// RequestBeforeAuthInterceptor rewrites a follow-up request on a bound session before after-auth interception.
+type RequestBeforeAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
+
 // RequestAfterAuthInterceptor rewrites a request after credential selection and before executor translation.
 type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
 
@@ -218,6 +221,8 @@ type Options struct {
 	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// RequestBeforeAuthInterceptor runs before after-auth interception on bound follow-up turns.
+	RequestBeforeAuthInterceptor RequestBeforeAuthInterceptor
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
