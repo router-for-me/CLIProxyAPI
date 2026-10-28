@@ -1654,6 +1654,12 @@ func resumeModelNotFoundStates(auth *Auth, now time.Time) bool {
 		if state == nil || state.Status != StatusDisabled {
 			continue
 		}
+		// StatusDisabled is part of the public auth state: only a state
+		// this branch disabled (it carries the model_not_found error) is
+		// resumed here. Explicitly disabled models stay disabled.
+		if !isExplicitModelNotFoundError(state.LastError, "") {
+			continue
+		}
 		state.Status = StatusActive
 		state.StatusMessage = ""
 		state.LastError = nil

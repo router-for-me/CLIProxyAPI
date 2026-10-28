@@ -109,3 +109,32 @@ func TestModelNotFoundBlockClearedOnCredentialUpdate(t *testing.T) {
 		t.Fatal("model still blocked after the credential update")
 	}
 }
+
+func TestExplicitlyDisabledModelSurvivesCredentialUpdate(t *testing.T) {
+	m, auth := newDisableCoolingManager(t)
+
+	live, ok := m.GetByID(auth.ID)
+	if !ok || live == nil {
+		t.Fatal("auth missing")
+	}
+	live.ModelStates = map[string]*ModelState{
+		"user-disabled": {
+			Status:         StatusDisabled,
+			StatusMessage:  "disabled by operator",
+			UpdatedAt:      time.Now(),
+			NextRetryAfter: time.Time{},
+		},
+	}
+	if _, errUpdate := m.Update(context.Background(), live.Clone()); errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+
+	after, ok := m.GetByID(auth.ID)
+	if !ok || after == nil {
+		t.Fatal("auth missing after update")
+	}
+	state := after.ModelStates["user-disabled"]
+	if state == nil || state.Status != StatusDisabled {
+		t.Fatalf("credential update re-enabled an explicitly disabled model: %#v", state)
+	}
+}

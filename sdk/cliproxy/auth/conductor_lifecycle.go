@@ -463,10 +463,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	auth.UpdatedAt = now
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
-	// A credential update may have added a model back, so a
-	// model_not_found block must not survive it. A token refresh
-	// says nothing about the model list and keeps the block.
-	if mode != updateModeRefresh {
+	// Only a replacement/config update can add a model back, so only it
+	// may clear a model_not_found block. Token refresh and request
+	// preparation merge runtime state and keep the block.
+	if mode == updateModeReplace {
 		cooldownStateChanged = resumeModelNotFoundStates(auth, now) || cooldownStateChanged
 	}
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
