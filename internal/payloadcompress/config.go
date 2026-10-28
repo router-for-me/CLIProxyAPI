@@ -39,6 +39,8 @@ type Combo struct {
 // Step names one engine in a combo pipeline.
 type Step struct {
 	Engine string `yaml:"engine" json:"engine"`
+	// Level tunes engines that have an intensity ladder: lite, full, ultra.
+	Level string `yaml:"level" json:"level"`
 }
 
 // Supported engine names.
@@ -47,6 +49,7 @@ const (
 	EngineHeadroom     = "headroom"
 	EngineLite         = "lite"
 	EngineRTK          = "rtk"
+	EngineCaveman      = "caveman"
 )
 
 const (
@@ -70,10 +73,26 @@ func DefaultConfig() Config {
 
 func knownEngine(name string) bool {
 	switch name {
-	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK:
+	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman:
 		return true
 	}
 	return false
+}
+
+// normalizeEngineLevel clamps an engine level to its supported ladder. A missing
+// level defaults to the safest rung.
+func normalizeEngineLevel(engine, level string) string {
+	if engine != EngineCaveman {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "full":
+		return "full"
+	case "ultra":
+		return "ultra"
+	default:
+		return "lite"
+	}
 }
 
 // Sanitize drops unknown engines and duplicate combos, and repairs the default
@@ -103,7 +122,7 @@ func (c *Config) Sanitize() {
 				log.Warnf("payloadcompress: unknown engine %q in combo %q ignored", step.Engine, name)
 				continue
 			}
-			steps = append(steps, Step{Engine: engine})
+			steps = append(steps, Step{Engine: engine, Level: normalizeEngineLevel(engine, step.Level)})
 		}
 		if len(steps) == 0 {
 			continue

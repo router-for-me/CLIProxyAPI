@@ -11,13 +11,15 @@ requests:
     output-styles:
       - id: terse-prose
         level: ultra
+      - id: antislop-copy
       - id: bogus-style
     combos:
       - name: shell
         models: ["claude-*"]
         pipeline:
           - engine: session-dedup
-          - engine: lite
+          - engine: caveman
+            level: ultra
           - engine: not-an-engine
 `
 
@@ -52,11 +54,21 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 	if cfg.Compression.DefaultCombo != "shell" {
 		t.Fatalf("default combo = %q", cfg.Compression.DefaultCombo)
 	}
-	if len(cfg.Compression.OutputStyles) != 1 {
+	if len(cfg.Compression.OutputStyles) != 2 {
 		t.Fatalf("output styles = %+v", cfg.Compression.OutputStyles)
 	}
 	if got := cfg.Compression.OutputStyles[0]; got.ID != "terse-prose" || got.Level != "ultra" {
 		t.Fatalf("output style = %+v", got)
+	}
+	if got := cfg.Compression.OutputStyles[1]; got.ID != "antislop-copy" || got.Level != "full" {
+		t.Fatalf("output style level default = %+v", got)
+	}
+	caveman := cfg.Compression.Combos[0].Pipeline[1]
+	if caveman.Engine != "caveman" || caveman.Level != "ultra" {
+		t.Fatalf("caveman step = %+v", caveman)
+	}
+	if lvl := cfg.Compression.Combos[0].Pipeline[0].Level; lvl != "" {
+		t.Fatalf("non-ladder engine kept a level: %q", lvl)
 	}
 }
 

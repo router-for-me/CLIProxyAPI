@@ -33,6 +33,12 @@ type textEngine interface {
 	compress(text string) (string, bool)
 }
 
+// kindAware is implemented by engines that must know whether a segment is human
+// prose or captured machine output.
+type kindAware interface {
+	compressKind(kind segmentKind, text string) (string, bool)
+}
+
 // bodyEngine rewrites the whole payload at once, for transforms that depend on
 // repeated content across segments. It returns replacement text by segment index.
 type bodyEngine interface {
@@ -68,16 +74,19 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 	stats.Segments = len(s.segs)
 
 	texts := make([]string, len(s.segs))
+	kinds := make([]segmentKind, len(s.segs))
 	for i := range s.segs {
 		texts[i] = s.segs[i].value.String()
+		kinds[i] = s.segs[i].kind
 	}
 	changed := make([]bool, len(texts))
 	dirty := false
 
 	for _, eng := range engines {
 		saved := 0
-		if be, ok := eng.(bodyEngine); ok {
-			for i, repl := range be.rewrite(texts) {
+		switch typed := eng.(type) {
+		case bodyEngine:
+			for i, repl := range typed.rewrite(texts) {
 				if i < 0 || i >= len(texts) || repl == texts[i] {
 					continue
 				}
@@ -85,9 +94,19 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 				texts[i] = repl
 				changed[i] = true
 			}
-		} else if te, ok := eng.(textEngine); ok {
+		case kindAware:
 			for i := range texts {
-				out, hit := te.compress(texts[i])
+				out, hit := typed.compressKind(kinds[i], texts[i])
+				if !hit || out == texts[i] {
+					continue
+				}
+				saved += len(texts[i]) - len(out)
+				texts[i] = out
+				changed[i] = true
+			}
+		case textEngine:
+			for i := range texts {
+				out, hit := typed.compress(texts[i])
 				if !hit || out == texts[i] {
 					continue
 				}
@@ -156,6 +175,8 @@ func buildEngines(steps []Step) []engine {
 			engines = append(engines, rtkEngine{})
 		case EngineHeadroom:
 			engines = append(engines, headroomEngine{})
+		case EngineCaveman:
+			engines = append(engines, cavemanEngine{level: step.Level})
 		case EngineSessionDedup:
 			engines = append(engines, &dedupEngine{})
 		}

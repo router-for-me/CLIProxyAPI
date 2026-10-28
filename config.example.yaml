@@ -284,11 +284,18 @@ requests:
   #         - engine: headroom      # Render homogeneous JSON record arrays as columns.
   #         - engine: rtk           # Collapse repeated command output lines, truncate long lines.
   #         - engine: lite
+  #     - name: prompts
+  #       models: ["*"]
+  #       pipeline:
+  #         - engine: caveman       # Lossy: drop filler, pleasantries, hedging, articles from user text only.
+  #           level: lite           # lite | full | ultra. Missing level defaults to lite.
+  #         - engine: lite
   #   # Output styles steer how the model writes its answer by appending an instruction
   #   # to the existing system prompt. They do not rewrite responses, so streaming and
   #   # tool calls are untouched. Injection is skipped for prompts that must not be
   #   # terse (security, deletion, "explain in detail") and for multimodal requests.
-  #   # Styles: terse-prose, less-code, ponytail, i-have-adhd. Levels: lite, full, ultra.
+  #   # Styles: terse-prose, less-code, ponytail, i-have-adhd, antislop-ui, antislop-copy.
+  #   # Levels: lite, full, ultra.
   #   output-styles:
   #     - id: terse-prose
   #       level: full

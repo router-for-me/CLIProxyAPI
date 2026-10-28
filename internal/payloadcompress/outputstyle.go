@@ -39,20 +39,20 @@ type styleLevels struct {
 }
 
 func (s styleLevels) text(level string) string {
-	var body string
 	switch level {
 	case "lite":
-		body = s.lite
+		return s.lite
 	case "ultra":
-		body = s.ultra
+		return s.ultra
 	default:
-		body = s.full
+		return s.full
 	}
-	if s.boundaries != "" {
-		return body + " " + s.boundaries + " " + sharedBoundaries
-	}
-	return body + " " + sharedBoundaries
 }
+
+// antislopBoundaries is the shared craft clause for both antislop styles.
+const antislopBoundaries = "Every shipped control works or is removed: no dead buttons, no links to nowhere, " +
+	"no navbar entries without destinations. No fabricated statistics, testimonials, security or compliance claims. " +
+	"Placeholders are labeled honestly, never disguised as final."
 
 // styleCatalog is the registry. Adding a style is one entry here.
 var styleCatalog = map[string]styleLevels{
@@ -92,6 +92,18 @@ Rules:
 - Question complex asks: "Do you need X, or does Y cover it?"
 - When two solutions tie, pick the edge-case-correct one.`,
 		ultra: "# Ponytail (ultra)\nLazy senior dev. Best code = code never written. Before any code: YAGNI → reuse → stdlib → platform → installed dep → one line → minimum that works. Fix root cause not symptom: grep every caller, patch shared function once. No unrequested abstractions, no new deps, no boilerplate. Deletion > addition. Fewest files. Shortest working diff, only after understanding the problem. Question complex asks. Edge-case-correct when tied.",
+	},
+	"antislop-ui": {
+		boundaries: antislopBoundaries,
+		lite:       "Antislop UI filter (lite). Every visual technique needs a purpose: hierarchy, identity, or readability; technique without purpose is removed. No default blue-purple gradient wash, no glass or glow on every surface, no template layout (hero plus identical card grid, bento mosaic, Trusted-By bar).",
+		full:       "Antislop UI filter, not a style guide. Every visual technique must pass a purpose test: it serves hierarchy, identity, or readability, and the reason is written down. Technique without purpose is removed. Color and decoration are accents, not defaults: no blue-purple gradient wash, no glass on every surface (max 1-2 elements), no glow everywhere (max 1-2 focus accents), no large shadow on every component. Radius follows one system, not pills everywhere. Palette capped at 2-3 core colors plus 1 accent. No template layout (hero plus identical card grid, bento mosaic, fake terminal hero, Trusted-By bar, 3 pricing columns). Composition follows content needs, not the AI default order.",
+		ultra:      "Antislop UI (ultra). Purpose test every visual technique (hierarchy, identity, readability) or cut it. Accents, not defaults: no gradient wash; glass max 1-2 elements; glow max 1-2 focus accents; no large shadow on every component; one radius system; 2-3 core colors plus 1 accent. No template layouts (hero plus card grid, bento, fake terminal hero, Trusted-By bar, 3 pricing columns). Layout follows content.",
+	},
+	"antislop-copy": {
+		boundaries: antislopBoundaries,
+		lite:       "Antislop copy filter (lite). Specific language, not AI defaults. Never use the em dash character. No generic CTAs (Get Started, Learn More), no buzzwords (Seamless, Revolutionary), no chatbot closers (Hope this helps). Never invent facts, names, numbers, or quotes. Text contrast meets WCAG AA (4.5:1 normal, 3:1 large); every control is reachable by keyboard.",
+		full:       "Antislop copy and human filter. Copy uses specific language, not AI defaults. Never use the em dash character. No generic CTAs (Get Started, Learn More, Try Now, Explore, Discover). No buzzwords (AI Powered, Seamless, Revolutionary, Cutting Edge, Next Generation). No chatbot closers (Hope this helps, Let me know if). No signposting announcements (Let's dive in, Here's what you need to know). No fake-candid openers (Honestly?, Real talk). Name the actor: We rewrote pricing, never pricing was updated. No forced rule-of-three trios, no not-just-X-its-Y formulas, no aphorism formulas. Never invent facts, names, numbers, or quotes. UI holds up for real people: text contrast meets WCAG AA (4.5:1 normal, 3:1 large), checked across the whole area. Never outline none without a visible focus-visible replacement. All controls reachable by keyboard (Tab, Enter or Space, Escape closes dialogs). No mouse-only patterns, no color-only status (pair with text or icon). Data views ship perceivable empty, loading, and error states. Mobile reflows with intent: no horizontal overflow, 200 percent zoom never clips text, focused input never hidden under the on-screen keyboard, tap targets at least 44px.",
+		ultra:      "Antislop copy and human (ultra). Specific words only. No em dash character. Ban generic CTAs (Get Started, Learn More, Try Now), buzzwords (AI Powered, Seamless, Next Generation), chatbot closers, signposting, fake-candid openers, forced trios, not-just-X-its-Y. Name the actor. Never invent facts, names, numbers, quotes. WCAG AA contrast (4.5:1 normal, 3:1 large); visible focus-visible; full keyboard (Tab, Enter or Space, Escape); no color-only status; empty, loading, error states; mobile: no horizontal overflow, 200 percent zoom safe, tap targets 44px+.",
 	},
 	"i-have-adhd": {
 		lite: "# I have ADHD (lite)\nLead with the action: command, path, or snippet first, prose after. Number multi-step work; each step one bounded action. End with ONE concrete next step. No preamble, no recap, no closing pleasantries.",
@@ -136,11 +148,14 @@ func normalizeLevel(level string) string {
 }
 
 // styleInstruction builds the injected text. Unknown ids are dropped, so a typo
-// degrades to "no style" instead of a broken prompt.
+// degrades to "no style" instead of a broken prompt. Boundary clauses are emitted
+// once even when several styles declare the same one.
 func styleInstruction(selection []OutputStyle) string {
 	var b strings.Builder
 	b.WriteString(outputStyleMarker)
 	applied := 0
+	seenBoundary := map[string]bool{}
+	var boundaries []string
 	for _, sel := range selection {
 		id := strings.ToLower(strings.TrimSpace(sel.ID))
 		levels, ok := styleCatalog[id]
@@ -149,10 +164,18 @@ func styleInstruction(selection []OutputStyle) string {
 		}
 		b.WriteString("\n- [" + id + "] " + levels.text(normalizeLevel(sel.Level)))
 		applied++
+		if levels.boundaries != "" && !seenBoundary[levels.boundaries] {
+			seenBoundary[levels.boundaries] = true
+			boundaries = append(boundaries, levels.boundaries)
+		}
 	}
 	if applied == 0 {
 		return ""
 	}
+	for _, clause := range boundaries {
+		b.WriteString("\n" + clause)
+	}
+	b.WriteString("\n" + sharedBoundaries)
 	return b.String()
 }
 
