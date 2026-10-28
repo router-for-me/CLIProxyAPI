@@ -64,6 +64,9 @@ func flushResponsesSSE(w http.ResponseWriter) error {
 
 type responsesSSEFramer struct {
 	pending              []byte
+	nextFramePrefix      []byte
+	nextFieldSuffix      []byte
+	syntheticBreaks      []int
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
@@ -81,17 +84,102 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	if len(chunk) == 0 || f.terminalEvent != "" {
 		return
 	}
+	if len(f.nextFieldSuffix) > 0 {
+		trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+		_, complete, _ := responsesSSEChunkField(trimmed)
+		lastLine := bytes.TrimSpace(f.nextFramePrefix[bytes.LastIndexByte(f.nextFramePrefix, '\n')+1:])
+		if complete && len(lastLine) > 0 && !bytes.HasPrefix(lastLine, []byte("data:")) {
+			f.nextFramePrefix = append(f.nextFramePrefix, f.nextFieldSuffix...)
+			f.nextFieldSuffix = nil
+		} else {
+			f.nextFieldSuffix = append(f.nextFieldSuffix, chunk...)
+			trimmed = bytes.TrimLeft(f.nextFieldSuffix, " \t\r\n")
+			_, _, partial := responsesSSEChunkField(trimmed)
+			if partial {
+				return
+			}
+			chunk = f.nextFieldSuffix
+			f.nextFieldSuffix = nil
+		}
+	}
+	if len(f.nextFramePrefix) > 0 {
+		payload, found := responsesSSEDataPayload(f.nextFramePrefix)
+		if found && json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "" &&
+			!responsesSSEHasField(f.nextFramePrefix, []byte("event:")) && responsesSSEFrameLen(f.nextFramePrefix) == 0 {
+			trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+			field, complete, partial := responsesSSEChunkField(trimmed)
+			lastLine := bytes.TrimSpace(f.nextFramePrefix[bytes.LastIndexByte(f.nextFramePrefix, '\n')+1:])
+			_, _, lastPartial := responsesSSEChunkField(lastLine)
+			if complete && lastPartial {
+				joined := append(bytes.Clone(lastLine), trimmed...)
+				joinedField, joinedComplete, _ := responsesSSEChunkField(joined)
+				if joinedComplete && (joinedField == "event" || joinedField == "data" || joinedField == "id" || joinedField == "retry" ||
+					(field != "" && field != "event" && field != "data" && field != "id" && field != "retry")) {
+					complete = false
+				}
+			}
+			newFieldPrefix := bytes.HasPrefix(lastLine, []byte("data:"))
+			for _, prefix := range [][]byte{[]byte("event:"), []byte("data:"), []byte("id:"), []byte("retry:")} {
+				newFieldPrefix = newFieldPrefix || (len(trimmed) < len(prefix) && bytes.HasPrefix(prefix, trimmed))
+			}
+			if partial && newFieldPrefix {
+				f.nextFieldSuffix = append(f.nextFieldSuffix, chunk...)
+				return
+			}
+			if complete && !bytes.HasSuffix(f.nextFramePrefix, []byte("\n")) && !bytes.HasSuffix(f.nextFramePrefix, []byte("\r")) &&
+				chunk[0] != '\n' && chunk[0] != '\r' {
+				f.nextFramePrefix = append(f.nextFramePrefix, '\n')
+			}
+		}
+		f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+		chunk = f.nextFramePrefix
+		f.nextFramePrefix = nil
+	}
+	if responsesSSEHasEmptyEventData(f.pending) {
+		trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+		field, complete, partial := responsesSSEChunkField(trimmed)
+		if partial {
+			f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+			return
+		}
+		newFrame := complete && field != "data"
+		if complete && field == "data" {
+			payload, _ := responsesSSEDataPayload(trimmed)
+			valid := json.Valid(payload)
+			if !valid && !bytes.Equal(payload, []byte("[DONE]")) && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+			hasEvent := responsesSSEHasField(trimmed, []byte("event:"))
+			if valid && hasEvent && responsesSSEEventName(trimmed) == "" && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+			newFrame = bytes.Equal(payload, []byte("[DONE]")) ||
+				(valid && (gjson.GetBytes(payload, "type").String() != "" || hasEvent))
+			if valid && !newFrame && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+		}
+		if newFrame {
+			f.writeFrame(w, f.pending)
+			f.pending = f.pending[:0]
+			f.syntheticBreaks = f.syntheticBreaks[:0]
+			if f.terminalEvent != "" {
+				return
+			}
+		}
+	}
 	if responsesSSEStartsNewDataFrame(f.pending, chunk) {
 		f.writeFrame(w, f.pending)
 		f.pending = f.pending[:0]
+		f.syntheticBreaks = f.syntheticBreaks[:0]
 		if f.terminalEvent != "" {
 			return
 		}
 	}
-	if responsesSSENeedsLineBreak(f.pending, chunk) {
-		f.pending = append(f.pending, '\n')
-	}
-	f.pending = append(f.pending, chunk...)
+	f.pending = responsesSSEAppendChunk(f.pending, &f.syntheticBreaks, chunk)
 	for {
 		frameLen := responsesSSEFrameLen(f.pending)
 		if frameLen == 0 {
@@ -100,6 +188,7 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 		f.writeFrame(w, f.pending[:frameLen])
 		copy(f.pending, f.pending[frameLen:])
 		f.pending = f.pending[:len(f.pending)-frameLen]
+		f.syntheticBreaks = responsesSSEConsumeBreaks(f.syntheticBreaks, frameLen)
 		if f.terminalEvent != "" {
 			f.pending = f.pending[:0]
 			return
@@ -107,16 +196,36 @@ func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
 	}
 	if len(bytes.TrimSpace(f.pending)) == 0 {
 		f.pending = f.pending[:0]
+		f.syntheticBreaks = f.syntheticBreaks[:0]
 		return
 	}
-	if len(f.pending) == 0 || !responsesSSECanEmitWithoutDelimiter(f.pending) {
+	if len(f.pending) == 0 || responsesSSEHasEmptyEventData(f.pending) || !responsesSSECanEmitWithoutDelimiter(f.pending) {
 		return
 	}
 	f.writeFrame(w, f.pending)
 	f.pending = f.pending[:0]
+	f.syntheticBreaks = f.syntheticBreaks[:0]
 }
 
 func (f *responsesSSEFramer) Flush(w io.Writer) {
+	if len(f.nextFieldSuffix) > 0 {
+		if responsesSSENeedsLineBreak(f.nextFramePrefix, f.nextFieldSuffix) {
+			f.nextFramePrefix = append(f.nextFramePrefix, '\n')
+		}
+		f.nextFramePrefix = append(f.nextFramePrefix, f.nextFieldSuffix...)
+		f.nextFieldSuffix = nil
+	}
+	if len(f.nextFramePrefix) > 0 {
+		trimmed := bytes.TrimLeft(f.nextFramePrefix, " \t\r\n")
+		_, _, partial := responsesSSEChunkField(trimmed)
+		if partial && !bytes.HasPrefix([]byte("data"), trimmed) {
+			f.writeFrame(w, f.pending)
+			f.pending = f.pending[:0]
+			f.syntheticBreaks = f.syntheticBreaks[:0]
+		}
+		f.pending = responsesSSEAppendChunk(f.pending, &f.syntheticBreaks, f.nextFramePrefix)
+		f.nextFramePrefix = nil
+	}
 	if len(f.pending) == 0 || f.terminalEvent != "" {
 		return
 	}
@@ -124,17 +233,19 @@ func (f *responsesSSEFramer) Flush(w io.Writer) {
 		f.pending = f.pending[:0]
 		return
 	}
-	if !responsesSSECanFlushWithoutDelimiter(f.pending) {
+	frame := responsesSSERecoverJSONFrame(f.pending, f.syntheticBreaks)
+	if !responsesSSECanFlushWithoutDelimiter(frame) {
 		f.pending = f.pending[:0]
 		return
 	}
-	f.writeFrame(w, f.pending)
+	f.writeFrame(w, frame)
 	f.pending = f.pending[:0]
+	f.syntheticBreaks = f.syntheticBreaks[:0]
 }
 
 func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
 	if f.writeErr == nil {
-		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(frame))
+		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(responsesSSERecoverJSONFrame(frame, f.syntheticBreaks)))
 	}
 }
 
@@ -161,8 +272,10 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
 			return false
 		}
 
-		// For standard Responses API clients: filter any codex.* private events.
-		if strings.HasPrefix(name, "codex.") {
+		// For standard Responses API clients: filter any codex.* private events, and the Codex
+		// backend's moderation metadata, which is not a public Responses event: clients that parse
+		// a closed event list fail on it.
+		if strings.HasPrefix(name, "codex.") || name == "response.metadata" {
 			return true
 		}
 
@@ -185,13 +298,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.dataFrames++
 		return frame
 	}
-	if !json.Valid(payload) {
-		return frame
-	}
-
 	payloadType := gjson.GetBytes(payload, "type").String()
 	if f.shouldFilterPrivateEvent(streamEvent, payloadType) {
 		return nil
+	}
+	if !json.Valid(payload) {
+		return frame
 	}
 
 	f.dataFrames++
@@ -329,6 +441,73 @@ func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
 		found = true
 	}
 	return payload, found
+}
+
+func responsesSSERecoverJSONFrame(frame []byte, syntheticBreaks []int) []byte {
+	if len(syntheticBreaks) == 0 {
+		return frame
+	}
+	payload, found := responsesSSEDataPayload(frame)
+	if found && json.Valid(payload) {
+		return frame
+	}
+
+	// Consider only newlines inserted at chunk boundaries when recovering invalid JSON.
+	positions := make([]int, 0, len(syntheticBreaks))
+	for _, pos := range syntheticBreaks {
+		if pos >= 0 && pos < len(frame) && frame[pos] == '\n' {
+			positions = append(positions, pos)
+		}
+	}
+	try := func(candidate []byte) []byte {
+		recovered, ok := responsesSSEDataPayload(candidate)
+		if !ok || !json.Valid(recovered) {
+			return nil
+		}
+		return responsesSSEFrameWithData(candidate, recovered)
+	}
+	for i, pos := range positions {
+		if i == 8 {
+			break
+		}
+		candidate := make([]byte, 0, len(frame)-1)
+		candidate = append(candidate, frame[:pos]...)
+		candidate = append(candidate, frame[pos+1:]...)
+		if recovered := try(candidate); recovered != nil {
+			return recovered
+		}
+	}
+	if len(positions) > 1 {
+		candidate := make([]byte, 0, len(frame)-len(positions))
+		start := 0
+		for _, pos := range positions {
+			candidate = append(candidate, frame[start:pos]...)
+			start = pos + 1
+		}
+		candidate = append(candidate, frame[start:]...)
+		if recovered := try(candidate); recovered != nil {
+			return recovered
+		}
+	}
+	return frame
+}
+
+func responsesSSEAppendChunk(pending []byte, syntheticBreaks *[]int, chunk []byte) []byte {
+	if responsesSSENeedsLineBreak(pending, chunk) {
+		*syntheticBreaks = append(*syntheticBreaks, len(pending))
+		pending = append(pending, '\n')
+	}
+	return append(pending, chunk...)
+}
+
+func responsesSSEConsumeBreaks(syntheticBreaks []int, consumed int) []int {
+	remaining := syntheticBreaks[:0]
+	for _, pos := range syntheticBreaks {
+		if pos >= consumed {
+			remaining = append(remaining, pos-consumed)
+		}
+	}
+	return remaining
 }
 
 func responsesSSEFrameWithData(frame, payload []byte) []byte {
@@ -469,6 +648,29 @@ func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
 	return responsesSSEDataLinesValid(trimmed)
 }
 
+func responsesSSEChunkField(chunk []byte) (name string, complete, partial bool) {
+	if len(chunk) == 0 {
+		return "", false, false
+	}
+	for i, b := range chunk {
+		if b == ':' || b == '\n' || b == '\r' {
+			return string(chunk[:i]), true, false
+		}
+		if !(b >= 'a' && b <= 'z') && !(b >= 'A' && b <= 'Z') && !(b >= '0' && b <= '9') && b != '-' && b != '_' && b != '.' {
+			return "", false, false
+		}
+	}
+	return "", false, true
+}
+
+func responsesSSEHasEmptyEventData(chunk []byte) bool {
+	if !responsesSSEHasField(chunk, []byte("event:")) {
+		return false
+	}
+	payload, found := responsesSSEDataPayload(chunk)
+	return found && len(bytes.TrimSpace(payload)) == 0
+}
+
 func responsesSSECanFlushWithoutDelimiter(chunk []byte) bool {
 	trimmed := bytes.TrimSpace(chunk)
 	return len(trimmed) > 0 && responsesSSEHasField(trimmed, []byte("data:")) && responsesSSEDataLinesValid(trimmed)
@@ -519,10 +721,34 @@ func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
 	}
 	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
 		if bytes.HasPrefix(trimmed, prefix) {
-			return true
+			return !responsesSSEDataEndsInsideJSONString(pending)
 		}
 	}
 	return false
+}
+
+func responsesSSEDataEndsInsideJSONString(chunk []byte) bool {
+	payload, found := responsesSSEDataPayload(chunk)
+	payload = bytes.TrimSpace(payload)
+	if !found || len(payload) == 0 || (payload[0] != '{' && payload[0] != '[' && payload[0] != '"') {
+		return false
+	}
+	inString := false
+	escaped := false
+	for _, b := range payload {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString && b == '\\' {
+			escaped = true
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+		}
+	}
+	return inString
 }
 
 // OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.

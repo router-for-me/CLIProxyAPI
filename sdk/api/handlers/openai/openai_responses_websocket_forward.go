@@ -178,7 +178,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if eventType == "response.subscription_usage" {
+				if eventType == "response.subscription_usage" ||
+					(eventType == "response.metadata" && !isCodexResponsesClientRequest(c)) {
 					continue
 				}
 				if eventType == "response.created" {
