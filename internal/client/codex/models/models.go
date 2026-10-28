@@ -101,6 +101,44 @@ func MarshalCompact(payload any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
+// ApplyProviderDescription prepends known provider identifiers onto each model's
+// description in a complete Codex client catalog payload, before serialization.
+// When no known providers exist for a model, the original description is kept.
+// Multiple providers are joined with "/" in the order returned by providersForModel;
+// empty provider identifiers (after TrimSpace) are omitted. Listed providers are
+// not a completeness or realtime availability guarantee.
+func ApplyProviderDescription(payload map[string]any, providersForModel ProvidersForModelFunc) {
+	if providersForModel == nil {
+		return
+	}
+	models, ok := payload["models"].([]map[string]any)
+	if !ok {
+		return
+	}
+	for _, model := range models {
+		id := stringModelValue(model, "slug")
+		if id == "" {
+			continue
+		}
+		providers := make([]string, 0)
+		for _, provider := range providersForModel(id) {
+			provider = strings.TrimSpace(provider)
+			if provider == "" {
+				continue
+			}
+			providers = append(providers, provider)
+		}
+		if len(providers) == 0 {
+			continue
+		}
+		description := strings.Join(providers, "/")
+		if original := stringModelValue(model, "description"); original != "" {
+			description = description + "." + original
+		}
+		model["description"] = description
+	}
+}
+
 func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
 	return buildCodexClientModelsWithToolCapabilities(models, providersForModel, nil, webSearchCapabilityForModel, nil, nil, optimizeMultiAgentV2, clientVersion)
 }

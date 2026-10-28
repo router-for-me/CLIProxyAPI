@@ -739,6 +739,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion strin
 		// tool_search, which never consulted Home routes for search support.
 		payload = codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, nil, optimizeMultiAgentV2, clientVersion)
 	}
+	codexmodels.ApplyProviderDescription(payload, homeProvidersForModel(entries))
 	body, errMarshal := codexmodels.MarshalCompact(payload)
 	if errMarshal != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
