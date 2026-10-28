@@ -114,6 +114,21 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
 	}
+	isClaude := strings.EqualFold(provider, "claude") || strings.EqualFold(provider, "anthropic") || strings.EqualFold(executorType, "ClaudeExecutor")
+	if usageDetail.CacheCreation != nil || (isClaude && usageDetail.CacheCreationTokens > 0) {
+		split := coreusage.CacheCreationUsage{}
+		if usageDetail.CacheCreation != nil {
+			split = *usageDetail.CacheCreation
+		}
+		split.Ephemeral5mInputTokens = max(split.Ephemeral5mInputTokens, 0)
+		split.Ephemeral1hInputTokens = max(split.Ephemeral1hInputTokens, 0)
+		// Attribute unclassified cache writes to the legacy 5-minute price.
+		remaining := max(usageDetail.CacheCreationTokens, 0)
+		remaining -= min(remaining, split.Ephemeral5mInputTokens)
+		remaining -= min(remaining, split.Ephemeral1hInputTokens)
+		split.Ephemeral5mInputTokens += remaining
+		tokens.CacheCreation = &split
+	}
 
 	failed := record.Failed
 	if !failed {
@@ -234,6 +249,8 @@ type tokenStats struct {
 	CacheReadTokensPresent bool  `json:"cache_read_tokens_present"`
 	CacheCreationTokens    int64 `json:"cache_creation_tokens"`
 	TotalTokens            int64 `json:"total_tokens"`
+
+	CacheCreation *coreusage.CacheCreationUsage `json:"cache_creation,omitempty"`
 }
 
 type failDetail struct {

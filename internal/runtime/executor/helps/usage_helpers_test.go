@@ -376,6 +376,36 @@ func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
 	}
 }
 
+func TestParseClaudeUsageCacheCreationTTLs(t *testing.T) {
+	tests := []struct {
+		name      string
+		fields    string
+		total     int64
+		tokens5m  int64
+		tokens1h  int64
+		wantSplit bool
+	}{
+		{"mixed", `"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_1h_input_tokens":400}`, 1000, 600, 400, true},
+		{"partial", `"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_1h_input_tokens":400}`, 1000, 0, 400, true},
+		{"split only", `"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_1h_input_tokens":400}`, 1000, 600, 400, true},
+		{"legacy total", `"cache_creation_input_tokens":1000`, 1000, 0, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detail := ParseClaudeUsage([]byte(`{"usage":{"input_tokens":10,"output_tokens":20,` + tt.fields + `}}`))
+			if detail.CacheCreationTokens != tt.total || detail.TotalTokens != tt.total+30 || !detail.TokenBreakdown.Valid() {
+				t.Fatalf("usage = %+v, want cache writes counted once", detail)
+			}
+			if (detail.CacheCreation != nil) != tt.wantSplit {
+				t.Fatalf("cache creation = %+v, want split present=%v", detail.CacheCreation, tt.wantSplit)
+			}
+			if tt.wantSplit && (detail.CacheCreation.Ephemeral5mInputTokens != tt.tokens5m || detail.CacheCreation.Ephemeral1hInputTokens != tt.tokens1h) {
+				t.Fatalf("cache creation = %+v, want 5m=%d 1h=%d", detail.CacheCreation, tt.tokens5m, tt.tokens1h)
+			}
+		})
+	}
+}
+
 func TestParseClaudeUsagePreservesThinkingTokensAsReasoningSubset(t *testing.T) {
 	// Sanitized shape from local Anthropic request logs under ~/.config/cpa/logs.
 	data := []byte(`{"usage":{"input_tokens":2,"cache_creation_input_tokens":831,"cache_read_input_tokens":44225,"output_tokens":244,"output_tokens_details":{"thinking_tokens":40}}}`)
@@ -1177,6 +1207,38 @@ func TestStreamUsageBufferObserveClaudeStream_MergesStartAndDelta(t *testing.T) 
 	wantTotal := int64(2095 + 15 + 355598 + 7185)
 	if detail.TotalTokens != wantTotal {
 		t.Errorf("TotalTokens = %d, want %d", detail.TotalTokens, wantTotal)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_CacheCreationTTLs(t *testing.T) {
+	tests := []struct {
+		name     string
+		fields   string
+		tokens5m int64
+		tokens1h int64
+	}{
+		{"omitted split", `"output_tokens":20`, 600, 400},
+		{"repeated total", `"output_tokens":20,"cache_creation_input_tokens":1000`, 600, 400},
+		{"explicit zero correction", `"output_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":1000,"ephemeral_1h_input_tokens":0}`, 1000, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buffer StreamUsageBuffer
+			buffer.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_creation":{"ephemeral_5m_input_tokens":600,"ephemeral_1h_input_tokens":400},"output_tokens":1}}}`))
+			for range 2 {
+				buffer.ObserveClaudeStream([]byte(`data: {"type":"message_delta","usage":{` + tt.fields + `}}`))
+			}
+			detail, ok := buffer.Detail()
+			if !ok || detail.CacheCreation == nil {
+				t.Fatalf("usage = %+v, want cache creation TTLs", detail)
+			}
+			if detail.CacheCreation.Ephemeral5mInputTokens != tt.tokens5m || detail.CacheCreation.Ephemeral1hInputTokens != tt.tokens1h {
+				t.Fatalf("cache creation = %+v, want 5m=%d 1h=%d", detail.CacheCreation, tt.tokens5m, tt.tokens1h)
+			}
+			if detail.CacheCreationTokens != 1000 || detail.TotalTokens != 1030 || !detail.TokenBreakdown.Valid() {
+				t.Fatalf("usage = %+v, want cache writes counted once", detail)
+			}
+		})
 	}
 }
 

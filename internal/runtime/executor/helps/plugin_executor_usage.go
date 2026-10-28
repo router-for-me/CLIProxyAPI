@@ -175,6 +175,9 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	if merged.CacheCreationTokens == 0 && existing.CacheCreationTokens > 0 {
 		merged.CacheCreationTokens = existing.CacheCreationTokens
 	}
+	if merged.CacheCreation == nil {
+		merged.CacheCreation = existing.CacheCreation
+	}
 	if merged.OutputTokens == 0 && existing.OutputTokens > 0 {
 		merged.OutputTokens = existing.OutputTokens
 	}
