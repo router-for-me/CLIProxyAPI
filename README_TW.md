@@ -1,6 +1,6 @@
 # CLI Proxy API
 
-[English](README.md) | 中文 | [日本語](README_JA.md)
+[English](README.md) | [简体中文](README_CN.md) | 繁體中文 | [日本語](README_JA.md)
 
 如果您想在您的桌面使用 CLIProxyAPI，我們推薦您使用我們的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客戶端，該客戶端提供了圖形化的配置介面、自動更新、系統托盤整合、一鍵啟動/關閉 CLIProxyAPI 服務等功能。
 
