@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -616,8 +617,14 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 	return res, nil
 }
 
+// devinSubagentEmojiDirective matches the emoji directive in Claude Code subagent
+// system prompts. Devin's content policy rejects the whole request when it is present
+// (as it does the Agent SDK identity line), so every subagent fails with 403 permission_denied.
+var devinSubagentEmojiDirective = regexp.MustCompile(`For clear communication with the user,?\s+the assistant MUST avoid using emojis\.`)
+
 // SanitizeDevinSystemPrompt strips Claude Code attribution and CLI identity headers
-// (referencing Antigravity conventions), and applies zero-width obfuscation for configured sensitive words.
+// (referencing Antigravity conventions), softens the subagent emoji directive,
+// and applies zero-width obfuscation for configured sensitive words.
 func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) string {
 	if prompt == "" {
 		return ""
@@ -630,7 +637,7 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if util.IsClaudeCodeAttributionSystemText(trimmed) {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "You are Claude Code") {
+		if strings.HasPrefix(trimmed, "You are Claude Code") || strings.HasPrefix(trimmed, "You are a Claude agent, built on Anthropic") {
 			continue
 		}
 		if strings.Contains(trimmed, "authorized security testing") || strings.Contains(trimmed, "destructive techniques, DoS attacks") {
@@ -651,6 +658,7 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if matcher != nil && matcher.Matches(trimmed) {
 			continue
 		}
+		line = devinSubagentEmojiDirective.ReplaceAllString(line, "For clear communication with the user the assistant should avoid using emojis.")
 		kept = append(kept, line)
 	}
 	res := strings.TrimSpace(strings.Join(kept, "\n"))

@@ -159,6 +159,31 @@ func TestSanitizeDevinSystemPrompt_AndSensitiveWords(t *testing.T) {
 	}
 }
 
+func TestSanitizeDevinSystemPrompt_ClaudeCodeSubagentPrompt(t *testing.T) {
+	cases := []string{
+		"- For clear communication with the user the assistant MUST avoid using emojis.",
+		"- For clear communication with the user, the assistant MUST avoid using emojis.",
+	}
+	for _, directive := range cases {
+		rawPrompt := "You are a Claude agent, built on Anthropic's Claude Agent SDK.\nYou are an agent for Claude Code.\nNotes:\n" + directive + "\n- Do not use a colon before tool calls."
+		sanitized := SanitizeDevinSystemPrompt(rawPrompt, nil)
+
+		if strings.Contains(sanitized, "Claude Agent SDK") {
+			t.Errorf("sanitized prompt still contains Agent SDK identity: %s", sanitized)
+		}
+
+		if strings.Contains(sanitized, "MUST avoid using emojis") {
+			t.Errorf("sanitized prompt still contains the blocked emoji directive: %s", sanitized)
+		}
+		if !strings.Contains(sanitized, "- For clear communication with the user the assistant should avoid using emojis.") {
+			t.Errorf("emoji directive should be softened, not dropped: %s", sanitized)
+		}
+		if !strings.Contains(sanitized, "- Do not use a colon before tool calls.") {
+			t.Errorf("surrounding lines should be preserved: %s", sanitized)
+		}
+	}
+}
+
 func TestBuildDevinGetChatMessageRequest_WithImages(t *testing.T) {
 	prompts := []DevinPrompt{
 		{
