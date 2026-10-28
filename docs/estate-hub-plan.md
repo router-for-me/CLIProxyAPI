@@ -187,7 +187,7 @@ next refresher tick (within a minute) restores them from the snapshot.
 
 ## Device matrix (Waseem, 26 Oct 2026: "any agent from any device" by Tue 28 / Wed 29 Oct)
 
-Last verified: 28 Oct 2026 (m6, mbp, omarchy). On mbp Waseem is signed in to Muse, agy, Devin, Grok and Kimi:
+Last verified: 28 Oct 2026 (m6, mbp, omarchy, wasnewpc). On mbp Waseem is signed in to Muse, agy, Devin, Grok and Kimi:
 `devin auth status` and `grok models` report it, Muse and Kimi hold their credential files, agy is his word.
 
 Work devices only: wasnewpc, omarchy (same GPU box, Linux boot; one boot up at a time), mbp, m6. naz and the
@@ -204,9 +204,9 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 | opencode | hub | hub | hub (fixed 28 Oct: npm postinstall had not run, so the binary did not start) | hub | hub provider in `~/.config/opencode/opencode.json` |
 | Muse CLI | login (launcher installed 26 Oct) | install+login | signed in (1.4.14) | login? (installed) | own login; Muse models via hub for the tools above |
 | agy (Antigravity) | login (installed 26 Oct) | login? (installed) | signed in (Waseem, 28 Oct; 1.4.9) | login (binary copied from auto-vps 26 Oct) | own login |
-| Devin CLI | login (installed 26 Oct) | install+login | signed in (installed 28 Oct, 3000.11.228) | login (binary copied from auto-vps 26 Oct) | own login; Devin models via hub for the tools above |
-| Grok CLI | hub (default) | install | hub (beside Waseem's own grok.com login, which stays default) | hub (default) | hub models in `~/.grok/config.toml` (see below) |
-| Kimi CLI | hub (default) | install | hub (beside Waseem's own Kimi login, which stays default; CLI is 0.20.3) | hub (default) | hub provider in `~/.kimi-code/config.toml` (see below) |
+| Devin CLI | login (installed 26 Oct) | login (installed 28 Oct, 3000.11.228) | signed in (installed 28 Oct, 3000.11.228) | login (binary copied from auto-vps 26 Oct) | own login; Devin models via hub for the tools above |
+| Grok CLI | hub (default) | hub (default; npm, 28 Oct) | hub (beside Waseem's own grok.com login, which stays default) | hub (default) | hub models in `~/.grok/config.toml` (see below) |
+| Kimi CLI | hub (default) | hub (default; 2.4.0, 28 Oct) | hub (beside Waseem's own Kimi login, which stays default; CLI is 0.20.3) | hub (default) | hub provider in `~/.kimi-code/config.toml` (see below) |
 | dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | installed (npm; mise cannot resolve its rc version), key needed | API key from BWS, or hub `deepseek-flash` through OMP/pi |
 | commandcode | installed, key needed | installed, key needed | installed, key needed | installed (mise), key needed | API key from BWS, or hub `commandcode/*` through OMP/pi |
 | cursor-agent / agent | install | install | installed | installed | own login (Cursor); no hub path |
@@ -217,9 +217,11 @@ models per tool: Grok `[model.hub-grok-build]` (`grok-build-0.1`) and `[model.hu
 `[providers.hub]` (`type = "openai"`) with `hub/kimi-k3` and `hub/kimi-k3.1-pro`. `base_url` is the hub's `/v1`
 and the key is the same hub access key as Claude Code's. Where the tool is not signed in, the hub model is the
 default; where Waseem is signed in (mbp), his own login stays the default and the hub models are picked with
-`grok -m hub-grok-build` or `kimi -m hub/kimi-k3`. All four answered a one-word prompt on m6, omarchy and mbp.
+`grok -m hub-grok-build` or `kimi -m hub/kimi-k3`. All four answered a one-word prompt on m6, omarchy, mbp and wasnewpc.
 Apply with `ssh <host> 'python3 -I -' < docs/estate-hub-devices/hub-grok-kimi.py` (macOS, Linux) or run
-`docs/estate-hub-devices/hub-grok-kimi.ps1` on wasnewpc; both are idempotent and never print the key.
+`docs/estate-hub-devices/hub-grok-kimi.ps1` with `pwsh -File` on wasnewpc; both are idempotent and never print the key.
+On wasnewpc, run installers with `pwsh`, not `powershell`: the ssh shell is PowerShell 7, and Windows PowerShell 5.1
+started from it cannot load `Get-FileHash`, so Devin's installer fails its checksum step.
 
 "login?" means installed but whether it is signed in on that device is unverified. Omarchy done 26 Oct 22:30: Claude Code, Codex, OMP, pi, opencode on the hub (all answered or list 25 hub models); Herdr there is the Arch package 0.9.1-2 in /usr/bin (update with the package manager, not `herdr update`); auto-vps saved in its machines. The GPU box is one machine: wasnewpc is unreachable while omarchy is booted and vice versa.
 
@@ -346,6 +348,7 @@ the local fallback login; running ones keep the route they started with.
 - 2026-10-26 22:35: m6 has every harness installed (kimi 2.3.3, devin, agy 1.4.7, muse 1.4.13 via the Meta launcher, grok via npm); installers inspected first, kept at /opt/automancer/var/scratch/t3eval/installers/. Logins on m6 for Muse, agy, Devin, Kimi and Grok are Waseem's.
 - 2026-10-26 22:55: L3 build (estate-278f7e18, PR #3 d6abbc05) live on m6. First real run: 23 credentials, no poll errors; CommandCode (USD left of monthly grant, 5h, week), OpenCode Go (5h, week, month), GLM (5h, week) and DeepSeek balance all show. Codex banked resets not visible yet on the page (allowances on auto-vps shows 7); re-check after the next poll. Screenshots: Notes/Reports/assets/26-10-26-hub-dashboard-v3-{desktop,phone}.png. t8318 closed.
 - 2026-10-28: device matrix gaps. Grok CLI and Kimi CLI take a custom endpoint and now carry hub models on m6, omarchy and mbp (all answered). mbp: opencode fixed (its npm postinstall had not run, so the binary never started; the provider config was fine) and lists the 25 hub models; Devin CLI installed; Kimi CLI was already installed and signed in (0.20.3). wasnewpc was off (the GPU box was booted as omarchy), so its Grok, Kimi and Devin installs are still open.
+- 2026-10-28 (evening): wasnewpc closed. Grok (npm), Kimi 2.4.0 and Devin 3000.11.228 installed; Grok and Kimi default to the hub and all four hub models answered; none of the three is signed in.
 - 2026-10-28: hub credentials are in the nightly encrypted backup (ops PR #1332, merged): `estate-extra-stage`'s `hub` part streams m6's `~/.cli-proxy-api` (auth files, `usage-snapshot.cache`) and `~/.local/hub/config.yaml` over ssh into age; the estate-extra tiers carry it to naz and B2. Restore steps: ops `runbooks/vps-ops.md` "Restore the estate hub's credentials (m6)". A dry-run restore matched all 20 files byte for byte. A new state file on m6 outside those two paths needs adding to that part.
 - 2026-10-28: t8314. Both flaky interrupt tests were symptoms of one handler race that upstream fixed the same day (9717e325, issue #7065: a late interrupt after a terminal event got a fake `response.incomplete` or was dropped). Cherry-picked here; `TestResponsesInterruptStopsHTTPUpstream` also waits on a channel for the upstream cancel instead of reading a flag once (fork PR #4; the test half went upstream as router-for-me/CLIProxyAPI#7086 to `dev`). m6 needs a rebuild from `main` to carry it.
 - 2026-10-28 18:23-18:36: auto-vps Claude Code and Codex trialled on the hub (Fable, Opus, Sonnet, Terra answered; Claude and Codex pins landed on the named accounts; an unknown pin got 400). The chair stopped the lane because bb was unreliable (it was already slow at 18:00, before any change) and ran `estate-hub-route off`; the cut-over waits for Waseem ("auto-vps cut-over" above). Hub groups and notes set. PRs open as drafts.
