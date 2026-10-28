@@ -1,6 +1,11 @@
 package payloadcompress
 
-import "strings"
+import (
+	"math"
+	"strconv"
+	"strings"
+	"unicode"
+)
 
 // liteEngine removes formatting noise that carries no meaning for a model:
 // ANSI escapes, carriage returns, trailing spaces and runs of blank lines.
@@ -21,8 +26,8 @@ func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
 	if limit <= 0 {
 		limit = liteDefaultMaxToolLength
 	}
-	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit {
-		return capMiddleChars(text, limit), true
+	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit && charLen(text) > limit {
+		return truncateToolText(text, limit), true
 	}
 	return e.compress(text)
 }
@@ -176,4 +181,93 @@ func trimTrailingSpace(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// The tool-result cap mirrors upstream lite.ts: a hard cut is adjusted to the
+// nearest whitespace inside a lookback/lookahead window, so a truncated result
+// never garbles the word a cut lands in.
+const toolTruncationLookback = 80
+
+// toolTruncationMarker ends every capped single-line result.
+const toolTruncationMarker = "\n...[truncated]"
+
+// toolElisionReserve is the room the middle marker needs, whatever its line count.
+const toolElisionReserve = 32
+
+// toolTailShare is the fraction of the budget the tail keeps.
+const toolTailShare = 0.3
+
+func isWordRuneAt(runes []rune, i int) bool {
+	return i >= 0 && i < len(runes) && !unicode.IsSpace(runes[i])
+}
+
+func findWhitespaceBackward(runes []rune, cutIndex int) int {
+	windowStart := max(0, cutIndex-toolTruncationLookback)
+	for i := cutIndex; i > windowStart; i-- {
+		if !isWordRuneAt(runes, i-1) {
+			return i - 1
+		}
+	}
+	return -1
+}
+
+func findWhitespaceForward(runes []rune, cutIndex int) int {
+	windowEnd := min(len(runes), cutIndex+toolTruncationLookback)
+	for i := cutIndex; i < windowEnd; i++ {
+		if !isWordRuneAt(runes, i) {
+			return i
+		}
+	}
+	return -1
+}
+
+// backOffToWordBoundary prefers the end of the previous word, which keeps the
+// result at or under the cap. If nothing precedes the cut, it completes the
+// current word instead; with no boundary either way the hard cut stands.
+func backOffToWordBoundary(runes []rune, cutIndex int) int {
+	if !isWordRuneAt(runes, cutIndex-1) || !isWordRuneAt(runes, cutIndex) {
+		return cutIndex
+	}
+	if backward := findWhitespaceBackward(runes, cutIndex); backward != -1 {
+		return backward
+	}
+	if forward := findWhitespaceForward(runes, cutIndex); forward != -1 {
+		return forward
+	}
+	return cutIndex
+}
+
+// lastNewlineBefore mirrors lastIndexOf("\\n", from): a negative start finds
+// nothing, and a start past the end searches the whole slice.
+func lastNewlineBefore(runes []rune, from int) int {
+	if from < 0 {
+		return -1
+	}
+	for i := min(from, len(runes)-1); i >= 0; i-- {
+		if runes[i] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+func countLines(text string) int { return strings.Count(text, "\n") + 1 }
+
+// truncateToolText caps a tool result the way upstream Lite does. Multi-line
+// content keeps its tail as well as its head: a head-only cut deletes the lines
+// an agent is about to edit, so it invents them from memory and the edit fails as
+// a stale anchor. Single-line content takes the word-boundary cut.
+func truncateToolText(text string, maxLength int) string {
+	runes := []rune(text)
+	budget := maxLength - charLen(toolTruncationMarker) - toolElisionReserve
+	if budget > 0 && countLines(text) > 10 {
+		headCut := backOffToWordBoundary(runes, int(math.Ceil(float64(budget)*(1-toolTailShare))))
+		tailStart := lastNewlineBefore(runes, len(runes)-(budget-headCut)) + 1
+		if tailStart > headCut {
+			elided := countLines(string(runes[headCut:tailStart]))
+			return string(runes[:headCut]) + "\n... [" + strconv.Itoa(elided) + " lines elided] ...\n" +
+				string(runes[tailStart:]) + toolTruncationMarker
+		}
+	}
+	return string(runes[:min(backOffToWordBoundary(runes, maxLength), len(runes))]) + toolTruncationMarker
 }

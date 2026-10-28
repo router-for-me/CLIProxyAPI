@@ -28,7 +28,7 @@ func (e *dedupEngine) rewrite(texts []string) map[int]string {
 	seen := make(map[uint64]int, len(texts))
 	var repl map[int]string
 	for i, text := range texts {
-		if len(text) < minSize || strings.HasPrefix(text, dedupMarker) {
+		if len(text) < minSize || charLen(text) < minSize || strings.HasPrefix(text, dedupMarker) {
 			continue
 		}
 		h := sampledHash(text)
@@ -45,7 +45,7 @@ func (e *dedupEngine) rewrite(texts []string) map[int]string {
 			repl = make(map[int]string, 1)
 		}
 		repl[i] = dedupMarker + " #" + strconv.Itoa(prev+1) + "; " +
-			strconv.Itoa(len(text)) + " bytes omitted]"
+			strconv.Itoa(charLen(text)) + " chars omitted]"
 	}
 	return repl
 }

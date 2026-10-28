@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -257,4 +258,10 @@ func appendJSONString(dst []byte, s string) []byte {
 func hasFence(line string) bool {
 	trimmed := strings.TrimSpace(line)
 	return strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")
+}
+
+// charLen counts characters rather than bytes, so the char-named option caps
+// mean the same thing for non-ASCII text as they do for ASCII.
+func charLen(s string) int {
+	return utf8.RuneCountInString(s)
 }

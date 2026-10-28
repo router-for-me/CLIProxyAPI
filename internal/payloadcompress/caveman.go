@@ -23,7 +23,7 @@ func (e cavemanEngine) compressKind(kind segmentKind, text string) (string, bool
 	if minLength <= 0 {
 		minLength = cavemanDefaultMinLength
 	}
-	if kind != kindUser || len(text) < minLength {
+	if kind != kindUser || len(text) < minLength || charLen(text) < minLength {
 		return text, false
 	}
 	if e.level == "" {
