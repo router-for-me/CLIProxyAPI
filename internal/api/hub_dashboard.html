@@ -7,16 +7,19 @@
 <title>Hub allowances</title>
 <style>
 :root {
-  --ground: #fff1e5; --ink: #33302e; --strong: #1a1817; --muted: #66605c; --rule: #e8d6c7; --hover: #fbe6d4;
-  --accent: #0f5499; --good: #0d7680; --bad: #990f3d; --warn: #96490a; --track: #f2dfce; --fill: #0f5499;
-  --serif: Georgia, "Times New Roman", serif;
+  --ground: oklch(0.985 0.004 85); --ink: oklch(0.27 0.012 260); --strong: oklch(0.17 0.012 260); --muted: oklch(0.49 0.012 260);
+  --rule: oklch(0.91 0.006 260); --hover: oklch(0.955 0.006 260); --track: oklch(0.9 0.008 260);
+  --accent: oklch(0.5 0.16 255); --ok: oklch(0.64 0.15 155); --warn: oklch(0.76 0.15 70); --bad: oklch(0.6 0.2 25);
+  --warn-ink: oklch(0.52 0.13 60); --bad-ink: oklch(0.52 0.19 25);
   color-scheme: light;
   font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --ground: #1f2229; --ink: #ece1d7; --strong: #fff8f1; --muted: #aea398; --rule: #393d47; --hover: #2a2e37;
-    --accent: #8fb9f5; --good: #4fc0b6; --bad: #ff8fac; --warn: #f0a75e; --track: #343843; --fill: #8fb9f5;
+    --ground: oklch(0.18 0.012 260); --ink: oklch(0.9 0.008 260); --strong: oklch(0.98 0.004 260); --muted: oklch(0.68 0.012 260);
+    --rule: oklch(0.27 0.012 260); --hover: oklch(0.22 0.012 260); --track: oklch(0.36 0.012 260);
+    --accent: oklch(0.74 0.12 250); --ok: oklch(0.72 0.15 155); --warn: oklch(0.8 0.14 75); --bad: oklch(0.68 0.18 25);
+    --warn-ink: var(--warn); --bad-ink: var(--bad);
     color-scheme: dark;
   }
 }
@@ -25,73 +28,122 @@ body { margin: 0; background: var(--ground); color: var(--ink); font-variant-num
 ::selection { background: var(--accent); color: var(--ground); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 [hidden] { display: none !important; }
-main { max-width: 1240px; margin: 0 auto; padding: 12px 16px 40px; }
-header { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; }
-h1, h2, h3 { font-family: var(--serif); color: var(--strong); margin: 0; }
-h1 { font-size: 1.5rem; letter-spacing: -0.01em; }
-h2 { font-size: 1.125rem; border-top: 2px solid var(--strong); padding-top: 6px; margin: 22px 0 2px; display: flex; align-items: baseline; gap: 8px; }
-h3 { font-size: 1rem; padding: 14px 0 4px; display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--strong); }
-h2 small, h3 small { font: 400 .8rem/1 system-ui, sans-serif; color: var(--muted); margin-left: auto; }
+main { max-width: 1080px; margin: 0 auto; padding: 10px 16px 40px; }
+h1 { font-size: 1.125rem; color: var(--strong); margin: 0; letter-spacing: -0.01em; }
 .muted { color: var(--muted); }
 .spacer { flex: 1; }
 button, select, input { font: inherit; color: inherit; }
-button { border: 1px solid var(--muted); background: transparent; border-radius: 6px; padding: 6px 12px; min-height: 36px; cursor: pointer; }
-button:hover { background: var(--hover); }
+button { border: 1px solid var(--rule); background: transparent; border-radius: 6px; padding: 6px 12px; min-height: 36px; cursor: pointer; }
+button:active { background: var(--track); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--ground); font-weight: 600; }
 button:disabled { opacity: .55; cursor: progress; }
-select, input { border: 1px solid var(--muted); background: var(--ground); border-radius: 6px; padding: 6px 8px; min-height: 36px; min-width: 0; }
-.list { list-style: none; margin: 0; padding: 0; }
-/* A ticker row: what and whose on the left, the figure and its pace on the right. */
-.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--rule); }
-.row > :nth-child(even) { text-align: right; }
-.what { font-weight: 600; color: var(--strong); min-width: 0; display: flex; align-items: baseline; white-space: nowrap; }
-.what .name { overflow: hidden; text-overflow: ellipsis; }
-.what .who { font-weight: 400; color: var(--ink); margin-left: .3em; }
-.fig { font-size: 1.25rem; font-weight: 600; line-height: 1.15; color: var(--strong); }
-.fig small { font-size: .75rem; font-weight: 400; color: var(--muted); margin-left: 2px; }
-.line { font-size: .85rem; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pace { font-size: .85rem; white-space: nowrap; }
-.good { color: var(--good); }
-.bad { color: var(--bad) !important; }
-.warn { color: var(--warn); }
-.mark { flex: none; font: 600 .7rem/1 system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; padding: 2px 5px; border-radius: 3px; border: 1px solid currentColor; margin-left: 6px; vertical-align: 2px; }
-.mark.next { color: var(--ground); background: var(--accent); border-color: var(--accent); }
-.mark.bad, .mark.warn, .mark.off { background: transparent; }
-.mark.off { color: var(--muted); }
+select, input { border: 1px solid var(--rule); background: var(--ground); border-radius: 6px; padding: 6px 8px; min-height: 36px; min-width: 0; }
+@media (hover: hover) and (pointer: fine) {
+  button:not(.primary):hover, details.acct > summary:hover, .chip:hover { background: var(--hover); }
+}
+header { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; white-space: nowrap; }
+header button { padding: 4px 12px; font-size: .85rem; }
+
+/* Spend next: the router's next account per provider. */
+#chips { display: flex; align-items: center; gap: 6px; padding-bottom: 12px; border-bottom: 1px solid var(--rule); overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; }
+#chips > span { flex: none; font-size: .8rem; color: var(--muted); margin-right: 2px; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 10px 4px 8px; border: 1px solid var(--rule); border-radius: 999px; color: var(--ink); text-decoration: none; font-size: .85rem; white-space: nowrap; }
+.chip:active { background: var(--track); }
+.chip b { color: var(--strong); font-weight: 650; }
+.chip .logo { width: 16px; height: 16px; }
+
+.logo { width: 24px; height: 24px; flex: none; color: var(--strong); }
+.logo.initial { display: inline-grid; place-items: center; border-radius: 6px; background: var(--track); font: 700 .75rem/1 system-ui, sans-serif; }
+
+/* One row per plan. Phone: name over bars, figure over reset. Wide: one line. */
+.row { display: grid; grid-template-columns: 24px minmax(0, 1fr) 5.5rem; grid-template-areas: "logo name fig" "logo bars when"; column-gap: 12px; row-gap: 5px; align-items: center; padding: 11px 6px; border-bottom: 1px solid var(--rule); }
+.row > .logo { grid-area: logo; align-self: start; margin-top: 2px; }
+.name { grid-area: name; min-width: 0; display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--strong); white-space: nowrap; }
+.name { flex-wrap: wrap; row-gap: 4px; }
+.name .n { min-width: 0; max-width: 100%; overflow: clip; text-overflow: ellipsis; }
+.bars { grid-area: bars; min-width: 0; display: grid; gap: 4px; }
+.fig { grid-area: fig; justify-self: end; font-size: 1.125rem; font-weight: 650; line-height: 1.1; color: var(--strong); }
+.when { grid-area: when; justify-self: end; align-self: start; font-size: .8rem; color: var(--ink); white-space: nowrap; }
+.when .lbl { display: none; color: var(--muted); }
+.stale > summary > :is(.bars, .fig) { opacity: .45; }
+.out-early { color: var(--warn-ink); white-space: nowrap; }
+button.danger { border-color: var(--bad-ink); color: var(--bad-ink); }
+.actions label { flex: 1 1 140px; display: grid; gap: 2px; font-size: .75rem; color: var(--muted); }
+.actions label input { color: var(--ink); font-size: .95rem; }
+.fig.warn, .when.warn, .warn { color: var(--warn-ink); }
+.fig.bad, .when.bad, .bad { color: var(--bad-ink); }
+
+/* The gauge: twenty blocks, like sysdash's bar, filled by what is left. */
+.gauge { height: 10px; background: var(--track); -webkit-mask: repeating-linear-gradient(90deg, #000 0 calc(5% - 2px), transparent calc(5% - 2px) 5%); mask: repeating-linear-gradient(90deg, #000 0 calc(5% - 2px), transparent calc(5% - 2px) 5%); }
+.gauge i, .thin i { display: block; height: 100%; background: var(--ok); }
+.gauge i.warn, .thin i.warn { background: var(--warn); }
+.gauge i.bad, .thin i.bad { background: var(--bad); }
+.sub { display: flex; align-items: center; gap: 8px; font-size: .75rem; color: var(--muted); line-height: 1; }
+.thin { flex: 1; height: 3px; background: var(--track); border-radius: 2px; overflow: clip; }
+.sub .cap { flex: none; }
+.none { font-size: .8rem; color: var(--muted); }
+
+.tag { flex: none; font: 650 .68rem/1 system-ui, sans-serif; letter-spacing: .03em; text-transform: uppercase; padding: 3px 5px; border-radius: 4px; border: 1px solid currentColor; }
+.tag.next { color: var(--ground); background: var(--accent); border-color: var(--accent); }
+.tag.bank { color: var(--accent); text-transform: none; letter-spacing: 0; }
+.tag.bank.warn { color: var(--warn-ink); }
+.tag.off { color: var(--muted); }
+
 details.acct > summary { list-style: none; cursor: pointer; }
 details.acct > summary::-webkit-details-marker { display: none; }
-details.acct > summary:hover { background: var(--hover); }
+details.acct > summary:active { background: var(--hover); }
+details.acct:target > summary { background: var(--hover); }
 details.acct[open] > summary { border-bottom-color: transparent; }
-details.acct.out .what, details.acct.out .fig, details.acct.out .pace { color: var(--muted) !important; }
-.body { padding: 2px 0 14px; border-bottom: 1px solid var(--rule); }
+details.acct.out > summary > :is(.logo, .bars, .fig) { opacity: .45; }
+details.acct.out .name { color: var(--muted); }
+
+.body { padding: 0 6px 14px 42px; border-bottom: 1px solid var(--rule); }
 .win { padding: 6px 0; }
-.win .top { display: flex; justify-content: space-between; gap: 8px; font-size: .9rem; }
-.bar { height: 4px; background: var(--track); margin: 4px 0 3px; }
-.bar i { display: block; height: 100%; background: var(--fill); }
-.bar i.bad { background: var(--bad); }
-.win .bottom { display: flex; justify-content: space-between; gap: 8px; font-size: .8rem; color: var(--muted); }
+.win .top, .win .bottom { display: flex; justify-content: space-between; gap: 8px; }
+.win .top { font-size: .9rem; }
+.win .bottom { font-size: .8rem; color: var(--muted); }
+.win .thin { display: block; height: 5px; margin: 4px 0 3px; }
 dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 14px; margin: 8px 0 0; font-size: .85rem; }
 dt { color: var(--muted); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; align-items: center; }
-.actions input { flex: 1 1 140px; }
-.chev { flex: none; width: 10px; height: 10px; margin-left: 6px; vertical-align: 1px; color: var(--muted); transition: transform .12s ease-out; }
-details[open] .chev { transform: rotate(90deg); }
+
 #login { max-width: 400px; margin: 14vh auto; padding: 0 16px; }
 #login form { display: flex; gap: 8px; margin-top: 14px; }
 #login input { flex: 1; }
-.error { color: var(--bad); margin: 6px 0 0; }
+.error { color: var(--bad-ink); margin: 6px 0 0; }
 .error:empty { display: none; }
-footer { margin-top: 28px; padding-top: 8px; border-top: 1px solid var(--rule); color: var(--muted); font-size: .8rem; display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+footer { margin-top: 24px; color: var(--muted); font-size: .8rem; display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
 code { font-size: .95em; }
-@media (min-width: 960px) {
-  main { padding: 20px 28px 48px; }
-  .cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; }
+
+@media (min-width: 760px) {
+  main { padding: 18px 28px 48px; }
+  #chips { flex-wrap: wrap; }
+  .row { grid-template-columns: 24px minmax(12rem, 17rem) minmax(0, 1fr) 4.5rem 9rem; grid-template-areas: "logo name bars fig when"; column-gap: 18px; padding: 9px 8px; }
+  .row > .logo { align-self: center; margin-top: 0; }
+  .when { align-self: center; justify-self: start; }
+  .when .lbl { display: inline; }
+  .body { padding-left: 50px; }
+  .body > * { max-width: 46rem; }
 }
-@media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="logo-claude" viewBox="0 0 24 24"><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" fill="#D97757" fill-rule="nonzero"></path></symbol>
+<symbol id="logo-codex" viewBox="0 0 24 24"><path d="M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z" fill="#fff"></path><path d="M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z" fill="url(#lobe-icons-codex-_R_0_)"></path><defs><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-codex-_R_0_" x1="12" x2="12" y1="3" y2="21"><stop stop-color="#B1A7FF"></stop><stop offset=".5" stop-color="#7A9DFF"></stop><stop offset="1" stop-color="#3941FF"></stop></linearGradient></defs></symbol>
+<symbol id="logo-antigravity" viewBox="0 0 24 24"><mask height="23" id="lobe-icons-antigravity-0-_R_0_" maskUnits="userSpaceOnUse" width="24" x="0" y="1"><path d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z" fill="#fff"></path></mask><g mask="url(#lobe-icons-antigravity-0-_R_0_)"><g filter="url(#lobe-icons-antigravity-1-_R_0_)"><path d="M-1.018-3.992c-.408 3.591 2.686 6.89 6.91 7.37 4.225.48 7.98-2.043 8.387-5.633.408-3.59-2.686-6.89-6.91-7.37-4.225-.479-7.98 2.043-8.387 5.633z" fill="#FFE432"></path></g><g filter="url(#lobe-icons-antigravity-2-_R_0_)"><path d="M15.269 7.747c1.058 4.557 5.691 7.374 10.348 6.293 4.657-1.082 7.575-5.653 6.516-10.21-1.058-4.556-5.691-7.374-10.348-6.292-4.657 1.082-7.575 5.653-6.516 10.21z" fill="#FC413D"></path></g><g filter="url(#lobe-icons-antigravity-3-_R_0_)"><path d="M-12.443 10.804c1.338 4.703 7.36 7.11 13.453 5.378 6.092-1.733 9.947-6.95 8.61-11.652C8.282-.173 2.26-2.58-3.833-.848-9.925.884-13.78 6.1-12.443 10.804z" fill="#00B95C"></path></g><g filter="url(#lobe-icons-antigravity-4-_R_0_)"><path d="M-12.443 10.804c1.338 4.703 7.36 7.11 13.453 5.378 6.092-1.733 9.947-6.95 8.61-11.652C8.282-.173 2.26-2.58-3.833-.848-9.925.884-13.78 6.1-12.443 10.804z" fill="#00B95C"></path></g><g filter="url(#lobe-icons-antigravity-5-_R_0_)"><path d="M-7.608 14.703c3.352 3.424 9.126 3.208 12.896-.483 3.77-3.69 4.108-9.459.756-12.883C2.69-2.087-3.083-1.871-6.853 1.82c-3.77 3.69-4.108 9.458-.755 12.883z" fill="#00B95C"></path></g><g filter="url(#lobe-icons-antigravity-6-_R_0_)"><path d="M9.932 27.617c1.04 4.482 5.384 7.303 9.7 6.3 4.316-1.002 6.971-5.448 5.93-9.93-1.04-4.483-5.384-7.304-9.7-6.301-4.316 1.002-6.971 5.448-5.93 9.93z" fill="#3186FF"></path></g><g filter="url(#lobe-icons-antigravity-7-_R_0_)"><path d="M2.572-8.185C.392-3.329 2.778 2.472 7.9 4.771c5.122 2.3 11.042.227 13.222-4.63 2.18-4.855-.205-10.656-5.327-12.955-5.122-2.3-11.042-.227-13.222 4.63z" fill="#FBBC04"></path></g><g filter="url(#lobe-icons-antigravity-8-_R_0_)"><path d="M-3.267 38.686c-5.277-2.072 3.742-19.117 5.984-24.83 2.243-5.712 8.34-8.664 13.616-6.592 5.278 2.071 11.533 13.482 9.29 19.195-2.242 5.713-23.613 14.298-28.89 12.227z" fill="#3186FF"></path></g><g filter="url(#lobe-icons-antigravity-9-_R_0_)"><path d="M28.71 17.471c-1.413 1.649-5.1.808-8.236-1.878-3.135-2.687-4.531-6.201-3.118-7.85 1.412-1.649 5.1-.808 8.235 1.878s4.532 6.2 3.119 7.85z" fill="#749BFF"></path></g><g filter="url(#lobe-icons-antigravity-10-_R_0_)"><path d="M18.163 9.077c5.81 3.93 12.502 4.19 14.946.577 2.443-3.612-.287-9.727-6.098-13.658-5.81-3.931-12.502-4.19-14.946-.577-2.443 3.612.287 9.727 6.098 13.658z" fill="#FC413D"></path></g><g filter="url(#lobe-icons-antigravity-11-_R_0_)"><path d="M-.915 2.684c-1.44 3.473-.97 6.967 1.05 7.804 2.02.837 4.824-1.3 6.264-4.772 1.44-3.473.97-6.967-1.05-7.804-2.02-.837-4.824 1.3-6.264 4.772z" fill="#FFEE48"></path></g></g><defs><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="17.587" id="lobe-icons-antigravity-1-_R_0_" width="19.838" x="-3.288" y="-11.917"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="1.117"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="38.565" id="lobe-icons-antigravity-2-_R_0_" width="38.9" x="4.251" y="-13.493"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="5.4"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.517" id="lobe-icons-antigravity-3-_R_0_" width="40.955" x="-21.889" y="-10.592"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.517" id="lobe-icons-antigravity-4-_R_0_" width="40.955" x="-21.889" y="-10.592"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.595" id="lobe-icons-antigravity-5-_R_0_" width="36.632" x="-19.099" y="-10.278"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="34.087" id="lobe-icons-antigravity-6-_R_0_" width="33.533" x=".981" y="8.758"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.363"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="35.276" id="lobe-icons-antigravity-7-_R_0_" width="35.978" x="-6.143" y="-21.659"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.954"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="46.523" id="lobe-icons-antigravity-8-_R_0_" width="45.114" x="-11.96" y="-.46"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.531"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="24.054" id="lobe-icons-antigravity-9-_R_0_" width="25.094" x="10.485" y=".58"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.159"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="30.007" id="lobe-icons-antigravity-10-_R_0_" width="33.508" x="5.833" y="-12.467"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="2.669"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="26.151" id="lobe-icons-antigravity-11-_R_0_" width="22.194" x="-8.355" y="-8.876"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.303"></feGaussianBlur></filter></defs></symbol>
+<symbol id="logo-xai" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"></path></symbol>
+<symbol id="logo-meta" fill="none" viewBox="0 0 24 24"><path d="M5.91 3.869C6.777 3.869 7.396 4.546 7.396 5.607 7.396 6.669 7.225 7.626 6.941 9.659 6.738 11.084 6.389 13.258 6.243 14.162 6.523 13.628 7.178 12.378 7.294 12.144 8.666 9.375 10.096 6.901 10.508 6.246 11.054 5.372 11.535 5.021 12.278 5.021 12.664 5.022 13.124 5.217 13.352 5.477 13.66 5.829 13.725 6.398 13.714 7.019 13.698 7.97 13.574 9.486 13.405 11.177 13.33 11.929 13.185 13.466 13.087 14.496 13.965 12.925 15.591 10.035 16.246 9.025 16.817 8.146 17.392 7.579 18.164 7.579 18.83 7.579 19.651 8.05 19.603 9.302 19.531 11.149 19.264 15.174 19.143 16.979 19.96 15.79 21.033 14.029 21.436 13.367 21.842 12.698 22.26 12.157 22.894 12.139 23.544 12.12 23.979 12.562 23.999 13.244 24.019 13.927 23.612 14.694 23.072 15.565 22.486 16.511 21.831 17.523 21.033 18.468 20.236 19.413 19.502 20.131 18.384 20.131 17.382 20.131 16.677 19.465 16.628 18.246 16.602 17.607 16.723 16.234 16.814 15.16 16.92 13.917 17.048 12.717 17.137 11.923 16.256 13.535 14.402 16.912 13.568 18.23 12.752 19.52 12.355 19.974 11.493 19.975 10.631 19.975 10.253 19.354 10.241 18.42 10.227 17.407 10.988 11.324 11.246 9.297 10.828 10.191 9.801 12.385 9.157 13.69 8.534 14.953 7.489 17.135 6.73 18.393 6.184 19.298 5.57 19.975 4.66 19.975 3.75 19.975 3.236 19.363 3.236 18.379 3.236 17.395 3.521 15.756 3.827 13.723 3.98 12.739 4.155 11.667 4.352 10.53 4.496 9.708 4.746 8.26 4.9 7.371 4.2 8.461 2.941 10.423 2.558 11.014 2.131 11.671 1.749 12.15 1.115 12.15 0.416 12.15 0 11.605 0 10.971 0 10.337 0.322 9.848 0.846 8.988 1.518 7.883 2.726 6.377 3.388 5.586 4.168 4.654 4.947 3.869 5.91 3.869Z" fill="url(#lobe-icons-muse-_R_0_)"></path><defs><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-muse-_R_0_" x1="31.979" x2="5.981" y1="26.171" y2="-3.014"><stop offset=".255" stop-color="#0082FB"></stop><stop offset=".697" stop-color="#0064E0"></stop><stop offset="1" stop-color="#0040DC"></stop></linearGradient></defs></symbol>
+<symbol id="logo-kimi" viewBox="0 0 24 24"><path d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" fill="#1783FF"></path><path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" fill="currentColor"></path></symbol>
+<symbol id="logo-devin" viewBox="0 0 24 24"><path d="M2.033 9.867l2.554 1.483a.589.589 0 00.592 0l2.554-1.483.01-.008a.608.608 0 00.11-.084l.013-.015a.631.631 0 00.076-.1c.003-.005.008-.01.01-.016a.558.558 0 00.052-.125l.007-.028a.611.611 0 00.019-.14V7.868c0-.572.307-1.105.8-1.392a1.595 1.595 0 011.598 0l1.277.742a.54.54 0 00.129.053l.028.01c.044.01.088.015.133.016h.006l.013-.002a.587.587 0 00.27-.074l.011-.004 2.554-1.483a.596.596 0 00.297-.516V2.253a.595.595 0 00-.297-.516L12.293.257a.587.587 0 00-.591 0L9.148 1.737l-.01.01a.609.609 0 00-.109.083l-.014.015a.632.632 0 00-.076.1c-.003.005-.008.01-.01.016a.57.57 0 00-.052.124l-.007.028a.612.612 0 00-.018.14v1.483c0 .572-.307 1.105-.8 1.393a1.597 1.597 0 01-1.599 0l-1.276-.742a.603.603 0 00-.13-.053l-.028-.008a.658.658 0 00-.133-.018h-.02a.57.57 0 00-.269.074c-.003.002-.008.002-.012.005L2.033 5.872a.596.596 0 00-.297.515v2.966c0 .213.113.41.297.515z" fill="#3969CA"></path><path d="M15.943 10.607a1.596 1.596 0 011.599 0l1.276.74c.041.025.085.04.13.055l.028.008c.043.01.088.016.133.018h.005c.005 0 .01-.002.014-.003a.474.474 0 00.122-.016l.021-.005a.616.616 0 00.126-.052c.004-.002.009-.002.013-.005l2.554-1.482a.597.597 0 00.297-.516V6.383a.596.596 0 00-.297-.515l-2.552-1.483a.587.587 0 00-.592 0l-2.553 1.482-.011.008a.61.61 0 00-.108.084l-.014.016a.637.637 0 00-.076.1c-.003.005-.008.01-.01.016a.57.57 0 00-.052.124l-.007.029a.612.612 0 00-.018.14v1.482c0 .572-.307 1.105-.8 1.393a1.597 1.597 0 01-1.599 0l-1.276-.742a.584.584 0 00-.13-.053l-.028-.008a.62.62 0 00-.133-.018h-.02a.587.587 0 00-.269.074l-.012.004L9.15 10a.596.596 0 00-.296.516v2.966c0 .212.112.409.296.515l2.554 1.483s.008.002.012.005c.04.022.082.04.126.052l.02.004a.57.57 0 00.123.017l.014.002h.006c.054 0 .108-.01.16-.025a.587.587 0 00.13-.054l1.277-.741a1.597 1.597 0 012.398 1.392v1.482c0 .049.007.095.019.14l.007.028a.619.619 0 00.051.125c.004.006.008.01.01.016a.6.6 0 00.076.1l.014.015c.033.032.069.06.108.084.004.002.006.006.011.008l2.554 1.483a.59.59 0 00.593 0l2.554-1.483a.597.597 0 00.296-.516v-2.965a.595.595 0 00-.296-.516l-2.554-1.483s-.008-.002-.012-.005a.54.54 0 00-.126-.051c-.007-.003-.013-.003-.02-.005a.635.635 0 00-.125-.017h-.018a.557.557 0 00-.16.026.588.588 0 00-.13.053l-1.276.742a1.595 1.595 0 01-1.598 0 1.615 1.615 0 010-2.785l-.005-.001z" fill="#21C19A"></path><path d="M14.848 18.265l-2.554-1.482-.012-.005a.526.526 0 00-.126-.052c-.007-.002-.014-.002-.02-.005a.64.64 0 00-.124-.017h-.02a.56.56 0 00-.16.026.588.588 0 00-.13.053l-1.276.742a1.594 1.594 0 01-1.598 0c-.493-.286-.8-.82-.8-1.393V14.65a.563.563 0 00-.018-.14l-.008-.028a.604.604 0 00-.051-.124l-.01-.017a.603.603 0 00-.076-.1l-.014-.015a.596.596 0 00-.109-.084c-.003-.002-.005-.006-.01-.008L5.178 12.65a.587.587 0 00-.591 0l-2.554 1.483a.596.596 0 00-.297.516v2.965c0 .213.113.41.297.516l2.554 1.483.012.004a.618.618 0 00.267.074l.016.002h.007a.55.55 0 00.16-.026.584.584 0 00.129-.053l1.277-.742a1.597 1.597 0 012.398 1.393v1.482c0 .05.007.095.019.14l.007.028c.013.044.03.085.051.125l.01.016c.022.036.047.07.076.1l.014.015c.032.032.069.06.109.084l.01.008 2.554 1.483a.587.587 0 00.593 0l2.554-1.483a.596.596 0 00.296-.515v-2.966a.596.596 0 00-.296-.516h-.002z" fill="#0294DE"></path></symbol>
+<symbol id="logo-gemini" viewBox="0 0 24 24"><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" fill="#3186FF"></path><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" fill="url(#lobe-icons-gemini-0-_R_0_)"></path><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" fill="url(#lobe-icons-gemini-1-_R_0_)"></path><path d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z" fill="url(#lobe-icons-gemini-2-_R_0_)"></path><defs><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-gemini-0-_R_0_" x1="7" x2="11" y1="15.5" y2="12"><stop stop-color="#08B962"></stop><stop offset="1" stop-color="#08B962" stop-opacity="0"></stop></linearGradient><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-gemini-1-_R_0_" x1="8" x2="11.5" y1="5.5" y2="11"><stop stop-color="#F94543"></stop><stop offset="1" stop-color="#F94543" stop-opacity="0"></stop></linearGradient><linearGradient gradientUnits="userSpaceOnUse" id="lobe-icons-gemini-2-_R_0_" x1="3.5" x2="17.5" y1="13.5" y2="12"><stop stop-color="#FABC12"></stop><stop offset=".46" stop-color="#FABC12" stop-opacity="0"></stop></linearGradient></defs></symbol>
+<symbol id="logo-opencode-go" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path></symbol>
+<symbol id="logo-zai" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z"></path></symbol>
+<symbol id="logo-commandcode" fill="currentColor" fill-rule="evenodd" viewBox="0 0 24 24"><path clip-rule="evenodd" d="M19.334 0a4.67 4.67 0 0 0-4.666 4.668v2H9.334v-2A4.67 4.67 0 0 0 4.668 0 4.67 4.67 0 0 0 0 4.668a4.67 4.67 0 0 0 4.668 4.665h2v5.334h-2A4.67 4.67 0 0 0 0 19.334 4.67 4.67 0 0 0 4.668 24a4.67 4.67 0 0 0 4.666-4.666v-2h5.334v2A4.67 4.67 0 0 0 19.334 24 4.67 4.67 0 0 0 24 19.334a4.67 4.67 0 0 0-4.666-4.667h-2V9.333h2A4.67 4.67 0 0 0 24 4.668 4.673 4.673 0 0 0 19.334 0m-2 6.666v-2c0-1.107.893-2 2-2s2 .893 2 2-.893 2-2 2zm-12.668 0c-1.107 0-2-.893-2-2s.893-2 2-2 2 .893 2 2v2zm4.666 8V9.334h5.334v5.334zm10.002 6.667c-1.107 0-2-.893-2-2v-2h2c1.107 0 2 .892 2 2 0 1.107-.893 2-2 2m-14.668 0c-1.107 0-2-.893-2-2 0-1.108.893-2 2-2h2v2c0 1.107-.893 2-2 2"></path></symbol>
+<symbol id="logo-deepseek" viewBox="0 0 24 24"><path d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z" fill="#4D6BFE"></path></symbol>
+<symbol id="logo-local" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01" stroke-linecap="round" stroke-width="2.6"/></symbol>
+</defs></svg>
 <div id="login" hidden>
   <h1>Hub allowances</h1>
   <p class="muted">Enter the management key. It stays in this browser.</p>
@@ -103,20 +155,14 @@ code { font-size: .95em; }
 </div>
 <main id="app" hidden>
   <header>
-    <h1>Hub</h1>
+    <h1>Hub allowances</h1>
     <span class="spacer"></span>
     <span id="updated" class="muted"></span>
     <button id="reload">Refresh</button>
   </header>
+  <nav id="chips" aria-label="Spend next" hidden></nav>
   <p id="error" class="error" role="alert"></p>
-  <div id="content" class="cols" hidden>
-    <div>
-      <section id="next-section"><h2>Spend next</h2><ul id="next" class="list"></ul></section>
-      <section id="low-section"><h2>Running low <small id="low-count"></small></h2><ul id="low" class="list"></ul></section>
-      <section id="banked-section"><h2>Banked resets</h2><ul id="banked" class="list"></ul></section>
-    </div>
-    <section><h2>Accounts</h2><div id="accounts"></div></section>
-  </div>
+  <div id="accounts"></div>
   <footer>
     <span id="meta"></span>
     <span>Pin a client with the header <code>X-CPA-Account: &lt;account or group&gt;</code>.</span>
@@ -131,14 +177,12 @@ const NAMES = {
   claude: "Claude", codex: "Codex", kimi: "Kimi", xai: "Grok", antigravity: "Antigravity", meta: "Muse", devin: "Devin", gemini: "Gemini",
   commandcode: "CommandCode", "opencode-go": "OpenCode Go", zai: "GLM", deepseek: "DeepSeek", local: "Local",
 };
-const ORDER = Object.keys(NAMES);
-// An allowance is running low at LOW percent left, or below half left when it
-// is on course to run out before it resets (earlier projections are noise).
-const LOW = 15;
+// A window is spent at SPENT percent used (cxswap's line, as the router uses);
+// its bar turns amber below WARN percent left and red at LOW or less (sysdash's colours).
+const SPENT = 95, WARN = 40, LOW = 15;
 const providerKey = (p) => (p || "other").replace(/^openai-compatib(le|ility)-/, "");
 const providerName = (p) => NAMES[providerKey(p)] || providerKey(p);
 const $ = (id) => document.getElementById(id);
-const CHEV = '<svg class="chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 6.5 5 3 8.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
 let data = null;
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -171,8 +215,7 @@ function cadence(minutes, short) {
   if (near(1440, 5)) return short ? "day" : "Daily";
   if (near(10080, 60)) return short ? "week" : "Weekly";
   if (minutes >= 40000 && minutes <= 46000) return short ? "month" : "Monthly";
-  const n = minutes >= 1440 ? Math.round(minutes / 1440) + (short ? "d" : "-day") : Math.round(minutes / 60) + (short ? "h" : "-hour");
-  return n;
+  return minutes >= 1440 ? Math.round(minutes / 1440) + (short ? "d" : "-day") : Math.round(minutes / 60) + (short ? "h" : "-hour");
 }
 function money(b) {
   try { return new Intl.NumberFormat(undefined, { style: "currency", currency: b.currency || "USD" }).format(b.left); } catch { return `${b.left} ${b.currency}`; }
@@ -192,52 +235,77 @@ async function api(method, path, body) {
 
 // blocker says why the router will not pick this account now, or null.
 function blocker(a) {
-  if (a.disabled) return { text: "Disabled", mark: "Disabled", cls: "off" };
+  if (a.disabled) return { text: "Disabled", when: "disabled", cls: "off" };
   const hold = time(a.hold_until);
-  if (future(hold)) return { text: `Held until ${clock(hold)} (${until(hold)})`, mark: "Held", cls: "warn" };
+  if (future(hold)) return { text: `Held until ${clock(hold)} (${until(hold)})`, when: `held ${until(hold)}`, tag: "Held", cls: "warn" };
   const retry = time(a.next_retry_after);
-  if (a.unavailable || future(retry)) return { text: future(retry) ? `Cooling down until ${clock(retry)}` : (a.status_message || "Unavailable"), mark: "Cooling down", cls: "warn" };
+  if (a.unavailable || future(retry)) return { text: future(retry) ? `Cooling down until ${clock(retry)}` : (a.status_message || "Unavailable"), when: "cooling", tag: "Cooling", cls: "warn" };
   return null;
 }
 
-// routerOrder reproduces consume-first within a provider (docs/estate-hub.md).
-function routerOrder(a, b) {
-  const ab = !!a._blocker, bb = !!b._blocker;
-  if (ab !== bb) return ab ? 1 : -1;
-  if ((b.priority || 0) !== (a.priority || 0)) return (b.priority || 0) - (a.priority || 0);
-  const ca = a.consume_first || {}, cb = b.consume_first || {};
-  if (!!ca.spent !== !!cb.spent) return ca.spent ? 1 : -1;
-  if (!!ca.reset_at !== !!cb.reset_at) return ca.reset_at ? -1 : 1;
-  if (ca.reset_at && ca.reset_at !== cb.reset_at) return new Date(ca.reset_at) - new Date(cb.reset_at);
-  if ((ca.used_percent || 0) !== (cb.used_percent || 0)) return (ca.used_percent || 0) - (cb.used_percent || 0);
-  return String(a.id).localeCompare(String(b.id));
-}
-
-function displayName(a) { return a.note || (a.source === "config" ? "API key" : a.label || a.email || a.name || a.id); }
 function plan(a) {
-  const p = (a.usage && a.usage.plan) || (a.id_token && a.id_token.plan_type) || "";
-  return p.replace(/^SUBSCRIPTION_TIER_/, "").replace(/_/g, " ");
+  const p = ((a.usage && a.usage.plan) || (a.id_token && a.id_token.plan_type) || "").replace(/^SUBSCRIPTION_TIER_/, "").replace(/_/g, " ");
+  return p === p.toLowerCase() ? p.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : p;
 }
 function windowsOf(a) {
   return ((a.usage && a.usage.windows) || []).filter((w) => !w.reset_at || future(time(w.reset_at)));
 }
 const left = (w) => Math.max(0, Math.min(100, 100 - (w.used_percent || 0)));
-// binding is the main window with the least left: the one that stops the account first.
-function binding(a) {
-  const all = windowsOf(a), main = all.filter((w) => !w.label);
-  return (main.length ? main : all).reduce((m, w) => (!m || left(w) < left(m) ? w : m), null);
-}
+const tone = (l) => (l <= LOW ? "bad" : l < WARN ? "warn" : "");
 const shortName = (w) => [w.label && w.label.replace(/ only$/, ""), cadence(w.window_minutes, true)].filter(Boolean).join(" ") || "allowance";
 const longName = (w) => [w.label, cadence(w.window_minutes)].filter(Boolean).join(" · ");
-function weekly(a) {
-  return windowsOf(a).find((w) => !w.label && Math.abs((w.window_minutes || 0) - 10080) < 60);
-}
+const isWeek = (w) => Math.abs((w.window_minutes || 0) - 10080) < 60;
+function weekly(a) { return windowsOf(a).find((w) => !w.label && isWeek(w)); }
 function banked(a) {
   return ((a.usage && a.usage.banked_resets) || []).filter((c) => !c.expires_at || future(time(c.expires_at)));
 }
 function updated(a) {
   const observed = time(a.quota && a.quota.observed_at), fetched = time(a.usage && a.usage.fetched_at);
   return observed && (!fetched || observed > fetched) ? observed : fetched;
+}
+
+// rowsOf gives one row per plan. An account whose windows are all named pools
+// (Antigravity's Gemini and Claude/GPT) is one row per pool, as allowances shows it.
+function rowsOf(a) {
+  const wins = windowsOf(a), pools = [...new Set(wins.map((w) => w.label || ""))];
+  if (pools.length > 1 && !pools.includes("")) return pools.map((p) => makeRow(a, wins.filter((w) => w.label === p), p));
+  const plain = wins.filter((w) => !w.label);
+  return [makeRow(a, plain.length ? plain : wins, "")];
+}
+// The row's bar is its weekly window (the one consume-first ranks on), else its
+// longest; the thin bar is the tightest of the rest, usually the 5-hour window.
+function makeRow(a, wins, pool) {
+  const main = wins.find(isWeek) || wins.reduce((m, w) => (!m || (w.window_minutes || 0) > (m.window_minutes || 0) ? w : m), null);
+  const rest = wins.filter((w) => w !== main);
+  const second = rest.reduce((m, w) => (!m || left(w) < left(m) ? w : m), null);
+  const full = wins.filter((w) => w.used_percent >= SPENT);
+  const spent = full.length > 0 || (!pool && !!(a.consume_first && a.consume_first.spent));
+  const back = full.reduce((m, w) => { const r = time(w.reset_at); return r && (!m || r > m) ? r : m; }, null);
+  const cf = a.consume_first || {};
+  return {
+    a, pool, main, second, spent, back, wins: pool ? wins : windowsOf(a),
+    id: (a.id + (pool ? "-" + pool : "")).replace(/[^\w.-]+/g, "-"), provider: providerKey(a.provider), blocker: a._blocker,
+    reset: time((main && main.reset_at) || cf.reset_at), used: main ? main.used_percent || 0 : cf.used_percent || 0,
+    balance: a.usage && a.usage.balance,
+  };
+}
+function rowName(r) {
+  const a = r.a, pool = r.pool && r.pool.replace(/ models$/i, "").replace(/ and /, "/");
+  if (a.note) return [a.note, pool].filter(Boolean).join(" ");
+  const p = providerName(a.provider), pl = plan(a);
+  return [pl.toLowerCase().startsWith(p.toLowerCase()) ? pl : p, pl.toLowerCase().startsWith(p.toLowerCase()) ? "" : pl, pool].filter(Boolean).join(" ");
+}
+
+// order is consume-first across every provider: usable before spent before held,
+// then soonest reset, least used, id (docs/estate-hub.md, "Reading the state").
+function order(x, y) {
+  if (!!x.blocker !== !!y.blocker) return x.blocker ? 1 : -1;
+  if ((y.a.priority || 0) !== (x.a.priority || 0)) return (y.a.priority || 0) - (x.a.priority || 0);
+  if (x.spent !== y.spent) return x.spent ? 1 : -1;
+  if (!!x.reset !== !!y.reset) return x.reset ? -1 : 1;
+  if (x.reset && +x.reset !== +y.reset) return x.reset - y.reset;
+  if (x.used !== y.used) return x.used - y.used;
+  return String(x.id).localeCompare(String(y.id));
 }
 
 // pace projects a window to its reset at the rate it has been used so far, the
@@ -254,13 +322,11 @@ function pace(w) {
   const empty = ((100 - used) * elapsed) / used;
   return { spare: (elapsed / duration) * 100 - used, lasts: empty >= remaining, emptyAt: new Date(Date.now() + empty) };
 }
-function paceMark(w) {
+// runsOut flags a window under half left that is on course to run dry before
+// it resets (earlier in a window the projection is noise).
+function runsOut(w) {
   const p = pace(w);
-  if (!p) return null;
-  if (p.spent) return { text: `back ${clock(p.reset)}`, cls: "bad" };
-  if (p.unused) return { text: "unused", cls: "muted" };
-  if (!p.lasts) return { text: `runs out ${clock(p.emptyAt)}`, cls: "bad" };
-  return Math.round(p.spare) >= 5 ? { text: `+${Math.round(p.spare)} spare`, cls: "good" } : { text: "on pace", cls: "muted" };
+  return !!p && p.lasts === false && left(w) <= 50;
 }
 function paceText(w) {
   const p = pace(w);
@@ -269,69 +335,44 @@ function paceText(w) {
   const spare = Math.round(p.spare), lead = spare >= 5 ? `${spare} spare` : spare <= -5 ? `${-spare} over` : "On pace";
   return p.lasts ? `${lead}, lasts to reset` : `${lead}, runs out in ${until(p.emptyAt)}`;
 }
-const lowWindow = (w) => {
-  const p = pace(w);
-  return left(w) <= LOW || (left(w) <= 50 && p && p.lasts === false);
-};
 
-function figHTML(w, balance) {
-  if (w) return `<span class="fig${left(w) <= LOW ? " bad" : ""}">${Math.round(left(w))}%</span>`;
-  if (balance) return `<span class="fig">${esc(money(balance))}</span>`;
-  return '<span class="fig muted">–</span>';
+function logoHTML(provider, cls) {
+  if (document.getElementById("logo-" + provider)) return `<svg class="logo ${cls || ""}" aria-hidden="true"><use href="#logo-${provider}"/></svg>`;
+  return `<span class="logo initial ${cls || ""}" aria-hidden="true">${esc(providerName(provider).slice(0, 1).toUpperCase())}</span>`;
 }
-function markHTML(w) {
-  const m = w && paceMark(w);
-  return `<span class="pace ${m ? m.cls : ""}">${m ? esc(m.text) : ""}</span>`;
+function meter(w, cls, label) {
+  const l = Math.round(left(w));
+  return `<span class="${cls}" role="meter" aria-label="${esc(label)}" aria-valuenow="${l}" aria-valuemin="0" aria-valuemax="100"><i class="${tone(l)}" style="width:${l}%"></i></span>`;
 }
 function balanceText(b) {
   return b.total ? `${money(b)} of ${money({ left: b.total, currency: b.currency })} left` : `${money(b)} balance`;
 }
-
-// tickerRow is the shape every summary row shares; title is trusted HTML.
-function tickerRow(title, w, sub, balance) {
-  return `<li class="row"><span class="what">${title}</span>${figHTML(w, balance)}<span class="line">${esc(sub)}</span>${markHTML(w)}</li>`;
-}
-
-// who names the account beside its provider, unless that only repeats the provider.
-function who(a) {
-  const name = displayName(a);
-  return a.source === "config" || name.toLowerCase() === providerKey(a.provider) ? "" : name;
-}
-
-function nextHTML(provider, a) {
-  const w = binding(a), b = a.usage && a.usage.balance, reset = w && time(w.reset_at);
-  const sub = [who(a), b && w ? balanceText(b) : b ? "balance" : w ? shortName(w) + " left" : "no figures", reset ? "resets " + clock(reset) : ""].filter(Boolean).join(" · ");
-  return tickerRow(`<span class="name">${esc(providerName(provider))}</span>`, w, sub, b);
-}
-
-// lowRows gives each usable account's lowest window that is running low.
-function lowRows(accounts) {
-  const rows = [];
-  for (const a of accounts) {
-    const low = a._blocker ? [] : windowsOf(a).filter(lowWindow).sort((x, y) => left(x) - left(y));
-    if (low.length) rows.push({ a, w: low[0] });
-  }
-  return rows;
+function bankTag(a) {
+  const credits = banked(a);
+  if (!credits.length) return "";
+  const first = credits[0].expires_at ? time(credits[0].expires_at) : null;
+  const soon = first && first - Date.now() < 3 * 86400000;
+  return `<span class="tag bank${soon ? " warn" : ""}" title="${first ? `First expires ${esc(clock(first))}. ` : ""}Redeem in Codex.">${credits.length} banked${soon ? ` · next ends ${until(first).split(" ")[0]}` : ""}</span>`;
 }
 
 function windowHTML(w) {
   const reset = time(w.reset_at), l = Math.round(left(w));
-  return `<div class="win"><div class="top"><span>${esc(longName(w))}</span><span class="${l <= LOW ? "bad" : ""}">${l}% left</span></div>` +
-    `<div class="bar" role="meter" aria-label="${esc(longName(w))} left" aria-valuenow="${l}" aria-valuemin="0" aria-valuemax="100"><i class="${l <= LOW ? "bad" : ""}" style="width:${l}%"></i></div>` +
+  return `<div class="win"><div class="top"><span>${esc(longName(w))}</span><span class="${tone(l)}">${l}% left</span></div>` +
+    meter(w, "thin", longName(w) + " left") +
     `<div class="bottom"><span>${reset ? `Resets ${clock(reset)} (${until(reset)})` : ""}</span><span>${esc(paceText(w))}</span></div></div>`;
 }
 
-function factsHTML(a) {
-  const facts = [], b = a._blocker, up = updated(a), err = a.usage && a.usage.error;
+function factsHTML(r) {
+  const a = r.a, facts = [], b = r.blocker, up = updated(a), err = a.usage && a.usage.error;
   if (b) facts.push(["State", `<span class="${b.cls === "off" ? "" : b.cls}">${esc(b.text)}</span>`]);
   if (plan(a)) facts.push(["Plan", esc(plan(a))]);
-  if (a.email && a.email !== displayName(a)) facts.push(["Login", esc(a.email)]);
+  if (a.email && a.email !== rowName(r)) facts.push(["Login", esc(a.email)]);
   if (a.source === "config") facts.push(["Source", "API key in the config file"]);
-  if (a.usage && a.usage.balance) facts.push(["Balance", esc(balanceText(a.usage.balance))]);
+  if (r.balance) facts.push(["Balance", esc(balanceText(r.balance))]);
   const credits = banked(a);
   if (credits.length) {
-    const first = credits[0].expires_at ? time(credits[0].expires_at) : null;
-    facts.push(["Banked", `${credits.length} reset${credits.length === 1 ? "" : "s"}${first ? `, first expires ${esc(clock(first))}` : ""}`]);
+    facts.push(["Banked", `${credits.length} reset${credits.length === 1 ? "" : "s"}, expiring ` +
+      esc(credits.map((c) => (c.expires_at ? clock(time(c.expires_at)) : "never")).join(", ")) + "; redeem in Codex"]);
   }
   if (a.group) facts.push(["Groups", esc(a.group.split(",").map((g) => g.trim()).filter(Boolean).join(", "))]);
   const cooldowns = (a.cooldowns || []).filter((c) => c.scope !== "credential");
@@ -353,71 +394,73 @@ function manageHTML(a) {
   return `<div class="actions" data-name="${esc(a.name)}">
     <select aria-label="Hold for"><option value="1">1 hour</option><option value="5" selected>5 hours</option><option value="24">1 day</option>${resetAt ? `<option value="reset:${esc(resetAt)}">Until weekly reset</option>` : ""}</select>
     <button data-act="hold">Hold</button>${held ? '<button data-act="unhold">Release hold</button>' : ""}
-    <button data-act="${a.disabled ? "enable" : "disable"}">${a.disabled ? "Enable" : "Disable"}</button></div>
-    <div class="actions" data-name="${esc(a.name)}"><input name="note" aria-label="Name" placeholder="Name" value="${esc(a.note || "")}"><input name="group" aria-label="Groups" placeholder="Groups, comma separated" value="${esc(a.group || "")}"><button data-act="save">Save</button></div>`;
+    <span class="spacer"></span><button data-act="${a.disabled ? "enable" : "disable"}"${a.disabled ? "" : ' class="danger"'}>${a.disabled ? "Enable" : "Disable"}</button></div>
+    <div class="actions" data-name="${esc(a.name)}"><label>Name<input name="note" value="${esc(a.note || "")}"></label><label>Groups, comma separated<input name="group" value="${esc(a.group || "")}"></label><button data-act="save">Save</button></div>`;
 }
 
-function accountHTML(a, isNext) {
-  const b = a._blocker, w = binding(a), err = a.usage && a.usage.error;
-  const marks = [isNext ? '<span class="mark next">Next</span>' : "",
-    b ? `<span class="mark ${b.cls}">${b.mark}</span>` : "",
-    !b && a.consume_first && a.consume_first.spent ? '<span class="mark bad">Spent</span>' : "",
-    err ? '<span class="mark bad">Poll failed</span>' : ""].join("");
-  const others = windowsOf(a).filter((x) => x !== w).map((x) => `${shortName(x)} ${Math.round(left(x))}%`);
-  const balance = a.usage && a.usage.balance;
-  const sub = [w ? shortName(w) + " left" : "", ...others, balance && w ? balanceText(balance) : "", !w && !balance ? (a.source === "config" ? "No figures for this API" : "No figures yet") : ""].filter(Boolean).join(" · ");
-  return `<details class="acct${b ? " out" : ""}" data-id="${esc(a.id)}"><summary class="row">` +
-    `<span class="what"><span class="name">${esc(displayName(a))}</span>${marks}${CHEV}</span>${figHTML(w, balance)}<span class="line">${esc(sub)}</span>${markHTML(w)}</summary>` +
-    `<div class="body">${windowsOf(a).map(windowHTML).join("")}${factsHTML(a)}${manageHTML(a)}</div></details>`;
+// figure is the row's number: allowance left, or the balance for a prepaid key.
+function figure(r) {
+  if (r.balance) return `<span class="fig" title="${esc(balanceText(r.balance))}">${esc(money(r.balance))}</span>`;
+  if (!r.main) return '<span class="fig muted">–</span>';
+  const l = Math.round(left(r.main));
+  return `<span class="fig ${r.spent ? "bad" : tone(l)}">${l}%</span>`;
+}
+function whenHTML(r) {
+  if (r.blocker) return `<span class="when ${r.blocker.cls === "off" ? "" : r.blocker.cls}">${esc(r.blocker.when)}</span>`;
+  if (r.spent && r.back) return `<span class="when bad" title="Back ${esc(clock(r.back))}">back ${until(r.back)}</span>`;
+  return r.reset ? `<span class="when" title="Resets ${esc(clock(r.reset))}"><span class="lbl">resets </span>${until(r.reset)}</span>` : '<span class="when"></span>';
+}
+function barsHTML(r) {
+  const parts = [], cap = (w) => (r.pool ? cadence(w.window_minutes, true) : shortName(w));
+  if (r.main) parts.push(meter(r.main, "gauge", `${shortName(r.main)} left`));
+  if (r.second) parts.push(`<span class="sub">${meter(r.second, "thin", `${shortName(r.second)} left`)}<span class="cap">${esc(cap(r.second))} ${Math.round(left(r.second))}% left</span></span>`);
+  else if (r.main && !isWeek(r.main)) parts.push(`<span class="sub"><span class="cap">${esc(cap(r.main))}</span></span>`);
+  const early = [r.main, r.second].filter((w) => w && runsOut(w)).map((w) => `${cap(w)} out ${clock(pace(w).emptyAt)}`);
+  if (early.length && !r.spent) parts.push(`<span class="sub"><span class="out-early" title="On course to run out before it resets">${esc(early.join(" · "))}</span></span>`);
+  if (!parts.length) parts.push(`<span class="none">${r.balance ? "Prepaid balance" : r.a.source === "config" ? "No figures for this API" : "No figures yet"}</span>`);
+  return `<span class="bars">${parts.join("")}</span>`;
+}
+
+function rowHTML(r, isNext) {
+  const a = r.a, b = r.blocker, err = a.usage && a.usage.error;
+  const tags = [isNext ? '<span class="tag next">Next</span>' : "",
+    b && b.tag ? `<span class="tag ${b.cls}">${b.tag}</span>` : "",
+    !b && r.spent ? '<span class="tag bad">Spent</span>' : "",
+    err ? '<span class="tag bad" title="The last usage poll failed">Poll failed</span>' : "",
+    bankTag(a)].join("");
+  return `<details class="acct${b ? " out" : err ? " stale" : ""}" id="r-${esc(r.id)}" data-id="${esc(r.id)}"><summary class="row">` +
+    `${logoHTML(r.provider)}<span class="name"><span class="n">${esc(rowName(r))}</span>${tags}</span>${barsHTML(r)}${figure(r)}${whenHTML(r)}</summary>` +
+    `<div class="body">${r.wins.map(windowHTML).join("")}${factsHTML(r)}${manageHTML(a)}</div></details>`;
+}
+
+function chipHTML(r, many) {
+  const who = many ? rowName(r).replace(new RegExp("^" + providerName(r.provider) + " ", "i"), "") : "";
+  const fig = r.balance ? money(r.balance) : Math.round(left(r.main)) + "%";
+  return `<a class="chip" href="#r-${esc(r.id)}" title="Spend next on ${esc(providerName(r.provider))}: ${esc(rowName(r))}">${logoHTML(r.provider)}${who ? `<span>${esc(who)}</span>` : ""}<b>${esc(fig)}</b>${r.reset ? `<span class="muted">${until(r.reset)}</span>` : ""}</a>`;
 }
 
 function render() {
   const consumeFirst = /^(consume-?first|cf)$/i.test(data.strategy || "");
   const refresh = data.usage_refresh && data.usage_refresh.interval;
   $("updated").textContent = "Updated " + clock(new Date());
-  $("content").hidden = false;
   $("meta").textContent = `Routing ${data.strategy || "round-robin"} · usage polled ${refresh ? "every " + refresh : "only from traffic"}`;
-  const groups = new Map();
+  const rows = [];
   for (const a of data.accounts) {
     a._blocker = blocker(a);
-    const key = providerKey(a.provider);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(a);
+    rows.push(...rowsOf(a));
   }
-  const rank = (p) => (ORDER.includes(p) ? ORDER.indexOf(p) : ORDER.length);
-  const ordered = [...groups.entries()].sort((x, y) => rank(x[0]) - rank(y[0]) || x[0].localeCompare(y[0]));
-  let next = "", accounts = "", bankedRows = "";
-  const low = [];
-  for (const [provider, list] of ordered) {
-    list.sort(routerOrder);
-    const first = consumeFirst ? list.find((a) => !a._blocker) : null;
-    if (first) next += nextHTML(provider, first);
-    const marked = list.length > 1 ? first : null;
-    low.push(...lowRows(list));
-    for (const a of list) {
-      const credits = banked(a);
-      if (!credits.length) continue;
-      const expiry = credits[0].expires_at ? time(credits[0].expires_at) : null;
-      const soon = expiry && expiry - Date.now() < 3 * 86400000;
-      bankedRows += `<li class="row"><span class="what"><span class="name">${esc(providerName(provider))}<span class="who">${esc(who(a))}</span></span></span><span class="fig">${credits.length}</span>` +
-        `<span class="line${soon ? " warn" : ""}">${expiry ? `first expires ${esc(clock(expiry))} (${until(expiry)})` : "no expiry"}</span><span class="pace muted">redeem in Codex</span></li>`;
-    }
-    const usable = list.filter((a) => !a._blocker).length;
-    accounts += `<h3>${esc(providerName(provider))}<small>${list.length > 1 ? `${usable} of ${list.length} in rotation` : ""}</small></h3>${list.map((a) => accountHTML(a, a === marked)).join("")}`;
-  }
-  low.sort((x, y) => left(x.w) - left(y.w));
-  $("next").innerHTML = next;
-  $("next-section").hidden = !next;
-  $("low").innerHTML = low.map(({ a, w }) => {
-    const reset = time(w.reset_at);
-    const title = `<span class="name">${esc(providerName(a.provider))}<span class="who">${esc(who(a))}</span></span>`;
-    return tickerRow(title, w, `${shortName(w)} left${reset ? ` · resets ${clock(reset)}` : ""}`);
-  }).join("") || '<li class="row"><span class="line">Nothing is running low.</span></li>';
-  $("low-count").textContent = low.length || "";
-  $("banked").innerHTML = bankedRows;
-  $("banked-section").hidden = !bankedRows;
+  rows.sort(order);
+  // The router's next account per provider: its first usable, unspent row.
+  const next = new Map();
+  if (consumeFirst) for (const r of rows) if (!r.blocker && !r.spent && !next.has(r.provider)) next.set(r.provider, r);
+  const chips = [...next.values()].filter((r) => r.main || r.balance);
+  const several = new Set(rows.map((r) => r.provider).filter((p, i, all) => all.indexOf(p) !== i));
+  $("chips").innerHTML = chips.length ? "<span>Spend next</span>" + chips.map((r) => chipHTML(r, several.has(r.provider))).join("") : "";
+  $("chips").hidden = !chips.length;
   const open = new Set([...document.querySelectorAll("details.acct[open]")].map((d) => d.dataset.id));
-  $("accounts").innerHTML = accounts || '<p class="muted">The hub holds no credentials.</p>';
+  const accounts = (p) => new Set(rows.filter((r) => r.provider === p).map((r) => r.a.id)).size;
+  const many = new Set([...next.keys()].filter((p) => accounts(p) > 1));
+  $("accounts").innerHTML = rows.map((r) => rowHTML(r, many.has(r.provider) && next.get(r.provider) === r)).join("") || '<p class="muted">The hub holds no credentials.</p>';
   for (const d of document.querySelectorAll("details.acct")) if (open.has(d.dataset.id)) d.open = true;
 }
 
@@ -482,6 +525,11 @@ $("logout").addEventListener("click", () => signOut());
 $("accounts").addEventListener("click", (e) => {
   const button = e.target.closest("button[data-act]");
   if (button) act(button);
+});
+// A spend-next chip opens the row it points at.
+$("chips").addEventListener("click", (e) => {
+  const chip = e.target.closest("a.chip"), row = chip && document.getElementById(chip.hash.slice(1));
+  if (row) row.open = true;
 });
 // Refresh every 30 s while visible, but never under a half-typed name or an open select.
 setInterval(() => { if (!document.hidden && data && !document.activeElement.closest(".actions")) load(); }, 30000);

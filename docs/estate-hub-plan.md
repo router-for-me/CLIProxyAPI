@@ -185,6 +185,23 @@ show figures with no "Poll failed" mark, and that a Codex account with a banked 
 Seen in passing, not changed: editing an account's name or groups drops its quota headers until the
 next refresher tick (within a minute) restores them from the snapshot.
 
+## L4 outcome (2026-10-28): one graphical table
+
+Waseem rejected v3 on 28 Oct ("I want one table, shown graphically, with proper logos for each
+service, showing a bar, allowance left, in spend-first order, resets shown alongside ... closer to
+what sysdash shows"). Lane bb thread thr_8zinmqbui3 rebuilt `/hub` as one list; operator detail is in
+`docs/estate-hub.md` ("Dashboard"), his words are principle 5 in `PRODUCT.md`. Same data source and
+actions, no new config keys. Logos: lobe-icons 1.101.0 (MIT) inlined as an SVG sprite; "local" (the
+estate gateway) has no brand and gets a drawn server mark. One independent design critique (Opus,
+screenshots only) ran; its accepted fixes are in. Rejected: swapping the Codex, OpenCode and
+CommandCode marks (they are those brands' own logos) and a Next tag on single-account providers.
+
+Banked resets were never missing from the hub. The 26 Oct v3 screenshot was taken two minutes after
+the deploy, before the refresher's first Codex poll; v3 rendered against 28 Oct data lists all of
+them. The hub holds 5 of the 7 that `allowances` counts: the other 2 belong to Codex Team GDP, which
+was deliberately not signed in on the hub (26 Oct). Banked resets persist in the usage snapshot, so a
+restart keeps them.
+
 ## Device matrix (Waseem, 26 Oct 2026: "any agent from any device" by Tue 28 / Wed 29 Oct)
 
 Last verified: 28 Oct 2026 (m6, mbp, omarchy, wasnewpc). On mbp Waseem is signed in to Muse, agy, Devin, Grok and Kimi:
@@ -356,3 +373,4 @@ the local fallback login; running ones keep the route they started with.
 - 2026-10-28: hub credentials are in the nightly encrypted backup (ops PR #1332, merged): `estate-extra-stage`'s `hub` part streams m6's `~/.cli-proxy-api` (auth files, `usage-snapshot.cache`) and `~/.local/hub/config.yaml` over ssh into age; the estate-extra tiers carry it to naz and B2. Restore steps: ops `runbooks/vps-ops.md` "Restore the estate hub's credentials (m6)". A dry-run restore matched all 20 files byte for byte. A new state file on m6 outside those two paths needs adding to that part.
 - 2026-10-28: t8314. Both flaky interrupt tests were symptoms of one handler race that upstream fixed the same day (9717e325, issue #7065: a late interrupt after a terminal event got a fake `response.incomplete` or was dropped). Cherry-picked here; `TestResponsesInterruptStopsHTTPUpstream` also waits on a channel for the upstream cancel instead of reading a flag once (fork PR #4; the test half went upstream as router-for-me/CLIProxyAPI#7086 to `dev`). m6 needs a rebuild from `main` to carry it.
 - 2026-10-28 18:23-18:36: auto-vps Claude Code and Codex trialled on the hub (Fable, Opus, Sonnet, Terra answered; Claude and Codex pins landed on the named accounts; an unknown pin got 400). The chair stopped the lane because bb was unreliable (it was already slow at 18:00, before any change) and ran `estate-hub-route off`; the cut-over waits for Waseem ("auto-vps cut-over" above). Hub groups and notes set. PRs open as drafts.
+- 2026-10-28 19:28: L4 (one graphical table, `estate-2fe4a080`) live on m6; `/hub` 200 on the tailnet, traffic serving. Previous binary kept as `~/.local/hub/cliproxyapi.prev-estate-278f7e18` (roll back: move it over `cliproxyapi`, then `launchctl kickstart -k gui/$(id -u)/uk.automancer.hub`). Seen on deploy: the first spawn after swapping the binary failed with `OS_REASON_CODESIGNING`; launchd's KeepAlive retry started it within seconds (`codesign -v` passes). Screenshots: repo `docs/estate-hub-screens/v4-*.png` (account names and emails replaced, the fork is public); real ones in `Notes/Reports/assets/26-10-28-hub-v4-*.png`.

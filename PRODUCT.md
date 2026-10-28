@@ -46,3 +46,8 @@ that he can stop opening CodexBar and sysdash, the tools it replaces.
 2. Less is more: a figure appears once, in the place it is needed.
 3. Show the router's truth: the order on the page is the order the hub will use.
 4. Name things the way Waseem does (account names, plan names, his sysdash labels).
+5. One graphical list, like sysdash: a row per plan with its logo, a bar of what is left and the
+   reset beside it, in spend-first order across every provider. No sections or columns of cards.
+   This one is Waseem's own (28 Oct 2026, rejecting the sectioned v3 page): "I want one table, shown
+   graphically, with proper logos for each service, showing a bar, allowance left, in spend-first
+   order, resets shown alongside."
