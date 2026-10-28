@@ -68,6 +68,12 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		isEphemeralSession = true
 		sess = newEphemeralCodexWebsocketSession()
 	}
+	if sess != nil {
+		sess.connMu.Lock()
+		sess.recoverTransport = cliproxyexecutor.DownstreamWebsocket(ctx)
+		sess.turnContext = ctx
+		sess.connMu.Unlock()
+	}
 	streamSessionLocked := sess != nil && !isEphemeralSession
 	unlockStreamSession := func() {
 		if sess != nil && streamSessionLocked {
@@ -99,6 +105,15 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		conn, closer = existingWebsocketSessionConn(sess, authID, wsURL, executionProxyURL(ctx, sess.effectiveConfig(authID, e.cfg), auth), useSIWC)
 		if conn == nil {
 			unlockStreamSession()
+			if cliproxyexecutor.DownstreamWebsocket(ctx) && sess != nil {
+				sess.activeMu.Lock()
+				lost := cliproxyexecutor.IsUpstreamWebsocketTurnError(sess.terminalErr)
+				sess.activeMu.Unlock()
+				if lost {
+					// The socket this continuation refers to was lost, not replaced.
+					return nil, &cliproxyexecutor.UpstreamWebsocketTurnError{FullContextRequired: true}
+				}
+			}
 			return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
 		}
 	} else {
@@ -110,6 +125,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 		upstreamHeaders = respHS.Header.Clone()
 	}
 	if errDial != nil {
+		if cliproxyexecutor.IsUpstreamWebsocketTurnError(errDial) {
+			unlockStreamSession()
+			return nil, codexWebsocketTurnEventID(errDial, originalPayload)
+		}
 		bodyErr := websocketHandshakeBody(respHS)
 		if respHS != nil {
 			helps.RecordAPIWebsocketUpgradeRejection(ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr)
@@ -153,10 +172,30 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	restoreMultiAgentV2 := !multiAgentV2Conflict && (optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 
+	if sess != nil && !isEphemeralSession && cliproxyexecutor.DownstreamWebsocket(ctx) {
+		if errLoss := cliproxyexecutor.WebsocketInputLossError(ctx); errLoss != nil {
+			sess.clearActive(conn, readCh)
+			unlockStreamSession()
+			return nil, codexWebsocketTurnEventID(errLoss, originalPayload)
+		}
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
 		helps.RecordAPIWebsocketError(ctx, e.cfg, "send", errSend)
+		if sess != nil && !isEphemeralSession && cliproxyexecutor.DownstreamWebsocket(ctx) {
+			// A failed write may still have delivered the create: never send it again.
+			errSend = codexWebsocketTurnEventID(codexWebsocketTurnTransportError(errSend), originalPayload)
+			if cliproxyexecutor.IsUpstreamWebsocketTurnError(errSend) {
+				// The reader may not see the failure before the invalidation: record the loss
+				// so the next continuation answers 409 instead of requiring a replay.
+				sess.markTerminalError(conn, errSend)
+				e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
+				sess.clearActive(conn, readCh)
+				sess.reqMu.Unlock()
+				return nil, errSend
+			}
+		}
 		if sess != nil && !isEphemeralSession {
 			if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "send_error", errSend)
@@ -286,7 +325,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
-				mappedErr := mapCodexWebsocketReadError(errRead)
+				mappedErr := codexWebsocketTurnEventID(mapCodexWebsocketReadError(errRead), originalPayload)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
 					sess.clearActive(conn, readCh)
@@ -588,7 +627,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 					return
 				}
-				mappedErr := mapCodexWebsocketReadError(errRead)
+				mappedErr := codexWebsocketTurnEventID(mapCodexWebsocketReadError(errRead), originalPayload)
 				terminateReason = "read_error"
 				terminateErr = mappedErr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
