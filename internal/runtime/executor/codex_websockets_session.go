@@ -84,6 +84,16 @@ type codexWebsocketSession struct {
 
 	responseStateConn   *websocket.Conn
 	terminalResponseIDs map[string]struct{}
+	// activeResponseID is the newest response known to run, or to have run,
+	// on responseStateConn. The read loop sets it on response.created and on
+	// the terminal event of that same response, before the payload is
+	// delivered downstream. activeResponseTerminal then tells an interrupt
+	// snapshot that the turn already ended even while its read channel is
+	// still awaiting teardown. A duplex socket may also reject a queued
+	// create while another response runs; only the matching id ends the
+	// active response. An empty id means no response.created was seen yet.
+	activeResponseID       string
+	activeResponseTerminal bool
 
 	readerConn *websocket.Conn
 
@@ -122,6 +132,8 @@ func (s *codexWebsocketSession) setActiveLocked(conn *websocket.Conn, ch chan co
 	}
 	s.activeConn = conn
 	s.activeCh = ch
+	s.activeResponseID = ""
+	s.activeResponseTerminal = false
 	if conn != nil && ch != nil {
 		activeCtx, activeCancel := context.WithCancel(context.Background())
 		s.activeDone = activeCtx.Done()
@@ -206,6 +218,8 @@ func (s *codexWebsocketSession) clearActive(conn *websocket.Conn, ch chan codexW
 	}
 	s.activeConn = nil
 	s.activeCh = nil
+	s.activeResponseID = ""
+	s.activeResponseTerminal = false
 	if s.activeCancel != nil {
 		s.activeCancel()
 	}
@@ -839,15 +853,53 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}
-			// Record terminal IDs before delivery: downstream may still be
-			// processing this turn after its active read channel is cleared.
-			responseID := gjson.GetBytes(payload, "response.id")
-			if isTerminalEvent(eventType) && eventType != "error" && responseID.Type == gjson.String && responseID.String() != "" {
-				sess.activeMu.Lock()
-				if sess.responseStateConn == conn {
-					sess.terminalResponseIDs[responseID.String()] = struct{}{}
+			// Track the running response before delivery: downstream may
+			// still be processing this turn after its active read channel is
+			// cleared, and interrupts arriving after the completion must not
+			// forward while teardown is still pending. Terminal events only
+			// end their own response; a duplex socket can reject a queued
+			// create while another response is still running.
+			//
+			// Failure events (error, response.failed) use the duplex
+			// attribution shapes: an explicit response id (response.id or
+			// top-level response_id) ends only that response, while an
+			// id-less failure ends the running one. Success terminals only
+			// carry response.id, and one without an id is left unattributed,
+			// as before.
+			responseID := gjson.GetBytes(payload, "response.id").String()
+			if eventType == "response.created" {
+				if responseID != "" {
+					sess.activeMu.Lock()
+					if sess.responseStateConn == conn && sess.activeConn == conn && sess.activeCh != nil {
+						sess.activeResponseID = responseID
+						sess.activeResponseTerminal = false
+					}
+					sess.activeMu.Unlock()
 				}
-				sess.activeMu.Unlock()
+			} else if isTerminalEvent(eventType) {
+				failure := eventType == "error" || eventType == "response.failed"
+				if failure && responseID == "" {
+					responseID = gjson.GetBytes(payload, "response_id").String()
+				}
+				if responseID != "" || failure {
+					sess.activeMu.Lock()
+					if sess.responseStateConn == conn {
+						terminalID := responseID
+						if terminalID == "" {
+							// Id-less failure: the running response ended.
+							terminalID = sess.activeResponseID
+						}
+						if terminalID != "" && eventType != "error" {
+							// Match the pre-existing terminal-ID recording,
+							// which never covered error events.
+							sess.terminalResponseIDs[terminalID] = struct{}{}
+						}
+						if terminalID != "" && sess.activeResponseID == terminalID {
+							sess.activeResponseTerminal = true
+						}
+					}
+					sess.activeMu.Unlock()
+				}
 			}
 		}
 

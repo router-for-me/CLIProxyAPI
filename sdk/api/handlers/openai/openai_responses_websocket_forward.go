@@ -30,6 +30,9 @@ type responsesWebsocketForwardOptions struct {
 	suppressError            func(*interfaces.ErrorMessage) bool
 	keepAliveInterval        *time.Duration
 	localInterrupt           *responsesLocalInterrupt
+	// websocketOwned reports whether this turn runs on an upstream
+	// websocket. While true, no interrupt may claim the local HTTP path.
+	websocketOwned func() bool
 }
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
@@ -48,6 +51,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	}
 	toolCacheTurn := opts.toolCacheTurn
 	completed := false
+	// turnEnded tracks every terminal outcome (success or failure) for the
+	// local-interrupt window; completed stays success-only for stream
+	// completion bookkeeping.
+	turnEnded := false
 	responseStarted := false
 	completedOutput := []byte("[]")
 	completedResponseID := ""
@@ -74,8 +81,28 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		keepAliveC = keepAliveTicker.C
 	}
 	if opts.localInterrupt != nil {
-		opts.localInterrupt.begin()
-		defer opts.localInterrupt.end()
+		websocketOwned := opts.websocketOwned != nil && opts.websocketOwned()
+		opts.localInterrupt.begin(websocketOwned)
+		if websocketOwned {
+			defer opts.localInterrupt.endWebsocketTurn()
+		}
+		defer func() {
+			opts.localInterrupt.end()
+			// The reader may have claimed a frame in the gap between the
+			// last loop iteration and this return. It already logged the
+			// frame as locally handled, so answer it here instead of
+			// dropping it; otherwise the client waits for a reply that
+			// never comes. Frames claimed while the socket or request is
+			// already gone need no answer.
+			if c.Request.Context().Err() == nil {
+				if claimed := opts.localInterrupt.takeClaimed(); claimed != nil {
+					_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+						StatusCode: http.StatusBadRequest,
+						Error:      errors.New("no active response to interrupt"),
+					})
+				}
+			}
+		}()
 	}
 	localFrames := opts.localInterrupt.framesChan()
 
@@ -112,6 +139,20 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	for {
 		select {
 		case interruptPayload := <-localFrames:
+			if turnEnded {
+				// The frame was claimed before the terminal payload landed, so
+				// the reader already told the client it was handled locally.
+				// The response is over: reject instead of fabricating an
+				// incomplete event, and keep waiting for the turn to drain.
+				if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      errors.New("no active response to interrupt"),
+				}); errWrite != nil {
+					cancel(errWrite)
+					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+				}
+				continue
+			}
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
@@ -175,6 +216,26 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				keepAliveTicker.Reset(keepAliveInterval)
 			}
 
+			// A queued local interrupt belongs to an in-flight HTTP turn:
+			// consume it before forwarding more upstream payload. Once the
+			// turn ended the frame can only be stale, so reject it.
+			if opts.localInterrupt != nil {
+				if interruptPayload := opts.localInterrupt.takeClaimed(); interruptPayload != nil {
+					if !turnEnded {
+						return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
+					}
+					// The response is over: reject instead of fabricating an
+					// incomplete event, then keep forwarding this chunk.
+					if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+						StatusCode: http.StatusBadRequest,
+						Error:      errors.New("no active response to interrupt"),
+					}); errWrite != nil {
+						cancel(errWrite)
+						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
+					}
+				}
+			}
+
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
 				eventType := gjson.GetBytes(payloads[i], "type").String()
@@ -185,6 +246,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				if eventType == "response.created" {
 					responseStarted = true
 					completed = false
+					turnEnded = false
+					if opts.localInterrupt != nil {
+						opts.localInterrupt.reactivate()
+					}
 					outputItemsByIndex = make(map[int64][]byte)
 					outputItemsFallback = nil
 					pendingToolCallIDs = make(map[string]struct{})
@@ -218,8 +283,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// reason "interrupted", to acknowledge response.interrupt. Closing
 					// the client socket here would block the follow-up request.
 					completed = true
+					turnEnded = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i], outputItemsByIndex, outputItemsFallback)
 					completedResponseID = responseCompletedIDFromPayload(payloads[i])
+				} else if eventType == "response.failed" {
+					// A failed response ends the turn without a completion
+					// identity; only its local-interrupt window closes.
+					turnEnded = true
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {
@@ -250,6 +320,15 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// 	websocketPayloadEventType(payloads[i]),
 				// 	websocketPayloadPreview(payloads[i]),
 				// )
+				if turnEnded && opts.localInterrupt != nil && opts.localInterrupt.isActive() {
+					// Stop claiming local interrupts before the client can see
+					// the terminal event; a later frame is then rejected by
+					// the reader instead of being answered or dropped here.
+					// The isActive guard keeps multi-payload chunks from
+					// toggling the state back off after response.created
+					// reactivated it.
+					opts.localInterrupt.deactivate()
+				}
 				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
