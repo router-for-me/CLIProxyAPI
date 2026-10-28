@@ -17,8 +17,8 @@ func (rtkEngine) name() string { return EngineRTK }
 const (
 	rtkMinLines     = 8
 	rtkMaxLineBytes = 512
-	rtkHeadBytes    = 256
-	rtkTailBytes    = 128
+	rtkHeadChars    = 256
+	rtkTailChars    = 128
 	rtkRepeatMark   = " (×"
 )
 
@@ -80,10 +80,10 @@ func (e rtkEngine) compress(text string) (string, bool) {
 		if len(line) > rtkMaxLineBytes {
 			// Count and cut by character: the marker promises chars, and a byte cut
 			// can split a multi-byte rune.
-			if runes := []rune(raw); len(runes) > rtkHeadBytes+rtkTailBytes {
-				line = string(runes[:rtkHeadBytes]) + " …(" +
-					strconv.Itoa(len(runes)-rtkHeadBytes-rtkTailBytes) + " chars omitted)… " +
-					string(runes[len(runes)-rtkTailBytes:])
+			if runes := []rune(raw); len(runes) > rtkHeadChars+rtkTailChars {
+				line = string(runes[:rtkHeadChars]) + " …(" +
+					strconv.Itoa(len(runes)-rtkHeadChars-rtkTailChars) + " chars omitted)… " +
+					string(runes[len(runes)-rtkTailChars:])
 				changed = true
 			}
 		}
@@ -112,12 +112,13 @@ func (e rtkEngine) compress(text string) (string, bool) {
 		return text, false
 	}
 
+	if capped, ok := capMiddleCharsByLine(out, limits.maxChars); ok {
+		out = capped
+	}
+
 	res := strings.Join(out, "\n")
 	if trailing {
 		res += "\n"
-	}
-	if len(res) > limits.maxChars && charLen(res) > limits.maxChars {
-		res = capMiddleChars(res, limits.maxChars)
 	}
 	// A rewrite that saves less than the threshold is not worth destabilizing the
 	// prefix for.
@@ -151,4 +152,44 @@ func capMiddleChars(text string, max int) string {
 	tail := max - head
 	omitted := strconv.Itoa(len(runes) - head - tail)
 	return string(runes[:head]) + "…(" + omitted + " chars omitted)…" + string(runes[len(runes)-tail:])
+}
+
+// charElisionReserve is the room the elision marker needs inside a char budget:
+// it covers "…(", the decimal count and " chars omitted)…".
+const charElisionReserve = 32
+
+// capMiddleCharsByLine keeps whole lines inside a character budget, dropping the
+// middle so the first command and the final error both survive. It cuts on line
+// boundaries: a mid-line cut leaves fragments that read like real data.
+func capMiddleCharsByLine(lines []string, max int) ([]string, bool) {
+	budget := max - charElisionReserve
+	if max < 8 || budget <= 0 || len(lines) < 3 {
+		return lines, false
+	}
+	total := 0
+	for _, line := range lines {
+		total += charLen(line) + 1
+	}
+	if total <= max {
+		return lines, false
+	}
+	head, headChars := 0, 0
+	for head < len(lines) && headChars+charLen(lines[head])+1 <= budget*2/3 {
+		headChars += charLen(lines[head]) + 1
+		head++
+	}
+	tail, tailChars := 0, 0
+	for tail < len(lines)-head && tailChars+charLen(lines[len(lines)-1-tail])+1 <= budget-headChars {
+		tailChars += charLen(lines[len(lines)-1-tail]) + 1
+		tail++
+	}
+	if len(lines)-head-tail <= 0 {
+		return lines, false
+	}
+	elided := charLen(strings.Join(lines[head:len(lines)-tail], "\n"))
+	out := make([]string, 0, head+tail+1)
+	out = append(out, lines[:head]...)
+	out = append(out, "…("+strconv.Itoa(elided)+" chars omitted)…")
+	out = append(out, lines[len(lines)-tail:]...)
+	return out, true
 }

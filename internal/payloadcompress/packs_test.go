@@ -1,6 +1,7 @@
 package payloadcompress
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -317,5 +318,34 @@ func TestDefaultKnobsMatchUpstream(t *testing.T) {
 	}
 	if autoDetect := (cavemanEngine{}); !autoDetect.packEnabled("en") || autoDetect.packEnabled("pt-BR") {
 		t.Fatal("caveman default enabled packs must be English only")
+	}
+}
+
+// TestRTKCharCapKeepsWholeLines pins the max-chars cap to line boundaries. A
+// mid-line cut leaves fragments that read like real output, so every surviving
+// line must exist verbatim in the input.
+func TestRTKCharCapKeepsWholeLines(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 300; i++ {
+		b.WriteString("line " + strconv.Itoa(i) + " " + strings.Repeat("x", 40) + "\n")
+	}
+	in := b.String()
+	out, ok := rtkEngine{opts: StepOptions{MaxChars: 3000}}.compress(in)
+	if !ok {
+		t.Fatal("expected a rewrite")
+	}
+	if n := charLen(out); n > 3000 {
+		t.Fatalf("char cap exceeded: %d chars", n)
+	}
+	if !strings.Contains(out, "chars omitted") {
+		t.Fatalf("missing char marker: %q", out[:80])
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.Contains(line, "chars omitted") {
+			continue
+		}
+		if !strings.Contains(in, line+"\n") {
+			t.Fatalf("line was cut mid-line: %q", line)
+		}
 	}
 }

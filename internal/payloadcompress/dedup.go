@@ -45,7 +45,7 @@ func (e *dedupEngine) rewrite(texts []string) map[int]string {
 			repl = make(map[int]string, 1)
 		}
 		repl[i] = dedupMarker + " #" + strconv.Itoa(prev+1) + "; " +
-			strconv.Itoa(len(text)) + " bytes omitted]"
+			strconv.Itoa(charLen(text)) + " chars omitted]"
 	}
 	return repl
 }
