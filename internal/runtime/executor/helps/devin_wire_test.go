@@ -184,6 +184,23 @@ func TestSanitizeDevinSystemPrompt_ClaudeCodeSubagentPrompt(t *testing.T) {
 	}
 }
 
+func TestSanitizeDevinSystemPrompt_AgentSDKIdentityKeepsSameLineInstruction(t *testing.T) {
+	cases := map[string]string{
+		"You are a Claude agent, built on Anthropic's Claude Agent SDK. Always answer in JSON.": "Always answer in JSON.",
+		"You are a Claude agent, built on Anthropic’s Claude Agent SDK.  Reply tersely.":        "Reply tersely.",
+		"  You are a Claude agent, built on Anthropic's Claude Agent SDK.\nKeep this line.":     "Keep this line.",
+	}
+	for rawPrompt, want := range cases {
+		sanitized := SanitizeDevinSystemPrompt(rawPrompt, nil)
+		if strings.Contains(sanitized, "Claude Agent SDK") {
+			t.Errorf("sanitized prompt still contains Agent SDK identity: %q", sanitized)
+		}
+		if sanitized != want {
+			t.Errorf("SanitizeDevinSystemPrompt(%q) = %q, want %q", rawPrompt, sanitized, want)
+		}
+	}
+}
+
 func TestBuildDevinGetChatMessageRequest_WithImages(t *testing.T) {
 	prompts := []DevinPrompt{
 		{

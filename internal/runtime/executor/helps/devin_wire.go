@@ -622,6 +622,11 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 // (as it does the Agent SDK identity line), so every subagent fails with 403 permission_denied.
 var devinSubagentEmojiDirective = regexp.MustCompile(`For clear communication with the user,?\s+the assistant MUST avoid using emojis\.`)
 
+// devinAgentSDKIdentity matches the Agent SDK identity sentence that opens sdk-cli
+// system prompts (claude -p, Agent SDK, Claude Code subagents). Only the sentence is
+// stripped so a caller instruction on the same line survives.
+var devinAgentSDKIdentity = regexp.MustCompile(`^You are a Claude agent, built on Anthropic['’]s Claude Agent SDK\.\s*`)
+
 // SanitizeDevinSystemPrompt strips Claude Code attribution and CLI identity headers
 // (referencing Antigravity conventions), softens the subagent emoji directive,
 // and applies zero-width obfuscation for configured sensitive words.
@@ -637,8 +642,15 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if util.IsClaudeCodeAttributionSystemText(trimmed) {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "You are Claude Code") || strings.HasPrefix(trimmed, "You are a Claude agent, built on Anthropic") {
+		if strings.HasPrefix(trimmed, "You are Claude Code") {
 			continue
+		}
+		if devinAgentSDKIdentity.MatchString(trimmed) {
+			trimmed = devinAgentSDKIdentity.ReplaceAllString(trimmed, "")
+			if trimmed == "" {
+				continue
+			}
+			line = trimmed
 		}
 		if strings.Contains(trimmed, "authorized security testing") || strings.Contains(trimmed, "destructive techniques, DoS attacks") {
 			continue
