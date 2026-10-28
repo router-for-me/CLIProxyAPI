@@ -2954,3 +2954,16 @@ func retryStickySize(selector *SessionAffinitySelector) int {
 	defer selector.retryStickyMu.RUnlock()
 	return len(selector.retrySticky)
 }
+
+func TestSessionAffinitySelector_RetryStickyAvoidNeedsExistingBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+
+	// No binding existed (e.g. a stateless or LCP request failed), so nothing
+	// may be created for a later header session to consume.
+	selector.markRetryStickyAvoid("mixed", "glm-5.3-flash", "caller-a", "auth-a")
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); ok {
+		t.Fatalf("avoid marker created without a binding: %v", entry)
+	}
+}

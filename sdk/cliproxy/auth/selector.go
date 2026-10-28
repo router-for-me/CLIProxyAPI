@@ -1140,8 +1140,15 @@ func (s *SessionAffinitySelector) retryStickyEntryFor(provider, model, callerSco
 		return retryStickyEntry{}, false
 	}
 	if !time.Now().Before(entry.expiresAt) {
+		// Another request may have replaced the expired record with a fresh
+		// binding between the read and this lock; reuse it instead of
+		// falling through to a new selection.
 		s.retryStickyMu.Lock()
-		if current, still := s.retrySticky[key]; still && !time.Now().Before(current.expiresAt) {
+		if current, still := s.retrySticky[key]; still {
+			if time.Now().Before(current.expiresAt) {
+				s.retryStickyMu.Unlock()
+				return current, true
+			}
 			delete(s.retrySticky, key)
 		}
 		s.retryStickyMu.Unlock()
@@ -1179,7 +1186,10 @@ func (s *SessionAffinitySelector) markRetryStickyAvoid(provider, model, callerSc
 	}
 	key := s.retryStickyKey(provider, model, callerScope)
 	s.retryStickyMu.Lock()
-	if current, ok := s.retrySticky[key]; ok && current.authID != authID {
+	// Only an existing binding for this caller+model is steered: its
+	// presence proves a header session selected here. Another auth's
+	// binding, or no binding at all, is left untouched.
+	if current, ok := s.retrySticky[key]; !ok || current.authID != authID {
 		s.retryStickyMu.Unlock()
 		return
 	}
