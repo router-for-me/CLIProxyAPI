@@ -264,6 +264,61 @@ requests:
   #   bootstrap-retries: 1          # Default: 0 (disabled). Retries before first byte is sent.
   #   send-keepalive-before-ft: false # Default: false. When true and keepalive-seconds > 0, send SSE heartbeats before the first token.
 
+  # Optional request-context compression. Deterministic transforms only: the same
+  # input bytes always produce the same output bytes, so provider prompt caches
+  # stay warm across retries and fallbacks. Payload rules below still run last.
+  # compression:
+  #   enabled: false               # Default: false.
+  #   shadow: false                # Default: false. Compute and log savings, send the original payload.
+  #   min-bytes: 4096              # Payloads smaller than this are skipped.
+  #   default-combo: standard      # Used when no model-scoped combo matches.
+  #   combos:
+  #     - name: standard
+  #       models: ["*"]            # Supports wildcards (e.g., "claude-*")
+  #       pipeline:                # Runs in order; each engine sees the previous output.
+  #         - engine: session-dedup # Elide segments that repeat an earlier message verbatim.
+  #         - engine: lite          # Strip ANSI, carriage returns, trailing spaces, blank runs.
+  #     - name: shell
+  #       models: ["*sonnet*", "*gpt-5*"]
+  #       pipeline:
+  #         - engine: headroom      # Render homogeneous JSON record arrays as columns.
+  #         - engine: rtk           # Collapse repeated command output lines, truncate long lines.
+  #         - engine: lite
+  #     - name: prompts
+  #       models: ["*"]
+  #       pipeline:
+  #         - engine: caveman       # Lossy: drop filler, pleasantries, hedging, articles from user text only.
+  #           level: lite           # lite | full | ultra. Missing level defaults to lite.
+  #           options:
+  #             language: en        # Pack tag: en, es, pt-BR, id, it, de, fr, ja, ru, hu, zh.
+  #             auto-detect: true   # Infer the pack from the prompt text, choosing among language-packs.
+  #             language-packs: []  # Packs auto-detection may pick. Empty means English only.
+  #             min-message-length: 50
+  #             skip-rules: []      # Rule names to disable, e.g. ["articles", "ultra_abbreviations"].
+  #         - engine: lite
+  #           options:
+  #             max-tool-length: 2000       # Truncate longer tool results, head and tail kept.
+  #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
+  #
+  #   # Every engine accepts an options block; omitted knobs keep the defaults below,
+  #   # which are the upstream OmniRoute defaults.
+  #   #   headroom:       min-rows: 8
+  #   #   session-dedup:  min-block-chars: 80
+  #   #   lite:           max-tool-length: 2000, compress-tool-results: true
+  #   #   rtk:            intensity: minimal, max-lines: 120, max-chars: 12000,
+  #   #                   deduplicate-threshold: 3, min-savings-percent: 0 (off)
+  #   #   caveman:        level: lite, min-message-length: 50,
+  #   #                   language: "", auto-detect: true, language-packs: [en]
+  #   # Output styles steer how the model writes its answer by appending an instruction
+  #   # to the existing system prompt. They do not rewrite responses, so streaming and
+  #   # tool calls are untouched. Injection is skipped for prompts that must not be
+  #   # terse (security, deletion, "explain in detail") and for multimodal requests.
+  #   # Styles: terse-prose, less-code, ponytail, i-have-adhd, antislop-ui, antislop-copy,
+  #   # terse-cjk (文言). Levels: lite, full, ultra.
+  #   output-styles:
+  #     - id: terse-prose
+  #       level: full
+
   # Optional payload configuration
   # payload:
   #   default: # Default rules only set parameters when they are missing in the payload.

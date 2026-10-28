@@ -8,11 +8,46 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/payloadcompress"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// applyRequestCompression runs the configured compression combo over the final
+// business payload. Rooted payloads (envelope formats) are left alone because
+// their offsets are not the conversation itself.
+func applyRequestCompression(cfg *config.Config, model, root string, body []byte) []byte {
+	if cfg == nil || root != "" || (!cfg.Compression.Enabled && len(cfg.Compression.OutputStyles) == 0) {
+		return body
+	}
+	out, stats := payloadcompress.ApplyAll(cfg.Compression, model, body)
+	if !stats.Applied {
+		if cfg.Compression.Shadow && (stats.Combo != "" || stats.Style != "") && log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"combo":    stats.Combo,
+				"style":    stats.Style,
+				"bytes_in": stats.BytesIn,
+				"bytes_to": stats.BytesOut,
+				"saved":    stats.Saved,
+			}).Debug("payload compression shadow")
+		}
+		return body
+	}
+	if log.IsLevelEnabled(log.DebugLevel) {
+		log.WithFields(log.Fields{
+			"combo":    stats.Combo,
+			"bytes_in": stats.BytesIn,
+			"bytes_to": stats.BytesOut,
+			"segments": stats.Segments,
+			"style":    stats.Style,
+			"saved":    stats.Saved,
+		}).Debug("payload compression applied")
+	}
+	return out
+}
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
 // paths as relative to the provided root path and restricts matches to the given
@@ -79,6 +114,10 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 		out = removeToolTypeFromPayloadWithRoot(out, root, "image_generation")
 		out = removeToolChoiceFromPayloadWithRoot(out, root, "image_generation")
 	}
+
+	// Compress conversation context deterministically. Built-in transforms run before
+	// payload rules so user rules remain the final semantic barrier.
+	out = applyRequestCompression(cfg, model, root, out)
 
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
