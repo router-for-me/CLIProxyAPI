@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/gin-gonic/gin"
@@ -164,6 +165,41 @@ func (w *responseCompressionCommitWriter) FlushError() error {
 type responseCompressor interface {
 	io.WriteCloser
 	Flush() error
+	Reset(io.Writer)
+}
+
+type responseCompressorPool interface {
+	Get() any
+	Put(any)
+}
+
+// responseCompressorPools reuse encoders across responses. The default zstd encoder keeps an
+// 8 MiB window and its buffers (about 18 MB per stream); a 1 MiB window with lower encoder
+// memory loses little ratio on API responses, which are far smaller than the window.
+var responseCompressorPools = map[string]responseCompressorPool{
+	"zstd": &sync.Pool{New: func() any {
+		encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20), zstd.WithLowerEncoderMem(true))
+		if errNewWriter != nil {
+			log.Errorf("create response compression encoder: %v", errNewWriter)
+			return nil
+		}
+		return encoder
+	}},
+	"gzip": &sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }},
+}
+
+// newResponseCompressor takes a pooled encoder writing to dst, or nil when none can be created.
+func newResponseCompressor(encoding string, dst io.Writer) responseCompressor {
+	pool := responseCompressorPools[encoding]
+	if pool == nil {
+		return nil
+	}
+	compressor, _ := pool.Get().(responseCompressor)
+	if compressor == nil {
+		return nil
+	}
+	compressor.Reset(dst)
+	return compressor
 }
 
 // responseCompressionWriter keeps headers uncommitted until the encoding is known.
@@ -307,17 +343,10 @@ func (w *responseCompressionWriter) decide(force bool, size int) {
 			return
 		}
 	}
-	var compressor responseCompressor
-	if w.encoding == "gzip" {
-		compressor = gzip.NewWriter(w.ResponseWriter)
-	} else {
-		encoder, errNewWriter := zstd.NewWriter(w.ResponseWriter, zstd.WithEncoderConcurrency(1))
-		if errNewWriter != nil {
-			log.Errorf("create response compression encoder: %v", errNewWriter)
-			w.decided = true
-			return
-		}
-		compressor = encoder
+	compressor := newResponseCompressor(w.encoding, w.ResponseWriter)
+	if compressor == nil {
+		w.decided = true
+		return
 	}
 	w.compressor = compressor
 	w.decided = true
@@ -372,6 +401,14 @@ func (w *responseCompressionWriter) finish() {
 			} else {
 				log.Errorf("close response compression encoder: %v", errClose)
 			}
+		}
+		// Drop the response writer reference before pooling the encoder, and fail later writes
+		// instead of sending them uncompressed under Content-Encoding.
+		w.compressor.Reset(io.Discard)
+		responseCompressorPools[w.encoding].Put(w.compressor)
+		w.compressor = nil
+		if w.writeErr == nil {
+			w.writeErr = io.ErrClosedPipe
 		}
 	}
 }

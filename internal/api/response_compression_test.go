@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -305,5 +306,131 @@ func TestResponseCompressionSSEIncremental(t *testing.T) {
 				t.Fatal("decoded SSE differs")
 			}
 		})
+	}
+}
+
+type deterministicResponseCompressorPool struct {
+	newCompressor func() any
+	item          any
+}
+
+func (p *deterministicResponseCompressorPool) Get() any {
+	if p.item == nil {
+		return p.newCompressor()
+	}
+	item := p.item
+	p.item = nil
+	return item
+}
+
+func (p *deterministicResponseCompressorPool) Put(item any) {
+	p.item = item
+}
+
+func TestResponseCompressionReusesPooledEncoders(t *testing.T) {
+	bodies := []string{
+		"{\"message\":\"" + strings.Repeat("first response ", 200) + "\"}",
+		"{\"message\":\"" + strings.Repeat("second, different response ", 150) + "\"}",
+	}
+	engine := gin.New()
+	engine.Use(responseCompressionMiddleware(&config.Config{}))
+	body := ""
+	engine.GET("/", func(c *gin.Context) {
+		c.Data(http.StatusOK, "application/json", []byte(body))
+	})
+	for _, encoding := range []string{"zstd", "gzip"} {
+		original := responseCompressorPools[encoding]
+		created := 0
+		responseCompressorPools[encoding] = &deterministicResponseCompressorPool{
+			newCompressor: func() any { created++; return original.Get() },
+		}
+		t.Cleanup(func() { responseCompressorPools[encoding] = original })
+		const rounds = 16
+		for round := 0; round < rounds; round++ {
+			if round%2 == 1 {
+				// A failed client write must not poison the encoder handed to the next response.
+				context, _ := gin.CreateTestContext(httptest.NewRecorder())
+				context.Header("Content-Type", "application/json")
+				writer := &responseCompressionWriter{ResponseWriter: &compressionErrorWriter{ResponseWriter: context.Writer}, encoding: encoding, minBytes: 1}
+				_, _ = writer.WriteString(bodies[0])
+				writer.finish()
+				continue
+			}
+			body = bodies[(round/2)%len(bodies)]
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Accept-Encoding", encoding)
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, req)
+			if got := rec.Header().Get("Content-Encoding"); got != encoding {
+				t.Fatalf("%s round %d: Content-Encoding = %q", encoding, round, got)
+			}
+			if got := string(compressionTestBody(t, encoding, rec.Body.Bytes())); got != body {
+				t.Fatalf("%s round %d: decoded body mismatch", encoding, round)
+			}
+		}
+		if created != 1 {
+			t.Fatalf("%s: created %d encoders for %d responses, want 1", encoding, created, rounds)
+		}
+	}
+}
+
+func TestResponseCompressionReusesEncoderAfterWriteFailure(t *testing.T) {
+	for _, encoding := range []string{"zstd", "gzip"} {
+		t.Run(encoding, func(t *testing.T) {
+			original := responseCompressorPools[encoding]
+			responseCompressorPools[encoding] = &deterministicResponseCompressorPool{newCompressor: original.Get}
+			t.Cleanup(func() { responseCompressorPools[encoding] = original })
+
+			failedContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+			failedContext.Header("Content-Type", "text/event-stream")
+			failedWriter := &responseCompressionWriter{
+				ResponseWriter: &compressionErrorWriter{ResponseWriter: failedContext.Writer},
+				encoding:       encoding,
+				minBytes:       1,
+			}
+			_, errWrite := failedWriter.WriteString("data: failed\n\n")
+			if errWrite == nil {
+				errWrite = failedWriter.FlushError()
+			}
+			if !errors.Is(errWrite, io.ErrClosedPipe) {
+				t.Fatalf("failed response error = %v, want %v", errWrite, io.ErrClosedPipe)
+			}
+			failedCompressor := failedWriter.compressor
+			if failedCompressor == nil {
+				t.Fatal("failed response has no compressor")
+			}
+			failedWriter.finish()
+
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Header("Content-Type", "application/json")
+			writer := &responseCompressionWriter{ResponseWriter: context.Writer, encoding: encoding, minBytes: 1}
+			body := `{"message":"response after failure"}`
+			if _, errWrite = writer.WriteString(body); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			if writer.compressor != failedCompressor {
+				t.Fatal("the encoder from the failed response was not reused")
+			}
+			writer.finish()
+			if got := string(compressionTestBody(t, encoding, recorder.Body.Bytes())); got != body {
+				t.Fatalf("decoded body = %q, want %q", got, body)
+			}
+		})
+	}
+}
+
+func TestResponseCompressionWriteAfterFinishFails(t *testing.T) {
+	for _, encoding := range []string{"zstd", "gzip"} {
+		context, _ := gin.CreateTestContext(httptest.NewRecorder())
+		context.Header("Content-Type", "text/event-stream")
+		writer := &responseCompressionWriter{ResponseWriter: context.Writer, encoding: encoding, minBytes: 1}
+		if _, errWrite := writer.WriteString("data: one\n\n"); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		writer.finish()
+		if _, errWrite := writer.WriteString("data: late\n\n"); errWrite == nil {
+			t.Fatalf("%s: a write after finish must fail, not go out uncompressed", encoding)
+		}
 	}
 }

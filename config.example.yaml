@@ -36,7 +36,8 @@ server:
 
   # Negotiated compression of downstream HTTP responses (including SSE streams).
   # Responses are compressed only when the client advertises zstd or gzip in
-  # Accept-Encoding; WebSocket upgrades are never wrapped.
+  # Accept-Encoding; WebSocket upgrades are never wrapped. Encoder memory is
+  # retained for the lifetime of an open stream and depends on prior pool usage.
   response-compression:
     # Default: true.
     enabled: true
