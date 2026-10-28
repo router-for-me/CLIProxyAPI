@@ -1111,6 +1111,9 @@ const retryStickyMinSweep = 64
 type retryStickyEntry struct {
 	authID    string
 	expiresAt time.Time
+	// avoid marks a binding whose auth just failed, so the next cache
+	// miss for this caller fails over instead of re-picking it.
+	avoid bool
 }
 
 func (s *SessionAffinitySelector) retryStickyKey(provider, model, callerScope string) string {
@@ -1125,16 +1128,16 @@ func (s *SessionAffinitySelector) retryStickyEnabled(callerScope string) bool {
 	return s != nil && s.retrySticky != nil && callerScope != "" && s.retryStickyWindow > 0
 }
 
-func (s *SessionAffinitySelector) getRetrySticky(provider, model, callerScope string) (string, bool) {
+func (s *SessionAffinitySelector) retryStickyEntryFor(provider, model, callerScope string) (retryStickyEntry, bool) {
 	if !s.retryStickyEnabled(callerScope) {
-		return "", false
+		return retryStickyEntry{}, false
 	}
 	key := s.retryStickyKey(provider, model, callerScope)
 	s.retryStickyMu.RLock()
 	entry, ok := s.retrySticky[key]
 	s.retryStickyMu.RUnlock()
 	if !ok {
-		return "", false
+		return retryStickyEntry{}, false
 	}
 	if !time.Now().Before(entry.expiresAt) {
 		s.retryStickyMu.Lock()
@@ -1142,9 +1145,9 @@ func (s *SessionAffinitySelector) getRetrySticky(provider, model, callerScope st
 			delete(s.retrySticky, key)
 		}
 		s.retryStickyMu.Unlock()
-		return "", false
+		return retryStickyEntry{}, false
 	}
-	return entry.authID, true
+	return entry, true
 }
 
 func (s *SessionAffinitySelector) setRetrySticky(provider, model, callerScope, authID string) {
@@ -1166,17 +1169,24 @@ func (s *SessionAffinitySelector) setRetrySticky(provider, model, callerScope, a
 	s.retryStickyMu.Unlock()
 }
 
-// clearRetrySticky drops the record only while it still refers to the auth
-// that failed. Overlapping retries may have installed a newer binding for the
-// same caller, and that newer record must survive a stale failure.
-func (s *SessionAffinitySelector) clearRetrySticky(provider, model, callerScope, authID string) {
-	if !s.retryStickyEnabled(callerScope) {
+// markRetryStickyAvoid records that this caller's bound auth just failed, so
+// the next cache-missing retry fails over before reusing it. This is a
+// compare-and-set: a newer binding installed by an overlapping retry, or one
+// belonging to another auth, is left alone.
+func (s *SessionAffinitySelector) markRetryStickyAvoid(provider, model, callerScope, authID string) {
+	if authID == "" || !s.retryStickyEnabled(callerScope) {
 		return
 	}
 	key := s.retryStickyKey(provider, model, callerScope)
 	s.retryStickyMu.Lock()
-	if entry, ok := s.retrySticky[key]; ok && entry.authID == authID {
-		delete(s.retrySticky, key)
+	if current, ok := s.retrySticky[key]; ok && current.authID != authID {
+		s.retryStickyMu.Unlock()
+		return
+	}
+	s.retrySticky[key] = retryStickyEntry{
+		authID:    authID,
+		expiresAt: time.Now().Add(s.retryStickyWindow),
+		avoid:     true,
 	}
 	s.retryStickyMu.Unlock()
 }
@@ -1402,13 +1412,27 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// (rotated on every retry), reuse the previous binding for this
 	// provider+model instead of letting the fallback selector re-pick from
 	// the top of the priority list.
-	stickyAuthID, hasSticky := s.getRetrySticky(provider, model, callerScope)
+	// A record left by a failed attempt carries avoid so this caller fails
+	// over to another candidate instead of re-picking the same auth.
+	stickyEntry, hasSticky := s.retryStickyEntryFor(provider, model, callerScope)
 	if isHeaderSession && !isFork && !isSubagent && hasSticky {
-		for _, candidate := range available {
-			if candidate.ID == stickyAuthID {
-				bind(candidate.ID, true)
-				entry.Infof("session-affinity: retry-sticky reuse | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), candidate.ID, provider, model)
-				return candidate, nil
+		if !stickyEntry.avoid {
+			for _, candidate := range available {
+				if candidate.ID == stickyEntry.authID {
+					bind(candidate.ID, true)
+					entry.Infof("session-affinity: retry-sticky reuse | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), candidate.ID, provider, model)
+					return candidate, nil
+				}
+			}
+		} else if len(fallbackAuths) > 1 {
+			remaining := make([]*Auth, 0, len(fallbackAuths))
+			for _, candidate := range fallbackAuths {
+				if candidate.ID != stickyEntry.authID {
+					remaining = append(remaining, candidate)
+				}
+			}
+			if len(remaining) > 0 {
+				fallbackAuths = remaining
 			}
 		}
 	}
@@ -1425,7 +1449,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// provider+model.  If the old sticky is still valid but its auth is
 	// unavailable, we leave it alone so that a recovered auth can be picked
 	// up again on the next retry.
-	if isHeaderSession && !isFork && !isSubagent && !hasSticky {
+	if isHeaderSession && !isFork && !isSubagent && (!hasSticky || stickyEntry.avoid) {
 		s.setRetrySticky(provider, model, callerScope, auth.ID)
 	}
 	if isFork && fallbackID != "" {
@@ -1833,6 +1857,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// the current request without unbinding the session from its bound credential.
 		return
 	}
+	// The sticky record is keyed on caller+provider+model, so a failed attempt
+	// is marked here: an interceptor may have erased the session identity, and
+	// the next retry must still steer away from this auth.
+	if !res.Success {
+		s.markRetryStickyAvoid(ns, nsModel, sessionMetadataString(res.Options.Metadata, cliproxyexecutor.CallerScopeMetadataKey), res.AuthID)
+	}
 
 	// LCP bindings are independent from explicit harness bindings. A successful
 	// extension is recorded as a new sequence while credential-attributed failures
@@ -1907,15 +1937,6 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	s.cache.CompareAndDelete(cacheKey, res.AuthID)
 	if fallbackKey != "" {
 		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
-	}
-	// Credential-attributed failures also invalidate the retry-sticky record
-	// so that the next unstable-header request can bind to a healthy auth.
-	// The clear is compare-and-delete: an overlapping retry may have installed
-	// a newer binding since this failure, and that binding must survive.
-	if !res.Success && !shouldSkipCredentialCooldown(res.Error) {
-		if !s.rebindOnQuotaOnly || shouldRebindSessionAffinityOnError(res.Error) {
-			s.clearRetrySticky(ns, nsModel, sessionMetadataString(res.Options.Metadata, cliproxyexecutor.CallerScopeMetadataKey), res.AuthID)
-		}
 	}
 }
 
