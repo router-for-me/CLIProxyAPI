@@ -238,7 +238,7 @@ What each step installs is a draft PR, unmerged until its step (an hourly sweep 
 | `estate-hub-route`, `estate-hub-key`, codex-seat hub pins | Automancer-Ltd/automancer-bin#104 |
 | allowances / sysdash read the hub | Automancer-Ltd/automancer-ops#1335 |
 | account-pin plugin pins through the hub | Automancer-Ltd/bb-plugin-account-pin#16 |
-| Gandalf's Executor hub usage tool | see t8306 |
+| Gandalf's Executor hub usage tool | Automancer-Ltd/automancer-ops#1336 |
 | ROUTES.md and capacity.md | Automancer-Ltd/automancer-skills#133 |
 
 Already done on 28 Oct: hub groups (Claude `1`-`10` = the old cswap slots, Codex `pro`, `pro-gmail`,
@@ -279,8 +279,12 @@ the local fallback login; running ones keep the route they started with.
    the rollback path). Verify: `bb account-pin list` reads hub usage; spawn two throwaway lanes,
    `claude-code` titled `[pin:3]` and `codex` titled `[pin:pro-personal]`, each answering one word; the hub
    log shows those accounts. Archive them.
-6. **Docs and Gandalf.** Merge #133 (skills sync carries it). Deploy the Gandalf tool per its PR and run its
-   one-line `executor-tool call`.
+6. **Docs and Gandalf.** Merge #133 (skills sync carries it). Gandalf's tool, per #1336's body: merge and pull,
+   enable the `estate-hub-usage` user unit (127.0.0.1:8319), run `scripts/hub-svc-cutover.sh` dry then
+   `--apply` (adds `hub-svc.automancer.uk` to the estate-gateway Access app, tunnel and DNS), create and
+   deploy the `hub-readonly` Executor app. **Waseem's hands:** connecting its account means typing the
+   estate-gateway Access service token into Executor's connect form, as for local-gateway and autodash.
+   Verify with `executor-tool call hub-readonly.usage` (provider codex).
 7. **Fallback logins and rotation off.** Keep one local login per harness, Automancer's own and least used
    this week, and separate OAuth grants from the hub's (the hub signed in fresh on m6):
    Claude slot 1 (`waseem@automancer.uk`, Claude Auto Max 20): `cswap switch 1`; Codex `pro-personal`
