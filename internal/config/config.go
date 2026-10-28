@@ -4,11 +4,16 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/payloadcompress"
+
 // ServerResponseCompression mirrors SDKConfig.ResponseCompression on the outer
 // Config so JSON and YAML round trips preserve server.response-compression.
 // The canonical storage remains SDKConfig.ResponseCompression; read the
 // effective value via EffectiveResponseCompression.
 type ServerResponseCompression = ResponseCompressionConfig
+
+// CompressionConfig is the request-context compression settings block.
+type CompressionConfig = payloadcompress.Config
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
@@ -209,4 +214,8 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// Compression defines deterministic request-context compression. It runs after
+	// all built-in payload translation and before user payload rules.
+	Compression payloadcompress.Config `yaml:"compression" json:"compression"`
 }

@@ -24,6 +24,7 @@ type RemoteManagement = internalconfig.RemoteManagement
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig
+type CompressionConfig = internalconfig.CompressionConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
 type PayloadModelRule = internalconfig.PayloadModelRule
