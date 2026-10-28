@@ -108,6 +108,12 @@ func TestModelNotFoundBlockClearedOnCredentialUpdate(t *testing.T) {
 	if blocked, _, _ := isAuthBlockedForModel(after, "gpt-5.5", time.Now()); blocked {
 		t.Fatal("model still blocked after the credential update")
 	}
+	if after.Status == StatusError {
+		t.Fatalf("parent auth still reports an error: %#v", after.StatusMessage)
+	}
+	if after.LastError != nil && isExplicitModelNotFoundError(after.LastError, "") {
+		t.Fatalf("parent auth kept the missing-model error: %#v", after.LastError)
+	}
 }
 
 func TestExplicitlyDisabledModelSurvivesCredentialUpdate(t *testing.T) {
@@ -136,5 +142,29 @@ func TestExplicitlyDisabledModelSurvivesCredentialUpdate(t *testing.T) {
 	state := after.ModelStates["user-disabled"]
 	if state == nil || state.Status != StatusDisabled {
 		t.Fatalf("credential update re-enabled an explicitly disabled model: %#v", state)
+	}
+}
+
+func TestModelNotFoundWithoutCodeDisablesModelWhenCoolingDisabled(t *testing.T) {
+	m, auth := newDisableCoolingManager(t)
+	model := "claude-missing"
+	m.MarkResult(context.Background(), Result{
+		AuthID:   auth.ID,
+		Provider: auth.Provider,
+		Model:    model,
+		Success:  false,
+		Error: &Error{
+			Message:    `{"error":{"type":"not_found_error","message":"model: claude-missing"}}`,
+			HTTPStatus: http.StatusNotFound,
+		},
+	})
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("auth missing")
+	}
+	state := updated.ModelStates[model]
+	if state == nil || state.Status != StatusDisabled {
+		t.Fatalf("expected the model to be disabled, got %#v", state)
 	}
 }

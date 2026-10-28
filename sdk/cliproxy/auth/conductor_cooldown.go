@@ -508,11 +508,23 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if len(auth.ModelStates) > 0 {
 		updateAggregatedAvailability(auth, now)
 	}
-	if changed {
-		auth.Generation++
-		auth.UpdatedAt = now
+	if !changed {
+		return false
 	}
-	return changed
+	// MarkResult also stamped the parent auth with the missing-model
+	// error; lift that too, or the published auth keeps reporting
+	// StatusError after the model is usable again.
+	if auth.LastError != nil && isExplicitModelNotFoundError(auth.LastError, "") {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		if auth.Status == StatusError {
+			auth.Status = StatusActive
+		}
+	}
+	updateAggregatedAvailability(auth, now)
+	auth.Generation++
+	auth.UpdatedAt = now
+	return true
 }
 
 func dedupeStrings(values []string) []string {
@@ -1049,17 +1061,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
-					if isModelSupportResultError(result.Error) {
-						if disableCooling && isExplicitModelNotFoundError(result.Error, modelKey) {
-							// A model_not_found is a configuration fact: this credential
-							// cannot serve this model. Cooling is disabled here, so a
-							// deadline would be zeroed and retried immediately; mark the
-							// model unavailable on this credential instead. Selection
-							// already treats that state as a permanent block, and a
-							// credential update clears it.
-							state.Status = StatusDisabled
-							state.NextRetryAfter = time.Time{}
-						} else if disableCooling {
+					if disableCooling && isExplicitModelNotFoundError(result.Error, modelKey) {
+						// A model_not_found is a configuration fact: this credential
+						// cannot serve this model. Cooling is disabled here, so a
+						// deadline would be zeroed and retried immediately; mark the
+						// model unavailable on this credential instead. Selection
+						// already treats that state as a permanent block, and a
+						// credential update clears it. This model-aware check runs
+						// before the support gate because a structured model 404 does
+						// not always carry a model_not_found code.
+						state.Status = StatusDisabled
+						state.NextRetryAfter = time.Time{}
+					} else if isModelSupportResultError(result.Error) {
+						if disableCooling {
 							state.NextRetryAfter = time.Time{}
 						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
 							state.NextRetryAfter = now.Add(*result.RetryAfter)
