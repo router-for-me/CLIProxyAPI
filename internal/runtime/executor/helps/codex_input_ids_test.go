@@ -60,14 +60,19 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 		reasoningID          = "item_reasoning"
 		functionCallID       = "item_function_call"
 		functionCallOutputID = "item_function_call_output"
+		toolSearchCallID     = "item_tool_search_call"
+		legacyToolSearchID   = "ts_call_4000860"
 	)
 	body := []byte(`{"input":[` +
 		`{"type":"message","id":"` + messageID + `"},` +
 		`{"type":"reasoning","id":"` + reasoningID + `"},` +
 		`{"type":"function_call","id":"` + functionCallID + `","call_id":"call-1"},` +
 		`{"type":"function_call_output","id":"` + functionCallOutputID + `","call_id":"call-1"},` +
+		`{"type":"tool_search_call","id":"` + toolSearchCallID + `","call_id":"call-search-1","execution":"client"},` +
+		`{"type":"tool_search_call","id":"` + legacyToolSearchID + `","call_id":"call_4000860","execution":"client"},` +
 		`{"type":"reasoning","id":"rs-existing"},` +
 		`{"type":"function_call","id":"fc-existing","call_id":"call-2"},` +
+		`{"type":"tool_search_call","id":"tsc-existing","call_id":"call-search-2","execution":"client"},` +
 		`{"type":"message","id":"msg-existing"}` +
 		`]}`)
 
@@ -77,8 +82,11 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 		"rs_" + reasoningID,
 		"fc_" + functionCallID,
 		functionCallOutputID,
+		"tsc_" + toolSearchCallID,
+		"tsc_call_4000860",
 		"rs-existing",
 		"fc-existing",
+		"tsc-existing",
 		"msg-existing",
 	}
 
@@ -105,6 +113,7 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 		{name: "function call", itemType: "function_call", prefix: "fc_"},
 		{name: "custom tool call", itemType: "custom_tool_call", prefix: "ctc_"},
 		{name: "custom tool call output", itemType: "custom_tool_call_output", prefix: "ctco_"},
+		{name: "tool search call", itemType: "tool_search_call", prefix: "tsc_"},
 	} {
 		for _, idCase := range []struct {
 			name      string
@@ -155,6 +164,62 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestSanitizeCodexInputItemIDsNormalizesLegacyToolSearchCallIDs(t *testing.T) {
+	original := []byte(`{"input":[` +
+		`{"type":"reasoning","id":"rs_signed","encrypted_content":"gAAAA-opaque-signature","summary":[]},` +
+		`{"type":"tool_search_call","id":"ts_call_4000860","call_id":"call_4000860","execution":"client","status":"completed","arguments":{"query":"agents"}},` +
+		`{"type":"tool_search_output","id":"tso_call_4000860","call_id":"call_4000860","execution":"client","status":"completed","tools":[]}` +
+		`]}`)
+	snapshot := string(original)
+
+	got := SanitizeCodexInputItemIDs(original)
+
+	if string(original) != snapshot {
+		t.Fatalf("SanitizeCodexInputItemIDs mutated caller slice: got %s, want %s", original, snapshot)
+	}
+	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "rs_signed" {
+		t.Fatalf("reasoning id = %q, want rs_signed", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.0.encrypted_content").String(); actual != "gAAAA-opaque-signature" {
+		t.Fatalf("encrypted_content = %q, want gAAAA-opaque-signature", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.1.id").String(); actual != "tsc_call_4000860" {
+		t.Fatalf("tool_search_call id = %q, want tsc_call_4000860", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.1.call_id").String(); actual != "call_4000860" {
+		t.Fatalf("tool_search_call call_id = %q, want call_4000860", actual)
+	}
+	if actual := gjson.GetBytes(got, "input.2.call_id").String(); actual != "call_4000860" {
+		t.Fatalf("tool_search_output call_id = %q, want call_4000860", actual)
+	}
+
+	overlongBase := strings.Repeat("x", codexInputItemIDLimit)
+	for _, ids := range [][2]string{
+		{"ts_call_4000860", "tsc_call_4000860"},
+		{"tsc_call_4000860", "ts_call_4000860"},
+		{"ts_call_4000860", "call_4000860"},
+		{"call_4000860", "ts_call_4000860"},
+		{"ts_" + overlongBase, overlongBase},
+		{overlongBase, "ts_" + overlongBase},
+	} {
+		collisionBody := []byte(fmt.Sprintf(`{"input":[{"type":"tool_search_call","id":%q},{"type":"tool_search_call","id":%q}]}`, ids[0], ids[1]))
+		first := SanitizeCodexInputItemIDs(collisionBody)
+		second := SanitizeCodexInputItemIDs(collisionBody)
+		again := SanitizeCodexInputItemIDs(first)
+		id0 := gjson.GetBytes(first, "input.0.id").String()
+		id1 := gjson.GetBytes(first, "input.1.id").String()
+		if id0 == id1 {
+			t.Fatalf("distinct tool_search_call IDs %v collided: %q; payload=%s", ids, id0, first)
+		}
+		if !strings.HasPrefix(id0, "tsc_") || !strings.HasPrefix(id1, "tsc_") {
+			t.Fatalf("normalized IDs must start with tsc_: got (%q, %q)", id0, id1)
+		}
+		if string(first) != string(second) || string(first) != string(again) {
+			t.Fatalf("legacy collision normalization must be deterministic and idempotent: first=%s second=%s again=%s", first, second, again)
 		}
 	}
 }

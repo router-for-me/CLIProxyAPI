@@ -169,6 +169,26 @@ func TestConvertGeminiResponseToOpenAIResponses_ToolSearchCallStream(t *testing.
 	if added.Get("item.call_id").String() == "" || added.Get("item.call_id").String() != done.Get("item.call_id").String() || done.Get("item.call_id").String() != completed.Get("response.output.0.call_id").String() {
 		t.Fatalf("call_id must be non-empty and stable across events")
 	}
+	wantItemID := "tsc_" + added.Get("item.call_id").String()
+	for _, test := range []struct {
+		label string
+		item  gjson.Result
+	}{
+		{label: "added", item: added.Get("item")},
+		{label: "done", item: done.Get("item")},
+		{label: "completed", item: completed.Get("response.output.0")},
+	} {
+		if got := test.item.Get("id").String(); got != wantItemID {
+			t.Fatalf("%s id = %q, want %q; raw: %s", test.label, got, wantItemID, test.item.Raw)
+		}
+	}
+}
+
+func TestOpenAIResponsesToolSearchCallItemID(t *testing.T) {
+	got := openAIResponsesToolSearchCallItemID("call_fixture")
+	if got != "tsc_call_fixture" {
+		t.Fatalf("item ID = %q, want tsc_call_fixture", got)
+	}
 }
 
 func TestConvertGeminiResponseToOpenAIResponsesNonStream_ToolSearchCall(t *testing.T) {
@@ -188,6 +208,11 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStream_ToolSearchCall(t *testi
 	}
 	if got := item.Get("arguments.query").String(); got != "fixture tools" {
 		t.Fatalf("non-stream arguments = %s", item.Get("arguments").Raw)
+	}
+	if callID := item.Get("call_id").String(); callID == "" {
+		t.Fatalf("non-stream call_id must be non-empty: %s", item.Raw)
+	} else if got := item.Get("id").String(); got != "tsc_"+callID {
+		t.Fatalf("non-stream id = %q, want %q; raw: %s", got, "tsc_"+callID, item.Raw)
 	}
 	if item.Get("name").Exists() {
 		t.Fatalf("non-stream tool_search_call must not carry a name: %s", item.Raw)

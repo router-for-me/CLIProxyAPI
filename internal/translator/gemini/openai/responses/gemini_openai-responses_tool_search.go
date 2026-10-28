@@ -9,7 +9,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const openAIResponsesToolSearchIDPrefix = "ts_"
+const openAIResponsesToolSearchIDPrefix = "tsc_"
 
 // normalizeOpenAIResponsesToolSearchItems rewrites replayed client-executed
 // tool_search history into the function_call / function_call_output shape that
