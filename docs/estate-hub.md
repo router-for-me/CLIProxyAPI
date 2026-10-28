@@ -117,26 +117,33 @@ storage, as the stock panel does. It is one HTML file embedded in the binary, wi
 and it is turned off with the stock panel (`management.disable-control-panel: true`) or when the
 management API is off.
 
-The page answers two questions first. **Spend next** lists, per provider, the account consume-first
-will use next, with its tightest window's percent left (or its balance) and a pace mark. **Running
-low** lists every usable account whose tightest window is at 15% or less, or below half and on
-course to run out before it resets. **Banked resets** lists Codex accounts holding banked resets and
-when the first expires; they are redeemed in Codex itself.
+The page is one list, phone first, in the order consume-first spends (Waseem, 28 Oct 2026: "one
+table, shown graphically, with proper logos for each service, showing a bar, allowance left, in
+spend-first order, resets shown alongside ... closer to what sysdash shows"). Above it, **Spend next**
+is one chip per provider: the account the router will use next, its percent left (or balance) and
+time to reset. A chip jumps to its row.
 
-The pace mark is CodexBar's arithmetic on the figures the page already has: the window is assumed to
-keep being spent at its average rate so far. It reads `+12 spare` (12 points less used than an even
-spend would have used by now), `on pace`, `runs out Tue 15:18` (the projected time it runs dry, before
-its reset), `back Wed 00:07` (spent; when it resets) or `unused`. An account's detail spells it out,
-for example "5 over, runs out in 17h 30m" or "12 spare, lasts to reset".
+Each row is one plan: the provider's logo, the plan's name, a twenty-block bar of the weekly
+allowance left (or the longest window when there is no weekly one), and under it a thin bar for the
+tightest other window, usually the 5-hour one. Bars are green, amber below 40% left and red at 15%
+or less, as in sysdash. On the right are the percent left (a USD balance for prepaid API keys) and
+the time to the reset, with the exact time on hover. Tags mark **Next** (the router's next account
+for a provider with several), **Spent**, **Held**, **Cooling**, **Poll failed** and **N banked**
+(Codex banked resets; amber with the first expiry when it is within three days). Antigravity is one
+row per model pool, as `allowances` shows it.
 
-**Accounts** lists every credential and API key in the router's order within each provider. A row
-shows the tightest window, the others in brief, and marks for next, held, disabled, spent and a
-failed poll. Opening a row shows each window with its reset and pace, then plan, login, balance,
-banked resets, groups, cooldowns, recent requests and the age of the figures, then the actions: hold
-(1 hour, 5 hours, 1 day or until its weekly reset), release, disable or enable, and set its name
-(`note`) and groups, through the management API calls below. Config-file API keys are shown but are
-edited in the config. The page refreshes every 30 seconds while it is visible and keeps open rows open.
+The order across all providers is consume-first's: usable rows by soonest reset, then rows with no
+reset, then spent rows (any window at 95% or more used, showing when they are back), then held,
+cooling and disabled rows at the bottom. Within a provider this is the router's own order.
 
+Tapping a row opens each window with its reset and pace, then plan, login, balance, banked resets,
+groups, cooldowns, recent requests and the age of the figures, then the actions: hold (1 hour,
+5 hours, 1 day or until its weekly reset), release, disable or enable, and set its name (`note`) and
+groups, through the management API calls below. Config-file API keys are shown but are edited in the
+config. The pace line is CodexBar's arithmetic: the window is assumed to keep being spent at its
+average rate so far ("12 spare, lasts to reset", "5 over, runs out in 17h 30m"). The page refreshes
+every 30 seconds while it is visible and keeps open rows open. Logos are lobe-icons (MIT) inlined in
+the page; a provider without one gets its initial.
 
 A hold takes an account out of every routing path (all strategies, pinned or not) until a time:
 
