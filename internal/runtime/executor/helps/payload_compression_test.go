@@ -94,3 +94,30 @@ func TestPayloadCompressionShadowReturnsOriginal(t *testing.T) {
 		t.Fatal("shadow mode must send the original payload")
 	}
 }
+
+func TestPayloadOutputStyleAppliedThroughBarrier(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Compression.OutputStyles = []payloadcompress.OutputStyle{{ID: "terse-prose", Level: "full"}}
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "openai", "", body, body, "gpt-4o", "/v1/chat/completions")
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.HasPrefix(system, "base") || !strings.Contains(system, "CLIProxyAPI Output Styles") {
+		t.Fatalf("style not injected through the barrier: %q", system)
+	}
+}
+
+func TestPayloadOutputStyleSurvivesRepeatedApplication(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Compression.OutputStyles = []payloadcompress.OutputStyle{{ID: "ponytail", Level: "full"}}
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+
+	once := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "openai", "", body, body, "gpt-4o", "/v1/chat/completions")
+	twice := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "openai", "", once, body, "gpt-4o", "/v1/chat/completions")
+	if string(once) != string(twice) {
+		t.Fatal("barrier reapplication changed the payload")
+	}
+	if strings.Count(string(twice), "CLIProxyAPI Output Styles") != 1 {
+		t.Fatal("style injected twice")
+	}
+}

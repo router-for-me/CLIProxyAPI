@@ -8,6 +8,10 @@ requests:
     enabled: true
     shadow: true
     min-bytes: 2048
+    output-styles:
+      - id: terse-prose
+        level: ultra
+      - id: bogus-style
     combos:
       - name: shell
         models: ["claude-*"]
@@ -47,6 +51,12 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 	}
 	if cfg.Compression.DefaultCombo != "shell" {
 		t.Fatalf("default combo = %q", cfg.Compression.DefaultCombo)
+	}
+	if len(cfg.Compression.OutputStyles) != 1 {
+		t.Fatalf("output styles = %+v", cfg.Compression.OutputStyles)
+	}
+	if got := cfg.Compression.OutputStyles[0]; got.ID != "terse-prose" || got.Level != "ultra" {
+		t.Fatalf("output style = %+v", got)
 	}
 }
 

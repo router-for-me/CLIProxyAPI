@@ -22,6 +22,9 @@ type Config struct {
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
 	Combos []Combo `yaml:"combos" json:"combos"`
+	// OutputStyles injects response-style instructions into the system prompt.
+	// Independent of Enabled: styles are prompt shaping, not payload compression.
+	OutputStyles []OutputStyle `yaml:"output-styles" json:"output-styles"`
 }
 
 // Combo is one named engine pipeline, optionally scoped to models.
@@ -109,6 +112,22 @@ func (c *Config) Sanitize() {
 		combos = append(combos, Combo{Name: name, Models: combo.Models, Pipeline: steps})
 	}
 	c.Combos = combos
+
+	styles := make([]OutputStyle, 0, len(c.OutputStyles))
+	seenStyle := make(map[string]struct{}, len(c.OutputStyles))
+	for _, style := range c.OutputStyles {
+		id := strings.ToLower(strings.TrimSpace(style.ID))
+		if !knownStyle(id) {
+			log.Warnf("payloadcompress: unknown output style %q ignored", style.ID)
+			continue
+		}
+		if _, dup := seenStyle[id]; dup {
+			continue
+		}
+		seenStyle[id] = struct{}{}
+		styles = append(styles, OutputStyle{ID: id, Level: normalizeLevel(style.Level)})
+	}
+	c.OutputStyles = styles
 
 	c.DefaultCombo = strings.ToLower(strings.TrimSpace(c.DefaultCombo))
 	if _, ok := seen[c.DefaultCombo]; ok {

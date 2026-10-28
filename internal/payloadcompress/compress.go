@@ -13,8 +13,13 @@ type Stats struct {
 	Segments int
 	// Saved holds per-engine byte deltas, in pipeline order.
 	Saved map[string]int
-	// Applied is false in shadow mode, where the original body is returned.
+	// Applied reports that the returned body differs from the input. It stays
+	// false in shadow mode, where the caller gets the original body back.
 	Applied bool
+	// Style reports the injected output style, its target, or why it was skipped.
+	Style string
+	// StyleBytes is the byte delta of the system prompt injection.
+	StyleBytes int
 }
 
 // engine is the identity every pipeline step shares.
@@ -122,6 +127,23 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 	}
 	stats.Applied = true
 	return out, stats
+}
+
+// ApplyAll runs the whole transform chain: payload compression, then output-style
+// injection. Both are idempotent, so applying it again to its own output is a no-op.
+func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
+	out, stats := Apply(cfg, model, body)
+	styled, label := applyOutputStyles(cfg, out)
+	stats.Style = label
+	if label == "" || strings.HasPrefix(label, "skipped:") {
+		return out, stats
+	}
+	stats.StyleBytes = len(styled) - len(out)
+	if cfg.Shadow {
+		return out, stats
+	}
+	stats.Applied = true
+	return styled, stats
 }
 
 func buildEngines(steps []Step) []engine {

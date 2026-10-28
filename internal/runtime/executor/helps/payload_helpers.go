@@ -20,14 +20,15 @@ import (
 // business payload. Rooted payloads (envelope formats) are left alone because
 // their offsets are not the conversation itself.
 func applyRequestCompression(cfg *config.Config, model, root string, body []byte) []byte {
-	if cfg == nil || !cfg.Compression.Enabled || root != "" {
+	if cfg == nil || root != "" || (!cfg.Compression.Enabled && len(cfg.Compression.OutputStyles) == 0) {
 		return body
 	}
-	out, stats := payloadcompress.Apply(cfg.Compression, model, body)
+	out, stats := payloadcompress.ApplyAll(cfg.Compression, model, body)
 	if !stats.Applied {
-		if cfg.Compression.Shadow && stats.Combo != "" && log.IsLevelEnabled(log.DebugLevel) {
+		if cfg.Compression.Shadow && (stats.Combo != "" || stats.Style != "") && log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"combo":    stats.Combo,
+				"style":    stats.Style,
 				"bytes_in": stats.BytesIn,
 				"bytes_to": stats.BytesOut,
 				"saved":    stats.Saved,
@@ -41,6 +42,7 @@ func applyRequestCompression(cfg *config.Config, model, root string, body []byte
 			"bytes_in": stats.BytesIn,
 			"bytes_to": stats.BytesOut,
 			"segments": stats.Segments,
+			"style":    stats.Style,
 			"saved":    stats.Saved,
 		}).Debug("payload compression applied")
 	}
