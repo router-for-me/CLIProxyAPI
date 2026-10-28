@@ -557,3 +557,31 @@ func TestMergeExistingAuthMetadataPortalAttributionDeterministic(t *testing.T) {
 		t.Fatalf("expected stale portal to be skipped when target defines oauth_provider, got %#v", reloginTarget.Metadata["portal"])
 	}
 }
+
+func TestMergeExistingAuthMetadataDoesNotRestoreRefreshTokenExpiry(t *testing.T) {
+	target := &Auth{Provider: "claude", Metadata: map[string]any{"type": "claude"}}
+	MergeExistingAuthMetadata(target, map[string]any{
+		"refresh_token_expires_at": "2026-01-01T00:00:00Z",
+		"note":                     "kept",
+	})
+
+	if _, exists := target.Metadata["refresh_token_expires_at"]; exists {
+		t.Fatalf("refresh_token_expires_at = %v, want previous grant expiry dropped on re-login", target.Metadata["refresh_token_expires_at"])
+	}
+	if target.Metadata["note"] != "kept" {
+		t.Fatalf("note = %v, want kept", target.Metadata["note"])
+	}
+}
+
+func TestMergeRefreshedAuthAppliesRefreshTokenExpiry(t *testing.T) {
+	base := &Auth{ID: "claude", Provider: "claude", Metadata: map[string]any{"refresh_token_expires_at": "2026-01-01T00:00:00Z"}}
+	current := base.Clone()
+	current.Metadata["refresh_token_expires_at"] = "2026-01-15T00:00:00Z"
+	updated := base.Clone()
+	updated.Metadata["refresh_token_expires_at"] = "2026-01-31T00:00:00Z"
+
+	merged := MergeRefreshedAuth(base, current, updated)
+	if got := merged.Metadata["refresh_token_expires_at"]; got != "2026-01-31T00:00:00Z" {
+		t.Fatalf("refresh_token_expires_at = %v, want refreshed value", got)
+	}
+}

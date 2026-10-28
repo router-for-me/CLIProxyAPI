@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -134,7 +136,11 @@ type tokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
-	Organization struct {
+	// RefreshTokenExpiresIn is the remaining lifetime of the refresh token in
+	// seconds. Anthropic sends it as a number or a numeric string; it is kept
+	// raw so a malformed value never fails the token response.
+	RefreshTokenExpiresIn json.RawMessage `json:"refresh_token_expires_in,omitempty"`
+	Organization          struct {
 		UUID string `json:"uuid"`
 		Name string `json:"name"`
 	} `json:"organization"`
@@ -142,6 +148,38 @@ type tokenResponse struct {
 		UUID         string `json:"uuid"`
 		EmailAddress string `json:"email_address"`
 	} `json:"account"`
+}
+
+// parseRefreshTokenExpiresIn reads refresh_token_expires_in, accepting either a
+// JSON number or a numeric string. It reports false for absent, non-numeric or
+// non-positive values.
+func parseRefreshTokenExpiresIn(raw json.RawMessage) (int64, bool) {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return 0, false
+	}
+	if strings.HasPrefix(value, `"`) {
+		var text string
+		if errUnmarshal := json.Unmarshal(raw, &text); errUnmarshal != nil {
+			return 0, false
+		}
+		value = strings.TrimSpace(text)
+	}
+	seconds, errParse := strconv.ParseFloat(value, 64)
+	if errParse != nil || math.IsNaN(seconds) || seconds <= 0 || seconds > math.MaxInt32 {
+		return 0, false
+	}
+	return int64(seconds), true
+}
+
+// refreshTokenExpiresAt converts refresh_token_expires_in into an absolute RFC3339
+// UTC timestamp relative to now. It returns an empty string when the value is absent.
+func refreshTokenExpiresAt(now time.Time, raw json.RawMessage) string {
+	seconds, ok := parseRefreshTokenExpiresIn(raw)
+	if !ok {
+		return ""
+	}
+	return now.Add(time.Duration(seconds) * time.Second).UTC().Format(time.RFC3339)
 }
 
 // authorizationCodeExchangeRequest is the authorization-code exchange body.
@@ -448,6 +486,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 		OrganizationName: tokenResp.Organization.Name,
 		Expire:           time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
+	tokenData.RefreshTokenExpiresAt = refreshTokenExpiresAt(time.Now(), tokenResp.RefreshTokenExpiresIn)
 
 	// Replay the native login companion lookups and let the profile response win
 	// where it carries identity the token response omitted.
@@ -588,6 +627,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		RefreshToken: tokenResp.RefreshToken,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
+	tokenData.RefreshTokenExpiresAt = refreshTokenExpiresAt(time.Now(), tokenResp.RefreshTokenExpiresIn)
 	profile, errProfile := o.FetchOAuthProfile(ctx, tokenResp.AccessToken)
 	if errProfile != nil {
 		log.Warnf("fetch Claude OAuth profile after refresh: %v", errProfile)
@@ -621,6 +661,7 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 		DeviceIDs:        append([]string(nil), bundle.DeviceIDs...),
 		Expire:           bundle.TokenData.Expire,
 	}
+	storage.RefreshTokenExpiresAt = bundle.TokenData.RefreshTokenExpiresAt
 
 	return storage
 }
@@ -689,4 +730,9 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 		storage.OrganizationName = tokenData.OrganizationName
 	}
 	storage.Expire = tokenData.Expire
+	// The refresh token's end of life is fixed at sign-in; keep the stored value
+	// when a refresh response omits it.
+	if tokenData.RefreshTokenExpiresAt != "" {
+		storage.RefreshTokenExpiresAt = tokenData.RefreshTokenExpiresAt
+	}
 }
