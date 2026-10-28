@@ -187,7 +187,8 @@ next refresher tick (within a minute) restores them from the snapshot.
 
 ## Device matrix (Waseem, 26 Oct 2026: "any agent from any device" by Tue 28 / Wed 29 Oct)
 
-Last verified: 28 Oct 2026 (m6, mbp, omarchy).
+Last verified: 28 Oct 2026 (m6, mbp, omarchy). On mbp Waseem is signed in to Muse, agy, Devin, Grok and Kimi:
+`devin auth status` and `grok models` report it, Muse and Kimi hold their credential files, agy is his word.
 
 Work devices only: wasnewpc, omarchy (same GPU box, Linux boot; one boot up at a time), mbp, m6. naz and the
 Beelink HA box are excluded. Cell values: **hub** = points at m6 and works; **login** = CLI-only tool, Waseem logs
@@ -201,9 +202,9 @@ in on that device; **install** = not installed yet; **check** = installed, hub s
 | OMP | hub | hub | hub | hub | hub provider in `~/.omp/agent/models.json` (non-Claude models) |
 | pi | hub | hub | hub | hub | hub provider in `~/.pi/agent/models.json` |
 | opencode | hub | hub | hub (fixed 28 Oct: npm postinstall had not run, so the binary did not start) | hub | hub provider in `~/.config/opencode/opencode.json` |
-| Muse CLI | login (launcher installed 26 Oct) | install+login | login? (installed) | login? (installed) | own login; Muse models via hub for the tools above |
-| agy (Antigravity) | login (installed 26 Oct) | login? (installed) | login? (installed) | login (binary copied from auto-vps 26 Oct) | own login |
-| Devin CLI | login (installed 26 Oct) | install+login | login (installed 28 Oct, 3000.11.228) | login (binary copied from auto-vps 26 Oct) | own login; Devin models via hub for the tools above |
+| Muse CLI | login (launcher installed 26 Oct) | install+login | signed in (1.4.14) | login? (installed) | own login; Muse models via hub for the tools above |
+| agy (Antigravity) | login (installed 26 Oct) | login? (installed) | signed in (Waseem, 28 Oct; 1.4.9) | login (binary copied from auto-vps 26 Oct) | own login |
+| Devin CLI | login (installed 26 Oct) | install+login | signed in (installed 28 Oct, 3000.11.228) | login (binary copied from auto-vps 26 Oct) | own login; Devin models via hub for the tools above |
 | Grok CLI | hub (default) | install | hub (beside Waseem's own grok.com login, which stays default) | hub (default) | hub models in `~/.grok/config.toml` (see below) |
 | Kimi CLI | hub (default) | install | hub (beside Waseem's own Kimi login, which stays default; CLI is 0.20.3) | hub (default) | hub provider in `~/.kimi-code/config.toml` (see below) |
 | dsh (DeepSeek) | installed, key needed | installed, key needed | installed, key needed | installed (npm; mise cannot resolve its rc version), key needed | API key from BWS, or hub `deepseek-flash` through OMP/pi |
