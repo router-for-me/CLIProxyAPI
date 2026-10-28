@@ -291,20 +291,24 @@ requests:
   #           level: lite           # lite | full | ultra. Missing level defaults to lite.
   #           options:
   #             language: en        # Pack tag: en, es, pt-BR, id, it, de, fr, ja, ru, hu, zh.
-  #             auto-detect: false  # Infer the pack from the prompt text instead.
-  #             language-packs: []  # Fallback tags when detection finds nothing better.
+  #             auto-detect: true   # Infer the pack from the prompt text, choosing among language-packs.
+  #             language-packs: []  # Packs auto-detection may pick. Empty means English only.
   #             min-message-length: 50
   #             skip-rules: []      # Rule names to disable, e.g. ["articles", "ultra_abbreviations"].
   #         - engine: lite
   #           options:
-  #             max-tool-length: 0          # Truncate longer tool results, head and tail kept. 0 disables.
+  #             max-tool-length: 2000       # Truncate longer tool results, head and tail kept.
   #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
   #
-  #   # Every engine accepts an options block; omitted knobs keep the defaults below.
-  #   #   headroom:       min-rows: 8, max-columns: 32
+  #   # Every engine accepts an options block; omitted knobs keep the defaults below,
+  #   # which are the upstream OmniRoute defaults.
+  #   #   headroom:       min-rows: 8
   #   #   session-dedup:  min-block-chars: 80
-  #   #   rtk:            intensity: minimal|standard|aggressive, max-lines, max-chars,
-  #   #                   deduplicate-threshold, min-savings-percent
+  #   #   lite:           max-tool-length: 2000, compress-tool-results: true
+  #   #   rtk:            intensity: minimal, max-lines: 120, max-chars: 12000,
+  #   #                   deduplicate-threshold: 3, min-savings-percent: 0 (off)
+  #   #   caveman:        level: lite, min-message-length: 50,
+  #   #                   language: "", auto-detect: true, language-packs: [en]
   #   # Output styles steer how the model writes its answer by appending an instruction
   #   # to the existing system prompt. They do not rewrite responses, so streaming and
   #   # tool calls are untouched. Injection is skipped for prompts that must not be

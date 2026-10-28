@@ -33,12 +33,14 @@ type rtkLimits struct {
 }
 
 func (e rtkEngine) limits() rtkLimits {
-	limits := rtkLimits{minRun: 5, maxLines: 120, maxChars: 12000, minSavings: 5}
+	// Defaults are the upstream RTK defaults: minimal intensity, 120 lines, 12000
+	// chars, dedup threshold 3, and no savings gate.
+	limits := rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000}
 	switch e.opts.Intensity {
 	case "standard":
-		limits = rtkLimits{minRun: 3, maxLines: 200, maxChars: 24000, minSavings: 5}
+		limits.maxLines, limits.maxChars = 200, 24000
 	case "aggressive":
-		limits = rtkLimits{minRun: 2, maxLines: 400, maxChars: 48000, minSavings: 2}
+		limits.minRun, limits.maxLines, limits.maxChars = 2, 400, 48000
 	}
 	if e.opts.DeduplicateThreshold > 0 {
 		limits.minRun = e.opts.DeduplicateThreshold

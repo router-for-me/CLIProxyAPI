@@ -20,17 +20,15 @@ const (
 	headroomMarker      = "# columns="
 	headroomMinBytes    = 512
 	headroomDefaultRows = 8
-	headroomDefaultCols = 32
+	// headroomMaxColumns is a sanity guard, not a knob: a table this wide does not
+	// shrink enough to be worth rewriting.
+	headroomMaxColumns = 32
 )
 
 func (e headroomEngine) compress(text string) (string, bool) {
 	minRows := e.opts.MinRows
 	if minRows <= 0 {
 		minRows = headroomDefaultRows
-	}
-	maxCols := e.opts.MaxColumns
-	if maxCols <= 0 {
-		maxCols = headroomDefaultCols
 	}
 	trimmed := strings.TrimSpace(text)
 	if len(trimmed) < headroomMinBytes || trimmed[0] != '[' {
@@ -55,7 +53,7 @@ func (e headroomEngine) compress(text string) (string, bool) {
 		keys = append(keys, k.String())
 		return true
 	})
-	if !ok || len(keys) == 0 || len(keys) > maxCols {
+	if !ok || len(keys) == 0 || len(keys) > headroomMaxColumns {
 		return text, false
 	}
 	homogeneous := true

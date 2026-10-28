@@ -116,13 +116,23 @@ func TestCavemanUsesPortuguesePack(t *testing.T) {
 }
 
 func TestCavemanAutoDetect(t *testing.T) {
-	engine := cavemanEngine{level: "lite", opts: StepOptions{AutoDetect: true}}
 	text := "Preciso corrigir o arquivo porque falhou obrigado, por favor basicamente."
-	if got := engine.ruleSet(text); len(got) == 0 {
-		t.Fatal("auto-detect resolved no rules")
-	}
 	if got := detectLanguage(text); got != "pt-BR" {
 		t.Fatalf("detected %s", got)
+	}
+	// Detection only picks among the enabled packs, which default to English.
+	strict := cavemanEngine{level: "lite"}
+	if got := strict.pack(text); got != "en" {
+		t.Fatalf("unexpected pack %s without enabled packs", got)
+	}
+	loose := cavemanEngine{level: "lite", opts: StepOptions{LanguagePacks: []string{"en", "pt-BR"}}}
+	if got := loose.pack(text); got != "pt-BR" {
+		t.Fatalf("auto-detect picked %s, want pt-BR", got)
+	}
+	off := false
+	pinned := cavemanEngine{level: "lite", opts: StepOptions{LanguagePacks: []string{"en", "pt-BR"}, AutoDetect: &off}}
+	if got := pinned.pack(text); got != "en" {
+		t.Fatalf("auto-detect=false still detected %s", got)
 	}
 }
 
@@ -180,28 +190,38 @@ func TestEngineOptionOverrides(t *testing.T) {
 }
 
 func TestRTKIntensityLadder(t *testing.T) {
-	// Four identical lines: minimal (run >= 5) leaves them, aggressive (run >= 2)
-	// collapses them.
-	text := "build start\n" + strings.Repeat("retrying\n", 4) +
+	// A pair of identical lines: the upstream default threshold (3) keeps them,
+	// aggressive (2) collapses them.
+	text := "build start\nretrying\nretrying\n" +
 		strings.Join([]string{"a", "b", "c", "d", "e", "f", "g", "h"}, "\n") + "\nbuild done\n"
 
-	minimalOut, okMin := rtkEngine{opts: StepOptions{Intensity: "minimal"}}.compress(text)
-	if okMin {
-		t.Fatalf("minimal must not collapse a run of 4:\n%s", minimalOut)
+	if out, ok := (rtkEngine{}).compress(text); ok {
+		t.Fatalf("default threshold must not collapse a run of 2:\n%s", out)
 	}
-	aggOut, okAgg := rtkEngine{opts: StepOptions{Intensity: "aggressive"}}.compress(text)
+	aggOut, okAgg := (rtkEngine{opts: StepOptions{Intensity: "aggressive"}}).compress(text)
 	if !okAgg {
 		t.Fatal("aggressive should collapse the run")
 	}
-	if !strings.Contains(aggOut, "retrying"+rtkRepeatMark+"4)") {
+	if !strings.Contains(aggOut, "retrying"+rtkRepeatMark+"2)") {
 		t.Fatalf("aggressive did not collapse:\n%s", aggOut)
 	}
 
-	// An explicit deduplicate-threshold override wins over the ladder.
-	thresh := rtkEngine{opts: StepOptions{Intensity: "minimal", DeduplicateThreshold: 3}}
+	// An explicit deduplicate-threshold override wins over the ladder, and the
+	// upstream default is 3.
+	thresh := rtkEngine{opts: StepOptions{Intensity: "minimal", DeduplicateThreshold: 2}}
 	threshOut, okThresh := thresh.compress(text)
-	if !okThresh || !strings.Contains(threshOut, "retrying"+rtkRepeatMark+"4)") {
+	if !okThresh || !strings.Contains(threshOut, "retrying"+rtkRepeatMark+"2)") {
 		t.Fatalf("deduplicate-threshold override ignored:\n%s", threshOut)
+	}
+}
+
+func TestRTKDefaultCapsMatchUpstream(t *testing.T) {
+	limits := rtkEngine{}.limits()
+	if limits.minRun != 3 || limits.maxLines != 120 || limits.maxChars != 12000 {
+		t.Fatalf("default limits = %+v", limits)
+	}
+	if limits.minSavings != 0 {
+		t.Fatalf("default savings gate must be off, got %d", limits.minSavings)
 	}
 }
 
@@ -248,3 +268,34 @@ func TestLiteToolResultCap(t *testing.T) {
 }
 
 func strPtr(v string) *string { return &v }
+
+// TestDefaultKnobsMatchUpstream pins every engine default to the value OmniRoute
+// ships, so a drift shows up as a test failure rather than as silent behavior.
+func TestDefaultKnobsMatchUpstream(t *testing.T) {
+	var hr headroomEngine
+	if hr.name() != EngineHeadroom {
+		t.Fatal("headroom engine missing")
+	}
+	if headroomDefaultRows != 8 {
+		t.Fatalf("headroom min-rows = %d", headroomDefaultRows)
+	}
+	if dedupDefaultMinSize != 80 {
+		t.Fatalf("session-dedup min-block-chars = %d", dedupDefaultMinSize)
+	}
+	if liteDefaultMaxToolLength != 2000 {
+		t.Fatalf("lite max-tool-length = %d", liteDefaultMaxToolLength)
+	}
+	var li liteEngine
+	if !li.keepToolResults() {
+		t.Fatal("lite compress-tool-results must default to true")
+	}
+	if limits := (rtkEngine{}).limits(); limits != (rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000}) {
+		t.Fatalf("rtk defaults = %+v", limits)
+	}
+	if got := (cavemanEngine{}).pack("  "); got != "en" {
+		t.Fatalf("caveman default language = %s", got)
+	}
+	if autoDetect := (cavemanEngine{}); !autoDetect.packEnabled("en") || autoDetect.packEnabled("pt-BR") {
+		t.Fatal("caveman default enabled packs must be English only")
+	}
+}

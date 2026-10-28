@@ -50,13 +50,12 @@ type Step struct {
 type StepOptions struct {
 	// Headroom: minimum homogeneous rows before columnar compaction.
 	MinRows int `yaml:"min-rows" json:"min-rows"`
-	// Headroom: maximum columns to render before giving up.
-	MaxColumns int `yaml:"max-columns" json:"max-columns"`
 
 	// SessionDedup: minimum segment size that may be elided as a duplicate.
 	MinBlockChars int `yaml:"min-block-chars" json:"min-block-chars"`
 
 	// Lite: truncate a tool result longer than this, head and tail kept.
+	// Defaults to 2000, the upstream default.
 	MaxToolLength int `yaml:"max-tool-length" json:"max-tool-length"`
 	// Lite: skip tool-result truncation entirely when false.
 	CompressToolResults *bool `yaml:"compress-tool-results" json:"compress-tool-results"`
@@ -78,9 +77,10 @@ type StepOptions struct {
 	SkipRules []string `yaml:"skip-rules" json:"skip-rules"`
 	// Caveman: language pack tag ("pt-BR", "ja", ...). Empty means infer.
 	Language string `yaml:"language" json:"language"`
-	// Caveman: infer the pack from the prompt text instead of Language.
-	AutoDetect bool `yaml:"auto-detect" json:"auto-detect"`
-	// Caveman: fallback packs when auto-detection finds nothing better than English.
+	// Caveman: infer the pack from the prompt text, choosing among LanguagePacks.
+	// Defaults to true, the upstream default.
+	AutoDetect *bool `yaml:"auto-detect" json:"auto-detect"`
+	// Caveman: packs auto-detection may pick from. Defaults to English only.
 	LanguagePacks []string `yaml:"language-packs" json:"language-packs"`
 }
 
@@ -140,9 +140,6 @@ func normalizeEngineLevel(engine, level string) string {
 func sanitizeStepOptions(opts StepOptions) StepOptions {
 	if opts.MinRows < 0 {
 		opts.MinRows = 0
-	}
-	if opts.MaxColumns < 0 || opts.MaxColumns == 1 {
-		opts.MaxColumns = 0
 	}
 	if opts.MaxToolLength < 0 {
 		opts.MaxToolLength = 0

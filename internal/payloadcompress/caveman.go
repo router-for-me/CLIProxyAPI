@@ -48,17 +48,36 @@ func (e cavemanEngine) compressKind(kind segmentKind, text string) (string, bool
 	return restoreSpans(out, spans), true
 }
 
+// pack picks the rule tag. An explicit language wins; otherwise detection
+// chooses among the enabled packs, which default to English only.
+func (e cavemanEngine) pack(text string) string {
+	if tag := strings.TrimSpace(e.opts.Language); tag != "" {
+		return tag
+	}
+	if e.opts.AutoDetect == nil || *e.opts.AutoDetect {
+		if tag := detectLanguage(text); e.packEnabled(tag) {
+			return tag
+		}
+	}
+	return "en"
+}
+
+func (e cavemanEngine) packEnabled(tag string) bool {
+	if len(e.opts.LanguagePacks) == 0 {
+		return tag == "en"
+	}
+	for _, pack := range e.opts.LanguagePacks {
+		if strings.EqualFold(strings.TrimSpace(pack), tag) {
+			return true
+		}
+	}
+	return false
+}
+
 // ruleSet resolves the language pack for this segment, then applies the level and
 // skip-rules filters.
 func (e cavemanEngine) ruleSet(text string) []cavemanRule {
-	tag := strings.TrimSpace(e.opts.Language)
-	if e.opts.AutoDetect || tag == "" {
-		tag = detectLanguage(text)
-		if tag == "en" && len(e.opts.LanguagePacks) > 0 && !e.opts.AutoDetect {
-			tag = strings.TrimSpace(e.opts.LanguagePacks[0])
-		}
-	}
-	rules := packRulesFor(tag)
+	rules := packRulesFor(e.pack(text))
 	if len(e.opts.SkipRules) == 0 {
 		return filterRulesByLevel(rules, e.level)
 	}

@@ -75,7 +75,7 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 		t.Fatalf("non-ladder engine kept a level: %q", lvl)
 	}
 	opts := caveman.Options
-	if opts.Language != "pt-BR" || !opts.AutoDetect || len(opts.SkipRules) != 1 {
+	if opts.Language != "pt-BR" || opts.AutoDetect == nil || !*opts.AutoDetect || len(opts.SkipRules) != 1 {
 		t.Fatalf("caveman options = %+v", opts)
 	}
 }

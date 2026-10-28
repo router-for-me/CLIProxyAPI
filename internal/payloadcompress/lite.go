@@ -11,12 +11,18 @@ type liteEngine struct {
 
 func (liteEngine) name() string { return EngineLite }
 
+// liteDefaultMaxToolLength is the upstream DEFAULT_MAX_TOOL_LENGTH.
+const liteDefaultMaxToolLength = 2000
+
 // compressKind adds the tool-result cap that lite owns upstream, then falls back
 // to prose cleanup.
 func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
-	if kind == kindToolOutput && e.keepToolResults() && e.opts.MaxToolLength > 0 &&
-		len(text) > e.opts.MaxToolLength {
-		return capMiddleChars(text, e.opts.MaxToolLength), true
+	limit := e.opts.MaxToolLength
+	if limit <= 0 {
+		limit = liteDefaultMaxToolLength
+	}
+	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit {
+		return capMiddleChars(text, limit), true
 	}
 	return e.compress(text)
 }
