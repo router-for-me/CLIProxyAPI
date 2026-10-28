@@ -143,17 +143,6 @@ func capMiddle(lines []string, max int, unit string) []string {
 	return out
 }
 
-func capMiddleChars(text string, max int) string {
-	if max < 8 || charLen(text) <= max {
-		return text
-	}
-	runes := []rune(text)
-	head := max * 2 / 3
-	tail := max - head
-	omitted := strconv.Itoa(len(runes) - head - tail)
-	return string(runes[:head]) + "…(" + omitted + " chars omitted)…" + string(runes[len(runes)-tail:])
-}
-
 // charElisionReserve is the room the elision marker needs inside a char budget:
 // it covers "…(", the decimal count and " chars omitted)…".
 const charElisionReserve = 32
