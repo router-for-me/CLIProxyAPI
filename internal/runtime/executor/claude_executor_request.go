@@ -2344,6 +2344,34 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 	return resolver
 }
 
+// restorePrefixlessAlias maps a name the model emitted without the leading
+// "mcp__" ("<server>__<toolID>_<semantic>") or without the whole
+// "mcp__<server>__" prefix ("<toolID>_<semantic>") back to its original tool.
+// Names starting with "mcp__" and names the caller declared itself are never
+// rewritten, and only an exact, unique alias tail matches.
+func (resolver claudeMCPAliasResolver) restorePrefixlessAlias(name string) (string, bool) {
+	if name == "" || strings.HasPrefix(name, "mcp__") {
+		return "", false
+	}
+	for _, entry := range resolver.aliases {
+		if entry.original == name {
+			return "", false
+		}
+	}
+	if original, ok := resolver.exact["mcp__"+name]; ok && original != "mcp__"+name {
+		return original, true
+	}
+	matchedOriginal := ""
+	matchCount := 0
+	for _, entry := range resolver.aliases {
+		if strings.TrimPrefix(entry.alias, "mcp__"+entry.parts.server+"__") == name {
+			matchedOriginal = entry.original
+			matchCount++
+		}
+	}
+	return matchedOriginal, matchCount == 1
+}
+
 // restorePassthroughWrapped maps a tail that is exactly a declared caller-owned MCP
 // tool name (mcp__server__tool) back to that tool.
 func (resolver claudeMCPAliasResolver) restorePassthroughWrapped(tail string) (string, bool) {
@@ -2415,6 +2443,10 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
+		if original, ok := resolver.restorePrefixlessAlias(name); ok {
+			log.Debugf("claude oauth mcp alias: recovered prefixless tool name %q as %q", name, original)
+			return original, true, nil
+		}
 		return "", false, nil
 	}
 

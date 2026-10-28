@@ -1161,3 +1161,62 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }
+
+// restoreToolUseName runs one tool_use name through both the non-stream and the
+// stream reverse paths and requires them to agree.
+func restoreToolUseName(t *testing.T, name string, reverseMap map[string]string) string {
+	t.Helper()
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames(%q) error = %v", name, errReverse)
+	}
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, name))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine(%q) error = %v", name, errStream)
+	}
+	got := gjson.GetBytes(restored, "content.0.name").String()
+	if gotStream := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); gotStream != got {
+		t.Fatalf("stream restored %q as %q, non-stream as %q", name, gotStream, got)
+	}
+	return got
+}
+
+func TestReverseRemapOAuthToolNamesRecoversPrefixlessAlias(t *testing.T) {
+	secret := "prefixless-alias-caller"
+	body := []byte(`{"tools":[{"name":"eval"},{"name":"read"}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
+	evalAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	parts, ok := parseClaudeMCPAlias(evalAlias)
+	if !ok {
+		t.Fatalf("eval alias is invalid: %q", evalAlias)
+	}
+	bare := parts.toolID + "_" + parts.semantic
+
+	// The model dropped "mcp__<server>__" (seen live as "tip_eval" for
+	// "mcp__lion_inflict__tip_eval") or only the leading "mcp__".
+	for _, drifted := range []string{bare, parts.server + "__" + bare} {
+		if got := restoreToolUseName(t, drifted, reverseMap); got != "eval" {
+			t.Fatalf("restored %q as %q, want eval", drifted, got)
+		}
+	}
+
+	// Original names and unrelated names are forwarded unchanged.
+	for _, name := range []string{"eval", "read", "not_a_tool"} {
+		if got := restoreToolUseName(t, name, reverseMap); got != name {
+			t.Fatalf("restored %q as %q, want it unchanged", name, got)
+		}
+	}
+
+	// A declared tool whose real name equals another tool's alias tail keeps
+	// its own name: the caller's declaration wins over prefix recovery.
+	collidingBody := []byte(fmt.Sprintf(`{"tools":[{"name":"eval"},{"name":%q}]}`, bare))
+	collidingRemapped, collidingMap := remapOAuthToolNamesWithOptions(collidingBody, claudeMCPAliasOptions{secret: secret})
+	if got := gjson.GetBytes(collidingRemapped, "tools.0.name").String(); got != evalAlias {
+		t.Fatalf("eval alias changed between requests: %q != %q", got, evalAlias)
+	}
+	if got := restoreToolUseName(t, bare, collidingMap); got != bare {
+		t.Fatalf("restored declared tool %q as %q, want it unchanged", bare, got)
+	}
+}
