@@ -7,9 +7,10 @@ import (
 	"strings"
 )
 
-// rtkEngine compacts captured command output: collapse repeated lines, shorten
-// pathological lines, and cap the total size. It only fires on shapes that look
-// like machine output, and it keeps the first copy of anything it elides.
+// rtkEngine compacts captured command output: select the filter for the output's
+// shape, collapse repeated lines, shorten pathological lines, and cap the total
+// size. It only fires on shapes that look like machine output, and it keeps the
+// first copy of anything it elides.
 type rtkEngine struct {
 	opts StepOptions
 }
@@ -69,7 +70,15 @@ func (e rtkEngine) compress(text string) (string, bool) {
 	if strings.Count(text, "\n") < rtkMinLines {
 		return text, false
 	}
+	original := text
 	limits := e.limits()
+
+	// Filters run before the caps below: a filter knows what the command that
+	// produced this output looks like, which is what decides which lines are noise.
+	changed := false
+	if filtered, ok := applyRTKFilters(text); ok {
+		text, changed = filtered, true
+	}
 
 	lines := strings.Split(text, "\n")
 	trailing := lines[len(lines)-1] == ""
@@ -77,7 +86,6 @@ func (e rtkEngine) compress(text string) (string, bool) {
 		lines = lines[:len(lines)-1]
 	}
 
-	changed := false
 	out := make([]string, 0, len(lines))
 	for i := 0; i < len(lines); i++ {
 		raw := lines[i]
@@ -109,12 +117,12 @@ func (e rtkEngine) compress(text string) (string, bool) {
 		i += run - 1
 	}
 
-	if capped, ok := rtkTruncate(out, limits); ok {
+	if capped, ok := rtkTruncate(out, limits, rtkDefaultPriority); ok {
 		out = capped
 		changed = true
 	}
 	if !changed {
-		return text, false
+		return original, false
 	}
 
 	res := strings.Join(out, "\n")
@@ -123,8 +131,8 @@ func (e rtkEngine) compress(text string) (string, bool) {
 	}
 	// A rewrite that saves less than the threshold is not worth destabilizing the
 	// prefix for.
-	if len(res) >= len(text)-len(text)*limits.minSavings/100 {
-		return text, false
+	if len(res) >= len(original)-len(original)*limits.minSavings/100 {
+		return original, false
 	}
 	return res, true
 }
@@ -144,11 +152,11 @@ var rtkSeverity = regexp.MustCompile(`(?i)` + strings.Join([]string{
 // the line pass has already dropped the middle.
 const rtkTruncatedByChars = "\n[rtk:truncated by chars]\n"
 
-// rtkTruncate ports upstream smartTruncate: keep the head and the tail, keep any
-// diagnostic line from the middle, and only then enforce the char budget on line
-// boundaries, so the head does not end inside an anchor and the tail does not
-// start inside a grep hit.
-func rtkTruncate(lines []string, limits rtkLimits) ([]string, bool) {
+// rtkDefaultPriority is the vocabulary the engine-level cap rescues from the
+// middle of a line elision. Filter packs pass their own preserve patterns.
+var rtkDefaultPriority = []*regexp.Regexp{rtkSeverity}
+
+func rtkTruncate(lines []string, limits rtkLimits, priority []*regexp.Regexp) ([]string, bool) {
 	overLines := limits.maxLines > 0 && len(lines) > limits.maxLines
 	overChars := limits.maxChars > 0 && charLen(strings.Join(lines, "\n")) > limits.maxChars
 	if !overLines && !overChars {
@@ -156,8 +164,8 @@ func rtkTruncate(lines []string, limits rtkLimits) ([]string, bool) {
 	}
 	// A pattern matching most lines is not selective: it would fill the head with
 	// the same text the plain head already keeps.
-	patterns := make([]*regexp.Regexp, 0, 1)
-	for _, re := range []*regexp.Regexp{rtkSeverity} {
+	patterns := make([]*regexp.Regexp, 0, len(priority))
+	for _, re := range priority {
 		hits := 0
 		for _, line := range lines {
 			if re.MatchString(line) {
