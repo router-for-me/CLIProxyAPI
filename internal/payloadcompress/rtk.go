@@ -78,10 +78,14 @@ func (e rtkEngine) compress(text string) (string, bool) {
 		raw := lines[i]
 		line := raw
 		if len(line) > rtkMaxLineBytes {
-			line = raw[:rtkHeadBytes] + " …(" +
-				strconv.Itoa(len(raw)-rtkHeadBytes-rtkTailBytes) + " chars omitted)… " +
-				raw[len(raw)-rtkTailBytes:]
-			changed = true
+			// Count and cut by character: the marker promises chars, and a byte cut
+			// can split a multi-byte rune.
+			if runes := []rune(raw); len(runes) > rtkHeadBytes+rtkTailBytes {
+				line = string(runes[:rtkHeadBytes]) + " …(" +
+					strconv.Itoa(len(runes)-rtkHeadBytes-rtkTailBytes) + " chars omitted)… " +
+					string(runes[len(runes)-rtkTailBytes:])
+				changed = true
+			}
 		}
 		run := 1
 		if raw != "" && !strings.Contains(raw, rtkRepeatMark) {
@@ -112,7 +116,7 @@ func (e rtkEngine) compress(text string) (string, bool) {
 	if trailing {
 		res += "\n"
 	}
-	if len(res) > limits.maxChars {
+	if len(res) > limits.maxChars && charLen(res) > limits.maxChars {
 		res = capMiddleChars(res, limits.maxChars)
 	}
 	// A rewrite that saves less than the threshold is not worth destabilizing the
@@ -139,11 +143,12 @@ func capMiddle(lines []string, max int, unit string) []string {
 }
 
 func capMiddleChars(text string, max int) string {
-	if max < 8 || len(text) <= max {
+	if max < 8 || charLen(text) <= max {
 		return text
 	}
+	runes := []rune(text)
 	head := max * 2 / 3
 	tail := max - head
-	omitted := strconv.Itoa(len(text) - head - tail)
-	return text[:head] + "…(" + omitted + " chars omitted)…" + text[len(text)-tail:]
+	omitted := strconv.Itoa(len(runes) - head - tail)
+	return string(runes[:head]) + "…(" + omitted + " chars omitted)…" + string(runes[len(runes)-tail:])
 }

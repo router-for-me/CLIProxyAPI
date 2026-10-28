@@ -21,7 +21,7 @@ func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
 	if limit <= 0 {
 		limit = liteDefaultMaxToolLength
 	}
-	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit {
+	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit && charLen(text) > limit {
 		return capMiddleChars(text, limit), true
 	}
 	return e.compress(text)

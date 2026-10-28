@@ -3,6 +3,7 @@ package payloadcompress
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLanguagePacksLoad(t *testing.T) {
@@ -264,6 +265,25 @@ func TestLiteToolResultCap(t *testing.T) {
 	disabled := liteEngine{opts: StepOptions{MaxToolLength: 500, CompressToolResults: &off}}
 	if out, ok := disabled.compressKind(kindToolOutput, long); ok || len(out) != len(long) {
 		t.Fatal("compress-tool-results=false must disable the cap")
+	}
+}
+
+// TestLiteToolResultCapCountsChars pins the cap to characters: 300 CJK
+// characters are 900 bytes but only 300 characters, so a 500 cap keeps them.
+func TestLiteToolResultCapCountsChars(t *testing.T) {
+	engine := liteEngine{opts: StepOptions{MaxToolLength: 500}}
+	if out, ok := engine.compressKind(kindToolOutput, strings.Repeat("漢", 300)); ok {
+		t.Fatalf("300 chars under a 500 char cap must not truncate, got %d bytes", len(out))
+	}
+	out, ok := engine.compressKind(kindToolOutput, strings.Repeat("漢", 600))
+	if !ok {
+		t.Fatal("expected truncation")
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("truncation split a multi-byte rune")
+	}
+	if n := utf8.RuneCountInString(out); n > 560 {
+		t.Fatalf("cap is %d chars, not bytes: got %d", 500, n)
 	}
 }
 

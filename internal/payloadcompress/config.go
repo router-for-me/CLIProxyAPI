@@ -54,8 +54,8 @@ type StepOptions struct {
 	// SessionDedup: minimum segment size that may be elided as a duplicate.
 	MinBlockChars int `yaml:"min-block-chars" json:"min-block-chars"`
 
-	// Lite: truncate a tool result longer than this, head and tail kept.
-	// Defaults to 2000, the upstream default.
+	// Lite: truncate a tool result longer than this many characters, head and
+	// tail kept. Defaults to 2000, the upstream default.
 	MaxToolLength int `yaml:"max-tool-length" json:"max-tool-length"`
 	// Lite: skip tool-result truncation entirely when false.
 	CompressToolResults *bool `yaml:"compress-tool-results" json:"compress-tool-results"`

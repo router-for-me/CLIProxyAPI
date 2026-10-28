@@ -297,7 +297,7 @@ requests:
   #             skip-rules: []      # Rule names to disable, e.g. ["articles", "ultra_abbreviations"].
   #         - engine: lite
   #           options:
-  #             max-tool-length: 2000       # Truncate longer tool results, head and tail kept.
+  #             max-tool-length: 2000       # Truncate longer tool results, in characters, head and tail kept.
   #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
   #
   #   # Every engine accepts an options block; omitted knobs keep the defaults below,
