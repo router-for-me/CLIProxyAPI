@@ -202,6 +202,25 @@ them. The hub holds 5 of the 7 that `allowances` counts: the other 2 belong to C
 was deliberately not signed in on the hub (26 Oct). Banked resets persist in the usage snapshot, so a
 restart keeps them.
 
+## L4 follow-up (2026-10-28): smooth bars, no chips, missing providers
+
+Waseem on v4: smoother gradient bars, drop the spend-next chips, and "some services aren't pulling
+through: CommandCode, Devin etc., whereas CodexBar does read them". Per provider, as of 19:51:
+
+| Provider | On /hub | Why |
+|---|---|---|
+| Claude (10), Codex (4), Antigravity (2 pools), Kimi, Muse, GLM, OpenCode Go, Grok | figures | polled |
+| Devin | figures (since this change) | The executor's status refresh never runs for an idle login, so its quota signals stayed empty. The refresher now polls the same seat-management status call with the hub's own login. CodexBar reads app.devin.ai with a browser session instead (its Devin provider is switched off on mbp). |
+| DeepSeek | balance only | Its API reports a prepaid balance and no windows. |
+| CommandCode | last figures from 17:35, "Poll failed" | The API key is dead. The hub's key is the one in BWS `AUT_COMMANDCODE_API_KEY` (same hash), and CommandCode refuses it for billing and for model calls (HTTP 401). CodexBar on mbp reads CommandCode from Waseem's commandcode.ai browser session, not a key, so it still works. Fix: a new API key from commandcode.ai into `AUT_COMMANDCODE_API_KEY`, then into `openai-compatibility` in m6's `~/.local/hub/config.yaml`. Tracker t9501. |
+| Local | "Own GPUs, no allowance" | The estate gateway has no quota. |
+| Cursor | not a row | Cursor has no login on the hub; its included models draw on the Grok Ultra pool, which is the one Grok row. |
+| Claude GDP Team | no figures, disabled | Disabled logins are not polled. |
+
+Codex Team GDP was signed in on the hub at 19:48 by someone else, with priority -1 and group `team`, so it
+ranks below every other Codex seat (and on the page below spent rows). Its 2 banked resets now show,
+making 7.
+
 ## Device matrix (Waseem, 26 Oct 2026: "any agent from any device" by Tue 28 / Wed 29 Oct)
 
 Last verified: 28 Oct 2026 (m6, mbp, omarchy, wasnewpc). On mbp Waseem is signed in to Muse, agy, Devin, Grok and Kimi:
@@ -374,3 +393,4 @@ the local fallback login; running ones keep the route they started with.
 - 2026-10-28: t8314. Both flaky interrupt tests were symptoms of one handler race that upstream fixed the same day (9717e325, issue #7065: a late interrupt after a terminal event got a fake `response.incomplete` or was dropped). Cherry-picked here; `TestResponsesInterruptStopsHTTPUpstream` also waits on a channel for the upstream cancel instead of reading a flag once (fork PR #4; the test half went upstream as router-for-me/CLIProxyAPI#7086 to `dev`). m6 needs a rebuild from `main` to carry it.
 - 2026-10-28 18:23-18:36: auto-vps Claude Code and Codex trialled on the hub (Fable, Opus, Sonnet, Terra answered; Claude and Codex pins landed on the named accounts; an unknown pin got 400). The chair stopped the lane because bb was unreliable (it was already slow at 18:00, before any change) and ran `estate-hub-route off`; the cut-over waits for Waseem ("auto-vps cut-over" above). Hub groups and notes set. PRs open as drafts.
 - 2026-10-28 19:28: L4 (one graphical table, `estate-2fe4a080`) live on m6; `/hub` 200 on the tailnet, traffic serving. Previous binary kept as `~/.local/hub/cliproxyapi.prev-estate-278f7e18` (roll back: move it over `cliproxyapi`, then `launchctl kickstart -k gui/$(id -u)/uk.automancer.hub`). Seen on deploy: the first spawn after swapping the binary failed with `OS_REASON_CODESIGNING`; launchd's KeepAlive retry started it within seconds (`codesign -v` passes). Screenshots: repo `docs/estate-hub-screens/v4-*.png` (account names and emails replaced, the fork is public); real ones in `Notes/Reports/assets/26-10-28-hub-v4-*.png`.
+- 2026-10-28 19:47: follow-up (`estate-19093a4d`, smooth bars, no chips, Devin polled) live on m6; previous binary kept as `~/.local/hub/cliproxyapi.prev-estate-2fe4a080`. Every binary swap so far has failed its first spawn with `OS_REASON_CODESIGNING`, even after an ad-hoc `codesign --force -s -`; launchd's KeepAlive retry starts it about 10 s later. Expect that gap, or try `launchctl bootout` then `bootstrap` next time. Screenshots: repo `docs/estate-hub-screens/v5-*.png` (redacted); real ones in `Notes/Reports/assets/26-10-28-hub-v5-*.png`.
