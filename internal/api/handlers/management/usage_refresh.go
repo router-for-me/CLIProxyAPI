@@ -272,7 +272,8 @@ func (h *Handler) saveUsageSnapshot() {
 func (h *Handler) usageEntry(auth *coreauth.Auth) gin.H {
 	record := h.usage.get(auth.ID)
 	windows := record.Windows
-	if coreauth.ProviderSupportsQuotaObservation(auth.Provider) {
+	// A Devin poll reads the same windows its executor records, so it replaces them.
+	if coreauth.ProviderSupportsQuotaObservation(auth.Provider) && !(strings.EqualFold(auth.Provider, "devin") && len(record.Windows) > 0) {
 		windows = append(coreauth.QuotaUsageWindows(auth.Quota), record.Windows...)
 	}
 	entry := gin.H{"windows": windows}

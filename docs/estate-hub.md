@@ -102,7 +102,7 @@ routing:
 | Kimi | `GET api.kimi.com/coding/v1/usages` | membership level (plan); 5-hour, weekly and monthly pools as used ratios, or the older used/limit counts |
 | Grok (`xai`) | `GET cli-chat-proxy.grok.com/v1/billing?format=credits`, `x-xai-token-auth: xai-grok-cli` | subscription tier; credit used percent for the billing period and its end |
 | Antigravity | `POST daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with the project | remaining fraction and reset per pool (Gemini, Claude and GPT) for the 5-hour and weekly buckets |
-| Devin | not polled: its executor already records daily and weekly remaining percent and resets | shown as-is |
+| Devin | `POST server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus` with the CLI login's session token (the call the Devin executor makes; CodexBar instead reads app.devin.ai with a browser session) | plan; daily and weekly remaining percent and resets. These replace the windows the executor records |
 | Muse (`meta`) | `POST api.meta.ai/muse-code/key` with the device (`dca:`) token | tier name; short window and weekly used percent and resets. The key this call mints is discarded |
 | DeepSeek (API key) | `GET api.deepseek.com/user/balance` | prepaid balance and its currency |
 | CommandCode (API key) | `GET api.commandcode.ai/alpha/billing/credits` and `/alpha/billing/subscriptions` | 5-hour and weekly caps; USD left in the monthly grant, the grant's size (from the plan when the reply omits it) and the period end |
@@ -119,14 +119,13 @@ management API is off.
 
 The page is one list, phone first, in the order consume-first spends (Waseem, 28 Oct 2026: "one
 table, shown graphically, with proper logos for each service, showing a bar, allowance left, in
-spend-first order, resets shown alongside ... closer to what sysdash shows"). Above it, **Spend next**
-is one chip per provider: the account the router will use next, its percent left (or balance) and
-time to reset. A chip jumps to its row.
+spend-first order, resets shown alongside ... closer to what sysdash shows"). Above it is only the
+title and the time of the last refresh: the table's order already says what is spent next.
 
-Each row is one plan: the provider's logo, the plan's name, a twenty-block bar of the weekly
+Each row is one plan: the provider's logo, the plan's name, a smooth bar of the weekly
 allowance left (or the longest window when there is no weekly one), and under it a thin bar for the
-tightest other window, usually the 5-hour one. Bars are green, amber below 40% left and red at 15%
-or less, as in sysdash. On the right are the percent left (a USD balance for prepaid API keys) and
+tightest other window, usually the 5-hour one. A bar's colour runs smoothly with what is left, on
+sysdash's bands: green from 70% left, amber at 40%, red at 15% or less. On the right are the percent left (a USD balance for prepaid API keys) and
 the time to the reset, with the exact time on hover. Tags mark **Next** (the router's next account
 for a provider with several), **Spent**, **Held**, **Cooling**, **Poll failed** and **N banked**
 (Codex banked resets; amber with the first expiry when it is within three days). Antigravity is one
