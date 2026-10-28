@@ -10,24 +10,34 @@ import (
 // headroomEngine rewrites a homogeneous JSON array of flat records into one
 // header line plus one line per row, so field names are written once instead of
 // once per row. Tool output that is a list of records is the common case.
-type headroomEngine struct{}
+type headroomEngine struct {
+	opts StepOptions
+}
 
 func (headroomEngine) name() string { return EngineHeadroom }
 
 const (
-	headroomMarker   = "# columns="
-	headroomMinBytes = 512
-	headroomMinRows  = 8
-	headroomMaxCols  = 32
+	headroomMarker      = "# columns="
+	headroomMinBytes    = 512
+	headroomDefaultRows = 8
+	headroomDefaultCols = 32
 )
 
-func (headroomEngine) compress(text string) (string, bool) {
+func (e headroomEngine) compress(text string) (string, bool) {
+	minRows := e.opts.MinRows
+	if minRows <= 0 {
+		minRows = headroomDefaultRows
+	}
+	maxCols := e.opts.MaxColumns
+	if maxCols <= 0 {
+		maxCols = headroomDefaultCols
+	}
 	trimmed := strings.TrimSpace(text)
 	if len(trimmed) < headroomMinBytes || trimmed[0] != '[' {
 		return text, false
 	}
 	arr := gjson.Parse(trimmed)
-	if !arr.IsArray() || arr.Get("#").Int() < headroomMinRows {
+	if !arr.IsArray() || arr.Get("#").Int() < int64(minRows) {
 		return text, false
 	}
 	row0 := arr.Get("0")
@@ -45,7 +55,7 @@ func (headroomEngine) compress(text string) (string, bool) {
 		keys = append(keys, k.String())
 		return true
 	})
-	if !ok || len(keys) == 0 || len(keys) > headroomMaxCols {
+	if !ok || len(keys) == 0 || len(keys) > maxCols {
 		return text, false
 	}
 	homogeneous := true

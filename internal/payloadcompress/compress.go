@@ -170,15 +170,15 @@ func buildEngines(steps []Step) []engine {
 	for _, step := range steps {
 		switch step.Engine {
 		case EngineLite:
-			engines = append(engines, liteEngine{})
+			engines = append(engines, liteEngine{opts: step.Options})
 		case EngineRTK:
-			engines = append(engines, rtkEngine{})
+			engines = append(engines, rtkEngine{opts: step.Options})
 		case EngineHeadroom:
-			engines = append(engines, headroomEngine{})
+			engines = append(engines, headroomEngine{opts: step.Options})
 		case EngineCaveman:
-			engines = append(engines, cavemanEngine{level: step.Level})
+			engines = append(engines, cavemanEngine{level: step.Level, opts: step.Options})
 		case EngineSessionDedup:
-			engines = append(engines, &dedupEngine{})
+			engines = append(engines, &dedupEngine{opts: step.Options})
 		}
 	}
 	return engines

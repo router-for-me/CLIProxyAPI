@@ -289,13 +289,28 @@ requests:
   #       pipeline:
   #         - engine: caveman       # Lossy: drop filler, pleasantries, hedging, articles from user text only.
   #           level: lite           # lite | full | ultra. Missing level defaults to lite.
+  #           options:
+  #             language: en        # Pack tag: en, es, pt-BR, id, it, de, fr, ja, ru, hu, zh.
+  #             auto-detect: false  # Infer the pack from the prompt text instead.
+  #             language-packs: []  # Fallback tags when detection finds nothing better.
+  #             min-message-length: 50
+  #             skip-rules: []      # Rule names to disable, e.g. ["articles", "ultra_abbreviations"].
   #         - engine: lite
+  #           options:
+  #             max-tool-length: 0          # Truncate longer tool results, head and tail kept. 0 disables.
+  #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
+  #
+  #   # Every engine accepts an options block; omitted knobs keep the defaults below.
+  #   #   headroom:       min-rows: 8, max-columns: 32
+  #   #   session-dedup:  min-block-chars: 80
+  #   #   rtk:            intensity: minimal|standard|aggressive, max-lines, max-chars,
+  #   #                   deduplicate-threshold, min-savings-percent
   #   # Output styles steer how the model writes its answer by appending an instruction
   #   # to the existing system prompt. They do not rewrite responses, so streaming and
   #   # tool calls are untouched. Injection is skipped for prompts that must not be
   #   # terse (security, deletion, "explain in detail") and for multimodal requests.
-  #   # Styles: terse-prose, less-code, ponytail, i-have-adhd, antislop-ui, antislop-copy.
-  #   # Levels: lite, full, ultra.
+  #   # Styles: terse-prose, less-code, ponytail, i-have-adhd, antislop-ui, antislop-copy,
+  #   # terse-cjk (文言). Levels: lite, full, ultra.
   #   output-styles:
   #     - id: terse-prose
   #       level: full

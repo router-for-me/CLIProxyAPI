@@ -41,6 +41,47 @@ type Step struct {
 	Engine string `yaml:"engine" json:"engine"`
 	// Level tunes engines that have an intensity ladder: lite, full, ultra.
 	Level string `yaml:"level" json:"level"`
+	// Options carries the per-engine knobs. Zero values mean "engine default".
+	Options StepOptions `yaml:"options" json:"options"`
+}
+
+// StepOptions tunes one pipeline step. Every field is optional; an omitted block
+// keeps the defaults documented on the engine, so an empty struct is always safe.
+type StepOptions struct {
+	// Headroom: minimum homogeneous rows before columnar compaction.
+	MinRows int `yaml:"min-rows" json:"min-rows"`
+	// Headroom: maximum columns to render before giving up.
+	MaxColumns int `yaml:"max-columns" json:"max-columns"`
+
+	// SessionDedup: minimum segment size that may be elided as a duplicate.
+	MinBlockChars int `yaml:"min-block-chars" json:"min-block-chars"`
+
+	// Lite: truncate a tool result longer than this, head and tail kept.
+	MaxToolLength int `yaml:"max-tool-length" json:"max-tool-length"`
+	// Lite: skip tool-result truncation entirely when false.
+	CompressToolResults *bool `yaml:"compress-tool-results" json:"compress-tool-results"`
+
+	// RTK: minimal, standard or aggressive. Sets threshold defaults.
+	Intensity string `yaml:"intensity" json:"intensity"`
+	// RTK: maximum lines kept per segment, head and tail kept.
+	MaxLines int `yaml:"max-lines" json:"max-lines"`
+	// RTK: maximum characters kept per segment.
+	MaxChars int `yaml:"max-chars" json:"max-chars"`
+	// RTK: how many identical consecutive lines collapse into one.
+	DeduplicateThreshold int `yaml:"deduplicate-threshold" json:"deduplicate-threshold"`
+	// RTK: minimum percentage saved before a rewrite is kept.
+	MinSavingsPercent int `yaml:"min-savings-percent" json:"min-savings-percent"`
+
+	// Caveman: minimum user-message length considered for rewriting.
+	MinMessageLength int `yaml:"min-message-length" json:"min-message-length"`
+	// Caveman: rule names to disable.
+	SkipRules []string `yaml:"skip-rules" json:"skip-rules"`
+	// Caveman: language pack tag ("pt-BR", "ja", ...). Empty means infer.
+	Language string `yaml:"language" json:"language"`
+	// Caveman: infer the pack from the prompt text instead of Language.
+	AutoDetect bool `yaml:"auto-detect" json:"auto-detect"`
+	// Caveman: fallback packs when auto-detection finds nothing better than English.
+	LanguagePacks []string `yaml:"language-packs" json:"language-packs"`
 }
 
 // Supported engine names.
@@ -95,6 +136,65 @@ func normalizeEngineLevel(engine, level string) string {
 	}
 }
 
+// sanitizeStepOptions clamps the knobs an engine would misbehave on.
+func sanitizeStepOptions(opts StepOptions) StepOptions {
+	if opts.MinRows < 0 {
+		opts.MinRows = 0
+	}
+	if opts.MaxColumns < 0 || opts.MaxColumns == 1 {
+		opts.MaxColumns = 0
+	}
+	if opts.MaxToolLength < 0 {
+		opts.MaxToolLength = 0
+	}
+	if opts.MaxLines < 0 {
+		opts.MaxLines = 0
+	}
+	if opts.MaxChars < 0 {
+		opts.MaxChars = 0
+	}
+	if opts.MinSavingsPercent < 0 || opts.MinSavingsPercent > 90 {
+		opts.MinSavingsPercent = 0
+	}
+	if opts.DeduplicateThreshold < 0 || opts.DeduplicateThreshold == 1 {
+		opts.DeduplicateThreshold = 0
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Intensity)) {
+	case "minimal":
+		opts.Intensity = "minimal"
+	case "standard":
+		opts.Intensity = "standard"
+	case "aggressive":
+		opts.Intensity = "aggressive"
+	default:
+		opts.Intensity = ""
+	}
+	opts.Language = strings.TrimSpace(opts.Language)
+	if opts.Language != "" && !knownLanguage(opts.Language) {
+		log.Warnf("payloadcompress: unknown caveman language %q, falling back to detection", opts.Language)
+		opts.Language = ""
+	}
+	packs := make([]string, 0, len(opts.LanguagePacks))
+	for _, tag := range opts.LanguagePacks {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || !knownLanguage(tag) {
+			continue
+		}
+		packs = append(packs, tag)
+	}
+	opts.LanguagePacks = packs
+	return opts
+}
+
+func knownLanguage(tag string) bool {
+	for _, known := range languageTags() {
+		if known == tag {
+			return true
+		}
+	}
+	return false
+}
+
 // Sanitize drops unknown engines and duplicate combos, and repairs the default
 // combo name so a typo in config degrades to "no compression", never to a panic.
 func (c *Config) Sanitize() {
@@ -122,7 +222,11 @@ func (c *Config) Sanitize() {
 				log.Warnf("payloadcompress: unknown engine %q in combo %q ignored", step.Engine, name)
 				continue
 			}
-			steps = append(steps, Step{Engine: engine, Level: normalizeEngineLevel(engine, step.Level)})
+			steps = append(steps, Step{
+				Engine:  engine,
+				Level:   normalizeEngineLevel(engine, step.Level),
+				Options: sanitizeStepOptions(step.Options),
+			})
 		}
 		if len(steps) == 0 {
 			continue

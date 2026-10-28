@@ -8,21 +8,27 @@ import (
 // dedupEngine replaces whole segments that are byte-identical to an earlier one.
 // Agent loops re-read the same file or re-run the same command constantly; the
 // first copy stays in place, so the content is still in context.
-type dedupEngine struct{}
+type dedupEngine struct {
+	opts StepOptions
+}
 
 func (*dedupEngine) name() string { return EngineSessionDedup }
 
 const (
-	dedupMarker   = "[context-compressed: identical to earlier message"
-	dedupMinBytes = 512
-	dedupHashSpan = 4096
+	dedupMarker         = "[context-compressed: identical to earlier message"
+	dedupDefaultMinSize = 80
+	dedupHashSpan       = 4096
 )
 
-func (*dedupEngine) rewrite(texts []string) map[int]string {
+func (e *dedupEngine) rewrite(texts []string) map[int]string {
+	minSize := e.opts.MinBlockChars
+	if minSize <= 0 {
+		minSize = dedupDefaultMinSize
+	}
 	seen := make(map[uint64]int, len(texts))
 	var repl map[int]string
 	for i, text := range texts {
-		if len(text) < dedupMinBytes || strings.HasPrefix(text, dedupMarker) {
+		if len(text) < minSize || strings.HasPrefix(text, dedupMarker) {
 			continue
 		}
 		h := sampledHash(text)

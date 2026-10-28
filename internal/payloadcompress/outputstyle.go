@@ -93,6 +93,13 @@ Rules:
 - When two solutions tie, pick the edge-case-correct one.`,
 		ultra: "# Ponytail (ultra)\nLazy senior dev. Best code = code never written. Before any code: YAGNI → reuse → stdlib → platform → installed dep → one line → minimum that works. Fix root cause not symptom: grep every caller, patch shared function once. No unrequested abstractions, no new deps, no boilerplate. Deletion > addition. Fewest files. Shortest working diff, only after understanding the problem. Question complex asks. Edge-case-correct when tied.",
 	},
+	// Wenyan: classical-Chinese ultra-terse style, ported from 9router's wenyan
+	// prompt. Instruction text is Chinese; the shared boundaries stay English.
+	"terse-cjk": {
+		lite:  "回答从简，去虚词、寒暄、修饰。代码、路径、命令、错误、URL、标识符一律照原样保留。",
+		full:  "以文言简体回答，惜字如金，去赘语虚词。代码、路径、命令、错误、URL、标识符照原样保留，不得改写。",
+		ultra: "以极简文言回答，字字千金。仅留要义。代码、API名、错误串、URL、标识符照原样保留，绝不省略或改写。",
+	},
 	"antislop-ui": {
 		boundaries: antislopBoundaries,
 		lite:       "Antislop UI filter (lite). Every visual technique needs a purpose: hierarchy, identity, or readability; technique without purpose is removed. No default blue-purple gradient wash, no glass or glow on every surface, no template layout (hero plus identical card grid, bento mosaic, Trusted-By bar).",

@@ -29,12 +29,13 @@ func TestCavemanLiteDropsFiller(t *testing.T) {
 }
 
 func TestCavemanIntensityLadder(t *testing.T) {
-	text := "I will make sure to query the database for the configuration of the function."
+	text := "Please basically query the database configuration for the function, " +
+		"and make sure to check the application dependency list."
 	lite, ok := (cavemanEngine{level: "lite"}).compressKind(kindUser, text)
 	if !ok {
 		t.Fatal("lite: expected compression")
 	}
-	if strings.Contains(lite, "database") && strings.Contains(lite, "make sure to") {
+	if strings.Contains(lite, "Please") || strings.Contains(lite, "basically") {
 		t.Fatalf("lite did not rewrite:\n%s", lite)
 	}
 	full, ok := (cavemanEngine{level: "full"}).compressKind(kindUser, text)

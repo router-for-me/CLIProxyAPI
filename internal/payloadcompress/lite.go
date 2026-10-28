@@ -5,9 +5,25 @@ import "strings"
 // liteEngine removes formatting noise that carries no meaning for a model:
 // ANSI escapes, carriage returns, trailing spaces and runs of blank lines.
 // Fenced code blocks are copied through byte for byte.
-type liteEngine struct{}
+type liteEngine struct {
+	opts StepOptions
+}
 
 func (liteEngine) name() string { return EngineLite }
+
+// compressKind adds the tool-result cap that lite owns upstream, then falls back
+// to prose cleanup.
+func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
+	if kind == kindToolOutput && e.keepToolResults() && e.opts.MaxToolLength > 0 &&
+		len(text) > e.opts.MaxToolLength {
+		return capMiddleChars(text, e.opts.MaxToolLength), true
+	}
+	return e.compress(text)
+}
+
+func (e liteEngine) keepToolResults() bool {
+	return e.opts.CompressToolResults == nil || *e.opts.CompressToolResults
+}
 
 func (liteEngine) compress(text string) (string, bool) {
 	if len(text) < 128 || !liteNeedsWork(text) {

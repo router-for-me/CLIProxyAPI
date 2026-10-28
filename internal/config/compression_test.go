@@ -20,6 +20,10 @@ requests:
           - engine: session-dedup
           - engine: caveman
             level: ultra
+            options:
+              language: pt-BR
+              auto-detect: true
+              skip-rules: ["articles"]
           - engine: not-an-engine
 `
 
@@ -69,6 +73,10 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 	}
 	if lvl := cfg.Compression.Combos[0].Pipeline[0].Level; lvl != "" {
 		t.Fatalf("non-ladder engine kept a level: %q", lvl)
+	}
+	opts := caveman.Options
+	if opts.Language != "pt-BR" || !opts.AutoDetect || len(opts.SkipRules) != 1 {
+		t.Fatalf("caveman options = %+v", opts)
 	}
 }
 

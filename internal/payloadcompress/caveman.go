@@ -5,33 +5,40 @@ import (
 	"strings"
 )
 
-// cavemanEngine compresses prose in user turns: filler, pleasantries, hedging,
-// redundant framing. It is lossy by design, so it is off unless a combo names it,
-// only touches user text, and leaves code, URLs and fenced blocks byte-identical.
+// cavemanEngine compresses prose in user turns with a language pack: filler,
+// pleasantries, hedging, redundant framing. It is lossy by design, so it is off
+// unless a combo names it, only touches user text, and leaves code, URLs, error
+// output and stack traces byte-identical.
 type cavemanEngine struct {
 	level string
+	opts  StepOptions
 }
 
 func (cavemanEngine) name() string { return EngineCaveman }
 
-const cavemanMinBytes = 64
+const cavemanDefaultMinLength = 50
 
 func (e cavemanEngine) compressKind(kind segmentKind, text string) (string, bool) {
-	if kind != kindUser || len(text) < cavemanMinBytes {
-		return text, false
+	minLength := e.opts.MinMessageLength
+	if minLength <= 0 {
+		minLength = cavemanDefaultMinLength
 	}
-	if isCodeDominant(text) {
+	if kind != kindUser || len(text) < minLength {
 		return text, false
 	}
 	if e.level == "" {
 		e.level = "lite"
 	}
+
 	protected, spans := protectSpans(text)
+	// Judge code dominance after protecting spans: fenced blocks and inline code
+	// are already hidden, so only the remaining prose is measured.
+	if isCodeDominant(protected) {
+		return text, false
+	}
+
 	out := protected
-	for _, rule := range cavemanRules {
-		if levelRank(rule.level) > levelRank(e.level) {
-			continue
-		}
+	for _, rule := range e.ruleSet(protected) {
 		out = rule.apply(out)
 	}
 	out = recapitalize(cleanupArtifacts(out))
@@ -39,6 +46,46 @@ func (e cavemanEngine) compressKind(kind segmentKind, text string) (string, bool
 		return text, false
 	}
 	return restoreSpans(out, spans), true
+}
+
+// ruleSet resolves the language pack for this segment, then applies the level and
+// skip-rules filters.
+func (e cavemanEngine) ruleSet(text string) []cavemanRule {
+	tag := strings.TrimSpace(e.opts.Language)
+	if e.opts.AutoDetect || tag == "" {
+		tag = detectLanguage(text)
+		if tag == "en" && len(e.opts.LanguagePacks) > 0 && !e.opts.AutoDetect {
+			tag = strings.TrimSpace(e.opts.LanguagePacks[0])
+		}
+	}
+	rules := packRulesFor(tag)
+	if len(e.opts.SkipRules) == 0 {
+		return filterRulesByLevel(rules, e.level)
+	}
+	skip := make(map[string]struct{}, len(e.opts.SkipRules))
+	for _, name := range e.opts.SkipRules {
+		skip[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	kept := make([]cavemanRule, 0, len(rules))
+	for _, rule := range rules {
+		if _, drop := skip[rule.name]; drop {
+			continue
+		}
+		kept = append(kept, rule)
+	}
+	return filterRulesByLevel(kept, e.level)
+}
+
+func filterRulesByLevel(rules []cavemanRule, level string) []cavemanRule {
+	rank := levelRank(level)
+	out := make([]cavemanRule, 0, len(rules))
+	for _, rule := range rules {
+		if levelRank(rule.level) > rank {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
 }
 
 func levelRank(level string) int {
@@ -52,7 +99,8 @@ func levelRank(level string) int {
 	}
 }
 
-// cavemanRule is one rewrite. Exactly one of repl, table or lowerOnly is used.
+// cavemanRule is one rewrite. A rule either replaces matches verbatim, maps the
+// matched text through a table, or only deletes when its guards allow it.
 type cavemanRule struct {
 	name  string
 	level string
@@ -62,29 +110,36 @@ type cavemanRule struct {
 	// lowerOnly deletes a match only when the next byte is a lowercase letter.
 	// Go's RE2 has no lookahead, so that condition is checked here.
 	lowerOnly bool
+	// notAfter holds literals a match must not directly follow ("make ", "be ").
+	notAfter []string
+	// notAfterWord rejects matches preceded by a letter, digit or underscore.
+	notAfterWord bool
+	// notBeforeWord rejects matches followed by a letter, digit or underscore.
+	notBeforeWord bool
+	// tail extends a match over trailing punctuation or whitespace, mirroring the
+	// `\s*` and `[,.!?\s]*` suffixes the packs append after their lookahead.
+	tail tailKind
+}
+
+// tailKind says how far past a match the deleted span reaches.
+type tailKind uint8
+
+const (
+	tailNone tailKind = iota
+	tailSpace
+	tailPunct
+)
+
+func (r cavemanRule) guarded() bool {
+	return r.lowerOnly || r.notAfterWord || r.notBeforeWord || r.tail != tailNone ||
+		len(r.notAfter) > 0 || r.table != nil || strings.Contains(r.repl, "$")
 }
 
 func (r cavemanRule) apply(text string) string {
-	switch {
-	case r.lowerOnly:
-		return deleteBeforeLower(text, r.re)
-	case r.table != nil:
-		return r.re.ReplaceAllStringFunc(text, func(match string) string {
-			key := strings.ToLower(strings.TrimRight(match, " \t\n"))
-			if repl, ok := r.table[key]; ok {
-				return repl
-			}
-			return match
-		})
-	default:
+	if !r.guarded() {
 		return r.re.ReplaceAllString(text, r.repl)
 	}
-}
-
-// deleteBeforeLower removes matches followed by a lowercase letter, which is what
-// articles, leading helpers and emphasis amplifiers need.
-func deleteBeforeLower(text string, re *regexp.Regexp) string {
-	locs := re.FindAllStringIndex(text, -1)
+	locs := r.re.FindAllStringIndex(text, -1)
 	if len(locs) == 0 {
 		return text
 	}
@@ -92,18 +147,73 @@ func deleteBeforeLower(text string, re *regexp.Regexp) string {
 	b.Grow(len(text))
 	prev := 0
 	for _, loc := range locs {
-		if loc[1] >= len(text) {
+		if loc[0] < prev {
 			continue
 		}
-		c := text[loc[1]]
-		if c < 'a' || c > 'z' {
+		if r.lowerOnly && (loc[1] >= len(text) || text[loc[1]] < 'a' || text[loc[1]] > 'z') {
 			continue
 		}
+		if r.notAfterWord && isWordPrefix(text, loc[0]) {
+			continue
+		}
+		if r.notBeforeWord && isWordNext(text, loc[1]) {
+			continue
+		}
+		if len(r.notAfter) > 0 && trailingGuardHit(text, loc[0], r.notAfter) {
+			continue
+		}
+		end := extendTail(text, loc[1], r.tail)
 		b.WriteString(text[prev:loc[0]])
-		prev = loc[1]
+		b.WriteString(r.replacement(text[loc[0]:loc[1]]))
+		prev = end
 	}
 	b.WriteString(text[prev:])
 	return b.String()
+}
+
+func (r cavemanRule) replacement(match string) string {
+	if r.table != nil {
+		key := strings.ToLower(strings.TrimRight(match, " \t\n"))
+		if repl, ok := r.table[key]; ok {
+			return repl
+		}
+		if r.repl == "" {
+			return match
+		}
+	}
+	return r.repl
+}
+
+// extendTail walks past the punctuation or whitespace the original pattern
+// consumed after its lookahead.
+func extendTail(text string, end int, tail tailKind) int {
+	if tail == tailNone {
+		return end
+	}
+	for end < len(text) {
+		c := text[end]
+		if c == ' ' || c == '\t' {
+			end++
+			continue
+		}
+		if tail == tailPunct && (c == ',' || c == '.' || c == '!' || c == '?') {
+			end++
+			continue
+		}
+		break
+	}
+	return end
+}
+
+// trailingGuardHit mirrors the JS lookbehind `(?<!X\s)` for literal X.
+func trailingGuardHit(text string, start int, guards []string) bool {
+	head := strings.TrimRight(text[:start], " \t\n")
+	for _, guard := range guards {
+		if strings.HasSuffix(head, guard) {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -115,6 +225,9 @@ var (
 	reLeadingBreak = regexp.MustCompile(`^\n+`)
 	reTrailBreak   = regexp.MustCompile(`\n+$`)
 	reSentenceStar = regexp.MustCompile(`(?m)(^|[.!?][ \t]|\n[ \t]*)([a-z])`)
+	reErrorLine    = regexp.MustCompile(`^\s*(?:[A-Za-z]*Error|Traceback|panic|Exception):`)
+	reStackFrame   = regexp.MustCompile(`^\s+at\s|^goroutine \d+`)
+	reBlankLine    = regexp.MustCompile(`^\s*$`)
 )
 
 func cleanupArtifacts(text string) string {
@@ -143,9 +256,8 @@ func recapitalize(text string) string {
 // normalization must be skipped for the whole span. It biases towards leaving
 // text alone, never towards corrupting it.
 func isCodeDominant(text string) bool {
-	lines := strings.Split(text, "\n")
 	total, code := 0, 0
-	for _, line := range lines {
+	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -180,8 +292,9 @@ func looksLikeCode(line string) bool {
 	return false
 }
 
-// protectSpans hides code, inline code and URLs behind placeholders so no rule can
-// rewrite them. Restoring is byte-exact.
+// protectSpans hides content no rule may touch behind numbered placeholders, so
+// restoring is byte-exact: error and stack-trace lines, fenced blocks, inline code
+// and URLs.
 func protectSpans(text string) (string, []string) {
 	var spans []string
 	var b strings.Builder
@@ -194,15 +307,24 @@ func protectSpans(text string) (string, []string) {
 		spans = append(spans, value)
 	}
 
+	lineStart := true
 	for i := 0; i < len(text); {
+		if lineStart {
+			lineStart = false
+			if end := errorLineEnd(text, i); end > i {
+				placeholder(text[i:end])
+				i = end
+				lineStart = true
+				continue
+			}
+		}
 		switch {
 		case strings.HasPrefix(text[i:], "```") || strings.HasPrefix(text[i:], "~~~"):
 			fence := text[i : i+3]
 			end := strings.Index(text[i+3:], fence)
 			if end < 0 {
 				b.WriteString(text[i:])
-				i = len(text)
-				continue
+				return b.String(), spans
 			}
 			end += i + 3 + 3
 			placeholder(text[i:end])
@@ -226,10 +348,42 @@ func protectSpans(text string) (string, []string) {
 			i = end
 		default:
 			b.WriteByte(text[i])
+			if text[i] == '\n' {
+				lineStart = true
+			}
 			i++
 		}
 	}
 	return b.String(), spans
+}
+
+// errorLineEnd returns the end of the error or stack-trace block starting at i,
+// continuation lines included, or i when the line is ordinary prose.
+func errorLineEnd(text string, i int) int {
+	end := lineEnd(text, i)
+	if !reErrorLine.MatchString(text[i:end]) && !reStackFrame.MatchString(text[i:end]) {
+		return i
+	}
+	for end < len(text) {
+		next := lineEnd(text, end+1)
+		candidate := text[end+1 : next]
+		if reBlankLine.MatchString(candidate) {
+			break
+		}
+		if !reStackFrame.MatchString(candidate) && !reErrorLine.MatchString(candidate) &&
+			!strings.HasPrefix(candidate, " ") && !strings.HasPrefix(candidate, "\t") {
+			break
+		}
+		end = next
+	}
+	return end
+}
+
+func lineEnd(text string, i int) int {
+	if idx := strings.IndexByte(text[i:], '\n'); idx >= 0 {
+		return i + idx
+	}
+	return len(text)
 }
 
 func isURLTerminator(c byte) bool {
@@ -256,16 +410,16 @@ func restoreSpans(text string, spans []string) string {
 			b.WriteByte(text[i])
 			continue
 		}
-		raw := text[i+1 : i+1+end]
 		index := 0
-		for j := 0; j < len(raw); j++ {
-			if raw[j] < '0' || raw[j] > '9' {
-				index = -1
+		valid := end > 0
+		for _, c := range []byte(text[i+1 : i+1+end]) {
+			if c < '0' || c > '9' {
+				valid = false
 				break
 			}
-			index = index*10 + int(raw[j]-'0')
+			index = index*10 + int(c-'0')
 		}
-		if index < 0 || index >= len(spans) {
+		if !valid || index >= len(spans) {
 			b.WriteByte(text[i])
 			continue
 		}
@@ -287,73 +441,4 @@ func itoaDecimal(v int) string {
 		v /= 10
 	}
 	return string(buf[pos:])
-}
-
-// cavemanRules is the port of OmniRoute's English rule pack, in its original
-// order. redundant_phrasing runs at lite rather than full: it consumes "make sure
-// to" before the pleasantries rule can strip "sure" and leave "make to".
-var cavemanRules = []cavemanRule{
-	{name: "redundant_phrasing", level: "lite", re: regexp.MustCompile(`(?i)\b(?:make sure to|be sure to|due to the fact that|the reason is because|it is important to|you should|remember to)\b\s*`), table: map[string]string{
-		"make sure to": "ensure", "be sure to": "ensure", "due to the fact that": "because",
-		"the reason is because": "because", "it is important to": "", "you should": "", "remember to": "",
-	}},
-	{name: "pleasantries", level: "lite", re: regexp.MustCompile(`(?i)\b(?:i'?d be happy to|i would be happy to|i'?d be glad to|i would be glad to|glad to help|happy to|thank you|thanks|no problem|you'?re welcome|absolutely|certainly|of course|sure)\b\s*`), repl: ""},
-	{name: "polite_framing", level: "lite", re: regexp.MustCompile(`(?i)\b(?:please|kindly|could you please|would you please|can you please|i would like you to|i want you to|i need you to)\b\s*`), repl: ""},
-	{name: "hedging", level: "lite", re: regexp.MustCompile(`(?i)\b(?:it seems like|it appears that|i think that|i believe that|probably|possibly|maybe it)\b\s*`), repl: ""},
-	{name: "verbose_instructions", level: "lite", re: regexp.MustCompile(`(?i)\b(?:provide a detailed explanation of|give me a comprehensive explanation of|write an in-depth explanation of|create a thorough explanation of|provide a detailed|give me a comprehensive|write an in-depth|create a thorough|explain in detail)\b\s*`), table: map[string]string{
-		"provide a detailed explanation of":      "explain",
-		"give me a comprehensive explanation of": "explain",
-		"write an in-depth explanation of":       "explain",
-		"create a thorough explanation of":       "explain",
-		"provide a detailed":                     "provide",
-		"give me a comprehensive":                "give",
-		"write an in-depth":                      "write",
-		"create a thorough":                      "create",
-		"explain in detail":                      "explain",
-	}},
-	{name: "filler_adverbs", level: "lite", re: regexp.MustCompile(`(?i)\b(?:basically|essentially|actually|literally|simply|currently)\b\s*`), repl: ""},
-	{name: "filler_phrases", level: "lite", re: regexp.MustCompile(`(?im)^(?:i want to|i need to|i'd like to|i'm looking for)\b\s*`), repl: ""},
-	{name: "redundant_openers", level: "lite", re: regexp.MustCompile(`(?im)^(?:hi there|hello|good morning|hey)[,.!?\s]*`), repl: ""},
-	{name: "verbose_requests", level: "lite", re: regexp.MustCompile(`(?i)\b(?:i was wondering if you could|would it be possible to)\b\s*`), repl: ""},
-	{name: "self_reference", level: "lite", re: regexp.MustCompile(`(?im)^(?:i am trying to|i am working on|i have been)\b\s*`), repl: ""},
-	{name: "excessive_gratitude", level: "lite", re: regexp.MustCompile(`(?i)\b(?:thank you so much|thanks in advance|i really appreciate)\b[,.!?\s]*`), repl: ""},
-	{name: "qualifier_removal", level: "lite", re: regexp.MustCompile(`(?i)\b(?:a bit|a little|somewhat|kind of|sort of)\b\s*`), repl: ""},
-	{name: "explanatory_prefix", level: "lite", re: regexp.MustCompile(`(?i)\b(?:the function appears to be handling|the code seems to|the class is|this module is)\b`), table: map[string]string{
-		"the function appears to be handling": "Function:", "the code seems to": "Code:",
-		"the class is": "Class:", "this module is": "Module:",
-	}},
-	{name: "question_to_directive", level: "lite", re: regexp.MustCompile(`(?i)\b(?:can you explain why|could you show me how|would you tell me|can you tell me)\b\s*`), table: map[string]string{
-		"can you explain why": "Explain why", "could you show me how": "Show how",
-		"would you tell me": "Tell me", "can you tell me": "Tell me",
-	}},
-	{name: "context_setup", level: "lite", re: regexp.MustCompile(`(?i)\b(?:i have the following code|here is my code|below is the code)\b\s*[:.]?\s*`), repl: "Code: "},
-	{name: "intent_clarification", level: "lite", re: regexp.MustCompile(`(?i)\b(?:what i'm trying to do is|my objective is to|what i need is|i'm aiming to)\b\s*`), repl: "Goal: "},
-	{name: "background_removal", level: "lite", re: regexp.MustCompile(`(?i)\b(?:as you may know,?\s*|as we discussed earlier,?\s*)`), repl: ""},
-	{name: "meta_commentary", level: "lite", re: regexp.MustCompile(`(?im)^(?:note that|keep in mind that|remember that)\b\s*`), repl: ""},
-	{name: "purpose_statement", level: "lite", re: regexp.MustCompile(`(?i)\b(?:for the purpose of|with the goal of|in an effort to|for every)\b`), table: map[string]string{
-		"for the purpose of": "for", "with the goal of": "to", "in an effort to": "to", "for every": "per",
-	}},
-	{name: "purpose_phrases", level: "lite", re: regexp.MustCompile(`(?i)\b(?:in order to|so as to)\b\s*`), repl: "to "},
-	{name: "verbose_connectors", level: "lite", re: regexp.MustCompile(`(?i)\b(?:furthermore|additionally|moreover|in addition)\b\s*`), repl: "also "},
-	{name: "transition_removal", level: "lite", re: regexp.MustCompile(`(?im)^(?:on the other hand,?\s*|in contrast,?\s*|however,?\s*)`), repl: ""},
-	{name: "emphasis_removal", level: "lite", re: regexp.MustCompile(`(?i)\b(?:very|really|extremely|highly|quite)[ \t]+`), lowerOnly: true},
-	{name: "repeated_context", level: "lite", re: regexp.MustCompile(`(?i)\b(?:as we discussed earlier|as mentioned before|as previously stated|as i said before)\b[,.]?\s*`), repl: "See above. "},
-	{name: "repeated_question", level: "lite", re: regexp.MustCompile(`(?i)\b(?:same question as before|i asked this earlier|this is the same question)\b[,.]?\s*`), repl: "[same question] "},
-	{name: "reestablished_context", level: "lite", re: regexp.MustCompile(`(?i)\b(?:going back to the code above|referring back to|returning to)\b\s*`), repl: "Re: "},
-	{name: "articles", level: "full", re: regexp.MustCompile(`(?i)\b(?:an|a|the)[ \t]+`), lowerOnly: true},
-	{name: "leader_phrases", level: "full", re: regexp.MustCompile(`(?im)^(?:i'll|i will|i can|i'd|let me|you can|we will|we can|let's)[ \t]+`), lowerOnly: true},
-	{name: "compound_collapse", level: "full", re: regexp.MustCompile(`(?i)\band any potential\b`), repl: ""},
-	{name: "list_conjunction", level: "full", re: regexp.MustCompile(`(?i),\s*and also\s+|,\s*as well as\s+`), repl: ", "},
-	{name: "redundant_quantifiers", level: "full", re: regexp.MustCompile(`(?i)\b(?:each and every single|each and every|any and all)\b`), table: map[string]string{
-		"each and every single": "each", "each and every": "each", "any and all": "all",
-	}},
-	{name: "passive_voice", level: "full", re: regexp.MustCompile(`(?i)\b(?:is being used|is being called|is being generated|was created|was generated|was implemented)\b`), table: map[string]string{
-		"is being used": "uses", "is being called": "calls", "is being generated": "generated",
-		"was created": "created", "was generated": "generated", "was implemented": "implemented",
-	}},
-	{name: "ultra_abbreviations", level: "ultra", re: regexp.MustCompile(`(?i)\b(?:database|configuration|function|request|response|implementation|authentication|authorization|application|dependency|dependencies)\b`), table: map[string]string{
-		"database": "DB", "configuration": "config", "function": "fn", "request": "req",
-		"response": "res", "implementation": "impl", "authentication": "auth",
-		"authorization": "authz", "application": "app", "dependency": "dep", "dependencies": "deps",
-	}},
 }
