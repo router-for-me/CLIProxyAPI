@@ -258,6 +258,11 @@ What each step installs is a draft PR, unmerged until its step (an hourly sweep 
 | Gandalf's Executor hub usage tool | Automancer-Ltd/automancer-ops#1336 |
 | ROUTES.md and capacity.md | Automancer-Ltd/automancer-skills#133 |
 
+Before the cut-over, 28 Oct: Waseem signed Codex Team GDP into the hub on m6 (`~/.local/hub/cliproxyapi
+-config ~/.local/hub/config.yaml -codex-login`, workspace Global Diversity Practice). It carries group `team`,
+note "Codex Team GDP" and `priority: -1`, the nearest hub form of cxswap's held-but-pinnable seat: a pin
+always reaches it, and unpinned Codex traffic reaches it only when all three Pro accounts are refused (cxswap
+never rotated into it at all). A pinned one-word request returned 200 from that login (hub log).
 Already done on 28 Oct: hub groups (Claude `1`-`10` = the old cswap slots, Codex `pro`, `pro-gmail`,
 `pro-personal` = the old cxswap names) and notes (the allowances names) on every Claude and Codex login;
 `~/.config/estate-hub/env` (mode 600) on auto-vps; `~/.codex/config.toml` carries the `cliproxy` provider
@@ -289,10 +294,8 @@ the local fallback login; running ones keep the route they started with.
    hub); Claude 5h shows only for accounts used in the current window; CommandCode stays STALE until the
    hub's CommandCode key passes its usage endpoint (HTTP 401 today). Merge #1335, `git -C /opt/automancer/ops pull --ff-only`. Verify `allowances` and
    `allowances --json` show hub figures with the hub as rotation owner; the bb allowances panel renders.
-5. **bb pins.** First clear the 23 Codex threads pinned to `team` (the held-out GDP Team seat, not on the
-   hub): `bb account-pin list --json`, then `bb account-pin clear <thread>` for each idle one (a running
-   one refuses; it is refused at its next turn after the release, with the re-pin command). Merge #16 and
-   run its `scripts/release.sh` (reloads that plugin only, prints
+5. **bb pins.** The 23 Codex threads pinned to `team` resolve to the hub's Codex Team GDP login. Merge #16
+   and run its `scripts/release.sh` (reloads that plugin only, prints
    the rollback path). Verify: `bb account-pin list` reads hub usage; spawn two throwaway lanes,
    `claude-code` titled `[pin:3]` and `codex` titled `[pin:pro-personal]`, each answering one word; the hub
    log shows those accounts. Archive them.
