@@ -25,6 +25,9 @@ type ClaudeTokenData struct {
 	OrganizationName string `json:"organization_name"`
 	// Expire is the timestamp of the token expiry.
 	Expire string `json:"expired"`
+	// RefreshTokenExpiresAt is the RFC3339 UTC time after which the refresh token
+	// can no longer be used. Empty when the token response did not report it.
+	RefreshTokenExpiresAt string `json:"refresh_token_expires_at,omitempty"`
 }
 
 // ClaudeAuthBundle aggregates authentication data after OAuth flow completion
