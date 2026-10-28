@@ -978,6 +978,9 @@ func formatHomeClaudeModel(entry homeModelEntry) map[string]any {
 	if entry.created > 0 {
 		model["created_at"] = time.Unix(entry.created, 0).UTC().Format(time.RFC3339)
 	}
+	if len(entry.providers) > 0 {
+		model["description"] = strings.Join(entry.providers, "/")
+	}
 	return model
 }
 

@@ -60,7 +60,18 @@ func (h *ClaudeCodeAPIHandler) HandlerType() string {
 func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
-	return modelRegistry.GetAvailableModels("claude")
+	models := modelRegistry.GetAvailableModels("claude")
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		if id == "" {
+			continue
+		}
+		providers := modelRegistry.GetModelProviders(id)
+		if len(providers) > 0 {
+			model["description"] = strings.Join(providers, "/")
+		}
+	}
+	return models
 }
 
 // ClaudeMessages handles Claude-compatible streaming chat completions.
