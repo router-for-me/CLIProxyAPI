@@ -2,6 +2,7 @@ package proxyutil
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -48,14 +49,83 @@ var (
 	environmentHTTPTransport     *http.Transport
 )
 
+func newEnvironmentHTTPTransport() *http.Transport {
+	transport := cloneDefaultTransport()
+	transport.Proxy = EnvironmentProxyFunc()
+	transport.DialTLSContext = buildEnvironmentDialTLSContext(transport)
+	return transport
+}
+
 // CachedEnvironmentHTTPTransport returns a shared transport using environment proxy rules.
 func CachedEnvironmentHTTPTransport() *http.Transport {
 	environmentHTTPTransportOnce.Do(func() {
-		transport := cloneDefaultTransport()
-		transport.Proxy = EnvironmentProxyFunc()
-		environmentHTTPTransport = transport
+		environmentHTTPTransport = newEnvironmentHTTPTransport()
 	})
 	return environmentHTTPTransport
+}
+
+func environmentHTTPSProxyURLForAddr(addr string) *url.URL {
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"} {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		normalized, errNormalize := NormalizeProxyURL(raw)
+		if errNormalize != nil {
+			continue
+		}
+		parsed, errParse := url.Parse(normalized)
+		if errParse != nil || parsed.Scheme != "https" {
+			continue
+		}
+		if proxyDialAddr(parsed) == addr {
+			return parsed
+		}
+	}
+	return nil
+}
+
+func buildEnvironmentDialTLSContext(base *http.Transport) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if proxyURL := environmentHTTPSProxyURLForAddr(addr); proxyURL != nil {
+			var proxyTLS *tls.Config
+			if base.TLSClientConfig != nil {
+				proxyTLS = base.TLSClientConfig.Clone()
+			}
+			return buildHTTPSProxyDialTLSContext(
+				proxyURL,
+				proxyTLS,
+				base.TLSHandshakeTimeout,
+				base.DialContext,
+			)(ctx, network, addr)
+		}
+
+		rawConn, errDial := base.DialContext(ctx, network, addr)
+		if errDial != nil {
+			return nil, errDial
+		}
+		host, _, errSplit := net.SplitHostPort(addr)
+		if errSplit != nil {
+			host = addr
+		}
+		tlsConfig := base.TLSClientConfig
+		if tlsConfig != nil {
+			tlsConfig = tlsConfig.Clone()
+		} else {
+			tlsConfig = &tls.Config{}
+		}
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = host
+		}
+		tlsConn := tls.Client(rawConn, tlsConfig)
+		if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+			if errClose := rawConn.Close(); errClose != nil {
+				return nil, fmt.Errorf("TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
+			}
+			return nil, fmt.Errorf("TLS handshake failed: %w", errHandshake)
+		}
+		return tlsConn, nil
+	}
 }
 
 // NormalizeProxyURL accepts full proxy URLs and host:port environment forms.

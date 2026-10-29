@@ -613,6 +613,86 @@ func TestBuildHTTPTransportHTTPSProxyH2Negotiation(t *testing.T) {
 	}
 }
 
+func TestNewEnvironmentHTTPTransportHTTPSProxyH2Negotiation(t *testing.T) {
+	targetServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, "target ok")
+	}))
+	defer targetServer.Close()
+
+	proxyCert := newTestCertificate(t)
+	proxyListener, errListen := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{proxyCert},
+		NextProtos:   []string{"h2", "http/1.1"},
+	})
+	if errListen != nil {
+		t.Fatalf("tls.Listen returned error: %v", errListen)
+	}
+	defer func() { _ = proxyListener.Close() }()
+
+	proxyDone := make(chan error, 1)
+	go func() {
+		conn, errAccept := proxyListener.Accept()
+		if errAccept != nil {
+			proxyDone <- errAccept
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		tlsConn := conn.(*tls.Conn)
+		if errHandshake := tlsConn.Handshake(); errHandshake != nil {
+			proxyDone <- errHandshake
+			return
+		}
+		if tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+			proxyDone <- errors.New("proxy negotiated h2 ALPN")
+			return
+		}
+		req, errRead := http.ReadRequest(bufio.NewReader(tlsConn))
+		if errRead != nil || req.Method != http.MethodConnect {
+			proxyDone <- fmt.Errorf("CONNECT request: %v", errRead)
+			return
+		}
+		targetURL, _ := url.Parse(targetServer.URL)
+		targetConn, errDial := net.Dial("tcp", targetURL.Host)
+		if errDial != nil {
+			proxyDone <- errDial
+			return
+		}
+		defer func() { _ = targetConn.Close() }()
+		if _, errWrite := io.WriteString(tlsConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			proxyDone <- errWrite
+			return
+		}
+		go func() { _, _ = io.Copy(targetConn, tlsConn); _ = targetConn.Close() }()
+		_, _ = io.Copy(tlsConn, targetConn)
+		proxyDone <- nil
+	}()
+
+	ClearProxyEnvironment()
+	t.Setenv("HTTPS_PROXY", "https://"+proxyListener.Addr().String())
+
+	transport := newEnvironmentHTTPTransport()
+	if transport.DialTLSContext == nil {
+		t.Fatal("expected environment transport to configure DialTLSContext")
+	}
+	certPool := x509.NewCertPool()
+	certPool.AddCert(proxyCert.Leaf)
+	for _, cert := range targetServer.TLS.Certificates {
+		if x509Cert, errParse := x509.ParseCertificate(cert.Certificate[0]); errParse == nil {
+			certPool.AddCert(x509Cert)
+		}
+	}
+	transport.TLSClientConfig = &tls.Config{RootCAs: certPool}
+
+	resp, errGet := (&http.Client{Transport: transport, Timeout: 5 * time.Second}).Get(targetServer.URL)
+	if errGet != nil {
+		t.Fatalf("client.Get returned error: %v", errGet)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if errProxy := <-proxyDone; errProxy != nil {
+		t.Fatalf("proxy returned error: %v", errProxy)
+	}
+}
+
 func TestBuildHTTPTransportHTTPSProxyHTTPTarget(t *testing.T) {
 	t.Parallel()
 
