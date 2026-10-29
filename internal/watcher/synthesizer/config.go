@@ -437,15 +437,16 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			a := &coreauth.Auth{
-				ID:         id,
-				Provider:   internalProviderKey,
-				Label:      compat.Name,
-				Prefix:     prefix,
-				Status:     coreauth.StatusActive,
-				Attributes: attrs,
-				Metadata:   metadata,
-				CreatedAt:  now,
-				UpdatedAt:  now,
+				ID:                  id,
+				Provider:            internalProviderKey,
+				Label:               compat.Name,
+				Prefix:              prefix,
+				Status:              coreauth.StatusActive,
+				Attributes:          attrs,
+				Metadata:            metadata,
+				CreatedAt:           now,
+				UpdatedAt:           now,
+				ProxyConnectionPool: authProxyConnectionPool(openAICompatConnectionPool(compat, nil)),
 			}
 			if len(a.Metadata) == 0 {
 				a.Metadata = nil

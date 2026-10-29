@@ -421,20 +421,51 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 
 // fallbackRoundTripper uses provider-specific TLS fingerprints for protected
 // HTTPS hosts and falls back to the standard transport for all other requests.
+//
+// Each pooled branch may be resolved lazily on first use: a single request only
+// ever takes one branch, and building both pools up front would spend two cache
+// slots per key (evicting live standard pools with unused Anthropic pools).
 type fallbackRoundTripper struct {
-	anthropic http.RoundTripper
-	chrome    http.RoundTripper
-	fallback  http.RoundTripper
+	mu          sync.Mutex
+	anthropic   http.RoundTripper
+	anthropicFn func() http.RoundTripper
+	chrome      http.RoundTripper
+	fallback    http.RoundTripper
+	fallbackFn  func() http.RoundTripper
+}
+
+func (f *fallbackRoundTripper) anthropicRoundTripper() http.RoundTripper {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.anthropicFn != nil {
+		if rt := f.anthropicFn(); rt != nil {
+			f.anthropic = rt
+		}
+		f.anthropicFn = nil
+	}
+	return f.anthropic
+}
+
+func (f *fallbackRoundTripper) fallbackRoundTripper() http.RoundTripper {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fallbackFn != nil {
+		if rt := f.fallbackFn(); rt != nil {
+			f.fallback = rt
+		}
+		f.fallbackFn = nil
+	}
+	return f.fallback
 }
 
 func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if IsAnthropicUpstreamURL(req.URL) {
-		return f.anthropic.RoundTrip(req)
+		return f.anthropicRoundTripper().RoundTrip(req)
 	}
 	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
 		return f.chrome.RoundTrip(req)
 	}
-	return f.fallback.RoundTrip(req)
+	return f.fallbackRoundTripper().RoundTrip(req)
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
@@ -469,13 +500,20 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
+	var anthropicFn, fallbackFn func() http.RoundTripper
 	if proxyURL != "" {
-		if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
-			standardTransport = transport
+		fallbackFn = func() http.RoundTripper {
+			if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
+				return transport
+			}
+			return standardTransport
 		}
 		// The Anthropic path has its own TLS fingerprint, so it needs its own pool kind.
-		if transport := pooledClaudeCodeTransport(proxyURL, cfg, auth); transport != nil {
-			anthropicRT = transport
+		anthropicFn = func() http.RoundTripper {
+			if transport := pooledClaudeCodeTransport(proxyURL, cfg, auth); transport != nil {
+				return transport
+			}
+			return anthropicRT
 		}
 	} else if ctxRoundTripper != nil {
 		chromeRT = ctxRoundTripper
@@ -483,19 +521,27 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		standardTransport = ctxRoundTripper
 	} else {
 		// A credential opt-in applies here too; an injected RoundTripper keeps priority.
-		if transport := pooledProxyTransport("", cfg, auth); transport != nil {
-			standardTransport = transport
+		fallbackFn = func() http.RoundTripper {
+			if transport := pooledProxyTransport("", cfg, auth); transport != nil {
+				return transport
+			}
+			return standardTransport
 		}
-		if transport := pooledClaudeCodeTransport("", cfg, auth); transport != nil {
-			anthropicRT = transport
+		anthropicFn = func() http.RoundTripper {
+			if transport := pooledClaudeCodeTransport("", cfg, auth); transport != nil {
+				return transport
+			}
+			return anthropicRT
 		}
 	}
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
-			anthropic: anthropicRT,
-			chrome:    chromeRT,
-			fallback:  standardTransport,
+			anthropic:   anthropicRT,
+			anthropicFn: anthropicFn,
+			chrome:      chromeRT,
+			fallback:    standardTransport,
+			fallbackFn:  fallbackFn,
 		},
 	}
 	if timeout > 0 {

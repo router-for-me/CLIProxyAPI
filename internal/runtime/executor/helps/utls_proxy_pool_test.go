@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -71,9 +72,9 @@ func TestUtlsAnthropicTransportPoolsPerCredential(t *testing.T) {
 		if !ok {
 			t.Fatalf("client transport = %T, want *fallbackRoundTripper", client.Transport)
 		}
-		transport, ok := fallback.anthropic.(*http.Transport)
+		transport, ok := fallback.anthropicRoundTripper().(*http.Transport)
 		if !ok {
-			t.Fatalf("anthropic transport = %T, want *http.Transport", fallback.anthropic)
+			t.Fatalf("anthropic transport = %T, want *http.Transport", fallback.anthropicRoundTripper())
 		}
 		return transport
 	}
@@ -99,9 +100,56 @@ func TestUtlsAnthropicTransportPoolsPerCredential(t *testing.T) {
 	plain := func(id string) http.RoundTripper {
 		t.Helper()
 		client := NewUtlsHTTPClient(context.Background(), cfg, &cliproxyauth.Auth{ID: id}, 0)
-		return client.Transport.(*fallbackRoundTripper).anthropic
+		return client.Transport.(*fallbackRoundTripper).anthropicRoundTripper()
 	}
 	if plain("key-a") != plain("key-b") {
 		t.Fatal("unpooled credentials must keep sharing the cached Claude Code transport")
+	}
+}
+
+// TestUtlsLazyPoolsDoNotEvictUsedPool pins that a request only populates the pool
+// kind it actually uses. Eagerly populating both the standard and Anthropic pools
+// consumed two cache slots per key, so 300 non-Anthropic keys exceeded the 512-slot
+// cache and evicted their own live pools on every second pass.
+func TestUtlsLazyPoolsDoNotEvictUsedPool(t *testing.T) {
+	ResetProxyTransports()
+	t.Cleanup(ResetProxyTransports)
+
+	var opened atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	cfg := testConfig()
+	const keys = 300
+	for round := 0; round < 2; round++ {
+		for i := 0; i < keys; i++ {
+			auth := poolOptInAuth("key-" + strconv.Itoa(i))
+			auth.ProxyURL = "direct"
+			client := NewUtlsHTTPClient(context.Background(), cfg, auth, 0)
+			resp, err := client.Get(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = io.Copy(io.Discard, resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			if err = resp.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if got := proxyTransportCache.Len(); got != keys {
+		t.Fatalf("cache holds %d entries, want %d (one per key, no unused Anthropic pools)", got, keys)
+	}
+	if got := opened.Load(); got != keys {
+		t.Fatalf("connections = %d, want %d (second round must reuse every key's pool)", got, keys)
 	}
 }

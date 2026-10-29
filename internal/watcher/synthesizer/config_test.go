@@ -1475,4 +1475,23 @@ func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
 	if enabled := auths[0].ProxyConnectionPool.Enabled; enabled != nil {
 		t.Fatalf("empty block must leave enabled unset (defaults to on), got %v", *enabled)
 	}
+
+	// An OpenAI-compatible provider with no API keys still synthesizes one auth
+	// record (e.g. a local Ollama/vLLM daemon) and must inherit the group pool block.
+	keyless := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:           "local-ollama",
+		BaseURL:        "http://127.0.0.1:11434/v1",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	keylessAuths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      keyless,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keylessAuths) != 1 || keylessAuths[0].ProxyConnectionPool == nil {
+		t.Fatalf("keyless OpenAI-compatible entry lost its group connection-pool block: %+v", keylessAuths)
+	}
 }

@@ -40,6 +40,12 @@ func TestProxyPoolGenerationRejectsOldSnapshotAfterReload(t *testing.T) {
 	if stale == nil || proxyTransportCache.Len() != 0 {
 		t.Fatal("stale snapshot repopulated pool")
 	}
+	if !stale.DisableKeepAlives {
+		t.Fatal("fenced one-off transport must disable keep-alives so it cannot leak idle sockets")
+	}
+	if staleClaude := pooledClaudeCodeTransport("direct", oldClone, poolOptInAuth("generation")); staleClaude == nil || !staleClaude.DisableKeepAlives {
+		t.Fatalf("fenced Anthropic transport must disable keep-alives, got %+v", staleClaude)
+	}
 	current := pooledProxyTransport("direct", next, poolOptInAuth("generation"))
 	if current == nil || proxyTransportCache.Len() != 1 {
 		t.Fatal("current snapshot did not populate pool")
