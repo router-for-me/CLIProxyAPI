@@ -9,11 +9,15 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 func TestEffectiveProxyURLUsesEnvironmentWhenUnset(t *testing.T) {
+	proxyutil.ClearProxyEnvironment()
 	t.Setenv("HTTP_PROXY", "http://env-proxy.example:8080")
 	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("https_proxy", "")
 
 	if got := effectiveProxyURL(context.Background(), nil, nil); got != "http://env-proxy.example:8080" {
 		t.Fatalf("effectiveProxyURL() = %q, want environment proxy", got)
@@ -22,6 +26,18 @@ func TestEffectiveProxyURLUsesEnvironmentWhenUnset(t *testing.T) {
 	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://config-proxy.example:8080"}}
 	if got := effectiveProxyURL(context.Background(), cfg, nil); got != "http://config-proxy.example:8080" {
 		t.Fatalf("effectiveProxyURL() = %q, want config proxy", got)
+	}
+}
+
+func TestNewProxyAwareHTTPClientPrefersInjectedRoundTripperOverEnvironment(t *testing.T) {
+	proxyutil.ClearProxyEnvironment()
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+
+	injected := &http.Transport{}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", injected)
+	client := NewProxyAwareHTTPClient(ctx, nil, nil, 0)
+	if client.Transport != injected {
+		t.Fatalf("transport = %T, want injected RoundTripper", client.Transport)
 	}
 }
 

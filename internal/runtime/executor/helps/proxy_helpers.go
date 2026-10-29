@@ -19,7 +19,8 @@ import (
 // 1. Use the execution-scoped request proxy if configured (highest priority)
 // 2. Use auth.ProxyURL if configured
 // 3. Use cfg.ProxyURL if auth proxy is not configured
-// 4. Use RoundTripper from context if none are configured
+// 4. Use RoundTripper from context when no explicit proxy is configured
+// 5. Use HTTP(S)_PROXY environment variables when nothing else is configured
 //
 // Parameters:
 //   - ctx: The context containing optional RoundTripper
@@ -36,23 +37,23 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		httpClient.Timeout = timeout
 	}
 
-	// Priority: request override, then auth.ProxyURL, then cfg.ProxyURL.
-	proxyURL := effectiveProxyURL(ctx, cfg, auth)
-
-	// If we have a proxy URL configured, set up the transport
+	proxyURL := explicitProxyURL(ctx, cfg, auth)
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
 		}
-		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyutil.Redact(proxyURL))
 	}
 
-	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+		return httpClient
+	}
+
+	if proxyutil.EnvironmentProxyConfigured() {
+		httpClient.Transport = proxyutil.CachedEnvironmentHTTPTransport()
 	}
 
 	return httpClient
@@ -89,12 +90,21 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 		}
 	}
 
-	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+	cacheKey := proxyutil.ProxyCacheKey(explicitProxyURL(ctx, cfg, auth))
 
-	tr, err := devinTransportCache.Get(proxyURL, func() (*http.Transport, error) {
+	tr, err := devinTransportCache.Get(cacheKey, func() (*http.Transport, error) {
 		var base *http.Transport
-		if proxyURL != "" {
-			base = buildProxyTransport(proxyURL)
+		switch cacheKey {
+		case "":
+			if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+				base = dt.Clone()
+			} else {
+				base = &http.Transport{}
+			}
+		case proxyutil.EnvironmentProxyCacheKey:
+			base = proxyutil.CachedEnvironmentHTTPTransport().Clone()
+		default:
+			base = buildProxyTransport(cacheKey)
 		}
 		if base == nil {
 			if dt, ok := http.DefaultTransport.(*http.Transport); ok {
@@ -127,7 +137,7 @@ func (rt devinNoGzipRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 	return rt.base.RoundTrip(req)
 }
 
-func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+func explicitProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
 	if proxyURL := cliproxyexecutor.RequestProxyURL(ctx); proxyURL != "" {
 		return proxyURL
 	}
@@ -137,9 +147,14 @@ func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		}
 	}
 	if cfg != nil {
-		if proxyURL := strings.TrimSpace(cfg.ProxyURL); proxyURL != "" {
-			return proxyURL
-		}
+		return strings.TrimSpace(cfg.ProxyURL)
+	}
+	return ""
+}
+
+func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if explicit := explicitProxyURL(ctx, cfg, auth); explicit != "" {
+		return explicit
 	}
 	return proxyutil.EnvironmentProxyURL()
 }
