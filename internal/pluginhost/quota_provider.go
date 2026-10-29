@@ -409,6 +409,16 @@ func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, prov
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
 	req.Host = h.hostConfigSummary()
+	current, errFresh := h.requestQuotaAuth(ctx, req.AuthID, req.AuthIndex, req.Metadata)
+	if errFresh != nil {
+		return pluginapi.QuotaFetchResponse{}, true, errFresh
+	}
+	if current != nil {
+		req.AuthID, req.Provider = current.ID, current.Provider
+		req.StorageJSON = storageJSONFromAuth(current)
+		req.Metadata, req.Attributes = cloneAnyMap(current.Metadata), cloneStringMap(current.Attributes)
+		req.HTTPClient = h.newHTTPClient(current, current.Provider)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "QuotaProvider.FetchQuota", recovered)
@@ -453,6 +463,16 @@ func (h *Host) callQuotaReset(ctx context.Context, record capabilityRecord, prov
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
 	req.Host = h.hostConfigSummary()
+	current, errFresh := h.requestQuotaAuth(ctx, req.AuthID, req.AuthIndex, req.Metadata)
+	if errFresh != nil {
+		return pluginapi.QuotaResetResponse{}, true, errFresh
+	}
+	if current != nil {
+		req.AuthID, req.Provider = current.ID, current.Provider
+		req.StorageJSON = storageJSONFromAuth(current)
+		req.Metadata, req.Attributes = cloneAnyMap(current.Metadata), cloneStringMap(current.Attributes)
+		req.HTTPClient = h.newHTTPClient(current, current.Provider)
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "QuotaProvider.ResetQuota", recovered)

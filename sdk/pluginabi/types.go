@@ -29,9 +29,12 @@ const (
 	// request.patch_body_before / request.patch_body_after methods; the host passes
 	// raw request body bytes directly across the C ABI without JSON/Base64 wrapping
 	// and splices validated byte-range edits in a single pass.
-	// Version 9 lets ModelRegistrar.RegisterModels and ModelProvider.StaticModels
-	// publish model catalogs for multiple providers in one response via Registrations.
+	// Version 9 adds per-auth host-managed on-demand token refresh and lets
+	// ModelRegistrar.RegisterModels and ModelProvider.StaticModels publish model
+	// catalogs for multiple providers in one response via Registrations.
 	SchemaVersion uint32 = 9
+	// SchemaVersionOnDemandRefresh is the first host schema supporting lazy refresh.
+	SchemaVersionOnDemandRefresh uint32 = 9
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3

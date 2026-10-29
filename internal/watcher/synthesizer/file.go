@@ -118,7 +118,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			FileName: filepath.Base(fullPath),
 			RawJSON:  data,
 		})
-		if errParse != nil && ctx.StrictFileParsing {
+		if errParse != nil && (ctx.StrictFileParsing || handled) {
 			return nil, fmt.Errorf("parse plugin auth file: %w", errParse)
 		}
 		if errParse == nil && handled {

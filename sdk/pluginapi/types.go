@@ -4,6 +4,8 @@ package pluginapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -254,6 +256,36 @@ type ModelAlias struct {
 	Alias string
 }
 
+// RefreshPolicy controls when the host rotates a plugin credential.
+type RefreshPolicy string
+
+// ErrInvalidRefreshPolicy prevents fallback to an unchecked credential parser.
+var ErrInvalidRefreshPolicy = errors.New("invalid plugin refresh policy")
+
+const (
+	RefreshDefault  RefreshPolicy = "default"
+	RefreshOnDemand RefreshPolicy = "on-demand"
+)
+
+// Valid reports whether the policy is supported by the host.
+func (p RefreshPolicy) Valid() bool {
+	return p == RefreshDefault || p == RefreshOnDemand
+}
+
+// UnmarshalJSON rejects unknown policies at the native plugin boundary.
+func (p *RefreshPolicy) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRefreshPolicy, err)
+	}
+	policy := RefreshPolicy(value)
+	if !policy.Valid() {
+		return fmt.Errorf("%w: unsupported value %q", ErrInvalidRefreshPolicy, value)
+	}
+	*p = policy
+	return nil
+}
+
 // AuthData describes a plugin provider auth record exchanged with the host.
 type AuthData struct {
 	// Provider is the provider key associated with the auth.
@@ -270,6 +302,8 @@ type AuthData struct {
 	ProxyURL string
 	// Disabled reports whether the auth should be skipped.
 	Disabled bool
+	// RefreshPolicy opts into request-only refresh. Omitted updates inherit the current policy.
+	RefreshPolicy *RefreshPolicy `json:"RefreshPolicy,omitempty"`
 	// StorageJSON contains provider-owned persisted auth data.
 	StorageJSON []byte
 	// Metadata contains mutable host-managed auth metadata.

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -245,7 +247,10 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 	req.RawJSON = bytes.Clone(req.RawJSON)
 	resp, errParse := provider.ParseAuth(ctx, req)
 	if errParse != nil {
-		return nil, false, errParse
+		var stored map[string]json.RawMessage
+		_ = json.Unmarshal(req.RawJSON, &stored)
+		_, managed := stored[refreshPolicyStorageKey]
+		return nil, managed || errors.Is(errParse, pluginapi.ErrInvalidRefreshPolicy), errParse
 	}
 	if !resp.Handled {
 		return nil, false, nil
@@ -253,6 +258,9 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 	datas := pluginAuthParseResponseAuths(resp)
 	auths = make([]*coreauth.Auth, 0, len(datas))
 	for _, data := range datas {
+		if errPolicy := restoreParsedRefreshPolicy(&data, req.RawJSON); errPolicy != nil {
+			return nil, true, errPolicy
+		}
 		if strings.TrimSpace(data.Provider) == "" {
 			data.Provider = req.Provider
 		}
@@ -420,62 +428,8 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	if errRefresh != nil {
 		return nil, true, errRefresh
 	}
-	data := pluginResp.Auth
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = authProvider(auth)
-	}
-	if strings.TrimSpace(data.ID) == "" {
-		data.ID = authID(auth)
-	}
-	if strings.TrimSpace(data.FileName) == "" {
-		data.FileName = auth.FileName
-	}
-	if strings.TrimSpace(data.Label) == "" {
-		data.Label = auth.Label
-	}
-	if strings.TrimSpace(data.Prefix) == "" {
-		data.Prefix = auth.Prefix
-	}
-	if strings.TrimSpace(data.ProxyURL) == "" {
-		data.ProxyURL = auth.ProxyURL
-	}
-	if len(data.Metadata) == 0 {
-		data.Metadata = cloneAnyMap(auth.Metadata)
-	}
-	if len(data.Attributes) == 0 {
-		if auth != nil {
-			data.Attributes = cloneStringMap(auth.Attributes)
-		}
-	} else if auth != nil {
-		attributes := cloneStringMap(data.Attributes)
-		for key, value := range auth.Attributes {
-			if _, exists := attributes[key]; !exists {
-				attributes[key] = value
-			}
-		}
-		data.Attributes = attributes
-	}
-	preserveFileAuthPriority(&data, auth)
-	if len(data.StorageJSON) == 0 {
-		data.StorageJSON = storageJSONFromAuth(auth)
-	}
-	if pluginResp.NextRefreshAfter.IsZero() {
-		data.NextRefreshAfter = auth.NextRefreshAfter
-	} else {
-		data.NextRefreshAfter = pluginResp.NextRefreshAfter
-	}
-	path := ""
-	if auth != nil && auth.Attributes != nil {
-		path = auth.Attributes[coreauth.AttributePath]
-	}
-	next := h.AuthDataToCoreAuth(data, path, data.FileName)
-	if next == nil {
-		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
-	}
-	next.Index = auth.Index
-	next.CreatedAt = auth.CreatedAt
-	next.UpdatedAt = auth.UpdatedAt
-	return next, true, nil
+	next, errConvert := h.refreshedAuth(auth, pluginResp)
+	return next, true, errConvert
 }
 
 func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
@@ -510,14 +464,19 @@ func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {
 }
 
 func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
+	return h.authDataToCoreAuth(data, path, fileName, false)
+}
+
+func (h *Host) authDataToCoreAuth(data pluginapi.AuthData, path, fileName string, canonical bool) *coreauth.Auth {
 	authDir := ""
 	if h != nil {
 		authDir = h.hostConfigSummary().AuthDir
 	}
-	return pluginAuthDataToCoreAuth(data, path, fileName, authDir)
+	return pluginAuthDataToCoreAuthWithPolicy(data, path, fileName, authDir, canonical)
 }
 
 type pluginTokenStorage struct {
+	mu       sync.RWMutex
 	provider string
 	rawJSON  []byte
 	meta     map[string]any
@@ -527,13 +486,17 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
 	}
-	if _, hadPriority := s.meta["priority"]; hadPriority {
-		if _, hasPriority := meta["priority"]; !hasPriority {
-			var raw map[string]any
-			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal == nil {
-				delete(raw, "priority")
-				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
-					s.rawJSON = cleaned
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, key := range []string{"priority", refreshPolicyStorageKey} {
+		if _, hadValue := s.meta[key]; hadValue {
+			if _, hasValue := meta[key]; !hasValue {
+				var raw map[string]any
+				if json.Unmarshal(s.rawJSON, &raw) == nil {
+					delete(raw, key)
+					if cleaned, err := json.Marshal(raw); err == nil {
+						s.rawJSON = cleaned
+					}
 				}
 			}
 		}
@@ -545,6 +508,8 @@ func (s *pluginTokenStorage) RawJSON() []byte {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
 	if errPayload != nil {
 		return nil
@@ -556,6 +521,8 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if s == nil {
 		return fmt.Errorf("plugin token storage is nil")
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
 	if errPayload != nil {
 		return errPayload
@@ -653,16 +620,73 @@ func atomicWriteFile(path string, data []byte) error {
 }
 
 func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, authDir string) *coreauth.Auth {
+	return pluginAuthDataToCoreAuthWithPolicy(data, path, fileName, authDir, false)
+}
+
+func pluginAuthDataToCoreAuthWithPolicy(data pluginapi.AuthData, path, fileName, authDir string, canonical bool) *coreauth.Auth {
 	provider := normalizeProviderID(data.Provider)
 	if provider == "" {
 		return nil
+	}
+	policy := pluginapi.RefreshDefault
+	if data.RefreshPolicy != nil {
+		if !data.RefreshPolicy.Valid() {
+			return nil
+		}
+		policy = *data.RefreshPolicy
 	}
 	metadata := cloneAnyMap(data.Metadata)
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
+	if policy == pluginapi.RefreshOnDemand && !canonical {
+		var raw map[string]any
+		if len(bytes.TrimSpace(data.StorageJSON)) > 0 {
+			if err := json.Unmarshal(data.StorageJSON, &raw); err != nil || raw == nil {
+				return nil
+			}
+		}
+		rawFields, errRaw := normalizeRefreshFields(raw)
+		metaFields, errMeta := normalizeRefreshFields(metadata)
+		if errRaw != nil || errMeta != nil {
+			return nil
+		}
+		for _, key := range []string{"access_token", "refresh_token", "expired", "api_key"} {
+			if value, supplied := rawFields[key]; supplied {
+				if meta, present := metaFields[key]; present && meta != value {
+					return nil
+				}
+			}
+		}
+		metadata = rawFields
+		for key, value := range metaFields {
+			metadata[key] = value
+		}
+		bearer, _ := metadata["access_token"].(string)
+		if explicit, supplied := data.Attributes["api_key"]; supplied && explicit != bearer {
+			return nil
+		}
+		if explicit, supplied := metadata["api_key"]; supplied && explicit != bearer {
+			return nil
+		}
+		var errMarshal error
+		data.StorageJSON, errMarshal = json.Marshal(metadata)
+		if errMarshal != nil {
+			return nil
+		}
+	}
 	if provider != "" {
 		metadata["type"] = provider
+	}
+	if policy == pluginapi.RefreshOnDemand {
+		metadata[refreshPolicyStorageKey] = string(policy)
+	} else {
+		delete(metadata, refreshPolicyStorageKey)
+		var raw map[string]any
+		if json.Unmarshal(data.StorageJSON, &raw) == nil && raw != nil {
+			delete(raw, refreshPolicyStorageKey)
+			data.StorageJSON, _ = json.Marshal(raw)
+		}
 	}
 	attributes := cloneStringMap(data.Attributes)
 	if attributes == nil {
@@ -695,6 +719,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
 		Provider:         provider,
+		RefreshPolicy:    policy,
 		ID:               id,
 		FileName:         fileName,
 		Label:            strings.TrimSpace(data.Label),

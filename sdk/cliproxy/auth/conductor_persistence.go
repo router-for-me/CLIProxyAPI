@@ -11,7 +11,7 @@ import (
 
 // lockAuthMutation acquires the reload barrier, then the credential gate, before
 // m.mu. Keep both until publication completes. Load never takes credential or
-// refresh locks. Store callbacks may read the manager, but must not mutate it.
+// refresh execution locks. Store callbacks may read the manager, but must not mutate it.
 func (m *Manager) lockAuthMutation(id string) func() {
 	release, _ := m.lockAuthMutationContext(context.Background(), id)
 	return release

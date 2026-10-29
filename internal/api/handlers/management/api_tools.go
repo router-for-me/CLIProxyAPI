@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -153,6 +154,9 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 		if token == "" {
 			if tokenErr != nil {
+				if auth != nil && auth.RefreshPolicy == pluginapi.RefreshOnDemand {
+					return fmt.Errorf("auth token refresh failed: %s", coreauth.ExtractUpstreamErrorSummary(tokenErr.Error()))
+				}
 				return errors.New("auth token refresh failed")
 			}
 			if authIndex != "" && auth == nil {
@@ -273,6 +277,17 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
 	if auth == nil {
 		return "", nil
+	}
+	if h != nil && h.authManager != nil {
+		current, err := h.authManager.EnsureRequestAuth(ctx, auth, "")
+		if err != nil {
+			return "", err
+		}
+		if auth.RefreshPolicy == pluginapi.RefreshOnDemand || current.RefreshPolicy == pluginapi.RefreshOnDemand {
+			return tokenValueForAuth(current), nil
+		}
+	} else if auth.RefreshPolicy == pluginapi.RefreshOnDemand {
+		return "", fmt.Errorf("managed token resolution requires an auth manager")
 	}
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -394,6 +395,9 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
 	if auth == nil {
+		return time.Time{}, false
+	}
+	if auth.RefreshPolicy == pluginapi.RefreshOnDemand {
 		return time.Time{}, false
 	}
 	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {

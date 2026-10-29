@@ -563,6 +563,10 @@ func (m *Manager) availableAuthsForRouteModelAcrossPriorities(auths []*Auth, pro
 }
 
 func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	return m.availableAuthsForRouteModelWithPredicate(auths, provider, routeModel, now, allPriorities, isAuthBlockedForModel)
+}
+
+func (m *Manager) availableAuthsForRouteModelWithPredicate(auths []*Auth, provider, routeModel string, now time.Time, allPriorities bool, blockedForModel func(*Auth, string, time.Time) (bool, blockReason, time.Time)) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -573,7 +577,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
-		blocked, reason, next := isAuthBlockedForModel(candidate, checkModel, now)
+		blocked, reason, next := blockedForModel(candidate, checkModel, now)
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
@@ -629,10 +633,18 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // unless session affinity or an across-priorities scheduler is active, in which case the selector
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
+	return m.availableAuthsForSelectorWithDemand(selector, auths, provider, routeModel, now, schedulerAcross, false)
+}
+
+func (m *Manager) availableAuthsForSelectorWithDemand(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross, demand bool) (priorityAuths, selectorAuths []*Auth, err error) {
+	predicate := isAuthBlockedForModel
+	if demand {
+		predicate = m.isAuthBlockedForRequest
+	}
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
 
 	if !sessionAffinity && !schedulerAcross {
-		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
+		priorityAuths, err = m.availableAuthsForRouteModelWithPredicate(auths, provider, routeModel, now, false, predicate)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -642,7 +654,7 @@ func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, pr
 
 	// One availability pass and one clone pass serve both lists: the highest priority tier is a
 	// subset of the across-priority candidates, so it is narrowed from the same cloned auths.
-	allAuths, errAcross := m.availableAuthsForRouteModelAcrossPriorities(auths, provider, routeModel, now)
+	allAuths, errAcross := m.availableAuthsForRouteModelWithPredicate(auths, provider, routeModel, now, true, predicate)
 	if errAcross != nil {
 		return nil, nil, errAcross
 	}
@@ -1045,6 +1057,13 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
 	if !okStrategy {
 		return nil, false, nil
+	}
+	if requestDemandSelection(ctx) {
+		selected, errBuiltin := m.scheduler.pickPrevalidated(ctx, strategy, providers, model, candidates)
+		if errBuiltin == nil && selected != nil {
+			keepSelectionID = true
+		}
+		return selected, true, errBuiltin
 	}
 	selected, handledBuiltin, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
 	if errBuiltin == nil && handledBuiltin && selected != nil {
@@ -2309,7 +2328,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	now := time.Now()
-	available, selectorAuths, errAvailable := m.availableAuthsForSelector(selector, candidates, "mixed", model, now, schedulerAcross)
+	available, selectorAuths, errAvailable := m.availableAuthsForSelectorWithDemand(selector, candidates, "mixed", model, now, schedulerAcross, requestDemandSelection(ctx))
 	if errAvailable != nil {
 		m.mu.RUnlock()
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)

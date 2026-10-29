@@ -14,6 +14,7 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -116,6 +117,9 @@ func (m *Manager) queueRefreshUnschedule(authID string) {
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
+		return false
+	}
+	if a.RefreshPolicy == pluginapi.RefreshOnDemand {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
@@ -338,7 +342,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if auth == nil || auth.RefreshPolicy == pluginapi.RefreshOnDemand || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -369,7 +373,7 @@ func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	auth := m.auths[job.id]
-	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch {
+	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RefreshPolicy == pluginapi.RefreshOnDemand || auth.RegistrationEpoch != job.registrationEpoch {
 		return false
 	}
 	job.running = true
@@ -396,6 +400,11 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 
 type authRefreshLock struct {
 	mu sync.Mutex
+	// Never hold stateMu while acquiring mu or the manager mutation gate.
+	stateMu sync.Mutex
+	active  *managedRefreshAttempt
+	pending *pendingAuthRotation
+	outcome *managedRefreshOutcome
 }
 
 func authOuterAccessToken(auth *Auth) string {
@@ -1219,6 +1228,14 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if failedAccessToken != "" {
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
+	current, found := m.GetByID(id)
+	state := m.authRefreshState(id)
+	if found && (current.RefreshPolicy == pluginapi.RefreshOnDemand || state.unsettled()) {
+		if registrationEpoch != 0 && !forceRefresh && failedAccessToken == "" {
+			return current, nil
+		}
+		return m.managedRefresh(ctx, current, forceRefresh, failedAccessToken)
+	}
 
 	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
 	lock, _ := lockValue.(*authRefreshLock)
@@ -1244,6 +1261,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
 	}
+	if registrationEpoch != 0 && auth.RefreshPolicy == pluginapi.RefreshOnDemand && !forceRefresh && failedAccessToken == "" {
+		return auth.Clone(), nil
+	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
 	}
@@ -1256,6 +1276,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		if !authMatchesTokenPartition(auth, failedAccessToken) && (authAccessToken(auth) != "" || authOuterAccessToken(auth) != "") {
 			return auth.Clone(), nil
 		}
+	}
+
+	if auth.RefreshPolicy == pluginapi.RefreshOnDemand || state.unsettled() {
+		lock.mu.Unlock()
+		refreshed, err := m.managedRefresh(ctx, auth, forceRefresh, failedAccessToken)
+		lock.mu.Lock()
+		return refreshed, err
 	}
 
 	// Do not repeatedly submit an unchanged refresh grant already known to be terminally rejected.
