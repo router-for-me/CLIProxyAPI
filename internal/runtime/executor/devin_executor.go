@@ -210,9 +210,13 @@ func (e *DevinExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	updated.Quota.Signals["weekly_quota_remaining_percent"] = fmt.Sprintf("%d%%", status.WeeklyQuotaRemainingPercent)
 	if !status.DailyQuotaResetAt.IsZero() {
 		updated.Quota.Signals["daily_quota_reset_at"] = status.DailyQuotaResetAt.Format(time.RFC3339)
+	} else {
+		delete(updated.Quota.Signals, "daily_quota_reset_at")
 	}
 	if !status.WeeklyQuotaResetAt.IsZero() {
 		updated.Quota.Signals["weekly_quota_reset_at"] = status.WeeklyQuotaResetAt.Format(time.RFC3339)
+	} else {
+		delete(updated.Quota.Signals, "weekly_quota_reset_at")
 	}
 	if !status.PlanStart.IsZero() {
 		updated.Quota.Signals["plan_start"] = status.PlanStart.Format(time.RFC3339)

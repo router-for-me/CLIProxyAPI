@@ -91,12 +91,12 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	if !ProviderSupportsQuotaObservation(provider) {
 		return q.ClearObservationSignals()
 	}
+	if observedAt.IsZero() || observedAt.Before(q.ObservedAt) {
+		return false
+	}
 	next := collectQuotaSignals(provider, headers)
 	if len(next) == 0 {
 		return false
-	}
-	if observedAt.IsZero() {
-		observedAt = time.Now()
 	}
 	q.Signals = next
 	q.ObservedAt = observedAt

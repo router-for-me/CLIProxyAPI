@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -30,8 +31,9 @@ type responseStatusHolder struct {
 }
 
 type responseHeadersHolder struct {
-	mu      sync.RWMutex
-	headers http.Header
+	mu         sync.RWMutex
+	headers    http.Header
+	observedAt time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -113,6 +115,7 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	observedAt := time.Now()
 	if ctx == nil {
 		return
 	}
@@ -122,12 +125,17 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	}
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
+	if observedAt.Before(holder.observedAt) {
+		return
+	}
 	holder.headers = cloneHTTPHeader(headers)
+	holder.observedAt = observedAt
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
-// such as quota metadata delivered in a websocket event.
-func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+// replacing the selected header family with one complete observation.
+func MergeResponseHeaders(ctx context.Context, headers http.Header, replace func(string) bool) {
+	observedAt := time.Now()
 	if ctx == nil || len(headers) == 0 {
 		return
 	}
@@ -137,8 +145,16 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	}
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
+	if observedAt.Before(holder.observedAt) {
+		return
+	}
 	if holder.headers == nil {
 		holder.headers = make(http.Header, len(headers))
+	}
+	for key := range holder.headers {
+		if replace(key) {
+			delete(holder.headers, key)
+		}
 	}
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
@@ -147,6 +163,7 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
 	}
+	holder.observedAt = observedAt
 }
 
 func GetResponseStatus(ctx context.Context) int {
@@ -160,17 +177,17 @@ func GetResponseStatus(ctx context.Context) int {
 	return int(holder.status.Load())
 }
 
-func GetResponseHeaders(ctx context.Context) http.Header {
+func GetResponseHeaders(ctx context.Context) (http.Header, time.Time) {
 	if ctx == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
 	if !ok || holder == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
-	return cloneHTTPHeader(holder.headers)
+	return cloneHTTPHeader(holder.headers), holder.observedAt
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {
