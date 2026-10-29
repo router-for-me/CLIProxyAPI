@@ -65,6 +65,39 @@ api-keys:
 	}
 }
 
+// TestEmptyConnectionPoolBlockStaysOptIn pins that a block with no fields is still an
+// opt-in (it asks for the defaults), including when it stands alone. A nil result here
+// silently disabled pooling for `connection-pool: {}`.
+func TestEmptyConnectionPoolBlockStaysOptIn(t *testing.T) {
+	raw := []byte(`config-version: 8
+api-keys:
+  codex:
+    - name: empty
+      base-url: "https://ollama.com/v1"
+      connection-pool: {}
+      keys:
+        - api-key: "empty-group"
+        - api-key: "empty-key"
+          connection-pool: {}
+`)
+	cfg, err := config.ParseConfigBytes(raw)
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+	if len(cfg.CodexKey) != 2 {
+		t.Fatalf("codex keys = %d, want 2", len(cfg.CodexKey))
+	}
+	for _, key := range cfg.CodexKey {
+		pool := key.ConnectionPool
+		if pool == nil {
+			t.Fatalf("key %q lost its empty connection-pool block", key.APIKey)
+		}
+		if pool.Enabled != nil || pool.IdleConnTimeout != "" || pool.MaxIdleConnsPerHost != nil {
+			t.Fatalf("key %q empty block = %+v, want unset fields", key.APIKey, pool)
+		}
+	}
+}
+
 // TestPerKeyConnectionPoolOverridesGroup pins per-key control inside one provider
 // group: keys may switch pooling on or off independently, and a partial override keeps
 // inheriting the group values it does not mention.
@@ -90,6 +123,8 @@ api-keys:
           connection-pool:
             idle-conn-timeout: null
             max-idle-conns-per-host: 4
+        - api-key: "empty-block"
+          connection-pool: {}
 `)
 	cfg, err := config.ParseConfigBytes(raw)
 	if err != nil {
@@ -119,6 +154,12 @@ api-keys:
 	}
 	if partial.MaxIdleConnsPerHost == nil || *partial.MaxIdleConnsPerHost != 2 {
 		t.Fatalf("partial override must inherit max-idle-conns-per-host, got %+v", partial)
+	}
+
+	// An empty per-key block only overrides nothing, so it inherits the whole group block.
+	empty := byKey["empty-block"]
+	if empty == nil || empty.Enabled == nil || !*empty.Enabled || empty.IdleConnTimeout != "300s" {
+		t.Fatalf("empty per-key block must inherit the group block, got %+v", empty)
 	}
 
 	nullSubkey := byKey["null-subkey"]

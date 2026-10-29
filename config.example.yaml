@@ -698,7 +698,10 @@ upstream:
 #       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
 #       # Optional connection reuse for this credential group. Writing the block is the opt-in;
-#       # pools stay per key, so pooling one key never shares connections with another key.
+#       # `connection-pool: {}` opts in with the defaults below. Pools stay per key, so pooling
+#       # one key never shares connections with another key. Applies to the standard transport
+#       # and the Claude Code TLS transport (Anthropic upstreams); the ChatGPT browser-profile
+#       # transport keeps its one-connection-per-request lifecycle.
 #       # Defaults: idle-conn-timeout 300s, max-idle-conns-per-host 2. Zero or negative values
 #       # disable keep-alives (every request dials). Authenticated proxy URLs are isolated per
 #       # proxy credential digest so rotating user:pass or sticky-session usernames never mix.

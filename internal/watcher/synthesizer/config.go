@@ -37,9 +37,9 @@ func authProxyConnectionPool(pool *config.ProxyConnectionPoolConfig) *coreauth.P
 		maxIdle := *pool.MaxIdleConnsPerHost
 		out.MaxIdleConnsPerHost = &maxIdle
 	}
-	if out.Enabled == nil && out.IdleConnTimeout == "" && out.MaxIdleConnsPerHost == nil {
-		return nil
-	}
+	// A block without fields is still the opt-in: it asks for the pool defaults. It
+	// must therefore stay non-nil, or an operator writing `connection-pool: {}` (or
+	// inheriting an empty group block) would silently get no pooling at all.
 	return out
 }
 

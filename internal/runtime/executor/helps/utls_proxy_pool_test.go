@@ -54,3 +54,54 @@ func TestUtlsFallbackProxyConnectionPool(t *testing.T) {
 		})
 	}
 }
+
+// TestUtlsAnthropicTransportPoolsPerCredential pins the Anthropic fingerprint path:
+// it is built by its own pool kind, so the credential's settings apply and two keys
+// never share one connection. Previously this transport was always the shared
+// per-proxy cache entry, which mixed distinct identities on one TLS connection and
+// ignored max-idle-conns-per-host.
+func TestUtlsAnthropicTransportPoolsPerCredential(t *testing.T) {
+	ResetProxyTransports()
+	t.Cleanup(ResetProxyTransports)
+	cfg := testConfig()
+	anthropicTransport := func(id string, override *cliproxyauth.ProxyConnectionPoolOverride) *http.Transport {
+		t.Helper()
+		client := NewUtlsHTTPClient(context.Background(), cfg, poolAuth(id, override), 0)
+		fallback, ok := client.Transport.(*fallbackRoundTripper)
+		if !ok {
+			t.Fatalf("client transport = %T, want *fallbackRoundTripper", client.Transport)
+		}
+		transport, ok := fallback.anthropic.(*http.Transport)
+		if !ok {
+			t.Fatalf("anthropic transport = %T, want *http.Transport", fallback.anthropic)
+		}
+		return transport
+	}
+
+	first := anthropicTransport("key-a", poolBlock())
+	if first.IdleConnTimeout != proxyPoolDefaultIdleConnTimeout || first.MaxIdleConnsPerHost != proxyPoolDefaultMaxIdleConnsPerHost {
+		t.Fatalf("pool defaults not applied to the Anthropic transport: %+v", first)
+	}
+	if got := anthropicTransport("key-a", poolBlock()); got != first {
+		t.Fatal("credential did not reuse its own Anthropic pool")
+	}
+	if second := anthropicTransport("key-b", poolBlock()); second == first {
+		t.Fatal("two credentials share one Anthropic transport")
+	}
+
+	// Zero bounds disable keep-alives on the fingerprint transport too.
+	zero := 0
+	if transport := anthropicTransport("key-a", &cliproxyauth.ProxyConnectionPoolOverride{MaxIdleConnsPerHost: &zero}); !transport.DisableKeepAlives {
+		t.Fatal("max-idle-conns-per-host: 0 must disable keep-alives on the Anthropic transport")
+	}
+
+	// Credentials that did not opt in keep the historical shared transport.
+	plain := func(id string) http.RoundTripper {
+		t.Helper()
+		client := NewUtlsHTTPClient(context.Background(), cfg, &cliproxyauth.Auth{ID: id}, 0)
+		return client.Transport.(*fallbackRoundTripper).anthropic
+	}
+	if plain("key-a") != plain("key-b") {
+		t.Fatal("unpooled credentials must keep sharing the cached Claude Code transport")
+	}
+}

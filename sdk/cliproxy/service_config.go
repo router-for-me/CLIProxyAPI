@@ -158,7 +158,7 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	}
 	// Clone before assigning the generation: callers may still hold the input snapshot.
 	newCfg = newCfg.CloneForRuntime()
-	helps.AdvanceProxyPoolGeneration(newCfg)
+	helps.AdvanceProxyPoolGeneration(s.proxyPoolPublisher, newCfg)
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()

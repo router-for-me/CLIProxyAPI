@@ -71,16 +71,30 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	return httpClient
 }
 
-// proxyPoolKey identifies one cached pool. scope isolates credentials, proxy is
-// the normalized proxy setting, and the remaining fields fold in every setting
-// that changes the built transport.
+// proxyPoolKey identifies one cached pool. publisher isolates the runtime that
+// published the config, kind separates transports with different TLS fingerprints,
+// scope isolates credentials, proxy is the normalized proxy setting, and the
+// remaining fields fold in every setting that changes the built transport.
 type proxyPoolKey struct {
+	publisher   uint64
+	kind        proxyPoolKind
 	scope       string
 	proxy       string
 	idle        time.Duration
 	max         int
 	invalidIdle string
 }
+
+// proxyPoolKind separates transports that cannot share a pool. The standard
+// transport and the Claude Code uTLS transport differ in TLS fingerprint, HTTP
+// version support, and header framing, so a transport built for one must never be
+// handed to the other even when the proxy and pool settings match.
+type proxyPoolKind uint8
+
+const (
+	proxyPoolKindStandard proxyPoolKind = iota
+	proxyPoolKindClaudeCode
+)
 
 const (
 	// proxyPoolDefaultIdleConnTimeout bounds how long an idle pooled connection
@@ -125,46 +139,88 @@ const (
 )
 
 var proxyTransportCache = NewTransportCache[proxyPoolKey](proxyPoolCapacity)
-var proxyPoolGeneration struct {
+
+// proxyPoolFence tracks the current snapshot generation of every runtime that
+// publishes configs. Fencing is per publisher: a reload in one service must never
+// retire the snapshots another service is still serving, because retiring a live
+// snapshot silently turns that service's pooling into a fresh transport per request.
+// One small entry per runtime is retained for the process lifetime.
+var proxyPoolFence struct {
 	sync.RWMutex
-	current uint64
+	nextPublisher  uint64
+	nextGeneration uint64
+	current        map[uint64]uint64
 }
 
-// AdvanceProxyPoolGeneration retires all older runtime snapshots before publication.
-// cfg must be a private snapshot not yet visible to request handlers.
-func AdvanceProxyPoolGeneration(cfg *config.Config) {
+// RegisterProxyPoolPublisher reserves one publisher identity per runtime. Pass the
+// result to AdvanceProxyPoolGeneration on every publication.
+func RegisterProxyPoolPublisher() uint64 {
+	proxyPoolFence.Lock()
+	defer proxyPoolFence.Unlock()
+	proxyPoolFence.nextPublisher++
+	return proxyPoolFence.nextPublisher
+}
+
+// AdvanceProxyPoolGeneration publishes cfg as the current snapshot of publisher and
+// retires only that publisher's older snapshots. cfg must be a private snapshot not
+// yet visible to request handlers. Pass 0 when the caller owns no publisher (direct
+// SDK embedding, helper probes, tests); those snapshots fence each other.
+func AdvanceProxyPoolGeneration(publisher uint64, cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
-	proxyPoolGeneration.Lock()
-	proxyPoolGeneration.current++
-	cfg.ProxyPoolGeneration = proxyPoolGeneration.current
-	proxyTransportCache.Purge()
-	proxyPoolGeneration.Unlock()
+	proxyPoolFence.Lock()
+	proxyPoolFence.nextGeneration++
+	generation := proxyPoolFence.nextGeneration
+	if proxyPoolFence.current == nil {
+		proxyPoolFence.current = make(map[uint64]uint64)
+	}
+	proxyPoolFence.current[publisher] = generation
+	cfg.ProxyPoolPublisher = publisher
+	cfg.ProxyPoolGeneration = generation
+	// Retire this publisher's pools only, while the fence excludes its snapshots: a
+	// purged-then-refilled cache would resurrect transports built from retired
+	// settings. Purging the whole cache would close the idle connections of every
+	// other runtime on each reload of this one.
+	proxyTransportCache.CloseMatching(func(key proxyPoolKey) bool { return key.publisher == publisher })
+	proxyPoolFence.Unlock()
 }
 
 // ResetProxyTransports closes idle connections in cached explicit proxy transports.
 func ResetProxyTransports() { proxyTransportCache.Purge() }
 
 func pooledProxyTransport(proxyURL string, cfg *config.Config, auth *cliproxyauth.Auth) *http.Transport {
+	tr, pooled := pooledTransport(proxyPoolKindStandard, proxyURL, cfg, auth, func() (*http.Transport, error) {
+		return buildPooledBaseTransport(proxyURL)
+	})
+	if pooled {
+		return tr
+	}
 	// Off unless this credential carries a connection-pool block. There is
 	// deliberately no global switch: pooling one api key must never change the
 	// transport lifecycle of another provider or OAuth identity. Without the
 	// block every request keeps the historical behavior of a fresh transport.
+	return buildProxyTransport(proxyURL)
+}
+
+// pooledTransport resolves one credential's pool for a transport kind. pooled is
+// false when the credential did not opt in or its proxy setting cannot be pooled, so
+// the caller keeps its historical transport.
+func pooledTransport(kind proxyPoolKind, proxyURL string, cfg *config.Config, auth *cliproxyauth.Auth, build func() (*http.Transport, error)) (*http.Transport, bool) {
 	settings, enabled := resolveProxyPoolSettings(auth)
 	if !enabled {
-		return buildProxyTransport(proxyURL)
+		return nil, false
 	}
 	setting, errParse := proxyutil.Parse(proxyURL)
 	if errParse != nil {
-		return buildProxyTransport(proxyURL)
+		return nil, false
 	}
 	idle := proxyPoolDefaultIdleConnTimeout
 	invalidIdle := ""
 	if raw := strings.TrimSpace(settings.IdleConnTimeout); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil {
 			if d <= 0 {
-				return unpooledBaseTransport(proxyURL, true)
+				return unpooledTransport(build, true), true
 			}
 			idle = d
 		} else {
@@ -174,29 +230,45 @@ func pooledProxyTransport(proxyURL string, cfg *config.Config, auth *cliproxyaut
 	max := proxyPoolDefaultMaxIdleConnsPerHost
 	if settings.MaxIdleConnsPerHost != nil {
 		if *settings.MaxIdleConnsPerHost <= 0 {
-			return unpooledBaseTransport(proxyURL, true)
+			return unpooledTransport(build, true), true
 		}
 		max = *settings.MaxIdleConnsPerHost
 	}
+	var publisher uint64
+	if cfg != nil {
+		publisher = cfg.ProxyPoolPublisher
+	}
 	cacheProxy, poolLabel := proxyPoolCacheTarget(setting)
-	key := proxyPoolKey{scope: proxyPoolScope(auth), proxy: cacheProxy, idle: idle, max: max, invalidIdle: invalidIdle}
-	// Only a snapshot that carries a retired generation is fenced. Generation 0 means the
-	// config was never published through the SDK generation fence (direct api callers,
-	// helper probes, tests), so it cannot be stale and must still pool; treating it as
-	// stale would silently disable pooling for every non-SDK caller that builds its own
-	// config.Config.
-	fenced := cfg != nil && cfg.ProxyPoolGeneration != 0
-	if fenced {
-		proxyPoolGeneration.RLock()
-		if cfg.ProxyPoolGeneration != proxyPoolGeneration.current {
-			proxyPoolGeneration.RUnlock()
-			return unpooledBaseTransport(proxyURL, false)
+	key := proxyPoolKey{
+		publisher:   publisher,
+		kind:        kind,
+		scope:       proxyPoolScope(auth),
+		proxy:       cacheProxy,
+		idle:        idle,
+		max:         max,
+		invalidIdle: invalidIdle,
+	}
+	// Only a snapshot that carries a retired generation is fenced. Generation 0 means
+	// the config was never published through the SDK generation fence (direct api
+	// callers, helper probes, tests), so it cannot be stale and must still pool;
+	// treating it as stale would silently disable pooling for every non-SDK caller
+	// that builds its own config.Config. The read lock is held across the cache lookup
+	// so a concurrent publication cannot purge the cache and watch this snapshot refill
+	// it with a transport built from retired settings.
+	if cfg != nil && cfg.ProxyPoolGeneration != 0 {
+		proxyPoolFence.RLock()
+		defer proxyPoolFence.RUnlock()
+		if cfg.ProxyPoolGeneration != proxyPoolFence.current[cfg.ProxyPoolPublisher] {
+			return unpooledTransport(build, false), true
 		}
 	}
 	tr, err := proxyTransportCache.Get(key, func() (*http.Transport, error) {
-		tr, errBuild := buildPooledBaseTransport(proxyURL)
+		tr, errBuild := build()
 		if errBuild != nil {
 			return nil, errBuild
+		}
+		if tr == nil {
+			return nil, fmt.Errorf("build returned no transport")
 		}
 		if invalidIdle != "" {
 			log.Warnf("proxy connection pool: invalid idle-conn-timeout %q, using %s", invalidIdle, proxyPoolDefaultIdleConnTimeout)
@@ -216,17 +288,14 @@ func pooledProxyTransport(proxyURL string, cfg *config.Config, auth *cliproxyaut
 				return stampProxyKeepAlive(conn), nil
 			}
 		}
-		log.Debugf("proxy connection pool: created transport %s scope=%s idle=%s max=%d", poolLabel, key.scope, idle, max)
+		log.Debugf("proxy connection pool: created transport kind=%d %s scope=%s idle=%s max=%d", kind, poolLabel, key.scope, idle, max)
 		return tr, nil
 	})
-	if fenced {
-		proxyPoolGeneration.RUnlock()
-	}
 	if err != nil {
 		log.Errorf("proxy connection pool: %v", err)
-		return nil
+		return nil, true
 	}
-	return tr
+	return tr, true
 }
 
 // resolveProxyPoolSettings resolves the pooling settings carried by one api-key
@@ -337,13 +406,12 @@ func authMetadataString(metadata map[string]any, key string) string {
 	return strings.TrimSpace(text)
 }
 
-// unpooledBaseTransport constructs a one-off transport for an opted-in credential
-// that must bypass the shared cache (zero/negative pool bounds or a fenced config
-// generation). Unlike buildProxyTransport, it still clones DefaultTransport when
-// proxyURL is empty so DisableKeepAlives and pool isolation are honoured instead of
-// falling back to the process-wide DefaultTransport pool.
-func unpooledBaseTransport(proxyURL string, disableKeepAlives bool) *http.Transport {
-	tr, errBuild := buildPooledBaseTransport(proxyURL)
+// unpooledTransport constructs a one-off transport for an opted-in credential that
+// must bypass the shared cache (zero/negative pool bounds or a fenced config
+// generation). It uses the kind's own builder, so an unpooled uTLS transport keeps
+// its TLS fingerprint, and DisableKeepAlives still isolates it from shared pools.
+func unpooledTransport(build func() (*http.Transport, error), disableKeepAlives bool) *http.Transport {
+	tr, errBuild := build()
 	if errBuild != nil {
 		log.Errorf("%v", errBuild)
 		return nil

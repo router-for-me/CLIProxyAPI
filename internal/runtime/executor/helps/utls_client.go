@@ -328,6 +328,13 @@ func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 }
 
 func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
+	return newClaudeCodeRoundTripperForDialer(claudeCodeDialer(proxyURL))
+}
+
+// claudeCodeDialer resolves the dialer the Claude Code transport uses for one proxy
+// setting. It is shared by the cached transport and the per-credential pooled one so
+// both keep the same proxy semantics.
+func claudeCodeDialer(proxyURL string) proxy.Dialer {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -337,7 +344,22 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return newClaudeCodeRoundTripperForDialer(dialer)
+	return dialer
+}
+
+// pooledClaudeCodeTransport returns the credential-scoped Claude Code uTLS transport
+// when the credential opted into pooling, or nil so the caller keeps the historical
+// shared per-proxy transport. Per credential pooling matters here because this
+// transport is otherwise shared by every key that uses the same proxy, which mixes
+// distinct identities on one connection and ignores the key's pool settings.
+func pooledClaudeCodeTransport(proxyURL string, cfg *config.Config, auth *cliproxyauth.Auth) *http.Transport {
+	tr, pooled := pooledTransport(proxyPoolKindClaudeCode, proxyURL, cfg, auth, func() (*http.Transport, error) {
+		return newClaudeCodeRoundTripperForDialer(claudeCodeDialer(proxyURL)), nil
+	})
+	if !pooled {
+		return nil
+	}
+	return tr
 }
 
 // newClaudeCodeRoundTripperForDialer builds the Claude Code transport on top
@@ -451,13 +473,22 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		if transport := pooledProxyTransport(proxyURL, cfg, auth); transport != nil {
 			standardTransport = transport
 		}
+		// The Anthropic path has its own TLS fingerprint, so it needs its own pool kind.
+		if transport := pooledClaudeCodeTransport(proxyURL, cfg, auth); transport != nil {
+			anthropicRT = transport
+		}
 	} else if ctxRoundTripper != nil {
 		chromeRT = ctxRoundTripper
 		anthropicRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
-	} else if transport := pooledProxyTransport("", cfg, auth); transport != nil {
+	} else {
 		// A credential opt-in applies here too; an injected RoundTripper keeps priority.
-		standardTransport = transport
+		if transport := pooledProxyTransport("", cfg, auth); transport != nil {
+			standardTransport = transport
+		}
+		if transport := pooledClaudeCodeTransport("", cfg, auth); transport != nil {
+			anthropicRT = transport
+		}
 	}
 
 	client := &http.Client{

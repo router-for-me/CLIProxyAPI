@@ -1447,3 +1447,32 @@ func TestConfigSynthesizer_OpenAICompatConnectionPoolMerge(t *testing.T) {
 		t.Fatalf("partial override must inherit max-idle-conns-per-host: %+v", partial)
 	}
 }
+
+// TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn pins that writing the block
+// without fields requests the pool defaults. Dropping it during synthesis disabled
+// pooling for `connection-pool: {}` and for keys inheriting an empty group block.
+func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:         "empty-block",
+		BaseURL:        "https://ollama.com/v1",
+		ProxyURL:       "direct",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auths = %d, want 1", len(auths))
+	}
+	if auths[0].ProxyConnectionPool == nil {
+		t.Fatal("an empty connection-pool block is still an opt-in and must reach the auth record")
+	}
+	if enabled := auths[0].ProxyConnectionPool.Enabled; enabled != nil {
+		t.Fatalf("empty block must leave enabled unset (defaults to on), got %v", *enabled)
+	}
+}
