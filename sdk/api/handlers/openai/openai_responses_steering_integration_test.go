@@ -13,8 +13,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
@@ -98,9 +100,22 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			}
 			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "steering-test-model"}})
 			defer registry.GetGlobalRegistry().UnregisterClient(authID)
-			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+			base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
+			base.SetModelRouterHost(&websocketLoggingRouter{
+				record: func(ctx context.Context, _ string, body []byte) {
+					// Model-router host HTTP calls share the duplex connection lifetime.
+					helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://router.invalid/route", Body: body})
+				},
+			})
+			h := NewOpenAIResponsesAPIHandler(base)
 			router := gin.New()
-			router.GET("/v1/responses", h.ResponsesWebsocket)
+			deferredCount := make(chan int, 1)
+			router.GET("/v1/responses", func(c *gin.Context) {
+				h.ResponsesWebsocket(c)
+				value, _ := c.Get(logging.DeferredAPIRequestContextKey)
+				requests, _ := value.([]logging.DeferredAPIRequest)
+				deferredCount <- len(requests)
+			})
 			downstream := httptest.NewServer(router)
 			defer downstream.Close()
 			c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
@@ -168,6 +183,16 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			}
 			if connections.Load() != 1 {
 				t.Fatalf("unexpected reconnect/replay: %d", connections.Load())
+			}
+			// An upstream disconnect can leave the downstream ready for another turn.
+			_ = c.Close()
+			select {
+			case n := <-deferredCount:
+				if n != 0 {
+					t.Fatalf("duplex socket retained %d deferred upstream requests", n)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("duplex handler did not return")
 			}
 		})
 	}
