@@ -283,7 +283,7 @@ func (s *FileCooldownStateStore) statePath(record CooldownStateRecord) (string, 
 func (s *FileCooldownStateStore) stateRelativePath(record CooldownStateRecord) string {
 	authFile := strings.TrimSpace(record.AuthFile)
 	if authFile != "" {
-		if filepath.IsAbs(authFile) && strings.TrimSpace(s.authDir) != "" {
+		if strings.TrimSpace(s.authDir) != "" {
 			if rel, errRel := filepath.Rel(s.authDir, authFile); errRel == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
 				return cdsPathForRel(rel)
 			}
