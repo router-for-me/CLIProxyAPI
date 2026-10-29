@@ -96,7 +96,11 @@ type SignatureSanitizeReport struct {
 	DroppedBlocks      int
 	DroppedSignatures  int
 	ReplacedSignatures int
-	Decisions          []SignatureCompatibilityDecision
+	// DroppedForeignProviderThinking is set when a thinking block with
+	// substantive provider state was dropped because it is not a legal Claude
+	// keep. Empty placeholders increment DroppedBlocks but do not set this flag.
+	DroppedForeignProviderThinking bool
+	Decisions                      []SignatureCompatibilityDecision
 }
 
 // SanitizeClaudeMessagesSignaturesForModel removes or preserves Claude
@@ -248,6 +252,9 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				messageModified = true
 			default:
 				report.DroppedBlocks++
+				if targetProvider == SignatureProviderClaude && thinkingBlockHasSubstantiveProviderState(part) {
+					report.DroppedForeignProviderThinking = true
+				}
 				messageModified = true
 			}
 		}
@@ -352,6 +359,18 @@ func claudeToolUseSignaturePaths() []string {
 
 func claudeToolUseProvenancePaths() []string {
 	return append(claudeToolUseSignaturePaths(), "model")
+}
+
+func thinkingBlockHasSubstantiveProviderState(part gjson.Result) bool {
+	if strings.TrimSpace(claudeThinkingBlockText(part)) != "" {
+		return true
+	}
+	for _, path := range []string{"signature", "thoughtSignature", "thought_signature", "encrypted_content", "data"} {
+		if strings.TrimSpace(part.Get(path).String()) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteEmptyJSONObjectPath(raw, path string) (string, bool) {
