@@ -140,6 +140,14 @@ type CodexClientConfig struct {
 	// Default false clears the capability regardless of template metadata.
 	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`
 
+	// AccountCatalog serves Codex clients their own ChatGPT account's model list. When true, a Codex catalog request
+	// (`/models?client_version=`) that carries the client's ChatGPT login is answered with the list ChatGPT's Codex
+	// backend returns for that login, entries passed through unchanged, followed by the catalog entries of the
+	// configured Codex API-key providers (as their own `/models?client_version=` returns them). Models only that
+	// account lists are routed to Codex OAuth credentials that forward the caller's Authorization header. The proxy
+	// never stores the login: it is used for the one request and dropped. Default false keeps the built-in catalog.
+	AccountCatalog bool `yaml:"account-catalog" json:"account-catalog"`
+
 	// WebSearchResultCache configures caching of upstream web search results for
 	// Codex Responses clients that drop search results from replayed history.
 	WebSearchResultCache CodexWebSearchResultCacheConfig `yaml:"web-search-result-cache" json:"web-search-result-cache"`
