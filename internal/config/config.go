@@ -192,14 +192,14 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+	// vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, gemini-app.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, meta-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// OAuthRequestScopedErrors defines per-provider request-scoped error rules applied to OAuth/file-backed auth entries.
-	// Supported channels include: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and OAuth plugin provider keys.
+	// Supported channels include: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, gemini-app, and OAuth plugin provider keys.
 	//
 	// NOTE: This applies only to OAuth credentials and does not affect per-credential request-scoped-errors under *-api-key.
 	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`

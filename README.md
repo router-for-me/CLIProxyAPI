@@ -128,6 +128,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - Grok Build support via OAuth login
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
+- Gemini App browser-session text chat ([setup and limitations](docs/gemini-app.md))
 - Multimodal input support (text and images)
 - Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
 - Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
