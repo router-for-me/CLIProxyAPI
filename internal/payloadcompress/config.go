@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
 
 // Config mirrors the requests.compression YAML block.
@@ -43,6 +44,27 @@ type Step struct {
 	Level string `yaml:"level" json:"level"`
 	// Options carries the per-engine knobs. Zero values mean "engine default".
 	Options StepOptions `yaml:"options" json:"options"`
+}
+
+// UnmarshalYAML accepts engine options both nested under options: (the
+// documented shape) and inline on the step (the upstream OmniRoute shape).
+// An explicit options block wins over inline keys.
+func (s *Step) UnmarshalYAML(node *yaml.Node) error {
+	type plain Step
+	var step plain
+	if err := node.Decode(&step); err != nil {
+		return err
+	}
+	var inline StepOptions
+	if err := node.Decode(&inline); err != nil {
+		return err
+	}
+	step.Options = inline
+	if err := node.Decode(&step); err != nil {
+		return err
+	}
+	*s = Step(step)
+	return nil
 }
 
 // StepOptions tunes one pipeline step. Every field is optional; an omitted block

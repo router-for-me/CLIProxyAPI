@@ -197,6 +197,10 @@ const toolElisionReserve = 32
 // toolTailShare is the fraction of the budget the tail keeps.
 const toolTailShare = 0.3
 
+// toolMinLinesForTail is the line count at or below which only the head is cut:
+// a short result has no tail worth defending.
+const toolMinLinesForTail = 10
+
 func isWordRuneAt(runes []rune, i int) bool {
 	return i >= 0 && i < len(runes) && !unicode.IsSpace(runes[i])
 }
@@ -254,6 +258,20 @@ func tailStartFrom(runes []rune, tailBudget int) int {
 
 func countLines(text string) int { return strings.Count(text, "\n") + 1 }
 
+// hasMoreLinesThan reports whether text holds more than lineCount lines, stopping
+// as soon as the answer is known so a huge result is never scanned twice.
+func hasMoreLinesThan(text string, lineCount int) bool {
+	index := 0
+	for found := 0; found < lineCount; found++ {
+		next := strings.IndexByte(text[index:], '\n')
+		if next < 0 {
+			return false
+		}
+		index += next + 1
+	}
+	return true
+}
+
 // truncateToolText caps a tool result the way upstream Lite does. Multi-line
 // content keeps its tail as well as its head: a head-only cut deletes the lines
 // an agent is about to edit, so it invents them from memory and the edit fails as
@@ -261,7 +279,7 @@ func countLines(text string) int { return strings.Count(text, "\n") + 1 }
 func truncateToolText(text string, maxLength int) string {
 	runes := []rune(text)
 	budget := maxLength - charLen(toolTruncationMarker) - toolElisionReserve
-	if budget > 0 && countLines(text) > 10 {
+	if budget > 0 && hasMoreLinesThan(text, toolMinLinesForTail) {
 		headCut := backOffToWordBoundary(runes, int(math.Ceil(float64(budget)*(1-toolTailShare))))
 		tailStart := tailStartFrom(runes, budget-headCut)
 		if tailStart > headCut {

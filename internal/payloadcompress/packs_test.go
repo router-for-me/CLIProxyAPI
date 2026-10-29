@@ -484,3 +484,23 @@ func TestLiteTailDroppedWhenNoLineFits(t *testing.T) {
 		}
 	}
 }
+
+// TestLiteHasMoreLinesThan pins the bounded line count to the plain one: the gate
+// must agree with countLines at the boundary, or the tail silently stops being
+// kept (or starts being kept for content too short for it).
+func TestLiteHasMoreLinesThan(t *testing.T) {
+	for n := 0; n <= 14; n++ {
+		text := strings.Repeat("x\n", n)
+		want := countLines(text) > toolMinLinesForTail
+		if got := hasMoreLinesThan(text, toolMinLinesForTail); got != want {
+			t.Fatalf("%d lines: hasMoreLinesThan=%v, countLines=%d", n+1, got, countLines(text))
+		}
+	}
+	// No trailing newline, and a single enormous line.
+	if hasMoreLinesThan(strings.Repeat("x", 1<<16), toolMinLinesForTail) {
+		t.Fatal("a single line is not more than ten")
+	}
+	if !hasMoreLinesThan(strings.Repeat("\n", toolMinLinesForTail+1), toolMinLinesForTail) {
+		t.Fatal("eleven newlines are more than ten lines")
+	}
+}
