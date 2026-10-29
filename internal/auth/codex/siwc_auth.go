@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -202,15 +203,51 @@ func (o *CodexAuth) ExchangeSIWCCodeForTokens(ctx context.Context, code, issuedC
 	return o.requestSIWCToken(ctx, form, issuedClientID, deviceID, true)
 }
 
+// SIWCRefreshError marks an error as originating from a Sign in with ChatGPT (SIWC) token refresh.
+type SIWCRefreshError struct {
+	Err error
+}
+
+func (e *SIWCRefreshError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *SIWCRefreshError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// IsSIWCRefreshError reports that this error came from the SIWC refresh partition.
+func (e *SIWCRefreshError) IsSIWCRefreshError() bool {
+	return true
+}
+
+// WrapSIWCRefreshError wraps err in a SIWCRefreshError if non-nil.
+func WrapSIWCRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing *SIWCRefreshError
+	if errors.As(err, &existing) {
+		return err
+	}
+	return &SIWCRefreshError{Err: err}
+}
+
 // RefreshSIWCTokens refreshes a Sign in with ChatGPT access token using its refresh token and issued client ID.
 func (o *CodexAuth) RefreshSIWCTokens(ctx context.Context, refreshToken, clientID, deviceID string) (*CodexSIWCTokenData, error) {
 	refreshToken = strings.TrimSpace(refreshToken)
 	if refreshToken == "" {
-		return nil, fmt.Errorf("SIWC refresh token is required")
+		return nil, WrapSIWCRefreshError(fmt.Errorf("SIWC refresh token is required"))
 	}
 	clientID = strings.TrimSpace(clientID)
 	if clientID == "" {
-		return nil, fmt.Errorf("Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT")
+		return nil, WrapSIWCRefreshError(fmt.Errorf("Stored OpenAI OAuth credential does not contain an issued client ID; reconnect ChatGPT"))
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -229,11 +266,11 @@ func (o *CodexAuth) RefreshSIWCTokens(ctx context.Context, refreshToken, clientI
 		return o.requestSIWCToken(refreshCtx, form, clientID, deviceID, false)
 	})
 	if errSF != nil {
-		return nil, errSF
+		return nil, WrapSIWCRefreshError(errSF)
 	}
 	tokenData, ok := result.(*CodexSIWCTokenData)
 	if !ok || tokenData == nil {
-		return nil, fmt.Errorf("SIWC token refresh failed: invalid single-flight result")
+		return nil, WrapSIWCRefreshError(fmt.Errorf("SIWC token refresh failed: invalid single-flight result"))
 	}
 	return tokenData, nil
 }

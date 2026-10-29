@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -968,6 +969,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
 		if result.Success {
+			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown {
+				auth.InferenceVerified = true
+				auth.LastInferenceVerifiedAt = now
+			}
 			if wasTerminalUnauthorized {
 				if modelKey != "" {
 					state := ensureModelState(auth, modelKey)
@@ -2208,7 +2213,7 @@ func isUnauthorizedError(err error) bool {
 		return true
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized")
+	return strings.Contains(raw, "status 401") || strings.Contains(raw, "401 unauthorized") || strings.Contains(raw, "(401)")
 }
 
 func hasUnauthorizedAuthFailure(auth *Auth) bool {
@@ -2247,6 +2252,170 @@ func HasDisabledInvalidGrantFailure(auth *Auth) bool {
 	return hasDisabledInvalidGrantFailure(auth)
 }
 
+var (
+	renewalURLPattern          = regexp.MustCompile(`(?i)https?://[^\s"'<>\\]+`)
+	renewalJWTPattern          = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?\b`)
+	renewalSecretKVPattern     = regexp.MustCompile(`(?i)\b(access_token|refresh_token|id_token|client_secret|code_verifier|code_challenge|authorization)\s*([=:]|"\s*:\s*")\s*(?:(?:bearer|basic|token)\s+)?([^\s"&',}\\]+)`)
+	renewalOAuthParamPatten    = regexp.MustCompile(`(?i)(?:[?&]|\b)(code|state)=([^\s"&',}\\]+)`)
+	renewalEscapedParamPattern = regexp.MustCompile(`(?i)(code|state)%3[dD]([^\s"&',}\\%]+)`)
+	renewalJSONStatePattern    = regexp.MustCompile(`(?i)("state"\s*:\s*)"([^"]*)(?:"|$)`)
+	renewalJSONCodePattern     = regexp.MustCompile(`(?i)("code"\s*:\s*)"([^"]*)(?:"|$)`)
+	renewalBearerPattern       = regexp.MustCompile(`(?i)\bBearer\s+[^\s"',}\\]+`)
+)
+
+func isKnownSafeOAuthErrorCode(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "refresh_token_reused",
+		"refresh_token_expired",
+		"refresh_token_invalidated",
+		"token_revoked",
+		"invalid_grant",
+		"invalid_client",
+		"invalid_request",
+		"invalid_request_error",
+		"unauthorized",
+		"rate_limit_exceeded",
+		"insufficient_quota",
+		"billing_hard_limit_reached",
+		"account_deactivated",
+		"context_length_exceeded",
+		"server_error",
+		"service_unavailable",
+		"bad_gateway",
+		"model_not_found":
+		return true
+	default:
+		return false
+	}
+}
+
+// SanitizeRenewalMessage strips URLs, bearer tokens, JWTs, OAuth codes/states, and secret fields from diagnostic messages.
+func SanitizeRenewalMessage(raw string) string {
+	return sanitizeRenewalMessage(raw)
+}
+
+func redactRenewalPatterns(in string) string {
+	out := renewalURLPattern.ReplaceAllString(in, "[redacted-url]")
+	out = renewalJWTPattern.ReplaceAllString(out, "[redacted-token]")
+	out = renewalBearerPattern.ReplaceAllString(out, "Bearer [redacted]")
+	out = renewalSecretKVPattern.ReplaceAllString(out, "${1}=[redacted]")
+	out = renewalOAuthParamPatten.ReplaceAllString(out, "${1}=[redacted]")
+	out = renewalEscapedParamPattern.ReplaceAllString(out, "${1}=[redacted]")
+	out = renewalJSONStatePattern.ReplaceAllString(out, `${1}"[redacted]"`)
+	out = renewalJSONCodePattern.ReplaceAllStringFunc(out, func(match string) string {
+		sub := renewalJSONCodePattern.FindStringSubmatch(match)
+		if len(sub) == 3 && isKnownSafeOAuthErrorCode(sub[2]) && strings.HasSuffix(match, `"`) {
+			return match
+		}
+		if len(sub) >= 2 {
+			return sub[1] + `"[redacted]"`
+		}
+		return `"code":"[redacted]"`
+	})
+	return out
+}
+
+func sanitizeRenewalMessage(raw string) string {
+	// Redact secrets on the full input BEFORE truncation so secrets straddling the truncation boundary cannot leak.
+	preRedacted := redactRenewalPatterns(raw)
+	out := internallogging.SafeDiagnosticForLog(preRedacted)
+	return redactRenewalPatterns(out)
+}
+
+func isTerminalRefreshGrantMessage(message string) bool {
+	lower := strings.ToLower(message)
+	for _, token := range []string{
+		"refresh_token_reused",
+		"refresh_token_expired",
+		"refresh_token_invalidated",
+		"token_revoked",
+		"invalid_client",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTerminalRefreshError(auth *Auth, err error) bool {
+	if err == nil {
+		return false
+	}
+	var partErr interface {
+		OuterRefreshError() error
+		SIWCRefreshError() error
+	}
+	if errors.As(err, &partErr) && partErr != nil {
+		return isTerminalRefreshError(auth, partErr.OuterRefreshError()) ||
+			isTerminalRefreshError(auth, partErr.SIWCRefreshError())
+	}
+	if isUnauthorizedError(err) || isTerminalRefreshGrantMessage(err.Error()) {
+		return true
+	}
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") && isInvalidGrantError(err) {
+		return true
+	}
+	return false
+}
+
+func terminalRefreshErrorCode(message string, statusCode int) string {
+	lower := strings.ToLower(message)
+	for _, code := range []string{
+		"refresh_token_reused",
+		"refresh_token_expired",
+		"refresh_token_invalidated",
+		"token_revoked",
+		"invalid_client",
+	} {
+		if strings.Contains(lower, code) {
+			return code
+		}
+	}
+	if isInvalidGrantErrorMessage(lower) {
+		return "invalid_grant"
+	}
+	if statusCode == http.StatusUnauthorized {
+		return "unauthorized"
+	}
+	return "refresh_failed"
+}
+
+func sanitizeRenewalError(auth *Auth, err error) *Error {
+	if err == nil {
+		return nil
+	}
+	var partErr interface {
+		OuterRefreshError() error
+		SIWCRefreshError() error
+	}
+	if errors.As(err, &partErr) && partErr != nil {
+		outerErr := partErr.OuterRefreshError()
+		siwcErr := partErr.SIWCRefreshError()
+		if outerErr != nil && isTerminalRefreshError(auth, outerErr) {
+			err = outerErr
+		} else if siwcErr != nil && isTerminalRefreshError(auth, siwcErr) {
+			err = siwcErr
+		}
+	}
+	raw := err.Error()
+	statusCode := statusCodeFromError(err)
+	if statusCode == 0 {
+		if isUnauthorizedError(err) {
+			statusCode = http.StatusUnauthorized
+		} else if isInvalidGrantError(err) || isTerminalRefreshGrantMessage(raw) {
+			statusCode = http.StatusBadRequest
+		}
+	}
+	terminal := isTerminalRefreshError(auth, err)
+	return &Error{
+		Code:       terminalRefreshErrorCode(raw, statusCode),
+		Message:    sanitizeRenewalMessage(raw),
+		HTTPStatus: statusCode,
+		Retryable:  !terminal,
+	}
+}
+
 func refreshErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
@@ -2255,7 +2424,7 @@ func refreshErrorFromError(err error) *Error {
 	if statusCode == 0 && isUnauthorizedError(err) {
 		statusCode = http.StatusUnauthorized
 	}
-	authErr := &Error{Message: err.Error(), HTTPStatus: statusCode}
+	authErr := &Error{Message: sanitizeRenewalMessage(err.Error()), HTTPStatus: statusCode}
 	if statusCode == http.StatusUnauthorized {
 		authErr.Code = "unauthorized"
 		authErr.Retryable = false

@@ -37,18 +37,40 @@ var (
 // ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
 var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
 
+type oauthRecoveryTarget struct {
+	AuthID           string
+	FileName         string
+	Provider         string
+	Email            string
+	AccountID        string
+	VerifyAfterLogin bool
+	VerifyModel      string
+}
+
 type oauthSession struct {
-	Provider       string
-	Status         string
-	Source         string
-	ProxyURL       string
-	Metadata       map[string]any
-	SIWC           *siwcBindSession
-	Committing     bool
-	SIWCCommitting bool
-	Completed      bool
-	CreatedAt      time.Time
-	ExpiresAt      time.Time
+	Provider        string
+	Status          string
+	Source          string
+	ProxyURL        string
+	Metadata        map[string]any
+	SIWC            *siwcBindSession
+	Target          *oauthRecoveryTarget
+	AuthID          string
+	SavedGrantHash  string
+	Saved           bool
+	Adopted         bool
+	BaselineExisted bool
+	BaselineVersion uint64
+	BaselineEpoch   uint64
+	AdoptedVersion  uint64
+	AdoptedEpoch    uint64
+	AdoptError      string
+	VerifyError     string
+	Committing      bool
+	SIWCCommitting  bool
+	Completed       bool
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
 }
 
 type oauthSessionStore struct {
@@ -235,7 +257,16 @@ func (s *oauthSessionStore) FailPendingPoll(state, message string) (errStatus st
 }
 
 func (s *oauthSessionStore) Complete(state string) {
+	s.CompleteWithAuth(state, "")
+}
+
+func (s *oauthSessionStore) CompleteWithAuth(state, authID string) {
+	s.CompleteWithOutcome(state, authID, "", strings.TrimSpace(authID) != "", strings.TrimSpace(authID) != "", false, 0, 0, 0, 0, "", "")
+}
+
+func (s *oauthSessionStore) CompleteWithOutcome(state, authID, savedGrantHash string, saved, adopted, baselineExisted bool, baselineVersion, baselineEpoch, adoptedVersion, adoptedEpoch uint64, adoptErr, verifyErr string) {
 	state = strings.TrimSpace(state)
+	authID = strings.TrimSpace(authID)
 	if state == "" {
 		return
 	}
@@ -252,11 +283,68 @@ func (s *oauthSessionStore) Complete(state string) {
 	session.Status = ""
 	session.ProxyURL = ""
 	session.Metadata = nil
+	session.AuthID = authID
+	session.SavedGrantHash = strings.TrimSpace(savedGrantHash)
+	session.Saved = saved
+	session.Adopted = adopted
+	session.BaselineExisted = baselineExisted
+	session.BaselineVersion = baselineVersion
+	session.BaselineEpoch = baselineEpoch
+	session.AdoptedVersion = adoptedVersion
+	session.AdoptedEpoch = adoptedEpoch
+	session.AdoptError = strings.TrimSpace(adoptErr)
+	session.VerifyError = strings.TrimSpace(verifyErr)
 	session.Committing = false
 	session.SIWCCommitting = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
 	s.sessions[state] = session
+}
+
+func (s *oauthSessionStore) SetTarget(state string, target oauthRecoveryTarget) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[state]
+	if !ok || session.Completed {
+		return
+	}
+	copyTarget := target
+	session.Target = &copyTarget
+	s.sessions[state] = session
+}
+
+func (s *oauthSessionStore) MarkAdopted(state string, adoptedVersion, adoptedEpoch uint64) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, ok := s.sessions[state]
+	if !ok || !session.Completed {
+		return
+	}
+	session.Adopted = true
+	session.AdoptedVersion = adoptedVersion
+	session.AdoptedEpoch = adoptedEpoch
+	session.AdoptError = ""
+	s.sessions[state] = session
+}
+
+func (s *oauthSessionStore) GetTarget(state string) (oauthRecoveryTarget, bool) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return oauthRecoveryTarget{}, false
+	}
+	session, ok := s.Get(state)
+	if !ok || session.Target == nil {
+		return oauthRecoveryTarget{}, false
+	}
+	return *session.Target, true
 }
 
 func (s *oauthSessionStore) CompleteProvider(provider string, source string) int {
@@ -438,6 +526,22 @@ func SetOAuthSessionError(state, message string) { oauthSessions.SetError(state,
 func FailOAuthSessionCommit(state, message string) { oauthSessions.FailCommit(state, message) }
 
 func CompleteOAuthSession(state string) { oauthSessions.Complete(state) }
+
+func CompleteOAuthSessionWithAuth(state, authID string) {
+	oauthSessions.CompleteWithAuth(state, authID)
+}
+
+func CompleteOAuthSessionWithOutcome(state, authID, savedGrantHash string, saved, adopted, baselineExisted bool, baselineVersion, baselineEpoch, adoptedVersion, adoptedEpoch uint64, adoptErr, verifyErr string) {
+	oauthSessions.CompleteWithOutcome(state, authID, savedGrantHash, saved, adopted, baselineExisted, baselineVersion, baselineEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
+}
+
+func SetOAuthSessionTarget(state string, target oauthRecoveryTarget) {
+	oauthSessions.SetTarget(state, target)
+}
+
+func GetOAuthSessionTarget(state string) (oauthRecoveryTarget, bool) {
+	return oauthSessions.GetTarget(state)
+}
 
 func CompleteOAuthSessionsByProvider(provider string) int {
 	return oauthSessions.CompleteProvider(provider, oauthSessionSourceBuiltin)
