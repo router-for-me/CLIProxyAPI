@@ -339,7 +339,36 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var param any
 		helps.InitializeApplyPatchStream(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, &param)
 		metadataLogged := false
+		var relayFrames helps.RelaySSEBuffer
+		processRelayFrames := func(payloads [][]byte) bool {
+			for _, payload := range payloads {
+				for _, frame := range splitRelayFrames(payload) {
+					reporter.ObserveResponseModel(frame)
+					streamUsage.ObserveGeminiStream(frame)
+					filtered := helps.FilterSSEUsageMetadata(frame)
+					lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, filtered, &param, claudeInputTokens)
+					helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+					helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
+						return statusErr{code: http.StatusBadGateway, msg: msg}
+					})
+					for i := range lines {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
+						case <-ctx.Done():
+							return false
+						}
+					}
+					if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+						return false
+					}
+				}
+			}
+			return true
+		}
 		finishStream := func() {
+			if !processRelayFrames(relayFrames.Finish()) {
+				return
+			}
 			if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 				return
 			}
@@ -388,27 +417,8 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					reporter.MarkFirstResponseByte()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
-					// A relay chunk may hold several SSE frames; the translators read one frame per call (gjson parses the first
-					// JSON object only), so each frame goes through the whole per-frame path: model, usage, translation, errors.
-					for _, frame := range splitRelayFrames(event.Payload) {
-						reporter.ObserveResponseModel(frame)
-						streamUsage.ObserveGeminiStream(frame)
-						filtered := helps.FilterSSEUsageMetadata(frame)
-						lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, filtered, &param, claudeInputTokens)
-						helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-						helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
-							return statusErr{code: http.StatusBadGateway, msg: msg}
-						})
-						for i := range lines {
-							select {
-							case out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}:
-							case <-ctx.Done():
-								return false
-							}
-						}
-						if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
-							return false
-						}
+					if !processRelayFrames(relayFrames.Feed(event.Payload)) {
+						return false
 					}
 					break
 				}
