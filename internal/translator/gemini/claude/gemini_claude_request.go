@@ -175,14 +175,18 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 							funcName = toolCallID
 						}
 						funcName = util.SanitizeFunctionName(funcName)
-						toolResult := util.ConvertClaudeToolResultContent(contentResult.Get("content"))
-						part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
+						toolResult := util.ConvertClaudeToolResult(contentResult)
+						part := []byte(`{"functionResponse":{"name":"","response":{}}}`)
 						part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
 						part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
+						resultPath := "functionResponse.response.result"
+						if toolResult.IsError {
+							resultPath = "functionResponse.response.error"
+						}
 						if toolResult.ResultIsRaw {
-							part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", toolResult.Result)
+							part = translatorcommon.SetGeminiFunctionResponseRaw(part, resultPath, toolResult.Result)
 						} else {
-							part, _ = sjson.SetBytes(part, "functionResponse.response.result", toolResult.Result)
+							part, _ = sjson.SetBytes(part, resultPath, toolResult.Result)
 						}
 						partItems = append(partItems, part)
 						for _, img := range toolResult.Images {

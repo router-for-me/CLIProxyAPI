@@ -13,18 +13,28 @@ type ClaudeToolResultImage struct {
 	Data     string
 }
 
-// ClaudeToolResult is the normalized form of a Claude tool_result `content` field,
+// ClaudeToolResult is the normalized form of a Claude tool_result block,
 // ready to be written into a Gemini-style functionResponse.
 type ClaudeToolResult struct {
-	// Result is the value for functionResponse.response.result.
+	// Result is the value for functionResponse.response.result or .error.
 	Result string
 	// ResultIsRaw reports whether Result holds raw JSON (write with sjson.SetRaw*)
 	// or a plain string (write with sjson.Set*). Writing raw JSON text through
 	// sjson.Set as a string value would double-encode it, so callers must honor
 	// this flag.
 	ResultIsRaw bool
+	// IsError preserves an explicit tool_result.is_error failure flag.
+	IsError bool
 	// Images holds base64 image blocks separated out of the content.
 	Images []ClaudeToolResultImage
+}
+
+// ConvertClaudeToolResult normalizes a complete Claude tool_result block while
+// preserving its success/failure semantics.
+func ConvertClaudeToolResult(block gjson.Result) ClaudeToolResult {
+	result := ConvertClaudeToolResultContent(block.Get("content"))
+	result.IsError = block.Get("is_error").Type == gjson.True
+	return result
 }
 
 // ConvertClaudeToolResultContent normalizes a Claude tool_result `content` field into
