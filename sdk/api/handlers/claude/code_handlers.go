@@ -518,6 +518,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
+	*coreauth.ClaudeQuotaErrorMetadata
 	Type    string              `json:"type"`
 	Message string              `json:"message"`
 	Details *claudeErrorDetails `json:"details,omitempty"`
@@ -553,6 +554,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			Type:    errType,
 			Message: message,
 		},
+	}
+	if msg != nil {
+		var quota *coreauth.ClaudeQuotaError
+		if errors.As(msg.Error, &quota) && quota != nil {
+			response.Error.ClaudeQuotaErrorMetadata = &quota.ClaudeQuotaErrorMetadata
+			response.Error.Message = quota.Message
+			response.Error.Type = claudeErrorTypeFromStatus(quota.StatusCode())
+		}
 	}
 	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}

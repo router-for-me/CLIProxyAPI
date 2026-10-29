@@ -103,8 +103,12 @@ func quotaTestAuth(id, provider string) *Auth {
 func quotaTestError(t *testing.T, err error, code string) {
 	t.Helper()
 	var target *Error
-	if !errors.As(err, &target) || target.Code != code || target.HTTPStatus != 503 {
-		t.Fatalf("error = %v, want %s with HTTP 503", err, code)
+	status := 503
+	if code == "claude_quota_exhausted" {
+		status = 429
+	}
+	if !errors.As(err, &target) || target.Code != code || target.HTTPStatus != status {
+		t.Fatalf("error = %v, want %s with HTTP %d", err, code, status)
 	}
 }
 

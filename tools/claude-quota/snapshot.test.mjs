@@ -6,16 +6,17 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { collectAndPublish, collectSnapshot, normalizeUsage } from './snapshot.mjs';
+import { collectAndPublish, collectSnapshot, normalizeUsage, retryAfterMS, sanitizeUsage } from './snapshot.mjs';
 
 const window = (utilization, resets_at = '2026-11-03T07:00:00Z') => ({ utilization, resets_at });
 const usage = () => ({ five_hour: window(0, null), seven_day: window(0), seven_day_opus: null, seven_day_sonnet: null });
+const syntheticFingerprint = 'a'.repeat(64);
 
 test('a failed account query leaves healthy account observations available', async () => {
   const mock = async (url, options) => {
     if (url.endsWith('/auth-files')) return new Response(JSON.stringify({ files: [
-      { type: 'claude', id: 'failed', auth_index: 'failed' },
-      { type: 'claude', id: 'healthy', auth_index: 'healthy' },
+      { type: 'claude', id: 'failed', auth_index: 'failed', credential_fingerprint: syntheticFingerprint },
+      { type: 'claude', id: 'healthy', auth_index: 'healthy', credential_fingerprint: syntheticFingerprint },
     ] }));
     const account = JSON.parse(options.body).authIndex;
     return new Response(JSON.stringify(account === 'failed' ? { status_code: 401, body: '{}' } : { status_code: 200, body: JSON.stringify(usage()) }));
@@ -52,10 +53,12 @@ test('model-specific limits and missing resets are handled safely', () => {
 });
 
 test('snapshot maps credential IDs and fails closed on upstream errors', async () => {
-  const mock = async url => url.endsWith('/auth-files') ? new Response(JSON.stringify({files: [{type:'claude', id:'account', auth_index:'index'}]})) : new Response(JSON.stringify({status_code:200, body:JSON.stringify(usage())}));
+  const mock = async url => url.endsWith('/auth-files') ? new Response(JSON.stringify({files: [{type:'claude', id:'account', auth_index:'index', credential_fingerprint:syntheticFingerprint}]})) : new Response(JSON.stringify({status_code:200, body:JSON.stringify(usage())}));
   assert.equal((await collectSnapshot('http://example', 'synthetic-key', mock)).accounts.account.eligible, true);
-  const failed = async url => url.endsWith('/auth-files') ? new Response(JSON.stringify({files: [{type:'claude', id:'account', auth_index:'index'}]})) : new Response(JSON.stringify({status_code:429, body:'{}'}));
-  await assert.rejects(collectSnapshot('http://example', 'synthetic-key', failed));
+  const failed = async url => url.endsWith('/auth-files') ? new Response(JSON.stringify({files: [{type:'claude', id:'account', auth_index:'index', credential_fingerprint:syntheticFingerprint}]})) : new Response(JSON.stringify({status_code:429, body:'{}'}));
+  const snapshot = await collectSnapshot('http://example', 'synthetic-key', failed);
+  assert.deepEqual(Object.keys(snapshot.accounts), []);
+  assert.equal(snapshot.retry_state.account.last_status, 429);
 });
 
 // All fixtures and mock credentials are synthetic; no live requests are made.
@@ -68,7 +71,7 @@ const deferred = () => {
 const fakeFetch = (onList = () => {}, value = usage()) => async url => {
   if (url.endsWith('/auth-files')) {
     await onList();
-    return Response.json({ files: [{ type: 'claude', id: 'synthetic-account', auth_index: 'synthetic-index' }] });
+    return Response.json({ files: [{ type: 'claude', id: 'synthetic-account', auth_index: 'synthetic-index', credential_fingerprint: syntheticFingerprint }] });
   }
   return Response.json({ status_code: 200, body: JSON.stringify(value) });
 };
@@ -106,6 +109,7 @@ test('freshness starts before the first request rather than at publication', asy
     clock = new Date('2026-10-28T10:10:00Z');
   }), () => clock);
   assert.equal(snapshot.observed_at, '2026-10-28T10:00:00.000Z');
+  assert.equal(snapshot.accounts['synthetic-account'].observed_at, '2026-10-28T10:10:00.000Z');
   assert.equal(clock - new Date(snapshot.observed_at), 600_000);
 });
 
@@ -160,4 +164,160 @@ test('process crash releases lock without PID files or stale-lock deletion', asy
   const exited = once(child, 'exit'); child.kill('SIGKILL'); await exited;
   await collectAndPublish(path, 'http://synthetic', 'synthetic-key', { fetcher: fakeFetch() });
   assert.equal(JSON.parse(await readFile(path, 'utf8')).accounts['synthetic-account'].eligible, true);
+});
+
+const epoch = Date.parse('2026-10-28T10:00:00Z');
+const credential = id => ({ type: 'claude', id, auth_index: `${id}-index`, credential_fingerprint: syntheticFingerprint });
+const runner = (files, handler, time, previous = {}, random = () => 0) => collectSnapshot('http://synthetic', 'synthetic-key', async (url, options) => {
+  if (url.endsWith('/auth-files')) return Response.json({ files });
+  const request = JSON.parse(options.body);
+  assert.equal(request.header['User-Agent'], 'claude-code/2.1.273');
+  return handler(request.authIndex);
+}, () => new Date(time), previous, { random });
+const successful = () => Response.json({ status_code: 200, body: JSON.stringify(usage()) });
+const broken = () => Response.json({ status_code: 503, body: 'synthetic-secret' });
+
+test('Retry-After accepts wrapper header case, arrays, delta seconds and HTTP dates', () => {
+  assert.equal(retryAfterMS({ 'rEtRy-AfTeR': ['180'] }, epoch), 180_000);
+  assert.equal(retryAfterMS({ 'Retry-After': 'Wed, 28 Oct 2026 10:04:00 GMT' }, epoch), 240_000);
+  for (const value of ['invalid', '-10', '1e20', 'Wed, 28 Oct 2026 09:00:00 GMT']) {
+    assert.equal(retryAfterMS({ 'retry-after': value }, epoch), 0);
+  }
+});
+
+test('normal cadence and repeated failures preserve cache age with capped jittered backoff', async () => {
+  const files = [credential('a')];
+  let snapshot = await runner(files, successful, epoch);
+  const original = snapshot.accounts.a;
+  snapshot = await runner(files, () => assert.fail('early request'), epoch + 299_999, snapshot);
+  assert.deepEqual(snapshot.accounts.a, original);
+  let time = epoch + 300_000;
+  for (let failures = 1; failures <= 7; failures++) {
+    snapshot = await runner(files, broken, time, snapshot, () => 1);
+    assert.equal(snapshot.retry_state.a.failures, failures);
+    const deadline = Date.parse(snapshot.retry_state.a.next_attempt_at);
+    assert.equal(deadline - time, Math.min(900_000, 60_000 * 2 ** (failures - 1) * 1.2));
+    assert.deepEqual(snapshot.accounts.a, original);
+    const skipped = await runner(files, () => assert.fail('backoff request'), deadline - 1, snapshot);
+    assert.deepEqual(skipped.retry_state.a, snapshot.retry_state.a);
+    time = deadline;
+  }
+  snapshot = await runner(files, successful, time, snapshot);
+  assert.equal(snapshot.accounts.a.observed_at, new Date(time).toISOString());
+  assert.equal(snapshot.retry_state.a, undefined);
+});
+
+test('cache merges independently and deleted, disabled or changed credential indices are pruned', async () => {
+  const files = ['a', 'b', 'c', 'd'].map(credential);
+  let snapshot = await runner(files, successful, epoch);
+  const old = snapshot.accounts.b;
+  snapshot = await runner(files, id => id === 'b-index' ? broken() : successful(), epoch + 300_000, snapshot);
+  assert.deepEqual(snapshot.accounts.b, old);
+  assert.equal(snapshot.accounts.a.observed_at, new Date(epoch + 300_000).toISOString());
+  snapshot = await runner([credential('a'), { ...credential('b'), auth_index: 'replacement' }, { ...credential('c'), disabled: true }], broken, epoch + 300_001, snapshot);
+  assert.deepEqual(Object.keys(snapshot.accounts), ['a']);
+  assert.deepEqual(Object.keys(snapshot.retry_state), ['b']);
+  assert.equal(snapshot.retry_state.b.auth_index, 'replacement');
+  assert.equal(snapshot.retry_state.b.failures, 1);
+});
+
+test('replacement at the same path and index invalidates cache and prior backoff', async () => {
+  const files = [credential('a')];
+  let snapshot = await runner(files, successful, epoch);
+  snapshot = await runner(files, broken, epoch + 300_000, snapshot);
+  const replaced = [{ ...credential('a'), credential_fingerprint: 'b'.repeat(64) }];
+  snapshot = await runner(replaced, broken, epoch + 300_001, snapshot);
+  assert.equal(snapshot.accounts.a, undefined);
+  assert.equal(snapshot.retry_state.a.failures, 1);
+  assert.equal(snapshot.retry_state.a.credential_fingerprint, 'b'.repeat(64));
+});
+
+test('native collection uses fingerprint listing and native API call routes', async () => {
+  const paths = [];
+  const snapshot = await collectSnapshot('http://synthetic/v8/management', 'synthetic-key', async url => {
+    paths.push(new URL(url).pathname);
+    if (url.endsWith('/quotas/claude/credentials')) return Response.json({ files: [credential('a')] });
+    return successful();
+  }, () => new Date(epoch));
+  assert.equal(snapshot.accounts.a.eligible, true);
+  assert.deepEqual(paths, ['/v8/management/quotas/claude/credentials', '/v8/management/requests/api-call']);
+});
+
+test('sanitized unknown limits keep a string kind for cache consumers', () => {
+  const sanitized = sanitizeUsage({ ...usage(), limits: [{ kind: 'future_limit', percent: 100, resets_at: '2026-11-03T07:00:00Z' }] });
+  assert.equal(sanitized.limits[0].kind, 'unknown');
+  assert.equal(normalizeUsage(sanitized).eligible, false);
+});
+
+test('upstream global 429 stops requests and retains unqueried accounts, respecting Retry-After', async () => {
+  const files = ['a', 'b'].map(credential);
+  let snapshot = await runner(files, successful, epoch);
+  const old = structuredClone(snapshot.accounts);
+  const calls = [];
+  snapshot = await runner(files, id => {
+    calls.push(id);
+    return Response.json({ status_code: 429, header: { 'RETRY-AFTER': ['1200'] }, body: 'synthetic-secret' });
+  }, epoch + 300_000, snapshot);
+  assert.deepEqual(calls, ['a-index']);
+  assert.equal(snapshot.global_retry_at, new Date(epoch + 1_500_000).toISOString());
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshot.accounts)), old);
+  snapshot = await runner(files, () => assert.fail('global backoff request'), epoch + 1_499_999, snapshot);
+  assert.equal(snapshot.retry_state.b, undefined);
+  snapshot = await runner(files, successful, epoch + 1_500_000, snapshot);
+  assert.equal(snapshot.global_retry_at, undefined);
+  assert.equal(snapshot.accounts.b.observed_at, new Date(epoch + 1_500_000).toISOString());
+});
+
+test('management HTTP status and malformed upstream status cannot leak response secrets', async () => {
+  const files = [credential('a')];
+  const management = await runner(files, () => new Response('synthetic-secret', { status: 429, headers: { 'Retry-After': '600' } }), epoch);
+  assert.equal(management.retry_state.a.management_status, 429);
+  assert.equal(management.retry_state.a.last_status, undefined);
+  assert.equal(management.global_retry_at, new Date(epoch + 600_000).toISOString());
+  const unknown = await runner(files, () => Response.json({ status_code: 'synthetic-secret', body: 'synthetic-secret' }), epoch);
+  assert.equal(unknown.retry_state.a.last_status, undefined);
+  assert.equal(JSON.stringify(unknown).includes('synthetic-secret'), false);
+});
+
+test('usage cache removes arbitrary fields and lock reasons while retaining eligibility', () => {
+  const input = { ...expanded, secret: 'synthetic-secret', seven_day_unknown: { ...window(100), secret: 'synthetic-secret' },
+    extra_usage: { is_enabled: true, used_credits: 20, token: 'synthetic-secret' } };
+  input.five_hour = { ...window(0), locked_reason: 'synthetic-secret' };
+  input.limits[0].token = 'synthetic-secret';
+  input.limits[0].scope.model.secret = 'synthetic-secret';
+  const safe = sanitizeUsage(input);
+  assert.equal(JSON.stringify(safe).includes('synthetic-secret'), false);
+  assert.equal(safe.seven_day_unknown, undefined);
+  const expected = normalizeUsage(input);
+  expected.weekly_reset = new Date(expected.weekly_reset).toISOString();
+  expected.five_hour_reset = new Date(expected.five_hour_reset).toISOString();
+  assert.deepEqual(normalizeUsage(safe), expected);
+  assert.deepEqual(safe.extra_usage, { is_enabled: true, used_credits: 20 });
+});
+
+test('legacy and malformed previous state cannot fabricate an observation', async () => {
+  for (const entry of [normalizeUsage(usage()), { ...normalizeUsage(usage()), observed_at: new Date(epoch).toISOString(), usage: usage() },
+    { auth_index: 'a-index', observed_at: 'bad', usage: usage() },
+    { auth_index: 'a-index', observed_at: new Date(epoch + 1).toISOString(), usage: usage() }]) {
+    const snapshot = await runner([credential('a')], broken, epoch, { accounts: { a: entry }, retry_state: { a: { failures: -1, next_attempt_at: 'bad' } } });
+    assert.equal(snapshot.accounts.a, undefined);
+    assert.equal(snapshot.retry_state.a.failures, 1);
+  }
+});
+
+test('publication persists failed retries and serialized runs re-read their schedule', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'claude-quota-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'snapshot.json');
+  let calls = 0;
+  const options = { now: () => new Date(epoch), random: () => 0, fetcher: async url => {
+    if (url.endsWith('/auth-files')) return Response.json({ files: [credential('a')] });
+    calls++; return broken();
+  } };
+  await Promise.all([collectAndPublish(path, 'http://synthetic', 'synthetic-key', options), collectAndPublish(path, 'http://synthetic', 'synthetic-key', options)]);
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).retry_state.a.failures, 1);
+  await writeFile(path, 'x'.repeat(2 * 1024 * 1024 + 1));
+  await collectAndPublish(path, 'http://synthetic', 'synthetic-key', options);
+  assert.equal(calls, 2);
 });

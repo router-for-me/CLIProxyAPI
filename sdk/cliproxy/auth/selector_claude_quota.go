@@ -18,15 +18,27 @@ type ClaudeQuotaSelector struct {
 }
 
 type claudeQuotaAccount struct {
-	WeeklyReset          time.Time `json:"weekly_reset"`
-	FiveHourReset        time.Time `json:"five_hour_reset"`
-	Eligible             *bool     `json:"eligible"`
-	BlockedModelFamilies []string  `json:"blocked_model_families"`
+	ObservedAt            time.Time       `json:"observed_at,omitempty"`
+	AuthIndex             string          `json:"auth_index,omitempty"`
+	CredentialFingerprint string          `json:"credential_fingerprint,omitempty"`
+	Usage                 json.RawMessage `json:"usage,omitempty"`
+	WeeklyReset           time.Time       `json:"weekly_reset"`
+	FiveHourReset         time.Time       `json:"five_hour_reset"`
+	Eligible              *bool           `json:"eligible"`
+	BlockedModelFamilies  []string        `json:"blocked_model_families"`
+}
+
+type claudeQuotaRetry struct {
+	AuthIndex             string    `json:"auth_index"`
+	CredentialFingerprint string    `json:"credential_fingerprint"`
+	NextAttemptAt         time.Time `json:"next_attempt_at"`
 }
 
 type claudeQuotaSnapshot struct {
-	ObservedAt time.Time                     `json:"observed_at"`
-	Accounts   map[string]claudeQuotaAccount `json:"accounts"`
+	RetryState    map[string]claudeQuotaRetry   `json:"retry_state,omitempty"`
+	GlobalRetryAt time.Time                     `json:"global_retry_at,omitempty"`
+	ObservedAt    time.Time                     `json:"observed_at"`
+	Accounts      map[string]claudeQuotaAccount `json:"accounts"`
 }
 
 type claudeQuotaModelsKey struct{}
@@ -91,7 +103,7 @@ func (manager *Manager) claudeQuotaContext(ctx context.Context, selector Selecto
 }
 
 func (selector *ClaudeQuotaSelector) load(now time.Time) (claudeQuotaSnapshot, error) {
-	invalid := &Error{Code: "claude_quota_unavailable", Message: "Claude quota snapshot is missing, invalid, or stale", HTTPStatus: 503}
+	invalid := newClaudeQuotaError("claude_quota_unavailable", "Claude quota snapshot is missing, invalid, or stale", "", now, time.Time{}, time.Time{})
 	file, errOpen := os.Open(selector.SnapshotPath)
 	if errOpen != nil {
 		return claudeQuotaSnapshot{}, invalid
@@ -99,10 +111,36 @@ func (selector *ClaudeQuotaSelector) load(now time.Time) (claudeQuotaSnapshot, e
 	raw, errRead := io.ReadAll(io.LimitReader(file, (1<<20)+1))
 	errClose := file.Close()
 	var snap claudeQuotaSnapshot
-	if errRead != nil || errClose != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &snap) != nil || snap.Accounts == nil || snap.ObservedAt.IsZero() || snap.ObservedAt.After(now) || now.Sub(snap.ObservedAt) > 2*time.Minute {
+	if errRead != nil || errClose != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &snap) != nil || snap.Accounts == nil || snap.ObservedAt.IsZero() || snap.ObservedAt.After(now) {
 		return claudeQuotaSnapshot{}, invalid
 	}
 	return snap, nil
+}
+
+func (account claudeQuotaAccount) observation(snapshot claudeQuotaSnapshot, now time.Time) (time.Time, bool) {
+	observed := account.ObservedAt
+	maxAge := 30 * time.Minute
+	if observed.IsZero() {
+		if account.AuthIndex != "" || len(account.Usage) > 0 || account.CredentialFingerprint != "" {
+			return observed, false
+		}
+		observed = snapshot.ObservedAt
+		maxAge = 2 * time.Minute
+	}
+	return observed, !observed.IsZero() && !observed.After(now) && now.Sub(observed) <= maxAge
+}
+
+func ReadClaudeQuotaUsage(path, authID, authIndex, fingerprint string, now time.Time) (json.RawMessage, time.Time, error) {
+	snapshot, err := (&ClaudeQuotaSelector{SnapshotPath: path}).load(now)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	account, exists := snapshot.Accounts[authID]
+	observed, fresh := account.observation(snapshot, now)
+	if !exists || !fresh || account.AuthIndex != authIndex || fingerprint == "" || account.CredentialFingerprint != fingerprint || len(account.Usage) == 0 || string(account.Usage) == "null" {
+		return nil, time.Time{}, newClaudeQuotaError("claude_quota_unavailable", "Claude cached usage is unavailable", "", now, time.Time{}, snapshot.nextCheck(authID, authIndex, fingerprint, now))
+	}
+	return account.Usage, observed, nil
 }
 
 func (selector *ClaudeQuotaSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
@@ -122,6 +160,8 @@ func (selector *ClaudeQuotaSelector) pick(ctx context.Context, provider, model s
 	}
 	snap, quotaErr := selector.load(now)
 	var accountErr error
+	var earliestReset, earliestNextCheck time.Time
+	unknownReset := false
 	weightSelector := fallback
 	if affinity, ok := sessionAffinitySelector(fallback); ok {
 		weightSelector = affinity.fallback
@@ -137,21 +177,39 @@ func (selector *ClaudeQuotaSelector) pick(ctx context.Context, provider, model s
 		if weighted && authWeight(candidate) <= 0 {
 			continue
 		}
+		nextCheck := snap.nextCheck(candidate.ID, candidate.Index, AccessTokenSHA256(candidate), now)
+		if earliestNextCheck.IsZero() || nextCheck.Before(earliestNextCheck) {
+			earliestNextCheck = nextCheck
+		}
 		data, known := snap.Accounts[candidate.ID]
-		if !known || data.Eligible == nil {
+		_, fresh := data.observation(snap, now)
+		bound := data.ObservedAt.IsZero() && data.AuthIndex == "" && len(data.Usage) == 0 && data.CredentialFingerprint == ""
+		if !bound {
+			bound = data.AuthIndex != "" && data.AuthIndex == candidate.Index && data.CredentialFingerprint != "" && data.CredentialFingerprint == AccessTokenSHA256(candidate)
+		}
+		if !known || data.Eligible == nil || !fresh || !bound || data.AuthIndex != "" && data.AuthIndex != candidate.Index {
 			accountErr = &Error{Code: "claude_quota_unavailable", Message: "Claude candidate quota is unknown", HTTPStatus: 503}
-			continue
-		}
-		if !*data.Eligible {
-			continue
-		}
-		if data.WeeklyReset.IsZero() || !data.WeeklyReset.After(now) || data.FiveHourReset.IsZero() || !data.FiveHourReset.After(now) {
-			accountErr = &Error{Code: "claude_quota_unavailable", Message: "Claude quota windows need refreshing", HTTPStatus: 503}
 			continue
 		}
 		resolved := models[candidate.ID]
 		if resolved == "" {
 			resolved = model
+		}
+		recordBlocked := func() {
+			reset := data.blockingReset(resolved, now)
+			if reset.IsZero() {
+				unknownReset = true
+			} else if earliestReset.IsZero() || reset.Before(earliestReset) {
+				earliestReset = reset
+			}
+		}
+		if !*data.Eligible {
+			recordBlocked()
+			continue
+		}
+		if data.WeeklyReset.IsZero() || !data.WeeklyReset.After(now) || data.FiveHourReset.IsZero() || !data.FiveHourReset.After(now) {
+			accountErr = &Error{Code: "claude_quota_unavailable", Message: "Claude quota windows need refreshing", HTTPStatus: 503}
+			continue
 		}
 		resolved = strings.ToLower(resolved)
 		blocked := false
@@ -165,6 +223,7 @@ func (selector *ClaudeQuotaSelector) pick(ctx context.Context, provider, model s
 			}
 		}
 		if blocked {
+			recordBlocked()
 			continue
 		}
 		if best == nil || data.WeeklyReset.Before(bestData.WeeklyReset) || data.WeeklyReset.Equal(bestData.WeeklyReset) && (data.FiveHourReset.Before(bestData.FiveHourReset) || data.FiveHourReset.Equal(bestData.FiveHourReset) && candidate.ID < best.ID) {
@@ -182,12 +241,15 @@ func (selector *ClaudeQuotaSelector) pick(ctx context.Context, provider, model s
 	}
 	if len(pool) == 0 {
 		if quotaErr != nil {
-			return nil, quotaErr
+			return nil, newClaudeQuotaError("claude_quota_unavailable", "Claude quota snapshot is missing, invalid, or stale", model, now, time.Time{}, earliestNextCheck)
 		}
 		if accountErr != nil {
-			return nil, accountErr
+			return nil, newClaudeQuotaError("claude_quota_unavailable", "Claude candidate quota is unavailable or needs refreshing", model, now, time.Time{}, earliestNextCheck)
 		}
-		return nil, &Error{Code: "claude_quota_exhausted", Message: "No Claude account has quota for this model", HTTPStatus: 503}
+		if unknownReset {
+			earliestReset = time.Time{}
+		}
+		return nil, newClaudeQuotaError("claude_quota_exhausted", "No Claude account has quota for this model", model, now, earliestReset, earliestNextCheck)
 	}
 	sort.Slice(pool, func(first, second int) bool { return pool[first].ID < pool[second].ID })
 	selected, errPick := fallback.Pick(ctx, provider, model, opts, pool)
@@ -198,4 +260,18 @@ func (selector *ClaudeQuotaSelector) pick(ctx context.Context, provider, model s
 		return best, nil
 	}
 	return selected, nil
+}
+
+// nextCheck respects collector backoff only when it belongs to the current
+// credential. A global collector pause applies regardless of account binding.
+func (snapshot claudeQuotaSnapshot) nextCheck(authID, authIndex, fingerprint string, now time.Time) time.Time {
+	next := now.Add(time.Minute)
+	retry := snapshot.RetryState[authID]
+	if authIndex != "" && fingerprint != "" && retry.AuthIndex == authIndex && retry.CredentialFingerprint == fingerprint && retry.NextAttemptAt.After(now) {
+		next = retry.NextAttemptAt
+	}
+	if snapshot.GlobalRetryAt.After(next) {
+		next = snapshot.GlobalRetryAt
+	}
+	return next
 }
