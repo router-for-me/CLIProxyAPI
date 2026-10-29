@@ -129,6 +129,6 @@ func (e *XAIExecutor) executeSpeech(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 
-	reporter.EnsurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }

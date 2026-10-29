@@ -74,7 +74,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	reporter.ObserveResponseModel(data)
-	reporter.EnsurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseXAIImageUsage(payload, data))
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
 
@@ -153,6 +153,6 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	}
 
 	reporter.ObserveResponseModel(data)
-	reporter.EnsurePublished(ctx)
+	reporter.Publish(ctx, helps.ParseXAIVideoUsage(payload, data))
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }

@@ -370,11 +370,12 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			if eventType != "response.incomplete" {
 				cacheCodexReasoningReplayFromCompleted(replayScope, payload)
 			}
-			if detail, ok := helps.ParseCodexUsage(payload); ok {
+			if detail, ok := helps.ParseCodexUsageWithOutputItems(payload, outputItemsByIndex, outputItemsFallback); ok {
 				reporter.Publish(ctx, detail)
 			} else {
 				reporter.EnsurePublished(ctx)
 			}
+			publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, payload, outputItemsByIndex, outputItemsFallback)
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, body, payload, &param)
 			if responseFormat == sdktranslator.FormatOpenAIResponse {

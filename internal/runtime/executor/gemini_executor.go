@@ -256,7 +256,9 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
 		return cliproxyexecutor.Response{}, err
 	}
-	reporter.Publish(ctx, helps.ParseGeminiUsage(data))
+	gemDetail := helps.ParseGeminiUsage(data)
+	helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
+	reporter.Publish(ctx, gemDetail)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -377,6 +379,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(nil, streamScannerBuffer)
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var streamUsage helps.StreamUsageBuffer
+		streamUsage.SetRequestPayload(body)
 		var terminalDelivered bool
 		defer func() {
 			if errContext := ctx.Err(); errContext != nil && !terminalDelivered {
@@ -400,9 +403,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
 				sawFinishReason = true
 			}
-			if detail, ok := helps.ParseGeminiStreamUsage(rawPayload); ok {
-				streamUsage.Observe(detail, true)
-			}
+			streamUsage.ObserveGeminiStream(rawPayload)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
 				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)

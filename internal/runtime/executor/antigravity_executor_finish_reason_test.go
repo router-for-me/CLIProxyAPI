@@ -323,3 +323,26 @@ func TestAntigravityStreamSynthesizesOpenAIToolCallsFinishReason(t *testing.T) {
 		t.Fatalf("expected exactly one finish_reason chunk, got %d", finishReasonCount)
 	}
 }
+
+func TestAntigravityAssemblyReplacesOnlyContentParts(t *testing.T) {
+	for _, metadata := range []string{
+		`"groundingMetadata":{"webSearchQueries":[]}`,
+		`"marker":"__cpa_parts_placeholder__"`,
+	} {
+		t.Run(metadata, func(t *testing.T) {
+			raw := []byte(`{"response":{"candidates":[{` + metadata + `,"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}}`)
+			exec := &AntigravityExecutor{}
+			first := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}}`)
+			out := exec.convertStreamChunksToNonStream([][]byte{first, raw})
+			if !gjson.ValidBytes(out) || gjson.GetBytes(out, "response.candidates.0.content.parts.0.text").String() != "hello" {
+				t.Fatalf("assembled parts replaced the wrong value: %s", out)
+			}
+			before := gjson.GetBytes(raw, "response.candidates.0")
+			after := gjson.GetBytes(out, "response.candidates.0")
+			if before.Get("groundingMetadata").Raw != after.Get("groundingMetadata").Raw ||
+				before.Get("marker").Raw != after.Get("marker").Raw {
+				t.Fatalf("assembly changed unrelated metadata: %s", out)
+			}
+		})
+	}
+}

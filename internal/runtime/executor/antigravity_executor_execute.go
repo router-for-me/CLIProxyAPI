@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -202,7 +203,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
-	reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
+	antiDetail := helps.ParseAntigravityUsage(bodyBytes)
+	helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
+	reporter.Publish(ctx, antiDetail)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		converted = helps.EnsureResponsesUsageDetails(converted)
 	}
@@ -418,57 +421,35 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		clearAntigravityCreditsFailureState(auth)
 	}
 	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
-	out := make(chan cliproxyexecutor.StreamChunk)
-	go func(resp *http.Response) {
-		defer close(out)
-		defer func() {
-			if errClose := resp.Body.Close(); errClose != nil {
-				log.Errorf("antigravity executor: close response body error: %v", errClose)
-			}
-		}()
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(nil, streamScannerBuffer)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if replayAccumulator != nil {
-				replayAccumulator.ObserveSSELine(line)
-			}
-
-			// Filter usage metadata for all models
-			// Only retain usage statistics in the terminal chunk
-			line = helps.FilterSSEUsageMetadata(line)
-
-			payload := helps.JSONPayload(line)
-			if payload == nil {
-				continue
-			}
-			reporter.ObserveResponseModel(payload)
-
-			out <- cliproxyexecutor.StreamChunk{Payload: payload}
+	var rawPayloads [][]byte
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, streamScannerBuffer)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+		if replayAccumulator != nil {
+			replayAccumulator.ObserveSSELine(line)
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
-		} else {
-			if replayAccumulator != nil {
-				replayAccumulator.Commit(ctx)
-			}
+		payload := helps.JSONPayload(line)
+		if payload == nil {
+			continue
 		}
-	}(httpResp)
-
-	var buffer bytes.Buffer
-	for chunk := range out {
-		if chunk.Err != nil {
-			return resp, chunk.Err
-		}
-		if len(chunk.Payload) > 0 {
-			_, _ = buffer.Write(chunk.Payload)
-			_, _ = buffer.Write([]byte("\n"))
-		}
+		reporter.ObserveResponseModel(payload)
+		rawPayloads = append(rawPayloads, bytes.Clone(payload))
 	}
-	resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
+	scanErr := scanner.Err()
+	if errClose := httpResp.Body.Close(); errClose != nil {
+		log.Errorf("antigravity executor: close response body error: %v", errClose)
+	}
+	if scanErr != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
+		reporter.PublishFailure(ctx, scanErr)
+		return resp, scanErr
+	}
+	if replayAccumulator != nil {
+		replayAccumulator.Commit(ctx)
+	}
+	resp = cliproxyexecutor.Response{Payload: e.convertStreamChunksToNonStream(rawPayloads)}
 
 	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
 	reporter.ObserveResponseModel(resp.Payload)
@@ -477,7 +458,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 	}
-	reporter.Publish(ctx, helps.ParseAntigravityUsage(resp.Payload))
+	antiDetail := helps.ParseAntigravityUsage(resp.Payload)
+	helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
+	reporter.Publish(ctx, antiDetail)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		converted = helps.EnsureResponsesUsageDetails(converted)
 	}
@@ -487,18 +470,43 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	return resp, nil
 }
 
+const antigravityPartsPlaceholder = `"__cpa_parts_placeholder__"`
+
 func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
-	responseTemplate := ""
-	var traceID string
-	var finishReason string
-	var modelVersion string
-	var responseID string
-	var role string
-	var usageRaw string
-	parts := make([]map[string]interface{}, 0)
-	var pendingKind string
-	var pendingText strings.Builder
-	var pendingThoughtSig string
+	var chunks [][]byte
+	remaining := stream
+	for len(remaining) > 0 {
+		var line []byte
+		if nl := bytes.IndexByte(remaining, '\n'); nl >= 0 {
+			line = remaining[:nl]
+			remaining = remaining[nl+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			chunks = append(chunks, trimmed)
+		}
+	}
+	return e.convertStreamChunksToNonStream(chunks)
+}
+
+func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []byte {
+	var (
+		responseNodeRaw    string
+		responsePartsRaw   string
+		responsePartsIndex int
+		traceID            string
+		finishReason       string
+		modelVersion       string
+		responseID         string
+		role               string
+		usageRaw           string
+		parts              []string
+		pendingKind        string
+		pendingText        strings.Builder
+		pendingThoughtSig  string
+	)
 
 	flushPending := func() {
 		if pendingKind == "" {
@@ -513,7 +521,8 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				pendingThoughtSig = ""
 				return
 			}
-			parts = append(parts, map[string]interface{}{"text": text})
+			encoded, _ := json.Marshal(map[string]any{"text": text})
+			parts = append(parts, string(encoded))
 		case "thought":
 			if strings.TrimSpace(text) == "" && pendingThoughtSig == "" {
 				pendingKind = ""
@@ -521,46 +530,45 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				pendingThoughtSig = ""
 				return
 			}
-			part := map[string]interface{}{"thought": true}
-			part["text"] = text
+			part := map[string]any{"thought": true, "text": text}
 			if pendingThoughtSig != "" {
 				part["thoughtSignature"] = pendingThoughtSig
 			}
-			parts = append(parts, part)
+			encoded, _ := json.Marshal(part)
+			parts = append(parts, string(encoded))
 		}
 		pendingKind = ""
 		pendingText.Reset()
 		pendingThoughtSig = ""
 	}
 
-	normalizePart := func(partResult gjson.Result) map[string]interface{} {
-		var m map[string]interface{}
-		_ = json.Unmarshal([]byte(partResult.Raw), &m)
-		if m == nil {
-			m = map[string]interface{}{}
+	normalizeRawPart := func(partResult gjson.Result, hasSnakeSig, hasSnakeInline bool, sig string, inlineRaw string) string {
+		if !hasSnakeSig && !hasSnakeInline {
+			return partResult.Raw
 		}
-		sig := partResult.Get("thoughtSignature").String()
-		if sig == "" {
-			sig = partResult.Get("thought_signature").String()
+		raw := []byte(partResult.Raw)
+		if hasSnakeSig {
+			if sig != "" {
+				raw, _ = sjson.SetBytes(raw, "thoughtSignature", sig)
+			}
+			raw, _ = sjson.DeleteBytes(raw, "thought_signature")
 		}
-		if sig != "" {
-			m["thoughtSignature"] = sig
-			delete(m, "thought_signature")
+		if hasSnakeInline {
+			if inlineRaw != "" {
+				raw, _ = sjson.SetRawBytes(raw, "inlineData", []byte(inlineRaw))
+			}
+			raw, _ = sjson.DeleteBytes(raw, "inline_data")
 		}
-		if inlineData, ok := m["inline_data"]; ok {
-			m["inlineData"] = inlineData
-			delete(m, "inline_data")
-		}
-		return m
+		return string(raw)
 	}
 
-	for _, line := range bytes.Split(stream, []byte("\n")) {
+	for _, line := range chunks {
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 || !gjson.ValidBytes(trimmed) {
 			continue
 		}
 
-		root := gjson.ParseBytes(trimmed)
+		root := util.GetGJSONBytesNoCopy(trimmed, "@this")
 		responseNode := root.Get("response")
 		if !responseNode.Exists() {
 			if root.Get("candidates").Exists() {
@@ -569,50 +577,113 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 				continue
 			}
 		}
-		responseTemplate = responseNode.Raw
+		responseNodeRaw = responseNode.Raw
+		responsePartsRaw = ""
+		responsePartsIndex = -1
 
 		if traceResult := root.Get("traceId"); traceResult.Exists() && traceResult.String() != "" {
 			traceID = traceResult.String()
 		}
 
-		if roleResult := responseNode.Get("candidates.0.content.role"); roleResult.Exists() {
-			role = roleResult.String()
-		}
-
-		if finishResult := responseNode.Get("candidates.0.finishReason"); finishResult.Exists() && finishResult.String() != "" {
-			finishReason = finishResult.String()
-		}
-
-		if modelResult := responseNode.Get("modelVersion"); modelResult.Exists() && modelResult.String() != "" {
-			modelVersion = modelResult.String()
-		}
-		if responseIDResult := responseNode.Get("responseId"); responseIDResult.Exists() && responseIDResult.String() != "" {
-			responseID = responseIDResult.String()
-		}
-		if usageResult := responseNode.Get("usageMetadata"); usageResult.Exists() {
-			usageRaw = usageResult.Raw
-		} else if usageMetadataResult := root.Get("usageMetadata"); usageMetadataResult.Exists() {
-			usageRaw = usageMetadataResult.Raw
-		}
-
-		if partsResult := responseNode.Get("candidates.0.content.parts"); partsResult.IsArray() {
-			for _, part := range partsResult.Array() {
-				hasFunctionCall := part.Get("functionCall").Exists()
-				hasInlineData := part.Get("inlineData").Exists() || part.Get("inline_data").Exists()
-				sig := part.Get("thoughtSignature").String()
-				if sig == "" {
-					sig = part.Get("thought_signature").String()
+		var partsResult gjson.Result
+		responseNode.ForEach(func(rk, rv gjson.Result) bool {
+			switch rk.String() {
+			case "modelVersion":
+				if rv.String() != "" {
+					modelVersion = rv.String()
 				}
-				text := part.Get("text").String()
-				thought := part.Get("thought").Bool()
+			case "responseId":
+				if rv.String() != "" {
+					responseID = rv.String()
+				}
+			case "usageMetadata", "cpaUsageMetadata":
+				if rk.String() == "usageMetadata" || usageRaw == "" {
+					usageRaw = rv.Raw
+				}
+			case "candidates":
+				if rv.IsArray() {
+					cand0 := rv.Get("0")
+					if cand0.IsObject() {
+						cand0.ForEach(func(ck, cv gjson.Result) bool {
+							switch ck.String() {
+							case "finishReason":
+								if cv.String() != "" {
+									finishReason = cv.String()
+								}
+							case "content":
+								if cv.IsObject() {
+									cv.ForEach(func(ctk, ctv gjson.Result) bool {
+										switch ctk.String() {
+										case "role":
+											role = ctv.String()
+										case "parts":
+											partsResult = ctv
+											responsePartsRaw = ctv.Raw
+											responsePartsIndex = ctv.Index - responseNode.Index
+										}
+										return true
+									})
+								}
+							}
+							return true
+						})
+					}
+				}
+			}
+			return true
+		})
+		if usageRaw == "" {
+			if usageMetadataResult := root.Get("usageMetadata"); usageMetadataResult.Exists() {
+				usageRaw = usageMetadataResult.Raw
+			}
+		}
+
+		if partsResult.IsArray() {
+			partsResult.ForEach(func(_, part gjson.Result) bool {
+				var (
+					hasFunctionCall bool
+					hasInlineData   bool
+					hasSnakeInline  bool
+					hasSnakeSig     bool
+					hasText         bool
+					sig             string
+					inlineRaw       string
+					text            string
+					thought         bool
+				)
+				part.ForEach(func(pk, pv gjson.Result) bool {
+					switch pk.String() {
+					case "functionCall":
+						hasFunctionCall = true
+					case "inlineData":
+						hasInlineData = true
+					case "inline_data":
+						hasInlineData = true
+						hasSnakeInline = true
+						inlineRaw = pv.Raw
+					case "thoughtSignature":
+						sig = pv.String()
+					case "thought_signature":
+						hasSnakeSig = true
+						if sig == "" {
+							sig = pv.String()
+						}
+					case "text":
+						hasText = true
+						text = pv.String()
+					case "thought":
+						thought = pv.Bool()
+					}
+					return true
+				})
 
 				if hasFunctionCall || hasInlineData {
 					flushPending()
-					parts = append(parts, normalizePart(part))
-					continue
+					parts = append(parts, normalizeRawPart(part, hasSnakeSig, hasSnakeInline, sig, inlineRaw))
+					return true
 				}
 
-				if thought || part.Get("text").Exists() {
+				if thought || hasText {
 					kind := "text"
 					if thought {
 						kind = "thought"
@@ -625,57 +696,97 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 					if kind == "thought" && sig != "" {
 						pendingThoughtSig = sig
 					}
-					continue
+					return true
 				}
 
 				flushPending()
-				parts = append(parts, normalizePart(part))
-			}
+				parts = append(parts, normalizeRawPart(part, hasSnakeSig, hasSnakeInline, sig, inlineRaw))
+				return true
+			})
 		}
 	}
 	flushPending()
 
-	if responseTemplate == "" {
-		responseTemplate = `{"candidates":[{"content":{"role":"model","parts":[]}}]}`
+	var templateBytes []byte
+	if responseNodeRaw == "" {
+		templateBytes = []byte(`{"candidates":[{"content":{"role":"model","parts":` + antigravityPartsPlaceholder + `}}]}`)
+	} else if responsePartsRaw != "" {
+		if idx := responsePartsIndex; idx >= 0 && idx+len(responsePartsRaw) <= len(responseNodeRaw) {
+			templateBytes = make([]byte, 0, len(responseNodeRaw)-len(responsePartsRaw)+len(antigravityPartsPlaceholder))
+			templateBytes = append(templateBytes, responseNodeRaw[:idx]...)
+			templateBytes = append(templateBytes, antigravityPartsPlaceholder...)
+			templateBytes = append(templateBytes, responseNodeRaw[idx+len(responsePartsRaw):]...)
+		} else {
+			templateBytes, _ = sjson.SetRawBytes([]byte(responseNodeRaw), "candidates.0.content.parts", []byte(antigravityPartsPlaceholder))
+		}
+	} else {
+		templateBytes, _ = sjson.SetRawBytes([]byte(responseNodeRaw), "candidates.0.content.parts", []byte(antigravityPartsPlaceholder))
 	}
 
-	partsJSON, _ := json.Marshal(parts)
-	updatedTemplate, _ := sjson.SetRawBytes([]byte(responseTemplate), "candidates.0.content.parts", partsJSON)
-	responseTemplate = string(updatedTemplate)
 	if role != "" {
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "candidates.0.content.role", role)
-		responseTemplate = string(updatedTemplate)
+		templateBytes, _ = sjson.SetBytes(templateBytes, "candidates.0.content.role", role)
 	}
 	if finishReason != "" {
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "candidates.0.finishReason", finishReason)
-		responseTemplate = string(updatedTemplate)
+		templateBytes, _ = sjson.SetBytes(templateBytes, "candidates.0.finishReason", finishReason)
 	}
 	if modelVersion != "" {
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "modelVersion", modelVersion)
-		responseTemplate = string(updatedTemplate)
+		templateBytes, _ = sjson.SetBytes(templateBytes, "modelVersion", modelVersion)
 	}
 	if responseID != "" {
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "responseId", responseID)
-		responseTemplate = string(updatedTemplate)
+		templateBytes, _ = sjson.SetBytes(templateBytes, "responseId", responseID)
 	}
 	if usageRaw != "" {
-		updatedTemplate, _ = sjson.SetRawBytes([]byte(responseTemplate), "usageMetadata", []byte(usageRaw))
-		responseTemplate = string(updatedTemplate)
-	} else if !gjson.Get(responseTemplate, "usageMetadata").Exists() {
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "usageMetadata.promptTokenCount", 0)
-		responseTemplate = string(updatedTemplate)
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "usageMetadata.candidatesTokenCount", 0)
-		responseTemplate = string(updatedTemplate)
-		updatedTemplate, _ = sjson.SetBytes([]byte(responseTemplate), "usageMetadata.totalTokenCount", 0)
-		responseTemplate = string(updatedTemplate)
+		templateBytes, _ = sjson.SetRawBytes(templateBytes, "usageMetadata", []byte(usageRaw))
+	} else if !gjson.GetBytes(templateBytes, "usageMetadata").Exists() {
+		templateBytes, _ = sjson.SetRawBytes(templateBytes, "usageMetadata", []byte(`{"promptTokenCount":0,"candidatesTokenCount":0,"totalTokenCount":0}`))
+	}
+	templateBytes, _ = sjson.DeleteBytes(templateBytes, "cpaUsageMetadata")
+
+	partsTotalLen := 2
+	for i, p := range parts {
+		if i > 0 {
+			partsTotalLen++
+		}
+		partsTotalLen += len(p)
 	}
 
-	output := `{"response":{},"traceId":""}`
-	updatedOutput, _ := sjson.SetRawBytes([]byte(output), "response", []byte(responseTemplate))
-	output = string(updatedOutput)
-	if traceID != "" {
-		updatedOutput, _ = sjson.SetBytes([]byte(output), "traceId", traceID)
-		output = string(updatedOutput)
+	traceJSON, _ := json.Marshal(traceID)
+	placeholder := gjson.GetBytes(templateBytes, "candidates.0.content.parts")
+	placeholderIdx := placeholder.Index
+	if placeholder.Raw != antigravityPartsPlaceholder || placeholderIdx <= 0 {
+		partsJSON := make([]byte, 0, partsTotalLen)
+		partsJSON = append(partsJSON, '[')
+		for i, p := range parts {
+			if i > 0 {
+				partsJSON = append(partsJSON, ',')
+			}
+			partsJSON = append(partsJSON, p...)
+		}
+		partsJSON = append(partsJSON, ']')
+		templateBytes, _ = sjson.SetRawBytes(templateBytes, "candidates.0.content.parts", partsJSON)
+		output := make([]byte, 0, len(templateBytes)+len(traceJSON)+28)
+		output = append(output, `{"response":`...)
+		output = append(output, templateBytes...)
+		output = append(output, `,"traceId":`...)
+		output = append(output, traceJSON...)
+		output = append(output, '}')
+		return output
 	}
-	return []byte(output)
+
+	output := make([]byte, 0, len(templateBytes)-len(antigravityPartsPlaceholder)+partsTotalLen+len(traceJSON)+28)
+	output = append(output, `{"response":`...)
+	output = append(output, templateBytes[:placeholderIdx]...)
+	output = append(output, '[')
+	for i, p := range parts {
+		if i > 0 {
+			output = append(output, ',')
+		}
+		output = append(output, p...)
+	}
+	output = append(output, ']')
+	output = append(output, templateBytes[placeholderIdx+len(antigravityPartsPlaceholder):]...)
+	output = append(output, `,"traceId":`...)
+	output = append(output, traceJSON...)
+	output = append(output, '}')
+	return output
 }

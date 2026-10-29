@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -601,6 +602,50 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			}
 			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
 				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
+			}
+		})
+	}
+}
+
+func TestCodexDirectOpenAIImageStreamAccountsLargeCompletedEvents(t *testing.T) {
+	for _, size := range []int{16, 100000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			event := `data: {"type":"image_generation.completed","model":"gpt-image-2","b64_json":"` + strings.Repeat("A", size) + `","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}` + "\n\n"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				if _, err := fmt.Fprint(w, event); err != nil {
+					t.Errorf("write upstream event: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			alias := t.Name()
+			capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+			coreusage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+			})
+			ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+			res, err := NewCodexExecutor(&config.Config{}).ExecuteStream(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+				Model:   "gpt-image-2",
+				Payload: []byte(`{"model":"gpt-image-2","prompt":"test"}`),
+			}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got bytes.Buffer
+			for chunk := range res.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				got.Write(chunk.Payload)
+			}
+			if got.String() != event {
+				t.Fatal("forwarded image SSE bytes changed")
+			}
+			record := capture.await(t)
+			if record.Detail.TotalTokens != 30 || record.Detail.ImageCount == nil || *record.Detail.ImageCount != 1 {
+				t.Fatalf("image completion usage missing: %+v", record.Detail)
 			}
 		})
 	}

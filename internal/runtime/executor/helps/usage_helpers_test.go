@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/tidwall/gjson"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -1499,5 +1502,579 @@ func TestFailFromErrorsCarriesStreamTruncatedCode(t *testing.T) {
 	plain := failFromErrors(errors.New("upstream stream closed before finishReason"))
 	if plain.Code != "" {
 		t.Fatalf("plain error must not gain truncated classification, got code %q", plain.Code)
+	}
+}
+
+func TestParseClaudeUsageExtractsCacheTTLServerToolsIterationsAndCost(t *testing.T) {
+	var buffer StreamUsageBuffer
+	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":4,"cache_creation_input_tokens":3036,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036},"output_tokens":16,"service_tier":"standard","inference_geo":"global","speed":"standard"}}}`)
+	lineToolUse := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{"query":"anthropic"}}}`)
+	lineToolResult := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://www.anthropic.com","title":"Anthropic"},{"type":"web_search_result","url":"https://docs.anthropic.com","title":"Docs"}]}}`)
+	lineDelta := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_creation_input_tokens":8846,"cache_read_input_tokens":3036,"output_tokens":483,"output_tokens_details":{"thinking_tokens":45},"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0},"iterations":[{"input_tokens":4,"output_tokens":53,"cache_read_input_tokens":0,"cache_creation_input_tokens":3036,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036},"type":"message","model":null},{"input_tokens":2,"output_tokens":430,"cache_read_input_tokens":3036,"cache_creation_input_tokens":5810,"cache_creation":{"ephemeral_5m_input_tokens":5810,"ephemeral_1h_input_tokens":0},"type":"message","model":null}],"cost":0.035471,"is_byok":false,"cost_details":{"upstream_inference_cost":0.035471,"upstream_inference_prompt_cost":0.023151,"upstream_inference_completions_cost":0.00232}}}`)
+
+	buffer.ObserveClaudeStream(lineStart)
+	buffer.ObserveClaudeStream(lineToolUse)
+	buffer.ObserveClaudeStream(lineToolResult)
+	buffer.ObserveClaudeStream(lineDelta)
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected observed stream usage")
+	}
+	if detail.InputTokens != 6 || detail.CacheReadTokens != 3036 || detail.CacheCreationTokens != 8846 || detail.OutputTokens != 483 || detail.ReasoningTokens != 45 || detail.TotalTokens != 12371 {
+		t.Fatalf("unexpected token totals: %+v", detail)
+	}
+	if detail.CacheCreation5mTokens == nil || *detail.CacheCreation5mTokens != 5810 {
+		t.Fatalf("CacheCreation5mTokens = %v, want 5810", detail.CacheCreation5mTokens)
+	}
+	if detail.CacheCreation1hTokens == nil || *detail.CacheCreation1hTokens != 3036 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 3036", detail.CacheCreation1hTokens)
+	}
+	if detail.WebSearchRequests == nil || *detail.WebSearchRequests != 1 {
+		t.Fatalf("WebSearchRequests = %v, want 1", detail.WebSearchRequests)
+	}
+	if detail.ToolUsageDetails == nil || detail.ToolUsageDetails.WebSearchCalls == nil || *detail.ToolUsageDetails.WebSearchCalls != 1 || detail.ToolUsageDetails.WebFetchCalls == nil || *detail.ToolUsageDetails.WebFetchCalls != 0 || detail.ToolUsageDetails.WebSearchQueries == nil || *detail.ToolUsageDetails.WebSearchQueries != 1 || detail.ToolUsageDetails.NumSearchResults == nil || *detail.ToolUsageDetails.NumSearchResults != 2 {
+		t.Fatalf("ToolUsageDetails = %+v, want web_search=1 queries=1 results=2 web_fetch=0", detail.ToolUsageDetails)
+	}
+	iterations := detail.IterationSlice()
+	if len(iterations) != 2 {
+		t.Fatalf("len(iterations) = %d, want 2", len(iterations))
+	}
+	if iterations[0].CacheCreation1hTokens == nil || *iterations[0].CacheCreation1hTokens != 3036 || iterations[1].CacheCreation5mTokens == nil || *iterations[1].CacheCreation5mTokens != 5810 {
+		t.Fatalf("iterations = %+v", iterations)
+	}
+	if detail.InferenceGeo != "global" || detail.Speed != "standard" || detail.UpstreamServiceTier != "standard" {
+		t.Fatalf("geo=%q speed=%q tier=%q", detail.InferenceGeo, detail.Speed, detail.UpstreamServiceTier)
+	}
+	if detail.CostDetails == nil || detail.CostDetails.Cost == nil || *detail.CostDetails.Cost != 0.035471 || detail.CostDetails.IsBYOK == nil || *detail.CostDetails.IsBYOK != false {
+		t.Fatalf("CostDetails = %+v", detail.CostDetails)
+	}
+}
+
+func TestParseGeminiAndAntigravityUsageWithModalitiesAndTools(t *testing.T) {
+	payload := []byte(`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"functionCall":{"name":"lookup","args":{"q":"a"}}},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]},"groundingMetadata":{"webSearchQueries":["gemini pricing","vertex grounding"],"groundingChunks":[{"web":{"uri":"https://a.example"}},{"web":{"uri":"https://b.example"}},{"retrievedContext":{"uri":"gs://b/doc"}}]},"urlContextMetadata":{"urlMetadata":[{"retrievedUrl":"https://c.example"}]}}],"usageMetadata":{"promptTokenCount":1000,"cachedContentTokenCount":400,"candidatesTokenCount":300,"thoughtsTokenCount":120,"toolUsePromptTokenCount":50,"totalTokenCount":1470,"trafficType":"ON_DEMAND_PRIORITY","promptTokensDetails":[{"modality":"TEXT","tokenCount":800},{"modality":"IMAGE","tokenCount":150},{"modality":"DOCUMENT","tokenCount":50}],"cacheTokensDetails":[{"modality":"TEXT","tokenCount":400}],"candidatesTokensDetails":[{"modality":"TEXT","tokenCount":100},{"modality":"IMAGE","tokenCount":200}]}}`)
+	detail := ParseGeminiUsage(payload)
+	ApplyGeminiRequestImageConfig(&detail, []byte(`{"generationConfig":{"imageConfig":{"aspectRatio":"16:9","imageSize":"2K"}}}`))
+	if detail.InputTokens != 1050 || detail.OutputTokens != 300 || detail.ReasoningTokens != 120 || detail.TotalTokens != 1470 {
+		t.Fatalf("unexpected Gemini token totals: %+v", detail)
+	}
+	if detail.TextInputTokens == nil || *detail.TextInputTokens != 800 || detail.ImageInputTokens == nil || *detail.ImageInputTokens != 150 || detail.FileInputTokens == nil || *detail.FileInputTokens != 50 || detail.CachedTextTokens == nil || *detail.CachedTextTokens != 400 {
+		t.Fatalf("unexpected Gemini input modalities: %+v", detail)
+	}
+	if detail.TextOutputTokens == nil || *detail.TextOutputTokens != 100 || detail.ImageOutputTokens == nil || *detail.ImageOutputTokens != 200 {
+		t.Fatalf("unexpected Gemini output modalities: %+v", detail)
+	}
+	if detail.UpstreamServiceTier != "ON_DEMAND_PRIORITY" || detail.ResponseServiceTier != "ON_DEMAND_PRIORITY" {
+		t.Fatalf("unexpected Gemini trafficType tier: upstream=%q response=%q", detail.UpstreamServiceTier, detail.ResponseServiceTier)
+	}
+	if detail.WebSearchRequests == nil || *detail.WebSearchRequests != 2 || detail.ToolUsageDetails == nil ||
+		detail.ToolUsageDetails.WebSearchCalls == nil || *detail.ToolUsageDetails.WebSearchCalls != 2 ||
+		detail.ToolUsageDetails.WebSearchQueries == nil || *detail.ToolUsageDetails.WebSearchQueries != 2 ||
+		detail.ToolUsageDetails.NumSearchResults == nil || *detail.ToolUsageDetails.NumSearchResults != 2 ||
+		detail.ToolUsageDetails.FileSearchCalls == nil || *detail.ToolUsageDetails.FileSearchCalls != 1 ||
+		detail.ToolUsageDetails.WebFetchCalls == nil || *detail.ToolUsageDetails.WebFetchCalls != 1 ||
+		detail.ToolUsageDetails.CodeExecutionCalls == nil || *detail.ToolUsageDetails.CodeExecutionCalls != 1 ||
+		detail.ToolUsageDetails.ToolCallsRequested == nil || *detail.ToolUsageDetails.ToolCallsRequested != 1 ||
+		detail.ToolUsageDetails.Extra["tool_use_prompt_tokens"] != 50 {
+		t.Fatalf("unexpected Gemini ToolUsageDetails: %+v", detail.ToolUsageDetails)
+	}
+	if detail.ImageCount == nil || *detail.ImageCount != 1 || detail.ImageDetails == nil || detail.ImageDetails.MimeType != "image/png" {
+		t.Fatalf("unexpected Gemini response ImageCount/ImageDetails: count=%+v details=%+v", detail.ImageCount, detail.ImageDetails)
+	}
+	if detail.RequestedImageDetails == nil || detail.RequestedImageDetails.AspectRatio != "16:9" || detail.RequestedImageDetails.ImageSize != "2K" {
+		t.Fatalf("unexpected Gemini RequestedImageDetails: %+v", detail.RequestedImageDetails)
+	}
+
+	var streamBuf StreamUsageBuffer
+	streamBuf.ObserveAntigravityStream([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"tool_a","args":{}}}]},"groundingMetadata":{"webSearchQueries":["q1"],"groundingChunks":[{"web":{"uri":"https://x.example"}}]}}]}}`))
+	streamBuf.ObserveAntigravityStream([]byte(`data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":30,"totalTokenCount":150}}}`))
+	streamDetail, ok := streamBuf.Detail()
+	if !ok {
+		t.Fatal("expected streamBuf.Detail() ok = true")
+	}
+	if streamDetail.TotalTokens != 150 || streamDetail.WebSearchRequests == nil || *streamDetail.WebSearchRequests != 1 || streamDetail.ToolUsageDetails == nil || streamDetail.ToolUsageDetails.ToolCallsRequested == nil || *streamDetail.ToolUsageDetails.ToolCallsRequested != 1 {
+		t.Fatalf("unexpected Antigravity stream merged usage: %+v tools=%+v", streamDetail, streamDetail.ToolUsageDetails)
+	}
+}
+
+func TestParseCodexUsageWithCollectedOutputItemsAndImageToolUsage(t *testing.T) {
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_codex_1","service_tier":"priority","prompt_cache_retention":"24h","output":[],"usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024,"text_tokens":1100,"image_tokens":100,"cached_tokens_details":{"text_tokens":1024}},"output_tokens":350,"output_tokens_details":{"reasoning_tokens":200,"text_tokens":150},"total_tokens":1550,"attribution":{"tier":"priority"}},"tool_usage":{"image_gen":{"input_tokens":80,"input_tokens_details":{"text_tokens":30,"image_tokens":50},"output_tokens":1056,"output_tokens_details":{"image_tokens":1056,"text_tokens":0},"total_tokens":1136}}}}`)
+	itemsByIndex := map[int64][]byte{
+		0: []byte(`{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"openai responses usage","sources":[{"url":"https://a.example"},{"url":"https://b.example"}]}}`),
+		1: []byte(`{"id":"ci_1","type":"code_interpreter_call","status":"completed"}`),
+		2: []byte(`{"id":"ig_1","type":"image_generation_call","status":"completed","size":"1024x1024","quality":"high","background":"transparent","output_format":"png","result":"AA=="}`),
+		3: []byte(`{"id":"fc_1","type":"function_call","status":"completed","name":"run_check","call_id":"call_1","arguments":"{}"}`),
+	}
+	detail, ok := ParseCodexUsageWithOutputItems(completed, itemsByIndex, nil)
+	if !ok {
+		t.Fatal("expected ParseCodexUsageWithOutputItems ok = true")
+	}
+	if detail.ResponseServiceTier != "priority" || detail.UpstreamServiceTier != "priority" {
+		t.Fatalf("unexpected service tier: response=%q upstream=%q", detail.ResponseServiceTier, detail.UpstreamServiceTier)
+	}
+	if detail.CacheDetails == nil || detail.CacheDetails.Retention != "24h" {
+		t.Fatalf("unexpected CacheDetails: %+v", detail.CacheDetails)
+	}
+	if detail.CachedTextTokens == nil || *detail.CachedTextTokens != 1024 {
+		t.Fatalf("unexpected CachedTextTokens: %+v", detail.CachedTextTokens)
+	}
+	if detail.WebSearchRequests == nil || *detail.WebSearchRequests != 1 {
+		t.Fatalf("unexpected WebSearchRequests: %+v", detail.WebSearchRequests)
+	}
+	if detail.ToolUsageDetails == nil ||
+		detail.ToolUsageDetails.WebSearchCalls == nil || *detail.ToolUsageDetails.WebSearchCalls != 1 ||
+		detail.ToolUsageDetails.WebSearchQueries == nil || *detail.ToolUsageDetails.WebSearchQueries != 1 ||
+		detail.ToolUsageDetails.NumSourcesUsed == nil || *detail.ToolUsageDetails.NumSourcesUsed != 2 ||
+		detail.ToolUsageDetails.CodeExecutionCalls == nil || *detail.ToolUsageDetails.CodeExecutionCalls != 1 ||
+		detail.ToolUsageDetails.ImageGenerationCalls == nil || *detail.ToolUsageDetails.ImageGenerationCalls != 1 ||
+		detail.ToolUsageDetails.ToolCallsRequested == nil || *detail.ToolUsageDetails.ToolCallsRequested != 1 {
+		t.Fatalf("unexpected ToolUsageDetails: %+v", detail.ToolUsageDetails)
+	}
+	if detail.ImageCount != nil || detail.ImageDetails != nil {
+		t.Fatalf("expected orchestrator record ImageCount/ImageDetails to be nil when tool_usage.image_gen is present, got count=%+v details=%+v", detail.ImageCount, detail.ImageDetails)
+	}
+
+	imgToolDetail, okImg := ParseCodexImageToolUsageWithOutputItems([]byte(`{"tools":[{"type":"image_generation","input_fidelity":"high"}]}`), completed, itemsByIndex, nil)
+	if !okImg {
+		t.Fatal("expected ParseCodexImageToolUsageWithOutputItems ok = true")
+	}
+	if imgToolDetail.TotalTokens != 1136 || imgToolDetail.TextInputTokens == nil || *imgToolDetail.TextInputTokens != 30 || imgToolDetail.ImageInputTokens == nil || *imgToolDetail.ImageInputTokens != 50 || imgToolDetail.ImageOutputTokens == nil || *imgToolDetail.ImageOutputTokens != 1056 {
+		t.Fatalf("unexpected image tool token breakdown: %+v", imgToolDetail)
+	}
+	if imgToolDetail.ImageCount == nil || *imgToolDetail.ImageCount != 1 || imgToolDetail.ImageDetails == nil || imgToolDetail.ImageDetails.Size != "1024x1024" || imgToolDetail.ImageDetails.InputFidelity != "" {
+		t.Fatalf("unexpected image tool response metadata: count=%+v details=%+v", imgToolDetail.ImageCount, imgToolDetail.ImageDetails)
+	}
+	if imgToolDetail.RequestedImageDetails == nil || imgToolDetail.RequestedImageDetails.InputFidelity != "high" {
+		t.Fatalf("unexpected image tool requested metadata: %+v", imgToolDetail.RequestedImageDetails)
+	}
+}
+
+func TestStreamUsageBufferObserveOpenAIStreamToolCallsAndImageCompleted(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f1","arguments":""}}]}}]}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"f2","arguments":"{}"}}]}}]}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"id":"chatcmpl-1","service_tier":"default","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}`))
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected buffer.Detail() ok = true")
+	}
+	if detail.TotalTokens != 70 || detail.ToolUsageDetails == nil || detail.ToolUsageDetails.ToolCallsRequested == nil || *detail.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("unexpected OpenAI stream tool call usage: %+v, tools=%+v", detail, detail.ToolUsageDetails)
+	}
+
+	var imgBuffer StreamUsageBuffer
+	imgBuffer.ObserveOpenAIStream([]byte(`data: {"type":"image_generation.completed","b64_json":"AA==","size":"1024x1536","quality":"medium","background":"opaque","output_format":"webp","usage":{"input_tokens":25,"input_tokens_details":{"text_tokens":25,"image_tokens":0},"output_tokens":1500,"output_tokens_details":{"image_tokens":1500,"text_tokens":0},"total_tokens":1525}}`))
+	imgDetail, okImg := imgBuffer.Detail()
+	if !okImg {
+		t.Fatal("expected imgBuffer.Detail() ok = true")
+	}
+	if imgDetail.TotalTokens != 1525 || imgDetail.ImageCount == nil || *imgDetail.ImageCount != 1 || imgDetail.ImageDetails == nil || imgDetail.ImageDetails.Size != "1024x1536" || imgDetail.ImageDetails.Quality != "medium" || imgDetail.ImageDetails.OutputFormat != "webp" {
+		t.Fatalf("unexpected OpenAI image stream usage: %+v, details=%+v", imgDetail, imgDetail.ImageDetails)
+	}
+}
+
+func TestParseCodexUsageExtractsXAIServerSideToolUsageAndModalities(t *testing.T) {
+	data := []byte(`{"type":"response.completed","response":{"id":"resp_xai_1","usage":{"input_tokens":3804,"input_tokens_details":{"cached_tokens":3072,"text_tokens":3500,"image_tokens":304,"cached_prompt_text_tokens":3072},"output_tokens":889,"output_tokens_details":{"reasoning_tokens":828,"text_tokens":61,"accepted_prediction_tokens":5,"rejected_prediction_tokens":2},"total_tokens":4693,"num_sources_used":0,"num_server_side_tools_used":1,"cost_in_usd_ticks":76246640,"server_side_tool_usage_details":{"web_search_calls":0,"x_search_calls":1,"x_posts_fetched":1,"x_users_fetched":0,"code_interpreter_calls":0,"file_search_calls":0,"mcp_calls":0,"document_search_calls":0,"image_generation_calls":0}}}}`)
+	detail, ok := ParseCodexUsage(data)
+	if !ok {
+		t.Fatal("expected ParseCodexUsage ok = true")
+	}
+	if detail.TextInputTokens == nil || *detail.TextInputTokens != 3500 || detail.ImageInputTokens == nil || *detail.ImageInputTokens != 304 || detail.CachedTextTokens == nil || *detail.CachedTextTokens != 3072 {
+		t.Fatalf("unexpected input modality tokens: %+v", detail)
+	}
+	if detail.TextOutputTokens == nil || *detail.TextOutputTokens != 61 || detail.AcceptedPredictionTokens == nil || *detail.AcceptedPredictionTokens != 5 || detail.RejectedPredictionTokens == nil || *detail.RejectedPredictionTokens != 2 {
+		t.Fatalf("unexpected output modality tokens: %+v", detail)
+	}
+	if detail.ToolUsageDetails == nil || detail.ToolUsageDetails.XSearchCalls == nil || *detail.ToolUsageDetails.XSearchCalls != 1 || detail.ToolUsageDetails.XPostsFetched == nil || *detail.ToolUsageDetails.XPostsFetched != 1 || detail.ToolUsageDetails.NumServerSideToolsUsed == nil || *detail.ToolUsageDetails.NumServerSideToolsUsed != 1 {
+		t.Fatalf("unexpected ToolUsageDetails: %+v", detail.ToolUsageDetails)
+	}
+	if detail.CostDetails == nil || detail.CostDetails.CostInUSDTicks == nil || *detail.CostDetails.CostInUSDTicks != 76246640 {
+		t.Fatalf("unexpected CostDetails: %+v", detail.CostDetails)
+	}
+}
+
+func TestParseXAIImageAndVideoUsage(t *testing.T) {
+	imgDetail := ParseXAIImageUsage(
+		[]byte(`{"model":"grok-imagine-image","prompt":"cat","aspect_ratio":"16:9","resolution":"2k","quality":"medium"}`),
+		[]byte(`{"data":[{"b64_json":"AA=="},{"b64_json":"BB=="}],"usage":{"prompt_tokens":12,"completion_tokens":100,"total_tokens":112}}`),
+	)
+	if imgDetail.TotalTokens != 112 || imgDetail.ImageCount == nil || *imgDetail.ImageCount != 2 {
+		t.Fatalf("unexpected image usage: %+v", imgDetail)
+	}
+	if imgDetail.RequestedImageDetails == nil || imgDetail.RequestedImageDetails.AspectRatio != "16:9" || imgDetail.RequestedImageDetails.Resolution != "2k" || imgDetail.RequestedImageDetails.Quality != "medium" {
+		t.Fatalf("unexpected requested image details: %+v", imgDetail.RequestedImageDetails)
+	}
+
+	vidDetail := ParseXAIVideoUsage(
+		[]byte(`{"model":"grok-imagine-video","prompt":"wave","aspect_ratio":"16:9","resolution":"720p","duration":5}`),
+		[]byte(`{"status":"completed","url":"https://example.com/v.mp4","video":{"resolution":"720p","aspect_ratio":"16:9"},"usage":{"prompt_tokens":20,"completion_tokens":400,"total_tokens":420}}`),
+	)
+	if vidDetail.TotalTokens != 420 || vidDetail.ImageDetails == nil || vidDetail.ImageDetails.Resolution != "720p" || vidDetail.ImageDetails.AspectRatio != "16:9" || vidDetail.RequestedImageDetails == nil || vidDetail.RequestedImageDetails.Resolution != "720p" {
+		t.Fatalf("unexpected video usage: %+v", vidDetail)
+	}
+	if vidDetail.MediaCounts == nil || vidDetail.MediaCounts.CompletionMedia == nil || *vidDetail.MediaCounts.CompletionMedia != 1 || vidDetail.MediaCounts.AudioSeconds == nil || *vidDetail.MediaCounts.AudioSeconds != 5 {
+		t.Fatalf("unexpected video media counts: %+v", vidDetail.MediaCounts)
+	}
+}
+
+func TestStreamUsageBufferObserveClaudeStream_PreservesSingleTurnCacheCreationTTL(t *testing.T) {
+	var buffer StreamUsageBuffer
+	buffer.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-haiku-5-5","usage":{"input_tokens":16,"cache_creation_input_tokens":45045,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":45045},"output_tokens":4,"speed":"standard"}}}`))
+	buffer.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`))
+
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("expected observed stream usage")
+	}
+	if detail.CacheCreation5mTokens == nil || *detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("CacheCreation5mTokens = %v, want explicit 0", detail.CacheCreation5mTokens)
+	}
+	if detail.CacheCreation1hTokens == nil || *detail.CacheCreation1hTokens != 45045 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 45045", detail.CacheCreation1hTokens)
+	}
+}
+
+func TestClaudeStreamUsageOwnsStrings(t *testing.T) {
+	line := []byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"speed":"standard","service_tier":"priority","inference_geo":"global","cache_creation":{"mode":"explicit","ttl":"2h","retention":"24h","ephemeral_2h_input_tokens":5},"server_tool_use":{"custom_tool_requests":2},"iterations":[{"type":"message","model":"claude-sonnet"}]}}}`)
+	var b StreamUsageBuffer
+	b.ObserveClaudeStream(line)
+	for i := range line {
+		line[i] = 'X'
+	}
+	d, ok := b.Detail()
+	if !ok || d.ResponseServiceTier != "standard" || d.Speed != "standard" ||
+		d.UpstreamServiceTier != "priority" || d.InferenceGeo != "global" {
+		t.Fatalf("usage strings changed after input reuse: %+v", d)
+	}
+	iterations := d.IterationSlice()
+	if len(iterations) != 1 || iterations[0].Type != "message" || iterations[0].Model != "claude-sonnet" {
+		t.Fatalf("iteration strings changed after input reuse: %+v", iterations)
+	}
+	if d.CacheDetails == nil || d.CacheDetails.Mode != "explicit" || d.CacheDetails.TTL != "2h" ||
+		d.CacheDetails.Retention != "24h" || d.CacheDetails.ByTTL["2h"] != 5 {
+		t.Fatalf("cache strings changed after input reuse: %+v", d.CacheDetails)
+	}
+	if d.ToolUsageDetails == nil || d.ToolUsageDetails.Extra["custom_tool_requests"] != 2 {
+		t.Fatalf("tool counter key changed after input reuse: %+v", d.ToolUsageDetails)
+	}
+}
+
+func TestClaudeStreamUsageSurvivesScannerReuse(t *testing.T) {
+	start := `data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,"speed":"standard","service_tier":"priority","inference_geo":"global"}}}`
+	delta := `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"` + strings.Repeat("A", 100) + `"}}`
+	stream := start + "\n" + strings.Repeat(delta+"\n", 100) + `data: {"type":"message_delta","usage":{"output_tokens":10}}` + "\n"
+	scanner := bufio.NewScanner(strings.NewReader(stream))
+	var b StreamUsageBuffer
+	for scanner.Scan() {
+		b.ObserveClaudeStream(scanner.Bytes())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	d, ok := b.Detail()
+	if !ok || d.InputTokens != 10 || d.OutputTokens != 10 || d.Speed != "standard" ||
+		d.UpstreamServiceTier != "priority" || d.InferenceGeo != "global" {
+		t.Fatalf("scanner reuse corrupted usage: %+v", d)
+	}
+}
+
+func TestClaudeStreamToolDeduplicationOwnsIDsAndCountsMultipleSearches(t *testing.T) {
+	use1 := []byte(`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"tool_1","name":"web_search"}}`)
+	result1 := []byte(`data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","tool_use_id":"tool_1","content":[]}}`)
+	result2 := []byte(`data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","tool_use_id":"tool_2","content":[]}}`)
+	var b StreamUsageBuffer
+	for i := 0; i < 2; i++ {
+		useCopy, resultCopy := bytes.Clone(use1), bytes.Clone(result1)
+		b.ObserveClaudeStream(useCopy)
+		b.ObserveClaudeStream(resultCopy)
+		for j := range useCopy {
+			useCopy[j] = 'X'
+		}
+		for j := range resultCopy {
+			resultCopy[j] = 'X'
+		}
+	}
+	b.ObserveClaudeStream(result2)
+	d, ok := b.Detail()
+	if !ok || d.ToolUsageDetails == nil || d.ToolUsageDetails.WebSearchQueries == nil ||
+		*d.ToolUsageDetails.WebSearchQueries != 1 || d.ToolUsageDetails.WebSearchCalls == nil ||
+		*d.ToolUsageDetails.WebSearchCalls != 2 || d.WebSearchRequests == nil || *d.WebSearchRequests != 2 {
+		t.Fatalf("unexpected Claude stream search counts: detail=%+v tools=%+v", d, d.ToolUsageDetails)
+	}
+}
+
+func TestGeminiStreamUsageAccumulatesToolExecutions(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapped=%v", wrapped), func(t *testing.T) {
+			var b StreamUsageBuffer
+			observe := func(payload string) {
+				if wrapped {
+					b.ObserveAntigravityStream([]byte(`data: {"response":` + payload + `}`))
+				} else {
+					b.ObserveGeminiStream([]byte("data: " + payload))
+				}
+			}
+			for _, name := range []string{"first", "second"} {
+				observe(fmt.Sprintf(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":%q,"args":{}}},{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]},"groundingMetadata":{"webSearchQueries":["q1","q2"]}}]}`, name))
+				d, ok := b.Detail()
+				if !ok || d.ToolUsageDetails == nil || d.ToolUsageDetails.ToolCallsRequested == nil ||
+					d.ToolUsageDetails.CodeExecutionCalls == nil {
+					t.Fatalf("missing incremental tool usage: %+v", d)
+				}
+				want := int64(1)
+				if name == "second" {
+					want = 2
+				}
+				if *d.ToolUsageDetails.ToolCallsRequested != want || *d.ToolUsageDetails.CodeExecutionCalls != want ||
+					d.ImageCount == nil || *d.ImageCount != want {
+					t.Fatalf("incremental counts: tools=%+v images=%v, want %d", d.ToolUsageDetails, d.ImageCount, want)
+				}
+			}
+			observe(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12,"toolUsePromptTokenCount":1}}`)
+			d, _ := b.Detail()
+			if d.TotalTokens != 12 || *d.ToolUsageDetails.ToolCallsRequested != 2 ||
+				*d.ToolUsageDetails.CodeExecutionCalls != 2 || *d.ImageCount != 2 ||
+				d.WebSearchRequests == nil || *d.WebSearchRequests != 2 ||
+				d.ToolUsageDetails.Extra["tool_use_prompt_tokens"] != 1 {
+				t.Fatalf("terminal usage lost counts or double-counted grounding: %+v tools=%+v", d, d.ToolUsageDetails)
+			}
+		})
+	}
+}
+
+func TestStripUsageMetadataPreservesToolArguments(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("wrapped=%v", wrapped), func(t *testing.T) {
+			raw := `{"usageMetadata":{"promptTokenCount":5},"candidates":[{"content":{"parts":[{"functionCall":{"name":"save","args":{"usageMetadata":{"value":1}}}}]}}]}`
+			prefix := ""
+			if wrapped {
+				raw = `{"response":` + raw + `}`
+				prefix = "response."
+			}
+			out, changed := StripUsageMetadataFromJSON([]byte(raw))
+			if !changed || !gjson.ValidBytes(out) || gjson.GetBytes(out, prefix+"usageMetadata").Exists() ||
+				gjson.GetBytes(out, prefix+"cpaUsageMetadata.promptTokenCount").Int() != 5 ||
+				gjson.GetBytes(out, prefix+"candidates.0.content.parts.0.functionCall.args.usageMetadata.value").Int() != 1 {
+				t.Fatalf("metadata rename changed the wrong field: %s", out)
+			}
+		})
+	}
+}
+
+func TestCodexUsageOwnsImageMetadataStrings(t *testing.T) {
+	for _, imageTool := range []bool{false, true} {
+		t.Run(fmt.Sprintf("image_tool=%v", imageTool), func(t *testing.T) {
+			raw := []byte(`{"response":{"usage":{"input_tokens":1,"output_tokens":1,"server_tool_use":{"custom_tool_requests":3}},"prompt_cache_retention":"24h","tool_usage":{"image_gen":{"input_tokens":1,"output_tokens":2}},"output":[{"type":"image_generation_call","status":"completed","size":"1024x1024","quality":"high"}]}}`)
+			var detailJSON []byte
+			if !imageTool {
+				detailJSON = bytes.ReplaceAll(raw, []byte(`"image_gen"`), []byte(`"other_tool"`))
+			} else {
+				detailJSON = raw
+			}
+			d, ok := ParseCodexUsage(detailJSON)
+			if imageTool {
+				d, ok = ParseCodexImageToolUsage(detailJSON)
+			}
+			for i := range detailJSON {
+				detailJSON[i] = 'X'
+			}
+			if !ok || d.ImageDetails == nil || d.ImageDetails.Size != "1024x1024" || d.ImageDetails.Quality != "high" {
+				t.Fatalf("image metadata aliases input buffer: %+v", d.ImageDetails)
+			}
+			if !imageTool && (d.CacheDetails == nil || d.CacheDetails.Retention != "24h" ||
+				d.ToolUsageDetails == nil || d.ToolUsageDetails.Extra["custom_tool_requests"] != 3) {
+				t.Fatalf("cache metadata or tool keys alias input buffer: %+v", d)
+			}
+		})
+	}
+}
+
+func TestResponsesCacheWriteLifetimesAreReportedNotInferred(t *testing.T) {
+	tests := []struct {
+		name, body  string
+		short, long *int64
+	}{
+		{name: "mixed", body: `{"response":{"prompt_cache_options":{"mode":"explicit","ttl":"12h"},"usage":{"input_tokens":100,"output_tokens":1,"total_tokens":101,"input_tokens_details":{"cache_write_tokens":70,"cache_write_tokens_details":{"ttl_30m_tokens":30,"ttl_12h_tokens":40}}}}}`, short: usage.Int64Ptr(30), long: usage.Int64Ptr(40)},
+		{name: "explicit zero", body: `{"response":{"usage":{"input_tokens":100,"output_tokens":1,"input_tokens_details":{"cache_write_tokens":70,"cache_write_tokens_details":{"ttl_30m_tokens":0,"ttl_12h_tokens":70}}}}}`, short: usage.Int64Ptr(0), long: usage.Int64Ptr(70)},
+		{name: "ttl does not imply bucket", body: `{"response":{"prompt_cache_options":{"mode":"explicit","ttl":"12h"},"usage":{"input_tokens":100,"output_tokens":1,"input_tokens_details":{"cache_write_tokens":70}}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, ok := ParseCodexUsage([]byte(tt.body))
+			if !ok {
+				t.Fatal("missing usage")
+			}
+			check := func(name string, got, want *int64) {
+				t.Helper()
+				if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+					t.Errorf("%s got %v want %v", name, got, want)
+				}
+			}
+			check("30m", d.CacheCreation30mTokens, tt.short)
+			check("12h", d.CacheCreation12hTokens, tt.long)
+			if d.CacheCreationTokens != 70 {
+				t.Fatalf("cache total=%d", d.CacheCreationTokens)
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamToolCallsAcrossChoicesAndIncrementalChunks(t *testing.T) {
+	var b StreamUsageBuffer
+	b.ObserveOpenAIStream([]byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a"}]}}]}`))
+	b.ObserveOpenAIStream([]byte(`data: {"choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"id":"b"}]}}]}`))
+	d, ok := b.Detail()
+	if !ok || d.ToolUsageDetails == nil || d.ToolUsageDetails.ToolCallsRequested == nil || *d.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("partial tool calls = %+v, want 2", d.ToolUsageDetails)
+	}
+	b.ObserveOpenAIStream([]byte(`data: {"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`))
+	d, _ = b.Detail()
+	if d.ToolUsageDetails == nil || d.ToolUsageDetails.ToolCallsRequested == nil || *d.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("terminal tool calls = %+v, want 2", d.ToolUsageDetails)
+	}
+
+	var inc StreamUsageBuffer
+	inc.ObserveOpenAIStream([]byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0}]}}]}`))
+	inc.ObserveOpenAIStream([]byte(`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1}]}}]}`))
+	dInc, _ := inc.Detail()
+	if dInc.ToolUsageDetails == nil || dInc.ToolUsageDetails.ToolCallsRequested == nil || *dInc.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("incremental tool calls = %+v, want 2", dInc.ToolUsageDetails)
+	}
+}
+
+func TestOpenAIStreamMultipleImageCompletionsWithoutUsage(t *testing.T) {
+	var b StreamUsageBuffer
+	b.ObserveOpenAIStream([]byte(`data: {"type":"image_generation.completed","b64_json":"AA==","size":"1024x1024"}`))
+	b.ObserveOpenAIStream([]byte(`data: {"type":"image_generation.completed","b64_json":"BB==","size":"1024x1536"}`))
+	d, ok := b.Detail()
+	if !ok || d.ImageCount == nil || *d.ImageCount != 2 || d.ImageDetails == nil || d.ImageDetails.Size != "1024x1536" {
+		t.Fatalf("image stream detail = %+v details=%+v, want ImageCount=2 and latest size", d, d.ImageDetails)
+	}
+}
+
+func TestGeminiPartialArgsDeduplicationAndScannerReuse(t *testing.T) {
+	combined := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"Par","willContinue":true}],"willContinue":true}},{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"is"}],"willContinue":true}},{"functionCall":{}},{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"Lyon"}],"willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+	d := ParseGeminiUsage(combined)
+	if d.ToolUsageDetails == nil || d.ToolUsageDetails.ToolCallsRequested == nil || *d.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("direct ParseGeminiUsage ToolCallsRequested = %+v, want 2", d.ToolUsageDetails)
+	}
+
+	var b StreamUsageBuffer
+	for _, chunk := range []string{
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"Tok","willContinue":true}],"willContinue":true}}]}}]}`,
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"yo","willContinue":true}],"willContinue":true}}]}}]}`,
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city"},{"jsonPath":"$.days","numberValue":0}],"willContinue":true}}]}}]}`,
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"Os","willContinue":true}],"willContinue":true}}]}}]}`,
+		`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"aka"}]}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`,
+	} {
+		b.ObserveGeminiStream([]byte(chunk))
+	}
+	dStream, ok := b.Detail()
+	if !ok || dStream.ToolUsageDetails == nil || dStream.ToolUsageDetails.ToolCallsRequested == nil || *dStream.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("stream ToolCallsRequested = %+v, want 2", dStream.ToolUsageDetails)
+	}
+
+	first := `data: {"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"weather","partialArgs":[{"jsonPath":"$.city","stringValue":"Paris"}],"willContinue":true}}]}}]}`
+	filler := `data: {"candidates":[{"content":{"parts":[{"text":"` + strings.Repeat("X", 120) + `"}]}}]}`
+	last := `data: {"candidates":[{"index":0,"content":{"parts":[{"functionCall":{"name":"weather","partialArgs":[{"jsonPath":"$.city","stringValue":"London"}],"willContinue":false}}]}}]}`
+	scanner := bufio.NewScanner(strings.NewReader(first + "\n" + strings.Repeat(filler+"\n", 100) + last + "\n"))
+	var scannerBuf StreamUsageBuffer
+	for scanner.Scan() {
+		scannerBuf.ObserveGeminiStream(scanner.Bytes())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	dScanner, ok := scannerBuf.Detail()
+	if !ok || dScanner.ToolUsageDetails == nil || dScanner.ToolUsageDetails.ToolCallsRequested == nil || *dScanner.ToolUsageDetails.ToolCallsRequested != 2 {
+		t.Fatalf("scanner reuse ToolCallsRequested = %+v, want 2", dScanner.ToolUsageDetails)
+	}
+}
+
+func TestGeminiStreamUsageMergePreservesEarlierModalitiesAndTier(t *testing.T) {
+	for _, wrapped := range []bool{false, true} {
+		t.Run(map[bool]string{false: "gemini", true: "antigravity"}[wrapped], func(t *testing.T) {
+			var b StreamUsageBuffer
+			observe := func(s string) {
+				if wrapped {
+					b.ObserveAntigravityStream([]byte(`data: {"response":` + s + `}`))
+				} else {
+					b.ObserveGeminiStream([]byte("data: " + s))
+				}
+			}
+			observe(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11,"trafficType":"ON_DEMAND","promptTokensDetails":[{"modality":"IMAGE","tokenCount":10}]}}`)
+			observe(`{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}}`)
+			d, _ := b.Detail()
+			if d.ImageInputTokens == nil || *d.ImageInputTokens != 10 || d.UpstreamServiceTier != "ON_DEMAND" {
+				t.Fatalf("lost structured usage: %+v", d)
+			}
+		})
+	}
+}
+
+func TestCodexCustomToolCallWithoutXSearchPrefixCountsAsRequestedToolCall(t *testing.T) {
+	d, ok := ParseCodexUsage([]byte(`{"response":{"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"custom_tool_call","status":"completed","name":"x_keyword_search","call_id":"call_local_1"}]}}`))
+	if !ok || d.ToolUsageDetails == nil || d.ToolUsageDetails.ToolCallsRequested == nil || *d.ToolUsageDetails.ToolCallsRequested != 1 {
+		t.Fatalf("misclassified client custom_tool_call: %+v", d.ToolUsageDetails)
+	}
+}
+
+func TestClaudeStreamProvisionalZeroWebSearchDoesNotFreezeCompletedSearches(t *testing.T) {
+	for _, initial := range []string{"", `,"server_tool_use":{"web_search_requests":0}`} {
+		t.Run(fmt.Sprintf("initial_zero=%v", initial != ""), func(t *testing.T) {
+			var b StreamUsageBuffer
+			b.ObserveClaudeStream([]byte(fmt.Sprintf(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1%s}}}`, initial)))
+			for i := 1; i <= 2; i++ {
+				b.ObserveClaudeStream([]byte(fmt.Sprintf(`data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","tool_use_id":"tool_%d","content":[]}}`, i)))
+			}
+			b.ObserveClaudeStream([]byte(`data: {"type":"message_delta","usage":{"output_tokens":20}}`))
+			d, ok := b.Detail()
+			if !ok || d.WebSearchRequests == nil || *d.WebSearchRequests != 2 ||
+				d.ToolUsageDetails == nil || d.ToolUsageDetails.WebSearchCalls == nil || *d.ToolUsageDetails.WebSearchCalls != 2 {
+				t.Fatalf("expected 2 completed searches, got detail=%+v tools=%+v", d, d.ToolUsageDetails)
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamPreservesCacheTTLBucketsAndStructuredOnlyUsage(t *testing.T) {
+	var cacheBuf StreamUsageBuffer
+	cacheBuf.ObserveOpenAIStream([]byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":{"cache_write_tokens":70,"cache_write_tokens_details":{"ttl_30m_tokens":30,"ttl_12h_tokens":40}}}}`))
+	cacheDetail, ok := cacheBuf.Detail()
+	if !ok || cacheDetail.CacheCreation30mTokens == nil || *cacheDetail.CacheCreation30mTokens != 30 ||
+		cacheDetail.CacheCreation12hTokens == nil || *cacheDetail.CacheCreation12hTokens != 40 {
+		t.Fatalf("stream lost cache TTL buckets: %+v", cacheDetail)
+	}
+
+	var costBuf StreamUsageBuffer
+	costBuf.ObserveOpenAIStream([]byte(`data: {"usage":{"cost":0.25,"cost_in_usd_ticks":2500000000,"server_tool_use":{"web_search_requests":2}}}`))
+	costDetail, ok := costBuf.Detail()
+	if !ok || costDetail.CostDetails == nil || costDetail.CostDetails.Cost == nil || *costDetail.CostDetails.Cost != 0.25 ||
+		costDetail.WebSearchRequests == nil || *costDetail.WebSearchRequests != 2 {
+		t.Fatalf("stream lost structured-only usage: %+v", costDetail)
+	}
+}
+
+func TestObserveResponsesStreamPreservesOutputItemDoneToolUsageWhenCompletedOutputEmpty(t *testing.T) {
+	var b StreamUsageBuffer
+	b.ObserveResponsesStream([]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"ct_1","type":"custom_tool_call","status":"completed","call_id":"xs_1","name":"x_keyword_search","input":"{}"}}`))
+	b.ObserveResponsesStream([]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"lookup","arguments":"{}"}}`))
+	b.ObserveResponsesStream([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":20,"output_tokens":10,"total_tokens":30}}}`))
+	d, ok := b.Detail()
+	if !ok || d.ToolUsageDetails == nil ||
+		d.ToolUsageDetails.XSearchCalls == nil || *d.ToolUsageDetails.XSearchCalls != 1 ||
+		d.ToolUsageDetails.ToolCallsRequested == nil || *d.ToolUsageDetails.ToolCallsRequested != 1 {
+		t.Fatalf("ObserveResponsesStream lost output_item.done tool usage: %+v", d.ToolUsageDetails)
+	}
+
+	var pluginBuf StreamUsageBuffer
+	ObservePluginExecutorStreamUsage("openai-response", []byte(strings.Join([]string{
+		`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		"",
+		`data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`,
+	}, "\n")), &pluginBuf)
+	pd, pok := pluginBuf.Detail()
+	if !pok || pd.ToolUsageDetails == nil || pd.ToolUsageDetails.ToolCallsRequested == nil || *pd.ToolUsageDetails.ToolCallsRequested != 1 {
+		t.Fatalf("ObservePluginExecutorStreamUsage lost output_item.done tool usage: %+v", pd.ToolUsageDetails)
 	}
 }

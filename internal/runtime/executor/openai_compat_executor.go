@@ -330,7 +330,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}
 
 	reporter.ObserveResponseModel(body)
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
+	reporter.Publish(ctx, helps.ParseOpenAIImageUsage(payload, body, contentType))
 	reporter.EnsurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
 	return resp, nil
@@ -483,7 +483,9 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				loggedErr = statusErr{code: streamErr.code, msg: "upstream stream returned an error payload"}
 			}
 			helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
-			reporter.PublishFailure(ctx, loggedErr)
+			if !streamUsage.PublishFailure(ctx, reporter, loggedErr) {
+				reporter.PublishFailure(ctx, loggedErr)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 			case <-ctx.Done():
@@ -533,6 +535,9 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			}
 
 			// Observe complete upstream frames before translation or downstream backpressure.
+			if !isDone && len(dataLines) > 1 {
+				streamUsage.ObserveOpenAIStream(dataPayload)
+			}
 			helps.ObserveChatTokenEvent(reporter, dataPayload)
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, streamLine, &param, claudeInputTokens)
@@ -612,7 +617,9 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		}
 		if errScan != nil && !seenDone {
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
@@ -740,12 +747,17 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		var streamUsage helps.StreamUsageBuffer
+		streamUsage.SetRequestPayload(payload, contentType)
+		usageObserver := helps.NewOpenAIStreamUsageObserver(&streamUsage, streamScannerBuffer)
 		observer := helps.NewStreamResponseModelObserver(reporter)
 		defer func() {
 			observer.Finish()
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
+			usageObserver.Finish()
+			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)
@@ -755,6 +767,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 				chunk := bytes.Clone(buffer[:n])
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
 				observer.Feed(chunk)
+				usageObserver.Feed(chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
@@ -764,7 +777,11 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 			if errRead != nil {
 				if errRead != io.EOF {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.PublishFailure(ctx, errRead)
+					observer.Finish()
+					usageObserver.Finish()
+					if !streamUsage.PublishFailure(ctx, reporter, errRead) {
+						reporter.PublishFailure(ctx, errRead)
+					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 					case <-ctx.Done():

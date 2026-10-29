@@ -168,10 +168,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 		case "response.completed":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
+			if detail, ok := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); ok {
 				reporter.Publish(ctx, detail)
 			}
-			publishCodexImageToolUsage(ctx, reporter, body, eventData)
+			publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, eventData, outputItemsByIndex, outputItemsFallback)
 			results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImageResults(eventData, outputItemsByIndex, outputItemsFallback)
 			if errExtract != nil {
 				return resp, errExtract
@@ -307,10 +307,10 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 					return
 				}
 			case "response.completed":
-				if detail, ok := helps.ParseCodexUsage(eventData); ok {
+				if detail, ok := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); ok {
 					reporter.Publish(ctx, detail)
 				}
-				publishCodexImageToolUsage(ctx, reporter, body, eventData)
+				publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, eventData, outputItemsByIndex, outputItemsFallback)
 				results, _, usageRaw, _, errExtract := codexExtractImageResults(eventData, outputItemsByIndex, outputItemsFallback)
 				if errExtract != nil {
 					sendError(errExtract)
@@ -405,7 +405,7 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 		return resp, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	reporter.Publish(ctx, helps.ParseOpenAIImageUsage(body, data, contentType))
 	reporter.EnsurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
@@ -478,10 +478,13 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	go func() {
 		defer close(out)
 		var streamUsage helps.StreamUsageBuffer
+		streamUsage.SetRequestPayload(body, contentType)
+		usageObserver := helps.NewOpenAIStreamUsageObserver(&streamUsage, streamScannerBuffer)
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
+			usageObserver.Finish()
 			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 		}()
@@ -492,9 +495,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
-				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
-				}
+				usageObserver.Feed(chunk)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
@@ -504,7 +505,10 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			if errRead != nil {
 				if errRead != io.EOF {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.PublishFailure(ctx, errRead)
+					usageObserver.Finish()
+					if !streamUsage.PublishFailure(ctx, reporter, errRead) {
+						reporter.PublishFailure(ctx, errRead)
+					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
 					case <-ctx.Done():

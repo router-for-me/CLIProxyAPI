@@ -370,7 +370,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			e.rememberClaudeOAuthToolAliases(body, oauthToolNamesReverseMap, msgID)
 		}
 		lines := bytes.Split(data, []byte("\n"))
+		var eventBuf bytes.Buffer
 		for i, line := range lines {
+			eventBuf.Write(line)
+			eventBuf.WriteByte('\n')
+			if len(bytes.TrimSpace(line)) == 0 {
+				streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
+				eventBuf.Reset()
+			}
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
 			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
@@ -381,6 +388,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 				return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
 			}
 			lines[i] = restoredLine
+		}
+		if eventBuf.Len() > 0 {
+			streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
+			eventBuf.Reset()
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {

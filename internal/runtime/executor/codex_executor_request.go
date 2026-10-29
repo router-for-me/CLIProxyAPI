@@ -726,7 +726,11 @@ func normalizeCodexParallelToolCallsForTools(body []byte) []byte {
 }
 
 func publishCodexImageToolUsage(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte) {
-	detail, ok := helps.ParseCodexImageToolUsage(completedData)
+	publishCodexImageToolUsageWithOutputItems(ctx, reporter, body, completedData, nil, nil)
+}
+
+func publishCodexImageToolUsageWithOutputItems(ctx context.Context, reporter *helps.UsageReporter, body []byte, completedData []byte, itemsByIndex map[int64][]byte, fallback [][]byte) {
+	detail, ok := helps.ParseCodexImageToolUsageWithOutputItems(body, completedData, itemsByIndex, fallback)
 	if !ok {
 		return
 	}
