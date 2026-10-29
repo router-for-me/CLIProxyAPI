@@ -1050,6 +1050,10 @@ type OpenAICompatibilityModel struct {
 	// Default false preserves max_tokens for older compatible upstreams.
 	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens,omitempty" json:"use-max-completion-tokens,omitempty"`
 
+	// UseResponsesAPI selects the Responses upstream while retaining client protocol translation.
+	// Default false preserves Chat Completions for existing providers.
+	UseResponsesAPI bool `yaml:"use-responses-api,omitempty" json:"use-responses-api,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
