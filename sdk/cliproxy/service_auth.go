@@ -417,6 +417,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		return nil
 	}
 	auth = auth.Clone()
+	priorProxyNode := coreauth.ProxyPoolNode(auth)
 	s.ensureExecutorsForAuthWithContext(ctx, auth, false)
 
 	// IMPORTANT: Update coreManager FIRST, before model registration.
@@ -477,6 +478,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		auth = current
 	}
 	s.cancelStaleAntigravityProbes(auth.ID)
+	s.persistProxyPoolBinding(ctx, auth, priorProxyNode)
 	return auth
 }
 

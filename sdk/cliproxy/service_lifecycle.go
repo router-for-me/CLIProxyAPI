@@ -82,6 +82,8 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(cfg)
 	s.configureCooldownStateStore(cfg)
+	s.applyProxyPools(cfg)
+	s.applyKunKunBrowser(cfg)
 
 	s.registerPluginAuthParser()
 	if s.coreManager != nil && !homeEnabled {
@@ -327,6 +329,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
+		s.closeProxyPools()
+		s.closeKunKunBrowser()
 		if watcher := s.currentWatcher(); watcher != nil {
 			if err := watcher.Stop(); err != nil {
 				log.Errorf("failed to stop file watcher: %v", err)

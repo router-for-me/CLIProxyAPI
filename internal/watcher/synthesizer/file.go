@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -172,6 +173,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				ApplyAuthExcludedModelsMeta(auth, perAccountExcluded, "oauth")
 				coreauth.ApplyCustomHeadersFromMetadata(auth)
 				applyFingerprintProfileAttribute(auth, metadata)
+				applyKunKunProfileAttribute(auth, metadata)
 				auth.BindFileSnapshot(fullPath, data)
 			}
 			return auths, nil
@@ -254,6 +256,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	applyVertexOpenAPISettingsAttribute(a, metadata)
 	ApplyAuthExcludedModelsMeta(a, perAccountExcluded, "oauth")
 	applyFingerprintProfileAttribute(a, metadata)
+	applyKunKunProfileAttribute(a, metadata)
 	// For Kimi auth files, preserve domain and base_url attributes.
 	if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
 		if bu, ok := metadata["base_url"].(string); ok && strings.TrimSpace(bu) != "" {
@@ -358,6 +361,26 @@ func extractOAuthModelAliasesFromMetadata(metadata map[string]any) []config.OAut
 	}
 	cfg.SanitizeOAuthModelAlias()
 	return cfg.OAuthModelAlias["auth"]
+}
+
+// applyKunKunProfileAttribute restores the persisted KunKun sandbox profile id
+// from the auth file so it is exposed through Attributes after reload.
+func applyKunKunProfileAttribute(auth *coreauth.Auth, metadata map[string]any) {
+	if auth == nil || metadata == nil {
+		return
+	}
+	raw, ok := metadata[browser.KunKunProfileIDAttribute].(string)
+	if !ok {
+		return
+	}
+	profileID := strings.TrimSpace(raw)
+	if profileID == "" {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[browser.KunKunProfileIDAttribute] = profileID
 }
 
 func applyVertexOpenAPISettingsAttribute(auth *coreauth.Auth, metadata map[string]any) {

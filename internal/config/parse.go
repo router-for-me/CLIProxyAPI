@@ -49,6 +49,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	cfg.NormalizeKunKunBrowser()
 	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
 		return nil, errValidate
 	}
@@ -56,6 +57,12 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		return nil, errValidate
 	}
 	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := ValidateProxyPools(cfg.ProxyPools); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := ValidateKunKunBrowserConfig(cfg.KunKunBrowser); errValidate != nil {
 		return nil, errValidate
 	}
 	if cfg.Discovery.ServiceType == "" {

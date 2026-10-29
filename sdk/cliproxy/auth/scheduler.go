@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyResetPriority      schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -170,6 +171,10 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *ResetPrioritySelector:
+		// The incremental scheduler has no reset-time state. It keeps the
+		// selector mapped explicitly and falls back to round-robin traversal.
+		return schedulerStrategyResetPriority
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:

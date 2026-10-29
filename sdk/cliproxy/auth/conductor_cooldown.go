@@ -946,6 +946,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
+			if !result.SkipQuotaObservation {
+				// Anchor the first successful generation call so a credential
+				// without reset headers can still derive its window end.
+				auth.ensureQuotaWindowAnchor(now)
+			}
 		} else {
 			auth.Failed++
 		}

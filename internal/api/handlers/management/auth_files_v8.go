@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -110,9 +112,42 @@ func applySessionProxyToAuthRecord(record *coreauth.Auth, proxyURL string) {
 		record.Metadata = make(map[string]any)
 	}
 	record.Metadata["proxy_url"] = proxyURL
+	// Persist the deterministic KunKun sandbox id when this session was launched
+	// through an installed alternate browser launcher. Recomputing from the
+	// record provider and the same session proxy yields the launch-time id. The
+	// value goes into metadata as well so token storages write it to the auth
+	// file; the file synthesizer maps it back into Attributes on reload.
+	if browser.HasLauncher() && strings.TrimSpace(record.Provider) != "" {
+		profileID := browser.DeriveKunKunProfileID(record.Provider, proxyURL)
+		record.Metadata[browser.KunKunProfileIDAttribute] = profileID
+		if record.Attributes == nil {
+			record.Attributes = make(map[string]string)
+		}
+		record.Attributes[browser.KunKunProfileIDAttribute] = profileID
+	}
 	if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(record.Metadata)
 	}
+}
+
+// resolveOAuthProxyPoolID resolves a proxy pool id to a concrete node for an
+// OAuth login session that has not produced an auth record yet.
+func (h *Handler) resolveOAuthProxyPoolID(ctx context.Context, provider, poolID string) (string, error) {
+	if h == nil || h.authManager == nil {
+		return "", fmt.Errorf("proxy pool resolver is not available")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	node, errResolve := h.authManager.ResolveProxyPoolNode(ctx, provider, "", poolID)
+	if errResolve != nil {
+		return "", errResolve
+	}
+	node = strings.TrimSpace(node)
+	if node == "" {
+		return "", fmt.Errorf("proxy pool %q is not configured", strings.TrimSpace(poolID))
+	}
+	return node, nil
 }
 
 // StartOAuthV8 dispatches login using the provider query parameter or POST JSON body.
@@ -183,13 +218,68 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 			if rawProxy == "" {
 				rawProxy = rawProxyKebab
 			}
-			validatedProxy, errProxy := validateOAuthSessionProxyURL(rawProxy)
-			if errProxy != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
-				return
+
+			var rawProxyPoolID string
+			for _, key := range []string{"proxy_pool_id", "proxy-pool-id"} {
+				value, exists := bodyMap[key]
+				if !exists || value == nil {
+					continue
+				}
+				text, ok := value.(string)
+				if !ok {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_pool_id"})
+					return
+				}
+				trimmed := strings.TrimSpace(text)
+				if trimmed == "" {
+					continue
+				}
+				if rawProxyPoolID != "" && rawProxyPoolID != trimmed {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_pool_id"})
+					return
+				}
+				rawProxyPoolID = trimmed
 			}
-			if validatedProxy != "" {
-				c.Set(oauthSessionProxyURLContextKey, validatedProxy)
+
+			// A "pool:" prefix in proxy_url is an alias for proxy_pool_id.
+			if aliasPoolID, isPoolAlias := strings.CutPrefix(strings.TrimSpace(rawProxy), "pool:"); isPoolAlias {
+				aliasPoolID = strings.TrimSpace(aliasPoolID)
+				if aliasPoolID == "" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_pool_id"})
+					return
+				}
+				if rawProxyPoolID != "" && rawProxyPoolID != aliasPoolID {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "conflicting proxy settings"})
+					return
+				}
+				rawProxyPoolID = aliasPoolID
+				rawProxy = ""
+			}
+
+			if rawProxyPoolID != "" {
+				if rawProxy != "" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "conflicting proxy settings"})
+					return
+				}
+				requestCtx := context.Background()
+				if c.Request != nil {
+					requestCtx = c.Request.Context()
+				}
+				resolvedProxy, errResolveProxy := h.resolveOAuthProxyPoolID(requestCtx, provider, rawProxyPoolID)
+				if errResolveProxy != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_pool_id"})
+					return
+				}
+				c.Set(oauthSessionProxyURLContextKey, resolvedProxy)
+			} else {
+				validatedProxy, errProxy := validateOAuthSessionProxyURL(rawProxy)
+				if errProxy != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+					return
+				}
+				if validatedProxy != "" {
+					c.Set(oauthSessionProxyURLContextKey, validatedProxy)
+				}
 			}
 
 			if rawDomain, exists := bodyMap["domain"]; exists && rawDomain != nil {
@@ -235,7 +325,7 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 			extraMeta := make(map[string]any)
 			for k, v := range bodyMap {
 				switch k {
-				case "provider", "proxy_url", "proxy-url", "is_webui":
+				case "provider", "proxy_url", "proxy-url", "proxy_pool_id", "proxy-pool-id", "is_webui":
 					continue
 				default:
 					extraMeta[k] = v

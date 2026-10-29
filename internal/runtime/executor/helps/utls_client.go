@@ -24,11 +24,14 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
-// providers that require browser-like TLS. The HTTP version follows ALPN. Each
-// request gets a dedicated connection that is closed with the response body.
+// utlsRoundTripper implements http.RoundTripper using the account's configured
+// browser fingerprint for providers that require browser-like TLS. The HTTP
+// version follows ALPN. Each request gets a dedicated connection that is closed
+// with the response body.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer        proxy.Dialer
+	clientHelloID tls.ClientHelloID
+	roots         *x509.CertPool
 }
 
 type closeConnectionBody struct {
@@ -56,7 +59,7 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL, preset string) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
@@ -66,7 +69,10 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return &utlsRoundTripper{dialer: dialer}
+	return &utlsRoundTripper{
+		dialer:        dialer,
+		clientHelloID: TLSClientHelloIDForPreset(preset),
+	}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
@@ -79,8 +85,15 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
-	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
+	// A zero-value round tripper built directly by a caller keeps the
+	// historical HelloChrome_Auto fingerprint.
+	clientHelloID := t.clientHelloID
+	if clientHelloID == (tls.ClientHelloID{}) {
+		clientHelloID = tls.HelloChrome_Auto
+	}
+
+	tlsConfig := &tls.Config{ServerName: host, RootCAs: t.roots}
+	tlsConn := tls.UClient(conn, tlsConfig, clientHelloID)
 
 	handshakeCtx, cancelHandshake := handshakeContext(ctx)
 	defer cancelHandshake()
@@ -444,7 +457,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	// Every executor path that reaches this client passes the selected Auth, so
+	// the account preset and User-Agent family can be resolved directly here
+	// instead of adding an execution-context key.
+	preset := ResolveAccountTLSPreset(authTLSPreset(auth), authIDForTLSPreset(auth), authUserAgent(auth))
+	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL, preset)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {

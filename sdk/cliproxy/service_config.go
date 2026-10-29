@@ -55,19 +55,25 @@ type configCommit struct {
 }
 
 type routingRuntimeState struct {
-	strategy                 string
-	sessionAffinity          bool
-	sessionAffinityTTL       time.Duration
-	sessionAffinitySubagents bool
-	sessionAffinityRebindOn  string
+	strategy                   string
+	sessionAffinity            bool
+	sessionAffinityTTL         time.Duration
+	sessionAffinitySubagents   bool
+	sessionAffinityRebindOn    string
+	resetPriorityUrgentSeconds int
+	resetPriorityJitterSeconds int
+	resetPriorityFallback      string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
-		sessionAffinityTTL:       time.Hour,
-		sessionAffinitySubagents: true,
-		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
+		strategy:                   "round-robin",
+		sessionAffinityTTL:         time.Hour,
+		sessionAffinitySubagents:   true,
+		sessionAffinityRebindOn:    coreauth.SessionAffinityRebindOnAny,
+		resetPriorityUrgentSeconds: 900,
+		resetPriorityJitterSeconds: 60,
+		resetPriorityFallback:      "weighted",
 	}
 	if cfg == nil {
 		return state
@@ -78,6 +84,20 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "reset-priority", "resetpriority":
+		state.strategy = "reset-priority"
+	}
+	if cfg.Routing.ResetPriorityUrgentSeconds > 0 {
+		state.resetPriorityUrgentSeconds = cfg.Routing.ResetPriorityUrgentSeconds
+	}
+	if cfg.Routing.ResetPriorityJitterSeconds > 0 {
+		state.resetPriorityJitterSeconds = cfg.Routing.ResetPriorityJitterSeconds
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Routing.ResetPriorityFallback)) {
+	case "round-robin", "roundrobin", "rr":
+		state.resetPriorityFallback = "round-robin"
+	case "weighted", "weighted-round-robin", "weightedroundrobin", "wrr":
+		state.resetPriorityFallback = "weighted"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -104,6 +124,16 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "reset-priority":
+		var fallback coreauth.Selector = &coreauth.WeightedRoundRobinSelector{}
+		if state.resetPriorityFallback == "round-robin" {
+			fallback = &coreauth.RoundRobinSelector{}
+		}
+		selector = coreauth.NewResetPrioritySelector(
+			fallback,
+			time.Duration(state.resetPriorityUrgentSeconds)*time.Second,
+			time.Duration(state.resetPriorityJitterSeconds)*time.Second,
+		)
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
@@ -148,6 +178,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	}
 	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
+		return configCommit{}
+	}
+	if errValidate := config.ValidateProxyPools(newCfg.ProxyPools); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid proxy pools")
 		return configCommit{}
 	}
 
@@ -262,6 +296,8 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)
+	s.applyProxyPools(commit.cfg)
+	s.applyKunKunBrowser(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)
 	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {
 		return false
