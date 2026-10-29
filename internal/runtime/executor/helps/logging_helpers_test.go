@@ -155,3 +155,52 @@ func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordAPIRequestSkipsDeferredCaptureOnWebsocketConnection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	ginCtx.Set(logging.WebsocketConnectionContextKey, true)
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	for i := 0; i < 3; i++ {
+		RecordAPIRequest(ctx, &config.Config{}, UpstreamRequestLog{
+			URL:    "https://api.example.com/v1/responses",
+			Method: http.MethodPost,
+			Body:   []byte(`{"model":"m"}`),
+		})
+	}
+
+	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
+		t.Fatalf("deferred API requests on a websocket context = %#v, want none", value)
+	}
+	if used, exists := ginCtx.Get(deferredAPIRequestBytesKey); exists {
+		t.Fatalf("deferred API request bytes on a websocket context = %v, want none", used)
+	}
+}
+
+// Upgrade headers alone do not make a WebSocket: a POST carrying them is served
+// as plain HTTP, and its error-only log still needs the upstream request body.
+func TestRecordAPIRequestDefersOnHTTPRequestWithUpgradeHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("Connection", "Upgrade")
+	ginCtx.Request.Header.Set("Upgrade", "websocket")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	RecordAPIRequest(ctx, &config.Config{}, UpstreamRequestLog{
+		URL:    "https://api.example.com/v1/responses",
+		Method: http.MethodPost,
+		Body:   []byte(`{"model":"upgrade-headers"}`),
+	})
+
+	value, _ := ginCtx.Get(logging.DeferredAPIRequestContextKey)
+	requests, _ := value.([]logging.DeferredAPIRequest)
+	if len(requests) != 1 {
+		t.Fatalf("deferred API requests = %d, want 1", len(requests))
+	}
+	if captured := string(requests[0]()); !strings.Contains(captured, `{"model":"upgrade-headers"}`) {
+		t.Fatalf("captured API request = %q, want the upstream body", captured)
+	}
+}

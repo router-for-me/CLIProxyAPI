@@ -129,6 +129,13 @@ func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
 	if ginCtx == nil {
 		return
 	}
+	// An established WebSocket keeps one gin context for the whole connection,
+	// so captures would stay pinned until it closes, and the error-only log never
+	// fires for it (it ends with 101 and records no API response error). Read the
+	// marker through Keys: async callbacks may run while c.Request is replaced.
+	if _, isWebsocket := ginCtx.Get(logging.WebsocketConnectionContextKey); isWebsocket {
+		return
+	}
 	var requests []logging.DeferredAPIRequest
 	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
 		requests, _ = value.([]logging.DeferredAPIRequest)
