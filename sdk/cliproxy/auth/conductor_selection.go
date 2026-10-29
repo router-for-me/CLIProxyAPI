@@ -88,7 +88,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *SoonestResetFirstSelector:
 		return true
 	default:
 		return false
@@ -995,7 +995,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool, clientHeaders ...http.Header) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
-	if UnwrapWeightedRoundRobinSelector(selector) != nil {
+	if selectorExcludesZeroWeight(selector) {
 		// Exclude zero-weight credentials before priority selection, just as the
 		// scheduler predicate does, including when only a lower tier has weight.
 		auths = positiveWeightAuths(auths)
@@ -1057,7 +1057,7 @@ func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Conte
 	if !ok || affinity == nil || (!affinity.rebindOnQuotaOnly && !affinity.rebindOnNever) || len(affinityCandidates) == 0 {
 		return nil
 	}
-	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
+	if selectorUsesWeights(affinity.fallback) {
 		affinityCandidates = positiveWeightAuths(affinityCandidates)
 	}
 	var authIDs map[string]struct{}
@@ -2314,7 +2314,7 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.Selector())
+	return selectorStrategy(m.Selector()) != schedulerStrategyCustom
 }
 
 func shouldRetrySchedulerPick(err error) bool {
@@ -3254,14 +3254,10 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 }
 
 func selectorExcludesZeroWeight(selector Selector) bool {
-	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
-		return true
-	}
 	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
-		_, weighted := affinity.fallback.(*WeightedRoundRobinSelector)
-		return weighted
+		return selectorUsesWeights(affinity.fallback)
 	}
-	return false
+	return selectorUsesWeights(selector)
 }
 
 // earliestPoolCooldownForModelAt scans the model's candidate credentials with

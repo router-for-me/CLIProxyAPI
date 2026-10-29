@@ -180,7 +180,7 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset-first
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
@@ -196,6 +196,13 @@ routing:
   # Credits are process-local and reset on restart or selector replacement.
   # In Home mode, compatible Home versions charge retained WS turns from usage after completion;
   # CPA preserves the retained credential and concurrency slot instead of redispatching each turn.
+  # soonest-reset-first keeps usable session bindings, then selects the highest available
+  # priority, prefers Codex websocket credentials for websocket requests, and chooses the
+  # earliest future quota reset within each provider.
+  # Known resets precede unknown resets; when a provider has no known resets, weights decide.
+  # Missing, malformed, and expired resets are unknown; cooldown deadlines are not quota resets.
+  # Equal resets use plain smooth weighted round-robin without sticky-session credit compensation.
+  # Non-positive weights also exclude the credential under soonest-reset-first.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers

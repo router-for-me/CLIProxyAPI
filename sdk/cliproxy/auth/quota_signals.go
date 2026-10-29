@@ -2,8 +2,10 @@ package auth
 
 import (
 	"maps"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -12,6 +14,53 @@ const (
 	maxQuotaSignalHeaders = 64
 	maxQuotaSignalValue   = 512
 )
+
+var quotaResetSignals = map[string][]struct{ at, after string }{
+	"claude": {
+		{at: "Anthropic-Ratelimit-Unified-5h-Reset"},
+		{at: "Anthropic-Ratelimit-Unified-7d-Reset"},
+	},
+	"codex": {
+		{at: "X-Codex-Primary-Reset-At", after: "X-Codex-Primary-Reset-After-Seconds"},
+		{at: "X-Codex-Secondary-Reset-At", after: "X-Codex-Secondary-Reset-After-Seconds"},
+	},
+	"devin": {
+		{at: "daily_quota_reset_at"},
+		{at: "weekly_quota_reset_at"},
+	},
+}
+
+func (q QuotaState) nextReset(provider string, now time.Time) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, signal := range quotaResetSignals[strings.ToLower(strings.TrimSpace(provider))] {
+		var resetAt time.Time
+		raw := strings.TrimSpace(q.Signals[signal.at])
+		if raw != "" {
+			if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds > 0 {
+				resetAt = time.Unix(seconds, 0)
+			} else if timestamp, errParse := time.Parse(time.RFC3339Nano, raw); errParse == nil {
+				resetAt = timestamp
+			} else {
+				continue
+			}
+		} else {
+			if signal.after == "" || q.ObservedAt.IsZero() {
+				continue
+			}
+			seconds, errParse := strconv.ParseInt(strings.TrimSpace(q.Signals[signal.after]), 10, 64)
+			if errParse != nil || seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+				continue
+			}
+			resetAt = q.ObservedAt.Add(time.Duration(seconds) * time.Second)
+		}
+		if resetAt.After(now) && (!found || resetAt.Before(earliest)) {
+			earliest = resetAt
+			found = true
+		}
+	}
+	return earliest, found
+}
 
 // ProviderSupportsQuotaObservation reports whether the named provider emits a
 // passive credential-level quota snapshot understood by collectQuotaSignals.

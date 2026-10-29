@@ -74,7 +74,7 @@ type smoothWeightedState struct {
 type weightedSelectorStateModelKey struct{}
 
 func withWeightedSelectorStateModel(ctx context.Context, selector Selector, routeModel string) context.Context {
-	if _, ok := selector.(*WeightedRoundRobinSelector); !ok || strings.TrimSpace(routeModel) == "" {
+	if !selectorUsesWeights(selector) || strings.TrimSpace(routeModel) == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, weightedSelectorStateModelKey{}, routeModel)
@@ -1676,7 +1676,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	now := time.Now()
 	availabilityCandidates := auths
-	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+	if selectorUsesWeights(s.fallback) {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
@@ -1867,7 +1867,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 
 	availabilityCandidates := auths
-	if _, weighted := s.fallback.(*WeightedRoundRobinSelector); weighted {
+	if selectorUsesWeights(s.fallback) {
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	now := time.Now()
