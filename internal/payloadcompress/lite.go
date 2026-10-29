@@ -237,15 +237,16 @@ func backOffToWordBoundary(runes []rune, cutIndex int) int {
 	return cutIndex
 }
 
-// lastNewlineBefore mirrors lastIndexOf("\\n", from): a negative start finds
-// nothing, and a start past the end searches the whole slice.
-func lastNewlineBefore(runes []rune, from int) int {
-	if from < 0 {
+// tailStartFrom is the start of the tail kept after the elision marker: the first
+// line that begins inside the last tailBudget characters, so the tail never exceeds
+// its budget. -1 when no complete line fits, which falls back to the head-only cut.
+func tailStartFrom(runes []rune, tailBudget int) int {
+	if tailBudget <= 0 {
 		return -1
 	}
-	for i := min(from, len(runes)-1); i >= 0; i-- {
-		if runes[i] == '\n' {
-			return i
+	for i := max(0, len(runes)-tailBudget); i < len(runes); i++ {
+		if runes[i] == '\n' && i+1 < len(runes) {
+			return i + 1
 		}
 	}
 	return -1
@@ -262,7 +263,7 @@ func truncateToolText(text string, maxLength int) string {
 	budget := maxLength - charLen(toolTruncationMarker) - toolElisionReserve
 	if budget > 0 && countLines(text) > 10 {
 		headCut := backOffToWordBoundary(runes, int(math.Ceil(float64(budget)*(1-toolTailShare))))
-		tailStart := lastNewlineBefore(runes, len(runes)-(budget-headCut)) + 1
+		tailStart := tailStartFrom(runes, budget-headCut)
 		if tailStart > headCut {
 			elided := countLines(string(runes[headCut:tailStart]))
 			return string(runes[:headCut]) + "\n... [" + strconv.Itoa(elided) + " lines elided] ...\n" +

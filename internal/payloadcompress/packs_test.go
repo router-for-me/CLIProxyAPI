@@ -423,9 +423,64 @@ func TestLiteToolResultCapElidesLines(t *testing.T) {
 			t.Fatalf("tail line was cut mid-line: %q", line)
 		}
 	}
-	// Upstream snaps the tail start back to the previous newline, so the tail can
-	// overshoot its share by one line; the cap is a soft limit by that much.
-	if n, widest := charLen(out), 68; n > limit+widest {
-		t.Fatalf("cap exceeded by more than one line: %d chars", n)
+	// The tail starts on the first line that begins inside its share, so the cap is
+	// hard: a long last line can no longer push the result past the budget.
+	if n := charLen(out); n > limit+charLen(toolTruncationMarker) {
+		t.Fatalf("cap exceeded: %d chars for a %d cap", n, limit)
+	}
+}
+
+// TestLiteTailFitsItsBudget pins the tail budget: the tail starts on the first
+// line that begins inside its share, so a long line at the boundary can no longer
+// push the result past the cap.
+func TestLiteTailFitsItsBudget(t *testing.T) {
+	lines := make([]string, 50)
+	for i := range lines {
+		label := strconv.Itoa(i+1) + ":"
+		lines[i] = label + strings.Repeat("x", 200-len(label))
+	}
+	in := strings.Join(lines, "\n")
+	out, ok := liteEngine{}.compressKind(kindToolOutput, in)
+	if !ok {
+		t.Fatal("expected truncation")
+	}
+	if n := charLen(out); n > liteDefaultMaxToolLength+64 {
+		t.Fatalf("output is %d chars, cap is %d", n, liteDefaultMaxToolLength)
+	}
+	if !strings.HasPrefix(out, "1:") {
+		t.Fatal("the head must survive the cut")
+	}
+	if !strings.Contains(out, "\n"+lines[49]+"\n") {
+		t.Fatal("the last line must survive whole")
+	}
+	if !strings.Contains(out, "lines elided] ...") || !strings.HasSuffix(out, "...[truncated]") {
+		t.Fatalf("missing markers: %q", out[len(out)-80:])
+	}
+}
+
+// TestLiteTailDroppedWhenNoLineFits pins the fallback: when the last line alone is
+// larger than the whole tail share, the tail is dropped instead of partially kept.
+func TestLiteTailDroppedWhenNoLineFits(t *testing.T) {
+	for _, width := range []int{1000, 20000} {
+		for _, count := range []int{11, 30} {
+			lines := make([]string, count)
+			for i := range lines {
+				label := strconv.Itoa(i+1) + ":"
+				lines[i] = label + strings.Repeat("y", width-len(label))
+			}
+			out, ok := liteEngine{}.compressKind(kindToolOutput, strings.Join(lines, "\n"))
+			if !ok {
+				t.Fatalf("%d x %d: expected truncation", count, width)
+			}
+			if n := charLen(out); n > liteDefaultMaxToolLength+64 {
+				t.Fatalf("%d x %d: output is %d chars", count, width, n)
+			}
+			if !strings.HasPrefix(out, "1:") {
+				t.Fatalf("%d x %d: the head must survive the cut", count, width)
+			}
+			if strings.Contains(out, "lines elided") {
+				t.Fatalf("%d x %d: no partial tail line may be kept", count, width)
+			}
+		}
 	}
 }
