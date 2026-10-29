@@ -201,7 +201,9 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(wsResp.Body), err)
 		return cliproxyexecutor.Response{}, err
 	}
-	reporter.Publish(ctx, helps.ParseGeminiUsage(wsResp.Body))
+	gemDetail := helps.ParseGeminiUsage(wsResp.Body)
+	helps.ApplyGeminiRequestImageConfig(&gemDetail, body.payload)
+	reporter.Publish(ctx, gemDetail)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -328,6 +330,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		}
 		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, body.toFormat, responseFormat, originalRequest)
 		var streamUsage helps.StreamUsageBuffer
+		streamUsage.SetRequestPayload(body.payload)
 		defer streamUsage.Publish(ctx, reporter)
 		var streamErr error
 		defer func() {
@@ -389,9 +392,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					// JSON object only), so each frame goes through the whole per-frame path: model, usage, translation, errors.
 					for _, frame := range splitRelayFrames(event.Payload) {
 						reporter.ObserveResponseModel(frame)
-						if detail, ok := helps.ParseGeminiStreamUsage(frame); ok {
-							streamUsage.Observe(detail, true)
-						}
+						streamUsage.ObserveGeminiStream(frame)
 						filtered := helps.FilterSSEUsageMetadata(frame)
 						lines := helps.TranslateStreamWithClaudeInputTokens(ctx, body.toFormat, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translatedReq, filtered, &param, claudeInputTokens)
 						helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})

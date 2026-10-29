@@ -97,9 +97,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		if detail, ok := helps.ParseCodexUsage(eventData); ok {
-			upstreamUsage.Observe(detail, true)
-		}
+		upstreamUsage.ObserveResponsesStream(eventData)
 		prepared.applyPatch.RememberDispatcherEvent(eventData)
 		eventData = namespaceRestorer.restore(eventData)
 		if prepared.webSearchAlias != "" {
@@ -136,8 +134,10 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 					upstreamUsage.PublishFailure(ctx, reporter, errTranslation)
 					return cliproxyexecutor.Response{}, errTranslation
 				}
-				if detail, ok := helps.ParseCodexUsage(eventData); ok {
-					reporter.Publish(ctx, detail)
+				if !upstreamUsage.Publish(ctx, reporter) {
+					if detail, ok := helps.ParseCodexUsageWithOutputItems(completedData, outputItemsByIndex, outputItemsFallback); ok {
+						reporter.Publish(ctx, detail)
+					}
 				}
 				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
 					out = helps.EnsureResponsesUsageDetails(out)

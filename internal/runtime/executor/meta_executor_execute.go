@@ -214,9 +214,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			}
 			filteringSubscriptionUsage = false
 		}
-		if detail, ok := helps.ParseCodexUsage(eventData); ok {
-			upstreamUsage.Observe(detail, true)
-		}
+		upstreamUsage.ObserveResponsesStream(eventData)
 		if errEvent := metaStreamEventError(eventData); errEvent != nil {
 			return metaCompletedTranslation{}, errEvent
 		}
@@ -232,6 +230,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
 			case "response.completed", "response.incomplete":
 				completedData := patchCodexCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				upstreamUsage.ObserveResponsesStream(completedData)
 				var param any
 				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {

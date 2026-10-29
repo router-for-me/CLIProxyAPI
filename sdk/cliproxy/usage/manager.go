@@ -94,7 +94,7 @@ type Failure struct {
 	Code string
 }
 
-// Detail holds the token usage breakdown.
+// Detail holds the token and structured usage breakdown captured from an upstream response.
 type Detail struct {
 	InputTokens         int64
 	OutputTokens        int64
@@ -105,6 +105,34 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+
+	CacheCreation5mTokens    *int64
+	CacheCreation30mTokens   *int64
+	CacheCreation1hTokens    *int64
+	CacheCreation12hTokens   *int64
+	TextInputTokens          *int64
+	ImageInputTokens         *int64
+	AudioInputTokens         *int64
+	VideoInputTokens         *int64
+	FileInputTokens          *int64
+	CachedTextTokens         *int64
+	TextOutputTokens         *int64
+	ImageOutputTokens        *int64
+	AudioOutputTokens        *int64
+	AcceptedPredictionTokens *int64
+	RejectedPredictionTokens *int64
+	CacheDetails             *CacheDetails
+	WebSearchRequests        *int64
+	ImageCount               *int64
+	RequestedImageDetails    *ImageDetails
+	ImageDetails             *ImageDetails
+	MediaCounts              *MediaCounts
+	ToolUsageDetails         *ToolUsageDetails
+	Iterations               *[]IterationUsage
+	CostDetails              *CostDetails
+	Speed                    string
+	InferenceGeo             string
+	UpstreamServiceTier      string
 }
 
 type requestedModelAliasContextKey struct{}

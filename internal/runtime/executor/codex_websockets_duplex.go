@@ -869,11 +869,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				if eventType != "response.incomplete" {
 					cacheCodexReasoningReplayFromCompleted(current.replayScope, payload)
 				}
-				if detail, ok := helps.ParseCodexUsage(payload); ok {
+				if detail, ok := helps.ParseCodexUsageWithOutputItems(payload, outputItems, outputFallback); ok {
 					reporter.Publish(ctx, detail)
 				} else {
 					reporter.EnsurePublished(ctx)
 				}
+				publishCodexImageToolUsageWithOutputItems(ctx, reporter, current.clientBody, payload, outputItems, outputFallback)
 			}
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
 				return
