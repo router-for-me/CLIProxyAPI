@@ -8,46 +8,38 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// ParsePluginExecutorResponseUsage extracts token usage from a non-streaming plugin executor response.
-func ParsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Detail {
-	if len(payload) == 0 {
-		return usage.Detail{}
-	}
-	switch strings.ToLower(strings.TrimSpace(protocol)) {
-	case "claude":
-		return parseClaudePayloadUsage(payload)
-	case "gemini":
-		return ParseGeminiUsage(payload)
-	case "interactions", "interactions-response":
-		return ParseInteractionsUsage(payload)
-	case "antigravity":
-		return ParseAntigravityUsage(payload)
-	case "codex", "openai-response":
-		return parseResponsesPluginExecutorUsage(payload)
-	default:
-		return ParseOpenAIUsage(payload)
-	}
+// UnobservedPluginExecutorUsage records an attempt without inventing a token
+// measurement. An explicit all-zero usage object is parsed separately.
+func UnobservedPluginExecutorUsage() usage.Detail {
+	return usage.Detail{TokenBreakdown: usage.NewUnobservedTokenBreakdown()}
 }
 
-// parseResponsesPluginExecutorUsage reads both streaming-event usage (response.usage)
-// and a completed Responses object (top-level usage). A service tier without
-// response.usage must not hide the completed object's token counts.
-func parseResponsesPluginExecutorUsage(payload []byte) usage.Detail {
-	detail, ok := ParseCodexUsage(payload)
-	if ok && hasNonZeroTokenUsage(detail) {
-		return detail
+// ParsePluginExecutorResponseUsage extracts token usage from a non-streaming plugin executor response.
+func ParsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Detail {
+	if observed := NewPluginUsageObservation(protocol); observed != nil {
+		observed.Observe(payload)
+		return observed.Detail()
 	}
-	openAIDetail := ParseOpenAIUsage(payload)
-	if hasNonZeroTokenUsage(openAIDetail) {
-		if openAIDetail.ResponseServiceTier == "" {
-			openAIDetail.ResponseServiceTier = detail.ResponseServiceTier
-		}
-		return openAIDetail
+	if len(payload) == 0 {
+		return UnobservedPluginExecutorUsage()
 	}
-	if ok {
-		return detail
+	var detail usage.Detail
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "claude":
+		detail = parseClaudePayloadUsage(payload)
+	case "gemini":
+		detail = ParseGeminiUsage(payload)
+	case "interactions", "interactions-response":
+		detail = ParseInteractionsUsage(payload)
+	case "antigravity":
+		detail = ParseAntigravityUsage(payload)
+	default:
+		detail = ParseOpenAIUsage(payload)
 	}
-	return openAIDetail
+	if !detail.TokenBreakdown.Valid() && !hasNonZeroTokenUsage(detail) {
+		detail.TokenBreakdown = usage.NewUnobservedTokenBreakdown()
+	}
+	return detail
 }
 
 // ObservePluginExecutorStreamUsage parses streaming chunks and updates a stream usage buffer.
@@ -82,6 +74,12 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		})
 	case "codex", "openai-response":
 		IterateStreamLines(payload, func(line []byte) {
+			observed := NewPluginUsageObservation(protocol)
+			observed.Observe(line)
+			if observed.seen {
+				buffer.Observe(observed.Detail(), true)
+				return
+			}
 			if jsonBytes := ExtractStreamJSONPayload(line); len(jsonBytes) > 0 {
 				// A service tier without response.usage is not token usage. Fall through
 				// so a completed Responses object's top-level usage is still recorded.
@@ -95,6 +93,12 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 	default:
 		IterateStreamLines(payload, func(line []byte) {
 			buffer.ObserveOpenAIStream(line)
+			if observed := NewPluginUsageObservation(protocol); observed != nil {
+				observed.Observe(line)
+				if observed.seen {
+					buffer.Observe(observed.Detail(), true)
+				}
+			}
 		})
 	}
 }
