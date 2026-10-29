@@ -145,6 +145,27 @@ func TestClaudeOAuthTLSResumptionIsWireSafe(t *testing.T) {
 	}
 }
 
+func TestNewUtlsRoundTripperUsesEnvironmentProxyWhenConfigEmpty(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:3128")
+
+	explicit := newUtlsRoundTripper(&sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:3128"})
+	fromEnv := newUtlsRoundTripper(nil)
+	if explicit.sessionCache != fromEnv.sessionCache {
+		t.Fatal("environment HTTP_PROXY should share session cache with explicit proxy URL")
+	}
+
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:3128")
+	configured := newUtlsRoundTripper(&sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:3100"})
+	other := newUtlsRoundTripper(&sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:3100"})
+	if configured.sessionCache == fromEnv.sessionCache {
+		t.Fatal("explicit ProxyURL should override environment proxy for session cache key")
+	}
+	if configured.sessionCache != other.sessionCache {
+		t.Fatal("same explicit proxy should share session cache")
+	}
+}
+
 func TestClaudeOAuthSessionCacheBoundsProxyCardinality(t *testing.T) {
 	firstProxy := "http://127.0.0.1:31000"
 	first := claudeOAuthSessionCache(firstProxy)

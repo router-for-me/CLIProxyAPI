@@ -176,12 +176,14 @@ type utlsRoundTripper struct {
 
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
-	var proxyURL string
-	if cfg != nil {
-		proxyURL = cfg.ProxyURL
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+	proxyURL := proxyutil.EnvironmentProxyURL()
+	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	if proxyURL != "" {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
-			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
+			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}

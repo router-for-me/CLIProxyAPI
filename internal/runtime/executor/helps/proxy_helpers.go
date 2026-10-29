@@ -137,9 +137,11 @@ func effectiveProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		}
 	}
 	if cfg != nil {
-		return strings.TrimSpace(cfg.ProxyURL)
+		if proxyURL := strings.TrimSpace(cfg.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
 	}
-	return ""
+	return proxyutil.EnvironmentProxyURL()
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

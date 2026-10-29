@@ -11,6 +11,20 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestEffectiveProxyURLUsesEnvironmentWhenUnset(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://env-proxy.example:8080")
+	t.Setenv("HTTPS_PROXY", "")
+
+	if got := effectiveProxyURL(context.Background(), nil, nil); got != "http://env-proxy.example:8080" {
+		t.Fatalf("effectiveProxyURL() = %q, want environment proxy", got)
+	}
+
+	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://config-proxy.example:8080"}}
+	if got := effectiveProxyURL(context.Background(), cfg, nil); got != "http://config-proxy.example:8080" {
+		t.Fatalf("effectiveProxyURL() = %q, want config proxy", got)
+	}
+}
+
 func TestNewProxyAwareHTTPClientRequestProxyOverridesAuthAndGlobal(t *testing.T) {
 	t.Parallel()
 
