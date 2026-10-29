@@ -168,7 +168,7 @@ func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing
 	RecordAPIResponseMetadata(ctx, &config.Config{}, http.StatusOK, headers)
 	headers.Set("X-Upstream-Request-Id", "mutated")
 
-	got := logging.GetResponseHeaders(ctx)
+	got, _ := logging.GetResponseHeaders(ctx)
 	if got.Get("X-Upstream-Request-Id") != "upstream-req-1" {
 		t.Fatalf("response header = %q, want %q", got.Get("X-Upstream-Request-Id"), "upstream-req-1")
 	}

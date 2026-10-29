@@ -307,7 +307,7 @@ func TestGenericWebsocketEntryPointDoesNotObserveCodexQuota(t *testing.T) {
 	genericCtx := internallogging.WithResponseHeadersHolder(context.Background())
 	internallogging.SetResponseHeaders(genericCtx, http.Header{"X-Request-Id": []string{"xai-1"}})
 	AppendAPIWebsocketResponse(genericCtx, nil, frame)
-	generic := internallogging.GetResponseHeaders(genericCtx)
+	generic, _ := internallogging.GetResponseHeaders(genericCtx)
 	if got := generic.Get("X-Ratelimit-Remaining-Requests"); got != "" {
 		t.Fatalf("generic websocket entry point observed codex quota: %q", got)
 	}
@@ -320,7 +320,8 @@ func TestGenericWebsocketEntryPointDoesNotObserveCodexQuota(t *testing.T) {
 
 	codexCtx := internallogging.WithResponseHeadersHolder(context.Background())
 	AppendCodexAPIWebsocketResponse(codexCtx, nil, frame)
-	if got := internallogging.GetResponseHeaders(codexCtx).Get("X-Ratelimit-Remaining-Requests"); got != "0" {
+	codexHeaders, _ := internallogging.GetResponseHeaders(codexCtx)
+	if got := codexHeaders.Get("X-Ratelimit-Remaining-Requests"); got != "0" {
 		t.Fatalf("codex websocket entry point lost quota observation: %q", got)
 	}
 }
@@ -332,8 +333,8 @@ func TestMergeWebsocketQuotaHeaders(t *testing.T) {
 		"type":"codex.rate_limits",
 		"rate_limits":{"primary":{"used_percent":2,"window_minutes":10080,"reset_at":1782951970}},
 		"metered_limit_name":"codex_bengalfox"
-	}`)))
-	headers := internallogging.GetResponseHeaders(ctx)
+	}`)), isCodexQuotaHeaderName)
+	headers, _ := internallogging.GetResponseHeaders(ctx)
 	if headers.Get("X-Request-Id") != "req-1" || headers.Get("X-Codex-Active-Limit") != "codex_bengalfox" {
 		t.Fatalf("merged response headers = %#v", headers)
 	}

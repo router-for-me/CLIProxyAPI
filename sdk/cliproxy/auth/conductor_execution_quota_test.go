@@ -127,7 +127,7 @@ func TestExecutionAttemptsDoNotReuseQuotaResponseHeaders(t *testing.T) {
 			if len(second.Quota.Signals) != 0 || !second.Quota.ObservedAt.IsZero() {
 				t.Fatalf("pre-response failure inherited earlier attempt headers: %#v", second.Quota)
 			}
-			if headers := internallogging.GetResponseHeaders(ctx); len(headers) != 0 {
+			if headers, _ := internallogging.GetResponseHeaders(ctx); len(headers) != 0 {
 				t.Fatalf("attempt headers leaked into request holder: %#v", headers)
 			}
 		})

@@ -258,6 +258,7 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 		initialHeaders := http.Header{}
 		initialHeaders.Set("X-Upstream-Request-Id", "upstream-req-1")
 		internallogging.SetResponseHeaders(ctx, initialHeaders)
+		responseHeaders, _ := internallogging.GetResponseHeaders(ctx)
 
 		mgr := coreusage.NewManager(16)
 		defer mgr.Stop()
@@ -284,7 +285,7 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 				OutputTokens: 20,
 				TotalTokens:  30,
 			},
-			ResponseHeaders: internallogging.GetResponseHeaders(ctx),
+			ResponseHeaders: responseHeaders,
 		})
 
 		payload := waitForSinglePayload(t, 2*time.Second)
