@@ -121,12 +121,15 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			for {
 				_, b, err := c.ReadMessage()
 				if err != nil {
-					if !strings.HasPrefix(scenario, "disconnect_") {
-						t.Fatalf("early close: %v", err)
+					t.Fatalf("downstream read before expected terminal event: %v", err)
+				}
+				kind := gjson.GetBytes(b, "type").String()
+				if kind == "error" {
+					if !strings.HasPrefix(scenario, "disconnect_") || gjson.GetBytes(b, "error.code").String() != "upstream_websocket_lost" {
+						t.Fatalf("unexpected downstream error: %s", b)
 					}
 					break
 				}
-				kind := gjson.GetBytes(b, "type").String()
 				if kind == "response.created" && gjson.GetBytes(b, "response.id").String() == "r1" {
 					send(control1)
 					send(control2)
@@ -141,6 +144,9 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 					send([]byte(`{"type":"response.create","previous_response_id":"r1","input":[{"type":"function_call_output","call_id":"call1","output":"found"}]}`))
 				}
 				if kind == "response.completed" && gjson.GetBytes(b, "response.id").String() == "r2" {
+					if strings.HasPrefix(scenario, "disconnect_") {
+						t.Fatal("successor completed instead of reporting upstream disconnect")
+					}
 					completed = gjson.GetBytes(b, "response.output.0.content.0.text").String() == "STEER_OK"
 					_ = c.Close()
 					break

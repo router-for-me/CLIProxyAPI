@@ -2,9 +2,11 @@ package helps
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 )
 
@@ -55,6 +57,31 @@ func TestDevinApplyPatchDiagnosticsUsesTranslatorReason(t *testing.T) {
 	}
 	if explicit := d.Render(state, "devin_trailer_error"); !strings.Contains(explicit, `reason="devin_trailer_error"`) {
 		t.Fatalf("explicit reason did not win: %s", explicit)
+	}
+}
+
+func TestDevinApplyPatchDiagnosticsControlCharacterReasons(t *testing.T) {
+	for c := byte(0); c < 0x20; c++ {
+		t.Run(fmt.Sprintf("control_%02x", c), func(t *testing.T) {
+			_, err := applypatch.UnwrapInput("{\"input\":\"secret" + string(c) + "secret\"}")
+			if err == nil {
+				t.Fatal("expected invalid JSON")
+			}
+			state := &common.ApplyPatchErrorState{}
+			state.SetToolInputError(err)
+			got := (*DevinApplyPatchDiagnostics)(nil).Render(state, "")
+			if !strings.Contains(got, `reason="invalid control character in apply_patch input"`) || strings.Contains(got, "secret") {
+				t.Fatalf("unexpected diagnostic: %s", got)
+			}
+		})
+	}
+	for _, reason := range []string{
+		`decode apply_patch input value: invalid character 'x' in string`,
+		`decode apply_patch input value: invalid character 'secret' in string`,
+	} {
+		if got := devinPatchReasonCode(reason); got != "other" {
+			t.Errorf("reason %q classified as %q", reason, got)
+		}
 	}
 }
 
