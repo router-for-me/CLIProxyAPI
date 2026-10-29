@@ -62,6 +62,40 @@ func TestApplyClaudeHeaders_ConfirmedClientKeepsOAuthCredentialBetas(t *testing.
 	}
 }
 
+func TestApplyClaudeHeaders_ThinkingBindingControlsPreservedForOAuth(t *testing.T) {
+	incoming := http.Header{}
+	incoming.Set("Anthropic-Beta", claudeThinkingBindingBeta)
+
+	body := []byte(`{"model":"claude-fable-5-1","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}}}`)
+
+	for _, stream := range []bool{false, true} {
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(
+			req,
+			claudeOAuthAuthForBetaPolicy(),
+			claudeRaceProbeOAuthKey,
+			stream,
+			nil,
+			body,
+			nil,
+			incoming,
+			false,
+		); err != nil {
+			t.Fatalf("applyClaudeHeaders(stream=%v) error = %v", stream, err)
+		}
+
+		got := req.Header.Get("Anthropic-Beta")
+		if !strings.Contains(got, claudeThinkingBindingBeta) {
+			t.Fatalf(
+				"stream=%v: Anthropic-Beta = %q, want %s",
+				stream,
+				got,
+				claudeThinkingBindingBeta,
+			)
+		}
+	}
+}
+
 func TestApplyClaudeHeaders_ConfirmedAPIKeyClientKeepsPurePassthrough(t *testing.T) {
 	incoming := http.Header{}
 	incoming.Set("Anthropic-Beta", claudeCodeBeta+","+claudeEffortBeta)
