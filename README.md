@@ -167,6 +167,7 @@ Modern Ant Design-based management console for CLIProxyAPI v8+, combining CPAMC-
 
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
+- Native plugin on-demand refresh: [docs/plugin-on-demand-refresh.md](docs/plugin-on-demand-refresh.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
 - Custom Provider Example: `examples/custom-provider`
