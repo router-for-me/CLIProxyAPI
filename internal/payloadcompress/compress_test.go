@@ -1,9 +1,12 @@
 package payloadcompress
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func testConfig(pipeline ...string) Config {
@@ -16,6 +19,34 @@ func testConfig(pipeline ...string) Config {
 		MinBytes:     1,
 		DefaultCombo: "t",
 		Combos:       []Combo{{Name: "t", Models: []string{"*"}, Pipeline: steps}},
+	}
+}
+
+func TestStepOptionsParseNestedAndInline(t *testing.T) {
+	const raw = `
+combos:
+  - name: c
+    pipeline:
+      - engine: lite
+        max-tool-length: 10
+      - engine: caveman
+        language: ja
+        options:
+          min-message-length: 20
+        language-packs: [ja]
+`
+	decoder := yaml.NewDecoder(bytes.NewReader([]byte(raw)))
+	decoder.KnownFields(true)
+	var cfg Config
+	if err := decoder.Decode(&cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	steps := cfg.Combos[0].Pipeline
+	if steps[0].Options.MaxToolLength != 10 {
+		t.Fatalf("inline option lost: %+v", steps[0].Options)
+	}
+	if steps[1].Options.Language != "ja" || steps[1].Options.LanguagePacks[0] != "ja" || steps[1].Options.MinMessageLength != 20 {
+		t.Fatalf("mixed options lost: %+v", steps[1].Options)
 	}
 }
 

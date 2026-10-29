@@ -197,6 +197,10 @@ const toolElisionReserve = 32
 // toolTailShare is the fraction of the budget the tail keeps.
 const toolTailShare = 0.3
 
+// toolMinLinesForTail is the line count at or below which only the head is cut:
+// a short result has no tail worth defending.
+const toolMinLinesForTail = 10
+
 func isWordRuneAt(runes []rune, i int) bool {
 	return i >= 0 && i < len(runes) && !unicode.IsSpace(runes[i])
 }
@@ -237,21 +241,36 @@ func backOffToWordBoundary(runes []rune, cutIndex int) int {
 	return cutIndex
 }
 
-// lastNewlineBefore mirrors lastIndexOf("\\n", from): a negative start finds
-// nothing, and a start past the end searches the whole slice.
-func lastNewlineBefore(runes []rune, from int) int {
-	if from < 0 {
+// tailStartFrom is the start of the tail kept after the elision marker: the first
+// line that begins inside the last tailBudget characters, so the tail never exceeds
+// its budget. -1 when no complete line fits, which falls back to the head-only cut.
+func tailStartFrom(runes []rune, tailBudget int) int {
+	if tailBudget <= 0 {
 		return -1
 	}
-	for i := min(from, len(runes)-1); i >= 0; i-- {
-		if runes[i] == '\n' {
-			return i
+	for i := max(0, len(runes)-tailBudget); i < len(runes); i++ {
+		if runes[i] == '\n' && i+1 < len(runes) {
+			return i + 1
 		}
 	}
 	return -1
 }
 
 func countLines(text string) int { return strings.Count(text, "\n") + 1 }
+
+// hasMoreLinesThan reports whether text holds more than lineCount lines, stopping
+// as soon as the answer is known so a huge result is never scanned twice.
+func hasMoreLinesThan(text string, lineCount int) bool {
+	index := 0
+	for found := 0; found < lineCount; found++ {
+		next := strings.IndexByte(text[index:], '\n')
+		if next < 0 {
+			return false
+		}
+		index += next + 1
+	}
+	return true
+}
 
 // truncateToolText caps a tool result the way upstream Lite does. Multi-line
 // content keeps its tail as well as its head: a head-only cut deletes the lines
@@ -260,9 +279,9 @@ func countLines(text string) int { return strings.Count(text, "\n") + 1 }
 func truncateToolText(text string, maxLength int) string {
 	runes := []rune(text)
 	budget := maxLength - charLen(toolTruncationMarker) - toolElisionReserve
-	if budget > 0 && countLines(text) > 10 {
+	if budget > 0 && hasMoreLinesThan(text, toolMinLinesForTail) {
 		headCut := backOffToWordBoundary(runes, int(math.Ceil(float64(budget)*(1-toolTailShare))))
-		tailStart := lastNewlineBefore(runes, len(runes)-(budget-headCut)) + 1
+		tailStart := tailStartFrom(runes, budget-headCut)
 		if tailStart > headCut {
 			elided := countLines(string(runes[headCut:tailStart]))
 			return string(runes[:headCut]) + "\n... [" + strconv.Itoa(elided) + " lines elided] ...\n" +
