@@ -11,9 +11,13 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -953,6 +957,144 @@ func TestOpenAICompatExecutorResponsesStreamFailsOnEOFWithoutDone(t *testing.T) 
 	}
 	if !strings.Contains(streamErr.Error(), "closed before [DONE]") {
 		t.Fatalf("stream error does not explain the missing terminal marker: %v", streamErr)
+	}
+	truncatedErr, okTruncated := streamErr.(cliproxyexecutor.StreamTruncatedError)
+	if !okTruncated || !truncatedErr.IsStreamTruncated() {
+		t.Fatalf("stream error = %T (%v), want IsStreamTruncated() = true", streamErr, streamErr)
+	}
+}
+
+func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
+	const provider = "openai-compatible-minimax"
+	const model = "MiniMax-M3"
+	const partialChunk = `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"MiniMax-M3","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"
+
+	cases := []struct {
+		name              string
+		status            int
+		body              string
+		requests          int
+		wantCalls         int32
+		wantCooled        int
+		wantLastErrorText string
+		forbidAuthUnavail bool
+	}{
+		{
+			name:              "partial_stream_without_done_across_requests",
+			status:            http.StatusOK,
+			body:              partialChunk,
+			requests:          4,
+			wantCalls:         4,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "empty_200_stream_without_done",
+			status:            http.StatusOK,
+			body:              "",
+			requests:          1,
+			wantCalls:         1,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "real_http_502_control",
+			status:            http.StatusBadGateway,
+			body:              `{"error":{"message":"mock upstream gateway failure","type":"server_error"}}`,
+			requests:          2,
+			wantCalls:         3,
+			wantCooled:        3,
+			wantLastErrorText: "auth_unavailable: no auth available",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{}
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewOpenAICompatExecutor(provider, cfg))
+
+			for i := 0; i < 3; i++ {
+				id := fmt.Sprintf("minimax-compat-%s-%d", tc.name, i)
+				registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+				_, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
+					ID:       id,
+					Provider: provider,
+					Status:   cliproxyauth.StatusActive,
+					Attributes: map[string]string{
+						"api_key":      fmt.Sprintf("minimax-key-%d", i),
+						"base_url":     server.URL + "/v1",
+						"compat_name":  "minimax",
+						"provider_key": provider,
+					},
+				})
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+
+			requestPayload := []byte(`{"model":"MiniMax-M3","input":"hi","stream":true}`)
+			var lastObservedErr error
+			for reqIdx := 0; reqIdx < tc.requests; reqIdx++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				result, errStream := manager.ExecuteStream(ctx, []string{provider}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: requestPayload,
+				}, cliproxyexecutor.Options{
+					SourceFormat:    sdktranslator.FormatOpenAIResponse,
+					ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+					OriginalRequest: requestPayload,
+					Stream:          true,
+				})
+				observedErr := errStream
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							observedErr = chunk.Err
+						}
+					}
+				}
+				cancel()
+				if observedErr == nil {
+					t.Fatalf("request %d succeeded unexpectedly", reqIdx+1)
+				}
+				lastObservedErr = observedErr
+			}
+
+			cooled := 0
+			for _, auth := range manager.List() {
+				if state := auth.ModelStates[model]; state != nil && state.Unavailable && state.NextRetryAfter.After(time.Now()) {
+					cooled++
+				}
+			}
+
+			if calls.Load() != tc.wantCalls {
+				t.Errorf("upstream calls = %d, want %d", calls.Load(), tc.wantCalls)
+			}
+			if cooled != tc.wantCooled {
+				t.Errorf("cooled credentials = %d, want %d", cooled, tc.wantCooled)
+			}
+			if lastObservedErr == nil || !strings.Contains(lastObservedErr.Error(), tc.wantLastErrorText) {
+				t.Errorf("last error = %v, want substring %q", lastObservedErr, tc.wantLastErrorText)
+			}
+			if tc.forbidAuthUnavail && lastObservedErr != nil && strings.Contains(lastObservedErr.Error(), "auth_unavailable") {
+				t.Errorf("last error unexpectedly degraded to auth_unavailable: %v", lastObservedErr)
+			}
+		})
 	}
 }
 
