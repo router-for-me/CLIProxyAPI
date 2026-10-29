@@ -628,7 +628,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			// Without a translator-confirmed terminal state, a clean Responses or Claude EOF
 			// without [DONE] remains a failed stream instead of completing it.
 			if responseFormat == sdktranslator.FormatOpenAIResponse || (responseFormat == sdktranslator.FormatClaude && !sawFinishReason) {
-				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
+				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]", streamTruncated: true}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				if !helps.RecordApplyPatchStreamFailureWithUsage(ctx, param, reporter, &streamUsage, streamErr) {
 					if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
