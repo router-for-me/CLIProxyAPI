@@ -54,7 +54,7 @@ func TestModelRegistrationPluginExclusionSources(t *testing.T) {
 			modelProvider := &exclusionFenceModelProvider{provider: provider, onModels: func() pluginapi.ModelResponse {
 				calls++
 				if calls == 1 {
-					if commit := service.commitConfigUpdate(newCfg); commit.cfg != newCfg {
+					if commit := service.commitConfigUpdate(newCfg); commit.cfg == nil {
 						t.Fatal("config update was rejected")
 					}
 				}
