@@ -19,7 +19,7 @@ func (s *SoonestResetFirstSelector) Pick(ctx context.Context, provider, model st
 	if errAvailable != nil {
 		return nil, errAvailable
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
+	available = preferWebsocketAuthsPerProvider(ctx, available)
 	resets := make(map[*Auth]time.Time, len(available))
 	earliest := make(map[string]time.Time)
 	for _, candidate := range available {
@@ -53,4 +53,41 @@ func selectorUsesWeights(selector Selector) bool {
 	default:
 		return false
 	}
+}
+
+// preferWebsocketAuthsPerProvider applies the scheduler's websocket transport
+// preference within each websocket-preferring provider of a mixed candidate set.
+func preferWebsocketAuthsPerProvider(ctx context.Context, available []*Auth) []*Auth {
+	groups := make(map[string][]*Auth)
+	for _, candidate := range available {
+		if providerKey := canonicalSchedulingProvider(executorKeyFromAuth(candidate)); providerPrefersWebsocketTransport(providerKey) {
+			groups[providerKey] = append(groups[providerKey], candidate)
+		}
+	}
+	excluded := make(map[*Auth]struct{})
+	for _, group := range groups {
+		preferred := preferCodexWebsocketAuths(ctx, "codex", group)
+		if len(preferred) == len(group) {
+			continue
+		}
+		kept := make(map[*Auth]struct{}, len(preferred))
+		for _, candidate := range preferred {
+			kept[candidate] = struct{}{}
+		}
+		for _, candidate := range group {
+			if _, ok := kept[candidate]; !ok {
+				excluded[candidate] = struct{}{}
+			}
+		}
+	}
+	if len(excluded) == 0 {
+		return available
+	}
+	filtered := make([]*Auth, 0, len(available)-len(excluded))
+	for _, candidate := range available {
+		if _, ok := excluded[candidate]; !ok {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }

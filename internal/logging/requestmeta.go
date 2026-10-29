@@ -34,6 +34,7 @@ type responseHeadersHolder struct {
 	mu         sync.RWMutex
 	headers    http.Header
 	observedAt time.Time
+	observer   func(http.Header, time.Time)
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -103,6 +104,16 @@ func WithFreshResponseHeadersHolder(ctx context.Context) context.Context {
 	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
 }
 
+func WithResponseHeadersObserver(ctx context.Context, observer func(http.Header, time.Time)) context.Context {
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if ok && holder != nil {
+		holder.mu.Lock()
+		holder.observer = observer
+		holder.mu.Unlock()
+	}
+	return ctx
+}
+
 func SetResponseStatus(ctx context.Context, status int) {
 	if ctx == nil || status <= 0 {
 		return
@@ -124,12 +135,18 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 		return
 	}
 	holder.mu.Lock()
-	defer holder.mu.Unlock()
 	if observedAt.Before(holder.observedAt) {
+		holder.mu.Unlock()
 		return
 	}
 	holder.headers = cloneHTTPHeader(headers)
 	holder.observedAt = observedAt
+	observer := holder.observer
+	snapshot := cloneHTTPHeader(holder.headers)
+	holder.mu.Unlock()
+	if observer != nil {
+		observer(snapshot, observedAt)
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
@@ -144,8 +161,8 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header, replace func
 		return
 	}
 	holder.mu.Lock()
-	defer holder.mu.Unlock()
 	if observedAt.Before(holder.observedAt) {
+		holder.mu.Unlock()
 		return
 	}
 	if holder.headers == nil {
@@ -164,6 +181,12 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header, replace func
 		holder.headers[canonicalKey] = append([]string(nil), values...)
 	}
 	holder.observedAt = observedAt
+	observer := holder.observer
+	snapshot := cloneHTTPHeader(holder.headers)
+	holder.mu.Unlock()
+	if observer != nil {
+		observer(snapshot, observedAt)
+	}
 }
 
 func GetResponseStatus(ctx context.Context) int {
