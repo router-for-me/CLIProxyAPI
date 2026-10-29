@@ -62,9 +62,11 @@ type routingRuntimeState struct {
 	sessionAffinityRebindOn  string
 }
 
+const defaultRoutingStrategy = "round-robin"
+
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
-		strategy:                 "round-robin",
+		strategy:                 defaultRoutingStrategy,
 		sessionAffinityTTL:       time.Hour,
 		sessionAffinitySubagents: true,
 		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
@@ -74,6 +76,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	}
 
 	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
+	case "round-robin", "roundrobin", "rr":
+		state.strategy = defaultRoutingStrategy
 	case "weighted-round-robin", "weightedroundrobin", "wrr":
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
