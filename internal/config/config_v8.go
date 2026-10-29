@@ -385,6 +385,9 @@ var sharedKeyFields = map[string]bool{
 	"priority": true, "prefix": true, "proxy-url": true, "headers": true,
 	"models": true, "excluded-models": true, "disable-cooling": true,
 	"request-retry": true, "request-scoped-errors": true,
+	// connection-pool follows proxy-url: a group-level default that each key may
+	// override, so an operator can pool one provider without touching the others.
+	"connection-pool": true,
 }
 
 func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
@@ -438,17 +441,43 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 				}
 			}
 			for i := 0; i < len(key.Content); i += 2 {
-				if key.Content[i].Value == "auth_index" || key.Content[i].Value == "auth-index" {
+				field := key.Content[i].Value
+				if field == "auth_index" || field == "auth-index" {
 					continue
 				}
-				if key.Content[i+1].Tag != "!!null" {
-					setYAMLPath(item, key.Content[i].Value, key.Content[i+1])
+				if key.Content[i+1].Tag == "!!null" {
+					continue
 				}
+				if field == "connection-pool" {
+					// A per-key block merges onto the group block so a key that overrides
+					// one field keeps inheriting the rest, matching the runtime resolution
+					// where an omitted field inherits the outer value. Replacing the whole
+					// block would silently drop the group's enabled: true.
+					setYAMLPath(item, field, mergeConnectionPoolNode(yamlPath(group, field), key.Content[i+1]))
+					continue
+				}
+				setYAMLPath(item, field, key.Content[i+1])
 			}
 			out.Content = append(out.Content, item)
 		}
 	}
 	return out, nil
+}
+
+// mergeConnectionPoolNode merges a per-key connection-pool block onto the group block.
+// Missing sub-keys fall back to the group value; the result is always a fresh node.
+func mergeConnectionPoolNode(base, override *yaml.Node) *yaml.Node {
+	merged := deepCopyNode(base)
+	if merged == nil || merged.Kind != yaml.MappingNode || override == nil || override.Kind != yaml.MappingNode {
+		return deepCopyNode(override)
+	}
+	for i := 0; i < len(override.Content); i += 2 {
+		if override.Content[i+1].Tag == "!!null" {
+			continue
+		}
+		setYAMLPath(merged, override.Content[i].Value, override.Content[i+1])
+	}
+	return merged
 }
 
 // groupLegacyKeys deliberately keeps one group per legacy entry: equal endpoints
