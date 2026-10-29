@@ -191,6 +191,12 @@ func (m authTabModel) renderContent() string {
 	for i, f := range m.files {
 		name := getString(f, "name")
 		channel := getString(f, "channel")
+		if channel == "" {
+			channel = getString(f, "provider")
+		}
+		if channel == "" {
+			channel = getString(f, "type")
+		}
 		email := getString(f, "email")
 		disabled := getBool(f, "disabled")
 
@@ -199,6 +205,19 @@ func (m authTabModel) renderContent() string {
 		if disabled {
 			statusIcon = lipgloss.NewStyle().Foreground(colorMuted).Render("○")
 			statusText = T("status_disabled")
+		} else if getBool(f, "requires_sign_in") {
+			statusIcon = warningStyle.Render("⚠")
+			statusText = "sign-in required"
+			if getBool(f, "unavailable") {
+				statusIcon = errorStyle.Render("✗")
+				statusText = "expired (sign-in required)"
+			}
+		} else if getBool(f, "unavailable") {
+			statusIcon = errorStyle.Render("✗")
+			statusText = getString(f, "status")
+			if statusText == "" {
+				statusText = "unavailable"
+			}
 		}
 
 		cursor := "  "
@@ -275,6 +294,11 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		{"Email", "email", false},
 		{"Status", "status", false},
 		{"Status Msg", "status_message", false},
+		{"Renewal", "renewal_state", false},
+		{"Stage", "recovery_stage", false},
+		{"Token Exp", "access_token_expires_at", false},
+		{"Next Action", "next_action", false},
+		{"Hint", "recovery_hint", false},
 		{"File Name", "file_name", false},
 		{"Auth Type", "auth_type", false},
 		{"Prefix", "prefix", true},

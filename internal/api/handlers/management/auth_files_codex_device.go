@@ -25,6 +25,10 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 	}
 	sessionProxyURL := oauthSessionProxyURLFromContext(c)
 	oauthSessions.registerDevice(state, "codex", sessionProxyURL)
+	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
+	if hasSessionTarget {
+		SetOAuthSessionTarget(state, sessionTarget)
+	}
 
 	ctx, cancel := context.WithCancel(PopulateAuthContext(context.Background(), c))
 	watchCtx, stopWatch := context.WithCancel(ctx)
@@ -93,6 +97,11 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 		case <-ctx.Done():
 			return
 		}
+		recovery, errRecovery := h.prepareCodexDeviceRecovery(state, record)
+		if errRecovery != nil {
+			SetOAuthSessionError(state, errRecovery.Error())
+			return
+		}
 		applySessionProxyToAuthRecord(record, sessionProxyURL)
 		if errGuard := claimOAuthSessionCommit(state, "codex"); errGuard != nil {
 			return
@@ -106,9 +115,17 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			return
 		}
 		// Persistence commits the login. Runtime registration can outlive its acquisition budget.
-		CompleteOAuthSession(state)
-		if errNotify := h.notifyPersistedTokenRecord(context.WithoutCancel(ctx), savedPath, record); errNotify != nil {
+		if recovery != nil {
+			CompleteOAuthSessionWithOutcome(state, record.ID, authGrantFingerprint(record), strings.TrimSpace(savedPath) != "", false, recovery.existed, recovery.version, recovery.epoch, 0, 0, "", "")
+		} else {
+			CompleteOAuthSession(state)
+		}
+		notifyCtx := context.WithoutCancel(ctx)
+		if errNotify := h.notifyPersistedTokenRecord(notifyCtx, savedPath, record); errNotify != nil {
 			log.Warn("Codex device authentication saved but post-auth notification failed")
+		}
+		if recovery != nil {
+			h.finishCodexDeviceRecovery(notifyCtx, state, record, recovery.target)
 		}
 	}()
 
@@ -132,14 +149,18 @@ func (h *Handler) RequestCodexDeviceToken(c *gin.Context) {
 			return
 		}
 		responseErrors := len(c.Errors)
-		c.JSON(http.StatusOK, gin.H{
+		response := gin.H{
 			"status":     "ok",
 			"url":        verificationURL,
 			"state":      state,
 			"flow":       "device",
 			"user_code":  userCode,
 			"expires_in": info.ExpiresIn,
-		})
+		}
+		if hasSessionTarget {
+			response["target_auth_id"] = sessionTarget.AuthID
+		}
+		c.JSON(http.StatusOK, response)
 		if len(c.Errors) > responseErrors {
 			return
 		}

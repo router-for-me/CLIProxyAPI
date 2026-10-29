@@ -304,3 +304,74 @@ func TestCreateAndUpdateTokenStorage_PlanType(t *testing.T) {
 		t.Fatalf("updated storage.PlanType = %q, want free", storage.PlanType)
 	}
 }
+
+func TestRefreshTokensWithRetry_TerminalGrantErrorsOnlyAttemptOnce(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	t.Cleanup(resetCodexRefreshGroupForTest)
+
+	cases := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantCalls  int32
+	}{
+		{
+			name:       "refresh_token_reused",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":{"message":"Your refresh token has already been used","code":"refresh_token_reused"}}`,
+			wantCalls:  1,
+		},
+		{
+			name:       "invalid_grant",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`,
+			wantCalls:  1,
+		},
+		{
+			name:       "refresh_token_expired",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":{"message":"Refresh token expired","code":"refresh_token_expired"}}`,
+			wantCalls:  1,
+		},
+		{
+			name:       "refresh_token_invalidated",
+			statusCode: http.StatusUnauthorized,
+			body:       `{"error":{"message":"Refresh token invalidated","code":"refresh_token_invalidated"}}`,
+			wantCalls:  1,
+		},
+		{
+			name:       "transient_503_retries",
+			statusCode: http.StatusServiceUnavailable,
+			body:       `{"error":"service_unavailable"}`,
+			wantCalls:  2,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCodexRefreshGroupForTest()
+			var calls int32
+			auth := &CodexAuth{
+				httpClient: &http.Client{
+					Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+						atomic.AddInt32(&calls, 1)
+						return &http.Response{
+							StatusCode: tc.statusCode,
+							Body:       io.NopCloser(strings.NewReader(tc.body)),
+							Header:     make(http.Header),
+							Request:    req,
+						}, nil
+					}),
+				},
+			}
+
+			_, errRefresh := auth.RefreshTokensWithRetry(context.Background(), "rt-"+tc.name, 2)
+			if errRefresh == nil {
+				t.Fatalf("expected error for %s", tc.name)
+			}
+			if got := atomic.LoadInt32(&calls); got != tc.wantCalls {
+				t.Fatalf("%s: RefreshTokensWithRetry attempts = %d, want %d", tc.name, got, tc.wantCalls)
+			}
+		})
+	}
+}

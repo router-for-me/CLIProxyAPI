@@ -1,19 +1,24 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type authFilesCooldownResponse struct {
@@ -760,4 +765,541 @@ func TestListAuthFiles_SparseModelState_BlockedModelDoesNotMakeAuthUnavailable(t
 	if file.Status != string(coreauth.StatusActive) {
 		t.Errorf("expected status=%q, got %q", coreauth.StatusActive, file.Status)
 	}
+}
+
+func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	now := time.Now().UTC()
+	futureExpiry := now.Add(24 * time.Hour).Truncate(time.Second)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	authDir := t.TempDir()
+	cfg := &config.Config{AuthDir: authDir}
+	manager.SetConfig(cfg)
+
+	exec := &failingRefreshManagementExecutor{
+		provider: "codex",
+		err: fmt.Errorf(
+			`token refresh failed with status 401: {"error":{"message":"Your refresh token has already been used to generate a new access token. Please try signing in again. https://auth.openai.com/authorize?code=secret-code&state=secret-state refresh_token=rt-secret-123 Authorization: Bearer opaque-bearer-secret","code":"refresh_token_reused"}}`,
+		),
+	}
+	manager.RegisterExecutor(exec)
+
+	credPath := filepath.Join(authDir, "codex-a.json")
+	if errWrite := os.WriteFile(credPath, []byte(`{"type":"codex","email":"a@example.com"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:       "codex-a.json",
+		Index:    "idx-codex-a",
+		FileName: "codex-a.json",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"email":         "a@example.com",
+			"account_id":    "acc-a",
+			"access_token":  "valid-access-token-secret",
+			"refresh_token": "rt-secret-123",
+			"expired":       futureExpiry.Format(time.RFC3339),
+		},
+		Attributes: map[string]string{"path": credPath, "source": credPath},
+	})
+
+	// Trigger terminal refresh failure via ForceRefreshAuth while access_token is still valid.
+	_, _ = manager.ForceRefreshAuth(context.Background(), "codex-a.json")
+
+	// Ordinary successful completed inference must NOT mask the terminal renewal failure.
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:            "codex-a.json",
+		Provider:          "codex",
+		Model:             "gpt-5.5",
+		Success:           true,
+		CompletedResponse: true,
+	})
+
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials?name=codex-a.json", nil)
+	ginCtx.Set(ConfigV8ContextKey, true)
+	h.ListAuthFiles(ginCtx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Files []map[string]any `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &resp); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(resp.Files))
+	}
+	entry := resp.Files[0]
+	if entry["requires_sign_in"] != true {
+		t.Fatalf("requires_sign_in = %v, want true (entry=%#v)", entry["requires_sign_in"], entry)
+	}
+	if entry["renewal_state"] != coreauth.RenewalStateSignInRequired {
+		t.Fatalf("renewal_state = %v, want %s", entry["renewal_state"], coreauth.RenewalStateSignInRequired)
+	}
+	if entry["recovery_stage"] != coreauth.RecoveryStageSignInRequired {
+		t.Fatalf("recovery_stage = %v, want %s", entry["recovery_stage"], coreauth.RecoveryStageSignInRequired)
+	}
+	if entry["access_token_expires_at"] != futureExpiry.Format(time.RFC3339) {
+		t.Fatalf("access_token_expires_at = %v, want %s", entry["access_token_expires_at"], futureExpiry.Format(time.RFC3339))
+	}
+	if entry["next_action"] != "sign_in" {
+		t.Fatalf("next_action = %v, want sign_in", entry["next_action"])
+	}
+	if entry["renewal_event"] == nil {
+		t.Fatalf("expected deduplicated renewal_event in entry: %#v", entry)
+	}
+	rawBody := rec.Body.String()
+	for _, forbidden := range []string{"valid-access-token-secret", "rt-secret-123", "secret-code", "secret-state", "opaque-bearer-secret", "https://auth.openai.com"} {
+		if strings.Contains(rawBody, forbidden) {
+			t.Fatalf("response leaked sensitive value %q in %s", forbidden, rawBody)
+		}
+	}
+
+	// Targeted OAuth recovery via StartOAuthV8: cancelling or wrong provider does not mark codex-a.json repaired.
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(ConfigV8ContextKey, true)
+		c.Next()
+	})
+	router.POST("/v8/management/oauth/auth-url", h.StartOAuthV8)
+	router.GET("/v8/management/oauth/status", h.GetAuthStatus)
+	router.DELETE("/v8/management/oauth/session", h.CancelAuthSession)
+	router.POST("/v8/management/credentials/verify", h.VerifyAuthFileV8)
+
+	wMismatch := httptest.NewRecorder()
+	reqMismatch := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"claude","name":"codex-a.json"}`))
+	reqMismatch.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wMismatch, reqMismatch)
+	if wMismatch.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for provider mismatch, got %d: %s", wMismatch.Code, wMismatch.Body.String())
+	}
+
+	wStart := httptest.NewRecorder()
+	reqStart := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json"}`))
+	reqStart.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wStart, reqStart)
+	if wStart.Code != http.StatusOK {
+		t.Fatalf("StartOAuthV8 status = %d, want 200: %s", wStart.Code, wStart.Body.String())
+	}
+	var startResp map[string]any
+	if errUnmarshal := json.Unmarshal(wStart.Body.Bytes(), &startResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal StartOAuthV8: %v", errUnmarshal)
+	}
+	if startResp["target_auth_id"] != "codex-a.json" {
+		t.Fatalf("target_auth_id = %v, want codex-a.json", startResp["target_auth_id"])
+	}
+	state, _ := startResp["state"].(string)
+
+	// Cancel login session and confirm codex-a.json still requires sign-in.
+	wCancel := httptest.NewRecorder()
+	router.ServeHTTP(wCancel, httptest.NewRequest(http.MethodDelete, "/v8/management/oauth/session?state="+state, nil))
+	if wCancel.Code != http.StatusOK {
+		t.Fatalf("CancelAuthSession status = %d, want 200", wCancel.Code)
+	}
+	stillBroken, _ := manager.GetByID("codex-a.json")
+	if !stillBroken.RequiresSignIn {
+		t.Fatal("cancelling OAuth session must not clear RequiresSignIn")
+	}
+
+	// Targeted recovery with a DIFFERENT account (other@example.com) must fail and not mark codex-a.json repaired.
+	mockSvc := &targetedRecoveryTestCodexOAuthService{
+		authDir:   authDir,
+		email:     "other@example.com",
+		accountID: "acc-other",
+	}
+	origFactory := newCodexOAuthService
+	newCodexOAuthService = func(*config.Config) codexOAuthService { return mockSvc }
+	t.Cleanup(func() { newCodexOAuthService = origFactory })
+
+	wDiffStart := httptest.NewRecorder()
+	reqDiffStart := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json"}`))
+	reqDiffStart.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wDiffStart, reqDiffStart)
+	if wDiffStart.Code != http.StatusOK {
+		t.Fatalf("StartOAuthV8 (diff account) status = %d: %s", wDiffStart.Code, wDiffStart.Body.String())
+	}
+	var diffStartResp struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(wDiffStart.Body.Bytes(), &diffStartResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal diffStartResp: %v", errUnmarshal)
+	}
+	diffStatus := pollOAuthStatusUntilDone(t, router, diffStartResp.State)
+	if diffStatus["status"] != "error" || !strings.Contains(fmt.Sprint(diffStatus["error"]), "does not match target credential") {
+		t.Fatalf("expected account mismatch error, got %#v", diffStatus)
+	}
+	afterMismatch, _ := manager.GetByID("codex-a.json")
+	if !afterMismatch.RequiresSignIn {
+		t.Fatal("authenticating a different account must not mark target credential repaired")
+	}
+
+	// Targeted recovery with missing account_id or missing email must also be rejected (fail-closed).
+	for _, missingCase := range []struct {
+		name      string
+		email     string
+		accountID string
+	}{
+		{name: "missing_account_id", email: "a@example.com", accountID: ""},
+		{name: "missing_email", email: "", accountID: "acc-a"},
+	} {
+		mockSvc.email = missingCase.email
+		mockSvc.accountID = missingCase.accountID
+		wMissing := httptest.NewRecorder()
+		reqMissing := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json"}`))
+		reqMissing.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(wMissing, reqMissing)
+		if wMissing.Code != http.StatusOK {
+			t.Fatalf("StartOAuthV8 (%s) status = %d: %s", missingCase.name, wMissing.Code, wMissing.Body.String())
+		}
+		var missingStartResp struct {
+			State string `json:"state"`
+		}
+		if errUnmarshal := json.Unmarshal(wMissing.Body.Bytes(), &missingStartResp); errUnmarshal != nil {
+			t.Fatalf("unmarshal missingStartResp (%s): %v", missingCase.name, errUnmarshal)
+		}
+		missingStatus := pollOAuthStatusUntilDone(t, router, missingStartResp.State)
+		if missingStatus["status"] != "error" || !strings.Contains(fmt.Sprint(missingStatus["error"]), "does not match target credential") {
+			t.Fatalf("%s: expected mismatch error, got %#v", missingCase.name, missingStatus)
+		}
+		afterMissing, _ := manager.GetByID("codex-a.json")
+		if !afterMissing.RequiresSignIn {
+			t.Fatalf("%s: missing identity field must not mark target credential repaired", missingCase.name)
+		}
+	}
+
+	// If saving to storage succeeds but runtime adoption fails, GetAuthStatus must report saved=true, adopted=false, recovery_stage=credential_saved.
+	mockSvc.email = "a@example.com"
+	mockSvc.accountID = "acc-a"
+	h.SetPostAuthPersistHook(func(context.Context, *coreauth.Auth) error {
+		return fmt.Errorf("simulated runtime adoption failure")
+	})
+	wUnadoptedStart := httptest.NewRecorder()
+	reqUnadoptedStart := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json"}`))
+	reqUnadoptedStart.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wUnadoptedStart, reqUnadoptedStart)
+	if wUnadoptedStart.Code != http.StatusOK {
+		t.Fatalf("StartOAuthV8 (unadopted) status = %d: %s", wUnadoptedStart.Code, wUnadoptedStart.Body.String())
+	}
+	var unadoptedStartResp struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(wUnadoptedStart.Body.Bytes(), &unadoptedStartResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal unadoptedStartResp: %v", errUnmarshal)
+	}
+	unadoptedStatus := pollOAuthStatusUntilDone(t, router, unadoptedStartResp.State)
+	if unadoptedStatus["status"] != "ok" || unadoptedStatus["saved"] != true || unadoptedStatus["adopted"] != false || unadoptedStatus["recovery_stage"] != coreauth.RecoveryStageCredentialSaved {
+		t.Fatalf("expected saved=true adopted=false recovery_stage=credential_saved when runtime adoption fails, got %#v", unadoptedStatus)
+	}
+	// An unrelated runtime update or replacement with a different grant must NOT falsely satisfy adoption for unadoptedStartResp.State.
+	unrelatedReplacement := stillBroken.Clone()
+	unrelatedReplacement.Metadata["access_token"] = "unrelated-access-token"
+	unrelatedReplacement.Metadata["refresh_token"] = "unrelated-refresh-token"
+	if _, errUnrelated := manager.Update(coreauth.WithSkipPersist(context.Background()), unrelatedReplacement); errUnrelated != nil {
+		t.Fatalf("Update unrelatedReplacement: %v", errUnrelated)
+	}
+	unrelatedStatus := pollOAuthStatusUntilDone(t, router, unadoptedStartResp.State)
+	if unrelatedStatus["adopted"] != false || unrelatedStatus["recovery_stage"] != coreauth.RecoveryStageCredentialSaved {
+		t.Fatalf("unrelated credential update must not mark OAuth session adopted, got %#v", unrelatedStatus)
+	}
+	// When a delayed watcher/reload subsequently adopts the actual saved file into manager AND an automatic refresh rotates
+	// the tokens BEFORE GetAuthStatus is polled again, polling GetAuthStatus must still report adopted=true and renewal_verified=true.
+	if errDelayedReg := h.registerAuthFromFile(context.Background(), credPath, nil); errDelayedReg != nil {
+		t.Fatalf("delayed registerAuthFromFile error: %v", errDelayedReg)
+	}
+	exec.err = nil
+	exec.rotateTokens = true
+	if _, errDelayedRot := manager.ForceRefreshAuth(coreauth.WithSkipPersist(context.Background()), "codex-a.json"); errDelayedRot != nil {
+		t.Fatalf("ForceRefreshAuth after delayed adoption error: %v", errDelayedRot)
+	}
+	exec.rotateTokens = false
+	delayedStatus := pollOAuthStatusUntilDone(t, router, unadoptedStartResp.State)
+	if delayedStatus["status"] != "ok" || delayedStatus["saved"] != true || delayedStatus["adopted"] != true || delayedStatus["renewal_verified"] != true || delayedStatus["recovery_stage"] != coreauth.RecoveryStageRenewalVerified {
+		t.Fatalf("expected delayed adoption + rotation to transition GetAuthStatus to adopted=true renewal_verified=true recovery_stage=renewal_verified, got %#v", delayedStatus)
+	}
+	h.SetPostAuthPersistHook(nil)
+
+	// Targeted recovery with the MATCHING account (a@example.com / acc-a) saves fresh tokens, adopts into manager, and clears RequiresSignIn.
+	wMatchStart := httptest.NewRecorder()
+	reqMatchStart := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json"}`))
+	reqMatchStart.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wMatchStart, reqMatchStart)
+	if wMatchStart.Code != http.StatusOK {
+		t.Fatalf("StartOAuthV8 (matching account) status = %d: %s", wMatchStart.Code, wMatchStart.Body.String())
+	}
+	var matchStartResp struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(wMatchStart.Body.Bytes(), &matchStartResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal matchStartResp: %v", errUnmarshal)
+	}
+	matchStatus := pollOAuthStatusUntilDone(t, router, matchStartResp.State)
+	if matchStatus["status"] != "ok" || matchStatus["auth_id"] != "codex-a.json" || matchStatus["saved"] != true || matchStatus["adopted"] != true {
+		t.Fatalf("expected saved & adopted ok status for codex-a.json, got %#v", matchStatus)
+	}
+	if matchStatus["requires_sign_in"] != false || matchStatus["renewal_state"] != coreauth.RenewalStateAwaitingFirstRenewal || matchStatus["recovery_stage"] != coreauth.RecoveryStageLoaded || matchStatus["inference_verified"] != false || matchStatus["renewal_verified"] != false {
+		t.Fatalf("unexpected post-recovery status fields: %#v", matchStatus)
+	}
+	repaired, _ := manager.GetByID("codex-a.json")
+	if repaired.RequiresSignIn || repaired.RefreshError != nil {
+		t.Fatalf("expected codex-a.json repaired in manager, got RequiresSignIn=%v RefreshError=%+v", repaired.RequiresSignIn, repaired.RefreshError)
+	}
+
+	// Operator-triggered POST /v8/management/credentials/verify:
+	// 1) response.incomplete must fail (HTTP 502) and NOT mark inference_verified=true.
+	exec.streamPayloads = [][]byte{[]byte(`data: {"type":"response.incomplete","response":{"status":"incomplete"}}` + "\n\n")}
+	wVerifyIncomp := httptest.NewRecorder()
+	reqVerifyIncomp := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/verify", strings.NewReader(`{"name":"codex-a.json","model":"gpt-5.5"}`))
+	reqVerifyIncomp.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wVerifyIncomp, reqVerifyIncomp)
+	if wVerifyIncomp.Code != http.StatusBadGateway {
+		t.Fatalf("VerifyAuthFileV8 (incomplete) status = %d, want 502: %s", wVerifyIncomp.Code, wVerifyIncomp.Body.String())
+	}
+
+	// 1b) 503 transient failure must NOT be misclassified as quota_blocked.
+	exec.streamPayloads = nil
+	exec.streamErr = &coreauth.Error{Code: "service_unavailable", Message: "upstream 503", HTTPStatus: http.StatusServiceUnavailable, Retryable: true}
+	wVerify503 := httptest.NewRecorder()
+	reqVerify503 := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/verify", strings.NewReader(`{"name":"codex-a.json","model":"gpt-5.5"}`))
+	reqVerify503.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wVerify503, reqVerify503)
+	if wVerify503.Code != http.StatusServiceUnavailable {
+		t.Fatalf("VerifyAuthFileV8 (503) status = %d, want 503: %s", wVerify503.Code, wVerify503.Body.String())
+	}
+	var verify503Resp map[string]any
+	if errUnmarshal := json.Unmarshal(wVerify503.Body.Bytes(), &verify503Resp); errUnmarshal != nil {
+		t.Fatalf("unmarshal verify503Resp: %v", errUnmarshal)
+	}
+	if verify503Resp["quota_blocked"] != false || verify503Resp["recovery_stage"] == coreauth.RecoveryStageQuotaBlocked {
+		t.Fatalf("503 transient failure must not be classified as quota_blocked, got %#v", verify503Resp)
+	}
+	_, _, _ = manager.ResetQuota(context.Background(), "codex-a.json")
+
+	// 2) 429 quota error after valid auth must transition recovery_stage to quota_blocked and sanitize any secrets in the error message.
+	exec.streamPayloads = nil
+	exec.streamErr = &coreauth.Error{
+		Code:       "rate_limit_exceeded",
+		Message:    "You have hit your usage limit https://chatgpt.com/backend-api/codex?code=secret-verify-code&state=secret-verify-state Bearer secret-verify-bearer",
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+	wVerifyQuota := httptest.NewRecorder()
+	reqVerifyQuota := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/verify", strings.NewReader(`{"name":"codex-a.json","model":"gpt-5.5"}`))
+	reqVerifyQuota.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wVerifyQuota, reqVerifyQuota)
+	if wVerifyQuota.Code != http.StatusTooManyRequests {
+		t.Fatalf("VerifyAuthFileV8 (quota) status = %d, want 429: %s", wVerifyQuota.Code, wVerifyQuota.Body.String())
+	}
+	for _, secret := range []string{"secret-verify-code", "secret-verify-state", "secret-verify-bearer", "https://chatgpt.com"} {
+		if strings.Contains(wVerifyQuota.Body.String(), secret) {
+			t.Fatalf("VerifyAuthFileV8 response leaked secret %q: %s", secret, wVerifyQuota.Body.String())
+		}
+	}
+	var quotaVerifyResp map[string]any
+	if errUnmarshal := json.Unmarshal(wVerifyQuota.Body.Bytes(), &quotaVerifyResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal quotaVerifyResp: %v", errUnmarshal)
+	}
+	if quotaVerifyResp["recovery_stage"] != coreauth.RecoveryStageQuotaBlocked || quotaVerifyResp["quota_blocked"] != true {
+		t.Fatalf("expected recovery_stage=quota_blocked and quota_blocked=true, got %#v", quotaVerifyResp)
+	}
+	_, _, _ = manager.ResetQuota(context.Background(), "codex-a.json")
+
+	// 3) Completed stream transitions recovery_stage to inference_verified.
+	exec.streamErr = nil
+	exec.streamPayloads = [][]byte{[]byte(`data: {"type":"response.completed"}` + "\n\n")}
+	wVerifyOK := httptest.NewRecorder()
+	reqVerifyOK := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/verify", strings.NewReader(`{"name":"codex-a.json","model":"gpt-5.5"}`))
+	reqVerifyOK.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wVerifyOK, reqVerifyOK)
+	if wVerifyOK.Code != http.StatusOK {
+		t.Fatalf("VerifyAuthFileV8 (ok) status = %d, want 200: %s", wVerifyOK.Code, wVerifyOK.Body.String())
+	}
+	var okVerifyResp map[string]any
+	if errUnmarshal := json.Unmarshal(wVerifyOK.Body.Bytes(), &okVerifyResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal okVerifyResp: %v", errUnmarshal)
+	}
+	if okVerifyResp["verified"] != true || okVerifyResp["inference_verified"] != true || okVerifyResp["recovery_stage"] != coreauth.RecoveryStageInferenceVerified {
+		t.Fatalf("expected verified=true inference_verified=true recovery_stage=inference_verified, got %#v", okVerifyResp)
+	}
+
+	// 3b) After a subsequent automatic refresh rotates tokens on the adopted credential, GetAuthStatus for matchStartResp.State
+	// must still report adopted=true and transition to renewal_verified=true / recovery_stage=renewal_verified.
+	exec.err = nil
+	exec.rotateTokens = true
+	if _, errForceRefresh := manager.ForceRefreshAuth(coreauth.WithSkipPersist(context.Background()), "codex-a.json"); errForceRefresh != nil {
+		t.Fatalf("ForceRefreshAuth after recovery error: %v", errForceRefresh)
+	}
+	rotatedStatus := pollOAuthStatusUntilDone(t, router, matchStartResp.State)
+	if rotatedStatus["adopted"] != true || rotatedStatus["renewal_verified"] != true || rotatedStatus["recovery_stage"] != coreauth.RecoveryStageRenewalVerified {
+		t.Fatalf("expected adopted=true renewal_verified=true recovery_stage=renewal_verified after token rotation, got %#v", rotatedStatus)
+	}
+
+	// 3c) If the adopted credential is subsequently replaced via Update by an unrelated credential
+	// and that replacement credential is refreshed, the original OAuth session must NOT claim the replacement's renewal.
+	currentAdopted, _ := manager.GetByID("codex-a.json")
+	postRotationUnrelated := currentAdopted.Clone()
+	postRotationUnrelated.Metadata["access_token"] = "unrelated-access-token"
+	postRotationUnrelated.Metadata["refresh_token"] = "unrelated-refresh-token"
+	if _, errUpdUnrelated := manager.Update(coreauth.WithSkipPersist(context.Background()), postRotationUnrelated); errUpdUnrelated != nil {
+		t.Fatalf("Update postRotationUnrelated error: %v", errUpdUnrelated)
+	}
+	if _, errForceUnrelated := manager.ForceRefreshAuth(coreauth.WithSkipPersist(context.Background()), "codex-a.json"); errForceUnrelated != nil {
+		t.Fatalf("ForceRefreshAuth unrelatedReplacement error: %v", errForceUnrelated)
+	}
+	replacedAfterRotationStatus := pollOAuthStatusUntilDone(t, router, matchStartResp.State)
+	if replacedAfterRotationStatus["adopted"] != false || strings.TrimSpace(fmt.Sprint(replacedAfterRotationStatus["adoption_error"])) == "" {
+		t.Fatalf("expected adopted=false and adoption_error after unrelated credential replacement + refresh, got %#v", replacedAfterRotationStatus)
+	}
+
+	// 4) Opt-in post-login verification (verify=true on StartOAuthV8) sanitizes verification_error in GetAuthStatus.
+	exec.streamPayloads = nil
+	exec.streamErr = &coreauth.Error{
+		Code:       "rate_limit_exceeded",
+		Message:    "Quota error https://chatgpt.com/backend-api/codex?code=secret-postlogin-code&state=secret-postlogin-state Bearer secret-postlogin-bearer",
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+	wVerifyOptIn := httptest.NewRecorder()
+	reqVerifyOptIn := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"codex","name":"codex-a.json","verify":true,"verify_model":"gpt-5.5"}`))
+	reqVerifyOptIn.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wVerifyOptIn, reqVerifyOptIn)
+	if wVerifyOptIn.Code != http.StatusOK {
+		t.Fatalf("StartOAuthV8 (verify=true) status = %d: %s", wVerifyOptIn.Code, wVerifyOptIn.Body.String())
+	}
+	var verifyOptInStartResp struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(wVerifyOptIn.Body.Bytes(), &verifyOptInStartResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal verifyOptInStartResp: %v", errUnmarshal)
+	}
+	optInStatus := pollOAuthStatusUntilDone(t, router, verifyOptInStartResp.State)
+	if optInStatus["status"] != "ok" || optInStatus["adopted"] != true || optInStatus["quota_blocked"] != true {
+		t.Fatalf("expected adopted=true quota_blocked=true after opt-in verify quota error, got %#v", optInStatus)
+	}
+	verifyErrText := fmt.Sprint(optInStatus["verification_error"])
+	if verifyErrText == "" {
+		t.Fatalf("expected sanitized verification_error in status response, got %#v", optInStatus)
+	}
+	for _, secret := range []string{"secret-postlogin-code", "secret-postlogin-state", "secret-postlogin-bearer", "https://chatgpt.com"} {
+		if strings.Contains(verifyErrText, secret) {
+			t.Fatalf("GetAuthStatus verification_error leaked secret %q: %s", secret, verifyErrText)
+		}
+	}
+}
+
+type targetedRecoveryTestCodexOAuthService struct {
+	authDir   string
+	email     string
+	accountID string
+}
+
+func (s *targetedRecoveryTestCodexOAuthService) GenerateAuthURL(state string, _ *codex.PKCECodes) (string, error) {
+	waitFile := filepath.Join(s.authDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+	payload, _ := json.Marshal(map[string]string{"state": state, "code": "code-" + state})
+	_ = os.WriteFile(waitFile, payload, 0o600)
+	return "https://auth.example.test/authorize?state=" + state, nil
+}
+
+func (s *targetedRecoveryTestCodexOAuthService) ExchangeCodeForTokens(_ context.Context, code string, _ *codex.PKCECodes) (*codex.CodexAuthBundle, error) {
+	now := time.Now().UTC()
+	return &codex.CodexAuthBundle{
+		TokenData: codex.CodexTokenData{
+			IDToken:      makeOAuthTestJWT("plus"),
+			AccessToken:  "fresh-access-" + code,
+			RefreshToken: "fresh-refresh-" + code,
+			AccountID:    s.accountID,
+			Email:        s.email,
+			PlanType:     "plus",
+			Expire:       now.Add(48 * time.Hour).Format(time.RFC3339),
+		},
+		LastRefresh: now.Format(time.RFC3339),
+	}, nil
+}
+
+func (s *targetedRecoveryTestCodexOAuthService) CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage {
+	return &codex.CodexTokenStorage{
+		IDToken:      bundle.TokenData.IDToken,
+		AccessToken:  bundle.TokenData.AccessToken,
+		RefreshToken: bundle.TokenData.RefreshToken,
+		AccountID:    bundle.TokenData.AccountID,
+		LastRefresh:  bundle.LastRefresh,
+		Email:        bundle.TokenData.Email,
+		Expire:       bundle.TokenData.Expire,
+		PlanType:     bundle.TokenData.PlanType,
+	}
+}
+
+func pollOAuthStatusUntilDone(t *testing.T, router http.Handler, state string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/status?state="+state, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("oauth status HTTP %d: %s", w.Code, w.Body.String())
+		}
+		var out map[string]any
+		if errUnmarshal := json.Unmarshal(w.Body.Bytes(), &out); errUnmarshal != nil {
+			t.Fatalf("unmarshal oauth status: %v", errUnmarshal)
+		}
+		if out["status"] != "wait" {
+			return out
+		}
+	}
+	t.Fatalf("timed out waiting for oauth session %s", state)
+	return nil
+}
+
+type failingRefreshManagementExecutor struct {
+	provider       string
+	err            error
+	rotateTokens   bool
+	streamErr      error
+	streamPayloads [][]byte
+}
+
+func (e *failingRefreshManagementExecutor) Identifier() string { return e.provider }
+
+func (e *failingRefreshManagementExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *failingRefreshManagementExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e.streamErr != nil {
+		return nil, e.streamErr
+	}
+	ch := make(chan cliproxyexecutor.StreamChunk, len(e.streamPayloads))
+	for _, p := range e.streamPayloads {
+		ch <- cliproxyexecutor.StreamChunk{Payload: p}
+	}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e *failingRefreshManagementExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	if e.rotateTokens && auth != nil {
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["access_token"] = "rotated-access-token"
+		auth.Metadata["refresh_token"] = "rotated-refresh-token"
+	}
+	return auth, nil
+}
+
+func (e *failingRefreshManagementExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e *failingRefreshManagementExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
 }

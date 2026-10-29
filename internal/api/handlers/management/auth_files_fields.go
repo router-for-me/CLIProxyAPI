@@ -1085,6 +1085,10 @@ func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath stri
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
+	} else if h.authManager != nil && strings.TrimSpace(savedPath) != "" {
+		if errReg := h.registerAuthFromFile(ctx, savedPath, record.CommittedAuthFile(savedPath)); errReg != nil {
+			return fmt.Errorf("register persisted auth failed: %w", errReg)
+		}
 	}
 	return nil
 }
