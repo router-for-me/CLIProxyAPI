@@ -26,6 +26,7 @@ type serverOptionConfig struct {
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config)
+	configValidator       func(*config.Config) error
 	exampleAPIKeySafeMode bool
 }
 
@@ -133,4 +134,9 @@ func WithExampleAPIKeySafeMode() ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.exampleAPIKeySafeMode = true
 	}
+}
+
+// WithConfigValidator checks application invariants before management configuration saves.
+func WithConfigValidator(validate func(*config.Config) error) ServerOption {
+	return func(cfg *serverOptionConfig) { cfg.configValidator = validate }
 }

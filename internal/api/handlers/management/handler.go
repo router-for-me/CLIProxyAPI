@@ -57,6 +57,8 @@ type Handler struct {
 	postAuthPersistHook     coreauth.PostAuthHook
 	pluginHost              *pluginhost.Host
 	configReloadHook        func(context.Context, *config.Config)
+	configValidator         func(*config.Config) error
+	acceptedConfig          *config.Config
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
@@ -137,6 +139,13 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 		log.Debug("management: ignoring config reload parsed from an older config file version")
 		return
 	}
+	if h.configValidator != nil {
+		if err := h.configValidator(cloned.CloneForRuntime()); err != nil {
+			log.Warn("management: rejected application configuration")
+			return
+		}
+		h.acceptedConfig = cloned.CloneForRuntime()
+	}
 	h.cfg = cloned
 }
 
@@ -208,6 +217,29 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	h.mu.Unlock()
 }
 
+// SetConfigValidator installs application checks before management configuration saves.
+func (h *Handler) SetConfigValidator(validate func(*config.Config) error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.configValidator = validate
+	h.acceptedConfig = h.cfg.CloneForRuntime()
+}
+
+// Caller holds h.mu. Legacy mutations already changed h.cfg, so restore the last accepted clone on rejection.
+func (h *Handler) validateConfigLocked(c *gin.Context, candidate *config.Config) bool {
+	if h.configValidator == nil {
+		return true
+	}
+	if err := h.configValidator(candidate.CloneForRuntime()); err != nil {
+		if candidate == h.cfg {
+			h.cfg = h.acceptedConfig.CloneForRuntime()
+		}
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_application_config"})
+		return false
+	}
+	return true
+}
+
 // SetConfigReloadHook updates the callback used after management saves config changes.
 func (h *Handler) SetConfigReloadHook(hook func(context.Context, *config.Config)) {
 	if h == nil {
@@ -224,6 +256,9 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 	if h == nil || h.cfg == nil {
 		return configReloadSnapshot{}
 	}
+	if h.configValidator != nil {
+		h.acceptedConfig = h.cfg.CloneForRuntime()
+	}
 	h.reloadGeneration++
 	return configReloadSnapshot{
 		cfg:        h.cfg.CloneForRuntime(),
@@ -234,6 +269,9 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.
 // Callers must hold h.mu.
 func (h *Handler) saveConfigAndSnapshotLocked(c *gin.Context) (configReloadSnapshot, bool) {
+	if !h.validateConfigLocked(c, h.cfg) {
+		return configReloadSnapshot{}, false
+	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", errSave)})
 		return configReloadSnapshot{}, false
@@ -459,6 +497,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 // persistLocked saves the current in-memory config to disk.
 // It expects the caller to hold h.mu.
 func (h *Handler) persistLocked(c *gin.Context) bool {
+	if !h.validateConfigLocked(c, h.cfg) {
+		return false
+	}
 	// Preserve comments when writing
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
