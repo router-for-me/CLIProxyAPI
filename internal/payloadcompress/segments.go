@@ -26,13 +26,18 @@ type segment struct {
 
 // scanner locates compressible text in a request payload.
 //
-// It deliberately only handles the shapes that carry bulk conversation text:
-// chat messages (`messages[]`) and Responses items (`input[]`). Everything else
-// - system prompts, assistant output, tool call arguments, thinking blocks,
-// cached prefixes - is never returned, so a transform can never corrupt it.
+// It only handles the shapes that carry bulk conversation text: chat messages
+// (`messages[]`) and Responses items (`input[]`). System prompts, assistant
+// output, tool call arguments and thinking blocks are never returned, and
+// neither is the provider-cached prefix unless compressPrefix asks for it, so a
+// transform cannot corrupt anything that must survive verbatim.
 type scanner struct {
 	body []byte
 	segs []segment
+	// compressPrefix lifts the cache_control exclusion so the cached zone is
+	// compressed too. Safe only for an append-stable pipeline; see
+	// Config.CachePrefix.
+	compressPrefix bool
 }
 
 // scan fills s.segs. It reports false when the payload has no recognizable
@@ -55,19 +60,22 @@ func (s *scanner) scan() bool {
 		return false
 	}
 
-	// Everything up to the last cache_control breakpoint is a provider-cached
-	// prefix. Rewriting it would trade saved input tokens for a cache miss and
-	// seconds of time-to-first-token, so those items are left byte-identical.
-	cut, idx := -1, 0
-	items.ForEach(func(_, item gjson.Result) bool {
-		if strings.Contains(item.Raw, "cache_control") {
-			cut = idx
-		}
-		idx++
-		return true
-	})
+	cut := -1
+	if !s.compressPrefix {
+		// Everything up to the last cache_control breakpoint is a provider-cached
+		// prefix. Rewriting it would trade saved input tokens for a cache miss and
+		// seconds of time-to-first-token, so those items are left byte-identical.
+		idx := 0
+		items.ForEach(func(_, item gjson.Result) bool {
+			if strings.Contains(item.Raw, "cache_control") {
+				cut = idx
+			}
+			idx++
+			return true
+		})
+	}
 
-	idx = 0
+	idx := 0
 	items.ForEach(func(_, item gjson.Result) bool {
 		if idx > cut {
 			s.addItem(item)

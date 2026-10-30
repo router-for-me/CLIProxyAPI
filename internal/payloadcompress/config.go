@@ -2,6 +2,19 @@
 // provider. Every transform is deterministic: identical input bytes must produce
 // identical output bytes, otherwise a changing prompt prefix invalidates the
 // provider prompt cache and costs more than the saved tokens are worth.
+//
+// Determinism alone is not enough, because a session appends turns rather than
+// replaying one body. The property the cache actually needs is append-stability:
+// compressing history H, then H plus more turns, must leave the compressed bytes
+// of H unchanged. An engine may therefore derive a segment's output only from that
+// segment and the segments before it, never from a total budget, a later turn, or
+// elapsed time.
+//
+// Append-stability holds from the turn compression engages. A body that starts
+// below Config.MinBytes and grows past it changes the prefix once, at that turn,
+// so keep MinBytes below the first request of a session. Output styles are a
+// separate stage chosen per request (see styleBypass) and are not covered by
+// this guarantee.
 package payloadcompress
 
 import (
@@ -19,6 +32,14 @@ type Config struct {
 	Shadow bool `yaml:"shadow" json:"shadow"`
 	// MinBytes skips payloads smaller than this many bytes.
 	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
+	// CachePrefix decides whether the provider-cached prefix is compressed.
+	// "preserve" (the default) leaves every message up to the last
+	// cache_control breakpoint byte-identical, so a hit is guaranteed and the
+	// cached zone costs full price. "compress" transforms that zone too and
+	// relies on the pipeline being append-stable: once a session is above
+	// MinBytes, the compressed bytes stay identical turn over turn, so the
+	// provider caches the smaller payload.
+	CachePrefix string `yaml:"cache-prefix" json:"cache-prefix"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -113,6 +134,14 @@ const (
 	EngineLite         = "lite"
 	EngineRTK          = "rtk"
 	EngineCaveman      = "caveman"
+)
+
+// CachePrefix modes. Only CachePrefixCompress changes behaviour; every other
+// value, including an empty one, means preserve, so an unset config can never
+// start rewriting a cached prefix.
+const (
+	CachePrefixPreserve = "preserve"
+	CachePrefixCompress = "compress"
 )
 
 const (
@@ -222,6 +251,15 @@ func (c *Config) Sanitize() {
 	}
 	if c.MinBytes <= 0 {
 		c.MinBytes = defaultMinBytes
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CachePrefix)) {
+	case CachePrefixCompress:
+		c.CachePrefix = CachePrefixCompress
+	case CachePrefixPreserve, "":
+		c.CachePrefix = CachePrefixPreserve
+	default:
+		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to preserve", c.CachePrefix)
+		c.CachePrefix = CachePrefixPreserve
 	}
 	seen := make(map[string]struct{}, len(c.Combos))
 	combos := c.Combos[:0]

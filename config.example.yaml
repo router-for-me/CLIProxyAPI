@@ -271,6 +271,15 @@ requests:
   #   enabled: false               # Default: false.
   #   shadow: false                # Default: false. Compute and log savings, send the original payload.
   #   min-bytes: 4096              # Payloads smaller than this are skipped.
+  #   cache-prefix: preserve       # preserve | compress. Preserve leaves every message up to
+  #                                # the last cache_control breakpoint byte-identical, so the
+  #                                # provider cache always hits and the cached zone costs full
+  #                                # price. Compress transforms that zone too: the cached bytes
+  #                                # shrink and stay identical turn over turn, but this trusts
+  #                                # every engine to be append-stable. See the payloadcompress doc.
+  #                                # Turn it on with shadow: true first.
+  #                                # Keep min-bytes below your session's first request: the turn
+  #                                # it is crossed is one cache miss, then the prefix is stable.
   #   default-combo: standard      # Used when no model-scoped combo matches.
   #   combos:
   #     - name: standard
