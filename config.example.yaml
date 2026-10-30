@@ -123,6 +123,17 @@ access:
     - "your-api-key-2"
     - "your-api-key-3"
 
+  # Optional model restrictions for keys already listed above. Without lists, access is unchanged.
+  # Match caller-visible model IDs and aliases without case sensitivity. * also matches /.
+  # Blocked models take precedence. Thinking suffixes such as (high) use the base model's policy.
+  # Restricted requests need an explicit identifiable model (or a known endpoint default).
+  # The dynamic auto model is rejected for restricted keys. Model catalogs are not filtered.
+  # api-key-policies:
+  #   - api-key: "your-api-key-1"
+  #     name: "chat-client"
+  #     allowed-models: ["claude/*", "gpt-*"]
+  #     blocked-models: ["gpt-image-*"]
+
 # Optional credential concurrency and observation contracts.
 
 # credentials:
