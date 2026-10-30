@@ -21,6 +21,7 @@ import (
 
 const (
 	antigravityCompactionCapsulePrefix = "cpa-ag-compact-v1:"
+	antigravityCompactionItemIDPrefix  = "cmp_ag_compact_"
 	fixedCompactionKeySecret           = "CLIProxyAPI"
 )
 
@@ -33,6 +34,30 @@ type antigravityCompactionCapsuleData struct {
 // RecognizedAntigravityCompactionCapsule reports whether encrypted content uses the CPA capsule prefix.
 func RecognizedAntigravityCompactionCapsule(encryptedContent string) bool {
 	return strings.HasPrefix(strings.TrimSpace(encryptedContent), antigravityCompactionCapsulePrefix)
+}
+
+func isRecognizedCPACompactionItem(item gjson.Result) bool {
+	if item.Get("type").String() != "compaction" {
+		return false
+	}
+	if RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
+		return true
+	}
+	return strings.HasPrefix(strings.TrimSpace(item.Get("id").String()), antigravityCompactionItemIDPrefix)
+}
+
+// HasRecognizedResponsesCompactionItem checks whether input contains a CPA-minted compaction item.
+func HasRecognizedResponsesCompactionItem(payload []byte) bool {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if isRecognizedCPACompactionItem(item) {
+			return true
+		}
+	}
+	return false
 }
 
 // HasResponsesCompactionTrigger checks whether input contains a compaction_trigger item.
@@ -89,7 +114,7 @@ func DropForeignResponsesCompactionItems(payload []byte, provider string) []byte
 	dropped := 0
 	items := make([]string, 0, len(input.Array()))
 	for _, item := range input.Array() {
-		if item.Get("type").String() == "compaction" && !RecognizedAntigravityCompactionCapsule(item.Get("encrypted_content").String()) {
+		if item.Get("type").String() == "compaction" && !isRecognizedCPACompactionItem(item) {
 			dropped++
 			continue
 		}
@@ -124,6 +149,32 @@ func ExpandResponsesCompactionCapsules(req *cliproxyexecutor.Request, opts *clip
 		opts.OriginalRequest = DropForeignResponsesCompactionItems(opts.OriginalRequest, provider)
 		if HasResponsesCompactionItem(opts.OriginalRequest) {
 			expanded, errExpand := ExpandAntigravityCompactionCapsules(opts.OriginalRequest)
+			if errExpand != nil {
+				return errExpand
+			}
+			opts.OriginalRequest = expanded
+		}
+	}
+	return nil
+}
+
+// ExpandRecognizedResponsesCompactionCapsules expands recognized CPA compaction capsules in req and opts while preserving foreign compaction items.
+func ExpandRecognizedResponsesCompactionCapsules(req *cliproxyexecutor.Request, opts *cliproxyexecutor.Options) error {
+	sameOriginal := req != nil && opts != nil && len(opts.OriginalRequest) > 0 && bytes.Equal(req.Payload, opts.OriginalRequest)
+	if req != nil && HasRecognizedResponsesCompactionItem(req.Payload) {
+		expanded, errExpand := ExpandRecognizedAntigravityCompactionCapsules(req.Payload)
+		if errExpand != nil {
+			return errExpand
+		}
+		req.Payload = expanded
+	}
+	if opts != nil && len(opts.OriginalRequest) > 0 {
+		if sameOriginal {
+			opts.OriginalRequest = req.Payload
+			return nil
+		}
+		if HasRecognizedResponsesCompactionItem(opts.OriginalRequest) {
+			expanded, errExpand := ExpandRecognizedAntigravityCompactionCapsules(opts.OriginalRequest)
 			if errExpand != nil {
 				return errExpand
 			}
@@ -219,6 +270,7 @@ func SealAntigravityCompaction(summary, modelName string) (string, error) {
 
 // UnsealAntigravityCompaction decrypts and validates an opaque capsule.
 func UnsealAntigravityCompaction(encryptedContent string) (string, error) {
+	encryptedContent = strings.TrimSpace(encryptedContent)
 	if !strings.HasPrefix(encryptedContent, antigravityCompactionCapsulePrefix) {
 		return "", fmt.Errorf("unrecognized compaction capsule format")
 	}
@@ -269,6 +321,39 @@ func ExpandAntigravityCompactionCapsules(payload []byte) ([]byte, error) {
 	changed := false
 	for _, item := range input.Array() {
 		if item.Get("type").String() == "compaction" {
+			encryptedContent := item.Get("encrypted_content").String()
+			summary, errUnseal := UnsealAntigravityCompaction(encryptedContent)
+			if errUnseal != nil {
+				return nil, fmt.Errorf("invalid compaction capsule: %w", errUnseal)
+			}
+			devMsg := []byte(`{"type":"message","role":"developer","content":[{"type":"input_text"}]}`)
+			devMsg, _ = sjson.SetBytes(devMsg, "content.0.text", "Context summary from previous turns:\n"+summary)
+			expandedItems = append(expandedItems, string(devMsg))
+			changed = true
+			continue
+		}
+		expandedItems = append(expandedItems, item.Raw)
+	}
+
+	if !changed {
+		return payload, nil
+	}
+
+	newInput := "[" + strings.Join(expandedItems, ",") + "]"
+	return sjson.SetRawBytes(payload, "input", []byte(newInput))
+}
+
+// ExpandRecognizedAntigravityCompactionCapsules expands recognized CPA compaction items in input into developer context while leaving non-CPA compaction items untouched.
+func ExpandRecognizedAntigravityCompactionCapsules(payload []byte) ([]byte, error) {
+	input := gjson.GetBytes(payload, "input")
+	if !input.IsArray() {
+		return payload, nil
+	}
+
+	var expandedItems []string
+	changed := false
+	for _, item := range input.Array() {
+		if isRecognizedCPACompactionItem(item) {
 			encryptedContent := item.Get("encrypted_content").String()
 			summary, errUnseal := UnsealAntigravityCompaction(encryptedContent)
 			if errUnseal != nil {

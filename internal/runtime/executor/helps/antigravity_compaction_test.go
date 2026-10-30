@@ -322,3 +322,35 @@ func TestExpandResponsesCompactionCapsulesAndBuildFromSummary(t *testing.T) {
 		t.Fatal("expected error for incomplete summary response, got nil")
 	}
 }
+
+func TestExpandRecognizedResponsesCompactionCapsules_PreservesForeign(t *testing.T) {
+	capsule, errSeal := SealAntigravityCompaction("Sealed CPA summary.", "claude-sonnet-4-6")
+	if errSeal != nil {
+		t.Fatalf("SealAntigravityCompaction failed: %v", errSeal)
+	}
+
+	rawReq := []byte(`{"input":[{"id":"cmp_ag_compact_1","type":"compaction","encrypted_content":"` + capsule + `"},{"id":"cmp_openai_1","type":"compaction","encrypted_content":"gAAAAABopenai-native"},{"type":"message","role":"user","content":"next"}]}`)
+	req := cliproxyexecutor.Request{Payload: rawReq}
+	opts := cliproxyexecutor.Options{OriginalRequest: rawReq}
+	if errExpand := ExpandRecognizedResponsesCompactionCapsules(&req, &opts); errExpand != nil {
+		t.Fatalf("ExpandRecognizedResponsesCompactionCapsules failed: %v", errExpand)
+	}
+	for _, target := range [][]byte{req.Payload, opts.OriginalRequest} {
+		items := gjson.GetBytes(target, "input").Array()
+		if len(items) != 3 {
+			t.Fatalf("input len = %d, want 3; payload=%s", len(items), target)
+		}
+		if items[0].Get("type").String() != "message" || items[0].Get("role").String() != "developer" || !strings.Contains(items[0].Get("content.0.text").String(), "Sealed CPA summary.") {
+			t.Fatalf("items[0] not expanded: %s", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "compaction" || items[1].Get("encrypted_content").String() != "gAAAAABopenai-native" {
+			t.Fatalf("native compaction item not preserved at items[1]: %s", items[1].Raw)
+		}
+	}
+
+	badReq := cliproxyexecutor.Request{Payload: []byte(`{"input":[{"id":"cmp_ag_compact_1","type":"compaction","encrypted_content":"cpa-ag-compact-v1:invalid"}]}`)}
+	badOpts := cliproxyexecutor.Options{}
+	if errBad := ExpandRecognizedResponsesCompactionCapsules(&badReq, &badOpts); errBad == nil {
+		t.Fatal("expected error for corrupted CPA compaction capsule, got nil")
+	}
+}
