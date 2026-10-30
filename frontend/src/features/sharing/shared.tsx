@@ -84,6 +84,7 @@ export function Pager({
             value={String(pageSize)}
             onChange={(value) => onPageSize(Number(value))}
             ariaLabel={t('sharing.page_size')}
+            size="sm"
             disabled={loading}
             options={[...new Set([pageSize, 50, 100, 200])]
               .sort((a, b) => a - b)

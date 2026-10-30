@@ -50,7 +50,8 @@
 }
 
 .triggerSm {
-  height: 28px;
+  // Matches .btn-sm so small selects and buttons share a row.
+  height: 32px;
   padding: 0 10px;
   font-size: 12px;
   box-shadow: none;

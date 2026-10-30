@@ -3,7 +3,6 @@
 // 注意：只挂载激活 tab，所以 FieldAnchor 的 DOM id 不会重复。
 
 import { useTranslation } from 'react-i18next';
-import type { ReactNode } from 'react';
 import { Input } from '@/components/ui/Input';
 import type { VisualConfigValues } from '@/types/visualConfig';
 import { SPONSORS } from '../../sponsors';
@@ -15,11 +14,9 @@ export type SharedFieldProps = {
   values: VisualConfigValues;
   disabled: boolean;
   onChange: (patch: Partial<VisualConfigValues>) => void;
-  /** 可选的标签上方占位行（见 SponsorHintSpacer），仅在需要与代理 URL 字段对齐时传入。 */
-  topExtra?: ReactNode;
 };
 
-export function HostField({ values, disabled, onChange, topExtra }: SharedFieldProps) {
+export function HostField({ values, disabled, onChange }: SharedFieldProps) {
   const { t } = useTranslation();
   return (
     <FieldAnchor fieldId="host">
@@ -29,7 +26,6 @@ export function HostField({ values, disabled, onChange, topExtra }: SharedFieldP
         value={values.host}
         onChange={(e) => onChange({ host: e.target.value })}
         disabled={disabled}
-        topExtra={topExtra}
       />
     </FieldAnchor>
   );
@@ -40,7 +36,6 @@ export function PortField({
   disabled,
   onChange,
   error,
-  topExtra,
 }: SharedFieldProps & { error?: string }) {
   const { t } = useTranslation();
   return (
@@ -53,7 +48,6 @@ export function PortField({
         onChange={(e) => onChange({ port: e.target.value })}
         disabled={disabled}
         error={error}
-        topExtra={topExtra}
       />
     </FieldAnchor>
   );
@@ -91,20 +85,6 @@ export function ProxyUrlField({ values, disabled, onChange }: SharedFieldProps) 
         disabled={disabled}
       />
     </FieldAnchor>
-  );
-}
-
-/**
- * 与代理 URL 字段同排时的隐形占位行：渲染在标签上方（Input 的 topExtra），
- * 赞助商存在时把同排字段整体下移与赞助行同高，让输入框水平对齐，
- * 同时标签与输入框之间保持正常间距；无赞助商则不渲染。
- */
-export function SponsorHintSpacer() {
-  if (SPONSORS.length === 0) return null;
-  return (
-    <p className={fieldStyles.fieldSponsorSpacer} aria-hidden="true">
-      &nbsp;
-    </p>
   );
 }
 

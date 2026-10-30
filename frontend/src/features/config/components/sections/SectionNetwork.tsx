@@ -13,7 +13,7 @@ import {
   FieldStack,
   ToggleRow,
 } from '../fields/FieldPrimitives';
-import { ProxyUrlField, SponsorHintSpacer } from '../fields/sharedFields';
+import { ProxyUrlField } from '../fields/sharedFields';
 import { getValidationMessage } from '../blocks/shared';
 
 const Icon = CONFIG_TAB_ICONS.network;
@@ -73,7 +73,6 @@ export function SectionNetwork({
           <FieldAnchor fieldId="requestRetry">
             <Input
               label={t('config_management.visual.sections.network.request_retry')}
-              topExtra={<SponsorHintSpacer />}
               type="number"
               placeholder="3"
               value={values.requestRetry}
@@ -85,7 +84,6 @@ export function SectionNetwork({
           <FieldAnchor fieldId="maxRetryCredentials">
             <Input
               label={t('config_management.visual.sections.network.max_retry_credentials')}
-              topExtra={<SponsorHintSpacer />}
               type="number"
               placeholder="0"
               value={values.maxRetryCredentials}

@@ -21,8 +21,11 @@
     margin-bottom: 0;
   }
 
+  /* Compact toolbar: every control here is 32px tall. */
   :global(.input) {
-    height: 36px;
+    height: 32px;
+    padding-top: 0;
+    padding-bottom: 0;
     border-radius: 10px;
     font-size: 13px;
   }

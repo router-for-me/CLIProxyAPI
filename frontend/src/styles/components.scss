@@ -1,6 +1,10 @@
 @use 'sass:color';
 @use './variables.scss' as *;
 
+// Inputs, selects, date pickers and buttons share one 40px height (32px for
+// small buttons) and 13px text so controls placed in the same row line up.
+$control-height: 40px;
+
 .btn {
   display: inline-flex;
   align-items: center;
@@ -8,7 +12,11 @@
   gap: $spacing-sm;
   border: 1px solid transparent;
   border-radius: $radius-md;
-  padding: 10px 14px;
+  // 9px padding + 20px line + 2px border = $control-height, without a
+  // min-height so compact icon buttons can still set their own height.
+  padding: 9px 14px;
+  font-size: 13px;
+  line-height: 20px;
   font-weight: 600;
   cursor: pointer;
   transition: all $transition-fast;
@@ -63,8 +71,8 @@
   }
 
   &.btn-sm {
-    padding: 8px 10px;
-    font-size: 14px;
+    padding: 5px 10px;
+    font-size: 13px;
   }
 
   &:disabled {
@@ -89,7 +97,9 @@ textarea {
   width: 100%;
   border: 1px solid var(--border-color);
   border-radius: $radius-md;
-  padding: 10px 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 20px;
   background-color: var(--bg-secondary);
   color: var(--text-primary);
   transition:
@@ -101,6 +111,14 @@ textarea {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 3px rgba($primary-color, 0.18);
   }
+
+  &::placeholder {
+    color: var(--text-tertiary);
+  }
+}
+
+input.input {
+  height: $control-height;
 }
 
 .form-group {
