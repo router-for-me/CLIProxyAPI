@@ -21,6 +21,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -2312,15 +2313,6 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if auth.RequiresSignIn {
 		return auth, &Error{Code: "sign_in_required", Message: "credential requires sign-in before inference verification", HTTPStatus: http.StatusConflict}
 	}
-	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	m.mu.RLock()
-	executor := m.executors[provider]
-	m.mu.RUnlock()
-	if executor == nil {
-		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
-	}
-	executor = executorForAuth(executor, auth)
-
 	routeModel := strings.TrimSpace(model)
 	if routeModel == "" {
 		if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); len(models) > 0 && models[0] != nil && strings.TrimSpace(models[0].ID) != "" {
@@ -2329,8 +2321,39 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 			routeModel = "gpt-5"
 		}
 	}
+	managedVerification := auth.RefreshPolicy == pluginapi.RefreshOnDemand || m.hasUnsettledRotation(auth.ID)
+	if managedVerification {
+		fresh, errFresh := m.EnsureRequestAuth(ctx, auth, routeModel)
+		if errFresh != nil {
+			current, _ := m.GetByID(id)
+			return current, errFresh
+		}
+		auth = fresh
+		if auth.Disabled || auth.Status == StatusDisabled || auth.RequiresSignIn {
+			return auth, &Error{Code: "auth_unavailable", Message: "credential became unavailable during inference verification", HTTPStatus: http.StatusConflict}
+		}
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if managedVerification {
+		provider = executorKeyFromAuth(auth)
+	}
+	m.mu.RLock()
+	executor := m.executors[provider]
+	m.mu.RUnlock()
+	if executor == nil {
+		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
+	}
+	executor = executorForAuth(executor, auth)
+
 	verifyModel := routeModel
-	if candidates, _, _, _ := m.executionModelCandidatesWithAlias(auth, routeModel); len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
+	candidates, _, _, _ := m.executionModelCandidatesWithAlias(auth, routeModel)
+	if managedVerification {
+		candidates = m.filterExecutionModels(auth, routeModel, candidates, len(candidates) > 1)
+		if len(candidates) == 0 {
+			return auth, &Error{Code: "auth_unavailable", Message: "credential has no available verification model", HTTPStatus: http.StatusConflict}
+		}
+	}
+	if len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
 		verifyModel = strings.TrimSpace(candidates[0])
 	}
 	stateModel := m.selectionModelKeyForAuth(auth, routeModel)
@@ -2364,6 +2387,40 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if errStream != nil {
 		rerr := resultErrorFromError(errStream)
 		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
+			current, _ := m.GetByID(id)
+			if managedVerification || current != nil && current.RefreshPolicy == pluginapi.RefreshOnDemand || m.hasUnsettledRotation(auth.ID) {
+				fresh, errFresh := m.EnsureRequestAuth(ctx, auth, routeModel)
+				if errFresh != nil {
+					current, _ := m.GetByID(id)
+					return current, errFresh
+				}
+				auth = fresh
+				if auth.Disabled || auth.Status == StatusDisabled || auth.RequiresSignIn {
+					return auth, &Error{Code: "auth_unavailable", Message: "credential became unavailable during inference verification", HTTPStatus: http.StatusConflict}
+				}
+				if canonicalSchedulingProvider(executorKeyFromAuth(auth)) != canonicalSchedulingProvider(provider) {
+					return auth, &Error{Code: "auth_route_changed", Message: "verification executor route changed before fallback", HTTPStatus: http.StatusConflict}
+				}
+				candidates, _, _, _ = m.preparedExecutionModelsWithAlias(auth, routeModel)
+				if len(candidates) == 0 || strings.TrimSpace(candidates[0]) == "" {
+					return auth, &Error{Code: "auth_unavailable", Message: "credential has no available verification model", HTTPStatus: http.StatusConflict}
+				}
+				verifyModel = strings.TrimSpace(candidates[0])
+				stateModel = m.selectionModelKeyForAuth(auth, routeModel)
+				if stateModel == "" {
+					stateModel = canonicalModelKey(routeModel)
+				}
+				payload = []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":1,"store":false}`, verifyModel))
+				req.Model, req.Payload = verifyModel, payload
+				opts.OriginalRequest = payload
+				executor = executorForAuth(m.executorFor(provider), auth)
+				if executor == nil {
+					return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
+				}
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion, regEpoch = auth.CredentialVersion, auth.RegistrationEpoch
+				executionSeq = m.nextExecutionSeq()
+			}
 			opts.Stream = false
 			resp, errExec := executor.Execute(execCtx, auth, req, opts)
 			rerrExec := resultErrorFromError(errExec)

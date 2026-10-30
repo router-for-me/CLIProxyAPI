@@ -111,7 +111,7 @@ func requestRefreshable(auth *Auth) bool {
 		return false
 	}
 	exp, known := auth.AccessTokenExpirationTime()
-	return known && !exp.IsZero() && !hasUnauthorizedAuthFailure(auth) && !hasRejectedRequestToken(auth)
+	return known && !exp.IsZero() && !hasUnauthorizedAuthFailure(auth) && !hasRejectedRequestToken(auth) && !authHasUnchangedRejectedRefreshToken(auth)
 }
 
 func hasRejectedRequestToken(auth *Auth) bool {
@@ -344,11 +344,12 @@ func (m *Manager) managedRefresh(ctx context.Context, base *Auth, force bool, fa
 			state.mu.Lock()
 			_, err := m.performManagedRefresh(strictRefreshContext(ctx), state, attempt.base, force, failedToken)
 			state.mu.Unlock()
+			cause := err
 			err = safeManagedRefreshError(err)
 			state.stateMu.Lock()
 			attempt.err = err
 			if err != nil {
-				voluntary := force && failedToken == "" && !requestRefreshDue(attempt.base, time.Now()) && !isUnauthorizedError(err) && !isInvalidGrantError(err)
+				voluntary := force && failedToken == "" && !requestRefreshDue(attempt.base, time.Now()) && !isTerminalRefreshError(attempt.base, cause) && !isInvalidGrantError(cause)
 				state.outcome = &managedRefreshOutcome{base: attempt.base, err: err, retryAt: time.Now().Add(refreshFailureBackoff), voluntary: voluntary}
 			} else {
 				state.outcome = nil
@@ -406,6 +407,12 @@ func (m *Manager) performManagedRefresh(ctx context.Context, state *authRefreshL
 		}
 		return m.commitManagedRotation(ctx, state, pending)
 	}
+	if authHasUnchangedRejectedRefreshToken(current) {
+		if current.RefreshError != nil {
+			return nil, current.RefreshError
+		}
+		return nil, errors.New("refresh token requires sign-in")
+	}
 	if failedToken != "" && authAccessToken(current) != failedToken && !requestRefreshDue(current, time.Now()) {
 		return current, nil
 	}
@@ -430,9 +437,9 @@ func (m *Manager) performManagedRefresh(ctx context.Context, state *authRefreshL
 	}
 	updated, err := exec.Refresh(ctx, current.Clone())
 	if err != nil {
-		err = safeManagedRefreshError(err)
 		var invalid *InvalidRefreshResultError
 		if errors.As(err, &invalid) {
+			err = safeManagedRefreshError(err)
 			state.stateMu.Lock()
 			state.pending = &pendingAuthRotation{base: current.Clone(), err: err}
 			state.stateMu.Unlock()
@@ -494,16 +501,40 @@ func (m *Manager) commitManagedRotation(ctx context.Context, state *authRefreshL
 }
 
 func (m *Manager) recordManagedRefreshFailure(base *Auth, err error) {
-	if !isUnauthorizedError(err) && !isInvalidGrantError(err) {
-		return
-	}
 	release := m.lockAuthMutation(base.ID)
 	defer release()
 	m.mu.Lock()
 	if current := m.auths[base.ID]; sameRotationSource(base, current) {
-		current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: 401}
-		current.Unavailable = true
-		current.Status = StatusError
+		now := time.Now()
+		terminal := isTerminalRefreshError(current, err) || isInvalidGrantError(err)
+		diagnostic := sanitizeRenewalError(current, err)
+		diagnostic.Retryable = !terminal
+		if terminal || !authHasAnyRejectedRefreshPartition(current) {
+			current.RefreshError = diagnostic
+		}
+		if terminal {
+			current.RequiresSignIn = true
+			current.RenewalVerified = false
+			current.LastRenewalVerifiedAt = time.Time{}
+			recordRejectedRefreshTokens(current, err)
+			if current.RenewalEventAt.IsZero() {
+				current.RenewalEventAt = now
+			}
+			current.LastError = &Error{Code: "unauthorized", Message: diagnostic.Message, HTTPStatus: 401}
+			current.Unavailable = true
+			if current.Disabled || current.Status == StatusDisabled {
+				current.Status = StatusDisabled
+			} else {
+				current.Status = StatusError
+			}
+			current.StatusMessage = "unauthorized (refresh token invalid)"
+			current.NextRefreshAfter = time.Time{}
+			current.NextRetryAfter = time.Time{}
+			current.RefreshFailures = 0
+		} else {
+			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+		}
+		current.UpdatedAt = now
 		current.Generation++
 		if m.scheduler != nil {
 			m.scheduler.upsertAuth(current.Clone())

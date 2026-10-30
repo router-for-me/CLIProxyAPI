@@ -39,6 +39,8 @@ The host admits expired, opted-in, refreshable credentials only through request 
 
 The host refreshes when access expiry is at or before the current time plus 60 seconds. It does not falsify the stored expiry. Buffered execution, remote token counts, stream opening, images, authenticated HTTP, quota fetch and reset, and billing token resolution use the committed snapshot. Refresh does not replay emitted stream content or repeat a quota reset.
 
+`Manager.VerifyInference` also acquires managed freshness for its pinned account before stream dispatch. A 501-only buffered fallback rechecks the current credential, executor route, and model support. Both attempts use the isolated verification session and minimal payload. Disabled or sign-in-required credentials keep the existing 409 gate. Only a completed generation verifies inference.
+
 Background rotation skips opted-in credentials, including jobs queued before a policy change. Model discovery and inspection retain their existing behavior and do not request freshness. SDK embedders bind the same manager with `pluginhost.Host.SetAuthManager` for authenticated quota operations.
 
 ## Persistence and failures
@@ -49,7 +51,9 @@ The host saves the normal refresh-aware merge before publishing the rotated pair
 
 Changing the registration epoch, credential version, expiry, or file source does not release a consumed grant. A temporarily unreadable file can remove the registration, but restoring the old or pending grant keeps it unsettled. The host saves a retained candidate only against its original source. A source change can therefore keep the credential unavailable until a distinct login replaces the grant.
 
-A successful provider rotation with an unusable or contradictory result quarantines the credential in the same refresh slot. Later demand, force refresh, a policy change, and reload cannot reuse the potentially consumed grant. A distinct replacement with usable access and refresh credentials releases that hold. Refresh endpoint errors remain retryable under the existing backoff.
+A successful provider rotation with an unusable or contradictory result quarantines the credential in the same refresh slot. Later demand, force refresh, a policy change, and reload cannot reuse the potentially consumed grant. A distinct replacement with usable access and refresh credentials releases that hold. Transient refresh endpoint errors remain retryable on later demand under the existing backoff.
+
+Terminal renewal errors record sanitized diagnostics, rejected refresh-token identities, and the sign-in requirement. Managed acquisition remains fail-closed and never resubmits an unchanged rejected grant, including under force refresh. A distinct login clears superseded renewal failure. Successful Save publishes renewal verification while preserving the original adoption identity. Failed Save does not verify renewal. Opt-out credentials keep upstream behavior, including ordinary inference with usable unexpired access after renewal rejection.
 
 A transient failure from voluntary force refresh does not block an otherwise fresh, unrejected credential. Due-demand failures and unsettled rotations still stop authenticated dispatch. A managed executor route change during preparation stops dispatch before the captured executor can run.
 
