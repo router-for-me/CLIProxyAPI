@@ -227,6 +227,16 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 	return out
 }
 
+func normalizeModelRegistrationResponse(resp pluginapi.ModelRegistrationResponse) []pluginapi.ProviderModels {
+	if len(resp.Registrations) > 0 {
+		return resp.Registrations
+	}
+	return []pluginapi.ProviderModels{{
+		Provider: resp.Provider,
+		Models:   resp.Models,
+	}}
+}
+
 // RegisterModels collects static catalogs for executor and per-auth registration.
 // Catalog-only plugins must not advertise availability independently of credentials.
 func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) {
@@ -237,7 +247,9 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 	snap := h.Snapshot()
 	records := h.activeRecordsFromSnapshot(snap)
 	nextProviders := make(map[string]string)
+	nextProviderSets := make(map[string][]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
+	nextPluginModelRegistrations := make(map[string][]pluginModelRegistration)
 	for _, record := range records {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		registrar := record.plugin.Capabilities.ModelRegistrar
@@ -253,8 +265,9 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			modelResp, errStaticModels := h.callModelProviderStaticModels(ctx, record, modelProvider)
 			errRegisterModels = errStaticModels
 			resp = pluginapi.ModelRegistrationResponse{
-				Provider: modelResp.Provider,
-				Models:   modelResp.Models,
+				Provider:      modelResp.Provider,
+				Models:        modelResp.Models,
+				Registrations: modelResp.Registrations,
 			}
 		} else {
 			resp, errRegisterModels = h.callModelRegistrar(ctx, record, registrar)
@@ -264,32 +277,57 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			continue
 		}
 
-		provider := strings.ToLower(strings.TrimSpace(resp.Provider))
-		if provider == "" || len(resp.Models) == 0 {
-			continue
-		}
-
-		models := make([]*registry.ModelInfo, 0, len(resp.Models))
-		for _, item := range resp.Models {
-			model := pluginModelInfoToRegistryModelInfo(item)
-			if model == nil || strings.TrimSpace(model.ID) == "" {
+		entries := normalizeModelRegistrationResponse(resp)
+		var providersForPlugin []string
+		seenProviders := make(map[string]struct{}, len(entries))
+		var regsForPlugin []pluginModelRegistration
+		regIndexByProvider := make(map[string]int, len(entries))
+		for _, entry := range entries {
+			provider := strings.ToLower(strings.TrimSpace(entry.Provider))
+			if provider == "" || len(entry.Models) == 0 {
 				continue
 			}
-			model.ID = strings.TrimSpace(model.ID)
-			models = append(models, model)
+
+			models := make([]*registry.ModelInfo, 0, len(entry.Models))
+			for _, item := range entry.Models {
+				model := pluginModelInfoToRegistryModelInfo(item)
+				if model == nil || strings.TrimSpace(model.ID) == "" {
+					continue
+				}
+				model.ID = strings.TrimSpace(model.ID)
+				models = append(models, model)
+			}
+			if len(models) == 0 {
+				continue
+			}
+
+			if _, exists := seenProviders[provider]; !exists {
+				seenProviders[provider] = struct{}{}
+				providersForPlugin = append(providersForPlugin, provider)
+			}
+			if idx, exists := regIndexByProvider[provider]; exists {
+				merged := map[string][]*registry.ModelInfo{provider: regsForPlugin[idx].models}
+				appendModelsForProvider(merged, provider, models)
+				regsForPlugin[idx].models = merged[provider]
+				continue
+			}
+			regIndexByProvider[provider] = len(regsForPlugin)
+			regsForPlugin = append(regsForPlugin, pluginModelRegistration{
+				pluginID:    record.id,
+				provider:    provider,
+				priority:    record.priority,
+				models:      cloneRegistryModels(models),
+				hasExecutor: record.plugin.Capabilities.Executor != nil,
+			})
 		}
-		if len(models) == 0 {
+		if len(regsForPlugin) == 0 {
 			continue
 		}
 
-		nextModelRegistrations[record.id] = pluginModelRegistration{
-			pluginID:    record.id,
-			provider:    provider,
-			priority:    record.priority,
-			models:      cloneRegistryModels(models),
-			hasExecutor: record.plugin.Capabilities.Executor != nil,
-		}
-		nextProviders[record.id] = provider
+		nextModelRegistrations[record.id] = regsForPlugin[0]
+		nextPluginModelRegistrations[record.id] = regsForPlugin
+		nextProviders[record.id] = providersForPlugin[0]
+		nextProviderSets[record.id] = providersForPlugin
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -297,7 +335,9 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 		return
 	}
 	h.modelProviders = nextProviders
+	h.modelProviderSets = nextProviderSets
 	h.modelRegistrations = nextModelRegistrations
+	h.pluginModelRegistrations = nextPluginModelRegistrations
 }
 
 // HasAuthModelProvider reports whether an active plugin declares per-auth model
@@ -327,11 +367,20 @@ func (h *Host) authModelProviderMatches(record capabilityRecord, provider string
 		identifier, ok := h.callAuthProviderIdentifier(record.id, caps.AuthProvider)
 		return ok && normalizeProviderID(identifier) == provider
 	}
-	candidate := normalizeProviderID(h.modelProvider(record.id))
-	if candidate == "" && caps.Executor != nil {
-		candidate, _ = h.executorProvider(record, caps.Executor)
+	candidates := h.modelProvidersForPlugin(record.id)
+	if len(candidates) > 0 {
+		for _, candidate := range candidates {
+			if normalizeProviderID(candidate) == provider {
+				return true
+			}
+		}
+		return false
 	}
-	return candidate == provider
+	if caps.Executor != nil {
+		candidate, _ := h.executorProvider(record, caps.Executor)
+		return candidate == provider
+	}
+	return false
 }
 
 func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModelResult {
@@ -465,7 +514,10 @@ func (h *Host) callModelRegistrar(ctx context.Context, record capabilityRecord, 
 			err = fmt.Errorf("model registrar panic: %v", recovered)
 		}
 	}()
-	return registrar.RegisterModels(ctx, pluginapi.ModelRegistrationRequest{Plugin: record.meta})
+	return registrar.RegisterModels(ctx, pluginapi.ModelRegistrationRequest{
+		Plugin:              record.meta,
+		MultiProviderModels: true,
+	})
 }
 
 func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabilityRecord, provider pluginapi.ModelProvider) (resp pluginapi.ModelResponse, err error) {
@@ -480,8 +532,9 @@ func (h *Host) callModelProviderStaticModels(ctx context.Context, record capabil
 		}
 	}()
 	return provider.StaticModels(ctx, pluginapi.StaticModelRequest{
-		Plugin: record.meta,
-		Host:   h.hostConfigSummary(),
+		Plugin:              record.meta,
+		Host:                h.hostConfigSummary(),
+		MultiProviderModels: true,
 	})
 }
 

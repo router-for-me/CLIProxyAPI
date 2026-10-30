@@ -416,6 +416,16 @@ type ModelRegistrar interface {
 type ModelRegistrationRequest struct {
 	// Plugin is the metadata of the plugin being registered.
 	Plugin Metadata
+	// MultiProviderModels reports whether the host supports ModelRegistrationResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
+}
+
+// ProviderModels pairs a provider key with the models registered for it.
+type ProviderModels struct {
+	// Provider is the provider key associated with the returned models.
+	Provider string `json:"provider,omitempty"`
+	// Models is the complete set of plugin-provided models for Provider.
+	Models []ModelInfo `json:"models,omitempty"`
 }
 
 // ModelRegistrationResponse returns provider and model metadata to register.
@@ -424,6 +434,12 @@ type ModelRegistrationResponse struct {
 	Provider string
 	// Models is the complete set of plugin-provided models.
 	Models []ModelInfo
+	// Registrations registers model sets for multiple providers in one call.
+	// When non-empty, each entry is registered under its own Provider for catalog
+	// and per-auth model discovery (plugins that also declare an Executor still
+	// bind that executor to the first registered provider); when empty, Provider
+	// and Models behave as a single registration.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
@@ -439,6 +455,8 @@ type StaticModelRequest struct {
 	Plugin Metadata
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
+	// MultiProviderModels reports whether the host supports ModelResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
 }
 
 // AuthModelRequest carries auth context for provider model discovery.
@@ -467,6 +485,9 @@ type ModelResponse struct {
 	Provider string
 	// Models is the complete set of discovered provider models.
 	Models []ModelInfo
+	// Registrations registers static model sets for multiple providers in one call.
+	// Used by StaticModels when non-empty; ignored by ModelsForAuth.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 	// AuthUpdate contains updated auth data from model discovery when needed.
 	AuthUpdate AuthData
 }
