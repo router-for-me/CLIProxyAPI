@@ -211,13 +211,40 @@ func styleBypass(body []byte) string {
 	return ""
 }
 
+// mediaPartTypes are the content part types that make a request multimodal.
+var mediaPartTypes = map[string]bool{
+	"image":       true,
+	"image_url":   true,
+	"input_image": true,
+	"document":    true,
+	"file":        true,
+}
+
+// hasMediaBlocks reports whether any content part is a media part. It matches on
+// the part's "type" instead of looking for the word anywhere in the body: agent
+// tool output is full of `{"image": "nginx:latest"}`, and treating that as
+// multimodal keeps styling off for the rest of the conversation.
 func hasMediaBlocks(body []byte) bool {
-	for _, key := range []string{"image", "image_url", "input_image", "document"} {
-		if bytes.Contains(body, []byte(`"`+key+`"`)) {
-			return true
-		}
+	if !bytes.Contains(body, []byte(`"type"`)) {
+		return false
 	}
-	return false
+	found := false
+	var walk func(gjson.Result)
+	walk = func(v gjson.Result) {
+		if found || (!v.IsObject() && !v.IsArray()) {
+			return
+		}
+		v.ForEach(func(_, child gjson.Result) bool {
+			if child.IsObject() && mediaPartTypes[child.Get("type").String()] {
+				found = true
+				return false
+			}
+			walk(child)
+			return !found
+		})
+	}
+	walk(gjson.ParseBytes(body))
+	return found
 }
 
 // recentUserText concatenates the text of the last three messages.
@@ -234,6 +261,13 @@ func recentUserText(body []byte) string {
 		}
 		items.ForEach(func(key, item gjson.Result) bool {
 			if key.Int() < int64(start) {
+				return true
+			}
+			// Only the human turn decides whether styling fits. Tool output and
+			// assistant text mention "delete" or "security" by accident, and a
+			// decision that flips mid-conversation rewrites the system prefix,
+			// which costs more than the style saves.
+			if item.Get("role").String() != "user" {
 				return true
 			}
 			switch content := item.Get("content"); {
