@@ -17,6 +17,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+// SelectorFactory constructs a complete routing selector at build time and when
+// normalized routing settings change. Unrelated reloads retain the selector.
+// Use NewRoutingSelector to retain native affinity around a custom policy.
+// Each invocation transfers ownership of a fresh selector to the service. Return
+// a non-nil selector or an error; do not return the currently installed instance.
+// Factories must not perform network or other blocking runtime work.
+type SelectorFactory func(*config.Config) (coreauth.Selector, error)
+
 // Builder constructs a Service instance with customizable providers.
 // It provides a fluent interface for configuring all aspects of the service
 // including authentication, file watching, HTTP server options, and lifecycle hooks.
@@ -46,7 +54,8 @@ type Builder struct {
 	accessManager *sdkaccess.Manager
 
 	// coreManager handles core authentication and execution.
-	coreManager *coreauth.Manager
+	coreManager     *coreauth.Manager
+	selectorFactory SelectorFactory
 
 	// cooldownStateStore overrides runtime cooldown persistence.
 	cooldownStateStore coreauth.CooldownStateStore
@@ -152,6 +161,14 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	return b
 }
 
+// WithSelectorFactory overrides selector construction, including for an injected
+// core auth manager. The factory receives a configuration snapshot and owns the
+// complete selector, including any affinity wrapper. Scheduler plugins run first.
+func (b *Builder) WithSelectorFactory(factory SelectorFactory) *Builder {
+	b.selectorFactory = factory
+	return b
+}
+
 // WithCooldownStateStore overrides the store used for runtime cooldown persistence.
 func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
 	b.cooldownStateStore = store
@@ -211,6 +228,15 @@ func (b *Builder) Build() (*Service, error) {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
 	}
 
+	var customSelector coreauth.Selector
+	if b.selectorFactory != nil {
+		var errSelector error
+		customSelector, errSelector = buildRoutingSelector(b.cfg, b.selectorFactory)
+		if errSelector != nil {
+			return nil, errSelector
+		}
+	}
+
 	tokenProvider := b.tokenProvider
 	if tokenProvider == nil {
 		tokenProvider = NewFileTokenClientProvider()
@@ -262,9 +288,19 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		routingState := normalizedRoutingRuntimeState(b.cfg)
-		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
+		selector := customSelector
+		if selector == nil {
+			selector = newRoutingSelector(routingState)
+		}
+		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 		appliedRoutingState = &routingState
 	}
+	if customSelector != nil {
+		coreManager.SetSelector(customSelector)
+		routingState := normalizedRoutingRuntimeState(b.cfg)
+		appliedRoutingState = &routingState
+	}
+
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
@@ -290,6 +326,7 @@ func (b *Builder) Build() (*Service, error) {
 		pluginHost:          pluginHost,
 		discoveryManager:    newDiscoveryAdvertiserManager(),
 		appliedRoutingState: appliedRoutingState,
+		selectorFactory:     b.selectorFactory,
 		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	if b.postAuthHook != nil {
