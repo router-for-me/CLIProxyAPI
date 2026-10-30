@@ -3924,3 +3924,108 @@ func TestConvertClaudeRequestToAntigravity_FunctionResponseJSONRef(t *testing.T)
 		t.Fatalf("expected result to contain ref target, got %q", result.String())
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.T) {
+	tests := []struct {
+		name         string
+		fields       string
+		wantResponse string
+		wantImage    bool
+	}{
+		{
+			name:         "success_without_flag",
+			fields:       `"content":"permission denied"`,
+			wantResponse: `{"result":"permission denied"}`,
+		},
+		{
+			name:         "explicit_success",
+			fields:       `"is_error":false,"content":{"ok":true}`,
+			wantResponse: `{"result":{"ok":true}}`,
+		},
+		{
+			name:         "non_bool_is_error_string_treated_as_success",
+			fields:       `"is_error":"true","content":"permission denied"`,
+			wantResponse: `{"result":"permission denied"}`,
+		},
+		{
+			name:         "non_bool_is_error_number_treated_as_success",
+			fields:       `"is_error":1,"content":"permission denied"`,
+			wantResponse: `{"result":"permission denied"}`,
+		},
+		{
+			name:         "failed_string",
+			fields:       `"is_error":true,"content":"permission denied"`,
+			wantResponse: `{"error":"permission denied"}`,
+		},
+		{
+			name:         "failed_structured_result",
+			fields:       `"is_error":true,"content":{"code":"EACCES","retryable":false}`,
+			wantResponse: `{"error":{"code":"EACCES","retryable":false}}`,
+		},
+		{
+			name:         "failed_text_and_image",
+			fields:       `"is_error":true,"content":[{"type":"text","text":"permission denied"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]`,
+			wantResponse: `{"error":{"type":"text","text":"permission denied"}}`,
+			wantImage:    true,
+		},
+		{
+			name:         "failed_image_only_array",
+			fields:       `"is_error":true,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]`,
+			wantResponse: `{"error":""}`,
+			wantImage:    true,
+		},
+		{
+			name:         "failed_single_image_object",
+			fields:       `"is_error":true,"content":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}`,
+			wantResponse: `{"error":""}`,
+			wantImage:    true,
+		},
+		{
+			name:         "failed_multiple_blocks",
+			fields:       `"is_error":true,"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]`,
+			wantResponse: `{"error":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}`,
+		},
+		{
+			name:         "failed_without_content",
+			fields:       `"is_error":true`,
+			wantResponse: `{"error":""}`,
+		},
+		{
+			name:         "failed_schema_ref_remains_opaque",
+			fields:       `"is_error":true,"content":{"$ref":"#/definitions/Error"}`,
+			wantResponse: `{"error":"{\"$ref\":\"#/definitions/Error\"}"}`,
+		},
+	}
+
+	for _, stream := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, tt.name), func(t *testing.T) {
+				input := []byte(fmt.Sprintf(`{"model":"claude-sonnet-4-5","messages":[
+					{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{}}]},
+					{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1",%s}]}
+				]}`, tt.fields))
+				output, errTranslate := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", input, stream)
+				if errTranslate != nil {
+					t.Fatal(errTranslate)
+				}
+				if !gjson.ValidBytes(output) {
+					t.Fatalf("invalid translated JSON: %s", output)
+				}
+				response := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse")
+				if response.Get("id").String() != "call_1" || response.Get("name").String() != "Read" {
+					t.Fatalf("tool result lost its call identity: %s", response.Raw)
+				}
+				if got := response.Get("response").Raw; got != tt.wantResponse {
+					t.Fatalf("functionResponse.response = %s, want %s", got, tt.wantResponse)
+				}
+				if tt.wantImage {
+					if got := response.Get("parts.0.inlineData").Raw; got != `{"mimeType":"image/png","data":"aGVsbG8="}` {
+						t.Fatalf("functionResponse.parts[0].inlineData = %s", got)
+					}
+				} else if response.Get("parts").Exists() {
+					t.Fatalf("unexpected functionResponse.parts: %s", response.Get("parts").Raw)
+				}
+			})
+		}
+	}
+}
