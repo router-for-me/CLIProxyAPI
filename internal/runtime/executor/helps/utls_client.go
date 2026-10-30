@@ -20,15 +20,18 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
 // utlsRoundTripper implements http.RoundTripper using a Chrome fingerprint for
-// providers that require browser-like TLS. The HTTP version follows ALPN. Each
-// request gets a dedicated connection that is closed with the response body.
+// providers that require browser-like TLS. The HTTP version follows ALPN.
+// Completed responses return their exclusive connection lease to a bounded pool.
 type utlsRoundTripper struct {
-	dialer proxy.Dialer
+	dialer  proxy.Dialer
+	rootCAs *x509.CertPool
+	poolMu  sync.Mutex
+	idle    []*utlsClientConnection
+	retired bool
 }
 
 type closeConnectionBody struct {
@@ -79,7 +82,7 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
-	tlsConfig := &tls.Config{ServerName: host}
+	tlsConfig := &tls.Config{ServerName: host, RootCAs: t.rootCAs}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	handshakeCtx, cancelHandshake := handshakeContext(ctx)
@@ -99,75 +102,73 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 }
 
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	hostname := req.URL.Hostname()
+	req = wrapUtlsRequestBody(req)
+	hostname := strings.ToLower(req.URL.Hostname())
 	port := req.URL.Port()
 	if port == "" {
 		port = "443"
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	tlsConn, err := t.createConnection(req.Context(), hostname, addr)
+	conn := t.takeIdle(addr)
+	if conn == nil {
+		tlsConn, err := t.createConnection(req.Context(), hostname, addr)
+		if err != nil {
+			closeUtlsRequestBody(req)
+			return nil, err
+		}
+		t.poolMu.Lock()
+		retired := t.retired
+		t.poolMu.Unlock()
+		if retired {
+			return roundTripUtlsConnection(req, tlsConn)
+		}
+		conn, err = newUtlsClientConnection(req.Context(), tlsConn, addr)
+		if err != nil {
+			closeUtlsRequestBody(req)
+			return nil, err
+		}
+	}
+	resp, err := conn.roundTrip.RoundTrip(req)
 	if err != nil {
+		conn.closeConnection()
+		closeUtlsRequestBody(req)
 		return nil, err
 	}
-	return roundTripUtlsConnection(req, tlsConn)
+	resp.Body = &pooledUtlsBody{ReadCloser: resp.Body, pool: t, conn: conn, ctx: req.Context()}
+	return resp, nil
 }
 
-// roundTripUtlsConnection selects the HTTP protocol before sending the request.
-// Empty ALPN is HTTP/1.1, including when a TLS-inspecting proxy omits ALPN.
+func closeUtlsRequestBody(req *http.Request) {
+	if req.Body != nil {
+		if err := req.Body.Close(); err != nil {
+			log.Debugf("utls: close request body: %v", err)
+		}
+	}
+}
+
+// Retired transports still serve their existing clients without retaining idle
+// sockets. This single-use path shares the same protocol and cancellation logic.
 func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Response, error) {
-	closeConnection := func() error {
-		// The HTTP/1.1 transport may already have closed its non-pooled
-		// connection after reading the response or canceling the request.
-		if errClose := tlsConn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-			return errClose
-		}
-		return nil
+	req = wrapUtlsRequestBody(req)
+	port := req.URL.Port()
+	if port == "" {
+		port = "443"
 	}
-	var resp *http.Response
-	var err error
-	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
-	case "h2":
-		h2Conn, errClientConn := (&http2.Transport{}).NewClientConn(tlsConn)
-		if errClientConn != nil {
-			err = fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
-			break
-		}
-		closeConnection = h2Conn.Close
-		resp, err = h2Conn.RoundTrip(req)
-	case "", "http/1.1":
-		// Reuse the already-handshaken uTLS connection. A fresh, non-pooling
-		// transport retains net/http's cancellation and request-body handling
-		// without changing the TLS fingerprint or redialing through another path.
-		transport := &http.Transport{
-			DisableKeepAlives: true,
-			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
-				return tlsConn, nil
-			},
-		}
-		resp, err = transport.RoundTrip(req)
-		transport.CloseIdleConnections()
-	default:
-		err = fmt.Errorf("utls: unsupported negotiated protocol %q", protocol)
-	}
+	conn, err := newUtlsClientConnection(req.Context(), tlsConn, net.JoinHostPort(req.URL.Hostname(), port))
 	if err != nil {
-		if errClose := closeConnection(); errClose != nil {
-			log.Debugf("utls: close connection after round trip failure: %v", errClose)
-		}
+		closeUtlsRequestBody(req)
 		return nil, err
 	}
-	if resp == nil {
-		if errClose := closeConnection(); errClose != nil {
-			log.Debugf("utls: close connection after empty response: %v", errClose)
-		}
-		return nil, fmt.Errorf("utls: upstream returned an empty response")
-	}
-	if resp.Body == nil {
-		resp.Body = http.NoBody
+	resp, err := conn.roundTrip.RoundTrip(req)
+	if err != nil {
+		conn.closeConnection()
+		closeUtlsRequestBody(req)
+		return nil, err
 	}
 	resp.Body = &closeConnectionBody{
 		ReadCloser:      resp.Body,
-		closeConnection: closeConnection,
+		closeConnection: conn.close,
 	}
 	return resp, nil
 }
@@ -444,7 +445,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+	var chromeRT http.RoundTripper = cachedChromeRoundTripper(proxyURL, auth)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
