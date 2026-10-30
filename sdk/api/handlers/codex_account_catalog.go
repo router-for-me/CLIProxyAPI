@@ -118,18 +118,27 @@ func codexAPIKeyCredentials(m *coreauth.Manager) []*coreauth.Auth {
 	return out
 }
 
-// ServeCodexAccountCatalog answers a Codex catalog request with the caller's account catalog. It returns false
-// (and writes nothing) when it doesn't apply: the switch is off, no credential forwards the caller's login, or the
-// caller sent no ChatGPT bearer. Upstream errors are passed back with their status, so Codex keeps its own fallback
-// and refreshes its login on a 401 as it would against ChatGPT.
+// ServeCodexAccountCatalog answers a Codex catalog request with the caller's account catalog. It returns false (and
+// writes nothing) only when the switch is off. Otherwise it always answers: the account's list plus the providers'
+// rows; the caller's last good list when ChatGPT is unreachable or failing; or an error (401 without the caller's
+// ChatGPT login, 503 before the forwarding credential has loaded, ChatGPT's own status otherwise), which leaves Codex
+// on the list it had and lets it refresh its login on a 401 as it would against ChatGPT.
 func (h *BaseAPIHandler) ServeCodexAccountCatalog(w http.ResponseWriter, r *http.Request, clientVersion string) bool {
 	if !h.CodexAccountCatalogEnabled() || r == nil {
 		return false
 	}
+	// With the switch on, a Codex catalog request is always answered here: never with this proxy's built-in model list,
+	// whose names and order differ from the account's (seen on macOS: "GPT 6.1 Sol", SolCard's rows first). An error
+	// status leaves Codex on the last list it had, which is what a failed request to ChatGPT itself would do.
 	creds := h.forwardingCodexCredentials()
+	if len(creds) == 0 {
+		writeJSONError(w, http.StatusServiceUnavailable, "account catalog not ready: no credential forwards the caller's ChatGPT login yet")
+		return true
+	}
 	bearer := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(creds) == 0 || !strings.HasPrefix(strings.ToLower(bearer), "bearer ") || len(bearer) < 20 {
-		return false
+	if !strings.HasPrefix(strings.ToLower(bearer), "bearer ") || len(bearer) < 20 {
+		writeJSONError(w, http.StatusUnauthorized, "account catalog needs the caller's ChatGPT login")
+		return true
 	}
 	base := codexDefaultBackendURL
 	if b := strings.TrimSpace(creds[0].Attributes["base_url"]); b != "" {
@@ -143,6 +152,11 @@ func (h *BaseAPIHandler) ServeCodexAccountCatalog(w http.ResponseWriter, r *http
 	codexAccountCatalog.mu.Unlock()
 	if !ok || time.Since(cached.fetched) > codexAccountCatalogTTL {
 		status, body, etag, err := fetchAccountCatalog(r.Context(), base, clientVersion, r.Header)
+		if (err != nil || status >= http.StatusInternalServerError) && ok {
+			// ChatGPT unreachable or failing: the caller's last good list, not an error the picker would show as empty.
+			serveCachedCatalog(w, cached)
+			return true
+		}
 		if err != nil {
 			writeJSONError(w, http.StatusBadGateway, "account catalog unavailable: "+err.Error())
 			return true
@@ -165,20 +179,24 @@ func (h *BaseAPIHandler) ServeCodexAccountCatalog(w http.ResponseWriter, r *http
 			codexAccountCatalog.known[slug] = m
 		}
 		for k, v := range codexAccountCatalog.byCaller { // drop stale entries; nothing outlives a few TTLs
-			if time.Since(v.fetched) > 5*codexAccountCatalogTTL {
+			if time.Since(v.fetched) > 60*codexAccountCatalogTTL {
 				delete(codexAccountCatalog.byCaller, k)
 			}
 		}
 		codexAccountCatalog.mu.Unlock()
 		h.registerAccountModels(creds)
 	}
+	serveCachedCatalog(w, cached)
+	return true
+}
+
+func serveCachedCatalog(w http.ResponseWriter, cached accountCatalogEntry) {
 	w.Header().Set("Content-Type", "application/json")
 	if cached.etag != "" {
 		w.Header().Set("ETag", cached.etag)
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(cached.body)
-	return true
 }
 
 func fetchAccountCatalog(ctx context.Context, base, clientVersion string, in http.Header) (int, []byte, string, error) {
@@ -365,4 +383,3 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }
-
