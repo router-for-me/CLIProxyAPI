@@ -106,6 +106,15 @@ func journalWhere(kind int, f Filter) (string, []any) {
 				add(field.name+"=?", field.value)
 			}
 		}
+		switch f.Outcome {
+		case "failed":
+			clauses = append(clauses, "failed=1")
+		case "ok":
+			clauses = append(clauses, "failed=0")
+		}
+		if collapsesAttempts(f) {
+			clauses = append(clauses, "superseded=0")
+		}
 		q := strings.ToLower(strings.TrimSpace(f.Model))
 		if pin, ok := modelQueryPin(q); ok {
 			clauses = append(clauses, "(serving_lower=? OR model_lower=?)")
@@ -124,6 +133,18 @@ func journalWhere(kind int, f Filter) (string, []any) {
 		}
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// collapsesAttempts reports whether earlier failed attempts of even-load-balanced
+// requests are folded into their final attempt. Upstream-side filters (owner,
+// channel, credential, pinned serving model) keep every attempt visible, since
+// each one was a real call against that upstream.
+func collapsesAttempts(f Filter) bool {
+	if f.Owner != "" || f.ChannelID != "" || f.CredentialID != "" {
+		return false
+	}
+	_, pinned := modelQueryPin(strings.ToLower(strings.TrimSpace(f.Model)))
+	return !pinned
 }
 
 func journalPage[T any](ctx context.Context, j *journalIndex, kind int, filter Filter, event func(journalEntry) *T) ([]T, int, error) {
@@ -191,7 +212,102 @@ func (s *Store) UsageContext(ctx context.Context, filter Filter) ([]UsageEvent, 
 	if err != nil {
 		return nil, 0, err
 	}
-	return journalPage(ctx, j, 1, filter, func(e journalEntry) *UsageEvent { return e.Usage })
+	items, total, err := journalPage(ctx, j, 1, filter, func(e journalEntry) *UsageEvent { return e.Usage })
+	if err != nil || len(items) == 0 {
+		return items, total, err
+	}
+	traces := []any{}
+	for _, item := range items {
+		if item.Balanced {
+			traces = append(traces, usageTrace(item))
+		}
+	}
+	if len(traces) == 0 {
+		return items, total, nil
+	}
+	rows, err := j.db.QueryContext(ctx, "SELECT trace, COUNT(*) FROM events INDEXED BY usage_trace WHERE kind=1 AND trace IN (?"+strings.Repeat(",?", len(traces)-1)+") GROUP BY trace", traces...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	counts := map[string]int{}
+	for rows.Next() {
+		var trace string
+		var count int
+		if err = rows.Scan(&trace, &count); err != nil {
+			return nil, 0, err
+		}
+		counts[trace] = count
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	for i := range items {
+		if items[i].Balanced {
+			items[i].Attempts = counts[usageTrace(items[i])]
+		}
+	}
+	return items, total, nil
+}
+
+// UsageAttemptsContext returns every upstream attempt of one client request,
+// oldest first, so a balanced call can show its full failover chain.
+func (s *Store) UsageAttemptsContext(ctx context.Context, trace string) ([]UsageEvent, error) {
+	j, err := s.queryJournal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := j.db.QueryContext(ctx, "SELECT source, position, length FROM events INDEXED BY usage_trace WHERE kind=1 AND trace=? ORDER BY at, source, position LIMIT 200", trace)
+	if err != nil {
+		return nil, err
+	}
+	type location struct {
+		source string
+		offset int64
+		length int
+	}
+	locations := []location{}
+	for rows.Next() {
+		var loc location
+		if err = rows.Scan(&loc.source, &loc.offset, &loc.length); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		locations = append(locations, loc)
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UsageEvent, 0, len(locations))
+	for _, loc := range locations {
+		entry, errRead := readJournalEntry(j.store.dir, loc.source, loc.offset, loc.length)
+		if errRead != nil {
+			return nil, errRead
+		}
+		if entry.Usage != nil {
+			out = append(out, *entry.Usage)
+		}
+	}
+	return out, nil
+}
+
+func readJournalEntry(dir, source string, offset int64, length int) (journalEntry, error) {
+	var entry journalEntry
+	file, err := os.Open(filepath.Join(dir, "journal", source))
+	if err != nil {
+		return entry, err
+	}
+	defer func() { _ = file.Close() }()
+	data := make([]byte, length)
+	if _, err = file.ReadAt(data, offset); err != nil && err != io.EOF {
+		return entry, err
+	}
+	if err = json.Unmarshal(data, &entry); err != nil {
+		return entry, fmt.Errorf("read indexed journal %s at byte %d: %w", source, offset, err)
+	}
+	return entry, nil
 }
 
 func (s *Store) CallsContext(ctx context.Context, filter Filter) ([]CallEvent, int, error) {
@@ -254,6 +370,13 @@ func (s *Store) SummaryContext(ctx context.Context, filter Filter) (Summary, []S
 		}
 		if errTotal := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT trace) FROM "+traceFrom+" WHERE "+where, args...).Scan(&result.total.Calls); errTotal != nil {
 			return nil, 0, errTotal
+		}
+		if collapsesAttempts(filter) {
+			// The superseded clause carries no argument, so swapping it keeps args aligned.
+			folded := strings.Replace(where, "superseded=0", "superseded=1", 1)
+			if errFolded := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+from+" WHERE "+folded, args...).Scan(&result.total.Failovers); errFolded != nil {
+				return nil, 0, errFolded
+			}
 		}
 		rows, errQuery := tx.QueryContext(ctx, "SELECT day, consumer, owner, channel, model, "+summaryColumns+" FROM "+from+" WHERE "+where+" GROUP BY day,consumer,owner,channel,model ORDER BY day DESC,channel||consumer||model", args...)
 		if errQuery != nil {

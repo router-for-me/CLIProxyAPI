@@ -271,8 +271,19 @@ The console has two related records:
 - **Usage records** describe each upstream attempt, with the caller, key identity,
   credential owner, channel, credential identity, model, streaming flag, status,
   input/output/cache/reasoning tokens, the translated reasoning effort, elapsed
-  time, and trace/request IDs. Retries
-  remain separate, so usage is attributed to the credential actually attempted.
+  time, trace/request IDs and, for failed attempts, the upstream error body
+  (truncated to 4 KB). Retries remain separate records, so usage is attributed
+  to the credential actually attempted.
+
+**Even-load calls.** Attempts made with an even-load key carry `balanced: true`.
+The usage list and summary fold the earlier failed attempts of such a request
+into its final attempt, so one client request appears once: the success if any
+channel succeeded, otherwise the last failure. Listed balanced rows report the
+trace's total `attempts`; the summary reports folded attempts as `failovers`.
+`GET /usage/attempts?trace=` returns the full ordered chain for the detail view.
+Owner, channel, credential or pinned-model filters show every attempt, because
+each was a real call against that upstream. Folding happens when the index
+imports a later attempt of the same trace.
 
 Status 499 is displayed as **Request interrupted**: the caller interrupted the
 request, not an upstream service failure. Codex HTTP response streams that close
@@ -286,7 +297,7 @@ history. Usage plugins run asynchronously; a completed call may appear shortly
 before its usage record. The journal remains independent of the existing
 `usage-statistics-enabled` Redis queue toggle.
 
-Summary call counts deduplicate trace IDs among matching upstream records. They
+Summary call counts deduplicate trace IDs among matching (unfolded) upstream records. They
 are not the count of all client calls; early failures are in the client-call table.
 Model-side usage (for example, image-tool usage) can produce additional usage
 records. Summary Token totals use the existing non-overlapping canonical token
@@ -319,6 +330,7 @@ only after the atomic file replacement succeeds; authentication reads do not wai
 for that disk I/O. Run only one proxy instance against a data directory.
 
 `journal-index.sqlite` is a rebuildable query index, not a second source of truth.
+An index from an older column layout is dropped and reimported automatically.
 It uses the pure-Go SQLite driver and WAL on a local filesystem. The first startup
 imports existing history in background batches; subsequent starts resume committed
 file offsets, and queries import only newly appended records. Import checkpoints
@@ -377,7 +389,7 @@ The account API base is `/v8/hub`. Protected endpoints accept
 | `/oauth/session` | DELETE | Cancel a pending OAuth flow. |
 | `/users`, `/users/:username` | GET / PATCH | All-member directory / admin `role` or `disabled` changes only. |
 | `/invites`, `/invites/:id` | GET, POST / DELETE | Administrator invitation issue/list/revoke. |
-| `/usage`, `/usage/summary`, `/calls`, `/audit` | GET | All-member persistent usage and operation history. |
+| `/usage`, `/usage/summary`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/attempts?trace=` lists every attempt of one request. |
 
 Quota lookup never requires credential export permission. The server resolves Kimi's
 `.com`/`.ai` usage host from the live credential and substitutes Meta's persisted
@@ -399,7 +411,9 @@ immutable identity fields. Model editor PATCH accepts `enabled_models` or
 `all_models: true`. Clients select a channel through the model ID, not headers.
 
 History filters: `consumer`, `owner`, `channel_id`, `credential_id`, `key_id`,
-`model`, `from`, `to`, `page`, `page_size` (maximum 200). Dates are RFC3339; `from`
+`model`, `outcome` (`ok` or `failed`, usage only), `from`, `to`, `page`, `page_size`
+(maximum 200). The usage page applies `outcome` to the list only; its statistics
+always cover both outcomes. Dates are RFC3339; `from`
 is inclusive and `to` is exclusive. Audit filters additionally include `actor`
 and `action`. Owner/channel/credential filters apply to upstream usage, not the
 client-call table, because early client errors have no serving credential.

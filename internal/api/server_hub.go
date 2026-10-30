@@ -159,10 +159,11 @@ func (s *Server) hubRequestMiddleware() gin.HandlerFunc {
 		var blockedModels []string
 		_ = json.Unmarshal([]byte(result.Metadata["key_blocked_models"]), &blockedModels)
 		c.Request = c.Request.WithContext(coreauth.WithBlockedModels(c.Request.Context(), blockedModels))
-		if keyAutoBalance := result.Metadata["key_auto_balance"] == "true"; keyAutoBalance {
+		keyAutoBalance := result.Metadata["key_auto_balance"] == "true"
+		if keyAutoBalance {
 			c.Request = c.Request.WithContext(coreauth.WithBareModelsAllowed(c.Request.Context()))
 		}
-		a := usage.Attribution{SiteID: result.Metadata["site_id"], Consumer: result.Metadata["username"], KeyID: result.Metadata["key_id"], KeyName: result.Metadata["key_name"]}
+		a := usage.Attribution{SiteID: result.Metadata["site_id"], Consumer: result.Metadata["username"], KeyID: result.Metadata["key_id"], KeyName: result.Metadata["key_name"], Balanced: keyAutoBalance}
 		c.Request = c.Request.WithContext(usage.WithAttribution(c.Request.Context(), a))
 		started := time.Now()
 		model := ""

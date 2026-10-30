@@ -2616,6 +2616,22 @@
     "view_usage": "View usage",
     "visibility_label": "Visibility",
     "withdraw": "Unpublish",
-    "withdrawn": "Unpublished"
+    "withdrawn": "Unpublished",
+    "balanced_attempts": "{{count}} attempts",
+    "balanced_tag_hint": "This key uses even load: failures switch to other channels serving the same model",
+    "attempts_title": "Attempts",
+    "attempt_index": "#{{index}}",
+    "attempt_switched": "Switched to the next channel",
+    "error_title": "Error",
+    "error_raw": "Raw response",
+    "no_error_body": "The upstream returned no error body",
+    "section_call": "Call",
+    "section_ids": "Tracing",
+    "field_serving_model": "Served by",
+    "records_title": "Call records",
+    "outcome_all": "All",
+    "outcome_ok": "Success",
+    "outcome_failed": "Failed",
+    "stat_failovers": "Plus {{count}} automatic switches"
   }
 }

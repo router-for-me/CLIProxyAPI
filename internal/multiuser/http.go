@@ -169,6 +169,7 @@ func (h *Controller) RegisterRoutes(public, member *gin.RouterGroup) {
 	member.GET("/usage", h.usage)
 	member.GET("/calls", h.calls)
 	member.GET("/usage/summary", h.summary)
+	member.GET("/usage/attempts", h.usageAttempts)
 	member.GET("/audit", h.audits)
 }
 
@@ -398,7 +399,7 @@ func (h *Controller) deleteInvite(c *gin.Context) {
 }
 
 func queryFilter(c *gin.Context) (Filter, error) {
-	f := Filter{Consumer: c.Query("consumer"), Owner: c.Query("owner"), ChannelID: c.Query("channel_id"), CredentialID: c.Query("credential_id"), KeyID: c.Query("key_id"), Model: c.Query("model"), Actor: c.Query("actor"), Action: c.Query("action"), Page: 1, PageSize: 50}
+	f := Filter{Consumer: c.Query("consumer"), Owner: c.Query("owner"), ChannelID: c.Query("channel_id"), CredentialID: c.Query("credential_id"), KeyID: c.Query("key_id"), Model: c.Query("model"), Outcome: c.Query("outcome"), Actor: c.Query("actor"), Action: c.Query("action"), Page: 1, PageSize: 50}
 	for name, dest := range map[string]*int{"page": &f.Page, "page_size": &f.PageSize} {
 		if raw := c.Query(name); raw != "" {
 			value, err := strconv.Atoi(raw)
@@ -416,6 +417,9 @@ func queryFilter(c *gin.Context) (Filter, error) {
 			}
 			*dest = value
 		}
+	}
+	if f.Outcome != "" && f.Outcome != "ok" && f.Outcome != "failed" {
+		return f, ErrInvalid
 	}
 	if !f.From.IsZero() && !f.To.IsZero() && !f.To.After(f.From) {
 		return f, ErrInvalid
@@ -447,6 +451,23 @@ func (h *Controller) usage(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"items": items, "total": total, "page": f.Page, "page_size": f.PageSize})
 }
+func (h *Controller) usageAttempts(c *gin.Context) {
+	trace := strings.TrimSpace(c.Query("trace"))
+	if trace == "" {
+		replyError(c, ErrInvalid)
+		return
+	}
+	if !h.historyReady(c) {
+		return
+	}
+	items, err := h.Store.UsageAttemptsContext(c.Request.Context(), trace)
+	if err != nil {
+		replyError(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"items": items})
+}
+
 func (h *Controller) calls(c *gin.Context) {
 	f, err := queryFilter(c)
 	if err != nil {

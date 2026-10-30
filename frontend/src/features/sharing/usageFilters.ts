@@ -20,6 +20,13 @@ export function buildUsageFilterQuery(
   return new URLSearchParams(values).toString();
 }
 
+/** Statistics describe every outcome; the outcome toggle narrows only the list. */
+export function withoutOutcome(query: string): string {
+  const values = new URLSearchParams(query);
+  values.delete('outcome');
+  return values.toString();
+}
+
 // Model candidates must not depend on the applied model filter itself;
 // otherwise applying one collapses the dropdown to just that model.
 export function buildModelCandidateQuery(
@@ -30,6 +37,7 @@ export function buildModelCandidateQuery(
   const values = Object.fromEntries(new URLSearchParams(queryString));
   delete values.scope;
   delete values.model;
+  delete values.outcome;
   delete values.page;
   delete values.page_size;
   if (scope === 'mine') values.consumer = me;

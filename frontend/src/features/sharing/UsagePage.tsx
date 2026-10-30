@@ -24,17 +24,19 @@ import {
 } from '@/components/ui/Table';
 import type { Account, Channel, PersonalKey, SharedKeyRef, UsageEntry } from './types';
 import { DailyTrend, LoadState, PageHeader, Pager } from './shared';
-import { date, duration, number, useSharingData } from './hooks';
+import { compactDate, date, duration, number, useSharingActions, useSharingData } from './hooks';
 import {
   buildModelCandidateQuery,
   buildUsageFilterQuery,
   resolveUsageKey,
   resolveUsageModel,
+  withoutOutcome,
   type UsageKeyOption,
 } from './usageFilters';
 import styles from './Sharing.module.scss';
 
 type UsageScope = 'mine' | 'contributed' | 'site';
+type UsageOutcome = '' | 'ok' | 'failed';
 type RangePreset = 'all' | 'today' | 'yesterday' | '7d' | '30d' | 'custom';
 
 const DAY_MS = 86400000;
@@ -138,6 +140,160 @@ function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
   );
 }
 
+function DetailSection({
+  title,
+  meta,
+  children,
+}: {
+  title: ReactNode;
+  meta?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className={styles.detailSection}>
+      <h3 className={styles.detailSectionTitle}>
+        {title}
+        {meta && <span className={styles.detailSectionMeta}>{meta}</span>}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+// Upstream error bodies are usually JSON envelopes; surface the human message
+// and keep the raw body available separately.
+export function errorMessage(body: string | undefined): string {
+  const text = (body || '').trim();
+  if (!text) return '';
+  const pick = (value: unknown): string => {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return '';
+    const record = value as Record<string, unknown>;
+    return pick(record.message) || pick(record.error) || pick(record.detail);
+  };
+  try {
+    const message = pick(JSON.parse(text)).trim();
+    if (message) return message;
+  } catch {
+    // Not JSON; fall back to the raw text.
+  }
+  return text;
+}
+
+function ErrorBlock({ body }: { body?: string }) {
+  const { t } = useTranslation();
+  const { copy } = useSharingActions(noRefresh);
+  const raw = (body || '').trim();
+  if (!raw) return <p className={styles.errorEmpty}>{t('sharing.no_error_body')}</p>;
+  const message = errorMessage(raw);
+  return (
+    <div className={styles.errorBlock}>
+      <div className={styles.errorHead}>
+        <span>{t('sharing.error_title')}</span>
+        <button type="button" className={styles.linkButton} onClick={() => void copy(raw)}>
+          {t('common.copy')}
+        </button>
+      </div>
+      <p className={styles.errorMessage}>{message}</p>
+      {message !== raw && (
+        <details className={styles.errorRaw}>
+          <summary>{t('sharing.error_raw')}</summary>
+          <pre>{raw}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+const noRefresh = async () => {};
+
+function AttemptTimeline({ entry }: { entry: UsageEntry }) {
+  const { t } = useTranslation();
+  const trace = entry.trace_id || entry.request_id;
+  const [state, setState] = useState<{ items: UsageEntry[]; error: string; loading: boolean }>({
+    items: [],
+    error: '',
+    loading: true,
+  });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ items: [], error: '', loading: true });
+    sharingApi.usageAttempts(trace, controller.signal).then(
+      (result) => {
+        if (!controller.signal.aborted)
+          setState({ items: result.items ?? [], error: '', loading: false });
+      },
+      (error) => {
+        if (controller.signal.aborted) return;
+        setState({
+          items: [],
+          error: error instanceof Error ? error.message : String(error),
+          loading: false,
+        });
+      }
+    );
+    return () => controller.abort();
+  }, [trace]);
+  const items = state.items.length ? state.items : [entry];
+  return (
+    <DetailSection
+      title={t('sharing.attempts_title')}
+      meta={t('sharing.balanced_attempts', { count: Math.max(items.length, entry.attempts || 1) })}
+    >
+      <LoadState loading={state.loading} error={state.error} />
+      <ol className={styles.timeline}>
+        {items.map((attempt, index) => {
+          const kind = entryStatus(attempt);
+          const current = attempt.id === entry.id;
+          const message = kind === 'ok' ? '' : errorMessage(attempt.error);
+          return (
+            <li
+              key={attempt.id}
+              className={`${styles.timelineItem} ${
+                kind === 'ok'
+                  ? styles.timelineOk
+                  : kind === 'fail'
+                    ? styles.timelineFail
+                    : styles.timelineMuted
+              } ${current ? styles.timelineCurrent : ''}`}
+            >
+              <div className={styles.timelineHead}>
+                <span className={styles.timelineIndex}>
+                  {t('sharing.attempt_index', { index: index + 1 })}
+                </span>
+                <span className={`${styles.mono} ${styles.timelineModel}`}>
+                  {servingModelId(attempt) || attempt.model}
+                </span>
+                <RequestStatus status={attempt.status} failed={attempt.failed} />
+              </div>
+              <div className={styles.cellSecondary}>
+                {[
+                  attempt.credential_name ? credentialDisplayName(attempt.credential_name) : '',
+                  attempt.owner ? `@${attempt.owner}` : '',
+                  `${t('sharing.latency_total_short')} ${duration(attempt.latency_ms)}`,
+                  attempt.ttft_ms > 0
+                    ? `${t('sharing.latency_ttft_short')} ${duration(attempt.ttft_ms)}`
+                    : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </div>
+              {message && (
+                <div className={styles.timelineError} title={message}>
+                  {message}
+                </div>
+              )}
+              {kind !== 'ok' && index < items.length - 1 && (
+                <div className={styles.timelineNext}>{t('sharing.attempt_switched')}</div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </DetailSection>
+  );
+}
+
 function UsageDetailSheet({
   entry,
   showConsumer,
@@ -148,20 +304,19 @@ function UsageDetailSheet({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  // Canonical accounting: cache buckets are subsets of input, reasoning is a
-  // subset of output; the total is input + output with no double counting.
-  const inputParts = entry
-    ? [
-        entry.cache_read_tokens > 0
-          ? t('sharing.token_cache', { count: number(entry.cache_read_tokens) })
-          : '',
-        entry.cache_creation_tokens > 0
-          ? t('sharing.token_cache_write', { count: number(entry.cache_creation_tokens) })
-          : '',
-      ].filter(Boolean)
-    : [];
+  const { copy } = useSharingActions(noRefresh);
   const cacheRate = entry ? cacheHitRate(entry) : null;
   const rate = entry ? tokensPerSecond(entry) : null;
+  const kind = entry ? entryStatus(entry) : 'ok';
+  const serving = entry ? servingModelId(entry) : '';
+  const idValue = (value: string) => (
+    <span className={styles.idValue}>
+      <span className={styles.mono}>{value}</span>
+      <button type="button" className={styles.linkButton} onClick={() => void copy(value)}>
+        {t('common.copy')}
+      </button>
+    </span>
+  );
   return (
     <Sheet
       open={!!entry}
@@ -176,93 +331,143 @@ function UsageDetailSheet({
       }
     >
       {entry && (
-        <dl className={styles.fieldGrid}>
-          <Field label={t('sharing.status_label')}>
-            <div>
+        <div className={styles.detailBody}>
+          <div
+            className={`${styles.outcomeBanner} ${
+              kind === 'ok'
+                ? styles.outcomeOk
+                : kind === 'fail'
+                  ? styles.outcomeFail
+                  : styles.outcomeMuted
+            }`}
+          >
+            <div className={styles.outcomeMain}>
               <RequestStatus status={entry.status} failed={entry.failed} />
-              {entry.status === 499 && (
-                <div className={styles.cellSecondary}>{t('sharing.status_interrupted_hint')}</div>
+              {entry.balanced && <BalancedTag attempts={entry.attempts} />}
+            </div>
+            <div className={styles.outcomeStats}>
+              <span>
+                {t('sharing.latency_total_short')} <strong>{duration(entry.latency_ms)}</strong>
+              </span>
+              {entry.ttft_ms > 0 && (
+                <span>
+                  {t('sharing.latency_ttft_short')} <strong>{duration(entry.ttft_ms)}</strong>
+                </span>
+              )}
+              {rate !== null && (
+                <span>
+                  <strong>{rate}</strong> t/s
+                </span>
               )}
             </div>
-          </Field>
-          <Field label={t('sharing.field_latency')}>{duration(entry.latency_ms)}</Field>
-          {entry.ttft_ms > 0 && (
-            <Field label={t('sharing.field_ttft')}>{duration(entry.ttft_ms)}</Field>
-          )}
-          {showConsumer && <Field label={t('sharing.consumer')}>{entry.consumer}</Field>}
-          <Field label={t('sharing.field_key')}>{entry.key_name || '—'}</Field>
-          <Field label={t('sharing.channel')}>{entry.channel}</Field>
-          {entry.owner && entry.owner !== entry.consumer && (
-            <Field label={t('sharing.owner_label')}>{entry.owner}</Field>
-          )}
-          <Field label={t('sharing.field_credential')}>
-            {entry.credential_name ? credentialDisplayName(entry.credential_name) : '—'}
-          </Field>
-          <Field label={t('sharing.field_model')}>
-            <span className={styles.mono}>
-              {entry.model}
-              {servingModelId(entry) && (
-                <span className={styles.cellSecondary}>（{servingModelId(entry)}）</span>
-              )}
-            </span>
-          </Field>
-          {entry.upstream_model && entry.upstream_model !== entry.model && (
-            <Field label={t('sharing.field_upstream_model')}>
-              <span className={styles.mono}>{entry.upstream_model}</span>
-            </Field>
-          )}
-          <Field label={t('sharing.field_tokens')}>
-            {entry.tokens_known ? (
-              <>
-                <div>
-                  {t('sharing.token_input')} {number(entry.input_tokens)}
-                  {inputParts.length > 0 && (
-                    <span className={styles.cellSecondary}>（{inputParts.join(' · ')}）</span>
-                  )}
-                </div>
-                <div>
-                  {t('sharing.token_output')} {number(entry.output_tokens)}
-                  {entry.reasoning_tokens > 0 && (
-                    <span className={styles.cellSecondary}>
-                      （{t('sharing.token_reasoning', { count: number(entry.reasoning_tokens) })}）
-                    </span>
-                  )}
-                </div>
-              </>
-            ) : (
-              t('sharing.unknown')
+            {kind === 'interrupted' && (
+              <p className={styles.cellSecondary}>{t('sharing.status_interrupted_hint')}</p>
             )}
-          </Field>
-          {cacheRate !== null && (
-            <Field label={t('sharing.field_cache_hit')}>{cacheRate.toFixed(1)}%</Field>
+            {kind === 'fail' && <ErrorBlock body={entry.error} />}
+          </div>
+
+          {entry.balanced && <AttemptTimeline entry={entry} />}
+
+          <DetailSection title={t('sharing.section_call')}>
+            <dl className={styles.fieldGrid}>
+              {showConsumer && <Field label={t('sharing.consumer')}>@{entry.consumer}</Field>}
+              <Field label={t('sharing.field_key')}>{entry.key_name || '—'}</Field>
+              <Field label={t('sharing.field_model')}>
+                <span className={styles.mono}>{entry.model}</span>
+              </Field>
+              {serving && (
+                <Field label={t('sharing.field_serving_model')}>
+                  <span className={styles.mono}>{serving}</span>
+                </Field>
+              )}
+              {entry.upstream_model && entry.upstream_model !== entry.model && (
+                <Field label={t('sharing.field_upstream_model')}>
+                  <span className={styles.mono}>{entry.upstream_model}</span>
+                </Field>
+              )}
+              <Field label={t('sharing.channel')}>
+                {entry.channel || '—'}
+                {entry.owner && entry.owner !== entry.consumer && (
+                  <span className={styles.cellSecondary}>（@{entry.owner}）</span>
+                )}
+              </Field>
+              <Field label={t('sharing.field_credential')}>
+                {entry.credential_name ? credentialDisplayName(entry.credential_name) : '—'}
+              </Field>
+              {entry.reasoning_effort && (
+                <Field label={t('sharing.field_reasoning_effort')}>
+                  <span className={styles.mono}>{entry.reasoning_effort}</span>
+                </Field>
+              )}
+            </dl>
+          </DetailSection>
+
+          {(entry.tokens_known || kind === 'ok') && (
+            <DetailSection title={t('sharing.field_tokens')}>
+              {entry.tokens_known ? (
+                <div className={styles.tokenTiles}>
+                  <div className={styles.tokenTile}>
+                    <span className={styles.statLabel}>{t('sharing.token_input')}</span>
+                    <strong>{number(entry.input_tokens)}</strong>
+                    {entry.cache_read_tokens > 0 && (
+                      <span className={styles.cellSecondary}>
+                        {t('sharing.token_cache', { count: number(entry.cache_read_tokens) })}
+                      </span>
+                    )}
+                    {entry.cache_creation_tokens > 0 && (
+                      <span className={styles.cellSecondary}>
+                        {t('sharing.token_cache_write', {
+                          count: number(entry.cache_creation_tokens),
+                        })}
+                      </span>
+                    )}
+                  </div>
+                  <div className={styles.tokenTile}>
+                    <span className={styles.statLabel}>{t('sharing.token_output')}</span>
+                    <strong>{number(entry.output_tokens)}</strong>
+                    {entry.reasoning_tokens > 0 && (
+                      <span className={styles.cellSecondary}>
+                        {t('sharing.token_reasoning', { count: number(entry.reasoning_tokens) })}
+                      </span>
+                    )}
+                  </div>
+                  {cacheRate !== null && (
+                    <div className={styles.tokenTile}>
+                      <span className={styles.statLabel}>{t('sharing.field_cache_hit')}</span>
+                      <strong>{cacheRate.toFixed(1)}%</strong>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className={styles.cellSecondary}>{t('sharing.unknown')}</p>
+              )}
+            </DetailSection>
           )}
-          {entry.reasoning_effort && (
-            <Field label={t('sharing.field_reasoning_effort')}>
-              <span className={styles.mono}>{entry.reasoning_effort}</span>
-            </Field>
+
+          {(entry.trace_id || entry.request_id) && (
+            <DetailSection title={t('sharing.section_ids')}>
+              <dl className={styles.fieldGrid}>
+                {entry.trace_id && (
+                  <Field label={t('sharing.field_trace')}>{idValue(entry.trace_id)}</Field>
+                )}
+                {entry.request_id && (
+                  <Field label={t('sharing.field_request')}>{idValue(entry.request_id)}</Field>
+                )}
+              </dl>
+            </DetailSection>
           )}
-          {rate !== null && <Field label={t('sharing.field_generation_speed')}>{rate} t/s</Field>}
-          {entry.trace_id && (
-            <Field label={t('sharing.field_trace')}>
-              <span className={styles.mono}>{entry.trace_id}</span>
-            </Field>
-          )}
-          {entry.request_id && (
-            <Field label={t('sharing.field_request')}>
-              <span className={styles.mono}>{entry.request_id}</span>
-            </Field>
-          )}
-        </dl>
+        </div>
       )}
     </Sheet>
   );
 }
 
-function RequestStatusPill({ kind }: { kind: 'fail' | 'interrupted' }) {
+export function BalancedTag({ attempts }: { attempts?: number }) {
   const { t } = useTranslation();
   return (
-    <span className={kind === 'interrupted' ? styles.pillInterrupted : styles.pillFail}>
-      {kind === 'interrupted' ? t('sharing.status_interrupted') : t('sharing.status_failed')}
+    <span className={styles.balancedTag} title={t('sharing.balanced_tag_hint')}>
+      {t('sharing.auto_balance')}
+      {attempts && attempts > 1 ? ` · ${t('sharing.balanced_attempts', { count: attempts })}` : ''}
     </span>
   );
 }
@@ -273,6 +478,13 @@ export const servingModelId = (entry: Partial<Pick<UsageEntry, 'model' | 'channe
   entry.model && entry.channel && !entry.model.startsWith(`${entry.channel}/`)
     ? `${entry.channel}/${entry.model}`
     : '';
+
+const tokenLine = (entry: UsageEntry) =>
+  `${number(entry.input_tokens)}${
+    entry.cache_read_tokens > 0 ? `（${number(entry.cache_read_tokens)}）` : ''
+  } / ${number(entry.output_tokens)}${
+    entry.reasoning_tokens > 0 ? `（${number(entry.reasoning_tokens)}）` : ''
+  }`;
 
 export function UsageLogRow({
   entry,
@@ -286,55 +498,39 @@ export function UsageLogRow({
   const { t } = useTranslation();
   const status = entryStatus(entry);
   const rate = tokensPerSecond(entry);
+  const serving = servingModelId(entry);
   const latencyClass =
     status === 'fail'
       ? styles.latencyFail
       : status === 'interrupted'
         ? styles.latencyInterrupted
         : '';
+  const error = status === 'fail' ? errorMessage(entry.error) : '';
   return (
     <TableRow className={styles.clickableRow} onClick={onOpen}>
       <TableCell>
-        <div className={`${styles.cellPrimary} ${styles.mono}`}>{date(entry.at)}</div>
-        {status !== 'ok' && (
-          <div className={styles.logStatusLine}>
-            <RequestStatusPill kind={status} />{' '}
-            <span className={styles.cellSecondary}>{entry.status}</span>
-          </div>
-        )}
+        <div className={`${styles.cellPrimary} ${styles.mono}`}>{compactDate(entry.at)}</div>
+        <div className={styles.cellSecondary}>
+          {t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}
+          {rate !== null ? ` · ${rate} t/s` : ''}
+        </div>
       </TableCell>
       <TableCell>
         <div className={styles.cellPrimary}>{entry.key_name || '—'}</div>
-        {showConsumer ? (
-          <div className={styles.cellSecondary}>@{entry.consumer}</div>
-        ) : (
-          <div className={styles.cellSecondary}>{entry.channel}</div>
-        )}
+        {showConsumer && <div className={styles.cellSecondary}>@{entry.consumer}</div>}
       </TableCell>
       <TableCell>
-        <div className={`${styles.cellPrimary} ${styles.mono}`}>
-          {entry.model}
-          {servingModelId(entry) && (
-            <span className={styles.cellSecondary}>（{servingModelId(entry)}）</span>
+        <div className={`${styles.cellPrimary} ${styles.mono}`}>{entry.model}</div>
+        <div className={styles.modelMeta}>
+          {entry.balanced && <BalancedTag attempts={entry.attempts} />}
+          {serving && (
+            <span className={`${styles.cellSecondary} ${styles.mono}`}>（{serving}）</span>
           )}
         </div>
-        {showConsumer && <div className={styles.cellSecondary}>{entry.channel}</div>}
-      </TableCell>
-      <TableCell>
-        <div className={styles.cellPrimary}>
-          {t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}
-        </div>
-        {rate !== null && <div className={styles.cellSecondary}>{rate} t/s</div>}
       </TableCell>
       <TableCell>
         {entry.tokens_known ? (
-          <div className={`${styles.cellPrimary} ${styles.mono}`}>
-            {`${number(entry.input_tokens)}${
-              entry.cache_read_tokens > 0 ? `（${number(entry.cache_read_tokens)}）` : ''
-            } / ${number(entry.output_tokens)}${
-              entry.reasoning_tokens > 0 ? `（${number(entry.reasoning_tokens)}）` : ''
-            }`}
-          </div>
+          <div className={`${styles.cellPrimary} ${styles.mono}`}>{tokenLine(entry)}</div>
         ) : (
           <span className={styles.cellSecondary}>{t('sharing.unknown')}</span>
         )}
@@ -350,6 +546,14 @@ export function UsageLogRow({
             {t('sharing.latency_total_short')} {duration(entry.latency_ms)}
           </div>
         </div>
+      </TableCell>
+      <TableCell>
+        <RequestStatus status={entry.status} failed={entry.failed} />
+        {error && (
+          <div className={styles.rowError} title={error}>
+            {error}
+          </div>
+        )}
       </TableCell>
     </TableRow>
   );
@@ -367,19 +571,24 @@ function UsageLogCard({
   const { t } = useTranslation();
   const status = entryStatus(entry);
   const rate = tokensPerSecond(entry);
+  const serving = servingModelId(entry);
+  const error = status === 'fail' ? errorMessage(entry.error) : '';
   return (
-    <button type="button" className={styles.keyCard} onClick={onOpen}>
+    <button type="button" className={`${styles.keyCard} ${styles.usageCard}`} onClick={onOpen}>
       <span className={styles.keyCardHead}>
-        <span className={`${styles.cellPrimary} ${styles.mono}`}>
-          {entry.model}
-          {servingModelId(entry) && (
-            <span className={styles.cellSecondary}>（{servingModelId(entry)}）</span>
+        <span className={`${styles.cellPrimary} ${styles.mono}`}>{entry.model}</span>
+        <RequestStatus status={entry.status} failed={entry.failed} />
+      </span>
+      {(entry.balanced || serving) && (
+        <span className={styles.modelMeta}>
+          {entry.balanced && <BalancedTag attempts={entry.attempts} />}
+          {serving && (
+            <span className={`${styles.cellSecondary} ${styles.mono}`}>（{serving}）</span>
           )}
         </span>
-      </span>
-      <span className={styles.cellSecondary}>{date(entry.at)}</span>
+      )}
       <span className={styles.cellSecondary}>
-        {entry.key_name || '—'}
+        {compactDate(entry.at)} · {entry.key_name || '—'}
         {showConsumer ? ` · @${entry.consumer}` : ''} · {entry.channel}
       </span>
       <span className={styles.cellSecondary}>
@@ -397,12 +606,7 @@ function UsageLogCard({
           : ''}
         {` · ${t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}`}
       </span>
-      {status !== 'ok' && (
-        <span className={styles.logStatusLine}>
-          <RequestStatusPill kind={status} />{' '}
-          <span className={styles.cellSecondary}>{entry.status}</span>
-        </span>
-      )}
+      {error && <span className={styles.rowError}>{error}</span>}
     </button>
   );
 }
@@ -430,6 +634,10 @@ export function UsagePage() {
   const appliedConsumer = scope === 'mine' ? '' : params.get('consumer') || '';
   const appliedFrom = params.get('from') || '';
   const appliedTo = params.get('to') || '';
+  const outcome: UsageOutcome =
+    params.get('outcome') === 'ok' || params.get('outcome') === 'failed'
+      ? (params.get('outcome') as UsageOutcome)
+      : '';
 
   const [model, setModel] = useState(params.get('model') || '');
   const [channelID, setChannelID] = useState(params.get('channel_id') || '');
@@ -504,7 +712,10 @@ export function UsagePage() {
   } = useSharingData(
     useCallback(
       (signal: AbortSignal) =>
-        sharingApi.summary(Object.fromEntries(new URLSearchParams(filterQuery)), signal),
+        sharingApi.summary(
+          Object.fromEntries(new URLSearchParams(withoutOutcome(filterQuery))),
+          signal
+        ),
       [filterQuery]
     ),
     { keepPreviousData: false, headerRefresh: false }
@@ -614,6 +825,7 @@ export function UsagePage() {
     const next = new URLSearchParams();
     if (scope !== 'mine') next.set('scope', scope);
     if (pageSize !== 50) next.set('page_size', String(pageSize));
+    if (outcome) next.set('outcome', outcome);
     if (resolvedModel) next.set('model', resolvedModel);
     if (channelID) next.set('channel_id', channelID);
     if (resolvedKey.keyId) next.set('key_id', resolvedKey.keyId);
@@ -657,6 +869,14 @@ export function UsagePage() {
     setParams(next);
   };
 
+  const setOutcome = (value: UsageOutcome) => {
+    const next = new URLSearchParams(params);
+    next.delete('page');
+    if (value) next.set('outcome', value);
+    else next.delete('outcome');
+    setParams(next);
+  };
+
   const setPageSize = (size: number) => {
     const next = new URLSearchParams(params);
     if (size === 50) next.delete('page_size');
@@ -682,6 +902,10 @@ export function UsagePage() {
         .filter(Boolean)
         .join('；')
     : undefined;
+  const cacheRate =
+    total && total.input_tokens > 0 && total.cache_read_tokens > 0
+      ? (total.cache_read_tokens / total.input_tokens) * 100
+      : null;
 
   const showConsumer = scope !== 'mine';
 
@@ -775,42 +999,79 @@ export function UsagePage() {
             </Button>
           </div>
         </div>
-        <div className={styles.statPills}>
-          <span className={styles.statPill} title={t('sharing.hint_executions')}>
-            <span className={styles.statPillLabel}>{t('sharing.pill_calls')}</span>
-            <span className={styles.statPillValue}>{total ? number(total.executions) : '—'}</span>
-          </span>
-          <span className={styles.statPill} title={tokenHint}>
-            <span className={styles.statPillLabel}>{t('sharing.pill_tokens')}</span>
-            <span className={styles.statPillValue}>
-              {total ? formatCompactNumber(total.total_tokens) : '—'}
-            </span>
-          </span>
-          <span
-            className={`${styles.statPill} ${
-              failureRate !== null && failureRate > 0
-                ? styles.statPillDanger
-                : styles.statPillSuccess
-            }`}
-            title={
-              total
-                ? t('sharing.hint_failures_detail', {
-                    failures: number(total.failures),
-                    executions: number(total.executions),
-                  })
-                : undefined
-            }
-          >
-            <span className={styles.statPillLabel}>{t('sharing.pill_failure_rate')}</span>
-            <span className={styles.statPillValue}>
-              {failureRate !== null ? `${failureRate.toFixed(1)}%` : '—'}
-            </span>
+      </Card>
+      <div className={styles.usageStats}>
+        <div className={styles.usageStat} title={t('sharing.hint_executions')}>
+          <span className={styles.statLabel}>{t('sharing.pill_calls')}</span>
+          <strong className={styles.statValue}>{total ? number(total.executions) : '—'}</strong>
+          <span className={styles.statHint}>
+            {total && total.failovers
+              ? t('sharing.stat_failovers', { count: number(total.failovers) })
+              : ' '}
           </span>
         </div>
-      </Card>
+        <div
+          className={`${styles.usageStat} ${
+            failureRate !== null && failureRate > 0 ? styles.usageStatDanger : ''
+          }`}
+        >
+          <span className={styles.statLabel}>{t('sharing.success_rate')}</span>
+          <strong className={styles.statValue}>
+            {failureRate !== null ? `${(100 - failureRate).toFixed(1)}%` : '—'}
+          </strong>
+          <span className={styles.statHint}>
+            {total
+              ? t('sharing.hint_failures_detail', {
+                  failures: number(total.failures),
+                  executions: number(total.executions),
+                })
+              : ' '}
+          </span>
+        </div>
+        <div className={styles.usageStat} title={tokenHint}>
+          <span className={styles.statLabel}>{t('sharing.pill_tokens')}</span>
+          <strong className={styles.statValue}>
+            {total ? formatCompactNumber(total.total_tokens) : '—'}
+          </strong>
+          <span className={styles.statHint}>
+            {total
+              ? t('sharing.hint_tokens_io', {
+                  input: formatCompactNumber(total.input_tokens),
+                  output: formatCompactNumber(total.output_tokens),
+                })
+              : ' '}
+          </span>
+        </div>
+        <div className={styles.usageStat}>
+          <span className={styles.statLabel}>{t('sharing.field_cache_hit')}</span>
+          <strong className={styles.statValue}>
+            {cacheRate !== null ? `${cacheRate.toFixed(1)}%` : '—'}
+          </strong>
+          <span className={styles.statHint}>
+            {total && total.cache_read_tokens > 0
+              ? t('sharing.token_cache', { count: formatCompactNumber(total.cache_read_tokens) })
+              : ' '}
+          </span>
+        </div>
+      </div>
       <Card title={t('sharing.trend_title')}>
         {summaryLoading && !summary ? null : <DailyTrend groups={groups} />}
       </Card>
+      <div className={styles.listToolbar}>
+        <h2 className={styles.listTitle}>{t('sharing.records_title')}</h2>
+        <div className={styles.segmented}>
+          {(['', 'ok', 'failed'] as const).map((value) => (
+            <button
+              key={value || 'all'}
+              type="button"
+              className={`${styles.segmentedItem} ${outcome === value ? styles.active : ''}`}
+              onClick={() => setOutcome(value)}
+            >
+              {t('sharing.outcome_' + (value || 'all'))}
+            </button>
+          ))}
+        </div>
+      </div>
       <LoadState loading={loading || summaryLoading} error={error || summaryError} />
       {!loading && !error && !usage?.items.length && (
         <EmptyState title={t('sharing.no_records')} description={t('sharing.no_records_hint')} />
@@ -831,7 +1092,7 @@ export function UsagePage() {
           <Table>
             <TableHeader>
               <TableRow>
-                {['time', 'key_label', 'model', 'col_mode', 'col_tokens', 'col_latency'].map(
+                {['time', 'key_label', 'model', 'col_tokens', 'col_latency', 'status_label'].map(
                   (key) => (
                     <TableHead key={key}>{t('sharing.' + key)}</TableHead>
                   )

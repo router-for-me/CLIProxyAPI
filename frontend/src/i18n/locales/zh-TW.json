@@ -2640,6 +2640,22 @@
     "view_usage": "查看用量",
     "visibility_label": "可見性",
     "withdraw": "下架",
-    "withdrawn": "已下架"
+    "withdrawn": "已下架",
+    "balanced_attempts": "嘗試 {{count}} 次",
+    "balanced_tag_hint": "此 Key 已開啟均勻負載，失敗時自動切換到其他同模型頻道",
+    "attempts_title": "呼叫過程",
+    "attempt_index": "第 {{index}} 次",
+    "attempt_switched": "切換下一個頻道",
+    "error_title": "錯誤訊息",
+    "error_raw": "查看原始回應",
+    "no_error_body": "上游未回傳錯誤內容",
+    "section_call": "呼叫資訊",
+    "section_ids": "追蹤",
+    "field_serving_model": "實際模型",
+    "records_title": "呼叫紀錄",
+    "outcome_all": "全部",
+    "outcome_ok": "成功",
+    "outcome_failed": "失敗",
+    "stat_failovers": "另有 {{count}} 次自動切換"
   }
 }

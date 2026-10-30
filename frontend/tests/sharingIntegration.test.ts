@@ -7,7 +7,12 @@ import { I18nextProvider } from 'react-i18next';
 import english from '../src/i18n/locales/en.json';
 import { AccountLoginForm } from '../src/features/sharing/AccountLoginForm';
 import { AccountPage } from '../src/features/sharing/AccountPage';
-import { RequestStatus, UsageLogRow, cacheHitRate } from '../src/features/sharing/UsagePage';
+import {
+  RequestStatus,
+  UsageLogRow,
+  cacheHitRate,
+  errorMessage,
+} from '../src/features/sharing/UsagePage';
 import { obfuscatedStorage } from '../src/services/storage/secureStorage';
 import { readFileSync } from 'node:fs';
 import { apiClient } from '../src/services/api/client';
@@ -323,6 +328,66 @@ describe('official frontend account integration', () => {
     expect(interrupted).toContain('Request interrupted');
     expect(interrupted).toContain('499');
     expect(interrupted).not.toContain('Failed');
+  });
+
+  test('usage log row tags even-load calls and surfaces the failure message', () => {
+    const wrap = (element: ReturnType<typeof createElement>) =>
+      render(createElement('table', null, createElement('tbody', null, element)));
+    const base = {
+      id: 'u3',
+      request_id: 'req-3',
+      trace_id: 'trace-3',
+      at: '2026-10-10T00:05:27Z',
+      consumer: 'alice',
+      key_id: 'k1',
+      key_name: 'phone',
+      owner: 'bob',
+      channel_id: 'ch1',
+      channel: 'bob-kimi',
+      credential_id: 'c1',
+      credential_name: 'bob-kimi-codex#1-internal.json',
+      provider: 'codex',
+      model: 'kimi-k3',
+      upstream_model: 'kimi-k3',
+      endpoint: 'POST /v1/chat/completions',
+      stream: false,
+      failed: true,
+      status: 429,
+      latency_ms: 300,
+      ttft_ms: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      total_tokens: 0,
+      tokens_known: false,
+      balanced: true,
+      attempts: 3,
+      error: '{"error":{"message":"rate limit reached","type":"rate_limit"}}',
+    };
+    const markup = wrap(createElement(UsageLogRow, { entry: base, showConsumer: false, onOpen: () => {} }));
+    expect(markup).toContain('Even load');
+    expect(markup).toContain('3 attempts');
+    expect(markup).toContain('rate limit reached');
+    expect(markup).not.toContain('rate_limit"');
+
+    const plain = wrap(
+      createElement(UsageLogRow, {
+        entry: { ...base, balanced: false, attempts: undefined, failed: false, status: 200 },
+        showConsumer: false,
+        onOpen: () => {},
+      })
+    );
+    expect(plain).not.toContain('Even load');
+    expect(plain).not.toContain('rate limit reached');
+  });
+
+  test('error message extraction prefers the JSON message and falls back to raw text', () => {
+    expect(errorMessage('{"error":{"message":"bad key"}}')).toBe('bad key');
+    expect(errorMessage('{"detail":"nope"}')).toBe('nope');
+    expect(errorMessage('upstream closed')).toBe('upstream closed');
+    expect(errorMessage('')).toBe('');
   });
 
   test('usage log row annotates cache and reasoning as subsets of input and output', () => {

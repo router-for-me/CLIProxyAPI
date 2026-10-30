@@ -30,6 +30,8 @@ type Attribution struct {
 	ChannelID      string
 	Channel        string
 	CredentialName string
+	// Balanced marks calls made with a key that has even load balancing enabled.
+	Balanced bool
 }
 
 type Record struct {

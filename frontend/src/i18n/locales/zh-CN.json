@@ -2614,6 +2614,22 @@
     "view_usage": "查看用量",
     "visibility_label": "可见性",
     "withdraw": "下架",
-    "withdrawn": "已下架"
+    "withdrawn": "已下架",
+    "balanced_attempts": "尝试 {{count}} 次",
+    "balanced_tag_hint": "该 Key 开启了均匀负载，失败时自动切换到其他同模型渠道",
+    "attempts_title": "调用过程",
+    "attempt_index": "第 {{index}} 次",
+    "attempt_switched": "切换下一个渠道",
+    "error_title": "错误信息",
+    "error_raw": "查看原始响应",
+    "no_error_body": "上游未返回错误内容",
+    "section_call": "调用信息",
+    "section_ids": "追踪",
+    "field_serving_model": "实际模型",
+    "records_title": "调用记录",
+    "outcome_all": "全部",
+    "outcome_ok": "成功",
+    "outcome_failed": "失败",
+    "stat_failovers": "另有 {{count}} 次自动切换"
   }
 }

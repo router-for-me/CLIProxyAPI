@@ -194,6 +194,8 @@ export const sharingApi = {
     indexAwareGet<HistoryPage<UsageEntry>>(sharingPath('/usage'), params, signal),
   summary: (params: Record<string, string | number>, signal?: AbortSignal) =>
     indexAwareGet<{ total: Summary; groups: Summary[] }>(sharingPath('/usage/summary'), params, signal),
+  usageAttempts: (trace: string, signal?: AbortSignal) =>
+    indexAwareGet<{ items: UsageEntry[] }>(sharingPath('/usage/attempts'), { trace }, signal),
   audits: (params: Record<string, string | number>, signal?: AbortSignal) =>
     indexAwareGet<HistoryPage<AuditEntry>>(sharingPath('/audit'), params, signal),
   credential: (routeID: string, body: Record<string, unknown>) =>

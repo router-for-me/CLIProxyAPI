@@ -133,6 +133,12 @@ export interface UsageEntry {
   tokens_known: boolean;
   /** Translated upstream thinking level (low/high/…), empty when the model did not set one. */
   reasoning_effort?: string;
+  /** Made with an even-load-balancing key; attempts share the trace ID. */
+  balanced?: boolean;
+  /** Upstream failure body (truncated), present on failed attempts. */
+  error?: string;
+  /** Total attempts in this balanced request's trace (list responses only). */
+  attempts?: number;
 }
 
 export interface Summary {
@@ -151,6 +157,8 @@ export interface Summary {
   cache_creation_tokens: number;
   total_tokens: number;
   unknown_token_records: number;
+  /** Earlier failed balanced attempts folded into their final attempt (total only). */
+  failovers?: number;
 }
 
 export interface AuditEntry {

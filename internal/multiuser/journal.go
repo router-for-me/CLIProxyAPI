@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -57,6 +58,28 @@ type UsageEvent struct {
 	TokenBreakdown      usage.TokenBreakdown `json:"token_breakdown"`
 	// ReasoningEffort is the translated upstream thinking level (low/high/…), when known.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Balanced marks attempts made with an even-load-balancing key; one client
+	// request may produce several attempts sharing the trace ID.
+	Balanced bool `json:"balanced,omitempty"`
+	// Error is the upstream failure body, truncated to maxUsageErrorBytes.
+	Error string `json:"error,omitempty"`
+	// Attempts is query-time only: the number of balanced attempts in this
+	// record's trace that match the same filter. It is never persisted.
+	Attempts int `json:"attempts,omitempty"`
+}
+
+const maxUsageErrorBytes = 4096
+
+// truncateUTF8 cuts s to at most limit bytes without splitting a rune.
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 type CallEvent struct {
@@ -84,12 +107,14 @@ type Filter struct {
 	CredentialID string
 	KeyID        string
 	Model        string
-	Actor        string
-	Action       string
-	From         time.Time
-	To           time.Time
-	Page         int
-	PageSize     int
+	// Outcome narrows usage to "ok" or "failed" attempts; empty keeps both.
+	Outcome  string
+	Actor    string
+	Action   string
+	From     time.Time
+	To       time.Time
+	Page     int
+	PageSize int
 }
 
 func (s *Store) appendEntry(at time.Time, entry journalEntry) error {
@@ -157,6 +182,10 @@ func (s *Store) HandleUsage(ctx context.Context, record usage.Record) {
 		TokensKnown:     d.TotalTokens != 0 || d.InputTokens != 0 || d.OutputTokens != 0,
 		TokenBreakdown:  d.TokenBreakdown,
 		ReasoningEffort: record.ReasoningEffort,
+		Balanced:        a.Balanced,
+	}
+	if record.Failed {
+		event.Error = truncateUTF8(strings.TrimSpace(record.Fail.Body), maxUsageErrorBytes)
 	}
 	if d.TokenBreakdown.Valid() && d.TokenBreakdown.Quality == usage.TokenAccountingQualityComplete {
 		b := d.TokenBreakdown
@@ -183,7 +212,8 @@ func matchUsage(event UsageEvent, filter Filter) bool {
 	return within(event.At, filter) && (filter.Consumer == "" || event.Consumer == filter.Consumer) &&
 		(filter.Owner == "" || event.Owner == filter.Owner) && (filter.ChannelID == "" || event.ChannelID == filter.ChannelID) &&
 		(filter.CredentialID == "" || event.CredentialID == filter.CredentialID) && (filter.KeyID == "" || event.KeyID == filter.KeyID) &&
-		matchModelQuery(event, filter.Model)
+		matchModelQuery(event, filter.Model) &&
+		(filter.Outcome == "" || event.Failed == (filter.Outcome == "failed"))
 }
 
 // Parenthesized channel/model suffixes pin bare-model calls to their serving
@@ -270,6 +300,9 @@ type Summary struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 	TotalTokens         int64  `json:"total_tokens"`
 	UnknownTokenRecords int64  `json:"unknown_token_records"`
+	// Failovers counts earlier failed attempts folded into balanced requests;
+	// only the overall total carries it.
+	Failovers int64 `json:"failovers,omitempty"`
 }
 
 func (s *Store) Summary(filter Filter) (Summary, []Summary, error) {

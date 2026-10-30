@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS events (
  failed INTEGER NOT NULL, known INTEGER NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL,
  reasoning INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_create INTEGER NOT NULL, total INTEGER NOT NULL,
  latency INTEGER NOT NULL, ttft INTEGER NOT NULL,
+ balanced INTEGER NOT NULL, superseded INTEGER NOT NULL,
  PRIMARY KEY (source, position, kind)
 );
 `
@@ -55,10 +56,14 @@ CREATE INDEX IF NOT EXISTS usage_trace ON events(trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_consumer_trace ON events(consumer,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_owner_trace ON events(owner,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_performance ON events(hour,model,failed,latency,ttft,output) WHERE kind=1;
-CREATE INDEX IF NOT EXISTS usage_summary ON events(day,consumer,owner,channel,model,trace,failed,known,input,output,reasoning,cache_read,cache_create,total,at,channel_id,credential_id,key_id,model_lower,serving_lower) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_summary ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,at,channel_id,credential_id,key_id,model_lower,serving_lower) WHERE kind=1;
 `
 
-const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+
+// supersedeAttemptsSQL hides earlier failed attempts of an even-load-balanced
+// request once a later attempt of the same trace exists.
+const supersedeAttemptsSQL = `UPDATE events SET superseded=1 WHERE kind=1 AND trace=? AND balanced=1 AND failed=1 AND superseded=0`
 
 type journalIndex struct {
 	store    *Store
@@ -197,10 +202,32 @@ func (j *journalIndex) open() error {
 	}
 	j.db.SetMaxOpenConns(6)
 	j.db.SetMaxIdleConns(6)
+	if err = j.resetOutdatedSchema(); err != nil {
+		return fmt.Errorf("open journal query index: %w", err)
+	}
 	if _, err = j.db.ExecContext(j.ctx, journalSchema); err != nil {
 		return fmt.Errorf("open journal query index: %w", err)
 	}
 	return os.Chmod(path, 0o600)
+}
+
+// resetOutdatedSchema drops a derived index built by an older column layout so
+// the journal is reimported with the current one.
+func (j *journalIndex) resetOutdatedSchema() error {
+	var count int
+	if err := j.db.QueryRowContext(j.ctx, "SELECT COUNT(*) FROM pragma_table_info('events')").Scan(&count); err != nil {
+		return err
+	}
+	var current int
+	if err := j.db.QueryRowContext(j.ctx, "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='superseded'").Scan(&current); err != nil {
+		return err
+	}
+	if count == 0 || current == 1 {
+		return nil
+	}
+	log.Info("multi-user: rebuilding journal query index for a new schema")
+	_, err := j.db.ExecContext(j.ctx, "DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS sources;")
+	return err
 }
 
 // snapshot holds the append lock only long enough to establish complete-record boundaries.
@@ -360,6 +387,11 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 				return errPrepare
 			}
 			defer func() { _ = statement.Close() }()
+			supersede, errPrepare := tx.PrepareContext(j.ctx, supersedeAttemptsSQL)
+			if errPrepare != nil {
+				return errPrepare
+			}
+			defer func() { _ = supersede.Close() }()
 			for n := 0; n < 2048 && offset < source.size; n++ {
 				if errContext := j.ctx.Err(); errContext != nil {
 					return errContext
@@ -375,7 +407,7 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 				if errDecode := json.Unmarshal(line, &entry); errDecode != nil {
 					return fmt.Errorf("invalid journal %s at byte %d: %w", source.name, offset, errDecode)
 				}
-				if errInsert := insertJournalEntry(j.ctx, statement, source.name, offset, len(line), entry); errInsert != nil {
+				if errInsert := insertJournalEntry(j.ctx, statement, supersede, source.name, offset, len(line), entry); errInsert != nil {
 					return errInsert
 				}
 				offset += int64(len(line))
@@ -398,25 +430,24 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 	}
 }
 
-func insertJournalEntry(ctx context.Context, statement *sql.Stmt, source string, offset int64, length int, entry journalEntry) error {
+func insertJournalEntry(ctx context.Context, statement, supersede *sql.Stmt, source string, offset int64, length int, entry journalEntry) error {
 	insert := func(kind int, at time.Time, u UsageEvent, actor, action string) error {
 		model := strings.ToLower(u.Model)
 		serving := model
 		if u.Channel != "" && !strings.HasPrefix(model, strings.ToLower(u.Channel)+"/") {
 			serving = strings.ToLower(u.Channel) + "/" + model
 		}
-		trace := u.TraceID
-		if trace == "" {
-			trace = u.RequestID
-		}
-		if trace == "" {
-			trace = u.ID
+		trace := usageTrace(u)
+		if kind == 1 && u.Balanced {
+			if _, err := supersede.ExecContext(ctx, trace); err != nil {
+				return err
+			}
 		}
 		_, err := statement.ExecContext(ctx, source, offset, length, kind,
 			at.UTC().Format(journalTimeFormat), at.UTC().Format("2006-01-02"), at.UTC().Truncate(time.Hour).Unix(),
 			u.Consumer, u.Owner, u.ChannelID, u.CredentialID, u.KeyID, u.Channel, u.Model, model, serving,
 			actor, action, trace, u.Failed, u.TokensKnown, u.InputTokens, u.OutputTokens,
-			u.ReasoningTokens, u.CacheReadTokens, u.CacheCreationTokens, u.TotalTokens, u.LatencyMS, u.TTFTMS)
+			u.ReasoningTokens, u.CacheReadTokens, u.CacheCreationTokens, u.TotalTokens, u.LatencyMS, u.TTFTMS, u.Balanced, false)
 		return err
 	}
 	if entry.Usage != nil {
@@ -435,4 +466,15 @@ func insertJournalEntry(ctx context.Context, statement *sql.Stmt, source string,
 		return insert(3, a.At, UsageEvent{}, a.Actor, a.Action)
 	}
 	return nil
+}
+
+// usageTrace groups the attempts of one client request.
+func usageTrace(u UsageEvent) string {
+	if u.TraceID != "" {
+		return u.TraceID
+	}
+	if u.RequestID != "" {
+		return u.RequestID
+	}
+	return u.ID
 }
