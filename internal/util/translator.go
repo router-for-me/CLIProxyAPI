@@ -263,29 +263,71 @@ func UnambiguousToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 	return toolNameMapFromClaudeRequest(rawJSON, true)
 }
 
+func claudePayloadMayContainToolAddition(rawJSON []byte) bool {
+	return bytes.Contains(rawJSON, []byte("tool_addition")) ||
+		bytes.Contains(rawJSON, []byte(`\u`)) ||
+		bytes.Contains(rawJSON, []byte(`\U`))
+}
+
+func forEachClaudeInlineToolAdditionDefinition(rawJSON []byte, fn func(def gjson.Result)) {
+	if !claudePayloadMayContainToolAddition(rawJSON) {
+		return
+	}
+	messages := gjson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return
+	}
+	messages.ForEach(func(_, message gjson.Result) bool {
+		if message.Get("role").String() != "system" {
+			return true
+		}
+		content := message.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() != "tool_addition" {
+				return true
+			}
+			toolSpec := part.Get("tool")
+			if toolSpec.Get("type").String() == "tool_definition" || toolSpec.Get("definition").IsObject() {
+				if def := toolSpec.Get("definition"); def.IsObject() {
+					fn(def)
+				}
+			}
+			return true
+		})
+		return true
+	})
+}
+
 func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[string]string {
 	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
 		return nil
 	}
 
 	tools := gjson.GetBytes(rawJSON, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	hasTools := tools.Exists() && tools.IsArray()
+	hasToolAddition := claudePayloadMayContainToolAddition(rawJSON)
+	if !hasTools && !hasToolAddition {
 		return nil
 	}
 
-	toolResults := tools.Array()
-	out := make(map[string]string, len(toolResults))
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	var out map[string]string
+	recordTool := func(tool gjson.Result) {
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			name = strings.TrimSpace(tool.Get("function.name").String())
 		}
 		if name == "" {
-			return true
+			return
 		}
 		key := CanonicalToolName(name)
 		if key == "" {
-			return true
+			return
+		}
+		if out == nil {
+			out = make(map[string]string, 4)
 		}
 		if previous, exists := out[key]; !exists {
 			out[key] = name
@@ -294,8 +336,17 @@ func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[stri
 			// an ambiguous canonical key, including exact declared names.
 			out[key] = ""
 		}
-		return true
-	})
+	}
+
+	if hasTools {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			recordTool(tool)
+			return true
+		})
+	}
+	if hasToolAddition {
+		forEachClaudeInlineToolAdditionDefinition(rawJSON, recordTool)
+	}
 
 	if len(out) == 0 {
 		return nil
@@ -325,19 +376,37 @@ func MapClaudeToolName(toolNameMap map[string]string, originalRequestRawJSON []b
 	}
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
 		tools := gjson.GetBytes(originalRequestRawJSON, "tools")
-		if tools.IsArray() {
+		hasTools := tools.IsArray()
+		hasToolAddition := claudePayloadMayContainToolAddition(originalRequestRawJSON)
+		if hasTools || hasToolAddition {
 			canonical := CanonicalToolName(name)
 			canonicalNames := map[string]bool{}
-			for _, tool := range tools.Array() {
+			exactMatch := false
+			inspectTool := func(tool gjson.Result) {
 				declared := strings.TrimSpace(tool.Get("name").String())
 				if declared == "" {
 					declared = strings.TrimSpace(tool.Get("function.name").String())
 				}
 				if declared == name {
-					return name
+					exactMatch = true
+					return
 				}
 				if declared != "" && CanonicalToolName(declared) == canonical {
 					canonicalNames[declared] = true
+				}
+			}
+			if hasTools {
+				for _, tool := range tools.Array() {
+					inspectTool(tool)
+					if exactMatch {
+						return name
+					}
+				}
+			}
+			if hasToolAddition {
+				forEachClaudeInlineToolAdditionDefinition(originalRequestRawJSON, inspectTool)
+				if exactMatch {
+					return name
 				}
 			}
 			if len(canonicalNames) > 1 {

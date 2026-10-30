@@ -1406,3 +1406,154 @@ func TestConvertClaudeRequestToCodex_StripsPatternPropertiesIncompatibleKeys(t *
 		t.Errorf("expected patternProperties key '^[a-z]+$' to be preserved, got: %s", params.Get("patternProperties").Raw)
 	}
 }
+
+func TestConvertClaudeRequestToCodex_MidConversationToolAdditions(t *testing.T) {
+	longMCPTool := "mcp__very_long_server_name_for_testing__deliver_final_subagent_handback_report"
+	inputJSON := `{
+		"model": "gpt-6.1-sol",
+		"tools": [
+			{
+				"name": "Read",
+				"description": "Read a file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			},
+			{
+				"name": "deferred_lookup",
+				"description": "Look up deferred notes",
+				"defer_loading": true,
+				"input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "Start task"},
+			{
+				"role": "system",
+				"content": [
+					{"type": "text", "text": "<system-reminder>SubagentHandback is now available</system-reminder>"},
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"name": "SubagentHandback",
+								"description": "Deliver subagent report",
+								"input_schema": {
+									"$schema": "https://json-schema.org/draft/2020-12/schema",
+									"type": "object",
+									"properties": {"summary": {"type": "string"}},
+									"required": ["summary"]
+								}
+							}
+						}
+					},
+					{
+						"type": "tool_addition",
+						"tool": {"type": "tool_reference", "name": "deferred_lookup"}
+					},
+					{
+						"type": "tool_removal",
+						"tool": {"type": "tool_reference", "name": "Read"}
+					}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"path": "README.md"}}
+				]
+			},
+			{
+				"role": "system",
+				"content": [
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"name": "` + longMCPTool + `",
+								"description": "Long MCP handback tool",
+								"input_schema": {"type": "object"}
+							}
+						}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "file contents"},
+					{"type": "text", "text": "Finish up"}
+				]
+			}
+		]
+	}`
+
+	translated, err := ConvertClaudeRequestToCodex("gpt-6.1-sol", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToCodex returned error: %v", err)
+	}
+
+	// Top-level tools[] must remain untouched (2 tools: Read and deferred_lookup) to preserve the prompt cache prefix.
+	topTools := gjson.GetBytes(translated, "tools").Array()
+	if len(topTools) != 2 {
+		t.Fatalf("expected 2 top-level tools, got %d: %s", len(topTools), gjson.GetBytes(translated, "tools").Raw)
+	}
+	if topTools[0].Get("name").String() != "Read" || topTools[1].Get("name").String() != "deferred_lookup" {
+		t.Fatalf("unexpected top-level tool names: %q, %q", topTools[0].Get("name").String(), topTools[1].Get("name").String())
+	}
+
+	// Expected input items:
+	// 0: message (user: "Start task")
+	// 1: message (user: "<system-reminder>...")
+	// 2: additional_tools (developer: SubagentHandback, deferred_lookup)
+	// 3: function_call (call_1)
+	// 4: function_call_output (call_1)
+	// 5: additional_tools (developer: shortened longMCPTool, deferred after function_call_output)
+	// 6: message (user: "Finish up")
+	inputs := gjson.GetBytes(translated, "input").Array()
+	if len(inputs) != 7 {
+		t.Fatalf("expected 7 input items, got %d: %s", len(inputs), gjson.GetBytes(translated, "input").Raw)
+	}
+
+	addTools1 := inputs[2]
+	if got := addTools1.Get("type").String(); got != "additional_tools" {
+		t.Fatalf("inputs[2].type = %q, want additional_tools: %s", got, addTools1.Raw)
+	}
+	if got := addTools1.Get("role").String(); got != "developer" {
+		t.Fatalf("inputs[2].role = %q, want developer: %s", got, addTools1.Raw)
+	}
+	addTools1List := addTools1.Get("tools").Array()
+	if len(addTools1List) != 2 {
+		t.Fatalf("expected 2 tools in first additional_tools, got %d: %s", len(addTools1List), addTools1.Raw)
+	}
+	if addTools1List[0].Get("type").String() != "function" || addTools1List[0].Get("name").String() != "SubagentHandback" {
+		t.Fatalf("unexpected first additional tool: %s", addTools1List[0].Raw)
+	}
+	if addTools1List[0].Get("strict").Type != gjson.False {
+		t.Fatalf("expected strict=false on SubagentHandback, got: %s", addTools1List[0].Raw)
+	}
+	if addTools1List[0].Get("input_schema").Exists() || addTools1List[0].Get("parameters.$schema").Exists() {
+		t.Fatalf("expected input_schema and parameters.$schema to be stripped: %s", addTools1List[0].Raw)
+	}
+	if addTools1List[0].Get("parameters.properties.summary.type").String() != "string" {
+		t.Fatalf("expected normalized parameters on SubagentHandback, got: %s", addTools1List[0].Raw)
+	}
+	if addTools1List[1].Get("type").String() != "function" || addTools1List[1].Get("name").String() != "deferred_lookup" {
+		t.Fatalf("unexpected second additional tool (resolved tool_reference): %s", addTools1List[1].Raw)
+	}
+	if addTools1List[1].Get("defer_loading").Exists() {
+		t.Fatalf("expected defer_loading to be stripped on resolved tool_reference: %s", addTools1List[1].Raw)
+	}
+
+	if inputs[3].Get("type").String() != "function_call" || inputs[4].Get("type").String() != "function_call_output" {
+		t.Fatalf("expected function_call (3) followed by function_call_output (4), got %q and %q", inputs[3].Get("type").String(), inputs[4].Get("type").String())
+	}
+	addTools2 := inputs[5]
+	if got := addTools2.Get("type").String(); got != "additional_tools" {
+		t.Fatalf("inputs[5].type = %q, want additional_tools: %s", got, addTools2.Raw)
+	}
+	shortLongName := addTools2.Get("tools.0.name").String()
+	if shortLongName == "" || shortLongName == longMCPTool || len(shortLongName) > 64 {
+		t.Fatalf("expected shortened MCP tool name <= 64 chars, got %q (len=%d)", shortLongName, len(shortLongName))
+	}
+}
