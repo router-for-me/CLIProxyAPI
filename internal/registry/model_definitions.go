@@ -533,6 +533,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "kiro", "codewhisperer":
+		return GetKiroModels()
 	default:
 		return nil
 	}

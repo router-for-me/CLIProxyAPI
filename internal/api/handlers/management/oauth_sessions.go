@@ -654,6 +654,8 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 		return "devin", nil
 	case "meta", "muse":
 		return "meta", nil
+	case "kiro", "codewhisperer":
+		return "kiro", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
