@@ -1,13 +1,18 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -430,6 +435,379 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 		}
 		if gjson.GetBytes(gotBody, "tools").Exists() {
 			t.Fatalf("expected user payload filter rule to remove tools after built-in injection, got body=%s", gotBody)
+		}
+	})
+}
+
+func TestCodexExecutorExpandsRecognizedCPACompactionCapsules_Issue7118(t *testing.T) {
+	summaryText := "Claude compacted summary before switching to GPT."
+	capsule, errSeal := helps.SealAntigravityCompaction(summaryText, "claude-sonnet-4-6")
+	if errSeal != nil {
+		t.Fatalf("SealAntigravityCompaction() error = %v", errSeal)
+	}
+
+	mixedPayload := `{"model":"gpt-6.1-sol","input":[` +
+		`{"id":"cmp_ag_compact_1","type":"compaction","encrypted_content":"` + capsule + `"},` +
+		`{"id":"cmp_native_1","type":"compaction","encrypted_content":"gAAAAABnative-openai-compaction"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"continue on GPT"}]}` +
+		`]}`
+
+	assertExpandedAndNativePreserved := func(t *testing.T, body []byte) {
+		t.Helper()
+		if bytes.Contains(body, []byte("cpa-ag-compact-v1:")) || bytes.Contains(body, []byte("cmp_ag_compact_1")) {
+			t.Fatalf("CPA compaction capsule leaked to Codex upstream: %s", body)
+		}
+		input := gjson.GetBytes(body, "input").Array()
+		if len(input) != 3 {
+			t.Fatalf("input len = %d, want 3; body=%s", len(input), body)
+		}
+		if input[0].Get("type").String() != "message" || input[0].Get("role").String() != "developer" {
+			t.Fatalf("input[0] = %s, want developer message", input[0].Raw)
+		}
+		if !strings.Contains(input[0].Get("content.0.text").String(), summaryText) {
+			t.Fatalf("input[0] text = %q, want summary %q", input[0].Get("content.0.text").String(), summaryText)
+		}
+		if input[1].Get("type").String() != "compaction" || input[1].Get("encrypted_content").String() != "gAAAAABnative-openai-compaction" {
+			t.Fatalf("native OpenAI compaction item not preserved at input[1]: %s", input[1].Raw)
+		}
+	}
+
+	t.Run("ExecuteStream expands CPA capsule and preserves native OpenAI compaction", func(t *testing.T) {
+		var gotBody []byte
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			gotBody = body
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n"))
+		}))
+		defer server.Close()
+
+		executor := NewCodexExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			},
+		}
+
+		streamResult, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: []byte(mixedPayload),
+			Stream:          true,
+		})
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+		assertExpandedAndNativePreserved(t, gotBody)
+	})
+
+	t.Run("Execute and executeCompact expand CPA capsule and preserve native OpenAI compaction", func(t *testing.T) {
+		var gotResponsesBody []byte
+		var gotCompactBody []byte
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			if r.URL.Path == "/responses/compact" {
+				gotCompactBody = body
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"resp_compact_1","object":"response.compaction","usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}`))
+				return
+			}
+			gotResponsesBody = body
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}\n\n"))
+		}))
+		defer server.Close()
+
+		executor := NewCodexExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			},
+		}
+
+		_, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: []byte(mixedPayload),
+		})
+		if errExec != nil {
+			t.Fatalf("Execute() error = %v", errExec)
+		}
+		assertExpandedAndNativePreserved(t, gotResponsesBody)
+
+		_, errCompact := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: []byte(mixedPayload),
+			Alt:             "responses/compact",
+		})
+		if errCompact != nil {
+			t.Fatalf("Execute(responses/compact) error = %v", errCompact)
+		}
+		assertExpandedAndNativePreserved(t, gotCompactBody)
+	})
+
+	t.Run("prepareCodexWebsocketStream and CountTokens expand CPA capsule", func(t *testing.T) {
+		wsExecutor := NewCodexWebsocketsExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"base_url": "http://127.0.0.1:1",
+				"api_key":  "test",
+			},
+		}
+		prepared, errPrep := wsExecutor.prepareCodexWebsocketStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: []byte(mixedPayload),
+			Stream:          true,
+		})
+		if errPrep != nil {
+			t.Fatalf("prepareCodexWebsocketStream() error = %v", errPrep)
+		}
+		assertExpandedAndNativePreserved(t, prepared.clientBody)
+
+		executor := NewCodexExecutor(&config.Config{})
+		withoutCapsulePayload := `{"model":"gpt-6.1-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue on GPT"}]}]}`
+		baseCountResp, errBaseCount := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(withoutCapsulePayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAIResponse,
+		})
+		if errBaseCount != nil {
+			t.Fatalf("CountTokens(base) error = %v", errBaseCount)
+		}
+		expandedCountResp, errExpandedCount := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAIResponse,
+		})
+		if errExpandedCount != nil {
+			t.Fatalf("CountTokens(expanded) error = %v", errExpandedCount)
+		}
+		if gjson.GetBytes(expandedCountResp.Payload, "response.usage.input_tokens").Int() <= gjson.GetBytes(baseCountResp.Payload, "response.usage.input_tokens").Int() {
+			t.Fatalf("expected expanded capsule token count (%s) > base token count (%s)", expandedCountResp.Payload, baseCountResp.Payload)
+		}
+	})
+
+	t.Run("damaged CPA capsule returns 400 without forwarding to upstream", func(t *testing.T) {
+		upstreamHits := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstreamHits++
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		executor := NewCodexExecutor(&config.Config{})
+		wsExecutor := NewCodexWebsocketsExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			},
+		}
+
+		assertBadRequest := func(t *testing.T, name string, err error) {
+			t.Helper()
+			if err == nil {
+				t.Fatalf("%s with damaged capsule succeeded, want 400 error", name)
+			}
+			var se statusErr
+			if statusCode := err.(interface{ StatusCode() int }).StatusCode(); statusCode != http.StatusBadRequest {
+				t.Fatalf("%s status = %d (%v), want %d", name, statusCode, se, http.StatusBadRequest)
+			}
+		}
+
+		corruptedPayloads := []string{
+			`{"model":"gpt-6.1-sol","input":[{"id":"cmp_ag_compact_bad","type":"compaction","encrypted_content":"cpa-ag-compact-v1:corrupted"},{"type":"message","role":"user","content":"hi"}]}`,
+			`{"model":"gpt-6.1-sol","input":[{"id":"cmp_ag_compact_bad","type":"compaction","encrypted_content":"truncated"},{"type":"message","role":"user","content":"hi"}]}`,
+		}
+
+		for _, badPayload := range corruptedPayloads {
+			req := cliproxyexecutor.Request{Model: "gpt-6.1-sol", Payload: []byte(badPayload)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: []byte(badPayload)}
+
+			_, errExec := executor.Execute(context.Background(), auth, req, opts)
+			assertBadRequest(t, "Execute()", errExec)
+
+			_, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+			assertBadRequest(t, "ExecuteStream()", errStream)
+
+			compactOpts := opts
+			compactOpts.Alt = "responses/compact"
+			_, errCompact := executor.Execute(context.Background(), auth, req, compactOpts)
+			assertBadRequest(t, "Execute(responses/compact)", errCompact)
+
+			_, errTokens := executor.CountTokens(context.Background(), auth, req, opts)
+			assertBadRequest(t, "CountTokens()", errTokens)
+
+			_, errWSExec := wsExecutor.Execute(context.Background(), auth, req, opts)
+			assertBadRequest(t, "wsExecutor.Execute()", errWSExec)
+
+			_, errWSStream := wsExecutor.ExecuteStream(context.Background(), auth, req, opts)
+			assertBadRequest(t, "wsExecutor.ExecuteStream()", errWSStream)
+		}
+		if upstreamHits != 0 {
+			t.Fatalf("upstreamHits = %d, want 0 when CPA capsule is damaged", upstreamHits)
+		}
+	})
+
+	t.Run("websocket wire frames and duplex follow-up frames expand CPA capsule before PayloadFinalizer", func(t *testing.T) {
+		receivedFrames := make(chan []byte, 4)
+		serverDone := make(chan struct{})
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer close(serverDone)
+			conn, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if errUpgrade != nil {
+				t.Errorf("upgrade websocket: %v", errUpgrade)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+			// 1. Initial response.create
+			_, first, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read initial create: %v", errRead)
+				return
+			}
+			receivedFrames <- first
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`))
+
+			// 2. Duplex response.steer
+			_, second, errRead := conn.ReadMessage()
+			if errRead != nil {
+				t.Errorf("read steer: %v", errRead)
+				return
+			}
+			receivedFrames <- second
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`))
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`))
+
+			// 3. Duplex follow-up response.create (Wait for damaged steer to abort before reaching upstream)
+			_, third, errRead := conn.ReadMessage()
+			if errRead == nil {
+				receivedFrames <- third
+			}
+		}))
+		defer server.Close()
+
+		cfg := &config.Config{
+			Codex: config.CodexConfig{ResponseSteering: true},
+			Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: []config.PayloadModelRule{{Name: "gpt-6.1-sol", Protocol: "codex"}},
+						Params: map[string]any{"input.0.content.0.text": "User rule override after CPA expansion"},
+					},
+				},
+			},
+		}
+		wsExec := NewCodexWebsocketsExecutor(cfg)
+		wsExec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+		auth := &cliproxyauth.Auth{
+			ID:       "ws-compact-auth",
+			Provider: "codex",
+			Attributes: map[string]string{
+				"api_key":    "test-key",
+				"base_url":   server.URL,
+				"websockets": "true",
+			},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		inputCh := make(chan cliproxyexecutor.WebsocketInput, 4)
+		ctx = cliproxyexecutor.WithWebsocketInput(cliproxyexecutor.WithDownstreamWebsocket(ctx), inputCh)
+
+		streamRes, errStream := wsExec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+			Model:   "gpt-6.1-sol",
+			Payload: []byte(mixedPayload),
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			OriginalRequest: []byte(mixedPayload),
+			Stream:          true,
+			Metadata:        map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "duplex-compact-session"},
+		})
+		if errStream != nil {
+			t.Fatalf("wsExec.ExecuteStream() error = %v", errStream)
+		}
+
+		steerPayload := `{"type":"response.steer","previous_response_id":"r1","input":[` +
+			`{"id":"cmp_ag_compact_2","type":"compaction","encrypted_content":"` + capsule + `"},` +
+			`{"id":"cmp_native_2","type":"compaction","encrypted_content":"gAAAAABnative-openai-compaction"},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"steer on GPT"}]}` +
+			`]}`
+		badSteerPayload := `{"type":"response.steer","previous_response_id":"r1","input":[` +
+			`{"id":"cmp_ag_compact_bad","type":"compaction","encrypted_content":"cpa-ag-compact-v1:corrupted"}` +
+			`]}`
+
+		sawStreamErr := false
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				sawStreamErr = true
+				break
+			}
+			evType := gjson.GetBytes(chunk.Payload, "type").String()
+			switch evType {
+			case "response.created":
+				inputCh <- cliproxyexecutor.WebsocketInput{Payload: []byte(steerPayload)}
+			case "response.completed":
+				inputCh <- cliproxyexecutor.WebsocketInput{Payload: []byte(badSteerPayload)}
+			}
+		}
+		if !sawStreamErr {
+			t.Fatal("expected stream error when duplex response.steer carries damaged CPA capsule")
+		}
+		cancel()
+		<-serverDone
+		close(receivedFrames)
+
+		var frames [][]byte
+		for f := range receivedFrames {
+			frames = append(frames, f)
+		}
+		if len(frames) != 2 {
+			t.Fatalf("upstream received %d websocket frames, want 2 (initial create + valid steer; damaged steer must be rejected locally)", len(frames))
+		}
+		for idx, frame := range frames {
+			if bytes.Contains(frame, []byte("cpa-ag-compact-v1:")) || bytes.Contains(frame, []byte("cmp_ag_compact_")) {
+				t.Fatalf("frame[%d] leaked CPA compaction capsule: %s", idx, frame)
+			}
+			input := gjson.GetBytes(frame, "input").Array()
+			if len(input) != 3 {
+				t.Fatalf("frame[%d] input len = %d, want 3; frame=%s", idx, len(input), frame)
+			}
+			if input[0].Get("type").String() != "message" || input[0].Get("role").String() != "developer" {
+				t.Fatalf("frame[%d] input[0] = %s, want developer message", idx, input[0].Raw)
+			}
+			// Verify PayloadFinalizer ran after capsule expansion and overrode input.0.content.0.text.
+			if gotText := input[0].Get("content.0.text").String(); gotText != "User rule override after CPA expansion" {
+				t.Fatalf("frame[%d] input[0].content.0.text = %q, want %q (PayloadFinalizer must run after capsule expansion)", idx, gotText, "User rule override after CPA expansion")
+			}
+			if input[1].Get("type").String() != "compaction" || input[1].Get("encrypted_content").String() != "gAAAAABnative-openai-compaction" {
+				t.Fatalf("frame[%d] native compaction item not preserved at input[1]: %s", idx, input[1].Raw)
+			}
 		}
 	})
 }

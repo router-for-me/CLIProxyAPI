@@ -474,7 +474,13 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					steerReq := req
 					steerReq.Payload = payload
 					steerOpts := opts
+					steerOpts.OriginalRequest = payload
 					steerOpts.Headers = steerHeaders
+					if errExpand := helps.ExpandRecognizedResponsesCompactionCapsules(&steerReq, &steerOpts); errExpand != nil {
+						fail(statusErr{code: http.StatusBadRequest, msg: errExpand.Error()})
+						return
+					}
+					payload = steerReq.Payload
 					if codexUseSIWCForRequest(ctx, auth, steerHeaders) {
 						payload = thinking.StripConfigurationUpdates(payload)
 					}
