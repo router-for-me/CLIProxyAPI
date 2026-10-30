@@ -86,7 +86,39 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return withAntigravityFlash38Tiers(cloneModelInfos(getModels().Antigravity))
+}
+
+// withAntigravityFlash38Tiers adds gemini-3.8-flash-{medium,low} (cloned from -high) when the
+// catalog lists only -high: Cloud Code serves the three tiers as separate ids. Local patch
+// (replaces PR #5467, which no longer applies to dev's model_updater refactor).
+func withAntigravityFlash38Tiers(models []*ModelInfo) []*ModelInfo {
+	var base *ModelInfo
+	have := make(map[string]bool, len(models))
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		have[m.ID] = true
+		if m.ID == "gemini-3.8-flash-high" {
+			base = m
+		}
+	}
+	if base == nil {
+		return models
+	}
+	for _, tier := range []struct{ id, display string }{
+		{"gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"},
+		{"gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"},
+	} {
+		if have[tier.id] {
+			continue
+		}
+		clone := cloneModelInfo(base)
+		clone.ID, clone.Name, clone.DisplayName, clone.Description = tier.id, tier.id, tier.display, tier.display
+		models = append(models, clone)
+	}
+	return models
 }
 
 var staticDevinModels = []*ModelInfo{
@@ -583,7 +615,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
-		data.Antigravity,
+		GetAntigravityModels(),
 		data.XAI,
 		GetDevinModels(),
 		GetMetaModels(),
