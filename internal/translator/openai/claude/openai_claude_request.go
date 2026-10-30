@@ -156,6 +156,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Process Anthropic messages
+	var midConversationToolDefs []gjson.Result
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		var pendingToolUseIDs []string
 		var pendingSystemReminders [][]byte
@@ -173,6 +174,20 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					} else {
 						messageItems = append(messageItems, msgJSON)
 					}
+				}
+				if contentResult.IsArray() {
+					contentResult.ForEach(func(_, part gjson.Result) bool {
+						if part.Get("type").String() != "tool_addition" {
+							return true
+						}
+						toolSpec := part.Get("tool")
+						if toolSpec.Get("type").String() == "tool_definition" || toolSpec.Get("definition").IsObject() {
+							if def := toolSpec.Get("definition"); def.IsObject() && def.Get("name").String() != "" {
+								midConversationToolDefs = append(midConversationToolDefs, def)
+							}
+						}
+						return true
+					})
 				}
 				return true
 			}
@@ -370,28 +385,36 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
-	// Process tools - convert Anthropic tools to OpenAI functions
+	// Process tools - convert Anthropic tools (and mid-conversation tool_addition definitions) to OpenAI functions
+	var toolItems [][]byte
+	var toolIndexByName map[string]int
+	if len(midConversationToolDefs) > 0 {
+		toolIndexByName = make(map[string]int)
+	}
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var toolItems [][]byte
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			openAIToolJSON := []byte(`{"type":"function","function":{"name":"","description":""}}`)
-			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", tool.Get("name").String())
-			openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.description", tool.Get("description").String())
-
-			// Convert Anthropic input_schema to OpenAI function parameters
-			if inputSchema := tool.Get("input_schema"); inputSchema.Exists() && inputSchema.Type != gjson.Null {
-				openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", normalizeObjectSchemaProperties(inputSchema.Value()))
-			} else {
-				openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(`{"type":"object","properties":{}}`))
+			openAIToolJSON := convertClaudeToolToOpenAI(tool)
+			if toolIndexByName != nil {
+				if name := tool.Get("name").String(); name != "" {
+					toolIndexByName[name] = len(toolItems)
+				}
 			}
-
 			toolItems = append(toolItems, openAIToolJSON)
 			return true
 		})
-
-		if len(toolItems) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+	}
+	for _, def := range midConversationToolDefs {
+		name := def.Get("name").String()
+		converted := convertClaudeToolToOpenAI(def)
+		if idx, exists := toolIndexByName[name]; exists {
+			toolItems[idx] = converted
+		} else {
+			toolIndexByName[name] = len(toolItems)
+			toolItems = append(toolItems, converted)
 		}
+	}
+	if len(toolItems) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
 	}
 
 	// Tool choice mapping - convert Anthropic tool_choice to OpenAI format
@@ -433,6 +456,20 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out, drops.Err()
+}
+
+func convertClaudeToolToOpenAI(tool gjson.Result) []byte {
+	openAIToolJSON := []byte(`{"type":"function","function":{"name":"","description":""}}`)
+	openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.name", tool.Get("name").String())
+	openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.description", tool.Get("description").String())
+
+	// Convert Anthropic input_schema to OpenAI function parameters
+	if inputSchema := tool.Get("input_schema"); inputSchema.Exists() && inputSchema.Type != gjson.Null {
+		openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", normalizeObjectSchemaProperties(inputSchema.Value()))
+	} else {
+		openAIToolJSON, _ = sjson.SetRawBytes(openAIToolJSON, "function.parameters", []byte(`{"type":"object","properties":{}}`))
+	}
+	return openAIToolJSON
 }
 
 func normalizeObjectSchemaProperties(schema any) any {

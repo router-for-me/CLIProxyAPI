@@ -1827,3 +1827,61 @@ func TestClaudeTextWithUncachedFileKeepsText(t *testing.T) {
 		t.Fatalf("body = %s", envelope.Body)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_MidConversationToolAdditionAppendsToTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5",
+		"tools": [
+			{
+				"name": "Read",
+				"description": "Read file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "start"},
+			{
+				"role": "system",
+				"content": [
+					{"type": "text", "text": "<system-reminder>SubagentHandback is now available</system-reminder>"},
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"name": "SubagentHandback",
+								"description": "Deliver subagent report",
+								"input_schema": {
+									"type": "object",
+									"properties": {"summary": {"type": "string"}},
+									"required": ["summary"]
+								}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	output, err := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToOpenAI returned error: %v", err)
+	}
+	tools := gjson.GetBytes(output, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools in OpenAI request, got %d: %s", len(tools), gjson.GetBytes(output, "tools").Raw)
+	}
+	if got := tools[1].Get("function.name").String(); got != "SubagentHandback" {
+		t.Fatalf("tools[1].function.name = %q, want SubagentHandback", got)
+	}
+	if got := tools[1].Get("function.parameters.properties.summary.type").String(); got != "string" {
+		t.Fatalf("unexpected tools[1] parameters: %s", tools[1].Get("function.parameters").Raw)
+	}
+
+	openAIResp := []byte(`{"id":"chatcmpl_1","model":"gpt-5","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"subagenthandback","arguments":"{\"summary\":\"done\"}"}}]}}]}`)
+	claudeResp := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "gpt-5", inputJSON, output, openAIResp, nil)
+	if got := gjson.GetBytes(claudeResp, "content.0.name").String(); got != "SubagentHandback" {
+		t.Fatalf("ConvertOpenAIResponseToClaudeNonStream tool name = %q, want SubagentHandback; resp=%s", got, claudeResp)
+	}
+}
