@@ -229,10 +229,30 @@ func (h *Host) snapshotModelRegistrations() []pluginModelRegistration {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	registrations := make([]pluginModelRegistration, 0, len(h.modelRegistrations))
-	for _, registration := range h.modelRegistrations {
-		registration.models = cloneRegistryModels(registration.models)
-		registrations = append(registrations, registration)
+	return h.snapshotModelRegistrationsLocked()
+}
+
+func (h *Host) snapshotModelRegistrationsLocked() []pluginModelRegistration {
+	if h == nil {
+		return nil
+	}
+	pluginIDs := make([]string, 0, len(h.modelRegistrations)+len(h.pluginModelRegistrations))
+	seenPlugins := make(map[string]struct{}, len(h.modelRegistrations)+len(h.pluginModelRegistrations))
+	for pluginID := range h.modelRegistrations {
+		seenPlugins[pluginID] = struct{}{}
+		pluginIDs = append(pluginIDs, pluginID)
+	}
+	for pluginID := range h.pluginModelRegistrations {
+		if _, exists := seenPlugins[pluginID]; !exists {
+			seenPlugins[pluginID] = struct{}{}
+			pluginIDs = append(pluginIDs, pluginID)
+		}
+	}
+	sort.Strings(pluginIDs)
+
+	registrations := make([]pluginModelRegistration, 0, len(pluginIDs))
+	for _, pluginID := range pluginIDs {
+		registrations = append(registrations, h.pluginRegistrationsLocked(pluginID)...)
 	}
 	sort.SliceStable(registrations, func(i, j int) bool {
 		if registrations[i].priority == registrations[j].priority {
@@ -241,6 +261,29 @@ func (h *Host) snapshotModelRegistrations() []pluginModelRegistration {
 		return registrations[i].priority > registrations[j].priority
 	})
 	return registrations
+}
+
+func (h *Host) pluginRegistrationsLocked(pluginID string) []pluginModelRegistration {
+	regs := h.pluginModelRegistrations[pluginID]
+	if len(regs) == 1 {
+		if single, ok := h.modelRegistrations[pluginID]; ok && (single.pluginID != "" || single.provider != "" || len(single.models) > 0) {
+			single.models = cloneRegistryModels(single.models)
+			return []pluginModelRegistration{single}
+		}
+	}
+	if len(regs) > 0 {
+		out := make([]pluginModelRegistration, 0, len(regs))
+		for _, reg := range regs {
+			reg.models = cloneRegistryModels(reg.models)
+			out = append(out, reg)
+		}
+		return out
+	}
+	if single, ok := h.modelRegistrations[pluginID]; ok && (single.pluginID != "" || single.provider != "" || len(single.models) > 0) {
+		single.models = cloneRegistryModels(single.models)
+		return []pluginModelRegistration{single}
+	}
+	return nil
 }
 
 func (h *Host) modelRegistration(pluginID string) pluginModelRegistration {
@@ -382,6 +425,37 @@ func (h *Host) modelProvider(pluginID string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.modelProviders[pluginID]
+}
+
+func (h *Host) modelProvidersForPlugin(pluginID string) []string {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	list := h.modelProviderSets[pluginID]
+	primary := strings.TrimSpace(h.modelProviders[pluginID])
+	if len(list) == 1 && primary != "" {
+		return []string{primary}
+	}
+	out := make([]string, 0, len(list)+1)
+	seen := make(map[string]struct{}, len(list)+1)
+	if primary != "" {
+		seen[primary] = struct{}{}
+		out = append(out, primary)
+	}
+	for _, item := range list {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }
 
 type executorAdapter struct {

@@ -28,8 +28,8 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 8 {
-		t.Fatalf("SchemaVersion = %d, want 8", SchemaVersion)
+	if SchemaVersion != 9 {
+		t.Fatalf("SchemaVersion = %d, want 9", SchemaVersion)
 	}
 	if SchemaVersionWebSocketResponseObserver != 4 {
 		t.Fatalf("SchemaVersionWebSocketResponseObserver = %d, want 4", SchemaVersionWebSocketResponseObserver)
@@ -51,6 +51,9 @@ func TestMethodNamesAreStable(t *testing.T) {
 	}
 	if SchemaVersionRequestInterceptorBodyPatch != 8 {
 		t.Fatalf("SchemaVersionRequestInterceptorBodyPatch = %d, want 8", SchemaVersionRequestInterceptorBodyPatch)
+	}
+	if SchemaVersionMultiProviderModels != 9 {
+		t.Fatalf("SchemaVersionMultiProviderModels = %d, want 9", SchemaVersionMultiProviderModels)
 	}
 	if MethodPluginRegister != "plugin.register" {
 		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)

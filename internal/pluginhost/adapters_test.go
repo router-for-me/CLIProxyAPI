@@ -4633,3 +4633,228 @@ func TestInterceptRequestBodyPatchValidationAndSequentialChaining(t *testing.T) 
 		}
 	}
 }
+
+func TestRegisterModelsMultiProviderRegistrationsAndUnload(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	host := New()
+	t.Cleanup(host.ShutdownAll)
+
+	host.RegisterPluginForTest("catalog-multi", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ModelRegistrar: modelRegistrarFunc(func(ctx context.Context, req pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
+				if !req.MultiProviderModels {
+					t.Fatalf("req.MultiProviderModels = false, want true")
+				}
+				return pluginapi.ModelRegistrationResponse{
+					Provider: "compat-direct",
+					Models:   []pluginapi.ModelInfo{{ID: "legacy-fallback-model"}},
+					Registrations: []pluginapi.ProviderModels{
+						{
+							Provider: "  Compat-Direct  ",
+							Models:   []pluginapi.ModelInfo{{ID: " model-direct "}},
+						},
+						{
+							Provider: "  Compat-VPN  ",
+							Models:   []pluginapi.ModelInfo{{ID: " model-vpn "}},
+						},
+					},
+				}, nil
+			}),
+		},
+	})
+	host.RegisterPluginForTest("auth-multi", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ModelProvider: modelProviderFunc{
+				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+					if !req.MultiProviderModels {
+						t.Fatalf("req.MultiProviderModels = false, want true")
+					}
+					return pluginapi.ModelResponse{
+						Registrations: []pluginapi.ProviderModels{
+							{
+								Provider: "  Compat-Auth-Direct  ",
+								Models:   []pluginapi.ModelInfo{{ID: " static-auth-direct "}},
+							},
+							{
+								Provider: "  Compat-Auth-VPN  ",
+								Models:   []pluginapi.ModelInfo{{ID: " static-auth-vpn "}},
+							},
+						},
+					}, nil
+				},
+				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+					switch strings.ToLower(strings.TrimSpace(req.AuthProvider)) {
+					case "compat-auth-direct":
+						return pluginapi.ModelResponse{
+							Provider: "compat-auth-direct",
+							Models:   []pluginapi.ModelInfo{{ID: "auth-model-direct"}},
+						}, nil
+					case "compat-auth-vpn":
+						return pluginapi.ModelResponse{
+							Provider: "compat-auth-vpn",
+							Models:   []pluginapi.ModelInfo{{ID: "auth-model-vpn"}},
+						}, nil
+					default:
+						return pluginapi.ModelResponse{}, nil
+					}
+				},
+			},
+		},
+	})
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if models := host.ModelsForProvider("compat-direct"); len(models) != 1 || models[0].ID != "model-direct" {
+		t.Fatalf("compat-direct models = %#v, want [model-direct]", models)
+	}
+	if models := host.ModelsForProvider("compat-vpn"); len(models) != 1 || models[0].ID != "model-vpn" {
+		t.Fatalf("compat-vpn models = %#v, want [model-vpn]", models)
+	}
+
+	if !host.HasAuthModelProvider("compat-auth-direct") || !host.HasAuthModelProvider("compat-auth-vpn") {
+		t.Fatalf("HasAuthModelProvider = (%v, %v), want (true, true)", host.HasAuthModelProvider("compat-auth-direct"), host.HasAuthModelProvider("compat-auth-vpn"))
+	}
+	directAuthRes := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "auth-1", Provider: "compat-auth-direct"})
+	if !directAuthRes.Handled || len(directAuthRes.Models) != 1 || directAuthRes.Models[0].ID != "auth-model-direct" {
+		t.Fatalf("ModelsForAuth(compat-auth-direct) = %#v, want handled with auth-model-direct", directAuthRes)
+	}
+	vpnAuthRes := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "auth-2", Provider: "compat-auth-vpn"})
+	if !vpnAuthRes.Handled || len(vpnAuthRes.Models) != 1 || vpnAuthRes.Models[0].ID != "auth-model-vpn" {
+		t.Fatalf("ModelsForAuth(compat-auth-vpn) = %#v, want handled with auth-model-vpn", vpnAuthRes)
+	}
+
+	if !host.UnloadPlugin("catalog-multi") {
+		t.Fatal("UnloadPlugin(catalog-multi) = false, want true")
+	}
+	if models := host.ModelsForProvider("compat-direct"); len(models) != 0 {
+		t.Fatalf("compat-direct models after unload = %#v, want empty", models)
+	}
+	if models := host.ModelsForProvider("compat-vpn"); len(models) != 0 {
+		t.Fatalf("compat-vpn models after unload = %#v, want empty", models)
+	}
+
+	if !host.UnloadPlugin("auth-multi") {
+		t.Fatal("UnloadPlugin(auth-multi) = false, want true")
+	}
+	if host.HasAuthModelProvider("compat-auth-direct") || host.HasAuthModelProvider("compat-auth-vpn") {
+		t.Fatalf("HasAuthModelProvider after unload = (%v, %v), want (false, false)", host.HasAuthModelProvider("compat-auth-direct"), host.HasAuthModelProvider("compat-auth-vpn"))
+	}
+}
+
+func TestRegisterModelsLegacyEmptyStaticModelsPreservesSingleProviderBehavior(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	registrarCalled := false
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "dual-empty-static",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ModelProvider: modelProviderFunc{
+					staticModels: func(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{}, nil
+					},
+					modelsForAuth: func(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{
+							Provider: "legacy-provider",
+							Models:   []pluginapi.ModelInfo{{ID: "unexpected"}},
+						}, nil
+					},
+				},
+				ModelRegistrar: modelRegistrarFunc(func(context.Context, pluginapi.ModelRegistrationRequest) (pluginapi.ModelRegistrationResponse, error) {
+					registrarCalled = true
+					return pluginapi.ModelRegistrationResponse{
+						Provider: "legacy-provider",
+						Models:   []pluginapi.ModelInfo{{ID: "legacy-model"}},
+					}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id: "empty-models-provider",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ModelProvider: modelProviderFunc{
+					staticModels: func(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{Provider: "gemini"}, nil
+					},
+					modelsForAuth: func(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{Provider: "gemini"}, nil
+					},
+				},
+			}},
+		},
+	)
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if registrarCalled {
+		t.Fatal("ModelRegistrar.RegisterModels was called despite ModelProvider being present")
+	}
+	if models := host.ModelsForProvider("legacy-provider"); len(models) != 0 {
+		t.Fatalf("legacy-provider models = %#v, want empty when StaticModels returns empty", models)
+	}
+	if host.HasAuthModelProvider("legacy-provider") {
+		t.Fatal("HasAuthModelProvider(legacy-provider) = true, want false when StaticModels returns empty")
+	}
+	if host.HasAuthModelProvider("gemini") {
+		t.Fatal("HasAuthModelProvider(gemini) = true, want false when StaticModels returns empty models")
+	}
+	if res := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "g1", Provider: "gemini"}); res.Handled {
+		t.Fatalf("ModelsForAuth(gemini) = %#v, want unhandled when StaticModels had no models", res)
+	}
+}
+
+func TestRegisterModelsStaticModelsRegistrationsMergeAndSharedProviderUnload(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	host := New()
+	t.Cleanup(host.ShutdownAll)
+
+	host.RegisterPluginForTest("alpha", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ModelProvider: modelProviderFunc{
+				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+					if !req.MultiProviderModels {
+						t.Fatalf("req.MultiProviderModels = false, want true")
+					}
+					return pluginapi.ModelResponse{
+						Registrations: []pluginapi.ProviderModels{
+							{Provider: "shared-provider", Models: []pluginapi.ModelInfo{{ID: "alpha-1"}}},
+							{Provider: "shared-provider", Models: []pluginapi.ModelInfo{{ID: "alpha-1"}, {ID: "alpha-2"}}},
+							{Provider: "alpha-only", Models: []pluginapi.ModelInfo{{ID: "alpha-only-1"}}},
+						},
+					}, nil
+				},
+			},
+		},
+	})
+	host.RegisterPluginForTest("bravo", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ModelRegistrar: staticModelRegistrar("shared-provider", "bravo-1"),
+		},
+	})
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	shared := host.ModelsForProvider("shared-provider")
+	if len(shared) != 3 || shared[0].ID != "alpha-1" || shared[1].ID != "alpha-2" || shared[2].ID != "bravo-1" {
+		t.Fatalf("shared-provider models = %#v, want [alpha-1 alpha-2 bravo-1]", shared)
+	}
+	if alphaOnly := host.ModelsForProvider("alpha-only"); len(alphaOnly) != 1 || alphaOnly[0].ID != "alpha-only-1" {
+		t.Fatalf("alpha-only models = %#v, want [alpha-only-1]", alphaOnly)
+	}
+
+	if !host.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	sharedAfterUnload := host.ModelsForProvider("shared-provider")
+	if len(sharedAfterUnload) != 1 || sharedAfterUnload[0].ID != "bravo-1" {
+		t.Fatalf("shared-provider models after unloading alpha = %#v, want [bravo-1]", sharedAfterUnload)
+	}
+	if alphaOnlyAfterUnload := host.ModelsForProvider("alpha-only"); len(alphaOnlyAfterUnload) != 0 {
+		t.Fatalf("alpha-only models after unloading alpha = %#v, want empty", alphaOnlyAfterUnload)
+	}
+}
