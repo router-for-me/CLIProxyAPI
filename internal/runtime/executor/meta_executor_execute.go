@@ -78,6 +78,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx, "meta executor", body, baseURL)
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
+	body = helps.EnsureMetaMuseToolNamespace(body)
 
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	return &metaPreparedRequest{
@@ -367,8 +368,8 @@ func (e *MetaExecutor) recordMetaRequest(ctx context.Context, auth *cliproxyauth
 }
 
 // applyMetaClientIdentity stamps the headers Muse Code 1.4.14 sends on
-// /v1/responses. Subscription keys reject older muse-build fingerprints with
-// client_attestation_denied. Session ids are a fresh UUID-7 per request so
+// /v1/responses. Tool-bearing subscription requests also need the canonical
+// tool namespace. Session ids are a fresh UUID-7 per request so
 // proxy traffic does not reuse one Muse session across unrelated clients.
 func applyMetaClientIdentity(req *http.Request) {
 	if req == nil {

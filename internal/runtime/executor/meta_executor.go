@@ -26,8 +26,8 @@ var (
 var metaRefreshGroup singleflight.Group
 
 // Captured from Muse Code 1.4.14-R7309.1 (build dec7d7497fecdad135ec5835a8161dbc92e55b58)
-// on linux-x86_64. Muse Code subscription keys return HTTP 403
-// client_attestation_denied when the request still looks like muse-build/1.3.0.
+// on linux-x86_64. Header parity alone does not satisfy subscription-key
+// attestation for tool-bearing requests; see helps.EnsureMetaMuseToolNamespace.
 const (
 	metaClientVersion = "1.4.14"
 	metaClientBuild   = "dec7d7497fecdad135ec5835a8161dbc92e55b58"
