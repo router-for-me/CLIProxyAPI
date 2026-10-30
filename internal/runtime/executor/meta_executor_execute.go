@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -365,6 +366,28 @@ func (e *MetaExecutor) recordMetaRequest(ctx context.Context, auth *cliproxyauth
 	})
 }
 
+// applyMetaClientIdentity stamps the headers Muse Code 1.4.14 sends on
+// /v1/responses. Subscription keys reject older muse-build fingerprints with
+// client_attestation_denied. Session ids are a fresh UUID-7 per request so
+// proxy traffic does not reuse one Muse session across unrelated clients.
+func applyMetaClientIdentity(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("User-Agent", metaUserAgent())
+	req.Header.Set("X-Client-Id", metaClientSurface)
+	if strings.TrimSpace(req.Header.Get("X-Tbh-Session-Id")) != "" {
+		return
+	}
+	sessionID := uuid.Must(uuid.NewV7()).String()
+	req.Header.Set("X-Tbh-Session-Id", sessionID)
+	req.Header.Set("X-Meta-Ai-Gateway-Session-Id", sessionID)
+	req.Header.Set("X-Tbh-Thread-Id", sessionID)
+	req.Header.Set("X-Tbh-Root-Session-Id", sessionID)
+	req.Header.Set("X-Tbh-Agent-Role", "main")
+	req.Header.Set("X-Tbh-Contributor-Mode", "1")
+}
+
 func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header) {
 	req.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
@@ -372,8 +395,7 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 	} else {
 		req.Header.Del("Authorization")
 	}
-	req.Header.Set("User-Agent", metaUserAgent)
-	req.Header.Set("X-Client-Id", "tbh:tui")
+	applyMetaClientIdentity(req)
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")
