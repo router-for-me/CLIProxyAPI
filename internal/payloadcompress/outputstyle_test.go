@@ -135,6 +135,20 @@ func TestOutputStyleBypassesTerseSensitiveRequests(t *testing.T) {
 	}
 }
 
+// Tool output mentioning "delete" must not flip styling. The injected text lives
+// in the system prompt, which is the first bytes the provider caches, so a
+// decision that flips mid-conversation costs the whole prefix.
+func TestOutputStyleIgnoresBypassKeywordsInToolOutput(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"sys"},` +
+		`{"role":"user","content":"ship it"},` +
+		`{"role":"tool","content":"deleted 3 files, security scan clean"}]}`)
+	_, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "chat" {
+		t.Fatalf("style = %q, want chat: tool output must not trigger bypass", stats.Style)
+	}
+}
+
 func TestOutputStyleBypassesMediaRequests(t *testing.T) {
 	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
 	body := []byte(`{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":[` +
@@ -143,6 +157,16 @@ func TestOutputStyleBypassesMediaRequests(t *testing.T) {
 	_, stats := ApplyAll(cfg, "m", body)
 	if stats.Style != "skipped:media" {
 		t.Fatalf("style = %q", stats.Style)
+	}
+}
+
+func TestOutputStyleIgnoresImageFieldsInToolOutput(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"sys"},{"role":"user","content":"deploy it"},` +
+		`{"role":"tool","content":"{\"image\": \"nginx:latest\", \"document\": \"runbook.md\"}"}]}`)
+	_, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "chat" {
+		t.Fatalf("tool output mentioning image/document skipped styling: %q", stats.Style)
 	}
 }
 
