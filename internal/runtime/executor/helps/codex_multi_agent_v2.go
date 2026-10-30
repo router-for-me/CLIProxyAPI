@@ -192,7 +192,7 @@ func translateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context
 	var convertErr error
 	switch {
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex:
-		translated, convertErr = codexclaude.ConvertClaudeRequestToCodexWithCompat(model, payload, stream)
+		translated, convertErr = codexclaude.ConvertClaudeRequestToCodexWithCompatContext(ctx, model, payload, stream)
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatGemini:
 		translated, convertErr = geminiclaude.ConvertClaudeRequestToGeminiWithCompat(model, payload, stream)
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatInteractions:
