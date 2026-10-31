@@ -200,8 +200,10 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput gjson.Result) bo
 	if !nextInput.Exists() || !nextInput.IsArray() {
 		return false
 	}
-	if requestType == wsRequestTypeCreate && !previousResponseID.Exists() && inputHasCodexLocalCompactionSummary(nextInput) {
-		return true
+	if requestType == wsRequestTypeCreate && !previousResponseID.Exists() {
+		if inputHasCodexLocalCompactionSummary(nextInput) || inputHasOpenCodeCompactionCheckpoint(nextInput) {
+			return true
+		}
 	}
 
 	for _, item := range nextInput.Array() {
@@ -246,14 +248,14 @@ func inputHasCodexLocalCompactionSummary(input gjson.Result) bool {
 		if role != "user" && role != "developer" {
 			return false
 		}
-		if role == "user" && strings.HasPrefix(codexLocalCompactionMessageText(item), codexLocalCompactionSummaryPrefix+"\n") {
+		if role == "user" && strings.HasPrefix(localCompactionMessageText(item), codexLocalCompactionSummaryPrefix+"\n") {
 			hasSummary = true
 		}
 	}
 	return hasSummary
 }
 
-func codexLocalCompactionMessageText(message gjson.Result) string {
+func localCompactionMessageText(message gjson.Result) string {
 	content := message.Get("content")
 	if content.Type == gjson.String {
 		return content.String()
@@ -269,6 +271,38 @@ func codexLocalCompactionMessageText(message gjson.Result) string {
 		}
 	}
 	return text.String()
+}
+
+func inputHasOpenCodeCompactionCheckpoint(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+
+	hasCheckpoint := false
+	for _, item := range input.Array() {
+		itemType := strings.TrimSpace(item.Get("type").String())
+		if itemType != "" && itemType != "message" {
+			return false
+		}
+		role := strings.TrimSpace(item.Get("role").String())
+		if role != "user" && role != "developer" {
+			return false
+		}
+		if role != "user" {
+			continue
+		}
+
+		text := localCompactionMessageText(item)
+		if !strings.HasPrefix(text, "<conversation-checkpoint>\n") ||
+			!strings.HasSuffix(strings.TrimSpace(text), "</conversation-checkpoint>") {
+			continue
+		}
+		_, summary, found := strings.Cut(text, "\n<summary>\n")
+		if found && strings.Contains(summary, "\n</summary>") {
+			hasCheckpoint = true
+		}
+	}
+	return hasCheckpoint
 }
 
 func inputSatisfiesPendingToolCalls(input gjson.Result, pendingCallIDs []string) bool {
