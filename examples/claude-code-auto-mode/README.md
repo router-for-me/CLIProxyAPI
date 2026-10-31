@@ -60,6 +60,40 @@ the same structure can also match. Claude remains responsible for interpreting
 the verdict and enforcing its permission policy. This configuration does not
 approve actions or disable checks.
 
+## Alternative: let each session select effort
+
+[client-effort.fragment.yaml](client-effort.fragment.yaml) is an alternative
+profile for deployments that want Claude's effort selection to reach Codex.
+Remove the old unconditional High override when applying this alternative;
+retain unrelated routing, authentication and payload rules. It is not applied
+on top of the fixed-High profile. Check later custom rules for effort overrides.
+
+Remove a deployment-imposed `CLAUDE_CODE_EFFORT_LEVEL=high` from the Claude
+launch environment as well: that variable takes precedence over the native
+session selector and launch flag. Preserve any original value for rollback.
+Native Claude Code can then use `/effort medium`, `/effort high`, or
+`claude -r --effort medium`. Changes to a parent environment require a new
+client process; do not interrupt an active task merely to apply the setting.
+
+The alternative preserves explicit supported client effort. The Medium default
+only fills a missing translated field: it does not rewrite an existing effort,
+an adaptive-thinking default or a model-suffix override. Native model defaults
+and saved per-model choices still matter; see the client's
+[effort resolution order](https://code.claude.com/docs/en/model-config#adjust-effort-level).
+
+Enable `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` in the Codex launch profile and
+preserve its previous value for rollback. Native Claude request-class hints
+then retain the old High policy for auxiliary work, including follow-up
+authorization review. An observed tool-free transcript envelope provides a
+fallback for already-running clients without those headers. The recognized
+stage-one exception then selects Medium. Hints and envelope conditions are
+operator routing policy, not authenticated safety metadata. Other source
+protocols are excluded from both High guards. Changed envelopes without hints
+follow the translated request instead; revalidate them after client updates.
+
+To undo, remove this alternative's default and three overrides, then restore the
+previous rules and any saved environment value. Client history is unchanged.
+
 ## Measurements and limits
 
 Measured on 2026-10-31 with GPT-6.1 Sol at Standard speed, an OAuth Codex backend
