@@ -98,6 +98,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
 		}
+		// Preserve optional capability metadata for clients that can use it while
+		// retaining the standard OpenAI model fields above for compatibility.
+		for _, key := range []string{"input_modalities", "output_modalities", "supported_parameters"} {
+			if capability, exists := model[key]; exists {
+				filteredModel[key] = capability
+			}
+		}
 
 		filteredModels[i] = filteredModel
 	}
