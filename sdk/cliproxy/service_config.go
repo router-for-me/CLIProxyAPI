@@ -2,10 +2,13 @@ package cliproxy
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -58,8 +61,43 @@ type routingRuntimeState struct {
 	strategy                 string
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
+	sessionAffinityStore     string
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
+}
+
+// sessionAffinityPersistencePath returns the configured snapshot path, or "" when
+// it is unset or would be picked up as a credential: a .json file directly in
+// the auth directory is watched and synchronized as an auth file, so writing the
+// snapshot there every few seconds would churn the watcher and token stores.
+func sessionAffinityPersistencePath(cfg *config.Config) string {
+	path := strings.TrimSpace(cfg.Routing.SessionAffinityPersistencePath)
+	if path == "" {
+		return ""
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".json") {
+		return path
+	}
+	authDir, errAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+	if errAuthDir != nil {
+		return path
+	}
+	snapshotDir, errSnapshot := filepath.Abs(filepath.Dir(path))
+	authDirAbs, errAuth := filepath.Abs(authDir)
+	if errSnapshot == nil && errAuth == nil && sameDirectory(snapshotDir, authDirAbs) {
+		log.Warnf("routing.session-affinity-persistence-path %q is a .json file in the auth directory and would be treated as a credential; session affinity persistence is disabled", path)
+		return ""
+	}
+	return path
+}
+
+// sameDirectory compares two absolute directories the way the auth watcher does:
+// case-insensitively on Windows.
+func sameDirectory(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -80,6 +118,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
+	state.sessionAffinityStore = sessionAffinityPersistencePath(cfg)
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
@@ -114,6 +153,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 			TTL:              state.sessionAffinityTTL,
 			SubagentAffinity: &subagents,
 			RebindOn:         state.sessionAffinityRebindOn,
+			PersistencePath:  state.sessionAffinityStore,
 		})
 	}
 	return selector

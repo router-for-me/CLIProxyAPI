@@ -175,6 +175,11 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
+  # Optional file for persisting session affinity bindings (session bindings and
+  # LCP prefix groups) across restarts, so prompt-cache locality survives a
+  # restart. Written atomically (mode 0600) every few seconds and on shutdown;
+  # unexpired entries are restored on startup. Empty (default) disables persistence.
+  # session-affinity-persistence-path: "./session-affinity.json"
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
   # for the same model, maximizing Prompt/KV Cache reuse and minimizing TTFT.
