@@ -126,7 +126,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	if host != nil {
 		quota.pluginIDs = host.QuotaProviderPluginIDs(c.Request.Context())
 	}
-	auths := h.authManager.List()
+	auths := deduplicateAuthFilesByIndex(h.authManager.List())
 	observedAt := time.Now().UTC()
 	cooldownsKnown := !h.authManager.HomeEnabled()
 	if pagination.enabled {
@@ -174,6 +174,25 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
 	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
+}
+
+func deduplicateAuthFilesByIndex(auths []*coreauth.Auth) []*coreauth.Auth {
+	seen := make(map[string]struct{}, len(auths))
+	out := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		index := strings.TrimSpace(auth.EnsureIndex())
+		if index != "" {
+			if _, exists := seen[index]; exists {
+				continue
+			}
+			seen[index] = struct{}{}
+		}
+		out = append(out, auth)
+	}
+	return out
 }
 
 func parseAuthFilesPagination(c *gin.Context) (authFilesPagination, error) {

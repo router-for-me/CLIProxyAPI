@@ -703,6 +703,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
 	previousAuths := m.auths
 	m.auths = make(map[string]*Auth, len(items))
+	seenAuthKeys := make(map[string]struct{}, len(items))
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64, len(items))
 	}
@@ -715,6 +716,12 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		if auth.Index != "" {
+			if _, exists := seenAuthKeys[auth.Index]; exists {
+				continue
+			}
+			seenAuthKeys[auth.Index] = struct{}{}
+		}
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 		auth.Generation = 1
