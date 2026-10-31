@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -18,6 +19,39 @@ import (
 	"github.com/tidwall/gjson"
 	xcurrency "golang.org/x/text/currency"
 )
+
+func isKiroAuth(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "kiro" || provider == "codewhisperer" {
+		return true
+	}
+	id := strings.ToLower(strings.TrimSpace(auth.ID))
+	fileName := strings.ToLower(strings.TrimSpace(auth.FileName))
+	if strings.HasPrefix(id, "kiro-") || strings.HasPrefix(fileName, "kiro-") {
+		return true
+	}
+	if auth.Metadata != nil {
+		if t, ok := auth.Metadata["type"].(string); ok && strings.EqualFold(strings.TrimSpace(t), "kiro") {
+			return true
+		}
+		if _, ok := auth.Metadata["profile_arn"]; ok {
+			return true
+		}
+		if _, ok := auth.Metadata["profileArn"]; ok {
+			return true
+		}
+		if m, ok := auth.Metadata["auth_method"].(string); ok && (strings.EqualFold(m, "idc") || strings.EqualFold(m, "builder-id")) {
+			return true
+		}
+		if m, ok := auth.Metadata["authMethod"].(string); ok && (strings.EqualFold(m, "idc") || strings.EqualFold(m, "builder-id")) {
+			return true
+		}
+	}
+	return false
+}
 
 type credentialQuotaRequest struct {
 	AuthIndexSnake  *string `json:"auth_index"`
@@ -83,6 +117,23 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 	provider := strings.TrimSpace(body.Provider)
 	if provider == "" {
 		provider = auth.Provider
+	}
+
+	if strings.EqualFold(pluginID, "kiro") || strings.EqualFold(provider, "kiro") || isKiroAuth(auth) {
+		cfg := h.configSnapshot()
+		quotaResp, errFetch := kiroauth.FetchNormalizedQuota(c.Request.Context(), cfg, auth)
+		if errFetch != nil {
+			log.WithError(errFetch).Warnf("failed to fetch quota for kiro credential %s", auth.Index)
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch quota: %v", errFetch)})
+			return
+		}
+		if savePath, errSave := h.saveTokenRecord(c.Request.Context(), auth); errSave != nil {
+			log.WithError(errSave).Warn("management: failed to persist updated kiro auth metadata after quota fetch")
+		} else if savePath != "" {
+			log.Debugf("management: updated kiro auth metadata saved to %s", savePath)
+		}
+		c.JSON(http.StatusOK, quotaResp)
+		return
 	}
 
 	if host != nil {
@@ -164,6 +215,21 @@ func (h *Handler) ResetCredentialQuota(c *gin.Context) {
 	provider := strings.TrimSpace(body.Provider)
 	if provider == "" {
 		provider = auth.Provider
+	}
+
+	if strings.EqualFold(pluginID, "kiro") || strings.EqualFold(provider, "kiro") || isKiroAuth(auth) {
+		if h.authManager != nil {
+			updated, _, errResetCore := h.authManager.ResetQuota(c.Request.Context(), auth.ID)
+			if errResetCore != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reset routing quota: %v", errResetCore)})
+				return
+			}
+			if updated != nil {
+				updated.EnsureIndex()
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": auth.Index})
+		return
 	}
 
 	req := pluginapi.QuotaResetRequest{
@@ -271,6 +337,23 @@ func (h *Handler) fetchQuotaForPlugin(c *gin.Context, pluginID, authIndex string
 		return
 	}
 
+	if strings.EqualFold(pluginID, "kiro") || isKiroAuth(auth) {
+		cfg := h.configSnapshot()
+		quotaResp, errFetch := kiroauth.FetchNormalizedQuota(c.Request.Context(), cfg, auth)
+		if errFetch != nil {
+			log.WithError(errFetch).Warnf("failed to fetch quota for kiro credential %s", auth.Index)
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch quota: %v", errFetch)})
+			return
+		}
+		if savePath, errSave := h.saveTokenRecord(c.Request.Context(), auth); errSave != nil {
+			log.WithError(errSave).Warn("management: failed to persist updated kiro auth metadata after quota fetch")
+		} else if savePath != "" {
+			log.Debugf("management: updated kiro auth metadata saved to %s", savePath)
+		}
+		c.JSON(http.StatusOK, quotaResp)
+		return
+	}
+
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
@@ -323,6 +406,21 @@ func (h *Handler) ResetPluginQuota(c *gin.Context) {
 	auth := h.authByIndex(authIndex)
 	if auth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		return
+	}
+
+	if strings.EqualFold(pluginID, "kiro") || isKiroAuth(auth) {
+		if h.authManager != nil {
+			updated, _, errResetCore := h.authManager.ResetQuota(c.Request.Context(), auth.ID)
+			if errResetCore != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reset routing quota: %v", errResetCore)})
+				return
+			}
+			if updated != nil {
+				updated.EnsureIndex()
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "auth_index": auth.Index})
 		return
 	}
 
