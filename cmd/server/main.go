@@ -72,6 +72,11 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
+	os.Exit(run())
+}
+
+// run finishes deferred cleanup before main applies the process exit status.
+func run() (exitStatus int) {
 	if len(os.Args) > 1 && os.Args[1] == "discover" {
 		discoverFlags := flag.NewFlagSet("discover", flag.ExitOnError)
 		timeoutSec := discoverFlags.Int("timeout", 3, "Discovery timeout in seconds")
@@ -94,7 +99,7 @@ func main() {
 			Include:     include,
 			Exclude:     exclude,
 		})
-		os.Exit(code)
+		return code
 	}
 
 	// For legacy --discover-json flag or JSON requests, keep stdout clean
@@ -212,7 +217,7 @@ func main() {
 			Include:     include,
 			Exclude:     exclude,
 		})
-		os.Exit(code)
+		return code
 	}
 
 	// Core application variables.
@@ -704,10 +709,7 @@ func main() {
 	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
-			if exitCode != 0 {
-				os.Exit(exitCode)
-			}
-			return
+			return exitCode
 		}
 	}
 
@@ -832,9 +834,12 @@ func main() {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			registry.SetLocalModelCatalogs(localModel)
-			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
+			if errStart := cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...); errStart != nil {
+				return 1
+			}
 		}
 	}
+	return
 }
 
 // resolveManagementBaseURL determines the management API base URL for TUI client mode.
