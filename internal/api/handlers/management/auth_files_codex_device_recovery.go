@@ -33,10 +33,7 @@ func (h *Handler) prepareCodexDeviceRecovery(state string, record *coreauth.Auth
 	if !matchesOAuthRecoveryTarget(target, authEmail(record), accountID, record.FileName) {
 		return nil, errors.New("Authenticated account does not match target credential")
 	}
-	record.ID = target.AuthID
-	if target.FileName != "" {
-		record.FileName = target.FileName
-	}
+	applyOAuthRecoveryTargetLocation(record, target)
 	recovery := &codexDeviceRecovery{target: target}
 	if h.authManager != nil {
 		if existing, okExisting := h.authManager.GetByID(record.ID); okExisting && existing != nil {
