@@ -81,7 +81,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Filter to the fields an OpenAI model list needs. context_length is not in
+	// the spec, but compatible gateways return it and clients use it to pick a
+	// context window.
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -97,6 +99,11 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		// Add owned_by field if it exists
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
+		}
+
+		// Add context_length field if it exists
+		if contextLength, exists := model["context_length"]; exists {
+			filteredModel["context_length"] = contextLength
 		}
 
 		filteredModels[i] = filteredModel
