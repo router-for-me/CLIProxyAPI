@@ -1475,6 +1475,10 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		HTTPStatus: http.StatusBadGateway,
 		Message:    `{"body":{"error":{"type":"invalid_request","message":"invalid input"}}}`,
 	}
+	missingMessagesErr := &Error{
+		HTTPStatus: http.StatusInternalServerError,
+		Message:    `{"error":{"message":"field messages is required","type":"server_error"}}`,
+	}
 	// Upstream sends this one as plain text rather than a JSON error body.
 	itemNotPersistedErr := &Error{
 		HTTPStatus: http.StatusNotFound,
@@ -1507,6 +1511,9 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "non-streaming context length behind bad gateway", err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming context length behind bad gateway", stream: true, err: contextLengthErr, wantStatus: http.StatusBadGateway},
 		{name: "streaming invalid request type behind bad gateway", stream: true, err: invalidRequestTypeErr, wantStatus: http.StatusBadGateway},
+		{name: "non-streaming missing messages behind internal error", provider: "claude", err: missingMessagesErr, wantStatus: http.StatusInternalServerError},
+		{name: "streaming missing messages behind internal error", provider: "claude", stream: true, err: missingMessagesErr, wantStatus: http.StatusInternalServerError},
+		{name: "streaming missing messages after payload", provider: "claude", stream: true, streamAfterPayload: true, err: missingMessagesErr, wantStatus: http.StatusInternalServerError},
 		{name: "non-streaming item not persisted", err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted", stream: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
 		{name: "streaming item not persisted after payload", stream: true, streamAfterPayload: true, err: itemNotPersistedErr, wantStatus: http.StatusNotFound},
