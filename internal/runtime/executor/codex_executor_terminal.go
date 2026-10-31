@@ -323,6 +323,21 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 }
 
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
+	if helps.IsCodexHTMLForbidden(statusCode, body) {
+		// An HTML edge rejection is not evidence of an invalid credential.
+		// Keep retrying bounded by the existing manager policy and honour any
+		// upstream Retry-After without retaining the HTML page in client history.
+		retryAfter := 5 * time.Second
+		if hint := parseRetryAfterHeader(headers, time.Now()); hint != nil && *hint > retryAfter {
+			retryAfter = *hint
+		}
+		return statusErr{
+			code:       http.StatusBadGateway,
+			msg:        `{"error":{"type":"server_error","code":"upstream_html_rejection","message":"Codex upstream returned an HTML HTTP 403 page. Retry after network connectivity is restored."}}`,
+			retryAfter: &retryAfter,
+			diagnostic: "Codex edge HTML rejection; original HTTP status 403",
+		}
+	}
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
