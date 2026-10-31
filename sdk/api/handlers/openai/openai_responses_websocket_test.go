@@ -2741,6 +2741,12 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			body:   `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`,
 			want:   true,
 		},
+		{
+			name:   "xai content refusal at 403",
+			status: http.StatusForbidden,
+			body:   `{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`,
+			want:   true,
+		},
 		// Credential, quota and transport failures stay silent: the client just
 		// reconnects, and a fresh socket already implies a full context resend.
 		{name: "unauthorized", status: http.StatusUnauthorized, body: "invalid token"},

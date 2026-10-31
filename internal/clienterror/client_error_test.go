@@ -246,6 +246,51 @@ func TestIsRequestFault(t *testing.T) {
 			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
 			want:   false,
 		},
+		{
+			// Verbatim xAI content refusal: tied to the prompt, so every credential
+			// returns the same answer.
+			name:   "xai content refusal",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`),
+			want:   true,
+		},
+		{
+			name:   "xai content refusal with typographic apostrophe",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"code":"permission-denied","error":"I’m sorry, I can’t help with that request."}`),
+			want:   true,
+		},
+		{
+			name:   "xai content refusal in websocket error envelope",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"type":"error","status":403,"error":{"code":"permission-denied","message":"I'm sorry, I can't help with that request."}}`),
+			want:   true,
+		},
+		{
+			name: "xai content refusal in response body",
+			err:  responseBodyError{status: http.StatusForbidden, body: `{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`},
+			want: true,
+		},
+		{
+			// The same xAI code also reports account-level denials. Those must keep
+			// credential rotation and cooldown.
+			name:   "xai account permission denied is not a request fault",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"code":"permission-denied","error":"Access to the chat endpoint is denied. Please ensure you're using the correct credentials."}`),
+			want:   false,
+		},
+		{
+			name:   "refusal text without permission-denied code is not a request fault",
+			status: http.StatusForbidden,
+			err:    errors.New(`{"code":"forbidden","error":"I'm sorry, I can't help with that request."}`),
+			want:   false,
+		},
+		{
+			name:   "refusal body on a non-403 status is not a request fault",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`{"code":"permission-denied","error":"I'm sorry, I can't help with that request."}`),
+			want:   false,
+		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
 		{name: "invalid JSON body", status: http.StatusBadGateway, err: errors.New(`{"error":`)},
