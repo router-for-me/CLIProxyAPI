@@ -537,3 +537,55 @@ func TestCodexUpstreamCompression_DirectImagePayloadRewrite(t *testing.T) {
 		})
 	}
 }
+
+func TestCompressCodexRequestBodyMatchesFreshEncoder(t *testing.T) {
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+		body := codexBenchPayload(size)
+		fresh, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+		if errNewWriter != nil {
+			t.Fatal(errNewWriter)
+		}
+		want := fresh.EncodeAll(body, nil)
+		if errClose := fresh.Close(); errClose != nil {
+			t.Fatal(errClose)
+		}
+		for round := 0; round < 3; round++ { // later rounds reuse a pooled encoder
+			got, errCompress := compressCodexRequestBody(body)
+			if errCompress != nil {
+				t.Fatal(errCompress)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%d bytes, round %d: pooled output differs from a fresh encoder", size, round)
+			}
+		}
+	}
+}
+
+func TestCompressCodexRequestBodyConcurrent(t *testing.T) {
+	decoder, errDecoder := zstd.NewReader(nil)
+	if errDecoder != nil {
+		t.Fatal(errDecoder)
+	}
+	defer decoder.Close()
+	errs := make(chan error, 32)
+	for i := 0; i < cap(errs); i++ {
+		go func(i int) {
+			body := []byte(strings.Repeat("request "+strconv.Itoa(i)+" ", 512))
+			compressed, errCompress := compressCodexRequestBody(body)
+			if errCompress == nil {
+				decoded, errDecode := decoder.DecodeAll(compressed, nil)
+				if errDecode != nil {
+					errCompress = errDecode
+				} else if !bytes.Equal(decoded, body) {
+					errCompress = io.ErrUnexpectedEOF
+				}
+			}
+			errs <- errCompress
+		}(i)
+	}
+	for i := 0; i < cap(errs); i++ {
+		if errRoundTrip := <-errs; errRoundTrip != nil {
+			t.Fatal(errRoundTrip)
+		}
+	}
+}
