@@ -457,3 +457,61 @@ func TestStatsReport(t *testing.T) {
 		t.Fatalf("empty stats reported %d%%", got)
 	}
 }
+
+// appendStabilityBody builds a conversation of n turns: prose, a shell call, a
+// noisy tool result and an assistant reply. Each turn only appends, so turn n is
+// a strict prefix-extension of turn n-1.
+func appendStabilityBody(n int) []byte {
+	noisy := strings.Repeat("build output line with noise   \n\n\n\n", 40)
+	var b strings.Builder
+	b.WriteString(`{"model":"m","messages":[`)
+	b.WriteString(`{"role":"system","content":` + quote("You are a coding agent. Keep diffs small.") + `},`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"role":"user","content":` + quote("turn "+itoa(i)+" please fix the failing test in pkg"+itoa(i)) + `},`)
+		b.WriteString(`{"role":"assistant","content":null,"tool_calls":[{"id":"c` + itoa(i) +
+			`","type":"function","function":{"name":"bash","arguments":"{\"command\":\"go test ./...\"}"}}]},`)
+		b.WriteString(`{"role":"tool","tool_call_id":"c` + itoa(i) + `","content":` + quote(noisy) + `},`)
+		b.WriteString(`{"role":"assistant","content":` + quote("I will patch pkg"+itoa(i)+" now. The fix touches one function.") + `}`)
+	}
+	b.WriteString(`]}`)
+	return []byte(b.String())
+}
+
+// Appending a turn must leave the compressed bytes of every earlier message
+// identical. A provider prompt cache is keyed on that prefix, so any drift here
+// makes every turn a full-price prompt instead of a cache read.
+func TestApplyIsAppendStable(t *testing.T) {
+	cfg := testConfig(EngineSessionDedup, EngineLite, EngineRTK, EngineHeadroom, EngineCaveman)
+	cfg.Combos[0].Pipeline[4].Level = "full"
+	cfg.Sanitize()
+
+	var prev []string
+	for turns := 1; turns <= 5; turns++ {
+		out, stats := Apply(cfg, "m", appendStabilityBody(turns))
+		if !stats.Applied {
+			t.Fatalf("turn %d: expected compression", turns)
+		}
+		var parsed struct {
+			Messages []struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(out, &parsed); err != nil {
+			t.Fatalf("turn %d: output is not valid JSON: %v", turns, err)
+		}
+		cur := make([]string, len(parsed.Messages))
+		for i, message := range parsed.Messages {
+			cur[i] = string(message.Content)
+		}
+		for i, before := range prev {
+			if i >= len(cur) || cur[i] != before {
+				t.Fatalf("turn %d: message %d changed after appending a turn\nbefore: %q\nafter:  %q",
+					turns, i, before, cur[i])
+			}
+		}
+		prev = cur
+	}
+}
