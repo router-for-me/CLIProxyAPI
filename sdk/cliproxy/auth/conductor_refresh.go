@@ -114,8 +114,24 @@ func (m *Manager) queueRefreshUnschedule(authID string) {
 	loop.remove(authID)
 }
 
+// codexAutoRefreshUnavailable mirrors the executor's local renewal requirements.
+// Runtime evaluators and Home retain control over their own refresh mechanisms.
+func (m *Manager) codexAutoRefreshUnavailable(a *Auth, now time.Time) bool {
+	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "codex") || m.HomeEnabled() {
+		return false
+	}
+	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
+		return false
+	}
+	if authMetadataString(a, "refresh_token") != "" {
+		return false
+	}
+	_, hasSIWC, _ := CodexSIWCNeedsRefresh(a, now)
+	return !hasSIWC
+}
+
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil {
+	if a == nil || m.codexAutoRefreshUnavailable(a, now) {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
