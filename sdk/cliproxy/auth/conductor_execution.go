@@ -1248,6 +1248,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
+			if isRequestTerminatedError(errStream) {
+				return nil, errStream
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
