@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"golang.org/x/net/http2"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2121,6 +2123,15 @@ func isTransientTransportError(err error) bool {
 		return false
 	}
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// A POST rejected by HTTP/2 before response headers is a transport
+	// failure, not a bad credential. Body/stream errors have no url.Error
+	// wrapper and must not gain a replay after output has been delivered.
+	var requestErr *url.Error
+	var streamErr http2.StreamError
+	if errors.As(err, &requestErr) && requestErr != nil && strings.EqualFold(requestErr.Op, "Post") &&
+		errors.As(requestErr.Err, &streamErr) && streamErr.StreamID != 0 && streamErr.Code == http2.ErrCodeProtocol {
 		return true
 	}
 	var dnsErr *net.DNSError
