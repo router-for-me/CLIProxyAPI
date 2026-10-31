@@ -285,14 +285,39 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
+// antigravityCreditsHintLockByAuth (auth.ID -> *sync.Mutex) makes clear's read-check-reset and the
+// refresh publish atomic per credential, so a stale-hint reset cannot overwrite a freshly published hint.
+// NOTE: in-process only; in home mode the hint lives in shared KV, so another process can still interleave.
+var antigravityCreditsHintLockByAuth sync.Map
+
+func lockAntigravityCreditsHint(authID string) func() {
+	mu, _ := antigravityCreditsHintLockByAuth.LoadOrStore(authID, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
+
+// publishAntigravityCreditsHint stores a refreshed hint under the same per-auth lock as clear's reset.
+func publishAntigravityCreditsHint(authID string, hint cliproxyauth.AntigravityCreditsHint) {
+	defer lockAntigravityCreditsHint(authID)()
+	cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+}
+
+// antigravityCreditsBeforeHintReset is a test seam between clear's hint read and its reset; nil in production.
+var antigravityCreditsBeforeHintReset func(authID string)
+
 func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
 	authID := strings.TrimSpace(auth.ID)
 	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(authID)
+	defer lockAntigravityCreditsHint(authID)()
 	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known && !hint.Available {
 		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
+			if antigravityCreditsBeforeHintReset != nil {
+				antigravityCreditsBeforeHintReset(authID)
+			}
 			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
 		}
 	}
@@ -578,7 +603,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		if balance != nil {
 			storeAntigravityCreditsBalanceBestEffort(authID, *balance)
 		}
-		cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+		publishAntigravityCreditsHint(authID, hint)
 		if balance != nil && hint.Available {
 			clearAntigravityCreditsPermanentlyDisabled(auth)
 		}
