@@ -40,6 +40,17 @@ func codexOpenAIImageTestOptions(path string, stream bool) cliproxyexecutor.Opti
 	}
 }
 
+func TestCodexHostedImageRequestUsesDefaultMainModel(t *testing.T) {
+	body := codexBuildImagesResponsesRequest("draw a square", nil, []byte(`{"type":"image_generation","model":"gpt-image-2"}`))
+
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.6-luna" {
+		t.Fatalf("main model = %q, want %q", got, "gpt-5.6-luna")
+	}
+	if got := gjson.GetBytes(body, "tools.0.model").String(); got != "gpt-image-2" {
+		t.Fatalf("tool model = %q, want %q", got, "gpt-image-2")
+	}
+}
+
 func TestCodexImagePayloadPreservesResolvedAlias(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
