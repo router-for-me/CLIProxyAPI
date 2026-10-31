@@ -188,6 +188,10 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 		"xai/grok-imagine-video-1.5-preview",
 		"x-ai/grok-imagine-video-1.5-preview",
 		"grok/grok-imagine-video-1.5-preview",
+		"grok-imagine-video-1.5-lite",
+		"xai/grok-imagine-video-1.5-lite",
+		"x-ai/grok-imagine-video-1.5-lite",
+		"grok/grok-imagine-video-1.5-lite",
 	} {
 		if !isSupportedVideosModel(model) {
 			t.Fatalf("expected %s to be supported", model)
@@ -207,6 +211,9 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	}
 	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
 		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
+	}
+	if isSupportedVideosModel("codex/grok-imagine-video-1.5-lite") {
+		t.Fatal("expected codex/grok-imagine-video-1.5-lite to be rejected")
 	}
 }
 
@@ -879,6 +886,121 @@ func TestXAIVideosNativeRetrieveUsesCanonicalBoundModel(t *testing.T) {
 	}
 	if binding.authID != "video-xai-1.5-auth" || binding.model != xaiVideos15Model {
 		t.Fatalf("binding = {authID:%q model:%q}, want {authID:%q model:%q}", binding.authID, binding.model, "video-xai-1.5-auth", xaiVideos15Model)
+	}
+}
+
+func TestVideosLiteCreateRetrievePreservesModelAndAuth(t *testing.T) {
+	const liteModel = "grok-imagine-video-1.5-lite"
+	for _, route := range []string{openAIVideosPath, xaiVideosGenerationsAPI, xaiVideosEditsAPI, xaiVideosExtensionsAPI} {
+		t.Run(route, func(t *testing.T) {
+			for _, model := range []string{liteModel, "xai/" + liteModel, "x-ai/" + liteModel, "grok/" + liteModel} {
+				t.Run(model, func(t *testing.T) {
+					resetVideoAuthBindingsForTest(t)
+					executor := &videoAuthCaptureExecutor{requestID: "video-lite-bound"}
+					manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+					manager.RegisterExecutor(executor)
+					authModels := []struct {
+						authID string
+						model  string
+					}{
+						{authID: "video-lite-default-auth", model: defaultXAIVideosModel},
+						{authID: "video-lite-auth-a", model: liteModel},
+						{authID: "video-lite-auth-b", model: liteModel},
+					}
+					for _, entry := range authModels {
+						auth := &coreauth.Auth{ID: entry.authID, Provider: "xai", Status: coreauth.StatusActive}
+						if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+							t.Fatalf("manager.Register(%s): %v", entry.authID, errRegister)
+						}
+						registry.GetGlobalRegistry().RegisterClient(entry.authID, auth.Provider, []*registry.ModelInfo{{ID: entry.model}})
+						manager.RefreshSchedulerEntry(entry.authID)
+					}
+					t.Cleanup(func() {
+						for _, entry := range authModels {
+							registry.GetGlobalRegistry().UnregisterClient(entry.authID)
+						}
+					})
+					handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+					createHandler := handler.VideosCreate
+					retrieveHandler := handler.VideosRetrieve
+					idField, retrieveRoute := "id", openAIVideosPath+"/:video_id"
+					retrievePath := openAIVideosPath + "/" + executor.requestID
+					if route != openAIVideosPath {
+						switch route {
+						case xaiVideosGenerationsAPI:
+							createHandler = handler.XAIVideosGenerations
+						case xaiVideosEditsAPI:
+							createHandler = handler.XAIVideosEdits
+						case xaiVideosExtensionsAPI:
+							createHandler = handler.XAIVideosExtensions
+						}
+						retrieveHandler = handler.XAIVideosRetrieve
+						idField, retrieveRoute = "request_id", videosPath+"/:request_id"
+						retrievePath = videosPath + "/" + executor.requestID
+					}
+
+					body := strings.NewReader(`{"model":` + strconv.Quote(model) + `,"prompt":"make a video"}`)
+					createResp := performVideosEndpointRequest(t, http.MethodPost, route, "application/json", body, createHandler)
+					if createResp.Code != http.StatusOK {
+						t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
+					}
+					if got := gjson.GetBytes(createResp.Body.Bytes(), idField).String(); got != executor.requestID {
+						t.Fatalf("created %s = %q, want %q", idField, got, executor.requestID)
+					}
+					retrieveResp := performVideosRouteRequest(t, http.MethodGet, retrieveRoute, retrievePath, "", nil, retrieveHandler)
+					if retrieveResp.Code != http.StatusOK {
+						t.Fatalf("retrieve status = %d, want %d: %s", retrieveResp.Code, http.StatusOK, retrieveResp.Body.String())
+					}
+					if route == openAIVideosPath {
+						for _, resp := range []*httptest.ResponseRecorder{createResp, retrieveResp} {
+							if got := gjson.GetBytes(resp.Body.Bytes(), "model").String(); got != liteModel {
+								t.Fatalf("response model = %q, want %s", got, liteModel)
+							}
+						}
+					}
+					authIDs := executor.AuthIDs()
+					if len(authIDs) != 2 || (authIDs[0] != "video-lite-auth-a" && authIDs[0] != "video-lite-auth-b") || authIDs[1] != authIDs[0] {
+						t.Fatalf("authIDs = %v, want both calls to use the same Lite auth", authIDs)
+					}
+					models := executor.Models()
+					if len(models) != 2 || models[0] != liteModel || models[1] != liteModel {
+						t.Fatalf("models = %v, want both calls to route with %s", models, liteModel)
+					}
+					payloadModels := executor.PayloadModels()
+					if len(payloadModels) != 2 || payloadModels[0] != liteModel {
+						t.Fatalf("payload models = %v, want create payload model %s", payloadModels, liteModel)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestVideosLiteRejectsForeignProviderPrefix(t *testing.T) {
+	handler := &OpenAIAPIHandler{}
+	for _, route := range []struct {
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{openAIVideosPath, handler.VideosCreate},
+		{xaiVideosGenerationsAPI, handler.XAIVideosGenerations},
+		{xaiVideosEditsAPI, handler.XAIVideosEdits},
+		{xaiVideosExtensionsAPI, handler.XAIVideosExtensions},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			body := strings.NewReader(`{"model":"codex/grok-imagine-video-1.5-lite","prompt":"make a video"}`)
+			resp := performVideosEndpointRequest(t, http.MethodPost, route.path, "application/json", body, route.handler)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+			}
+			errorField := "error.type"
+			if route.path == openAIVideosPath {
+				errorField = "error.code"
+			}
+			if got := gjson.GetBytes(resp.Body.Bytes(), errorField).String(); got != "invalid_request_error" {
+				t.Fatalf("%s = %q, want invalid_request_error", errorField, got)
+			}
+		})
 	}
 }
 
