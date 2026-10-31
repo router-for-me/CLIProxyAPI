@@ -264,6 +264,11 @@ func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType s
 			return true
 		}
 
+		// Compatibility: standard Responses clients reject this stream event variant.
+		if name == "response.metadata" {
+			return true
+		}
+
 		// If official Codex client, preserve codex.response.metadata but filter rate limits.
 		if f != nil && f.isCodexClient {
 			if name == "codex.rate_limits" {
