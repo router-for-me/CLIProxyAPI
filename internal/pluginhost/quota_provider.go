@@ -158,9 +158,11 @@ func (h *Host) QuotaProviderPluginIDs(ctx context.Context) map[string]string {
 			addCandidate(identifier, record.id)
 		}
 		addCandidate(normalizeProviderID(record.id), record.id)
-		if record.plugin.Capabilities.AuthProvider != nil {
-			if authID, okAuth := h.callAuthProviderIdentifier(record.id, record.plugin.Capabilities.AuthProvider); okAuth {
-				addCandidate(authID, record.id)
+		if hasRecordAuthProvider(record) {
+			if authIDs, okAuth := h.callRecordAuthProviderIdentifiers(record); okAuth {
+				for _, authID := range authIDs {
+					addCandidate(authID, record.id)
+				}
 			}
 		}
 	}
@@ -219,10 +221,14 @@ func (h *Host) quotaProviderRecord(ctx context.Context, provider string) *capabi
 			r := record
 			return &r
 		}
-		if record.plugin.Capabilities.AuthProvider != nil {
-			if authID, okAuth := h.callAuthProviderIdentifier(record.id, record.plugin.Capabilities.AuthProvider); okAuth && authID == provider {
-				r := record
-				return &r
+		if hasRecordAuthProvider(record) {
+			if authIDs, okAuth := h.callRecordAuthProviderIdentifiers(record); okAuth {
+				for _, authID := range authIDs {
+					if authID == provider {
+						r := record
+						return &r
+					}
+				}
 			}
 		}
 	}

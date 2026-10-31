@@ -139,6 +139,24 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			})
 			nextModelClients[clientID] = struct{}{}
 		}
+		if executorScopeAllowsOAuthModels(record.plugin.Capabilities) && hasRecordAuthProvider(record) {
+			if authIDs, okAuthIDs := h.callRecordAuthProviderIdentifiers(record); okAuthIDs {
+				for _, authID := range authIDs {
+					if authID == "" || authID == provider {
+						continue
+					}
+					if _, seenAuthProvider := seenProviders[authID]; seenAuthProvider {
+						continue
+					}
+					seenProviders[authID] = struct{}{}
+					if h.providerHasNativeExecutor(manager, authID) {
+						continue
+					}
+					nextProviders[authID] = struct{}{}
+					executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, authID, executor))
+				}
+			}
+		}
 	}
 	h.commitExecutorState(snap, manager, modelRegistry, providerModels, executorRegistrations, nextProviders, modelClientRegistrations, nextModelClients)
 }
@@ -403,6 +421,15 @@ func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 		candidate, okCandidate := h.executorProvider(record, executor)
 		if okCandidate && candidate == provider {
 			return true
+		}
+		if executorScopeAllowsOAuthModels(record.plugin.Capabilities) && hasRecordAuthProvider(record) {
+			if authIDs, okAuthIDs := h.callRecordAuthProviderIdentifiers(record); okAuthIDs {
+				for _, authID := range authIDs {
+					if authID == provider {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false
@@ -1049,8 +1076,8 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
-	record := a.host.authProviderRecord(authProvider(auth))
-	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
+	record, authProv := a.host.authProviderCredentialEntryForAuth(auth)
+	if record == nil || authProv == nil {
 		return auth.Clone(), nil
 	}
 	defer func() {
@@ -1061,7 +1088,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		}
 	}()
 
-	pluginResp, errRefresh := record.plugin.Capabilities.AuthProvider.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{
+	pluginResp, errRefresh := authProv.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{
 		AuthID:       authID(auth),
 		AuthProvider: authProvider(auth),
 		StorageJSON:  storageJSONFromAuth(auth),
@@ -1108,6 +1135,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		}
 		data.Attributes = attributes
 	}
+	preserveAuthOAuthProviderMetadata(&data, auth)
 	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)

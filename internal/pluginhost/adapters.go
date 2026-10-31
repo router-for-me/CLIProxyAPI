@@ -363,9 +363,16 @@ func (h *Host) authModelProviderMatches(record capabilityRecord, provider string
 	if caps.ModelProvider == nil || h.isPluginFused(record.id) || !executorScopeAllowsOAuthModels(caps) {
 		return false
 	}
-	if caps.AuthProvider != nil {
-		identifier, ok := h.callAuthProviderIdentifier(record.id, caps.AuthProvider)
-		return ok && normalizeProviderID(identifier) == provider
+	if hasRecordAuthProvider(record) {
+		identifiers, ok := h.callRecordAuthProviderIdentifiers(record)
+		if !ok {
+			return false
+		}
+		for _, identifier := range identifiers {
+			if normalizeProviderID(identifier) == provider {
+				return true
+			}
+		}
 	}
 	candidates := h.modelProvidersForPlugin(record.id)
 	if len(candidates) > 0 {

@@ -33,6 +33,7 @@ type pluginListEntry struct {
 	EffectiveEnabled bool                    `json:"effective_enabled"`
 	SupportsOAuth    bool                    `json:"supports_oauth"`
 	OAuthProvider    string                  `json:"oauth_provider"`
+	OAuthProviders   []string                `json:"oauth_providers,omitempty"`
 	SupportsQuota    bool                    `json:"supports_quota"`
 	QuotaProvider    string                  `json:"quota_provider,omitempty"`
 	Logo             string                  `json:"logo"`
@@ -125,6 +126,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
+			entry.OAuthProviders = pluginOAuthProviders(info.OAuthProviders)
 			entry.SupportsQuota = info.SupportsQuota
 			entry.QuotaProvider = htmlsanitize.String(info.QuotaProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
@@ -476,6 +478,13 @@ func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo 
 		})
 	}
 	return out
+}
+
+func pluginOAuthProviders(providers []string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	return htmlsanitize.Strings(providers)
 }
 
 func pluginMenus(menus []pluginhost.RegisteredPluginMenu) []pluginMenuInfo {

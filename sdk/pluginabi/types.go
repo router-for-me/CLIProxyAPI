@@ -31,7 +31,9 @@ const (
 	// and splices validated byte-range edits in a single pass.
 	// Version 9 lets ModelRegistrar.RegisterModels and ModelProvider.StaticModels
 	// publish model catalogs for multiple providers in one response via Registrations.
-	SchemaVersion uint32 = 9
+	// Version 10 lets a plugin expose multiple OAuth/auth provider identifiers via
+	// auth.identifier (identifiers) or Capabilities.AuthProviders / MultiAuthProvider.
+	SchemaVersion uint32 = 10
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -56,6 +58,9 @@ const (
 	// SchemaVersionMultiProviderModels is the first schema version where model
 	// registration responses may publish models for multiple providers via Registrations.
 	SchemaVersionMultiProviderModels uint32 = 9
+	// SchemaVersionMultiAuthProviders is the first schema version where a plugin
+	// may register multiple auth provider identifiers.
+	SchemaVersionMultiAuthProviders uint32 = 10
 )
 
 const (

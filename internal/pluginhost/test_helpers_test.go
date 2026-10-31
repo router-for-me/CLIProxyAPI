@@ -156,10 +156,45 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		}
 		return marshalRPCResult(resp)
 	case pluginabi.MethodAuthIdentifier:
+		if l.active.Capabilities.AuthProvider == nil && len(l.active.Capabilities.AuthProviders) == 0 {
+			return nil, fmt.Errorf("missing auth provider")
+		}
+		var primary string
+		var identifiers []string
+		if l.active.Capabilities.AuthProvider != nil {
+			primary = l.active.Capabilities.AuthProvider.Identifier()
+			if multi, okMulti := l.active.Capabilities.AuthProvider.(interface{ Identifiers() []string }); okMulti {
+				identifiers = append(identifiers, multi.Identifiers()...)
+			}
+		}
+		for _, prov := range l.active.Capabilities.AuthProviders {
+			if prov == nil {
+				continue
+			}
+			if primary == "" {
+				primary = prov.Identifier()
+			}
+			if id := prov.Identifier(); id != "" {
+				identifiers = append(identifiers, id)
+			}
+			if multi, okMulti := prov.(interface{ Identifiers() []string }); okMulti {
+				identifiers = append(identifiers, multi.Identifiers()...)
+			}
+		}
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: primary, Identifiers: identifiers})
+	case pluginabi.MethodAuthLoginStart:
 		if l.active.Capabilities.AuthProvider == nil {
 			return nil, fmt.Errorf("missing auth provider")
 		}
-		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.AuthProvider.Identifier()})
+		var req pluginapi.AuthLoginStartRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errStart := l.active.Capabilities.AuthProvider.StartLogin(ctx, req)
+		if errStart != nil {
+			return nil, errStart
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodFrontendAuthIdentifier:
 		if l.active.Capabilities.FrontendAuthProvider == nil {
 			return nil, fmt.Errorf("missing frontend auth provider")

@@ -57,6 +57,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.systemInstruction", []byte(systemInstructionResult.Raw))
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.system_instruction")
 	}
+	rawJSON = removeEmptyGeminiSystemInstructionParts(rawJSON)
 
 	rawJSON = normalizeGeminiGenerationConfigResponseSchema(rawJSON)
 
@@ -227,6 +228,50 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 	}
 	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.tools", translatorcommon.JoinRawArray(cleanedTools))
 	return rawJSON
+}
+
+func removeEmptyGeminiSystemInstructionParts(rawJSON []byte) []byte {
+	parts := util.GetGJSONBytesNoCopy(rawJSON, "request.systemInstruction.parts")
+	if !parts.IsArray() {
+		return rawJSON
+	}
+	hasEmptyPart := false
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if isEmptyGeminiPartObject(part) {
+			hasEmptyPart = true
+			return false
+		}
+		return true
+	})
+	if !hasEmptyPart {
+		return rawJSON
+	}
+	var cleanedParts [][]byte
+	parts.ForEach(func(_, part gjson.Result) bool {
+		if isEmptyGeminiPartObject(part) {
+			return true
+		}
+		cleanedParts = append(cleanedParts, []byte(part.Raw))
+		return true
+	})
+	if len(cleanedParts) == 0 {
+		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.systemInstruction")
+		return rawJSON
+	}
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.systemInstruction.parts", translatorcommon.JoinRawArray(cleanedParts))
+	return rawJSON
+}
+
+func isEmptyGeminiPartObject(part gjson.Result) bool {
+	if !part.IsObject() {
+		return false
+	}
+	hasField := false
+	part.ForEach(func(_, _ gjson.Result) bool {
+		hasField = true
+		return false
+	})
+	return !hasField
 }
 
 // geminiFunctionNameFields lists the part fields that can carry a function name.

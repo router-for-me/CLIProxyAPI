@@ -322,23 +322,25 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 			return
 		}
-		if provider != "" && !strings.EqualFold(strings.TrimSpace(targetAuth.Provider), strings.TrimSpace(provider)) {
+		if provider != "" && !h.oauthTargetAuthMatches(targetAuth, provider) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "provider does not match target credential"})
 			return
 		}
 		if provider == "" {
-			provider = strings.TrimSpace(targetAuth.Provider)
+			provider = h.resolveTargetOAuthProvider(targetAuth)
 		}
-		targetAccountID := ""
-		if targetAuth.Metadata != nil {
-			targetAccountID, _ = targetAuth.Metadata["account_id"].(string)
+		targetEmail, targetAccountID := authIdentityEmailAndAccountID(targetAuth)
+		targetPath := ""
+		if targetAuth.Attributes != nil {
+			targetPath = strings.TrimSpace(targetAuth.Attributes[coreauth.AttributePath])
 		}
 		c.Set(oauthSessionTargetContextKey, oauthRecoveryTarget{
 			AuthID:           targetAuth.ID,
 			FileName:         firstNonEmpty(strings.TrimSpace(targetAuth.FileName), targetAuth.ID),
+			Path:             targetPath,
 			Provider:         strings.TrimSpace(targetAuth.Provider),
-			Email:            authEmail(targetAuth),
-			AccountID:        strings.TrimSpace(targetAccountID),
+			Email:            targetEmail,
+			AccountID:        targetAccountID,
 			VerifyAfterLogin: verifyAfterLogin,
 			VerifyModel:      verifyModel,
 		})
@@ -374,6 +376,73 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "provider_not_found"})
 		}
 	}
+}
+
+func (h *Handler) resolveTargetOAuthProvider(targetAuth *coreauth.Auth) string {
+	if targetAuth == nil {
+		return ""
+	}
+	if h != nil {
+		h.mu.Lock()
+		host := h.pluginHost
+		h.mu.Unlock()
+		if host != nil {
+			for _, key := range []string{"oauth_provider", "portal"} {
+				if targetAuth.Attributes != nil {
+					if candidate := strings.TrimSpace(targetAuth.Attributes[key]); candidate != "" && host.HasAuthProvider(candidate) {
+						return candidate
+					}
+				}
+				if targetAuth.Metadata != nil {
+					if raw, ok := targetAuth.Metadata[key].(string); ok {
+						if candidate := strings.TrimSpace(raw); candidate != "" && host.HasAuthProvider(candidate) {
+							return candidate
+						}
+					}
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(targetAuth.Provider)
+}
+
+func (h *Handler) oauthTargetAuthMatches(targetAuth *coreauth.Auth, requestedProvider string) bool {
+	if targetAuth == nil {
+		return false
+	}
+	if h.oauthTargetProviderMatches(targetAuth.Provider, requestedProvider) {
+		return true
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		if targetAuth.Attributes != nil {
+			if candidate := strings.TrimSpace(targetAuth.Attributes[key]); candidate != "" && h.oauthTargetProviderMatches(candidate, requestedProvider) {
+				return true
+			}
+		}
+		if targetAuth.Metadata != nil {
+			if raw, ok := targetAuth.Metadata[key].(string); ok {
+				if candidate := strings.TrimSpace(raw); candidate != "" && h.oauthTargetProviderMatches(candidate, requestedProvider) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (h *Handler) oauthTargetProviderMatches(targetProvider, requestedProvider string) bool {
+	targetProvider = strings.TrimSpace(targetProvider)
+	requestedProvider = strings.TrimSpace(requestedProvider)
+	if strings.EqualFold(targetProvider, requestedProvider) {
+		return true
+	}
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	return host != nil && host.SameAuthProvider(targetProvider, requestedProvider)
 }
 
 // ImportOAuthV8 dispatches credential import using the provider query parameter.

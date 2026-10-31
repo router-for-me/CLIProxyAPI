@@ -179,3 +179,50 @@ func TestAcquisitionRuntimeSyncUsesCommittedCredential(t *testing.T) {
 		}
 	})
 }
+
+func TestNotifyCommittedCredentialPreservesLogicalID(t *testing.T) {
+	for _, useHook := range []bool{false, true} {
+		name := "manager"
+		if useHook {
+			name = "hook"
+		}
+		t.Run(name, func(t *testing.T) {
+			authDir := t.TempDir()
+			path := filepath.Join(authDir, "team", "account.json")
+			if errMkdir := os.MkdirAll(filepath.Dir(path), 0o700); errMkdir != nil {
+				t.Fatal(errMkdir)
+			}
+			if errWrite := os.WriteFile(path, []byte(`{"type":"codex","access_token":"stale-mirror"}`), 0o600); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+			cfg := &config.Config{AuthDir: authDir}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			h := &Handler{cfg: cfg, authManager: manager}
+			if useHook {
+				h.postAuthPersistHook = func(ctx context.Context, auth *coreauth.Auth) error {
+					if auth.FileName != "account.json" {
+						t.Errorf("nested credential filename = %q, want account.json", auth.FileName)
+					}
+					if auth.HasFileSnapshot() {
+						t.Error("committed notification retained a stale-file observation")
+					}
+					_, errRegister := manager.Register(coreauth.WithSkipPersist(ctx), auth)
+					return errRegister
+				}
+			}
+			record := &coreauth.Auth{ID: "logical-account", FileName: "team/account.json", Provider: "codex"}
+			record.BindCommittedAuthFile(path, []byte(`{"type":"codex","access_token":"remote-committed"}`))
+			if errNotify := h.notifyPersistedTokenRecord(context.Background(), path, record); errNotify != nil {
+				t.Fatal(errNotify)
+			}
+			current, ok := manager.GetByID(record.ID)
+			if !ok || current.Metadata["access_token"] != "remote-committed" {
+				t.Fatalf("logical credential did not adopt committed bytes: %#v", current)
+			}
+			if auths := manager.List(); len(auths) != 1 {
+				t.Fatalf("notification created duplicate credentials: %d", len(auths))
+			}
+		})
+	}
+}

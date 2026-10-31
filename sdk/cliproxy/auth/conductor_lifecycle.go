@@ -603,22 +603,39 @@ func equalErrorPtr(a, b *Error) bool {
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	m.RemoveIf(ctx, id, nil)
+}
+
+// RemoveIf deletes an auth from runtime state while holding the per-auth
+// mutation gate when predicate is nil or returns true for the current auth.
+func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth) bool) bool {
 	if m == nil {
-		return
+		return false
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return false
 	}
-	_ = ctx
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
+
+	if predicate != nil {
+		m.mu.RLock()
+		snapshot := m.auths[id]
+		if snapshot != nil {
+			snapshot = snapshot.Clone()
+		}
+		m.mu.RUnlock()
+		if !predicate(snapshot) {
+			return false
+		}
+	}
 
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -666,6 +683,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(context.Background())
+	return true
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {
