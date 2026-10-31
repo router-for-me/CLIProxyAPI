@@ -1266,3 +1266,75 @@ func TestConvertGeminiRequestToAntigravity_PreservesExistingResponseSchema(t *te
 		t.Fatalf("request.generationConfig.responseJsonSchema should have been removed. Output: %s", out)
 	}
 }
+
+func TestConvertGeminiRequestToAntigravity_RemovesEmptySystemInstructionParts(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputJSON string
+		wantParts []string
+		wantRole  string
+	}{
+		{
+			name: "camelCase systemInstruction with single empty part removes systemInstruction",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+				"systemInstruction": {"parts": [{}]},
+				"generationConfig": {"temperature": 1}
+			}`,
+		},
+		{
+			name: "snake_case system_instruction with single empty part removes systemInstruction",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+				"system_instruction": {"parts": [{}]},
+				"generationConfig": {"temperature": 1}
+			}`,
+		},
+		{
+			name: "mixed empty and non-empty parts preserves valid parts and role",
+			inputJSON: `{
+				"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+				"systemInstruction": {
+					"role": "user",
+					"parts": [{}, {"text": "Be concise"}, {}]
+				}
+			}`,
+			wantParts: []string{"Be concise"},
+			wantRole:  "user",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := ConvertGeminiRequestToAntigravity("gemini-3.8-flash", []byte(tt.inputJSON), true)
+			if err != nil {
+				t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+			}
+			if gjson.GetBytes(out, "request.system_instruction").Exists() {
+				t.Fatalf("request.system_instruction should not exist. Output: %s", out)
+			}
+			sys := gjson.GetBytes(out, "request.systemInstruction")
+			if len(tt.wantParts) == 0 {
+				if sys.Exists() {
+					t.Fatalf("request.systemInstruction should be removed when all parts are empty, got: %s", sys.Raw)
+				}
+				return
+			}
+			if !sys.Exists() {
+				t.Fatalf("request.systemInstruction should exist. Output: %s", out)
+			}
+			if gotRole := sys.Get("role").String(); gotRole != tt.wantRole {
+				t.Fatalf("request.systemInstruction.role = %q, want %q. Output: %s", gotRole, tt.wantRole, out)
+			}
+			parts := sys.Get("parts").Array()
+			if len(parts) != len(tt.wantParts) {
+				t.Fatalf("len(request.systemInstruction.parts) = %d, want %d. Output: %s", len(parts), len(tt.wantParts), out)
+			}
+			for i, wantText := range tt.wantParts {
+				if gotText := parts[i].Get("text").String(); gotText != wantText {
+					t.Fatalf("request.systemInstruction.parts[%d].text = %q, want %q. Output: %s", i, gotText, wantText, out)
+				}
+			}
+		})
+	}
+}

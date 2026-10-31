@@ -38,6 +38,16 @@ func TestRemoveEmptyGeminiFunctionToolsDeletesEmptyArray(t *testing.T) {
 	}
 }
 
+func TestRemoveEmptyGeminiSystemInstructionPartsReusesNormalizedPayload(t *testing.T) {
+	input := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"be concise"}]}}}`)
+
+	output := removeEmptyGeminiSystemInstructionParts(input)
+
+	if &output[0] != &input[0] {
+		t.Fatal("non-empty systemInstruction parts caused a payload copy")
+	}
+}
+
 func TestRewriteGeminiFunctionNamesNormalizesNonStringNames(t *testing.T) {
 	input := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":true,"args":{}}}]}],"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":[true]}}}}`)
 
