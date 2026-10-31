@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +57,7 @@ type configCommit struct {
 
 type routingRuntimeState struct {
 	strategy                 string
+	providerStrategies       string // sorted "provider=strategy" pairs that differ from strategy, comma-joined; a string keeps the state comparable
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
@@ -73,12 +75,20 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		return state
 	}
 
-	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
-	case "weighted-round-robin", "weightedroundrobin", "wrr":
-		state.strategy = "weighted-round-robin"
-	case "fill-first", "fillfirst", "ff":
-		state.strategy = "fill-first"
+	if name, ok := coreauth.RoutingStrategyName(cfg.Routing.Strategy); ok {
+		state.strategy = name
 	}
+	var pairs []string
+	for provider, strategy := range cfg.Routing.ProviderStrategies {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		name, ok := coreauth.RoutingStrategyName(strategy)
+		if provider == "" || !ok || name == state.strategy {
+			continue
+		}
+		pairs = append(pairs, provider+"="+name)
+	}
+	sort.Strings(pairs)
+	state.providerStrategies = strings.Join(pairs, ",")
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
@@ -98,14 +108,19 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 }
 
 func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
-	var selector coreauth.Selector
-	switch state.strategy {
-	case "weighted-round-robin":
-		selector = &coreauth.WeightedRoundRobinSelector{}
-	case "fill-first":
-		selector = &coreauth.FillFirstSelector{}
-	default:
+	selector, ok := coreauth.SelectorForStrategy(state.strategy)
+	if !ok {
 		selector = &coreauth.RoundRobinSelector{}
+	}
+	if state.providerStrategies != "" {
+		byProvider := map[string]coreauth.Selector{}
+		for _, pair := range strings.Split(state.providerStrategies, ",") {
+			provider, name, _ := strings.Cut(pair, "=")
+			if sel, ok := coreauth.SelectorForStrategy(name); ok {
+				byProvider[provider] = sel
+			}
+		}
+		selector = &coreauth.ProviderStrategySelector{Default: selector, ByProvider: byProvider}
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents

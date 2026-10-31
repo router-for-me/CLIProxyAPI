@@ -280,3 +280,21 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 		})
 	}
 }
+
+func TestConfigLoadsProviderStrategies(t *testing.T) {
+	path := writeUploadTestConfig(t, "routing:\n  strategy: round-robin\n  provider-strategies:\n    codex: p2c\n    xai: least-used\n")
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Routing.ProviderStrategies; len(got) != 2 || got["codex"] != "p2c" || got["xai"] != "least-used" {
+		t.Fatalf("provider-strategies = %v", got)
+	}
+	out, err := yaml.Marshal(cfg.Routing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "provider-strategies:") || !strings.Contains(string(out), "codex: p2c") {
+		t.Errorf("marshalled routing lost provider-strategies:\n%s", out)
+	}
+}
