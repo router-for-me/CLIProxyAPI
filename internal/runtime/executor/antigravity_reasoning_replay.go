@@ -1711,8 +1711,8 @@ func antigravityReplayToolSchemasFromRequests(rawRequests ...[]byte) map[string]
 				if !schema.Exists() {
 					continue
 				}
-				var schemaValue any
-				if json.Unmarshal([]byte(schema.Raw), &schemaValue) != nil {
+				schemaValue, okSchema := antigravityReplayJSONValue(schema)
+				if !okSchema {
 					continue
 				}
 				for _, schemaName := range []string{name, util.MapSanitizedFunctionName(nameMap, name)} {
@@ -1735,10 +1735,12 @@ func antigravityReplayJSONValue(result gjson.Result) (any, bool) {
 		raw = result.String()
 	}
 	var value any
-	if strings.TrimSpace(raw) == "" || json.Unmarshal([]byte(raw), &value) != nil {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil || decoder.Decode(new(any)) != io.EOF {
 		return nil, false
 	}
-	return value, true
+	return helps.NormalizeReplayJSONNumbers(value), true
 }
 
 func antigravityNormalizeReplayToolValue(value, schema any) any {
@@ -1968,10 +1970,12 @@ func antigravityRepairUnsignedFirstFunctionCalls(payload []byte) []byte {
 
 func antigravityCanonicalReplayJSON(raw []byte) []byte {
 	var value any
-	if json.Unmarshal(raw, &value) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil || decoder.Decode(new(any)) != io.EOF {
 		return bytes.TrimSpace(raw)
 	}
-	canonical, errMarshal := json.Marshal(value)
+	canonical, errMarshal := json.Marshal(helps.NormalizeReplayJSONNumbers(value))
 	if errMarshal != nil {
 		return bytes.TrimSpace(raw)
 	}
