@@ -328,6 +328,28 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	applyCodexHeadersWithSIWC(r, auth, codexUseSIWCForRequest(r.Context(), auth, ginHeaders), token, stream, cfg, ginHeaders)
 }
 
+// applyModelHeaderOverridesFor applies applyModelHeaderOverrides except for credentials that forward the caller's own
+// login (headers "Authorization": "$Authorization"): those requests keep the client's own identity headers, as the
+// client sent them to ChatGPT before the proxy was in the path.
+func applyModelHeaderOverridesFor(auth *cliproxyauth.Auth, headers http.Header, modelName string) {
+	if forwardsCallerLogin(auth) {
+		return
+	}
+	applyModelHeaderOverrides(headers, modelName)
+}
+
+func forwardsCallerLogin(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+		return false
+	}
+	for k, v := range auth.Attributes {
+		if strings.EqualFold(k, "header:Authorization") && strings.EqualFold(strings.TrimSpace(v), "$Authorization") {
+			return true
+		}
+	}
+	return false
+}
+
 // applyModelHeaderOverrides forces models.json config.override_header onto upstream headers.
 func applyModelHeaderOverrides(headers http.Header, modelName string) {
 	if headers == nil {

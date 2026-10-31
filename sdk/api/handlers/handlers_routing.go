@@ -207,6 +207,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	// A model only the caller's ChatGPT account lists (client.codex.account-catalog) routes to the credentials that
+	// forward the caller's login.
+	if len(providers) == 0 && h.RouteCodexAccountModel(baseModel) {
+		providers = util.GetProviderName(baseModel)
+	}
 
 	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
