@@ -7,6 +7,28 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
+func TestResolveDevinGPT61SolChatModelUID(t *testing.T) {
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		t.Run(effort, func(t *testing.T) {
+			want := "gpt-6-1-sol-" + effort
+			if got := ResolveDevinChatModelUID("devin/gpt-6-1-sol", effort, 0); got != want {
+				t.Errorf("body effort: got %q, want %q", got, want)
+			}
+			if got := ResolveDevinChatModelUID("devin/gpt-6-1-sol("+effort+")", "high", 0); got != want {
+				t.Errorf("suffix effort: got %q, want %q", got, want)
+			}
+		})
+	}
+	for _, modelID := range []string{"devin/gpt-6-1-sol", "gpt-6-1-sol", "devin/gpt-6.1-sol"} {
+		if got := ResolveDevinChatModelUID(modelID, "", 0); got != "gpt-6-1-sol-medium" {
+			t.Errorf("default effort for %q: got %q, want gpt-6-1-sol-medium", modelID, got)
+		}
+	}
+	if got := ResolveDevinChatModelUID("devin/gpt-6-1-sol", "none", 0); got != "gpt-6-1-sol-medium" {
+		t.Errorf("unsupported none effort: got %q, want gpt-6-1-sol-medium", got)
+	}
+}
+
 func TestResolveDevinChatModelUID(t *testing.T) {
 	tests := []struct {
 		name          string

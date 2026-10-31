@@ -99,6 +99,31 @@
       }
     },
     {
+      "id": "gpt-6-1-sol",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "openai",
+      "display_name": "GPT-6.1 Sol",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "gpt-6-sol",
       "object": "model",
       "type": "devin",

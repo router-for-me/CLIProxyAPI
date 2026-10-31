@@ -125,6 +125,20 @@ var staticDevinModels = []*ModelInfo{
 		},
 	},
 	{
+		ID:                        "devin/gpt-6-1-sol",
+		Object:                    "model",
+		Type:                      "devin",
+		OwnedBy:                   "openai",
+		DisplayName:               "GPT-6.1 Sol",
+		ContextLength:             1000000,
+		MaxCompletionTokens:       64000,
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+		Thinking: &ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	},
+	{
 		ID:                  "devin/glm-5-2",
 		Type:                "devin",
 		OwnedBy:             "zhipu",
