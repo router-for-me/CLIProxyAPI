@@ -434,7 +434,7 @@ func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallb
 		}
 		request.callbackInstances[instance] = struct{}{}
 		if request.closed {
-			instance.closed.Store(true)
+			instance.close()
 		}
 	}
 	h.mu.Unlock()
@@ -447,7 +447,7 @@ func markPluginLoadClosedLocked(request *pluginLoadRequest) []*hostCallbackInsta
 	request.closed = true
 	instances := make([]*hostCallbackInstance, 0, len(request.callbackInstances))
 	for instance := range request.callbackInstances {
-		instance.closed.Store(true)
+		instance.close()
 		instances = append(instances, instance)
 	}
 	return instances

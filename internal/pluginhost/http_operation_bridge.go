@@ -199,7 +199,7 @@ func (b *hostHTTPOperationBridge) closeInstance(pluginID string, instance *hostC
 		b.cancelPlugin(pluginID)
 		return
 	}
-	instance.closed.Store(true)
+	instance.close()
 	if b == nil {
 		return
 	}
@@ -229,7 +229,7 @@ func (b *hostHTTPOperationBridge) cancelMatching(pluginID string, instance *host
 			continue
 		}
 		if all && entry.instance != nil {
-			entry.instance.closed.Store(true)
+			entry.instance.close()
 		}
 		delete(b.operations, key)
 		entries = append(entries, entry)
@@ -260,7 +260,7 @@ func cancelHostHTTPOperation(entry *hostHTTPOperation) {
 
 func (h *Host) closeHostHTTPCallbackInstance(pluginID string, instance *hostCallbackInstance) {
 	if instance != nil {
-		instance.closed.Store(true)
+		instance.close()
 	}
 	if h == nil {
 		return
