@@ -47,6 +47,12 @@ func TestOpenAICompatRetryAfter(t *testing.T) {
 			want:   durationPointer(time.Minute),
 		},
 		{
+			name:   "top-level upstream rate limit payload",
+			status: http.StatusTooManyRequests,
+			body:   `{"message":"Upstream rate limit exceeded, please retry later","type":"rate_limit_error"}`,
+			want:   durationPointer(time.Minute),
+		},
+		{
 			name:    "provider header wins over fallback",
 			status:  http.StatusTooManyRequests,
 			headers: http.Header{"Retry-After": {"5"}},
