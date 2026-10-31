@@ -2540,6 +2540,101 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 	})
 }
 
+// TestResponseTransformRequestBodiesBySchemaVersion locks the request-body
+// delivery rules for the response normalize/translate hooks.
+//
+// The host invokes those hooks once per SSE frame, so shipping the client and
+// upstream request bodies on every frame made streaming cost
+// O(frames * request size). Plugins that opt out on schema v10 must therefore
+// see empty bodies on streaming calls while still receiving them on
+// non-streaming calls, and plugins that do not opt out (or sit below v11) must
+// keep the previous behaviour on both paths.
+func TestResponseTransformRequestBodiesBySchemaVersion(t *testing.T) {
+	cases := []struct {
+		name            string
+		schemaVersion   uint32
+		omitRequestBody bool
+		stream          bool
+		wantOriginal    string
+		wantTranslated  string
+	}{
+		{
+			name:            "schema 11 opt-out streaming omits request bodies",
+			schemaVersion:   pluginabi.SchemaVersionResponseTransformOmitRequestBody,
+			omitRequestBody: true,
+			stream:          true,
+		},
+		{
+			name:            "schema 11 opt-out non-streaming keeps request bodies",
+			schemaVersion:   pluginabi.SchemaVersionResponseTransformOmitRequestBody,
+			omitRequestBody: true,
+			stream:          false,
+			wantOriginal:    "original",
+			wantTranslated:  "translated",
+		},
+		{
+			name:           "schema 11 without opt-out keeps request bodies",
+			schemaVersion:  pluginabi.SchemaVersionResponseTransformOmitRequestBody,
+			stream:         true,
+			wantOriginal:   "original",
+			wantTranslated: "translated",
+		},
+		{
+			name:            "schema below v11 opt-out keeps request bodies",
+			schemaVersion:   pluginabi.SchemaVersionResponseTransformOmitRequestBody - 1,
+			omitRequestBody: true,
+			stream:          true,
+			wantOriginal:    "original",
+			wantTranslated:  "translated",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var beforeGot, translatorGot, afterGot pluginapi.ResponseTransformRequest
+			host := newHostWithRecords(capabilityRecord{
+				id: "transform",
+				plugin: pluginapi.Plugin{
+					SchemaVersion: tc.schemaVersion,
+					Capabilities: pluginapi.Capabilities{
+						ResponseTransformOmitRequestBody: tc.omitRequestBody,
+						ResponseBeforeTranslator: responseNormalizerFunc(func(_ context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+							beforeGot = req
+							return pluginapi.PayloadResponse{Body: req.Body}, nil
+						}),
+						ResponseTranslator: responseTranslatorFunc(func(_ context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+							translatorGot = req
+							return pluginapi.PayloadResponse{Body: req.Body}, nil
+						}),
+						ResponseAfterTranslator: responseNormalizerFunc(func(_ context.Context, req pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+							afterGot = req
+							return pluginapi.PayloadResponse{Body: req.Body}, nil
+						}),
+					},
+				},
+			})
+			assertBodies := func(hook string, got pluginapi.ResponseTransformRequest) {
+				t.Helper()
+				if string(got.Body) != "body" {
+					t.Fatalf("%s did not receive the response payload, body = %q", hook, got.Body)
+				}
+				if string(got.OriginalRequest) != tc.wantOriginal || string(got.TranslatedRequest) != tc.wantTranslated {
+					t.Fatalf("%s OriginalRequest/TranslatedRequest = %q/%q, want %q/%q", hook, got.OriginalRequest, got.TranslatedRequest, tc.wantOriginal, tc.wantTranslated)
+				}
+			}
+
+			host.NormalizeResponseBefore(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), tc.stream)
+			assertBodies("ResponseBeforeTranslator", beforeGot)
+			if _, ok := host.TranslateResponse(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), tc.stream); !ok {
+				t.Fatal("TranslateResponse() = false, want a translated payload")
+			}
+			assertBodies("ResponseTranslator", translatorGot)
+			host.NormalizeResponseAfter(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), []byte("translated"), []byte("body"), tc.stream)
+			assertBodies("ResponseAfterTranslator", afterGot)
+		})
+	}
+}
+
 func TestResponseHooksKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	normalizerHost := newHostWithRecords(
 		capabilityRecord{
