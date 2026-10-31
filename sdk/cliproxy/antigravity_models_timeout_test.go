@@ -118,7 +118,7 @@ func TestAntigravityAsyncProbe_DiscardsStaleProbeWhenAuthReRegistered(t *testing
 		close(probeStarted)
 		<-releaseProbe
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
+		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
 	}))
 	t.Cleanup(func() {
 		server.CloseClientConnections()
@@ -215,30 +215,36 @@ func TestAntigravityAsyncProbe_PreservesPluginModels(t *testing.T) {
 	svc.asyncProbeAntigravityCapabilities(context.Background(), auth, "antigravity")
 	svc.WaitAntigravityProbes()
 
-	// Check that plugin model is still present, and native model has web search capability
+	// A capability-only response must leave plugin and native metadata unchanged.
 	updated := GlobalModelRegistry().GetModelsForClient(auth.ID)
+	if len(updated) != len(models) {
+		t.Fatalf("model count changed: got %d, want %d", len(updated), len(models))
+	}
 	foundPlugin := false
+	foundNative := false
 	foundSearch := false
 	for _, m := range updated {
 		if m.ID == "plugin-custom-model" {
 			foundPlugin = true
 		}
-		if m.ID == "gemini-3.1-flash-lite" && m.SupportsWebSearch {
-			foundSearch = true
+		if m.ID == "gemini-3.1-flash-lite" {
+			foundNative = true
+			foundSearch = m.SupportsWebSearch
 		}
 	}
 	if !foundPlugin {
 		t.Fatal("expected plugin-custom-model to be preserved after capability probe")
 	}
-	if !foundSearch {
-		t.Fatal("expected gemini-3.1-flash-lite to have SupportsWebSearch=true")
+	if !foundNative {
+		t.Fatal("capability-only response removed the native model")
+	}
+	if foundSearch {
+		t.Fatal("capability-only response overrode registered search metadata")
 	}
 }
 
-// TestAntigravityAsyncProbe_AppliesCapabilitiesToAliasedAndPrefixedModels verifies that when
-// models have OAuth aliases and prefixes applied, the async capability probe correctly maps
-// them back to their upstream model identifiers and applies the probed capabilities.
-func TestAntigravityAsyncProbe_AppliesCapabilitiesToAliasedAndPrefixedModels(t *testing.T) {
+// Capability-only responses must not grant search to aliases or prefixed models.
+func TestAntigravityAsyncProbe_IgnoresSearchHintsForAliasedAndPrefixedModels(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite", "gemini-3.1-pro"]}`))
@@ -304,20 +310,20 @@ func TestAntigravityAsyncProbe_AppliesCapabilitiesToAliasedAndPrefixedModels(t *
 		}
 	}
 
-	if prefixedAliased == nil || !prefixedAliased.SupportsWebSearch {
-		t.Fatalf("expected my-prefix/aliased-flash to have SupportsWebSearch=true, got %+v", prefixedAliased)
+	if prefixedAliased == nil || prefixedAliased.SupportsWebSearch {
+		t.Fatalf("expected my-prefix/aliased-flash to retain SupportsWebSearch=false, got %+v", prefixedAliased)
 	}
-	if plainAliased == nil || !plainAliased.SupportsWebSearch {
-		t.Fatalf("expected aliased-flash to have SupportsWebSearch=true, got %+v", plainAliased)
+	if plainAliased == nil || plainAliased.SupportsWebSearch {
+		t.Fatalf("expected aliased-flash to retain SupportsWebSearch=false, got %+v", plainAliased)
 	}
 	if unrelated == nil || unrelated.SupportsWebSearch {
 		t.Fatalf("expected my-prefix/gemini-pro to NOT have SupportsWebSearch=true, got %+v", unrelated)
 	}
-	if slashedAliased == nil || !slashedAliased.SupportsWebSearch {
-		t.Fatalf("expected google/pro-flash to have SupportsWebSearch=true, got %+v", slashedAliased)
+	if slashedAliased == nil || slashedAliased.SupportsWebSearch {
+		t.Fatalf("expected google/pro-flash to retain SupportsWebSearch=false, got %+v", slashedAliased)
 	}
-	if prefixedSlashedAliased == nil || !prefixedSlashedAliased.SupportsWebSearch {
-		t.Fatalf("expected my-prefix/google/pro-flash to have SupportsWebSearch=true, got %+v", prefixedSlashedAliased)
+	if prefixedSlashedAliased == nil || prefixedSlashedAliased.SupportsWebSearch {
+		t.Fatalf("expected my-prefix/google/pro-flash to retain SupportsWebSearch=false, got %+v", prefixedSlashedAliased)
 	}
 }
 
@@ -332,7 +338,7 @@ func TestAntigravityAsyncProbe_UnregisteredClientNotResurrected(t *testing.T) {
 		close(probeStarted)
 		<-releaseProbe
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
+		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
 	}))
 	t.Cleanup(func() {
 		server.CloseClientConnections()

@@ -132,6 +132,8 @@ type Service struct {
 	homePluginSyncFetch          func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error)
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	antigravityProbeWg           sync.WaitGroup
+	// antigravityCatalog overrides the static Antigravity catalog in tests.
+	antigravityCatalog func() []*ModelInfo
 	// antigravityContext is protected by cfgMu and owns background model probes.
 	antigravityContext       context.Context
 	antigravityProbeMu       sync.Mutex
