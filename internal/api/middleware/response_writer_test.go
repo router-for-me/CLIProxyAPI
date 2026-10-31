@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -376,5 +378,56 @@ func TestFinalizeIncludes500InForceLog(t *testing.T) {
 	}
 	if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusInternalServerError {
 		t.Fatalf("expected 1 logged call for 500 status, got: %v", logger.loggedCalls)
+	}
+}
+
+type chunkRecordingLogger struct {
+	testRequestLogger
+	writer *chunkRecordingWriter
+}
+
+func (l *chunkRecordingLogger) LogStreamingRequest(string, string, map[string][]string, []byte, string) (logging.StreamingLogWriter, error) {
+	l.writer = &chunkRecordingWriter{}
+	return l.writer, nil
+}
+
+type chunkRecordingWriter struct {
+	testStreamingLogWriter
+	chunks []string
+}
+
+func (w *chunkRecordingWriter) WriteChunkAsync(chunk []byte) {
+	w.chunks = append(w.chunks, string(chunk))
+}
+
+func TestFinalizeStreamingDeliversBufferedChunks(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// With a single P the chunk worker only starts once Finalize blocks on it. That is the
+	// interleaving in which Finalize used to clear chunkChannel before the worker read it,
+	// losing every buffered chunk.
+	prevProcs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prevProcs) })
+
+	want := []string{"data: 1\n\n", "data: 2\n\n"}
+	for i := 0; i < 20; i++ {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		logger := &chunkRecordingLogger{testRequestLogger: testRequestLogger{enabled: true}}
+		wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{URL: "/v1/responses", Method: http.MethodPost})
+
+		wrapper.Header().Set("Content-Type", "text/event-stream")
+		wrapper.WriteHeader(http.StatusOK)
+		for _, chunk := range want {
+			if _, err := wrapper.Write([]byte(chunk)); err != nil {
+				t.Fatalf("Write error: %v", err)
+			}
+		}
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("Finalize error: %v", err)
+		}
+		if !slices.Equal(logger.writer.chunks, want) {
+			t.Fatalf("iteration %d: logged chunks = %q, want %q", i, logger.writer.chunks, want)
+		}
 	}
 }
