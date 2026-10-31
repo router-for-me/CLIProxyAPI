@@ -230,6 +230,11 @@ routing:
     # Default is false; when false, cooldown status is kept in memory only.
     save-cooldown-status: false
 
+    # When true, check Codex credentials that hold a quota cooldown against the provider usage report
+    # (every 30s, and when a request is rejected by a cooldown) and clear the cooldown once the
+    # provider says usage is allowed again. Sends one read-only usage request per cooled-down credential.
+    quota-reconcile: false
+
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
