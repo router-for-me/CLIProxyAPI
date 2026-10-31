@@ -229,8 +229,15 @@ type Manager struct {
 	rtProvider RoundTripperProvider
 
 	// Auto refresh state
-	refreshCancel context.CancelFunc
-	refreshLoop   *authAutoRefreshLoop
+	// refreshStartMu serializes StartAutoRefresh with itself and with stops, so a
+	// loop one call installs cannot be dropped by another without being retired.
+	refreshStartMu sync.Mutex
+	refreshCancel  context.CancelFunc
+	refreshLoop    *authAutoRefreshLoop
+	// retiredRefreshLoops are loops replaced by StartAutoRefresh or detached by a
+	// stop whose workers may still be running, so every later waiting stop
+	// (StopAutoRefreshContext) waits for them.
+	retiredRefreshLoops []*authAutoRefreshLoop
 	// refreshJobs retains queued and running jobs across loop restarts under m.mu.
 	refreshJobs map[string]*authRefreshJob
 

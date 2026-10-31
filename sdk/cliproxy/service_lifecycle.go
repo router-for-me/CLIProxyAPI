@@ -248,6 +248,12 @@ func (s *Service) Run(ctx context.Context) error {
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
+// Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving.
+// Do not call it from a refresh callback (such as a core auth manager hook's
+// OnAuthUpdated, which runs on a refresh worker) with a context that has no
+// deadline: that worker cannot return until Shutdown does. Hand it to another
+// goroutine instead.
+//
 // Parameters:
 //   - ctx: The context for controlling the shutdown timeout
 //
@@ -325,6 +331,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			watcherCancel()
 		}
 		if s.coreManager != nil {
+			// Cancel now; the wait for in-flight saves comes after the API server
+			// stops, so a slow save cannot keep it accepting requests.
 			s.coreManager.StopAutoRefresh()
 		}
 		if watcher := s.currentWatcher(); watcher != nil {
@@ -368,6 +376,14 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = errStop
 				}
+			}
+		}
+		if s.coreManager != nil {
+			// Wait for in-flight refreshes to finish saving, within the shutdown
+			// deadline, before plugin executors they may use are shut down. The
+			// StopAutoRefresh above already stopped the loop and the selector.
+			if errStop := s.coreManager.WaitAutoRefresh(ctx); errStop != nil {
+				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
 			}
 		}
 
