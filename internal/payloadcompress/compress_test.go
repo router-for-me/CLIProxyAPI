@@ -111,7 +111,9 @@ func TestApplyProtectsCachedPrefix(t *testing.T) {
 		`},{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]},` +
 		`{"role":"user","content":` + quote(fresh) + `}]}`)
 
-	out, stats := Apply(testConfig(EngineLite), "m", body)
+	cfg := testConfig(EngineLite)
+	cfg.CachePrefix = CachePrefixPreserve
+	out, stats := Apply(cfg, "m", body)
 	if !stats.Applied {
 		t.Fatal("expected compression")
 	}

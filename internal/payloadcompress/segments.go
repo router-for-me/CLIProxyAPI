@@ -1,6 +1,7 @@
 package payloadcompress
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -27,17 +28,19 @@ type segment struct {
 // scanner locates compressible text in a request payload.
 //
 // It only handles the shapes that carry bulk conversation text: chat messages
-// (`messages[]`) and Responses items (`input[]`). System prompts, assistant
-// output, tool call arguments and thinking blocks are never returned, and
-// neither is the provider-cached prefix unless compressPrefix asks for it, so a
-// transform cannot corrupt anything that must survive verbatim.
+// (`messages[]`) and Responses items (`input[]`). Assistant output, tool call
+// arguments and thinking blocks are never returned. The system prompt and the
+// provider-cached head are returned only when the config allows rewriting them,
+// so a transform cannot corrupt anything that must survive verbatim.
 type scanner struct {
 	body []byte
 	segs []segment
-	// compressPrefix lifts the cache_control exclusion so the cached zone is
-	// compressed too. Safe only for an append-stable pipeline; see
-	// Config.CachePrefix.
-	compressPrefix bool
+	// cachePrefix decides how far the provider-cached head is protected; see
+	// Config.CachePrefix. The zero value preserves.
+	cachePrefix string
+	// includeSystem lifts the system-prompt exclusion; see
+	// Config.PreserveSystemPrompt.
+	includeSystem bool
 }
 
 // scan fills s.segs. It reports false when the payload has no recognizable
@@ -61,7 +64,7 @@ func (s *scanner) scan() bool {
 	}
 
 	cut := -1
-	if !s.compressPrefix {
+	if s.cachePrefix == CachePrefixPreserve {
 		// Everything up to the last cache_control breakpoint is a provider-cached
 		// prefix. Rewriting it would trade saved input tokens for a cache miss and
 		// seconds of time-to-first-token, so those items are left byte-identical.
@@ -75,6 +78,10 @@ func (s *scanner) scan() bool {
 		})
 	}
 
+	if s.includeSystem {
+		s.addSystem(root)
+	}
+
 	idx := 0
 	items.ForEach(func(_, item gjson.Result) bool {
 		if idx > cut {
@@ -83,7 +90,42 @@ func (s *scanner) scan() bool {
 		idx++
 		return true
 	})
+
+	if len(s.segs) > 1 {
+		// The system prompt lives at the top level, so its spans do not fall in
+		// message order. Sorting keeps the single-pass rebuild valid.
+		sort.Slice(s.segs, func(i, j int) bool { return s.segs[i].start < s.segs[j].start })
+	}
 	return len(s.segs) > 0
+}
+
+// addSystem records the top-level system prompt, which arrives outside
+// `messages[]` for Claude (a string or parts array) and Gemini (parts).
+func (s *scanner) addSystem(root gjson.Result) {
+	s.addPromptValue(root.Get("system"), kindUser)
+	s.addPromptValue(root.Get("systemInstruction"), kindUser)
+	s.addPromptValue(root.Get("system_instruction"), kindUser)
+}
+
+// addPromptValue accepts a bare string, an array of parts, or an object carrying
+// text/parts: the three shapes a system prompt arrives in.
+func (s *scanner) addPromptValue(value gjson.Result, kind segmentKind) {
+	switch {
+	case value.Type == gjson.String:
+		s.add(value, kind)
+	case value.IsArray():
+		value.ForEach(func(_, part gjson.Result) bool {
+			s.addPromptValue(part, kind)
+			return true
+		})
+	case value.IsObject():
+		if text := value.Get("text"); text.Type == gjson.String {
+			s.add(text, kind)
+		}
+		if parts := value.Get("parts"); parts.Exists() {
+			s.addPromptValue(parts, kind)
+		}
+	}
 }
 
 func (s *scanner) addItem(item gjson.Result) {
@@ -99,6 +141,13 @@ func (s *scanner) addItem(item gjson.Result) {
 		return
 	}
 	switch item.Get("role").String() {
+	case "system":
+		if !s.includeSystem {
+			return
+		}
+		content := item.Get("content")
+		s.add(content, kindUser)
+		s.addParts(content, kindUser)
 	case "user":
 		content := item.Get("content")
 		s.add(content, kindUser)

@@ -9,7 +9,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// These tests pin the two cache-prefix modes against the only property that
+// These tests pin every cache-prefix mode against the only property that
 // makes them worth having: what the provider sees on the wire across the turns
 // of one session. Turning compression on is cheap; keeping the bytes it already
 // cached identical turn over turn is the part that costs or saves real money.
@@ -167,7 +167,7 @@ func TestCachePrefixCompressAppendStable(t *testing.T) {
 	}
 }
 
-// TestCachePrefixPreserveLeavesCachedZoneRaw pins the default: a segment behind
+// TestCachePrefixPreserveLeavesCachedZoneRaw pins the opt-out: a segment behind
 // the last breakpoint reaches the provider byte for byte, whatever the engines
 // would have done to it.
 func TestCachePrefixPreserveLeavesCachedZoneRaw(t *testing.T) {
@@ -184,9 +184,6 @@ func TestCachePrefixPreserveLeavesCachedZoneRaw(t *testing.T) {
 	}()
 
 	compressed, _ := Apply(cachePrefixTestConfig(CachePrefixPreserve), cachePrefixTestModel, body)
-	if unsanitized, _ := Apply(cachePrefixTestConfig(""), cachePrefixTestModel, body); !bytes.Equal(unsanitized, compressed) {
-		t.Fatal("an unset cache-prefix did not behave as preserve")
-	}
 
 	// Message 5 (turn 2's tool result) is behind the turn 3 breakpoint.
 	if want := appendJSONString(nil, noisyOutput(2)); !bytes.Contains(compressed, want) {
@@ -198,19 +195,20 @@ func TestCachePrefixPreserveLeavesCachedZoneRaw(t *testing.T) {
 	}
 }
 
-// TestCachePrefixDefaultsToPreserve guards the claim in Config: anything that
-// is not exactly "compress" preserves, so an unset or mistyped config can never
-// start rewriting a cached prefix.
-func TestCachePrefixDefaultsToPreserve(t *testing.T) {
-	for _, configured := range []string{"", "preserve", "PRESERVE", "compress ", "bogus"} {
+// TestCachePrefixDefaultsToCompress pins the upstream default: the body is
+// rewritten, because upstream never skips a message to protect a cache. Unknown
+// values degrade to that same default rather than to something stricter.
+func TestCachePrefixDefaultsToCompress(t *testing.T) {
+	for _, configured := range []string{"", "compress", "COMPRESS", "bogus", "freeze"} {
 		cfg := Config{CachePrefix: configured}
 		cfg.Sanitize()
-		want := CachePrefixPreserve
-		if strings.TrimSpace(strings.ToLower(configured)) == CachePrefixCompress {
-			want = CachePrefixCompress
+		if cfg.CachePrefix != CachePrefixCompress {
+			t.Fatalf("Sanitize(%q) = %q, want %q", configured, cfg.CachePrefix, CachePrefixCompress)
 		}
-		if cfg.CachePrefix != want {
-			t.Fatalf("Sanitize(%q) = %q, want %q", configured, cfg.CachePrefix, want)
-		}
+	}
+	cfg := Config{CachePrefix: "PRESERVE "}
+	cfg.Sanitize()
+	if cfg.CachePrefix != CachePrefixPreserve {
+		t.Fatalf("Sanitize(PRESERVE) = %q, want %q", cfg.CachePrefix, CachePrefixPreserve)
 	}
 }
