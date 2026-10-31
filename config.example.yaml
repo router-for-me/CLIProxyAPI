@@ -160,10 +160,25 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
+  # soonest-reset (alias reset-first) spends the credential whose weekly usage window resets
+  # soonest, so subscription quota that would expire unused is consumed first. It ranks each
+  # credential's latest quota snapshot: Claude anthropic-ratelimit-unified-5h/7d-* and Codex
+  # x-codex-primary/secondary-* response headers, and Devin's polled daily/weekly quota.
+  # Within the highest priority tier: credentials with any used-up window (Claude 5h/7d, Codex
+  # primary/secondary, Devin daily/weekly) go last. A Claude/Codex subscription whose weekly
+  # reset is not known yet (after a restart, or once its window rolled over) is picked first
+  # as a probe; while that response is pending (up to 5 minutes) it ranks after known resets
+  # but still ahead of credentials with nothing to learn. Responses without usage windows,
+  # such as Claude's fast-mode credit refusal, keep the last observed windows; a Claude
+  # rejection without windows still counts as used up until its reset. Token counts
+  # never probe. Then known resets go earliest first, then subscriptions
+  # without a known weekly reset, then credentials with none to learn (API keys, other
+  # providers). Ties go to the first credential by ID, as fill-first. Snapshots are kept in
+  # memory only, so ranks are relearned after a restart. Not applied in CLIProxyAPIHome mode.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

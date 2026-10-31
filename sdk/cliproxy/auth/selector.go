@@ -71,6 +71,19 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// SoonestResetSelector spends the credential whose weekly usage window resets soonest, so
+// subscription quota that would expire unused is consumed first. It ranks credentials by
+// their latest quota snapshot that reported usage windows (Claude and Codex response
+// headers, Devin status refreshes): usable before used-up, then a subscription whose weekly
+// reset is not known yet (one probe request learns it), then known resets earliest first,
+// then other subscriptions, then credentials with no weekly window to learn. Equal ranks
+// resolve to the lowest ID, as fill-first. Picks made through a Manager rank from the facts
+// its scheduler records as results arrive; other picks rank each candidate's own snapshot.
+type SoonestResetSelector struct {
+	mu     sync.Mutex
+	probes soonestResetProbes
+}
+
 type blockReason int
 
 const (
@@ -818,6 +831,20 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+// Pick selects the available auth whose weekly usage window resets soonest.
+func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return pickSoonestResetAuth(available, now, soonestResetFactsFromContext(ctx), &s.probes, soonestResetProbeAllowed(ctx)), nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

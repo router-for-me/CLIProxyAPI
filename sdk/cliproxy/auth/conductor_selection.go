@@ -73,7 +73,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *SoonestResetSelector:
 		return true
 	default:
 		return false
@@ -1977,6 +1977,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		selectorCtx = m.withSoonestResetFactsForSelector(selectorCtx, selector, selectorAuths)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -2007,7 +2008,8 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
-	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, nil)
+	// SelectAuth callers do not report results, so their picks must not spend probes.
+	selected, _, errPick := m.pickNextLegacy(withoutSoonestResetProbe(ctx), provider, model, opts, nil)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
 	}
@@ -2028,7 +2030,8 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 		return nil, &Error{Code: "invalid_auth_kind", Message: "required auth kind is invalid", HTTPStatus: http.StatusBadRequest}
 	}
 
-	selectionCtx := withRequiredAuthKind(ctx, requiredKind)
+	// SelectAuth callers do not report results, so their picks must not spend probes.
+	selectionCtx := withoutSoonestResetProbe(withRequiredAuthKind(ctx, requiredKind))
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
@@ -2054,7 +2057,7 @@ func (m *Manager) SelectAuthWithCredentialPolicy(ctx context.Context, provider, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	selectionCtx := withCredentialPolicy(ctx, policy)
+	selectionCtx := withoutSoonestResetProbe(withCredentialPolicy(ctx, policy))
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
@@ -2326,6 +2329,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		selectorCtx = m.withSoonestResetFactsForSelector(selectorCtx, selector, selectorAuths)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
