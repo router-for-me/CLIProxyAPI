@@ -495,7 +495,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			}
 			state.ensureSSEEventBoundary(c.Writer)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes, _ := json.Marshal(h.toClaudeErrorForContext(c, errMsg))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 		CloseError: func() *interfaces.ErrorMessage {
@@ -614,7 +614,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeError(msg))
+	body, err := json.Marshal(h.toClaudeErrorForContext(c, msg))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}
