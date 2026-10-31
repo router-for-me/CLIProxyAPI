@@ -227,3 +227,25 @@ func TestProxyConnectionPoolAuthenticatedProxyIsolation(t *testing.T) {
 		t.Fatalf("cache target leaked proxy secret: key=%q label=%q", cacheKey, label)
 	}
 }
+func TestProxyConnectionPoolCustomDefaultTransportDeclinesPooling(t *testing.T) {
+	ResetProxyTransports()
+	t.Cleanup(ResetProxyTransports)
+
+	oldDefault := http.DefaultTransport
+	defer func() { http.DefaultTransport = oldDefault }()
+
+	customRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200}, nil
+	})
+	http.DefaultTransport = customRT
+
+	cfg := testConfig()
+	auth := poolOptInAuth("custom-default")
+
+	// With empty proxy-url, pooling must be declined because http.DefaultTransport
+	// cannot be cloned into *http.Transport.
+	client := NewProxyAwareHTTPClient(context.Background(), cfg, auth, 0)
+	if client.Transport != nil {
+		t.Fatalf("client.Transport = %T, want nil so client uses http.DefaultTransport", client.Transport)
+	}
+}

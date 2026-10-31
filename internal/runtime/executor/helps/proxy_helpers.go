@@ -215,6 +215,16 @@ func pooledTransport(kind proxyPoolKind, proxyURL string, cfg *config.Config, au
 	if errParse != nil {
 		return nil, false
 	}
+	// When pooling against an empty proxy-url (net/http's inherited environment
+	// proxy), cloning http.DefaultTransport requires it to be a *http.Transport.
+	// If an SDK embedder installed a non-*http.Transport (e.g. mTLS, tracing, custom
+	// routing), decline pooling so the request keeps using the installed default
+	// instead of being replaced by an empty transport.
+	if kind == proxyPoolKindStandard && strings.TrimSpace(proxyURL) == "" {
+		if base, ok := http.DefaultTransport.(*http.Transport); !ok || base == nil {
+			return nil, false
+		}
+	}
 	idle := proxyPoolDefaultIdleConnTimeout
 	invalidIdle := ""
 	if raw := strings.TrimSpace(settings.IdleConnTimeout); raw != "" {
@@ -432,7 +442,7 @@ func buildPooledBaseTransport(proxyURL string) (*http.Transport, error) {
 		if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
 			return base.Clone(), nil
 		}
-		return &http.Transport{}, nil
+		return nil, fmt.Errorf("http.DefaultTransport is not *http.Transport")
 	}
 	tr, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
