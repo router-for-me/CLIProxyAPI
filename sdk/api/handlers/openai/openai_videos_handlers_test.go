@@ -63,12 +63,13 @@ func performVideosRouteRequest(t *testing.T, method string, routePath string, re
 }
 
 type videoAuthCaptureExecutor struct {
-	mu            sync.Mutex
-	requestID     string
-	contentURL    string
-	authIDs       []string
-	models        []string
-	payloadModels []string
+	mu                 sync.Mutex
+	requestID          string
+	contentURL         string
+	authIDs            []string
+	models             []string
+	payloadModels      []string
+	payloadResolutions []string
 }
 
 func (e *videoAuthCaptureExecutor) Identifier() string { return "xai" }
@@ -82,6 +83,7 @@ func (e *videoAuthCaptureExecutor) Execute(_ context.Context, auth *coreauth.Aut
 	e.authIDs = append(e.authIDs, authID)
 	e.models = append(e.models, req.Model)
 	e.payloadModels = append(e.payloadModels, strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String()))
+	e.payloadResolutions = append(e.payloadResolutions, gjson.GetBytes(req.Payload, "resolution").String())
 	e.mu.Unlock()
 
 	requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String())
@@ -886,6 +888,57 @@ func TestXAIVideosNativeRetrieveUsesCanonicalBoundModel(t *testing.T) {
 	}
 	if binding.authID != "video-xai-1.5-auth" || binding.model != xaiVideos15Model {
 		t.Fatalf("binding = {authID:%q model:%q}, want {authID:%q model:%q}", binding.authID, binding.model, "video-xai-1.5-auth", xaiVideos15Model)
+	}
+}
+
+func TestVideosLiteCreatePreservesResolution(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+	executor := &videoAuthCaptureExecutor{requestID: "video-lite-resolution"}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "video-lite-resolution-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: xaiVideos15LiteModel}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	for _, tc := range []struct {
+		name       string
+		resolution string
+		want       string
+	}{
+		{name: "1080p", resolution: "1080p", want: "1080p"},
+		{name: "480p", resolution: "480p", want: "480p"},
+		{name: "720p", resolution: "720p", want: "720p"},
+		{name: "default", want: "720p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"grok-imagine-video-1.5-lite","prompt":"make a video"`
+			if tc.resolution != "" {
+				body += `,"resolution":` + strconv.Quote(tc.resolution)
+			}
+			body += `}`
+			executor.mu.Lock()
+			before := len(executor.payloadResolutions)
+			executor.mu.Unlock()
+			resp := performVideosEndpointRequest(t, http.MethodPost, openAIVideosPath, "application/json", strings.NewReader(body), handler.VideosCreate)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("create status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+			}
+			executor.mu.Lock()
+			defer executor.mu.Unlock()
+			if len(executor.payloadResolutions) != before+1 {
+				t.Fatalf("upstream calls = %d, want %d", len(executor.payloadResolutions), before+1)
+			}
+			if got := executor.payloadResolutions[before]; got != tc.want {
+				t.Fatalf("upstream resolution = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

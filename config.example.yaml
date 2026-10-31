@@ -1179,6 +1179,8 @@ multimedia:
   # Grok video routes accept grok-imagine-video, grok-imagine-video-1.5,
   # grok-imagine-video-1.5-preview, and grok-imagine-video-1.5-lite.
   # Supported on /openai/v1/videos and the native xAI /v1/videos/* endpoints.
+  # The OpenAI-compatible route accepts resolution 480p, 720p, or 1080p (default: 720p).
+  # Built-in xAI video models remain available when a refreshed catalog omits them.
 
   # How long video IDs returned by /openai/v1/videos and xAI video creation stay bound
   # to the credential that created them. Default: 3h.

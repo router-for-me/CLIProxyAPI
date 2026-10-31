@@ -473,6 +473,8 @@ func xaiVideosResolution(raw string, fallback string) string {
 		return "480p"
 	case "720p":
 		return "720p"
+	case "1080p":
+		return "1080p"
 	default:
 		return fallback
 	}
