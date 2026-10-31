@@ -27,6 +27,7 @@ type SessionInfo struct {
 	IsFork          bool           `json:"is_fork,omitempty"`
 	IsCompaction    bool           `json:"is_compaction,omitempty"`
 	IsSubagent      bool           `json:"is_subagent,omitempty"`
+	RootSessionID   string         `json:"root_session_id,omitempty"` // top of a subagent tree, when the request names it
 	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
@@ -204,6 +205,11 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 		if agentID != "" && agentID != "main" {
 			info.AgentName = agentID
+			info.RootSessionID = "claude:" + sid
+			if parentCandidate != "" && parentCandidate != sid && !claudeNamesParentAgent(headers, root, parentCandidate) {
+				// The session itself names a parent session: that is the tree's root.
+				info.RootSessionID = "claude:" + parentCandidate
+			}
 			info.ParentSessionID = "claude:" + sid
 			if parentAgentID != "" && parentAgentID != "main" && parentAgentID != agentID {
 				info.ParentSessionID = "claude:" + sid + ":agent:" + parentAgentID
@@ -256,6 +262,13 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if agentID != "" && agentID != "main" {
 				info.SessionID = "claude:" + sid + ":agent:" + agentID
+				info.RootSessionID = "claude:" + sid
+				if parentSID != "" && parentSID != sid && !claudeNamesParentAgent(headers, root, parentSID) {
+					// The session itself names a parent session: that is the tree's root.
+					info.RootSessionID = "claude:" + parentSID
+				} else if parentCandidate != "" && parentCandidate != sid && !claudeNamesParentAgent(headers, root, parentCandidate) {
+					info.RootSessionID = "claude:" + parentCandidate
+				}
 				info.ParentSessionID = "claude:" + sid
 				if parentAgentID != "" && parentAgentID != "main" && parentAgentID != agentID {
 					info.ParentSessionID = "claude:" + sid + ":agent:" + parentAgentID
@@ -403,6 +416,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if cleanAgentName != "" && sid != "" {
 				info.SessionID = "codex:" + sid + ":agent:" + cleanAgentName
+				info.RootSessionID = "codex:" + sid
 				info.AgentName = cleanAgentName
 				if parentSID != "" {
 					info.ParentSessionID = "codex:" + parentSID
@@ -411,6 +425,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				}
 			} else {
 				info.SessionID = "codex:" + childSessionID
+				if sid != "" && sid != childSessionID {
+					info.RootSessionID = "codex:" + sid
+				}
 				if cleanAgentName != "" {
 					info.AgentName = cleanAgentName
 				} else {
@@ -943,6 +960,32 @@ func BoundSessionIdentity(id string) string {
 	return prefix + "#" + hashHex
 }
 
+// claudeNamesParentAgent reports whether id is the parent agent the request names rather than a
+// parent session: Claude Code's X-Claude-Code-Parent-Agent-Id header, metadata.parent_agent_id,
+// or parent_agent_id inside metadata.user_id JSON. Such an id names a node inside the session's
+// own tree, so it must not become the tree's root.
+func claudeNamesParentAgent(headers http.Header, root interface{ Get(string) gjson.Result }, id string) bool {
+	if id == "" {
+		return false
+	}
+	if sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id") == id {
+		return true
+	}
+	for _, prefix := range []string{"", "request."} {
+		for _, path := range []string{"metadata.parent_agent_id", "metadata.parentAgentId"} {
+			if normalizedSessionCandidate(root.Get(prefix+path).String()) == id {
+				return true
+			}
+		}
+		if userID := strings.TrimSpace(root.Get(prefix + "metadata.user_id").String()); strings.HasPrefix(userID, "{") {
+			if NormalizeExplicitID(gjson.Parse(userID).Get("parent_agent_id").String()) == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	if info.SessionID == "" {
 		return SessionInfo{}, false
@@ -950,6 +993,9 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	info.SessionID = BoundSessionIdentity(info.SessionID)
 	if info.ParentSessionID != "" {
 		info.ParentSessionID = BoundSessionIdentity(info.ParentSessionID)
+	}
+	if info.RootSessionID != "" {
+		info.RootSessionID = BoundSessionIdentity(info.RootSessionID)
 	}
 	if info.AgentName == "" {
 		info.AgentName = "main"
