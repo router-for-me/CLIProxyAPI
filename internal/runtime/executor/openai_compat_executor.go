@@ -994,10 +994,8 @@ func (e *OpenAICompatExecutor) applyPromptCacheKeyWithCompat(ctx context.Context
 		return translated, nil
 	}
 
-	for _, payload := range [][]byte{req.Payload, opts.OriginalRequest, translated} {
-		if promptCacheKey := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); promptCacheKey != "" {
-			return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
-		}
+	if promptCacheKey := helps.ExplicitPromptCacheKey(req.Payload, opts.OriginalRequest, translated); promptCacheKey != "" {
+		return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
 	}
 
 	modelName := strings.TrimSpace(gjson.GetBytes(translated, "model").String())
