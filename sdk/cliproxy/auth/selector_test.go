@@ -1954,6 +1954,101 @@ func TestSessionAffinitySelector_MultiModelSession(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_RetryStickyForUnstableHeaderSession(t *testing.T) {
+	t.Parallel()
+
+	fallback := &FillFirstSelector{}
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: fallback,
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "auth-a"},
+		{ID: "auth-b"},
+		{ID: "auth-c"},
+	}
+
+	// Simulate Zcode: same conversation, but every retry sends a brand-new
+	// X-Session-ID header.  The first request binds to auth-a (fill-first).
+	// Subsequent requests with *different* header session IDs should still
+	// reuse auth-a thanks to retry-sticky, instead of re-running fill-first
+	// and potentially landing on auth-b or auth-c.
+	scope := map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "zcode-caller"}
+	firstHeaders := http.Header{"X-Session-ID": []string{"zcode-retry-1"}}
+	first, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", cliproxyexecutor.Options{Headers: firstHeaders, Metadata: scope}, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("first Pick() returned nil")
+	}
+	if first.ID != "auth-a" {
+		t.Fatalf("first Pick() = %q, want auth-a (fill-first)", first.ID)
+	}
+
+	// Retry with a *different* header session ID (simulating Zcode rotation).
+	// Without retry-sticky this would miss the cache and re-run fill-first,
+	// which would again pick auth-a (highest priority).  With retry-sticky
+	// it should also pick auth-a, but the important thing is that it does NOT
+	// create a brand-new binding that could later drift.
+	secondHeaders := http.Header{"X-Session-ID": []string{"zcode-retry-2"}}
+	second, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", cliproxyexecutor.Options{Headers: secondHeaders, Metadata: scope}, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if second == nil {
+		t.Fatalf("second Pick() returned nil")
+	}
+	if second.ID != "auth-a" {
+		t.Fatalf("second Pick() = %q, want auth-a (retry-sticky reuse)", second.ID)
+	}
+
+	// Third retry with yet another session ID.
+	thirdHeaders := http.Header{"X-Session-ID": []string{"zcode-retry-3"}}
+	third, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", cliproxyexecutor.Options{Headers: thirdHeaders, Metadata: scope}, auths)
+	if err != nil {
+		t.Fatalf("third Pick() error = %v", err)
+	}
+	if third == nil {
+		t.Fatalf("third Pick() returned nil")
+	}
+	if third.ID != "auth-a" {
+		t.Fatalf("third Pick() = %q, want auth-a (retry-sticky reuse)", third.ID)
+	}
+
+	// Now make auth-a unavailable; retry-sticky should still point to auth-a
+	// (because we preserve the binding), but the actual pick should fail over
+	// to auth-b via the normal fallback path.
+	// The sticky entry itself is not affected by availability.
+	fourthHeaders := http.Header{"X-Session-ID": []string{"zcode-retry-4"}}
+	fourth, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", cliproxyexecutor.Options{Headers: fourthHeaders, Metadata: scope}, []*Auth{{ID: "auth-b"}, {ID: "auth-c"}})
+	if err != nil {
+		t.Fatalf("fourth Pick() error = %v", err)
+	}
+	if fourth == nil {
+		t.Fatalf("fourth Pick() returned nil")
+	}
+	if fourth.ID != "auth-b" {
+		t.Fatalf("fourth Pick() = %q, want auth-b (fallback after auth-a unavailable)", fourth.ID)
+	}
+
+	// Once auth-a comes back, a new unstable header session should bind to
+	// auth-a again via retry-sticky.
+	fifthHeaders := http.Header{"X-Session-ID": []string{"zcode-retry-5"}}
+	fifth, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", cliproxyexecutor.Options{Headers: fifthHeaders, Metadata: scope}, auths)
+	if err != nil {
+		t.Fatalf("fifth Pick() error = %v", err)
+	}
+	if fifth == nil {
+		t.Fatalf("fifth Pick() returned nil")
+	}
+	if fifth.ID != "auth-a" {
+		t.Fatalf("fifth Pick() = %q, want auth-a (retry-sticky reuse after recovery)", fifth.ID)
+	}
+}
+
 func TestExtractSessionID_MultimodalContent(t *testing.T) {
 	t.Parallel()
 
@@ -2698,5 +2793,177 @@ func TestExtractExplicitSessionIDs_EnhancedHarnesses(t *testing.T) {
 	}
 	if subagentAuth.ID != parentAuth.ID {
 		t.Fatalf("subagent did not inherit parent task credential: got %s, want %s", subagentAuth.ID, parentAuth.ID)
+	}
+}
+
+func newRetryStickyTestSelector(t *testing.T, window *time.Duration) *SessionAffinitySelector {
+	t.Helper()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback:          &FillFirstSelector{},
+		TTL:               time.Minute,
+		RetryStickyWindow: window,
+	})
+	t.Cleanup(selector.Stop)
+	return selector
+}
+
+func retryStickyPick(t *testing.T, selector *SessionAffinitySelector, session, scope string, auths []*Auth) {
+	t.Helper()
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-ID": []string{session}}}
+	if scope != "" {
+		opts.Metadata = map[string]any{cliproxyexecutor.CallerScopeMetadataKey: scope}
+	}
+	if _, err := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", opts, auths); err != nil {
+		t.Fatalf("Pick(%q) error = %v", session, err)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyScopedToCaller(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	retryStickyPick(t, selector, "a-1", "caller-a", auths)
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); !ok || entry.authID != "auth-a" {
+		t.Fatalf("caller-a sticky = (%v, %v), want auth-a", entry, ok)
+	}
+	// A different caller must not see caller-a's binding.
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-b"); ok {
+		t.Fatalf("caller-b sticky = %v, want none (record leaked across callers)", entry)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyNeedsCallerScope(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	retryStickyPick(t, selector, "n-1", "", auths)
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", ""); ok {
+		t.Fatalf("sticky = %v, want none without a caller scope", entry)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyZeroWindowDisables(t *testing.T) {
+	t.Parallel()
+
+	zero := time.Duration(0)
+	selector := newRetryStickyTestSelector(t, &zero)
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	retryStickyPick(t, selector, "z-1", "caller-a", auths)
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); ok {
+		t.Fatalf("sticky = %v, want none when the window is explicitly zero", entry)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyStaleFailureKeepsNewerBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+
+	selector.setRetrySticky("mixed", "glm-5.3-flash", "caller-a", "auth-a")
+
+	// A stale failure attributed to another auth must not touch the record.
+	selector.markRetryStickyAvoid("mixed", "glm-5.3-flash", "caller-a", "auth-b")
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); !ok || entry.authID != "auth-a" || entry.avoid {
+		t.Fatalf("sticky = %v, want auth-a untouched", entry)
+	}
+
+	// The auth that actually failed is flagged so the next retry steers away.
+	selector.markRetryStickyAvoid("mixed", "glm-5.3-flash", "caller-a", "auth-a")
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); !ok || !entry.avoid {
+		t.Fatalf("sticky = %v, want the failed auth marked", entry)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyAvoidsFailedAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	opts := func(session string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			Headers:  http.Header{"X-Session-ID": []string{session}},
+			Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "caller-a"},
+		}
+	}
+	candidates := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+
+	firstOpts := opts("h-1")
+	first, errFirst := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", firstOpts, candidates)
+	if errFirst != nil || first == nil || first.ID != "auth-a" {
+		t.Fatalf("first pick = %v (%v), want auth-a", first, errFirst)
+	}
+
+	selector.OnResult(Result{
+		AuthID:   "auth-a",
+		Provider: "mixed",
+		Model:    "glm-5.3-flash",
+		Success:  false,
+		Error:    &Error{Message: "upstream failed", HTTPStatus: http.StatusInternalServerError},
+		Options:  firstOpts,
+	})
+
+	// The failed auth stays selectable here (a zeroed deadline), so without the
+	// avoid mark fill-first would hand out auth-a again.
+	next, errNext := selector.Pick(context.Background(), "mixed", "glm-5.3-flash", opts("h-2"), candidates)
+	if errNext != nil || next == nil || next.ID != "auth-b" {
+		t.Fatalf("retry pick = %v (%v), want auth-b", next, errNext)
+	}
+}
+
+func TestSessionAffinitySelector_RetryStickyEvictsExpired(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+	selector.setRetrySticky("mixed", "m1", "caller-a", "auth-a")
+	selector.setRetrySticky("mixed", "m2", "caller-b", "auth-b")
+
+	// Expire the entries deterministically instead of sleeping.
+	selector.retryStickyMu.Lock()
+	for key, entry := range selector.retrySticky {
+		entry.expiresAt = time.Now().Add(-time.Minute)
+		selector.retrySticky[key] = entry
+	}
+	selector.retryStickyMu.Unlock()
+
+	if _, ok := selector.retryStickyEntryFor("mixed", "m1", "caller-a"); ok {
+		t.Fatal("expired binding was served")
+	}
+	if size := retryStickySize(selector); size != 1 {
+		t.Fatalf("retrySticky size = %d, want 1 (looked-up entry evicted)", size)
+	}
+
+	// Any sweep at the current threshold must drop the rest.
+	selector.retryStickySweepAt = 1
+	selector.setRetrySticky("mixed", "m3", "caller-c", "auth-c")
+	if size := retryStickySize(selector); size != 1 {
+		t.Fatalf("retrySticky size = %d, want 1 (sweep dropped expired entries)", size)
+	}
+}
+
+func retryStickySize(selector *SessionAffinitySelector) int {
+	selector.retryStickyMu.RLock()
+	defer selector.retryStickyMu.RUnlock()
+	return len(selector.retrySticky)
+}
+
+func TestSessionAffinitySelector_RetryStickyAvoidNeedsExistingBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := newRetryStickyTestSelector(t, nil)
+
+	// No binding existed (e.g. a stateless or LCP request failed), so nothing
+	// may be created for a later header session to consume.
+	selector.markRetryStickyAvoid("mixed", "glm-5.3-flash", "caller-a", "auth-a")
+	if entry, ok := selector.retryStickyEntryFor("mixed", "glm-5.3-flash", "caller-a"); ok {
+		t.Fatalf("avoid marker created without a binding: %v", entry)
 	}
 }

@@ -915,6 +915,18 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+
+	// retrySticky tracks the most recent auth binding per provider+model for
+	// requests whose session identity is unstable (e.g. Zcode rotates
+	// X-Session-ID on every retry).  When a new header-style session misses the
+	// cache, we reuse the previous binding instead of letting the fallback
+	// selector re-pick from the top of the priority list.
+	retryStickyMu     sync.RWMutex
+	retrySticky       map[string]retryStickyEntry
+	retryStickyWindow time.Duration
+	// retryStickySweepAt is the size at which the next sweep runs, so the
+	// amortised cost per insertion stays constant.
+	retryStickySweepAt int
 }
 
 const (
@@ -1046,6 +1058,13 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+
+	// RetryStickyWindow controls how long a binding is reused when a client
+	// sends an unstable session identity (e.g. Zcode rotates X-Session-ID on
+	// every retry). Bindings are scoped to the downstream caller so two
+	// unrelated sessions never share one.
+	// nil selects the 5 minute default; an explicit zero disables the feature.
+	RetryStickyWindow *time.Duration
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1069,13 +1088,132 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity = *cfg.SubagentAffinity
 	}
 	rebindOnQuotaOnly := normalizeSessionAffinityRebindOn(cfg.RebindOn) == SessionAffinityRebindOnQuota
-	return &SessionAffinitySelector{
-		fallback:          cfg.Fallback,
-		cache:             NewSessionCache(cfg.TTL),
-		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
-		subagentAffinity:  subagentAffinity,
-		rebindOnQuotaOnly: rebindOnQuotaOnly,
+	retryStickyWindow := 5 * time.Minute
+	if cfg.RetryStickyWindow != nil {
+		// An explicit zero (or negative) disables retry stickiness.
+		retryStickyWindow = *cfg.RetryStickyWindow
 	}
+	return &SessionAffinitySelector{
+		fallback:           cfg.Fallback,
+		cache:              NewSessionCache(cfg.TTL),
+		matcher:            cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		subagentAffinity:   subagentAffinity,
+		rebindOnQuotaOnly:  rebindOnQuotaOnly,
+		retrySticky:        make(map[string]retryStickyEntry),
+		retryStickyWindow:  retryStickyWindow,
+		retryStickySweepAt: retryStickyMinSweep,
+	}
+}
+
+// retryStickyMinSweep is the smallest map size that triggers a sweep.
+const retryStickyMinSweep = 64
+
+type retryStickyEntry struct {
+	authID    string
+	expiresAt time.Time
+	// avoid marks a binding whose auth just failed, so the next cache
+	// miss for this caller fails over instead of re-picking it.
+	avoid bool
+}
+
+func (s *SessionAffinitySelector) retryStickyKey(provider, model, callerScope string) string {
+	return callerScope + "::" + provider + "::" + canonicalModelKey(model)
+}
+
+// retryStickyEnabled reports whether retry stickiness applies for this
+// caller. Without a caller scope there is no stable way to tell two
+// unrelated sessions apart, so the feature stays off instead of pinning
+// every cache miss for a provider+model onto one credential.
+func (s *SessionAffinitySelector) retryStickyEnabled(callerScope string) bool {
+	return s != nil && s.retrySticky != nil && callerScope != "" && s.retryStickyWindow > 0
+}
+
+func (s *SessionAffinitySelector) retryStickyEntryFor(provider, model, callerScope string) (retryStickyEntry, bool) {
+	if !s.retryStickyEnabled(callerScope) {
+		return retryStickyEntry{}, false
+	}
+	key := s.retryStickyKey(provider, model, callerScope)
+	s.retryStickyMu.RLock()
+	entry, ok := s.retrySticky[key]
+	s.retryStickyMu.RUnlock()
+	if !ok {
+		return retryStickyEntry{}, false
+	}
+	if !time.Now().Before(entry.expiresAt) {
+		// Another request may have replaced the expired record with a fresh
+		// binding between the read and this lock; reuse it instead of
+		// falling through to a new selection.
+		s.retryStickyMu.Lock()
+		if current, still := s.retrySticky[key]; still {
+			if time.Now().Before(current.expiresAt) {
+				s.retryStickyMu.Unlock()
+				return current, true
+			}
+			delete(s.retrySticky, key)
+		}
+		s.retryStickyMu.Unlock()
+		return retryStickyEntry{}, false
+	}
+	return entry, true
+}
+
+func (s *SessionAffinitySelector) setRetrySticky(provider, model, callerScope, authID string) {
+	if authID == "" || !s.retryStickyEnabled(callerScope) {
+		return
+	}
+	key := s.retryStickyKey(provider, model, callerScope)
+	now := time.Now()
+	s.retryStickyMu.Lock()
+	// Rotated caller scopes and model keys would otherwise accumulate
+	// entries that are never looked up again.
+	if len(s.retrySticky) >= s.retryStickySweepAt {
+		s.sweepRetryStickyLocked(now)
+	}
+	s.retrySticky[key] = retryStickyEntry{
+		authID:    authID,
+		expiresAt: now.Add(s.retryStickyWindow),
+	}
+	s.retryStickyMu.Unlock()
+}
+
+// markRetryStickyAvoid records that this caller's bound auth just failed, so
+// the next cache-missing retry fails over before reusing it. This is a
+// compare-and-set: a newer binding installed by an overlapping retry, or one
+// belonging to another auth, is left alone.
+func (s *SessionAffinitySelector) markRetryStickyAvoid(provider, model, callerScope, authID string) {
+	if authID == "" || !s.retryStickyEnabled(callerScope) {
+		return
+	}
+	key := s.retryStickyKey(provider, model, callerScope)
+	s.retryStickyMu.Lock()
+	// Only an existing binding for this caller+model is steered: its
+	// presence proves a header session selected here. Another auth's
+	// binding, or no binding at all, is left untouched.
+	if current, ok := s.retrySticky[key]; !ok || current.authID != authID {
+		s.retryStickyMu.Unlock()
+		return
+	}
+	s.retrySticky[key] = retryStickyEntry{
+		authID:    authID,
+		expiresAt: time.Now().Add(s.retryStickyWindow),
+		avoid:     true,
+	}
+	s.retryStickyMu.Unlock()
+}
+
+// sweepRetryStickyLocked drops expired bindings and raises the next sweep
+// threshold so repeated insertions do not each walk the whole map.
+func (s *SessionAffinitySelector) sweepRetryStickyLocked(now time.Time) {
+	for existingKey, entry := range s.retrySticky {
+		if !now.Before(entry.expiresAt) {
+			delete(s.retrySticky, existingKey)
+		}
+	}
+	next := 2 * len(s.retrySticky)
+	if next < retryStickyMinSweep {
+		next = retryStickyMinSweep
+	}
+	s.retryStickySweepAt = next
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1165,11 +1303,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
 	isFork := false
+	isHeaderSession := strings.HasPrefix(primaryID, "header:")
 	if opts.Metadata != nil {
 		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
 			isFork = true
 		}
 	}
+	// Retry stickiness is scoped to the downstream caller: a cache-missing
+	// header session must never inherit a binding recorded for a different
+	// caller that happens to target the same provider and model.
+	callerScope := sessionMetadataString(opts.Metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 	fallbackKey := ""
 	if fallbackID != "" && fallbackID != primaryID {
@@ -1275,6 +1418,35 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
+	// Retry-sticky: when the client sends an unstable header-style session ID
+	// (rotated on every retry), reuse the previous binding for this
+	// provider+model instead of letting the fallback selector re-pick from
+	// the top of the priority list.
+	// A record left by a failed attempt carries avoid so this caller fails
+	// over to another candidate instead of re-picking the same auth.
+	stickyEntry, hasSticky := s.retryStickyEntryFor(provider, model, callerScope)
+	if isHeaderSession && !isFork && !isSubagent && hasSticky {
+		if !stickyEntry.avoid {
+			for _, candidate := range available {
+				if candidate.ID == stickyEntry.authID {
+					bind(candidate.ID, true)
+					entry.Infof("session-affinity: retry-sticky reuse | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), candidate.ID, provider, model)
+					return candidate, nil
+				}
+			}
+		} else if len(fallbackAuths) > 1 {
+			remaining := make([]*Auth, 0, len(fallbackAuths))
+			for _, candidate := range fallbackAuths {
+				if candidate.ID != stickyEntry.authID {
+					remaining = append(remaining, candidate)
+				}
+			}
+			if len(remaining) > 0 {
+				fallbackAuths = remaining
+			}
+		}
+	}
+
 	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
@@ -1283,6 +1455,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, nil
 	}
 	bind(auth.ID, true)
+	// Only record a new sticky when there was no previous sticky for this
+	// provider+model.  If the old sticky is still valid but its auth is
+	// unavailable, we leave it alone so that a recovered auth can be picked
+	// up again on the next retry.
+	if isHeaderSession && !isFork && !isSubagent && (!hasSticky || stickyEntry.avoid) {
+		s.setRetrySticky(provider, model, callerScope, auth.ID)
+	}
 	if isFork && fallbackID != "" {
 		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 	} else {
@@ -1687,6 +1866,12 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// Under session-affinity-rebind-on: quota, transient failures fail over for
 		// the current request without unbinding the session from its bound credential.
 		return
+	}
+	// The sticky record is keyed on caller+provider+model, so a failed attempt
+	// is marked here: an interceptor may have erased the session identity, and
+	// the next retry must still steer away from this auth.
+	if !res.Success {
+		s.markRetryStickyAvoid(ns, nsModel, sessionMetadataString(res.Options.Metadata, cliproxyexecutor.CallerScopeMetadataKey), res.AuthID)
 	}
 
 	// LCP bindings are independent from explicit harness bindings. A successful
