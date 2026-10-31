@@ -75,11 +75,77 @@ func SanitizeNonVertexGeminiRequestThoughtSignatures(payload []byte, contentsPat
 	return sanitizeGeminiRequestThoughtSignatures(payload, contentsPath, geminiSanitizeOptions{rejectBareTink: true})
 }
 
+// SanitizeGeminiSystemInstruction removes empty part objects ({}) from
+// systemInstruction.parts (and system_instruction.parts) at the same envelope
+// level as contentsPath. If all parts are empty, the systemInstruction field
+// itself is removed so upstream protobuf validation does not reject an
+// uninitialized Part.data oneof.
+func SanitizeGeminiSystemInstruction(payload []byte, contentsPath string) []byte {
+	prefix := ""
+	if trimmed := strings.TrimSpace(contentsPath); trimmed != "" {
+		if idx := strings.LastIndex(trimmed, "."); idx > 0 {
+			prefix = trimmed[:idx+1]
+		}
+	}
+	for _, key := range []string{"systemInstruction", "system_instruction"} {
+		sysPath := prefix + key
+		sys := util.GetGJSONBytesNoCopy(payload, sysPath)
+		if !sys.Exists() || !sys.IsObject() {
+			continue
+		}
+		parts := sys.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		hasEmptyPart := false
+		parts.ForEach(func(_, part gjson.Result) bool {
+			if isEmptyGeminiPartObject(part) {
+				hasEmptyPart = true
+				return false
+			}
+			return true
+		})
+		if !hasEmptyPart {
+			continue
+		}
+		keptParts := make([][]byte, 0, int(parts.Get("#").Int()))
+		parts.ForEach(func(_, part gjson.Result) bool {
+			if !isEmptyGeminiPartObject(part) {
+				keptParts = append(keptParts, []byte(part.Raw))
+			}
+			return true
+		})
+		if len(keptParts) == 0 {
+			if updated, errDelete := sjson.DeleteBytes(payload, sysPath); errDelete == nil {
+				payload = updated
+			}
+			continue
+		}
+		if updated, errSet := sjson.SetRawBytes(payload, sysPath+".parts", joinGeminiSignatureRawArray(keptParts)); errSet == nil {
+			payload = updated
+		}
+	}
+	return payload
+}
+
+func isEmptyGeminiPartObject(part gjson.Result) bool {
+	if !part.IsObject() {
+		return false
+	}
+	hasField := false
+	part.ForEach(func(_, _ gjson.Result) bool {
+		hasField = true
+		return false
+	})
+	return !hasField
+}
+
 func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string, opts geminiSanitizeOptions) []byte {
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
 		contentsPath = "contents"
 	}
+	payload = SanitizeGeminiSystemInstruction(payload, contentsPath)
 
 	contents := util.GetGJSONBytesNoCopy(payload, contentsPath)
 	if !contents.IsArray() || !geminiContentsThoughtSignaturesNeedSanitize(contents, opts) {

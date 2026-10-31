@@ -659,3 +659,30 @@ func TestSanitizeNonVertexGeminiRequestThoughtSignatures_PreservesWrappedEnvelop
 		t.Fatalf("text signature = %q, want wrapped envelope preserved", got)
 	}
 }
+
+func TestSanitizeGeminiRequestThoughtSignatures_StripsEmptySystemInstructionParts(t *testing.T) {
+	t.Run("drops_systemInstruction_when_all_parts_are_empty_objects", func(t *testing.T) {
+		input := []byte(`{"request":{"systemInstruction":{"parts":[{}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "request.contents")
+		if gjson.GetBytes(out, "request.systemInstruction").Exists() {
+			t.Fatalf("expected request.systemInstruction to be removed, got %s", out)
+		}
+	})
+
+	t.Run("retains_non_empty_systemInstruction_parts", func(t *testing.T) {
+		input := []byte(`{"systemInstruction":{"parts":[{},{"text":"keep rule"},{}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		parts := gjson.GetBytes(out, "systemInstruction.parts").Array()
+		if len(parts) != 1 || parts[0].Get("text").String() != "keep rule" {
+			t.Fatalf("unexpected systemInstruction.parts: %s", out)
+		}
+	})
+
+	t.Run("reuses_payload_when_systemInstruction_parts_are_valid", func(t *testing.T) {
+		input := []byte(`{"systemInstruction":{"parts":[{"text":"keep rule"}]},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		out := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+		if &out[0] != &input[0] {
+			t.Fatal("valid systemInstruction payload was unexpectedly copied")
+		}
+	})
+}
