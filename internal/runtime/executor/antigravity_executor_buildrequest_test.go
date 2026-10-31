@@ -545,3 +545,24 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 		t.Fatalf("deprecated should be removed from nested schema")
 	}
 }
+
+func TestAntigravityBuildRequest_StripsRequestStream(t *testing.T) {
+	body := buildRequestBodyFromRawPayload(t, "gemini-3.1-flash-image", []byte(`{
+		"request": {
+			"stream": true,
+			"contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+		}
+	}`))
+
+	request, ok := body["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("request object missing: %#v", body)
+	}
+	if _, exists := request["stream"]; exists {
+		t.Fatalf("request.stream must not reach Cloud Code: %#v", request)
+	}
+	contents, ok := request["contents"].([]any)
+	if !ok || len(contents) == 0 {
+		t.Fatalf("request.contents was dropped: %#v", request)
+	}
+}
