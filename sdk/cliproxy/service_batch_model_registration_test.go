@@ -167,7 +167,7 @@ func TestRegisterModelsForAuthBatch_ConcurrentUpdateDuringBatch_Issue6453(t *tes
 	})
 
 	var updateDone atomic.Bool
-	modelRegistrationTaskHook = func() {
+	modelRegistrationTaskHook = func(string) {
 		if updateDone.CompareAndSwap(false, true) {
 			updatedAuth := auth.Clone()
 			updatedAuth.Attributes = map[string]string{
