@@ -349,6 +349,12 @@ client:
       ttl: "24h"
       limit: 1024
 
+  claude:
+    # Show public Codex commentary as visible Claude text, retaining phase markers
+    # for replay. Genuine reasoning summaries remain thinking blocks.
+    # Default false preserves existing behavior for clients such as TTS consumers.
+    show-codex-commentary: false
+
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
   codex:
