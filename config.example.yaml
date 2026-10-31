@@ -294,13 +294,14 @@ requests:
   #                               #   preserves, so it can never corrupt a payload.
   #     threshold: 3              #   Default: 3, the upstream default.
   #   live-zone:                   # Reuse the previous turn's compressed prefix. Off by
-  #     enabled: false             #   default. Session id is the x-omniroute-session-id
-  #                                #   header, else a fingerprint of model, provider, system
-  #                                #   prompt, first user message and tool names. A request
-  #                                #   repeating that prefix skips the engines for the part
-  #                                #   already compressed. Needs cache-prefix: rewrite. Buys
-  #                                #   CPU, not tokens: the engines are already pure, so
-  #                                #   recompressing gives the same bytes.
+  #     enabled: false             #   default. Keys on the same session identity that
+  #                                #   affinity routing uses (canonical, LCP, execution or
+  #                                #   derived), so a request repeating that prefix skips the
+  #                                #   engines for the part already compressed. Needs
+  #                                #   cache-prefix: rewrite. Buys CPU, not tokens: the
+  #                                #   engines are already pure, so recompressing gives the
+  #                                #   same bytes. Useful mainly with session-affinity on,
+  #                                #   which is what guarantees a session keeps one identity.
   #   default-combo: standard      # Used when no model-scoped combo matches.
   #   combos:
   #     - name: standard

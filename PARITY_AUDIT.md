@@ -94,7 +94,12 @@ intensity-downgrade path are computed and never consumed anywhere in production.
    `TestApplyIsAppendStable` pins byte-identical prefixes across turns). Upstream's
    32 MB total-byte budget is not mirrored: the 100-entry cap already bounds memory
    for bodies this size. `cache-prefix` must be `rewrite`, because `protect` leaves
-   no transform to reuse.
+   no transform to reuse. The session id is **not** upstream's
+   `x-omniroute-session-id` header: it is this proxy's native identity, resolved by
+   `session.SessionIDFromMetadata` with the same precedence affinity routing uses
+   (canonical, LCP affinity, execution, derived), so one conversation is one
+   session for both. Upstream's own conversation fingerprint is therefore not
+   ported, deliberately: two derivations would drift apart.
 2. **`cache-prefix: rewrite` is the default, not `protect`.** Upstream never skips
    a message to protect a cache breakpoint. `protect` measured 0% on a realistic
    Claude Code body because the breakpoint sits near the tail.

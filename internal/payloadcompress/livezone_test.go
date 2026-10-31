@@ -32,39 +32,6 @@ func liveBody(tools int) []byte {
 	return append(b, ']', '}')
 }
 
-func TestSessionHeaderWinsOverFingerprint(t *testing.T) {
-	body := liveBody(1)
-	if got := SessionID("explicit-1", "m", "p", "", body); got != "explicit-1" {
-		t.Fatalf("header must win, got %q", got)
-	}
-	if got := SessionID("  ", "m", "p", "", body); got == "" {
-		t.Fatal("a blank header must fall back to the fingerprint")
-	}
-}
-
-func withModel(body []byte, model string) []byte {
-	return bytes.Replace(body, []byte(`"model":"`+cachePrefixTestModel+`"`), []byte(`"model":"`+model+`"`), 1)
-}
-
-func TestSessionFingerprintTracksIdentityParts(t *testing.T) {
-	body := liveBody(1)
-	base := SessionID("", "model-a", "prov", "conn", body)
-
-	if SessionID("", "model-a", "prov", "conn", withModel(body, "other-model")) == base {
-		t.Error("a model change must produce a new session")
-	}
-	if SessionID("", "model-a", "other", "conn", body) == base {
-		t.Error("a provider change must produce a new session")
-	}
-	if got := SessionID("", "model-a", "prov", "conn", liveBody(2)); got != base {
-		t.Error("appending a tool result must keep the session")
-	}
-	changed := bytes.Replace(body, []byte("run the go tests"), []byte("delete the cache dir"), 1)
-	if SessionID("", "model-a", "prov", "conn", changed) == base {
-		t.Error("a different first user message must produce a new session")
-	}
-}
-
 func TestLiveZoneReusesTheCompressedPrefix(t *testing.T) {
 	resetLiveZone()
 	t.Cleanup(resetLiveZone)

@@ -70,7 +70,7 @@ func TestPayloadCompressionRunsBeforePayloadRules(t *testing.T) {
 func TestPayloadCompressionSkipsRootedPayloads(t *testing.T) {
 	cfg := &config.Config{Compression: compressionConfig(payloadcompress.EngineLite)}
 	body := noisyPayload()
-	out := applyRequestCompression(cfg, "gpt-4o", "request", body, nil)
+	out := applyRequestCompression(cfg, "gpt-4o", "request", body, "")
 	if string(out) != string(body) {
 		t.Fatal("rooted payloads must be left alone")
 	}
@@ -79,7 +79,7 @@ func TestPayloadCompressionSkipsRootedPayloads(t *testing.T) {
 func TestPayloadCompressionDisabledByDefault(t *testing.T) {
 	cfg := &config.Config{}
 	body := noisyPayload()
-	out := applyRequestCompression(cfg, "gpt-4o", "", body, nil)
+	out := applyRequestCompression(cfg, "gpt-4o", "", body, "")
 	if string(out) != string(body) {
 		t.Fatal("compression must be opt-in")
 	}
@@ -89,7 +89,7 @@ func TestPayloadCompressionShadowReturnsOriginal(t *testing.T) {
 	cfg := &config.Config{Compression: compressionConfig(payloadcompress.EngineLite)}
 	cfg.Compression.Shadow = true
 	body := noisyPayload()
-	out := applyRequestCompression(cfg, "gpt-4o", "", body, nil)
+	out := applyRequestCompression(cfg, "gpt-4o", "", body, "")
 	if string(out) != string(body) {
 		t.Fatal("shadow mode must send the original payload")
 	}

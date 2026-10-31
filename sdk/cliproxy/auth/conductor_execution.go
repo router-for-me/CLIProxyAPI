@@ -2159,34 +2159,7 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	if ctx == nil {
 		return nil
 	}
-	canonicalID := ""
-	if len(metadata) > 0 {
-		canonicalID, _ = metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
-		if canonicalID == "" {
-			canonicalID, _ = metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string)
-		}
-		if canonicalID == "" {
-			if execID, _ := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); execID != "" {
-				execID = strings.TrimSpace(execID)
-				if !strings.HasPrefix(execID, "execution:") {
-					canonicalID = "execution:" + execID
-				} else {
-					canonicalID = execID
-				}
-			}
-		}
-		if canonicalID == "" {
-			if derivedID, _ := metadata[cliproxyexecutor.DerivedSessionIDMetadataKey].(string); derivedID != "" {
-				derivedID = strings.TrimSpace(derivedID)
-				if !strings.HasPrefix(derivedID, "derived:") {
-					canonicalID = "derived:" + derivedID
-				} else {
-					canonicalID = derivedID
-				}
-			}
-		}
-	}
-	canonicalID = strings.TrimSpace(canonicalID)
+	canonicalID := cliproxysession.SessionIDFromMetadata(metadata)
 	if canonicalID == "" {
 		clientMeta := logging.GetClientRequestMetadata(ctx)
 		if clientMeta.SessionID != "" || clientMeta.ParentSessionID != "" || clientMeta.NodeKind != "" || clientMeta.IsFork || clientMeta.IsCompaction {

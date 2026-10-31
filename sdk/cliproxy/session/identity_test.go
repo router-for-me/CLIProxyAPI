@@ -648,3 +648,61 @@ func TestEnrich_DoesNotClonePayloadWhenPopulatingOriginalRequest_Issue6101(t *te
 		t.Fatal("Enrich replaced explicitly provided OriginalRequest")
 	}
 }
+
+func TestSessionIDFromMetadataPrecedence(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{"empty", nil, ""},
+		{
+			"canonical wins over every fallback",
+			map[string]any{
+				cliproxyexecutor.CanonicalSessionIDMetadataKey:   "canon",
+				cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp",
+				cliproxyexecutor.ExecutionSessionMetadataKey:     "exec",
+				cliproxyexecutor.DerivedSessionIDMetadataKey:     "derived-raw",
+			},
+			"canon",
+		},
+		{
+			"lcp affinity next",
+			map[string]any{
+				cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp",
+				cliproxyexecutor.ExecutionSessionMetadataKey:     "exec",
+			},
+			"lcp",
+		},
+		{
+			"execution is prefixed",
+			map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec"},
+			"execution:exec",
+		},
+		{
+			"an already prefixed execution id is kept",
+			map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "execution:exec"},
+			"execution:exec",
+		},
+		{
+			"derived is prefixed",
+			map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "derived-raw"},
+			"derived:derived-raw",
+		},
+		{
+			"blank ids fall through",
+			map[string]any{
+				cliproxyexecutor.CanonicalSessionIDMetadataKey: "  ",
+				cliproxyexecutor.DerivedSessionIDMetadataKey:   "derived-raw",
+			},
+			"derived:derived-raw",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SessionIDFromMetadata(tc.metadata); got != tc.want {
+				t.Fatalf("SessionIDFromMetadata() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
