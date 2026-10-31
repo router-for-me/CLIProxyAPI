@@ -371,6 +371,34 @@ func TestRPCCapabilitiesIncludeRequestInterceptorOmitBody(t *testing.T) {
 	}
 }
 
+func TestRPCCapabilitiesIncludeResponseTransformOmitRequestBody(t *testing.T) {
+	plugin := pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			ResponseTranslator: responseTranslatorFunc(func(context.Context, pluginapi.ResponseTransformRequest) (pluginapi.PayloadResponse, error) {
+				return pluginapi.PayloadResponse{}, nil
+			}),
+			ResponseTransformOmitRequestBody: true,
+		},
+	}
+
+	caps := rpcCapabilitiesFromPlugin(plugin)
+	if !caps.ResponseTransformOmitRequestBody {
+		t.Fatal("ResponseTransformOmitRequestBody = false, want true")
+	}
+
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if decoded["response_transform_omit_request_body"] != true {
+		t.Fatalf("response_transform_omit_request_body = %#v, want true", decoded["response_transform_omit_request_body"])
+	}
+}
+
 func TestRPCRequestInterceptorOmitsBodyOnTheWireForSchema7(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

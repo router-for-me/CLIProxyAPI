@@ -121,6 +121,13 @@ type Capabilities struct {
 	ResponseBeforeTranslator ResponseNormalizer
 	// ResponseAfterTranslator normalizes translated responses before delivery.
 	ResponseAfterTranslator ResponseNormalizer
+	// ResponseTransformOmitRequestBody opts out of receiving
+	// ResponseTransformRequest.OriginalRequest and ResponseTransformRequest.TranslatedRequest
+	// in streaming TranslateResponse and NormalizeResponse calls. It is honored only on
+	// schema version 11+; the host then skips cloning and Base64-encoding both bodies on
+	// every SSE frame. Non-streaming calls still carry them because a converter may need
+	// the request once per response.
+	ResponseTransformOmitRequestBody bool
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
 	// RequestInterceptorOmitBodyBefore opts out of receiving RequestInterceptRequest.Body
