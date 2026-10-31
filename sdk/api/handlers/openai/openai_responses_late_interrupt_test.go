@@ -13,12 +13,58 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
+
+func TestResponsesTerminalEventDisarmsLocalInterruptBeforeStreamEOF(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	local := newResponsesLocalInterrupt()
+	data := make(chan []byte, 1)
+	data <- []byte(`{"type":"response.completed","response":{"id":"r1","output":[]}}`)
+	finished := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			finished <- err
+			return
+		}
+		defer conn.Close()
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = r
+		errs := make(chan *interfaces.ErrorMessage)
+		close(errs)
+		_, _, _, _, err = (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(ctx,
+			newResponsesWebsocketWriter(conn), func(...interface{}) {}, data, errs,
+			newInMemoryWebsocketTimelineLog(), t.Name(), responsesWebsocketForwardOptions{localInterrupt: local})
+		finished <- err
+	}))
+	defer server.Close()
+	defer close(data)
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, payload, err := client.ReadMessage()
+	if err != nil || gjson.GetBytes(payload, "type").String() != "response.completed" {
+		t.Fatalf("terminal event: %s, %v", payload, err)
+	}
+	// The stream is deliberately still open when the client can react to the terminal event.
+	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown"}`)) {
+		t.Fatal("finished response still accepts a local interrupt")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("stream unexpectedly ended before EOF: %v", err)
+	default:
+	}
+}
 
 // A delayed control frame must not queue an error for the next create, nor
 // cancel its response when the old response ID is repeated during that turn.
