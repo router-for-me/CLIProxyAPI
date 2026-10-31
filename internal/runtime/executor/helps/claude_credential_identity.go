@@ -212,6 +212,18 @@ func EnsureClaudeCredentialDevicePoolRequired(ctx context.Context, auth *cliprox
 	return deviceIDs, nil
 }
 
+// ClaudeAuthKind returns auth.AuthKind() evaluated on a metadata snapshot taken
+// under the Claude credential metadata lock. AuthKind falls back to metadata
+// (auth_kind, token fields, use_siwc), and request paths must not read
+// Auth.Metadata while another goroutine sharing the Auth writes it.
+func ClaudeAuthKind(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	view := &cliproxyauth.Auth{Attributes: auth.Attributes, Metadata: claudeauth.SnapshotMetadata(&auth.Metadata)}
+	return view.AuthKind()
+}
+
 // ClaudeCredentialAccountUUID returns the selected upstream credential's account UUID.
 func ClaudeCredentialAccountUUID(auth *cliproxyauth.Auth) string {
 	if auth == nil {
