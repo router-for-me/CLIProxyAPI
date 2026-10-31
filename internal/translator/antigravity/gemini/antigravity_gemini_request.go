@@ -231,47 +231,7 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 }
 
 func removeEmptyGeminiSystemInstructionParts(rawJSON []byte) []byte {
-	parts := util.GetGJSONBytesNoCopy(rawJSON, "request.systemInstruction.parts")
-	if !parts.IsArray() {
-		return rawJSON
-	}
-	hasEmptyPart := false
-	parts.ForEach(func(_, part gjson.Result) bool {
-		if isEmptyGeminiPartObject(part) {
-			hasEmptyPart = true
-			return false
-		}
-		return true
-	})
-	if !hasEmptyPart {
-		return rawJSON
-	}
-	var cleanedParts [][]byte
-	parts.ForEach(func(_, part gjson.Result) bool {
-		if isEmptyGeminiPartObject(part) {
-			return true
-		}
-		cleanedParts = append(cleanedParts, []byte(part.Raw))
-		return true
-	})
-	if len(cleanedParts) == 0 {
-		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.systemInstruction")
-		return rawJSON
-	}
-	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.systemInstruction.parts", translatorcommon.JoinRawArray(cleanedParts))
-	return rawJSON
-}
-
-func isEmptyGeminiPartObject(part gjson.Result) bool {
-	if !part.IsObject() {
-		return false
-	}
-	hasField := false
-	part.ForEach(func(_, _ gjson.Result) bool {
-		hasField = true
-		return false
-	})
-	return !hasField
+	return signature.SanitizeGeminiSystemInstruction(rawJSON, "request.contents")
 }
 
 // geminiFunctionNameFields lists the part fields that can carry a function name.
@@ -707,7 +667,118 @@ func logAntigravityClaudeGeminiSignatureSanitize(modelName, action, reason strin
 // FunctionCallGroup represents a group of function calls and their responses
 type FunctionCallGroup struct {
 	ResponsesNeeded int
+	CallIDs         []string // ordered function call IDs for matching responses when extras exist
 	CallNames       []string // ordered function call names for backfilling empty response names
+}
+
+func selectGroupResponses(collected []gjson.Result, group *FunctionCallGroup) ([]gjson.Result, []gjson.Result) {
+	needed := group.ResponsesNeeded
+	if len(collected) <= needed {
+		return collected, nil
+	}
+
+	hasCallID := false
+	for _, id := range group.CallIDs {
+		if id != "" {
+			hasCallID = true
+			break
+		}
+	}
+	if !hasCallID {
+		return collected[:needed], collected[needed:]
+	}
+
+	// Single O(M) pass over collected responses to index id and name once per part.
+	byID := make(map[string][]int, len(collected))
+	byName := make(map[string][]int, len(collected))
+	var emptyNameIdxs []int
+	for idx, resp := range collected {
+		funcResp := resp.Get("functionResponse")
+		if id := funcResp.Get("id").String(); id != "" {
+			byID[id] = append(byID[id], idx)
+		}
+		if name := funcResp.Get("name").String(); name != "" {
+			byName[name] = append(byName[name], idx)
+		} else {
+			emptyNameIdxs = append(emptyNameIdxs, idx)
+		}
+	}
+
+	used := make([]bool, len(collected))
+	selected := make([]gjson.Result, needed)
+	matchedSlot := make([]bool, needed)
+	popUnused := func(queue []int) (int, []int, bool) {
+		for len(queue) > 0 {
+			idx := queue[0]
+			queue = queue[1:]
+			if !used[idx] {
+				return idx, queue, true
+			}
+		}
+		return 0, queue, false
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if slot >= len(group.CallIDs) || group.CallIDs[slot] == "" {
+			continue
+		}
+		callID := group.CallIDs[slot]
+		if idx, rest, ok := popUnused(byID[callID]); ok {
+			byID[callID] = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+		} else {
+			delete(byID, callID)
+		}
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] || slot >= len(group.CallNames) || group.CallNames[slot] == "" {
+			continue
+		}
+		callName := group.CallNames[slot]
+		if idx, rest, ok := popUnused(byName[callName]); ok {
+			byName[callName] = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+			continue
+		}
+		delete(byName, callName)
+		if idx, rest, ok := popUnused(emptyNameIdxs); ok {
+			emptyNameIdxs = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+		} else {
+			emptyNameIdxs = nil
+		}
+	}
+
+	freeCursor := 0
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] {
+			continue
+		}
+		for freeCursor < len(collected) && used[freeCursor] {
+			freeCursor++
+		}
+		if freeCursor < len(collected) {
+			used[freeCursor] = true
+			selected[slot] = collected[freeCursor]
+			matchedSlot[slot] = true
+			freeCursor++
+		}
+	}
+
+	remaining := make([]gjson.Result, 0, len(collected)-needed)
+	for idx, resp := range collected {
+		if !used[idx] {
+			remaining = append(remaining, resp)
+		}
+	}
+	return selected, remaining
 }
 
 func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
@@ -901,10 +972,15 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				pendingGroups = pendingGroups[1:]
 
 				// Take the needed responses for this group
-				groupResponses := collectedResponses[:group.ResponsesNeeded]
-				collectedResponses = collectedResponses[group.ResponsesNeeded:]
+				var groupResponses []gjson.Result
+				groupResponses, collectedResponses = selectGroupResponses(collectedResponses, group)
 
 				appendFunctionResponses(groupResponses, group.CallNames)
+			}
+			if len(pendingGroups) == 0 {
+				// Any remaining responses in this turn have no preceding functionCall group
+				// to match and must not leak into subsequent model turns.
+				collectedResponses = nil
 			}
 
 			return true // Skip adding this content, responses are merged
@@ -912,9 +988,11 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 
 		// If this is a model with function calls, create a new group
 		if role == "model" {
+			var callIDs []string
 			var callNames []string
 			parts.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("functionCall").Exists() {
+					callIDs = append(callIDs, part.Get("functionCall.id").String())
 					callNames = append(callNames, part.Get("functionCall.name").String())
 				}
 				return true
@@ -931,6 +1009,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
 					ResponsesNeeded: len(callNames),
+					CallIDs:         callIDs,
 					CallNames:       callNames,
 				}
 				pendingGroups = append(pendingGroups, group)

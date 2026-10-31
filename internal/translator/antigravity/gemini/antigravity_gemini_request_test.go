@@ -567,6 +567,66 @@ func TestFixCLIToolResponse_MoreResponsesThanCalls(t *testing.T) {
 	}
 }
 
+func TestFixCLIToolResponse_MoreResponsesThanCallsDoesNotCorruptNextTurn(t *testing.T) {
+	input := `{
+		"model": "gemini-3.8-flash",
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "Inspect the project structure"}]
+				},
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"id": "call_210083", "name": "glob", "args": {"pattern": "src/**"}}},
+						{"functionCall": {"id": "call_210092", "name": "grep_search", "args": {"query": "header"}}},
+						{"functionCall": {"id": "call_210101", "name": "web_fetch", "args": {"url": "https://example.com"}}}
+					]
+				},
+				{
+					"role": "user",
+					"parts": [
+						{"functionResponse": {"id": "call_210083", "name": "glob", "response": {"output": "a"}}},
+						{"functionResponse": {"id": "call_210092", "name": "grep_search", "response": {"output": "b"}}},
+						{"functionResponse": {"id": "call_210101", "name": "web_fetch", "response": {"output": "c"}}},
+						{"functionResponse": {"id": "call_203720", "name": "glob", "response": {"output": "orphan"}}}
+					]
+				},
+				{
+					"role": "model",
+					"parts": [
+						{"functionCall": {"id": "call_153280", "name": "glob", "args": {"pattern": "src/components/**"}}},
+						{"functionCall": {"id": "call_153283", "name": "glob", "args": {"pattern": "src/i18n/**"}}}
+					]
+				},
+				{
+					"role": "user",
+					"parts": [
+						{"functionResponse": {"id": "call_153280", "name": "glob", "response": {"output": "d"}}},
+						{"functionResponse": {"id": "call_153283", "name": "glob", "response": {"output": "e"}}}
+					]
+				}
+			]
+		}
+	}`
+
+	result, err := fixCLIToolResponse([]byte(input))
+	if err != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", err)
+	}
+
+	if errValidate := signature.ValidateGeminiFunctionCallPairing(result); errValidate != nil {
+		t.Fatalf("expected valid function call pairing after fixCLIToolResponse, got error: %v\noutput: %s", errValidate, result)
+	}
+
+	gotID0 := gjson.GetBytes(result, "request.contents.4.parts.0.functionResponse.id").String()
+	gotID1 := gjson.GetBytes(result, "request.contents.4.parts.1.functionResponse.id").String()
+	if gotID0 != "call_153280" || gotID1 != "call_153283" {
+		t.Fatalf("contents[4] response IDs = [%q, %q], want [call_153280, call_153283]", gotID0, gotID1)
+	}
+}
+
 func TestFixCLIToolResponse_MultipleGroupsFIFO(t *testing.T) {
 	// Two sequential function call groups should be matched FIFO.
 	input := `{
