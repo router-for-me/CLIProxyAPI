@@ -309,9 +309,8 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network, addr strin
 		return nil, fmt.Errorf("read CONNECT response failed: %w", errRead)
 	}
 	if resp.StatusCode != http.StatusOK {
-		if resp.Body != nil {
-			_ = resp.Body.Close()
-		}
+		// The rejected connection cannot be reused. Closing the response body
+		// first can block while draining an unfinished proxy error response.
 		if errClose := conn.Close(); errClose != nil {
 			return nil, fmt.Errorf("proxy CONNECT returned status %s; close failed: %v", resp.Status, errClose)
 		}
