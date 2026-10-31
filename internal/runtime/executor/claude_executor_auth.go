@@ -34,13 +34,13 @@ func isClaudeSetupToken(auth *cliproxyauth.Auth, apiKey string) bool {
 	if !isClaudeOAuthToken(apiKey) || auth == nil {
 		return false
 	}
-	if skip, _ := auth.Metadata["skip_account_profile"].(bool); skip {
+	if claudeauth.ReadMetadataBool(&auth.Metadata, "skip_account_profile") {
 		return true
 	}
-	if isSetup, _ := auth.Metadata["is_setup_token"].(bool); isSetup {
+	if claudeauth.ReadMetadataBool(&auth.Metadata, "is_setup_token") {
 		return true
 	}
-	if isSetup, _ := auth.Metadata["setup_token"].(bool); isSetup {
+	if claudeauth.ReadMetadataBool(&auth.Metadata, "setup_token") {
 		return true
 	}
 	if kind := strings.ToLower(auth.Attributes["auth_kind"]); kind == "setup_token" || kind == "setup-token" {
