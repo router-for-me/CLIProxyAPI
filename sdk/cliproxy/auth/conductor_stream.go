@@ -438,6 +438,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
+		if !ephemeralResult {
+			var errFresh error
+			auth, errFresh = m.ensureExecutionAuth(ctx, auth, routeModel, provider)
+			if errFresh != nil {
+				return nil, errFresh
+			}
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -460,6 +467,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
+					var errFresh error
+					auth, errFresh = m.ensureExecutionAuth(ctx, auth, routeModel, provider)
+					if errFresh != nil {
+						return nil, errFresh
+					}
 					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
@@ -474,6 +486,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						}
 					}
 				} else {
+					if errFresh := m.managedRecoveryError(auth); errFresh != nil {
+						return nil, errFresh
+					}
 					warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationStream, errStream)
 				}
 			} else {
@@ -541,6 +556,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
+					var errFresh error
+					auth, errFresh = m.ensureExecutionAuth(ctx, auth, routeModel, provider)
+					if errFresh != nil {
+						return nil, errFresh
+					}
 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
@@ -562,6 +582,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						}
 					}
 				} else {
+					if errFresh := m.managedRecoveryError(auth); errFresh != nil {
+						return nil, errFresh
+					}
 					warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), bootstrapErr)
 				}
 			} else {

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 )
 
 type pluginCallFinishKey struct{}
@@ -103,6 +106,13 @@ func (c *guardedPluginClient) Call(ctx context.Context, method string, request [
 		}
 		result <- guardedPluginCallResult{response: response, err: errCall}
 	}()
+	if method == pluginabi.MethodAuthRefresh && coreauth.IsManagedRefreshContext(ctx) {
+		callResult := <-result
+		if callResult.recovered != nil {
+			panic(callResult.recovered)
+		}
+		return callResult.response, callResult.err
+	}
 	select {
 	case callResult := <-result:
 		if callResult.recovered != nil {

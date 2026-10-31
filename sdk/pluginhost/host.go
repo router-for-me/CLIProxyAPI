@@ -109,6 +109,13 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 	return h.inner.UnloadPluginContext(ctx, id)
 }
 
+// SetAuthManager binds authenticated plugin operations to the managed lifecycle.
+func (h *Host) SetAuthManager(manager *coreauth.Manager) {
+	if h != nil && h.inner != nil {
+		h.inner.SetAuthManager(manager)
+	}
+}
+
 // ParseAuth lets plugin auth providers parse a credential payload.
 func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
 	if h == nil || h.inner == nil {

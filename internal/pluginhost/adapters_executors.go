@@ -1073,64 +1073,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if errRefresh != nil {
 		return nil, errRefresh
 	}
-	data := pluginResp.Auth
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = authProvider(auth)
-	}
-	if strings.TrimSpace(data.ID) == "" {
-		data.ID = authID(auth)
-	}
-	if strings.TrimSpace(data.FileName) == "" && auth != nil {
-		data.FileName = auth.FileName
-	}
-	if strings.TrimSpace(data.Label) == "" && auth != nil {
-		data.Label = auth.Label
-	}
-	if strings.TrimSpace(data.Prefix) == "" && auth != nil {
-		data.Prefix = auth.Prefix
-	}
-	if strings.TrimSpace(data.ProxyURL) == "" && auth != nil {
-		data.ProxyURL = auth.ProxyURL
-	}
-	if len(data.Metadata) == 0 && auth != nil {
-		data.Metadata = cloneAnyMap(auth.Metadata)
-	}
-	if len(data.Attributes) == 0 {
-		if auth != nil {
-			data.Attributes = cloneStringMap(auth.Attributes)
-		}
-	} else if auth != nil {
-		attributes := cloneStringMap(data.Attributes)
-		for key, value := range auth.Attributes {
-			if _, exists := attributes[key]; !exists {
-				attributes[key] = value
-			}
-		}
-		data.Attributes = attributes
-	}
-	preserveFileAuthPriority(&data, auth)
-	if len(data.StorageJSON) == 0 {
-		data.StorageJSON = storageJSONFromAuth(auth)
-	}
-	if pluginResp.NextRefreshAfter.IsZero() && auth != nil {
-		data.NextRefreshAfter = auth.NextRefreshAfter
-	}
-	if !pluginResp.NextRefreshAfter.IsZero() {
-		data.NextRefreshAfter = pluginResp.NextRefreshAfter
-	}
-	path := ""
-	if auth != nil && auth.Attributes != nil {
-		path = auth.Attributes[coreauth.AttributePath]
-	}
-	next := a.host.AuthDataToCoreAuth(data, path, data.FileName)
-	if next == nil {
-		return nil, fmt.Errorf("plugin executor %s refresh returned invalid auth data", a.Identifier())
-	}
-	if auth != nil {
-		next.CreatedAt = auth.CreatedAt
-		next.UpdatedAt = auth.UpdatedAt
-	}
-	return next, nil
+	return a.host.refreshedAuth(auth, pluginResp)
 }
 
 func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {

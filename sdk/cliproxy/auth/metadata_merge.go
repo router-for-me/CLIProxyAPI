@@ -298,6 +298,9 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	}
 
 	// 2. Storage and Runtime
+	if base != nil && current.RefreshPolicy == base.RefreshPolicy {
+		merged.RefreshPolicy = updated.RefreshPolicy
+	}
 	if updated.Storage != nil {
 		merged.Storage = updated.Storage
 	}

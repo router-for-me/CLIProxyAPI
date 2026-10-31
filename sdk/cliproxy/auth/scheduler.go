@@ -623,6 +623,62 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 }
 
+func (s *authScheduler) pickPrevalidated(ctx context.Context, strategy schedulerStrategy, providers []string, model string, candidates []*Auth) (*Auth, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	providers = normalizeProviderKeys(providers)
+	byProvider := make(map[string][]*Auth, len(providers))
+	for _, candidate := range highestPriorityAuths(candidates) {
+		key := executorKeyFromAuth(candidate)
+		byProvider[key] = append(byProvider[key], candidate)
+	}
+	if len(providers) == 1 {
+		byProvider[providers[0]] = preferCodexWebsocketAuths(ctx, providers[0], byProvider[providers[0]])
+	}
+	total := 0
+	for _, provider := range providers {
+		total += len(byProvider[provider])
+	}
+	if total == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	cursorKey := strings.Join(providers, ",") + ":" + canonicalModelKey(model)
+	slot := 0
+	if strategy == schedulerStrategyRoundRobin {
+		slot = s.mixedCursors[cursorKey] % total
+	}
+	for _, provider := range providers {
+		pool := byProvider[provider]
+		if slot >= len(pool) {
+			slot -= len(pool)
+			continue
+		}
+		if strategy == schedulerStrategyFillFirst {
+			return pool[0], nil
+		}
+		providerState := s.providers[provider]
+		if providerState == nil {
+			return nil, &Error{Code: "auth_not_found", Message: "provider registration changed during selection"}
+		}
+		shard := providerState.ensureModelLocked(canonicalModelKey(model), time.Now())
+		priority := authPriority(pool[0])
+		bucket := shard.readyByPriority[priority]
+		if bucket == nil {
+			bucket = &readyBucket{}
+			shard.readyByPriority[priority] = bucket
+		}
+		view := &bucket.all
+		if len(providers) == 1 && provider == "codex" && cliproxyexecutor.DownstreamWebsocket(ctx) && authWebsocketsEnabled(pool[0]) {
+			view = &bucket.ws
+		}
+		picked := pool[successorIndex(pool, view.lastPicked)]
+		view.lastPicked = picked.ID
+		s.mixedCursors[cursorKey] = (s.mixedCursors[cursorKey] % total) + 1
+		return picked, nil
+	}
+	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+}
+
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()

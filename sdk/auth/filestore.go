@@ -71,6 +71,22 @@ func (s *FileTokenStore) SetBaseDir(dir string) {
 	s.dirLock.Unlock()
 }
 
+// OnDemandRefreshPath validates the physical credential used by managed rotation.
+func (s *FileTokenStore) OnDemandRefreshPath(auth *cliproxyauth.Auth) (string, error) {
+	path, err := s.resolveAuthPath(auth)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("on-demand auth file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("on-demand auth file is not a regular file")
+	}
+	return path, nil
+}
+
 // Save persists token storage and metadata to the resolved auth file path.
 func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
@@ -265,6 +281,9 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 			FileName: s.idFor(path, baseDir),
 			RawJSON:  data,
 		})
+		if errParse != nil && handled {
+			return nil, errParse
+		}
 		if errParse == nil && handled {
 			auths = compactPluginAuths(auths)
 			if len(auths) == 0 {

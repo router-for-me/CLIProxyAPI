@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -69,6 +70,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// RefreshPolicy is set by the plugin auth boundary, never inferred for built-in providers.
+	RefreshPolicy pluginapi.RefreshPolicy `json:"-"`
 	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
 	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
@@ -475,6 +478,9 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
+	if storage, ok := a.Storage.(interface{ CloneTokenStorage() baseauth.TokenStorage }); ok {
+		copyAuth.Storage = storage.CloneTokenStorage()
+	}
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
 		copyErr := *a.LastError

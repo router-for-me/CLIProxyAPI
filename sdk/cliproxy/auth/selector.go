@@ -821,6 +821,23 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth) {
+		return isAuthBlockedWithoutExpiry(auth, model, now)
+	}
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return true, blockReasonOther, time.Time{}
+	}
+	return isAuthBlockedWithoutExpiry(auth, model, now)
+}
+
+func isAuthBlockedForDemand(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
+	if requestRefreshable(auth) {
+		return isAuthBlockedWithoutExpiry(auth, model, now)
+	}
+	return isAuthBlockedForModel(auth, model, now)
+}
+
+func isAuthBlockedWithoutExpiry(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -828,9 +845,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if hasUnauthorizedAuthFailure(auth) {
-		return true, blockReasonOther, time.Time{}
-	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {

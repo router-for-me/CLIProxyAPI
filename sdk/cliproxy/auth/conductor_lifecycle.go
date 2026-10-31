@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -318,6 +319,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		m.mu.Unlock()
 		return nil, false, false, nil
 	}
+	if isFileSnapshot {
+		auth, _ = m.preserveCommittedAuthOnFileObservation(auth, existing)
+	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
 	}
@@ -327,6 +331,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if (mode == updateModeRefresh || mode == updateModePrepare) && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
+	}
+	if mode == updateModeRefresh && base != nil && (requiresStrictRefreshSave(ctx) || base.RefreshPolicy == pluginapi.RefreshOnDemand) && !sameRotationSource(base, existing) {
+		m.mu.Unlock()
+		return nil, false, false, fmt.Errorf("update auth %s: managed refresh source changed", auth.ID)
 	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
@@ -515,11 +523,20 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	auth.EnsureIndex()
 	// Save before publication, including the transactional Meta mint path.
+	syncPluginRefreshPolicy(auth)
 	// Runtime-only changes made during I/O are merged below, never overwritten.
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	persistManagedRotation := mode == updateModeRefresh && (requiresStrictRefreshSave(ctx) || base != nil && base.RefreshPolicy == pluginapi.RefreshOnDemand)
+	if persistManagedRotation {
+		ctx = strictRefreshContext(ctx)
+	}
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+		if persistManagedRotation {
+			m.mu.Unlock()
+			return nil, false, false, errPersist
+		}
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
 			m.mu.Unlock()
@@ -715,6 +732,12 @@ func (m *Manager) Load(ctx context.Context) error {
 			continue
 		}
 		auth.EnsureIndex()
+		if prev := previousAuths[auth.ID]; prev != nil {
+			if retained, held := m.preserveCommittedAuthOnFileObservation(auth, prev); held {
+				m.auths[auth.ID] = retained
+				continue
+			}
+		}
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 		auth.Generation = 1
@@ -772,6 +795,11 @@ type authPersistLock struct {
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
+	if requiresStrictRefreshSave(ctx) {
+		if err := m.durableRequestRefresh(auth); err != nil {
+			return err
+		}
+	}
 	m.mu.RLock()
 	store := m.store
 	m.mu.RUnlock()
@@ -815,7 +843,10 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 			return errWait
 		}
 		defer releaseFg()
-		_, err := store.Save(ctx, auth)
+		path, err := store.Save(ctx, auth)
+		if err == nil && requiresStrictRefreshSave(ctx) && path == "" {
+			return fmt.Errorf("managed rotation save returned no durability receipt")
+		}
 		return err
 	}
 
@@ -827,6 +858,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		return errWait
 	}
 	defer releaseFg()
-	_, err := store.Save(ctx, auth)
+	path, err := store.Save(ctx, auth)
+	if err == nil && requiresStrictRefreshSave(ctx) && path == "" {
+		return fmt.Errorf("managed rotation save returned no durability receipt")
+	}
 	return err
 }

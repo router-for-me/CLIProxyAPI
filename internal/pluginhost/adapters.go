@@ -438,6 +438,7 @@ func authDataHasValue(data pluginapi.AuthData) bool {
 		strings.TrimSpace(data.Prefix) != "" ||
 		strings.TrimSpace(data.ProxyURL) != "" ||
 		data.Disabled ||
+		data.RefreshPolicy != nil ||
 		len(data.StorageJSON) > 0 ||
 		len(data.Metadata) > 0 ||
 		len(data.Attributes) > 0 ||
@@ -447,6 +448,10 @@ func authDataHasValue(data pluginapi.AuthData) bool {
 func authDataWithDefaults(data pluginapi.AuthData, auth *coreauth.Auth) pluginapi.AuthData {
 	if auth == nil {
 		return data
+	}
+	if data.RefreshPolicy == nil && auth.RefreshPolicy != "" {
+		policy := auth.RefreshPolicy
+		data.RefreshPolicy = &policy
 	}
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = auth.Provider
