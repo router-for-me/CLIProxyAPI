@@ -31,7 +31,7 @@ import (
 const (
 	codexUserAgent             = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 	codexOriginator            = "codex-tui"
-	codexDefaultImageToolModel = "gpt-image-2"
+	codexDefaultImageToolModel = codexGPTImage25Model
 	codexResponsesLiteHeader   = "X-OpenAI-Internal-Codex-Responses-Lite"
 )
 
