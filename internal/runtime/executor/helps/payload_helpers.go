@@ -35,11 +35,14 @@ func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
 	}
 }
 
-func applyRequestCompression(cfg *config.Config, model, root string, body []byte) []byte {
+const sessionIDHeader = "x-omniroute-session-id"
+
+func applyRequestCompression(cfg *config.Config, model, root string, body []byte, headers http.Header) []byte {
 	if cfg == nil || root != "" || (!cfg.Compression.Enabled && len(cfg.Compression.OutputStyles) == 0) {
 		return body
 	}
-	out, stats := payloadcompress.ApplyAll(cfg.Compression, model, body)
+	sessionID := payloadcompress.SessionID(headers.Get(sessionIDHeader), model, "", "", body)
+	out, stats := payloadcompress.ApplyAllSession(cfg.Compression, model, sessionID, body)
 	// Info level: "what did this do to my request" is the only question the log has
 	// to answer, and it is invisible at debug. shortcut: one line per compressed
 	// request, quiet it with the log level if the volume is unwelcome.
@@ -125,7 +128,7 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 
 	// Compress conversation context deterministically. Built-in transforms run before
 	// payload rules so user rules remain the final semantic barrier.
-	out = applyRequestCompression(cfg, model, root, out)
+	out = applyRequestCompression(cfg, model, root, out, headers)
 
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0

@@ -37,14 +37,14 @@ type Config struct {
 	Shadow bool `yaml:"shadow" json:"shadow"`
 	// MinBytes skips payloads smaller than this many bytes.
 	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
-	// CachePrefix decides whether the provider-cached prefix is protected. The
-	// default "compress" rewrites the whole body and relies on the pipeline being
-	// append-stable: once a session is above MinBytes, the compressed bytes stay
-	// identical turn over turn, so the provider caches the smaller payload. This
-	// matches upstream, which never skips a message to protect a cache.
-	// "preserve" is the conservative opt-out: it leaves every item up to the last
-	// cache_control breakpoint byte-identical, so a hit is guaranteed and the
-	// cached zone costs full price.
+	// CachePrefix decides whether the region the provider has already cached may
+	// be rewritten. "rewrite" (the default) rewrites it, relying on the pipeline
+	// being append-stable: once a session is above MinBytes the compressed bytes
+	// stay identical turn over turn, so the provider caches the smaller payload.
+	// This matches upstream, which never skips a message to protect a cache.
+	// "protect" leaves every item up to the last cache_control breakpoint
+	// byte-identical, so the hit is guaranteed and that region costs full price.
+	// "compress" and "preserve" are accepted as aliases of the two.
 	CachePrefix string `yaml:"cache-prefix" json:"cache-prefix"`
 	// PreserveSystemPrompt mirrors upstream's preserveSystemPromptMode:
 	// "always" (the default) never rewrites the system prompt, "when-no-cache"
@@ -60,6 +60,10 @@ type Config struct {
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
 	Combos []Combo `yaml:"combos" json:"combos"`
+	// LiveZone mirrors upstream's liveZone config: reuse the transform a previous
+	// request in the same session already produced for its unchanged prefix.
+	// Opt-in, because it keeps per-session state between requests.
+	LiveZone LiveZoneConfig `yaml:"live-zone" json:"live-zone"`
 	// OutputStyles injects response-style instructions into the system prompt.
 	// Independent of Enabled: styles are prompt shaping, not payload compression.
 	OutputStyles []OutputStyle `yaml:"output-styles" json:"output-styles"`
@@ -71,6 +75,12 @@ type PrefixFreezeConfig struct {
 	// Threshold is how many sightings of one system prompt make it stable.
 	// Defaults to 3, the upstream default.
 	Threshold int `yaml:"threshold" json:"threshold"`
+}
+
+// LiveZoneConfig mirrors upstream's compressionConfig.liveZone block, which
+// carries nothing but the opt-in flag. The TTL and size bounds are internal.
+type LiveZoneConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 // Combo is one named engine pipeline, optionally scoped to models.
@@ -160,11 +170,18 @@ const (
 	EngineCaveman      = "caveman"
 )
 
-// CachePrefix modes. Only an exact known value changes behaviour; an empty or
-// unknown value falls back to compress, the upstream behaviour.
+// CachePrefix modes name the only cache decision this package makes: whether the
+// region the provider has already cached may be rewritten. "rewrite" (the
+// default, and what upstream does) rewrites it, so the smaller bytes become the
+// new cached prefix after one miss. "protect" leaves it byte-identical, which
+// guarantees the hit but leaves that region at full price. The older names are
+// still accepted as aliases.
 const (
-	CachePrefixPreserve = "preserve"
-	CachePrefixCompress = "compress"
+	CachePrefixRewrite = "rewrite"
+	CachePrefixProtect = "protect"
+
+	CachePrefixCompress = CachePrefixRewrite
+	CachePrefixPreserve = CachePrefixProtect
 )
 
 // PreserveSystemPrompt modes, mirroring upstream preserveSystemPromptMode.
@@ -284,13 +301,13 @@ func (c *Config) Sanitize() {
 		c.MinBytes = defaultMinBytes
 	}
 	switch strings.ToLower(strings.TrimSpace(c.CachePrefix)) {
-	case CachePrefixPreserve:
-		c.CachePrefix = CachePrefixPreserve
-	case CachePrefixCompress, "":
-		c.CachePrefix = CachePrefixCompress
+	case CachePrefixProtect, "preserve":
+		c.CachePrefix = CachePrefixProtect
+	case CachePrefixRewrite, "compress", "":
+		c.CachePrefix = CachePrefixRewrite
 	default:
-		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to compress", c.CachePrefix)
-		c.CachePrefix = CachePrefixCompress
+		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to rewrite", c.CachePrefix)
+		c.CachePrefix = CachePrefixRewrite
 	}
 	switch strings.ToLower(strings.TrimSpace(c.PreserveSystemPrompt)) {
 	case PreserveSystemPromptWhenNoCache:

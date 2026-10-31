@@ -95,6 +95,18 @@ type bodyEngine interface {
 //
 // The returned body aliases the input when nothing was compressed.
 func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
+	return applyCore(cfg, model, "", body)
+}
+
+// ApplySession compresses one request of a known session. With live-zone off it
+// is exactly Apply. With it on, the transform a previous request already
+// produced for this session's unchanged prefix is reused and only the appended
+// tail is compressed. See livezone.go.
+func ApplySession(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
+	return applyCore(cfg, model, sessionID, body)
+}
+
+func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
 	stats := Stats{BytesIn: len(body)}
 	if !cfg.Enabled || len(body) < cfg.MinBytes {
 		return body, stats
@@ -128,69 +140,47 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 		kinds[i] = s.segs[i].kind
 		commands[i] = s.segs[i].command
 	}
-	changed := make([]bool, len(texts))
-	dirty := false
+	originals := append(make([]string, 0, len(texts)), texts...)
 
-	for _, eng := range engines {
-		saved := 0
-		switch typed := eng.(type) {
-		case bodyEngine:
-			for i, repl := range typed.rewrite(texts) {
-				if i < 0 || i >= len(texts) || repl == texts[i] {
-					continue
-				}
-				saved += len(texts[i]) - len(repl)
-				texts[i] = repl
-				changed[i] = true
+	// start is the first segment the pipeline may rewrite. Live-zone reuse
+	// raises it past the prefix a previous request already compressed.
+	start := 0
+	var zone *liveZoneEntry
+	if sessionID != "" && cfg.LiveZone.Enabled && cfg.CachePrefix == CachePrefixRewrite {
+		zone, start = liveZoneReuse(cfg, model, sessionID, body, s.segs)
+		if start > 0 {
+			for i := 0; i < start; i++ {
+				texts[i] = zone.transformed[i]
 			}
-		case commandAware:
-			for i := range texts {
-				out, hit := typed.compressCommand(commands[i], texts[i])
-				if !hit || out == texts[i] {
-					continue
-				}
-				saved += len(texts[i]) - len(out)
-				texts[i] = out
-				changed[i] = true
-			}
-		case kindAware:
-			for i := range texts {
-				out, hit := typed.compressKind(kinds[i], texts[i])
-				if !hit || out == texts[i] {
-					continue
-				}
-				saved += len(texts[i]) - len(out)
-				texts[i] = out
-				changed[i] = true
-			}
-		case textEngine:
-			for i := range texts {
-				out, hit := typed.compress(texts[i])
-				if !hit || out == texts[i] {
-					continue
-				}
-				saved += len(texts[i]) - len(out)
-				texts[i] = out
-				changed[i] = true
-			}
-		}
-		if saved != 0 {
-			if stats.Saved == nil {
-				stats.Saved = make(map[string]int, len(engines))
-			}
-			stats.Saved[eng.name()] = saved
-			dirty = true
 		}
 	}
 
-	if !dirty {
+	saved := make(map[string]int, len(engines))
+	for _, eng := range engines {
+		delta := runEngine(eng, texts, kinds, commands, start)
+		if delta != 0 {
+			saved[eng.name()] = delta
+		}
+	}
+	if len(saved) > 0 {
+		stats.Saved = saved
+	}
+
+	changed := false
+	for i := range texts {
+		if texts[i] != originals[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
 		return body, stats
 	}
 
 	out := make([]byte, 0, len(body))
 	prev := 0
 	for i := range s.segs {
-		if !changed[i] {
+		if texts[i] == originals[i] {
 			continue
 		}
 		out = append(out, body[prev:s.segs[i].start]...)
@@ -203,14 +193,66 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 	if cfg.Shadow {
 		return body, stats
 	}
+	liveZoneStore(cfg, model, sessionID, body, s.segs, texts)
 	stats.Applied = true
 	return out, stats
+}
+
+// runEngine applies one engine from start onwards and returns the bytes it saved.
+// Engines that need body-wide context still see every segment, so a reused
+// prefix informs session dedup without being rewritten.
+func runEngine(eng engine, texts []string, kinds []segmentKind, commands []string, start int) int {
+	delta := 0
+	switch typed := eng.(type) {
+	case bodyEngine:
+		for i, repl := range typed.rewrite(texts) {
+			if i < start || i >= len(texts) || repl == texts[i] {
+				continue
+			}
+			delta += len(texts[i]) - len(repl)
+			texts[i] = repl
+		}
+	case commandAware:
+		for i := start; i < len(texts); i++ {
+			out, hit := typed.compressCommand(commands[i], texts[i])
+			if !hit || out == texts[i] {
+				continue
+			}
+			delta += len(texts[i]) - len(out)
+			texts[i] = out
+		}
+	case kindAware:
+		for i := start; i < len(texts); i++ {
+			out, hit := typed.compressKind(kinds[i], texts[i])
+			if !hit || out == texts[i] {
+				continue
+			}
+			delta += len(texts[i]) - len(out)
+			texts[i] = out
+		}
+	case textEngine:
+		for i := start; i < len(texts); i++ {
+			out, hit := typed.compress(texts[i])
+			if !hit || out == texts[i] {
+				continue
+			}
+			delta += len(texts[i]) - len(out)
+			texts[i] = out
+		}
+	}
+	return delta
 }
 
 // ApplyAll runs the whole transform chain: payload compression, then output-style
 // injection. Both are idempotent, so applying it again to its own output is a no-op.
 func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
-	out, stats := Apply(cfg, model, body)
+	return ApplyAllSession(cfg, model, "", body)
+}
+
+// ApplyAllSession is ApplyAll for a request that carries a session identity, so
+// the live zone can reuse the previous turn's compressed prefix.
+func ApplyAllSession(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
+	out, stats := ApplySession(cfg, model, sessionID, body)
 	styled, label := applyOutputStyles(cfg, out)
 	stats.Style = label
 	if label == "" || strings.HasPrefix(label, "skipped:") {
@@ -223,7 +265,6 @@ func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
 	stats.Applied = true
 	return styled, stats
 }
-
 func buildEngines(steps []Step) []engine {
 	engines := make([]engine, 0, len(steps))
 	for _, step := range steps {
