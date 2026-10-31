@@ -1112,11 +1112,17 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 
+// xaiBalanceExhaustedCooldown bounds how long a credential whose Grok Build
+// balance is exhausted stays out of rotation before a cheap re-probe.
+const xaiBalanceExhaustedCooldown = time.Hour
+
 // xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
 //   - credential invalidation (403 bad-credentials) is remapped to 401 so the
 //     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
 //   - free-tier exhaustion (subscription:free-usage-exhausted) carries a 24h
 //     RetryAfter hint for auth cooldown / account rotation
+//   - balance exhaustion (402) is reported as a credential-scoped 429 because
+//     the balance is shared by every model behind that credential
 //
 // Generic 429s stay without an explicit retry hint so conductor backoff still applies.
 func xaiStatusErr(code int, body []byte) statusErr {
@@ -1128,6 +1134,13 @@ func xaiStatusErr(code int, body []byte) statusErr {
 		// Upstream returns 403 for invalidated OAuth access tokens. Map to 401 so
 		// tryRefreshAfterUnauthorized / MarkResult unauthorized handling applies.
 		err.code = http.StatusUnauthorized
+		return err
+	}
+	if code == http.StatusPaymentRequired && strings.Contains(strings.ToLower(string(body)), "usage balance exhausted") {
+		d := xaiBalanceExhaustedCooldown
+		err.code = http.StatusTooManyRequests
+		err.retryAfter = &d
+		err.credentialScoped = true
 		return err
 	}
 	if code != http.StatusTooManyRequests {

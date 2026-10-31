@@ -87,3 +87,37 @@ func TestXAIStatusErr_EmptyBodyForbiddenUnchanged(t *testing.T) {
 		t.Fatalf("status = %d, want 403", err.StatusCode())
 	}
 }
+
+func TestXAIStatusErr_BalanceExhaustedIsCredentialScoped429(t *testing.T) {
+	body := []byte(`{"error":"Grok Build usage balance exhausted"}`)
+	err := xaiStatusErr(http.StatusPaymentRequired, body)
+	if err.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", err.StatusCode())
+	}
+	if err.RetryAfter() == nil {
+		t.Fatal("expected RetryAfter for balance exhaustion")
+	}
+	if *err.RetryAfter() != time.Hour {
+		t.Fatalf("RetryAfter = %v, want 1h", *err.RetryAfter())
+	}
+	if !err.IsCredentialScoped() {
+		t.Fatal("balance exhaustion should be credential scoped")
+	}
+	if !strings.Contains(err.Error(), "usage balance exhausted") {
+		t.Fatalf("error body should be preserved, got %q", err.Error())
+	}
+}
+
+func TestXAIStatusErr_Generic402Unchanged(t *testing.T) {
+	body := []byte(`{"error":"payment required"}`)
+	err := xaiStatusErr(http.StatusPaymentRequired, body)
+	if err.StatusCode() != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", err.StatusCode())
+	}
+	if err.RetryAfter() != nil {
+		t.Fatalf("expected nil RetryAfter for generic 402, got %v", *err.RetryAfter())
+	}
+	if err.IsCredentialScoped() {
+		t.Fatal("generic 402 should stay model scoped")
+	}
+}
