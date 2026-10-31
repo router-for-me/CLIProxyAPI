@@ -931,3 +931,34 @@ func truncateRunes(value string, limit int) string {
 func sourceFormatEqual(left, right sdktranslator.Format) bool {
 	return strings.EqualFold(strings.TrimSpace(left.String()), strings.TrimSpace(right.String()))
 }
+
+// SessionIDFromMetadata returns the request's unified session identity from
+// executor metadata, in the same precedence affinity routing uses: canonical,
+// then LCP affinity, execution and derived. Compression reuse and auth pinning
+// therefore agree on what one conversation is, without either re-deriving it.
+func SessionIDFromMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	if id, ok := metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string); ok && strings.TrimSpace(id) != "" {
+		return strings.TrimSpace(id)
+	}
+	if id, ok := metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey].(string); ok && strings.TrimSpace(id) != "" {
+		return strings.TrimSpace(id)
+	}
+	if id, ok := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string); ok && strings.TrimSpace(id) != "" {
+		id = strings.TrimSpace(id)
+		if !strings.HasPrefix(id, "execution:") {
+			return "execution:" + id
+		}
+		return id
+	}
+	if id, ok := metadata[cliproxyexecutor.DerivedSessionIDMetadataKey].(string); ok && strings.TrimSpace(id) != "" {
+		id = strings.TrimSpace(id)
+		if !strings.HasPrefix(id, "derived:") {
+			return "derived:" + id
+		}
+		return id
+	}
+	return ""
+}

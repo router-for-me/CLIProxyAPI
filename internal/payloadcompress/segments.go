@@ -23,6 +23,10 @@ type segment struct {
 	end   int
 	kind  segmentKind
 	value gjson.Result
+	// command is the shell command that produced this tool output, when the
+	// payload carries the call pairing. Empty for prose and for tool results
+	// whose originating call is not in the body.
+	command string
 }
 
 // scanner locates compressible text in a request payload.
@@ -35,6 +39,11 @@ type segment struct {
 type scanner struct {
 	body []byte
 	segs []segment
+	// toolCommands maps a tool call id to the shell command it ran, read from
+	// the payload's own call records. It is only ever read, never rewritten: a
+	// tool call's arguments stay byte-identical, they just tell the rtk filter
+	// which command produced the output it is looking at.
+	toolCommands map[string]string
 	// cachePrefix decides how far the provider-cached head is protected; see
 	// Config.CachePrefix. The zero value preserves.
 	cachePrefix string
@@ -82,6 +91,8 @@ func (s *scanner) scan() bool {
 		s.addSystem(root)
 	}
 
+	s.collectToolCommands(items)
+
 	idx := 0
 	items.ForEach(func(_, item gjson.Result) bool {
 		if idx > cut {
@@ -105,6 +116,47 @@ func (s *scanner) addSystem(root gjson.Result) {
 	s.addPromptValue(root.Get("system"), kindUser)
 	s.addPromptValue(root.Get("systemInstruction"), kindUser)
 	s.addPromptValue(root.Get("system_instruction"), kindUser)
+}
+
+// collectToolCommands pairs every tool call id in the payload with the shell
+// command it ran. Upstream picks an rtk filter by the command that produced the
+// output, which a chat payload only carries as a side record; reading it here is
+// the difference between running a command filter and guessing from content.
+func (s *scanner) collectToolCommands(items gjson.Result) {
+	items.ForEach(func(_, item gjson.Result) bool {
+		switch item.Get("type").String() {
+		case "function_call", "custom_tool_call":
+			s.recordCommand(item.Get("call_id").String(), item.Get("arguments").String())
+		case "local_shell_call":
+			s.recordCommand(item.Get("call_id").String(), item.Get("action.command").String())
+		}
+		item.Get("tool_calls").ForEach(func(_, call gjson.Result) bool {
+			s.recordCommand(call.Get("id").String(), call.Get("function.arguments").String())
+			return true
+		})
+		item.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if block.Get("type").String() == "tool_use" {
+				s.recordCommand(block.Get("id").String(), block.Get("input").Raw)
+			}
+			return true
+		})
+		return true
+	})
+}
+
+// recordCommand stores id -> command from a call record. An arguments value may
+// arrive as a JSON string or as an already-decoded object, and only a non-empty
+// command is worth keeping.
+func (s *scanner) recordCommand(id, arguments string) {
+	if id == "" || arguments == "" {
+		return
+	}
+	if cmd := gjson.Get(arguments, "command"); cmd.Type == gjson.String && cmd.String() != "" {
+		if s.toolCommands == nil {
+			s.toolCommands = make(map[string]string, 8)
+		}
+		s.toolCommands[id] = cmd.String()
+	}
 }
 
 // addPromptValue accepts a bare string, an array of parts, or an object carrying
@@ -133,11 +185,12 @@ func (s *scanner) addItem(item gjson.Result) {
 		s.add(item, kindUser)
 		return
 	}
-	// Responses API tool output items.
+	// Responses API tool output items carry their call id beside the text.
 	switch item.Get("type").String() {
 	case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
-		s.add(item.Get("output"), kindToolOutput)
-		s.addParts(item.Get("content"), kindToolOutput)
+		callID := item.Get("call_id").String()
+		s.addTool(item.Get("output"), callID)
+		s.addParts(item.Get("content"), kindToolOutput, callID)
 		return
 	}
 	switch item.Get("role").String() {
@@ -147,41 +200,63 @@ func (s *scanner) addItem(item gjson.Result) {
 		}
 		content := item.Get("content")
 		s.add(content, kindUser)
-		s.addParts(content, kindUser)
+		s.addParts(content, kindUser, "")
 	case "user":
 		content := item.Get("content")
 		s.add(content, kindUser)
-		s.addParts(content, kindUser)
+		s.addParts(content, kindUser, "")
 	case "tool":
+		callID := item.Get("tool_call_id").String()
 		content := item.Get("content")
-		s.add(content, kindToolOutput)
-		s.addParts(content, kindToolOutput)
+		s.addTool(content, callID)
+		s.addParts(content, kindToolOutput, callID)
 	}
 }
 
-func (s *scanner) addParts(content gjson.Result, kind segmentKind) {
+// addParts records the text blocks of a content array. callID names the tool
+// call the blocks answer, so a tool_result keeps its originating command.
+func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string) {
 	if !content.IsArray() {
 		return
 	}
 	content.ForEach(func(_, part gjson.Result) bool {
 		switch part.Get("type").String() {
 		case "text", "input_text", "output_text":
-			s.add(part.Get("text"), kind)
+			if kind == kindToolOutput {
+				s.addTool(part.Get("text"), callID)
+			} else {
+				s.add(part.Get("text"), kind)
+			}
 		case "tool_result":
+			resultID := part.Get("tool_use_id").String()
 			inner := part.Get("content")
 			if inner.IsArray() {
 				inner.ForEach(func(_, sub gjson.Result) bool {
 					if sub.Get("type").String() == "text" {
-						s.add(sub.Get("text"), kindToolOutput)
+						s.addTool(sub.Get("text"), resultID)
 					}
 					return true
 				})
 				return true
 			}
-			s.add(inner, kindToolOutput)
+			s.addTool(inner, resultID)
 		}
 		return true
 	})
+}
+
+// addTool records a tool-output string together with the shell command that
+// produced it, so a command-aware engine can pick its filter. The command is
+// look-up only: nothing in the payload is rewritten.
+func (s *scanner) addTool(res gjson.Result, callID string) {
+	before := len(s.segs)
+	s.add(res, kindToolOutput)
+	if callID == "" || len(s.segs) == before {
+		return
+	}
+	if cmd := s.toolCommands[callID]; cmd != "" {
+		s.segs[before].command = cmd
+	}
 }
 
 // add records a string value span. Spans whose offsets do not line up with the

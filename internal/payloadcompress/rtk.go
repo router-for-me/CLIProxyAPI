@@ -67,6 +67,17 @@ func (e rtkEngine) limits() rtkLimits {
 }
 
 func (e rtkEngine) compress(text string) (string, bool) {
+	return e.compressOutput("", text)
+}
+
+// compressCommand applies the filter for the command that produced the output.
+// A tool result carries its command when the payload records the call, and the
+// command decides the filter far more reliably than the output's own text.
+func (e rtkEngine) compressCommand(command, text string) (string, bool) {
+	return e.compressOutput(command, text)
+}
+
+func (e rtkEngine) compressOutput(command, text string) (string, bool) {
 	if strings.Count(text, "\n") < rtkMinLines {
 		return text, false
 	}
@@ -76,7 +87,7 @@ func (e rtkEngine) compress(text string) (string, bool) {
 	// Filters run before the caps below: a filter knows what the command that
 	// produced this output looks like, which is what decides which lines are noise.
 	changed := false
-	if filtered, ok := applyRTKFilters(text); ok {
+	if filtered, ok := applyRTKFilters(text, command); ok {
 		text, changed = filtered, true
 	}
 

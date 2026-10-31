@@ -35,11 +35,14 @@ func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
 	}
 }
 
-func applyRequestCompression(cfg *config.Config, model, root string, body []byte) []byte {
+// applyRequestCompression runs the configured compression combo over the final
+// business payload. sessionID is the request's native affinity identity; with
+// live-zone on it lets an unchanged prefix reuse the previous turn's transform.
+func applyRequestCompression(cfg *config.Config, model, root string, body []byte, sessionID string) []byte {
 	if cfg == nil || root != "" || (!cfg.Compression.Enabled && len(cfg.Compression.OutputStyles) == 0) {
 		return body
 	}
-	out, stats := payloadcompress.ApplyAll(cfg.Compression, model, body)
+	out, stats := payloadcompress.ApplyAllSession(cfg.Compression, model, sessionID, body)
 	// Info level: "what did this do to my request" is the only question the log has
 	// to answer, and it is invisible at debug. shortcut: one line per compressed
 	// request, quiet it with the log level if the volume is unwelcome.
@@ -74,8 +77,8 @@ func ApplyPayloadConfigWithRequest(cfg *config.Config, model, protocol, fromProt
 }
 
 // ApplyPayloadConfigWithRequestForExecutor applies payload config with explicit target executor context.
-func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header) []byte {
-	out, _ := ApplyPayloadConfigWithTrackedPathsForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers)
+func ApplyPayloadConfigWithRequestForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, sessionID string) []byte {
+	out, _ := applyPayloadConfigForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, sessionID)
 	return out
 }
 
@@ -95,6 +98,12 @@ func ApplyPayloadConfigWithTrackedPaths(cfg *config.Config, model, protocol, fro
 // it normalizes tool parameter integer types to satisfy client-side integer deserialization (#6237).
 // For Codex and Codex WebSocket targets, integer normalization is skipped (#6244).
 func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, trackedPaths ...string) ([]byte, map[string]bool) {
+	return applyPayloadConfigForExecutor(cfg, targetExecutor, model, protocol, fromProtocol, root, payload, original, requestedModel, requestPath, headers, "", trackedPaths...)
+}
+
+// applyPayloadConfigForExecutor carries the session identity that
+// ApplyPayloadConfigWithTrackedPathsForExecutor has no way to receive.
+func applyPayloadConfigForExecutor(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, payload, original []byte, requestedModel string, requestPath string, headers http.Header, sessionID string, trackedPaths ...string) ([]byte, map[string]bool) {
 	touched := make(map[string]bool)
 	if len(payload) == 0 {
 		return payload, touched
@@ -125,7 +134,7 @@ func ApplyPayloadConfigWithTrackedPathsForExecutor(cfg *config.Config, targetExe
 
 	// Compress conversation context deterministically. Built-in transforms run before
 	// payload rules so user rules remain the final semantic barrier.
-	out = applyRequestCompression(cfg, model, root, out)
+	out = applyRequestCompression(cfg, model, root, out, sessionID)
 
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0

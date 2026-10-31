@@ -55,6 +55,10 @@ type rtkFilterPack struct {
 	Match    struct {
 		OutputTypes []string `json:"outputTypes"`
 		Patterns    []string `json:"patterns"`
+		// Commands matches the shell command line that produced the output.
+		// It is upstream's primary selector and the only reliable one for
+		// command output whose text looks generic, such as a build log.
+		Commands []string `json:"commands"`
 	} `json:"match"`
 	Rules struct {
 		StripAnsi        bool                 `json:"stripAnsi"`
@@ -82,6 +86,7 @@ type rtkFilter struct {
 	id       string
 	priority int
 	types    []string
+	commands []*regexp.Regexp
 	match    []*regexp.Regexp
 	keep     []*regexp.Regexp
 	drop     []*regexp.Regexp
@@ -115,7 +120,20 @@ var (
 	rtkFiltersOnce sync.Once
 	rtkFilterList  []*rtkFilter
 	rtkFilterKinds map[string][]*regexp.Regexp
+	// rtkFilterCommands maps a filter type to the command lines it claims,
+	// compiled from each pack's match.commands.
+	rtkFilterCommands map[string][]*regexp.Regexp
 )
+
+// compileRTKCommands compiles a pack's command patterns. Upstream matches them
+// case-insensitively against the whole command line.
+func compileRTKCommands(id string, patterns []string) []*regexp.Regexp {
+	prefixed := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		prefixed = append(prefixed, "(?i)"+pattern)
+	}
+	return compileRTKPatterns(id, "command", prefixed)
+}
 
 // compileRTKPatterns drops the patterns RE2 rejects. Upstream instead guards
 // against ReDoS with a heuristic; linear-time matching makes that unnecessary.
@@ -137,6 +155,7 @@ func compileRTKFilter(pack rtkFilterPack) *rtkFilter {
 		id:             pack.ID,
 		priority:       pack.Priority,
 		types:          pack.Match.OutputTypes,
+		commands:       compileRTKCommands(pack.ID, pack.Match.Commands),
 		match:          compileRTKPatterns(pack.ID, "match", pack.Match.Patterns),
 		keep:           compileRTKPatterns(pack.ID, "include", pack.Rules.IncludePatterns),
 		drop:           compileRTKPatterns(pack.ID, "drop", pack.Rules.DropPatterns),
@@ -207,6 +226,15 @@ func loadRTKFilters() []*rtkFilter {
 			}
 			rtkFilterList = append(rtkFilterList, compileRTKFilter(pack))
 		}
+		rtkFilterCommands = make(map[string][]*regexp.Regexp, len(rtkFilterList))
+		for _, filter := range rtkFilterList {
+			for _, typ := range filter.types {
+				if len(filter.commands) == 0 {
+					continue
+				}
+				rtkFilterCommands[typ] = append(rtkFilterCommands[typ], filter.commands...)
+			}
+		}
 		sort.SliceStable(rtkFilterList, func(i, j int) bool {
 			if rtkFilterList[i].priority != rtkFilterList[j].priority {
 				return rtkFilterList[i].priority > rtkFilterList[j].priority
@@ -222,10 +250,15 @@ func loadRTKFilters() []*rtkFilter {
 // command output, and dropping its middle would hide the file.
 var rtkGenericErrorMarkers = regexp.MustCompile(`Error:|Exception:|Traceback \(most recent call last\):`)
 
-// detectRTKOutputType ports the content half of commandDetector: the type of the
+// detectRTKOutputType ports commandDetector: a command that names a known tool
+// settles the type outright, because it is the one signal the payload states
+// rather than implies. Without one it falls back to content: the type of the
 // best matching detector, most matched patterns first, table order on a tie.
-func detectRTKOutputType(text string) string {
+func detectRTKOutputType(text, command string) string {
 	loadRTKFilters()
+	if typ := detectRTKTypeFromCommand(command); typ != "" {
+		return typ
+	}
 	best, bestHits := "unknown", 0
 	for _, detector := range rtkDetectors {
 		hits := 0
@@ -239,6 +272,23 @@ func detectRTKOutputType(text string) string {
 		}
 	}
 	return best
+}
+
+// detectRTKTypeFromCommand returns the type whose command patterns match the
+// command line. Nothing matches when the command is unknown, which is the
+// common case: most providers do not echo the shell command back.
+func detectRTKTypeFromCommand(command string) string {
+	if command == "" {
+		return ""
+	}
+	for _, detector := range rtkDetectors {
+		for _, re := range rtkFilterCommands[detector.typ] {
+			if re.MatchString(command) {
+				return detector.typ
+			}
+		}
+	}
+	return ""
 }
 
 func (f *rtkFilter) hasType(typ string) bool {
@@ -260,9 +310,11 @@ func (f *rtkFilter) matchesText(text string) bool {
 }
 
 // selectRTKFilter walks upstream's cascade: the detected output type, then the
-// pack's own content patterns, then the generic fallback.
-func selectRTKFilter(text string) *rtkFilter {
-	typ := detectRTKOutputType(text)
+// pack's own content patterns, then the generic fallback. A known command
+// decides the type before any text is read, which is the only way a build log
+// with no distinctive markers ever reaches its filter.
+func selectRTKFilter(text, command string) *rtkFilter {
+	typ := detectRTKOutputType(text, command)
 	if typ == "unknown" && !rtkGenericErrorMarkers.MatchString(text) {
 		// A plain file or document read: no filter, or the truncating fallback
 		// would cut a source file in half.
@@ -420,10 +472,11 @@ func rtkCollapseRepeats(lines []string) ([]string, bool) {
 	return out, collapsed
 }
 
-// applyRTKFilters is the engine entry point: select a pack by content and apply
-// it, or return the text untouched.
-func applyRTKFilters(text string) (string, bool) {
-	filter := selectRTKFilter(text)
+// applyRTKFilters is the engine entry point: select a pack by the command that
+// produced the output, then by content, and apply it, or return the text
+// untouched.
+func applyRTKFilters(text, command string) (string, bool) {
+	filter := selectRTKFilter(text, command)
 	if filter == nil {
 		return text, false
 	}

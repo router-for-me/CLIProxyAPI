@@ -19,17 +19,20 @@ func (liteEngine) name() string { return EngineLite }
 // liteDefaultMaxToolLength is the upstream DEFAULT_MAX_TOOL_LENGTH.
 const liteDefaultMaxToolLength = 2000
 
-// compressKind adds the tool-result cap that lite owns upstream, then falls back
-// to prose cleanup.
+// compressKind runs the prose cleanup first, then applies the tool-result cap
+// that lite owns upstream. Upstream orders collapseWhitespace before
+// compressToolResults, so a tool result is capped after its blank runs are
+// collapsed; truncating first would spend the character budget on empty lines.
 func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
+	cleaned, changed := e.compress(text)
 	limit := e.opts.MaxToolLength
 	if limit <= 0 {
 		limit = liteDefaultMaxToolLength
 	}
-	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit && charLen(text) > limit {
-		return truncateToolText(text, limit), true
+	if kind == kindToolOutput && e.keepToolResults() && len(cleaned) > limit && charLen(cleaned) > limit {
+		return truncateToolText(cleaned, limit), true
 	}
-	return e.compress(text)
+	return cleaned, changed
 }
 
 func (e liteEngine) keepToolResults() bool {
