@@ -509,11 +509,23 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if len(auth.ModelStates) > 0 {
 		updateAggregatedAvailability(auth, now)
 	}
-	if changed {
-		auth.Generation++
-		auth.UpdatedAt = now
+	if !changed {
+		return false
 	}
-	return changed
+	// MarkResult also stamped the parent auth with the missing-model
+	// error; lift that too, or the published auth keeps reporting
+	// StatusError after the model is usable again.
+	if auth.LastError != nil && isExplicitModelNotFoundError(auth.LastError, "") {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		if auth.Status == StatusError {
+			auth.Status = StatusActive
+		}
+	}
+	updateAggregatedAvailability(auth, now)
+	auth.Generation++
+	auth.UpdatedAt = now
+	return true
 }
 
 func dedupeStrings(values []string) []string {
@@ -1054,7 +1066,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
-					if isModelSupportResultError(result.Error) {
+					if disableCooling && isExplicitModelNotFoundError(result.Error, modelKey) {
+						// A model_not_found is a configuration fact: this credential
+						// cannot serve this model. Cooling is disabled here, so a
+						// deadline would be zeroed and retried immediately; mark the
+						// model unavailable on this credential instead. Selection
+						// already treats that state as a permanent block, and a
+						// credential update clears it. This model-aware check runs
+						// before the support gate because a structured model 404 does
+						// not always carry a model_not_found code.
+						state.Status = StatusDisabled
+						state.NextRetryAfter = time.Time{}
+					} else if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
 						} else if result.RetryAfter != nil && *result.RetryAfter > 0 {
@@ -1636,6 +1659,39 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	}
 	*target = merged
 	return target
+}
+
+// resumeModelNotFoundStates re-enables models that were marked disabled after
+// an explicit model_not_found result. The credential configuration may have
+// added the model back, so the block must not outlive that configuration.
+func resumeModelNotFoundStates(auth *Auth, now time.Time) bool {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return false
+	}
+	changed := false
+	for _, state := range auth.ModelStates {
+		if state == nil || state.Status != StatusDisabled {
+			continue
+		}
+		// StatusDisabled is part of the public auth state: only a state
+		// this branch disabled (it carries the model_not_found error) is
+		// resumed here. Explicitly disabled models stay disabled.
+		if !isExplicitModelNotFoundError(state.LastError, "") {
+			continue
+		}
+		state.Status = StatusActive
+		state.StatusMessage = ""
+		state.LastError = nil
+		state.Unavailable = false
+		state.NextRetryAfter = time.Time{}
+		state.UpdatedAt = now
+		changed = true
+	}
+	if changed {
+		auth.Generation++
+		auth.UpdatedAt = now
+	}
+	return changed
 }
 
 func resetModelState(state *ModelState, now time.Time) {
