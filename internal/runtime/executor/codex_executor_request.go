@@ -157,6 +157,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		rawJSON = helps.DropOrphanResponsesToolCalls(rawJSON)
+	}
 	rawJSON = helps.SanitizeCodexInputItemIDs(rawJSON)
 	rawJSON = helps.FinalizePayload(ctx, rawJSON)
 	wireBody := rawJSON
