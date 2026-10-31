@@ -366,7 +366,7 @@ func TestApplyWatcherConfigUpdate_PreservesExistingWebsocketConnections(t *testi
 			if !okUpdated || updatedExec == nil {
 				t.Fatalf("expected %s executor after config hot reload", tt.provider)
 			}
-			if cfgUser, okCfgUser := updatedExec.(interface{ UsesConfig(*config.Config) bool }); !okCfgUser || !cfgUser.UsesConfig(reloadedCfg) {
+			if cfgUser, okCfgUser := updatedExec.(interface{ UsesConfig(*config.Config) bool }); !okCfgUser || !cfgUser.UsesConfig(service.currentConfig()) {
 				t.Fatalf("expected %s executor to use reloaded config", tt.provider)
 			}
 			if got := closedConnections.Load(); got != 0 {
