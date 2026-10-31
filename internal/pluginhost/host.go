@@ -375,6 +375,14 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			if !okCall {
 				continue
 			}
+			// callRegister picks plugin.reconfigure for an already-registered
+			// plugin, but until now that push was invisible in the logs: a
+			// rejected or ignored reconfigure looked exactly like a plugin that
+			// hot-reloads its config, so operators had no way to tell whether a
+			// config edit actually reached the running .so.
+			if lp != nil {
+				log.WithFields(pluginLogFields(file.ID, "", lp.version, file.Path)).Info("pluginhost: plugin reconfigured")
+			}
 		}
 		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
 		h.mu.Lock()
