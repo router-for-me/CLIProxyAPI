@@ -271,15 +271,28 @@ requests:
   #   enabled: false               # Default: false.
   #   shadow: false                # Default: false. Compute and log savings, send the original payload.
   #   min-bytes: 4096              # Payloads smaller than this are skipped.
-  #   cache-prefix: preserve       # preserve | compress. Preserve leaves every message up to
-  #                                # the last cache_control breakpoint byte-identical, so the
-  #                                # provider cache always hits and the cached zone costs full
-  #                                # price. Compress transforms that zone too: the cached bytes
-  #                                # shrink and stay identical turn over turn, but this trusts
-  #                                # every engine to be append-stable. See the payloadcompress doc.
-  #                                # Turn it on with shadow: true first.
-  #                                # Keep min-bytes below your session's first request: the turn
-  #                                # it is crossed is one cache miss, then the prefix is stable.
+  #   cache-prefix: compress      # preserve | compress. Compress (the default) rewrites the
+  #                               # whole body, including the provider-cached prefix: the bytes
+  #                               # shrink and stay identical turn over turn, so the provider caches
+  #                               # the smaller payload. Preserve is the conservative opt-out: it
+  #                               # leaves every message up to the LAST cache_control breakpoint
+  #                               # byte-identical, so a hit is guaranteed and the cached zone costs
+  #                               # full price. On a long cached session preserve can leave nothing
+  #                               # left to compress. See the payloadcompress doc.
+  #                               # Keep min-bytes below your session's first request: the turn
+  #                               # it is crossed is one cache miss, then the prefix is stable.
+  #   preserve-system-prompt: always # always | when-no-cache | never. Always (the default) never
+  #                               # rewrites the system prompt. when-no-cache rewrites it only when
+  #                               # nothing is cached: no cache_control marker in the body, and a
+  #                               # model that does not cache a prefix automatically (OpenAI, Codex,
+  #                               # Azure, Claude, Gemini and kin do). never rewrites it regardless,
+  #                               # at the cost of a prompt-cache miss.
+  #   prefix-freeze:              # Usage-observed prefix freeze. Off by default.
+  #     enabled: false            #   When true, the same system prompt seen threshold times is
+  #                               #   treated as a stable cached prefix and preserved, even for a
+  #                               #   provider the static check does not recognize. It only ever
+  #                               #   preserves, so it can never corrupt a payload.
+  #     threshold: 3              #   Default: 3, the upstream default.
   #   default-combo: standard      # Used when no model-scoped combo matches.
   #   combos:
   #     - name: standard

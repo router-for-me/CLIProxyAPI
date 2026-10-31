@@ -97,7 +97,11 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 	}
 	stats.Combo = combo.Name
 
-	s := &scanner{body: body, compressPrefix: cfg.CachePrefix == CachePrefixCompress}
+	s := &scanner{
+		body:          body,
+		cachePrefix:   cfg.CachePrefix,
+		includeSystem: !cfg.shouldPreserveSystemPrompt(model, body),
+	}
 	if !s.scan() {
 		return body, stats
 	}

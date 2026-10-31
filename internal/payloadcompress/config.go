@@ -15,6 +15,11 @@
 // so keep MinBytes below the first request of a session. Output styles are a
 // separate stage chosen per request (see styleBypass) and are not covered by
 // this guarantee.
+//
+// A config that is enabled but names no combo falls back to DefaultConfig, so
+// turning compression on is enough to get a working pipeline. prefix-freeze is
+// the one optional exception to purity: it observes system prompts across
+// requests, and only ever to preserve one.
 package payloadcompress
 
 import (
@@ -32,14 +37,25 @@ type Config struct {
 	Shadow bool `yaml:"shadow" json:"shadow"`
 	// MinBytes skips payloads smaller than this many bytes.
 	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
-	// CachePrefix decides whether the provider-cached prefix is compressed.
-	// "preserve" (the default) leaves every message up to the last
+	// CachePrefix decides whether the provider-cached prefix is protected. The
+	// default "compress" rewrites the whole body and relies on the pipeline being
+	// append-stable: once a session is above MinBytes, the compressed bytes stay
+	// identical turn over turn, so the provider caches the smaller payload. This
+	// matches upstream, which never skips a message to protect a cache.
+	// "preserve" is the conservative opt-out: it leaves every item up to the last
 	// cache_control breakpoint byte-identical, so a hit is guaranteed and the
-	// cached zone costs full price. "compress" transforms that zone too and
-	// relies on the pipeline being append-stable: once a session is above
-	// MinBytes, the compressed bytes stay identical turn over turn, so the
-	// provider caches the smaller payload.
+	// cached zone costs full price.
 	CachePrefix string `yaml:"cache-prefix" json:"cache-prefix"`
+	// PreserveSystemPrompt mirrors upstream's preserveSystemPromptMode:
+	// "always" (the default) never rewrites the system prompt, "when-no-cache"
+	// rewrites it only when nothing is cached, and "never" rewrites it even when
+	// that breaks a prompt cache.
+	PreserveSystemPrompt string `yaml:"preserve-system-prompt" json:"preserve-system-prompt"`
+	// PrefixFreeze is upstream's usage-observed prefix freeze: it watches the
+	// system prompt and, once the same one has been seen Threshold times, treats
+	// it as a stable cached prefix and preserves it. Opt-in and off by default,
+	// so an unset config never depends on cross-request state.
+	PrefixFreeze PrefixFreezeConfig `yaml:"prefix-freeze" json:"prefix-freeze"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -47,6 +63,14 @@ type Config struct {
 	// OutputStyles injects response-style instructions into the system prompt.
 	// Independent of Enabled: styles are prompt shaping, not payload compression.
 	OutputStyles []OutputStyle `yaml:"output-styles" json:"output-styles"`
+}
+
+// PrefixFreezeConfig mirrors upstream's COMPRESSION_PREFIX_FREEZE_* settings.
+type PrefixFreezeConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Threshold is how many sightings of one system prompt make it stable.
+	// Defaults to 3, the upstream default.
+	Threshold int `yaml:"threshold" json:"threshold"`
 }
 
 // Combo is one named engine pipeline, optionally scoped to models.
@@ -136,17 +160,24 @@ const (
 	EngineCaveman      = "caveman"
 )
 
-// CachePrefix modes. Only CachePrefixCompress changes behaviour; every other
-// value, including an empty one, means preserve, so an unset config can never
-// start rewriting a cached prefix.
+// CachePrefix modes. Only an exact known value changes behaviour; an empty or
+// unknown value falls back to compress, the upstream behaviour.
 const (
 	CachePrefixPreserve = "preserve"
 	CachePrefixCompress = "compress"
 )
 
+// PreserveSystemPrompt modes, mirroring upstream preserveSystemPromptMode.
 const (
-	defaultMinBytes = 4096
-	defaultCombo    = "standard"
+	PreserveSystemPromptAlways      = "always"
+	PreserveSystemPromptWhenNoCache = "when-no-cache"
+	PreserveSystemPromptNever       = "never"
+)
+
+const (
+	defaultMinBytes              = 4096
+	defaultCombo                 = "standard"
+	defaultPrefixFreezeThreshold = 3
 )
 
 // DefaultConfig returns the built-in pipeline. It only contains lossless
@@ -244,7 +275,7 @@ func knownLanguage(tag string) bool {
 }
 
 // Sanitize drops unknown engines and duplicate combos, and repairs the default
-// combo name so a typo in config degrades to "no compression", never to a panic.
+// combo name. A typo degrades to the next best thing, never to a panic.
 func (c *Config) Sanitize() {
 	if c == nil {
 		return
@@ -253,13 +284,27 @@ func (c *Config) Sanitize() {
 		c.MinBytes = defaultMinBytes
 	}
 	switch strings.ToLower(strings.TrimSpace(c.CachePrefix)) {
-	case CachePrefixCompress:
+	case CachePrefixPreserve:
+		c.CachePrefix = CachePrefixPreserve
+	case CachePrefixCompress, "":
 		c.CachePrefix = CachePrefixCompress
-	case CachePrefixPreserve, "":
-		c.CachePrefix = CachePrefixPreserve
 	default:
-		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to preserve", c.CachePrefix)
-		c.CachePrefix = CachePrefixPreserve
+		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to compress", c.CachePrefix)
+		c.CachePrefix = CachePrefixCompress
+	}
+	switch strings.ToLower(strings.TrimSpace(c.PreserveSystemPrompt)) {
+	case PreserveSystemPromptWhenNoCache:
+		c.PreserveSystemPrompt = PreserveSystemPromptWhenNoCache
+	case PreserveSystemPromptNever:
+		c.PreserveSystemPrompt = PreserveSystemPromptNever
+	case PreserveSystemPromptAlways, "":
+		c.PreserveSystemPrompt = PreserveSystemPromptAlways
+	default:
+		log.Warnf("payloadcompress: unknown preserve-system-prompt %q, falling back to always", c.PreserveSystemPrompt)
+		c.PreserveSystemPrompt = PreserveSystemPromptAlways
+	}
+	if c.PrefixFreeze.Threshold <= 0 {
+		c.PrefixFreeze.Threshold = defaultPrefixFreezeThreshold
 	}
 	seen := make(map[string]struct{}, len(c.Combos))
 	combos := c.Combos[:0]
@@ -292,6 +337,10 @@ func (c *Config) Sanitize() {
 		combos = append(combos, Combo{Name: name, Models: combo.Models, Pipeline: steps})
 	}
 	c.Combos = combos
+	if len(c.Combos) == 0 && c.Enabled {
+		// Enabled with no usable pipeline means the built-in one, not silence.
+		c.Combos = DefaultConfig().Combos
+	}
 
 	styles := make([]OutputStyle, 0, len(c.OutputStyles))
 	seenStyle := make(map[string]struct{}, len(c.OutputStyles))
