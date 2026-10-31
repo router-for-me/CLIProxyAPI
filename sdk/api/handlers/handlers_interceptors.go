@@ -354,6 +354,11 @@ func (h *BaseAPIHandler) interceptorHost() PluginInterceptorHost {
 	return host
 }
 
+// InterceptorHostSnapshot returns the active interceptor host for standalone HTTP routes.
+func (h *BaseAPIHandler) InterceptorHostSnapshot() PluginInterceptorHost {
+	return h.interceptorHost()
+}
+
 func streamInterceptorsEnabled(host PluginInterceptorHost) bool {
 	if host == nil {
 		return false

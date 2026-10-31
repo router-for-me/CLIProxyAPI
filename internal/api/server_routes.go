@@ -374,7 +374,6 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &routing)
-	upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
 
 	selectionHeaders := c.Request.Header.Clone()
 	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
@@ -388,7 +387,13 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errRoute, http.StatusServiceUnavailable), gin.H{"error": errRoute.Error()})
 		return
 	}
-	selectionOpts := coreexecutor.Options{Headers: selectionHeaders, OriginalRequest: body}
+	lifecycle := s.newCodexSearchLifecycle(ctx, c, selectionModel, strings.TrimSpace(routing.Model), body, selectionHeaders)
+	defer lifecycle.complete(ctx, c)
+	if !lifecycle.intercept(ctx, c, "") {
+		return
+	}
+	selectionHeaders = lifecycle.request.Headers
+	selectionOpts := coreexecutor.Options{Headers: selectionHeaders, OriginalRequest: lifecycle.request.Body}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	if s.handlers.AuthManager.HomeEnabled() {
@@ -414,6 +419,13 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
 		return
 	}
+	if !lifecycle.intercept(ctx, c, selected.ID) {
+		if selection != nil {
+			selection.End("request_rejected")
+		}
+		return
+	}
+	upstreamRequestBody := sanitizeCodexAlphaSearchBody(lifecycle.request.Body)
 	if selection != nil && selection.CanonicalSessionID != "" {
 		meta := logging.GetClientRequestMetadata(ctx)
 		meta.SessionID = selection.CanonicalSessionID
@@ -446,7 +458,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	baseHeaders.Set("Accept", "application/json")
 	baseHeaders.Set("Originator", "codex_cli_rs")
 	for _, name := range []string{"Version", "User-Agent", "Session_id", "X-Client-Request-Id"} {
-		if value := strings.TrimSpace(c.GetHeader(name)); value != "" {
+		if value := strings.TrimSpace(lifecycle.request.Headers.Get(name)); value != "" {
 			baseHeaders.Set(name, value)
 		}
 	}
