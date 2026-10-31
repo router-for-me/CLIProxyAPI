@@ -255,21 +255,38 @@ func stripPromptCacheBreakpointFromContent(content gjson.Result) ([]byte, bool) 
 	return translatorcommon.JoinRawArray(rebuiltParts), true
 }
 
-// applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction
-// for Codex upstream compatibility.
+// applyResponsesCompactionCompatibility keeps server-side compaction and drops
+// every other context_management form.
 //
-// Codex /responses currently rejects context_management with:
-// {"detail":"Unsupported parameter: context_management"}.
-//
-// Compatibility strategy:
-// 1) Remove context_management before forwarding to Codex upstream.
+// Codex /responses compacts automatically for
+// context_management: [{"type":"compaction","compact_threshold":N}]
+// (verified 2026-10-17: the stream returns encrypted compaction items). Other
+// strategies are not known to be accepted, so a value containing anything else
+// is removed rather than risk a rejected request.
 func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
-	if !gjson.GetBytes(rawJSON, "context_management").Exists() {
+	contextManagement := gjson.GetBytes(rawJSON, "context_management")
+	if !contextManagement.Exists() || isCodexCompactionContextManagement(contextManagement) {
 		return rawJSON
 	}
 
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
 	return rawJSON
+}
+
+func isCodexCompactionContextManagement(contextManagement gjson.Result) bool {
+	entries := contextManagement.Array()
+	if !contextManagement.IsArray() || len(entries) == 0 {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsObject() || entry.Get("type").String() != "compaction" {
+			return false
+		}
+		if threshold := entry.Get("compact_threshold"); threshold.Exists() && threshold.Type != gjson.Number {
+			return false
+		}
+	}
+	return true
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items
