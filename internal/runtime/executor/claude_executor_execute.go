@@ -422,7 +422,13 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		&param,
 	)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		errPatch := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		if upstreamStream {
+			streamUsage.PublishFailure(ctx, reporter, errPatch)
+		} else {
+			reporter.PublishFailureWithDetail(ctx, helps.ParseClaudeUsage(data), errPatch)
+		}
+		return cliproxyexecutor.Response{}, errPatch
 	}
 	if upstreamStream {
 		streamUsage.Publish(ctx, reporter)
