@@ -34,6 +34,9 @@ var (
 	errOAuthSessionExists     = errors.New("oauth session already exists")
 )
 
+// ErrOAuthDeviceCallback rejects browser callbacks for a device login state.
+var ErrOAuthDeviceCallback = fmt.Errorf("%w: device login does not accept callbacks", errOAuthSessionNotPending)
+
 // ErrSIWCCallbackRequiresV8 prevents legacy callback sinks from accepting SIWC codes.
 var ErrSIWCCallbackRequiresV8 = fmt.Errorf("%w: SIWC callbacks require /v8/management/oauth/callback", errOAuthSessionNotPending)
 
@@ -49,6 +52,8 @@ type oauthRecoveryTarget struct {
 }
 
 type oauthSession struct {
+	Device bool
+
 	Provider        string
 	Status          string
 	Source          string
@@ -112,6 +117,14 @@ func (s *oauthSessionStore) Register(state, provider string) {
 }
 
 func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) {
+	s.register(state, provider, proxyURL, false)
+}
+
+func (s *oauthSessionStore) registerDevice(state, provider, proxyURL string) {
+	s.register(state, provider, proxyURL, true)
+}
+
+func (s *oauthSessionStore) register(state, provider, proxyURL string, device bool) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	proxyURL = strings.TrimSpace(proxyURL)
@@ -125,6 +138,7 @@ func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) 
 
 	s.purgeExpiredLocked(now)
 	s.sessions[state] = oauthSession{
+		Device:    device,
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
@@ -362,7 +376,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
-		if session.SIWC == nil && !session.Completed && !session.Committing && !session.SIWCCommitting && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
+		if !session.Device && session.SIWC == nil && !session.Completed && !session.Committing && !session.SIWCCommitting && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
 			session.Status = ""
 			session.ProxyURL = ""
 			session.Metadata = nil
@@ -467,6 +481,14 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 	return true
 }
 
+// Discard removes a startup session whose state was never returned to the caller,
+// including a session that the login worker has already marked as failed.
+func (s *oauthSessionStore) Discard(state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, strings.TrimSpace(state))
+}
+
 func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
@@ -481,6 +503,10 @@ func cloneOAuthSessionMetadata(in map[string]any) map[string]any {
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
 func RegisterOAuthSession(state, provider string) { oauthSessions.Register(state, provider) }
+
+func RegisterDeviceOAuthSession(state, provider string) {
+	oauthSessions.registerDevice(state, provider, "")
+}
 
 func RegisterOAuthSessionWithProxy(state, provider, proxyURL string) {
 	oauthSessions.RegisterWithProxy(state, provider, proxyURL)
@@ -762,8 +788,13 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	if err != nil {
 		return "", err
 	}
-	if session, ok := oauthSessions.Get(state); ok && session.SIWC != nil {
-		return "", ErrSIWCCallbackRequiresV8
+	if session, ok := oauthSessions.Get(state); ok {
+		if session.Device {
+			return "", ErrOAuthDeviceCallback
+		}
+		if session.SIWC != nil {
+			return "", ErrSIWCCallbackRequiresV8
+		}
 	}
 	if !IsOAuthSessionPending(state, canonicalProvider) {
 		return "", errOAuthSessionNotPending

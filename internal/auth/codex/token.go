@@ -4,29 +4,17 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
-
-var codexFileLocks sync.Map
-
-func lockForFilePath(authFilePath string) *sync.Mutex {
-	cleaned := canonicalLockPath(authFilePath)
-	if actual, ok := codexFileLocks.Load(cleaned); ok {
-		return actual.(*sync.Mutex)
-	}
-	mu := &sync.Mutex{}
-	actual, _ := codexFileLocks.LoadOrStore(cleaned, mu)
-	return actual.(*sync.Mutex)
-}
 
 func canonicalLockPath(authFilePath string) string {
 	cleaned := filepath.Clean(strings.TrimSpace(authFilePath))
@@ -39,24 +27,6 @@ func canonicalLockPath(authFilePath string) string {
 		cleaned = filepath.Clean(filepath.Join(parent, filepath.Base(cleaned)))
 	}
 	return cleaned
-}
-
-// WithFileLock executes fn while holding both an in-process mutex and an inter-process lockfile for authFilePath.
-func WithFileLock(authFilePath string, fn func() error) error {
-	mu := lockForFilePath(authFilePath)
-	mu.Lock()
-	defer mu.Unlock()
-
-	if errDir := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errDir != nil {
-		return fmt.Errorf("failed to create credential directory: %w", errDir)
-	}
-	releaseLockFile, errLock := acquireInterProcessLockFile(authFilePath)
-	if errLock != nil {
-		return errLock
-	}
-	defer releaseLockFile()
-
-	return fn()
 }
 
 // WriteJSONFileAtomic writes data as JSON to authFilePath atomically via a temporary file in the same directory.
@@ -269,11 +239,16 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 // SaveTokenToFile serializes the Codex token storage to a JSON file under a per-file and inter-process lock,
 // reading and merging any existing JSON on disk before atomically replacing the file.
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
+	return ts.SaveTokenToFileContext(context.Background(), authFilePath)
+}
+
+// SaveTokenToFileContext bounds credential-lock acquisition by the caller's context.
+func (ts *CodexTokenStorage) SaveTokenToFileContext(ctx context.Context, authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
 	_ = strconv.IntSize
 
-	return WithFileLock(authFilePath, func() error {
+	return WithFileLockContext(ctx, authFilePath, func() error {
 		data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
 		if errMerge != nil {
 			return fmt.Errorf("failed to merge metadata: %w", errMerge)

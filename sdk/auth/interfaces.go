@@ -19,6 +19,16 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	// OnDeviceCode runs after a device code is issued and before token polling starts.
+	OnDeviceCode func(DeviceCodeInfo)
+}
+
+// DeviceCodeInfo contains the user-facing values needed to complete a device login.
+// It deliberately omits the private device authorization identifier used for polling.
+type DeviceCodeInfo struct {
+	UserCode        string
+	VerificationURL string
+	ExpiresIn       int // seconds
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

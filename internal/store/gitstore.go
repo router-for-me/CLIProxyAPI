@@ -22,6 +22,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -35,7 +37,7 @@ const (
 
 // GitTokenStore persists token records and auth metadata using git as the backing storage.
 type GitTokenStore struct {
-	mu        sync.Mutex
+	mu        misc.ContextMutex
 	dirLock   sync.RWMutex
 	baseDir   string
 	repoDir   string
@@ -47,6 +49,7 @@ type GitTokenStore struct {
 	lastGC    time.Time
 	pullFn    func(ctx context.Context, worktree *git.Worktree, pullOpts *git.PullOptions) error
 	pushFn    func(ctx context.Context, repo *git.Repository, pushOpts *git.PushOptions) error
+	openFn    func(path string) (*git.Repository, error)
 }
 
 type resolvedRemoteBranch struct {
@@ -68,7 +71,14 @@ func NewGitTokenStore(remote, username, password, branch string) *GitTokenStore 
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
 func (s *GitTokenStore) SetBaseDir(dir string) {
-	s.mu.Lock()
+	_ = s.SetBaseDirContext(context.Background(), dir)
+}
+
+// SetBaseDirContext lets canceled credential saves stop waiting for another repository operation.
+func (s *GitTokenStore) SetBaseDirContext(ctx context.Context, dir string) error {
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return errLock
+	}
 	defer s.mu.Unlock()
 
 	clean := strings.TrimSpace(dir)
@@ -78,7 +88,7 @@ func (s *GitTokenStore) SetBaseDir(dir string) {
 		s.repoDir = ""
 		s.configDir = ""
 		s.dirLock.Unlock()
-		return
+		return nil
 	}
 	if abs, err := filepath.Abs(clean); err == nil {
 		clean = abs
@@ -93,6 +103,7 @@ func (s *GitTokenStore) SetBaseDir(dir string) {
 	s.repoDir = repoDir
 	s.configDir = configDir
 	s.dirLock.Unlock()
+	return nil
 }
 
 // AuthDir returns the directory used for auth persistence.
@@ -288,6 +299,10 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 				}
 			}
 		}
+		if errRecover := s.recoverUnpushedPublications(ctx, repo, worktree, repoDir, s.baseDir); errRecover != nil {
+			s.dirLock.Unlock()
+			return fmt.Errorf("git token store: recover unpublished credential commit: %w", errRecover)
+		}
 		pullOpts := &git.PullOptions{ClientOptions: authMethod, RemoteName: "origin"}
 		if s.branch != "" {
 			pullOpts.ReferenceName = plumbing.NewBranchReferenceName(s.branch)
@@ -394,6 +409,10 @@ func (s *GitTokenStore) ensureRepositoryContextLocked(ctx context.Context) (errR
 			}
 		}
 		if !repositoryRecovered {
+			if errReplay := recoverGitPublications(ctx, repo, repoDir, s.baseDir); errReplay != nil {
+				s.dirLock.Unlock()
+				return fmt.Errorf("git token store: replay acquired credentials: %w", errReplay)
+			}
 			if errRestore := restoreMissingTrackedFiles(repo, repoDir); errRestore != nil {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: restore tracked worktree files: %w", errRestore)
@@ -431,7 +450,9 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("auth filestore: %w", errWeight)
 	}
 
-	s.mu.Lock()
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return "", errLock
+	}
 	defer s.mu.Unlock()
 
 	path, err := s.resolveAuthPath(auth)
@@ -446,7 +467,7 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	// was deliberately removed. Login and migration callers explicitly mark the
 	// save when creating a missing disabled credential is intentional.
 	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
-		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		if _, statErr := authpublication.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
 	}
@@ -462,67 +483,75 @@ func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
 	}
 
-	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
-		if errCodex != nil {
-			return "", errCodex
-		}
-	} else {
-		switch {
-		case auth.Storage != nil:
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
+	errPersist := persistAcquisitionMirror(ctx, path, auth, func(path string) error {
+		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+			if errCodex != nil {
+				return errCodex
 			}
-			auth.Metadata["disabled"] = auth.Disabled
-			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-				setter.SetMetadata(auth.Metadata)
-			}
-			if err = auth.Storage.SaveTokenToFile(path); err != nil {
-				return "", err
-			}
-		case auth.Metadata != nil:
-			auth.Metadata["disabled"] = auth.Disabled
-			raw, errMarshal := json.Marshal(auth.Metadata)
-			if errMarshal != nil {
-				return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
-			}
-			contentsMatch := false
-			if existing, errRead := os.ReadFile(path); errRead == nil {
-				contentsMatch = jsonEqual(existing, raw)
-			} else if !os.IsNotExist(errRead) {
-				return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
-			}
-			if !contentsMatch {
-				tmp := path + ".tmp"
-				if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-					return "", fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
+		} else {
+			switch {
+			case auth.Storage != nil:
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
 				}
-				if errRename := os.Rename(tmp, path); errRename != nil {
-					return "", fmt.Errorf("auth filestore: rename failed: %w", errRename)
+				auth.Metadata["disabled"] = auth.Disabled
+				if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+					setter.SetMetadata(auth.Metadata)
 				}
+				if err = auth.Storage.SaveTokenToFile(path); err != nil {
+					return err
+				}
+			case auth.Metadata != nil:
+				auth.Metadata["disabled"] = auth.Disabled
+				raw, errMarshal := json.Marshal(auth.Metadata)
+				if errMarshal != nil {
+					return fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
+				}
+				contentsMatch := false
+				if existing, errRead := os.ReadFile(path); errRead == nil {
+					contentsMatch = jsonEqual(existing, raw)
+				} else if !os.IsNotExist(errRead) {
+					return fmt.Errorf("auth filestore: read existing failed: %w", errRead)
+				}
+				if !contentsMatch {
+					tmp := path + ".tmp"
+					if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+						return fmt.Errorf("auth filestore: write temp failed: %w", errWrite)
+					}
+					if errRename := os.Rename(tmp, path); errRename != nil {
+						return fmt.Errorf("auth filestore: rename failed: %w", errRename)
+					}
+				}
+			default:
+				return fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 			}
-		default:
-			return "", fmt.Errorf("auth filestore: nothing to persist for %s", auth.ID)
 		}
-	}
 
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[cliproxyauth.AttributePath] = path
-	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
+		return nil
+	}, func(stagedPath string) error {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[cliproxyauth.AttributePath] = path
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceGit
 
-	if strings.TrimSpace(auth.FileName) == "" {
-		auth.FileName = auth.ID
-	}
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = auth.ID
+		}
 
-	messageID := auth.ID
-	if strings.TrimSpace(messageID) == "" {
-		messageID = filepath.Base(path)
-	}
-	if errCommit := s.commitAndPushContextLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath); errCommit != nil {
-		return "", errCommit
-	}
+		messageID := auth.ID
+		if strings.TrimSpace(messageID) == "" {
+			messageID = filepath.Base(path)
+		}
+		if errCommit := s.commitAuthSourceLocked(ctx, fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath, path, stagedPath); errCommit != nil {
+			return errCommit
+		}
 
+		return nil
+	}, func() { clearGitPublication(s.repoDirSnapshot(), relPath) })
+	if errPersist != nil {
+		return "", errPersist
+	}
 	return path, nil
 }
 
@@ -544,6 +573,9 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 			return walkErr
 		}
 		if d.IsDir() {
+			if d.Name() == authpublication.DirectoryName {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
@@ -561,7 +593,7 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 	if err != nil {
 		return nil, err
 	}
-	return entries, nil
+	return appendPendingAuthFiles(dir, entries, s.readAuthFile)
 }
 
 // Delete removes the auth file.
@@ -592,7 +624,7 @@ func (s *GitTokenStore) Delete(_ context.Context, id string) error {
 	if errCommit := s.commitAndPushLocked(fmt.Sprintf("Delete auth %s", messageID), rel); errCommit != nil {
 		return errCommit
 	}
-	return nil
+	return authpublication.Clear(path)
 }
 
 // PersistAuthFiles commits and pushes the provided paths to the remote repository.
@@ -717,7 +749,7 @@ func (s *GitTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
@@ -736,7 +768,7 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 	if provider == "" {
 		provider = "unknown"
 	}
-	info, err := os.Stat(path)
+	info, err := authpublication.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)
 	}
@@ -1695,7 +1727,11 @@ func (s *GitTokenStore) commitAndPushInitialLocked(message string, relPaths ...s
 	return s.commitAndPushWithOptionsLocked(context.Background(), message, true, relPaths...)
 }
 
-func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, relPaths ...string) (errResult error) {
+func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, message string, allowMissingRemote bool, relPaths ...string) error {
+	return s.commitSourcesAndPushLocked(ctx, message, allowMissingRemote, nil, relPaths...)
+}
+
+func (s *GitTokenStore) commitSourcesAndPushLocked(ctx context.Context, message string, allowMissingRemote bool, sources map[string]string, relPaths ...string) (errResult error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1706,13 +1742,22 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	if repoDir == "" {
 		return fmt.Errorf("git token store: repository path not configured")
 	}
-	repo, err := git.PlainOpen(repoDir)
+	openRepo := git.PlainOpen
+	if s.openFn != nil {
+		openRepo = s.openFn
+	}
+	repo, err := openRepo(repoDir)
 	if err != nil {
 		return fmt.Errorf("git token store: open repo: %w", err)
 	}
+	pushed := false
 	defer func() {
 		if errClose := repo.Close(); errClose != nil {
 			errCloseWrap := fmt.Errorf("git token store: close repo: %w", errClose)
+			if pushed {
+				log.Warnf("git token store: push succeeded but repository cleanup failed: %v", errClose)
+				return
+			}
 			if errResult == nil {
 				errResult = errCloseWrap
 			} else {
@@ -1736,6 +1781,27 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	if errHead != nil && !errors.Is(errHead, plumbing.ErrReferenceNotFound) {
 		return fmt.Errorf("git token store: get base head: %w", errHead)
 	}
+	var unbornBranch plumbing.ReferenceName
+	if baseRef == nil {
+		head, errReference := repo.Reference(plumbing.HEAD, false)
+		if errReference != nil {
+			return fmt.Errorf("git token store: inspect unborn HEAD: %w", errReference)
+		}
+		if head.Type() != plumbing.SymbolicReference || !head.Target().IsBranch() {
+			return fmt.Errorf("git token store: unborn HEAD does not name a branch")
+		}
+		unbornBranch = head.Target()
+	}
+	// Every unpublished mutation belongs to this attempt, including index changes
+	// made before Commit and failures while inspecting or rewriting its result.
+	defer func() {
+		if errResult == nil || pushed {
+			return
+		}
+		if errRestore := restoreUnpublishedGitState(repo, worktree, baseRef, unbornBranch); errRestore != nil {
+			errResult = errors.Join(errResult, fmt.Errorf("git token store: restore unpublished state: %w", errRestore))
+		}
+	}()
 	if errHead == nil {
 		if errReset := resetIndexToHead(repo, worktree); errReset != nil {
 			return fmt.Errorf("git token store: reset index before commit: %w", errReset)
@@ -1744,6 +1810,13 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 
 	added := false
 	for _, rel := range managedPaths {
+		if source, ok := sources[rel]; ok {
+			if err := stageAcquisitionBlob(repo, rel, source); err != nil {
+				return err
+			}
+			added = true
+			continue
+		}
 		if _, err = worktree.Add(rel); err != nil {
 			if errors.Is(err, gitindex.ErrEntryNotFound) {
 				continue
@@ -1790,13 +1863,6 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 	}
 	if baseRef != nil {
 		if errValidate := validateManagedTreeChanges(repo, baseRef.Hash(), commitHash, managedPaths); errValidate != nil {
-			errRestore := restoreHeadAndIndex(repo, worktree, baseRef)
-			if errRestore != nil {
-				return errors.Join(
-					fmt.Errorf("git token store: validate commit tree: %w", errValidate),
-					fmt.Errorf("git token store: restore head after rejected commit: %w", errRestore),
-				)
-			}
 			return fmt.Errorf("git token store: validate commit tree: %w", errValidate)
 		}
 	}
@@ -1808,14 +1874,9 @@ func (s *GitTokenStore) commitAndPushWithOptionsLocked(ctx context.Context, mess
 		return errRewrite
 	}
 	if errPush := s.pushRepositoryLocked(ctx, repo, repoDir, allowMissingRemote); errPush != nil {
-		if baseRef == nil {
-			return errPush
-		}
-		if errRestore := restoreHeadAndIndex(repo, worktree, baseRef); errRestore != nil {
-			return errors.Join(errPush, fmt.Errorf("git token store: restore head after rejected push: %w", errRestore))
-		}
 		return errPush
 	}
+	pushed = true
 	return nil
 }
 
@@ -1892,6 +1953,17 @@ func restoreHeadAndIndex(repo *git.Repository, worktree *git.Worktree, head *plu
 	return worktree.Reset(&git.ResetOptions{Mode: git.MixedReset, Commit: head.Hash()})
 }
 
+func restoreUnpublishedGitState(repo *git.Repository, worktree *git.Worktree, base *plumbing.Reference, unbornBranch plumbing.ReferenceName) error {
+	if base != nil {
+		return restoreHeadAndIndex(repo, worktree, base)
+	}
+	errRemove := repo.Storer.RemoveReference(unbornBranch)
+	if errors.Is(errRemove, plumbing.ErrReferenceNotFound) {
+		errRemove = nil
+	}
+	return errors.Join(errRemove, repo.Storer.SetIndex(&gitindex.Index{Version: 2}))
+}
+
 func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repository, repoDir string, allowMissingRemote bool) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1901,9 +1973,6 @@ func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repo
 	}
 	headRef, errHead := repo.Head()
 	if errHead != nil {
-		if errors.Is(errHead, plumbing.ErrReferenceNotFound) {
-			return nil
-		}
 		return fmt.Errorf("git token store: get head for push: %w", errHead)
 	}
 	if !headRef.Name().IsBranch() {
@@ -1937,8 +2006,9 @@ func (s *GitTokenStore) pushRepositoryLocked(ctx context.Context, repo *git.Repo
 			return fmt.Errorf("git token store: push: %w", errPush)
 		}
 	}
+	// Origin has accepted the commit. A local bookkeeping error cannot undo it.
 	if errReference := repo.Storer.SetReference(plumbing.NewHashReference(remoteName, headRef.Hash())); errReference != nil {
-		return fmt.Errorf("git token store: update remote tracking branch %s: %w", remoteName, errReference)
+		log.Warnf("git token store: push succeeded but updating remote tracking branch %s failed: %v", remoteName, errReference)
 	}
 	s.maybeRunGC(repoDir)
 	return nil

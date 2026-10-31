@@ -43,7 +43,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 
 	switch {
 	case auth.CodexRefreshPatch != nil:
-		errRefresh := codex.WithFileLock(path, func() error {
+		errRefresh := codex.WithFileLockContext(ctx, path, func() error {
 			existing, errRead := os.ReadFile(path)
 			if errRead != nil {
 				if os.IsNotExist(errRead) {
@@ -91,7 +91,13 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
-		if errSave := auth.Storage.SaveTokenToFile(path); errSave != nil {
+		var errSave error
+		if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+			errSave = storage.SaveTokenToFileContext(ctx, path)
+		} else {
+			errSave = auth.Storage.SaveTokenToFile(path)
+		}
+		if errSave != nil {
 			return true, errSave
 		}
 		if persistedBytes, errReadPersisted := os.ReadFile(path); errReadPersisted == nil && len(persistedBytes) > 0 {
@@ -105,7 +111,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 
 	case auth.Metadata != nil:
 		auth.Metadata["disabled"] = auth.Disabled
-		errLock := codex.WithFileLock(path, func() error {
+		errLock := codex.WithFileLockContext(ctx, path, func() error {
 			existing, errRead := os.ReadFile(path)
 			if errRead == nil && len(existing) > 0 {
 				var diskMap map[string]any

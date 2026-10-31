@@ -936,8 +936,13 @@ func (h *Handler) deleteTokenRecord(ctx context.Context, path string) error {
 }
 
 func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
+	store, _ := h.tokenStoreWithBaseDirContext(context.Background())
+	return store
+}
+
+func (h *Handler) tokenStoreWithBaseDirContext(ctx context.Context) (coreauth.Store, error) {
 	if h == nil {
-		return nil
+		return nil, nil
 	}
 	store := h.tokenStore
 	if store == nil {
@@ -945,11 +950,17 @@ func (h *Handler) tokenStoreWithBaseDir() coreauth.Store {
 		h.tokenStore = store
 	}
 	if cfg := h.configSnapshot(); cfg != nil {
-		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+		if dirSetter, ok := store.(interface {
+			SetBaseDirContext(context.Context, string) error
+		}); ok {
+			if err := dirSetter.SetBaseDirContext(ctx, cfg.AuthDir); err != nil {
+				return nil, fmt.Errorf("set token store directory: %w", err)
+			}
+		} else if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
 			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 	}
-	return store
+	return store, nil
 }
 
 func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
@@ -998,11 +1009,22 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 }
 
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
+	savedPath, err := h.persistTokenRecord(ctx, record)
+	if err != nil {
+		return savedPath, err
+	}
+	return savedPath, h.notifyPersistedTokenRecord(ctx, savedPath, record)
+}
+
+func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
 	}
 	h.mergeExistingAuthFileMetadata(record)
-	store := h.tokenStoreWithBaseDir()
+	store, errStore := h.tokenStoreWithBaseDirContext(ctx)
+	if errStore != nil {
+		return "", errStore
+	}
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
@@ -1018,6 +1040,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
+	record.BindCommittedAuthFile("", nil)
 	savedPath, errSave := store.Save(coreauth.WithAuthCreationIntent(ctx), record)
 	if errSave != nil {
 		return savedPath, errSave
@@ -1034,9 +1057,18 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return savedPath, fmt.Errorf("canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
 		}
 	}
+	return savedPath, nil
+}
+
+func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath string, record *coreauth.Auth) error {
 	if h.postAuthPersistHook != nil {
 		persistedRecord := record
-		if data, errRead := os.ReadFile(savedPath); errRead == nil && len(data) > 0 {
+		data := record.CommittedAuthFile(savedPath)
+		remotelyCommitted := len(data) > 0
+		if !remotelyCommitted {
+			data, _ = os.ReadFile(savedPath)
+		}
+		if len(data) > 0 {
 			cfg := h.configSnapshot()
 			authDir := filepath.Dir(savedPath)
 			if cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
@@ -1050,12 +1082,16 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				PluginAuthParser: h.pluginHost,
 			}, savedPath, data)
 			if errSynthesize != nil {
-				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
+				return fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
 			}
 			for _, auth := range auths {
 				if auth != nil && (auth.ID == record.ID || len(auths) == 1) {
 					if len(auths) == 1 && strings.TrimSpace(record.ID) != "" {
 						auth.ID = record.ID
+					}
+					if remotelyCommitted {
+						// These bytes are committed remotely, not an observation of the stale mirror.
+						auth.ClearFileSnapshot()
 					}
 					persistedRecord = auth
 					break
@@ -1063,12 +1099,12 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			}
 		}
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
-			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
+			return fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
 	} else if h.authManager != nil && strings.TrimSpace(savedPath) != "" {
-		if errReg := h.registerAuthFromFileWithID(ctx, savedPath, nil, record.ID); errReg != nil {
-			return savedPath, fmt.Errorf("register persisted auth failed: %w", errReg)
+		if errReg := h.registerAuthFromFileWithID(ctx, savedPath, record.CommittedAuthFile(savedPath), record.ID); errReg != nil {
+			return fmt.Errorf("register persisted auth failed: %w", errReg)
 		}
 	}
-	return savedPath, nil
+	return nil
 }

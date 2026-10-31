@@ -12,11 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -49,7 +49,7 @@ type ObjectTokenStore struct {
 	spoolRoot   string
 	configPath  string
 	authDir     string
-	mu          sync.Mutex
+	mu          misc.ContextMutex
 	putObjectFn func(ctx context.Context, key string, data []byte, contentType string) error
 }
 
@@ -179,73 +179,83 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	// was deliberately removed. Login and migration callers explicitly mark the
 	// save when creating a missing disabled credential is intentional.
 	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
-		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
+		if _, statErr := authpublication.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}
 	}
 
-	s.mu.Lock()
+	if errLock := s.mu.LockContext(ctx); errLock != nil {
+		return "", errLock
+	}
 	defer s.mu.Unlock()
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("object store: create auth directory: %w", err)
 	}
 
-	if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
-		if errCodex != nil {
-			return "", errCodex
-		}
-	} else {
-		switch {
-		case auth.Storage != nil:
-			if auth.Metadata == nil {
-				auth.Metadata = make(map[string]any)
+	errPersist := persistAcquisitionMirror(ctx, path, auth, func(path string) error {
+		if handled, errCodex := cliproxyauth.PersistCodexAuthFile(ctx, path, auth); handled {
+			if errCodex != nil {
+				return errCodex
 			}
-			auth.Metadata["disabled"] = auth.Disabled
-			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
-				setter.SetMetadata(auth.Metadata)
-			}
-			if err = auth.Storage.SaveTokenToFile(path); err != nil {
-				return "", err
-			}
-		case auth.Metadata != nil:
-			auth.Metadata["disabled"] = auth.Disabled
-			raw, errMarshal := json.Marshal(auth.Metadata)
-			if errMarshal != nil {
-				return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
-			}
-			contentsMatch := false
-			if existing, errRead := os.ReadFile(path); errRead == nil {
-				contentsMatch = jsonEqual(existing, raw)
-			} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
-				return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
-			}
-			if !contentsMatch {
-				tmp := path + ".tmp"
-				if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-					return "", fmt.Errorf("object store: write temp auth file: %w", errWrite)
+		} else {
+			switch {
+			case auth.Storage != nil:
+				if auth.Metadata == nil {
+					auth.Metadata = make(map[string]any)
 				}
-				if errRename := os.Rename(tmp, path); errRename != nil {
-					return "", fmt.Errorf("object store: rename auth file: %w", errRename)
+				auth.Metadata["disabled"] = auth.Disabled
+				if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+					setter.SetMetadata(auth.Metadata)
 				}
+				if err = auth.Storage.SaveTokenToFile(path); err != nil {
+					return err
+				}
+			case auth.Metadata != nil:
+				auth.Metadata["disabled"] = auth.Disabled
+				raw, errMarshal := json.Marshal(auth.Metadata)
+				if errMarshal != nil {
+					return fmt.Errorf("object store: marshal metadata: %w", errMarshal)
+				}
+				contentsMatch := false
+				if existing, errRead := os.ReadFile(path); errRead == nil {
+					contentsMatch = jsonEqual(existing, raw)
+				} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+					return fmt.Errorf("object store: read existing metadata: %w", errRead)
+				}
+				if !contentsMatch {
+					tmp := path + ".tmp"
+					if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
+						return fmt.Errorf("object store: write temp auth file: %w", errWrite)
+					}
+					if errRename := os.Rename(tmp, path); errRename != nil {
+						return fmt.Errorf("object store: rename auth file: %w", errRename)
+					}
+				}
+			default:
+				return fmt.Errorf("object store: nothing to persist for %s", auth.ID)
 			}
-		default:
-			return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
 		}
-	}
 
-	if auth.Attributes == nil {
-		auth.Attributes = make(map[string]string)
-	}
-	auth.Attributes[cliproxyauth.AttributePath] = path
-	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceObjectStore
+		return nil
+	}, func(stagedPath string) error {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[cliproxyauth.AttributePath] = path
+		auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceObjectStore
 
-	if strings.TrimSpace(auth.FileName) == "" {
-		auth.FileName = auth.ID
-	}
+		if strings.TrimSpace(auth.FileName) == "" {
+			auth.FileName = auth.ID
+		}
 
-	if err = s.uploadAuth(ctx, path); err != nil {
-		return "", err
+		if err = s.uploadAuthFrom(ctx, path, stagedPath); err != nil {
+			return err
+		}
+		return nil
+	}, nil)
+	if errPersist != nil {
+		return "", errPersist
 	}
 	return path, nil
 }
@@ -262,6 +272,9 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 			return walkErr
 		}
 		if d.IsDir() {
+			if d.Name() == authpublication.DirectoryName {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
@@ -280,7 +293,7 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 	if err != nil {
 		return nil, fmt.Errorf("object store: walk auth directory: %w", err)
 	}
-	return entries, nil
+	return appendPendingAuthFiles(dir, entries, s.readAuthFile)
 }
 
 // Delete removes an auth file locally and remotely.
@@ -303,7 +316,7 @@ func (s *ObjectTokenStore) Delete(ctx context.Context, id string) error {
 	if err = s.deleteAuthObject(ctx, path); err != nil {
 		return err
 	}
-	return nil
+	return authpublication.Clear(path)
 }
 
 // PersistAuthFiles uploads the provided auth files to the object storage backend.
@@ -465,10 +478,14 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 			return fmt.Errorf("object store: write auth %s: %w", local, errWrite)
 		}
 	}
-	return nil
+	return authpublication.ReconciledDirectory(s.authDir)
 }
 
 func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
+	return s.uploadAuthFrom(ctx, path, path)
+}
+
+func (s *ObjectTokenStore) uploadAuthFrom(ctx context.Context, path, source string) error {
 	if path == "" {
 		return nil
 	}
@@ -476,7 +493,7 @@ func (s *ObjectTokenStore) uploadAuth(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("object store: resolve auth relative path: %w", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(source)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return s.deleteAuthObject(ctx, path)
@@ -591,7 +608,7 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
-	data, err := os.ReadFile(path)
+	data, err := authpublication.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}
@@ -610,7 +627,7 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if provider == "" {
 		provider = "unknown"
 	}
-	info, err := os.Stat(path)
+	info, err := authpublication.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat auth file: %w", err)
 	}

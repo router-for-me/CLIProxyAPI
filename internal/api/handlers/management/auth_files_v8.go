@@ -354,7 +354,11 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 	case "claude":
 		h.RequestAnthropicToken(c)
 	case "codex":
-		h.RequestCodexToken(c)
+		if strings.EqualFold(strings.TrimSpace(c.Query("flow")), "device") {
+			h.RequestCodexDeviceToken(c)
+		} else {
+			h.RequestCodexToken(c)
+		}
 	case "antigravity":
 		h.RequestAntigravityToken(c)
 	case "kimi":
