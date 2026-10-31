@@ -63,6 +63,11 @@ workspace trust, and client approvals continue to be owned by Claude Code.
 See the client's [permission-mode documentation](https://code.claude.com/docs/en/permission-modes)
 for its current classifier-selection rules.
 
+For deployments with a general High override, see the
+[optional Auto Mode effort profile](../claude-code-auto-mode/README.md).
+It includes a mergeable config fragment, measured limitations, rollback, and
+tests that keep main work and follow-up review on the chosen High baseline.
+
 ## Image tools and coding latency
 
 CLIProxyAPI can add the native OpenAI `image_generation` tool automatically.
