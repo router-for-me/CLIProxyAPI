@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -95,6 +96,56 @@ func (s *recordingReleaseSender) WaitForSequence(sequence int64, timeout time.Du
 		case <-timer.C:
 			return false
 		case <-s.sent:
+		}
+	}
+}
+
+func TestReleaseFlusherIdleFlushDoesNotAllocate(t *testing.T) {
+	flusher := newReleaseFlusher(time.Hour, time.Hour, func(context.Context, ConcurrencyReleaseFrame) error {
+		return nil
+	})
+	// Simulate a long-lived pool: every credential/model pair has been acked and
+	// remains in the state map. An idle flush must not walk (or allocate for) it.
+	for i := 0; i < 1000; i++ {
+		group := executionregistry.ReleaseGroup{CredentialID: fmt.Sprintf("cred-%d", i), Model: "gpt"}
+		flusher.groups[group] = releaseState{Latest: 1, Acked: 1}
+	}
+
+	var failed bool
+	allocs := testing.AllocsPerRun(100, func() {
+		failed = flusher.flush(context.Background())
+	})
+	if failed {
+		t.Fatal("idle flush reported a failure")
+	}
+	if allocs != 0 {
+		t.Fatalf("idle flush allocated %.1f objects, want 0", allocs)
+	}
+}
+
+func TestReleaseFlusherClearsPendingAfterAck(t *testing.T) {
+	sender := &recordingReleaseSender{sent: make(chan struct{}, 4)}
+	flusher := newReleaseFlusher(time.Millisecond, 10*time.Millisecond, sender.Send)
+	group := executionregistry.ReleaseGroup{CredentialID: "cred-1", Model: "gpt"}
+	flusher.MarkDirty(group, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go flusher.Run(ctx)
+
+	if !sender.WaitForSequence(1, time.Second) {
+		t.Fatal("release sequence 1 was not acknowledged")
+	}
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for !flusher.idle() {
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("pending release was not cleared after acknowledgement")
 		}
 	}
 }
