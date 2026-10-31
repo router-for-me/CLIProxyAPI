@@ -128,18 +128,77 @@ func isRelativeWithinAuthDir(rel string, errRel error) bool {
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+func hasAuthProviderCap(caps pluginapi.Capabilities) bool {
+	if caps.AuthProvider != nil {
+		return true
+	}
+	for _, p := range caps.AuthProviders {
+		if p != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRecordAuthProvider(record capabilityRecord) bool {
+	return hasAuthProviderCap(record.plugin.Capabilities)
+}
+
+func recordAuthProviders(record capabilityRecord) []pluginapi.AuthProvider {
+	caps := record.plugin.Capabilities
+	out := make([]pluginapi.AuthProvider, 0, 1+len(caps.AuthProviders))
+	if caps.AuthProvider != nil {
+		out = append(out, caps.AuthProvider)
+	}
+	for _, p := range caps.AuthProviders {
+		if p != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func normalizeAuthProviderIdentifiers(values ...string) []string {
+	var out []string
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		for _, part := range strings.Split(raw, ",") {
+			id := normalizeProviderID(part)
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (h *Host) AuthProviderIdentifiers() []string {
 	if h == nil {
 		return nil
 	}
 	out := make([]string, 0)
+	seen := make(map[string]struct{})
 	for _, record := range h.activeRecords() {
-		provider := record.plugin.Capabilities.AuthProvider
-		if provider == nil || h.isPluginFused(record.id) {
+		if !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
 			continue
 		}
-		identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, provider)
-		if okIdentifier && identifier != "" {
+		identifiers, okIdentifiers := h.callRecordAuthProviderIdentifiers(record)
+		if !okIdentifiers {
+			continue
+		}
+		for _, identifier := range identifiers {
+			if identifier == "" {
+				continue
+			}
+			if _, exists := seen[identifier]; exists {
+				continue
+			}
+			seen[identifier] = struct{}{}
 			out = append(out, identifier)
 		}
 	}
@@ -150,37 +209,212 @@ func (h *Host) HasAuthProvider(provider string) bool {
 	return h.authProviderRecord(provider) != nil
 }
 
-func (h *Host) authProviderRecord(provider string) *capabilityRecord {
-	provider = normalizeProviderID(provider)
-	if h == nil || provider == "" {
-		return nil
+// SameAuthProvider reports whether providerA and providerB belong to the same active plugin auth provider.
+func (h *Host) SameAuthProvider(providerA, providerB string) bool {
+	providerA = normalizeProviderID(providerA)
+	providerB = normalizeProviderID(providerB)
+	if h == nil || providerA == "" || providerB == "" {
+		return false
+	}
+	if providerA == providerB {
+		return true
 	}
 	for _, record := range h.activeRecords() {
-		authProvider := record.plugin.Capabilities.AuthProvider
-		if authProvider == nil || h.isPluginFused(record.id) {
+		if !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
 			continue
 		}
-		identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider)
-		if okIdentifier && identifier == provider {
-			copyRecord := record
-			return &copyRecord
+		_, okA := h.recordOwnsCredentialProvider(record, providerA)
+		_, okB := h.recordOwnsCredentialProvider(record, providerB)
+		if okA && okB {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
-func (h *Host) callAuthProviderIdentifier(pluginID string, provider pluginapi.AuthProvider) (identifier string, ok bool) {
+func (h *Host) authProviderRecord(provider string) *capabilityRecord {
+	record, _ := h.authProviderEntry(provider)
+	return record
+}
+
+func (h *Host) authProviderEntry(provider string) (*capabilityRecord, pluginapi.AuthProvider) {
+	provider = normalizeProviderID(provider)
+	if h == nil || provider == "" {
+		return nil, nil
+	}
+	records := h.activeRecords()
+	for _, record := range records {
+		authProv, _, okMatch := h.recordAuthProviderForTarget(record, provider)
+		if okMatch && authProv != nil {
+			copyRecord := record
+			return &copyRecord, authProv
+		}
+	}
+	for _, record := range records {
+		authProv, okOwn := h.recordOwnsCredentialProvider(record, provider)
+		if okOwn && authProv != nil {
+			copyRecord := record
+			return &copyRecord, authProv
+		}
+	}
+	return nil, nil
+}
+
+func (h *Host) authProviderCredentialEntry(provider string) (*capabilityRecord, pluginapi.AuthProvider) {
+	return h.authProviderEntry(provider)
+}
+
+func (h *Host) recordOwnsCredentialProvider(record capabilityRecord, provider string) (pluginapi.AuthProvider, bool) {
+	provider = normalizeProviderID(provider)
+	if h == nil || provider == "" || !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
+		return nil, false
+	}
+	if authProv, _, okMatch := h.recordAuthProviderForTarget(record, provider); okMatch && authProv != nil {
+		return authProv, true
+	}
+	if portalID, okRecorded := h.recordedCredentialProviderPortal(record.id, provider); okRecorded {
+		if portalID != "" {
+			if authProv, _, okPortal := h.recordAuthProviderForTarget(record, portalID); okPortal && authProv != nil {
+				return authProv, true
+			}
+		}
+		authProv, _, okPrimary := h.recordAuthProviderForTarget(record, "")
+		return authProv, okPrimary && authProv != nil
+	}
+	matched := false
+	for _, candidate := range h.modelProvidersForPlugin(record.id) {
+		if normalizeProviderID(candidate) == provider {
+			matched = true
+			break
+		}
+	}
+	if !matched && record.plugin.Capabilities.Executor != nil {
+		if candidate, okExec := h.executorProvider(record, record.plugin.Capabilities.Executor); okExec && candidate == provider {
+			matched = true
+		}
+	}
+	if matched {
+		authProv, _, okPrimary := h.recordAuthProviderForTarget(record, "")
+		return authProv, okPrimary && authProv != nil
+	}
+	for _, prov := range recordAuthProviders(record) {
+		credIDs, okCredIDs := h.callAuthProviderCredentialProviders(record.id, prov)
+		if !okCredIDs {
+			return nil, false
+		}
+		for _, credID := range credIDs {
+			if credID == provider {
+				return prov, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func (h *Host) recordAuthProviderForTarget(record capabilityRecord, target string) (pluginapi.AuthProvider, string, bool) {
+	if h == nil || !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
+		return nil, "", false
+	}
+	providers := recordAuthProviders(record)
+	if len(providers) == 0 {
+		return nil, "", false
+	}
+	target = normalizeProviderID(target)
+	if target == "" {
+		identifiers, okIDs := h.callAuthProviderIdentifiers(record.id, providers[0])
+		if !okIDs {
+			return nil, "", false
+		}
+		primary := ""
+		if len(identifiers) > 0 {
+			primary = identifiers[0]
+		}
+		return providers[0], primary, true
+	}
+	for _, prov := range providers {
+		identifiers, okIDs := h.callAuthProviderIdentifiers(record.id, prov)
+		if !okIDs {
+			return nil, "", false
+		}
+		for _, identifier := range identifiers {
+			if identifier == target {
+				return prov, identifier, true
+			}
+		}
+	}
+	return nil, "", false
+}
+
+func (h *Host) callRecordAuthProviderIdentifiers(record capabilityRecord) ([]string, bool) {
+	if h == nil || !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
+		return nil, false
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, prov := range recordAuthProviders(record) {
+		identifiers, okIDs := h.callAuthProviderIdentifiers(record.id, prov)
+		if !okIDs {
+			return nil, false
+		}
+		for _, identifier := range identifiers {
+			if identifier == "" {
+				continue
+			}
+			if _, exists := seen[identifier]; exists {
+				continue
+			}
+			seen[identifier] = struct{}{}
+			out = append(out, identifier)
+		}
+	}
+	return out, true
+}
+
+func (h *Host) callAuthProviderIdentifiers(pluginID string, provider pluginapi.AuthProvider) (identifiers []string, ok bool) {
 	if h == nil || provider == nil || h.isPluginFused(pluginID) {
-		return "", false
+		return nil, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(pluginID, "AuthProvider.Identifier", recovered)
-			identifier = ""
+			identifiers = nil
 			ok = false
 		}
 	}()
-	return normalizeProviderID(provider.Identifier()), true
+	raw := []string{provider.Identifier()}
+	if multi, okMulti := provider.(interface{ Identifiers() []string }); okMulti && multi != nil {
+		raw = append(raw, multi.Identifiers()...)
+	}
+	return normalizeAuthProviderIdentifiers(raw...), true
+}
+
+func (h *Host) callAuthProviderCredentialProviders(pluginID string, provider pluginapi.AuthProvider) (providers []string, ok bool) {
+	if h == nil || provider == nil || h.isPluginFused(pluginID) {
+		return nil, false
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(pluginID, "AuthProvider.Identifier", recovered)
+			providers = nil
+			ok = false
+		}
+	}()
+	cov, okCov := provider.(interface{ CredentialProviders() []string })
+	if !okCov || cov == nil {
+		return nil, true
+	}
+	return normalizeAuthProviderIdentifiers(cov.CredentialProviders()...), true
+}
+
+func (h *Host) callAuthProviderIdentifier(pluginID string, provider pluginapi.AuthProvider) (identifier string, ok bool) {
+	identifiers, ok := h.callAuthProviderIdentifiers(pluginID, provider)
+	if !ok {
+		return "", false
+	}
+	if len(identifiers) == 0 {
+		return "", true
+	}
+	return identifiers[0], true
 }
 
 func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
@@ -191,19 +425,44 @@ func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*
 	return auths[0], true, nil
 }
 
+func extractRawJSONOAuthProviderHint(raw []byte) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil || payload == nil {
+		return ""
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		if value, ok := payload[key].(string); ok {
+			if normalized := normalizeProviderID(value); normalized != "" {
+				return normalized
+			}
+		}
+	}
+	return ""
+}
+
 func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
 	if h == nil {
 		return nil, false, nil
 	}
 	if strings.TrimSpace(req.Provider) != "" {
-		record := h.authProviderRecord(req.Provider)
+		if hint := extractRawJSONOAuthProviderHint(req.RawJSON); hint != "" {
+			if hintRecord, hintProv := h.authProviderEntry(hint); hintRecord != nil && hintProv != nil {
+				if owner, _ := h.authProviderEntry(req.Provider); owner == nil || owner.id == hintRecord.id {
+					return h.callSingleProviderParseAuths(ctx, *hintRecord, hintProv, req)
+				}
+			}
+		}
+		record, _ := h.authProviderCredentialEntry(req.Provider)
 		if record == nil {
 			return nil, false, nil
 		}
 		return h.callParseAuths(ctx, *record, req)
 	}
 	for _, record := range h.activeRecords() {
-		if record.plugin.Capabilities.AuthProvider == nil || h.isPluginFused(record.id) {
+		if !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
 			continue
 		}
 		auths, handled, errParse := h.callParseAuths(ctx, record, req)
@@ -223,9 +482,42 @@ func (h *Host) callParseAuth(ctx context.Context, record capabilityRecord, req p
 }
 
 func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req pluginapi.AuthParseRequest) (auths []*coreauth.Auth, handled bool, err error) {
-	provider := record.plugin.Capabilities.AuthProvider
+	if h == nil || !hasRecordAuthProvider(record) || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return nil, false, nil
+	}
+	var candidates []pluginapi.AuthProvider
+	if hint := extractRawJSONOAuthProviderHint(req.RawJSON); hint != "" {
+		if matched, _, okMatch := h.recordAuthProviderForTarget(record, hint); okMatch && matched != nil {
+			candidates = []pluginapi.AuthProvider{matched}
+		}
+	}
+	if len(candidates) == 0 {
+		if target := normalizeProviderID(req.Provider); target != "" {
+			if matched, _, okMatch := h.recordAuthProviderForTarget(record, target); okMatch && matched != nil {
+				candidates = []pluginapi.AuthProvider{matched}
+			} else if owned, okOwn := h.recordOwnsCredentialProvider(record, target); okOwn && owned != nil {
+				candidates = []pluginapi.AuthProvider{owned}
+			}
+		} else {
+			candidates = recordAuthProviders(record)
+		}
+	}
+	for _, provider := range candidates {
+		auths, handled, err = h.callSingleProviderParseAuths(ctx, record, provider, req)
+		if err != nil || handled {
+			return auths, handled, err
+		}
+	}
+	return nil, false, nil
+}
+
+func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabilityRecord, provider pluginapi.AuthProvider, req pluginapi.AuthParseRequest) (auths []*coreauth.Auth, handled bool, err error) {
 	if h == nil || provider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return nil, false, nil
+	}
+	primaryIdentifier, okID := h.callAuthProviderIdentifier(record.id, provider)
+	if !okID {
+		return nil, false, fmt.Errorf("auth provider identifier panic")
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -235,12 +527,13 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 			err = fmt.Errorf("auth provider panic: %v", recovered)
 		}
 	}()
+	portalIdentifier := h.resolveParsePortalIdentifier(record.id, provider, req.Provider, req.RawJSON, primaryIdentifier)
 	if req.Host.AuthDir == "" {
 		req.Host = h.hostConfigSummary()
 	}
 	req.Provider = normalizeProviderID(req.Provider)
 	if req.Provider == "" {
-		req.Provider = normalizeProviderID(provider.Identifier())
+		req.Provider = portalIdentifier
 	}
 	req.RawJSON = bytes.Clone(req.RawJSON)
 	resp, errParse := provider.ParseAuth(ctx, req)
@@ -257,18 +550,81 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 			data.Provider = req.Provider
 		}
 		if strings.TrimSpace(data.Provider) == "" {
-			data.Provider = normalizeProviderID(provider.Identifier())
+			data.Provider = primaryIdentifier
 		}
 		if normalizeProviderID(data.Provider) == "" {
 			return nil, true, fmt.Errorf("auth provider %s returned auth without provider", record.id)
 		}
+		effectivePortal := firstNonEmpty(authDataPortalHint(&data), portalIdentifier)
+		stampAuthDataOAuthProvider(&data, effectivePortal)
 		parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
 		if parsed == nil {
 			return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
 		}
+		h.recordCredentialProvider(record.id, req.Provider, effectivePortal)
+		h.recordCredentialProvider(record.id, data.Provider, effectivePortal)
 		auths = append(auths, parsed)
 	}
 	return auths, true, nil
+}
+
+func (h *Host) resolveParsePortalIdentifier(pluginID string, provider pluginapi.AuthProvider, reqProvider string, rawJSON []byte, fallback string) string {
+	if identifiers, ok := h.callAuthProviderIdentifiers(pluginID, provider); ok {
+		matches := func(candidate string) bool {
+			candidate = normalizeProviderID(candidate)
+			if candidate == "" {
+				return false
+			}
+			for _, id := range identifiers {
+				if id == candidate {
+					return true
+				}
+			}
+			return false
+		}
+		if hint := extractRawJSONOAuthProviderHint(rawJSON); matches(hint) {
+			return normalizeProviderID(hint)
+		}
+		if matches(reqProvider) {
+			return normalizeProviderID(reqProvider)
+		}
+	}
+	return normalizeProviderID(fallback)
+}
+
+func (h *Host) recordCredentialProvider(pluginID, provider, portalIdentifier string) {
+	pluginID = strings.TrimSpace(pluginID)
+	provider = normalizeProviderID(provider)
+	portalIdentifier = normalizeProviderID(portalIdentifier)
+	if h == nil || pluginID == "" || provider == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.authCredentialProviders == nil {
+		h.authCredentialProviders = make(map[string]map[string]string)
+	}
+	set := h.authCredentialProviders[pluginID]
+	if set == nil {
+		set = make(map[string]string)
+		h.authCredentialProviders[pluginID] = set
+	}
+	if _, exists := set[provider]; !exists || set[provider] == "" {
+		set[provider] = portalIdentifier
+	}
+}
+
+func (h *Host) recordedCredentialProviderPortal(pluginID, provider string) (string, bool) {
+	pluginID = strings.TrimSpace(pluginID)
+	provider = normalizeProviderID(provider)
+	if h == nil || pluginID == "" || provider == "" {
+		return "", false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	set := h.authCredentialProviders[pluginID]
+	portal, ok := set[provider]
+	return portal, ok
 }
 
 func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.AuthData {
@@ -313,8 +669,11 @@ func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string, 
 }
 
 func (h *Host) callStartLogin(ctx context.Context, record capabilityRecord, provider string, baseURL string, metadata map[string]any) (resp pluginapi.AuthLoginStartResponse, handled bool, err error) {
-	authProvider := record.plugin.Capabilities.AuthProvider
-	if h == nil || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+	authProvider, _, okProvider := h.recordAuthProviderForTarget(record, provider)
+	if !okProvider || authProvider == nil {
+		authProvider, okProvider = h.recordOwnsCredentialProvider(record, provider)
+	}
+	if h == nil || !okProvider || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.AuthLoginStartResponse{}, false, nil
 	}
 	defer func() {
@@ -357,9 +716,15 @@ func (h *Host) PollLogin(ctx context.Context, provider, state string, metadata .
 }
 
 func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provider, state string, metadata map[string]any) (resp pluginapi.AuthLoginPollResponse, handled bool, err error) {
-	authProvider := record.plugin.Capabilities.AuthProvider
-	if h == nil || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+	authProvider, matchedPortal, okProvider := h.recordAuthProviderForTarget(record, provider)
+	if !okProvider || authProvider == nil {
+		authProvider, okProvider = h.recordOwnsCredentialProvider(record, provider)
+	}
+	if h == nil || !okProvider || authProvider == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
 		return pluginapi.AuthLoginPollResponse{}, false, nil
+	}
+	if matchedPortal == "" {
+		matchedPortal, _ = h.callAuthProviderIdentifier(record.id, authProvider)
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -385,15 +750,127 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 	if errPoll != nil {
 		return pluginapi.AuthLoginPollResponse{}, true, errPoll
 	}
+	if resp.Status == pluginapi.AuthLoginStatusSuccess {
+		for index := range resp.Auths {
+			stampAuthDataOAuthProvider(&resp.Auths[index], matchedPortal)
+			h.recordCredentialProvider(record.id, resp.Auths[index].Provider, matchedPortal)
+		}
+		stampAuthDataOAuthProvider(&resp.Auth, matchedPortal)
+		h.recordCredentialProvider(record.id, resp.Auth.Provider, matchedPortal)
+	}
 	return resp, true, nil
+}
+
+func authDataPortalHint(data *pluginapi.AuthData) string {
+	if data == nil {
+		return ""
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		if data.Attributes != nil {
+			if v := normalizeProviderID(data.Attributes[key]); v != "" {
+				return v
+			}
+		}
+		if data.Metadata != nil {
+			if raw, ok := data.Metadata[key].(string); ok {
+				if v := normalizeProviderID(raw); v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func stampAuthDataOAuthProvider(data *pluginapi.AuthData, portalIdentifier string) {
+	if data == nil {
+		return
+	}
+	portalIdentifier = firstNonEmpty(authDataPortalHint(data), normalizeProviderID(portalIdentifier))
+	if portalIdentifier == "" {
+		return
+	}
+	credProvider := normalizeProviderID(data.Provider)
+	if credProvider == "" || credProvider == portalIdentifier {
+		return
+	}
+	if data.Metadata == nil {
+		data.Metadata = make(map[string]any)
+	}
+	if _, exists := data.Metadata["oauth_provider"]; !exists {
+		data.Metadata["oauth_provider"] = portalIdentifier
+	}
+	if data.Attributes == nil {
+		data.Attributes = make(map[string]string)
+	}
+	if strings.TrimSpace(data.Attributes["oauth_provider"]) == "" {
+		data.Attributes["oauth_provider"] = portalIdentifier
+	}
+}
+
+func authPortalHints(auth *coreauth.Auth) []string {
+	if auth == nil {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	add := func(v string) {
+		v = normalizeProviderID(v)
+		if v == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == v {
+				return
+			}
+		}
+		out = append(out, v)
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		if auth.Attributes != nil {
+			add(auth.Attributes[key])
+		}
+		if auth.Metadata != nil {
+			if raw, ok := auth.Metadata[key].(string); ok {
+				add(raw)
+			}
+		}
+	}
+	return out
+}
+
+func (h *Host) authProviderCredentialEntryForAuth(auth *coreauth.Auth) (*capabilityRecord, pluginapi.AuthProvider) {
+	if h == nil || auth == nil {
+		return nil, nil
+	}
+	credProv := normalizeProviderID(authProvider(auth))
+	for _, hint := range authPortalHints(auth) {
+		for _, record := range h.activeRecords() {
+			portalAuthProv, _, okPortal := h.recordAuthProviderForTarget(record, hint)
+			if !okPortal || portalAuthProv == nil {
+				continue
+			}
+			if credProv != "" && credProv != hint {
+				if explicitOwner, _ := h.authProviderEntry(credProv); explicitOwner != nil && explicitOwner.id != record.id {
+					continue
+				}
+				h.recordCredentialProvider(record.id, credProv, hint)
+			}
+			copyRecord := record
+			return &copyRecord, portalAuthProv
+		}
+	}
+	if credProv != "" {
+		return h.authProviderCredentialEntry(credProv)
+	}
+	return nil, nil
 }
 
 func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, handled bool, err error) {
 	if h == nil || auth == nil {
 		return nil, false, nil
 	}
-	record := h.authProviderRecord(authProvider(auth))
-	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
+	record, authProv := h.authProviderCredentialEntryForAuth(auth)
+	if record == nil || authProv == nil {
 		return nil, false, nil
 	}
 	if !h.recordCurrent(*record) {
@@ -408,7 +885,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		}
 	}()
 
-	pluginResp, errRefresh := record.plugin.Capabilities.AuthProvider.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{
+	pluginResp, errRefresh := authProv.RefreshAuth(ctx, pluginapi.AuthRefreshRequest{
 		AuthID:       authID(auth),
 		AuthProvider: authProvider(auth),
 		StorageJSON:  storageJSONFromAuth(auth),
@@ -455,6 +932,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		}
 		data.Attributes = attributes
 	}
+	preserveAuthOAuthProviderMetadata(&data, auth)
 	preserveFileAuthPriority(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
@@ -476,6 +954,24 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	next.CreatedAt = auth.CreatedAt
 	next.UpdatedAt = auth.UpdatedAt
 	return next, true, nil
+}
+
+func preserveAuthOAuthProviderMetadata(data *pluginapi.AuthData, auth *coreauth.Auth) {
+	if data == nil || auth == nil || len(auth.Metadata) == 0 {
+		return
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		raw, ok := auth.Metadata[key].(string)
+		if !ok || strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]any)
+		}
+		if _, exists := data.Metadata[key]; !exists {
+			data.Metadata[key] = raw
+		}
+	}
 }
 
 func preserveFileAuthPriority(data *pluginapi.AuthData, auth *coreauth.Auth) {

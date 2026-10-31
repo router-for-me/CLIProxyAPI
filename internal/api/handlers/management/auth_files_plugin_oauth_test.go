@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -262,13 +263,18 @@ func (s *pluginLoginRollbackStore) Delete(_ context.Context, id string) error {
 func (s *pluginLoginRollbackStore) SetBaseDir(string) {}
 
 type testAuthProvider struct {
-	identifier string
-	startLogin func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
-	pollLogin  func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
+	identifier  string
+	identifiers []string
+	startLogin  func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
+	pollLogin   func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
 }
 
 func (p *testAuthProvider) Identifier() string {
 	return p.identifier
+}
+
+func (p *testAuthProvider) Identifiers() []string {
+	return append([]string(nil), p.identifiers...)
 }
 
 func (p *testAuthProvider) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
@@ -407,5 +413,593 @@ func TestV8PluginOAuthUsesIndependentCallback(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Fatalf("plugin login calls=%d, want 2", callCount)
+	}
+}
+
+func TestV8PluginMultiPortalOAuthListLoginPollAndRelogin(t *testing.T) {
+	authDir := t.TempDir()
+	pluginsDir := writeManagementPluginFile(t, "omc-zcode-oauth")
+	enabled := true
+	host := pluginhost.New()
+	callCount := 0
+	host.RegisterPluginForTest("omc-zcode-oauth", pluginapi.Plugin{
+		Metadata: pluginapi.Metadata{
+			Name:             "OMC ZCode OAuth",
+			Version:          "1.0.0",
+			Author:           "test",
+			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+		},
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: &testAuthProvider{
+				identifier:  "zcode-zai",
+				identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+				startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+					callCount++
+					state := fmt.Sprintf("state-zcode-%s-%d", req.Provider, callCount)
+					t.Cleanup(func() { CancelOAuthSession(state) })
+					loginURL := "https://chat.z.ai/api/oauth/authorize"
+					if req.Provider == "zcode-bigmodel" {
+						loginURL = "https://bigmodel.cn/login?appId=zcode"
+					}
+					return pluginapi.AuthLoginStartResponse{
+						Provider:  req.Provider,
+						URL:       loginURL,
+						State:     state,
+						ExpiresAt: time.Now().Add(time.Hour),
+					}, nil
+				},
+				pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+					return pluginapi.AuthLoginPollResponse{
+						Status: pluginapi.AuthLoginStatusSuccess,
+						Auth: pluginapi.AuthData{
+							Provider:    "zcode",
+							ID:          "zcode-account.json",
+							FileName:    "zcode-account.json",
+							Label:       "ZCode Account (" + req.Provider + ")",
+							StorageJSON: []byte(`{"type":"zcode","access_token":"tok"}`),
+							Metadata:    map[string]any{"type": "zcode", "portal": req.Provider, "email": "user@example.com"},
+						},
+					}, nil
+				},
+			},
+		},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		Port:    8317,
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"omc-zcode-oauth": {Enabled: &enabled},
+			},
+		},
+	}, manager)
+	h.SetPluginHost(host)
+
+	router := gin.New()
+	router.GET("/v8/management/plugins", h.ListPlugins)
+	router.GET("/v8/management/oauth/auth-url", h.StartOAuthV8)
+	router.POST("/v8/management/oauth/auth-url", h.StartOAuthV8)
+	router.GET("/v8/management/get-auth-status", h.GetAuthStatus)
+
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, httptest.NewRequest(http.MethodGet, "/v8/management/plugins", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /v8/management/plugins status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listBody struct {
+		Plugins []struct {
+			ID             string   `json:"id"`
+			SupportsOAuth  bool     `json:"supports_oauth"`
+			OAuthProvider  string   `json:"oauth_provider"`
+			OAuthProviders []string `json:"oauth_providers"`
+		} `json:"plugins"`
+	}
+	if errUnmarshal := json.Unmarshal(listRec.Body.Bytes(), &listBody); errUnmarshal != nil {
+		t.Fatalf("decode plugins list: %v", errUnmarshal)
+	}
+	if len(listBody.Plugins) != 1 || !listBody.Plugins[0].SupportsOAuth || listBody.Plugins[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("plugins list = %#v, want SupportsOAuth=true OAuthProvider=zcode-zai", listBody.Plugins)
+	}
+	if !reflect.DeepEqual(listBody.Plugins[0].OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
+		t.Fatalf("oauth_providers = %#v, want [zcode-zai zcode-bigmodel]", listBody.Plugins[0].OAuthProviders)
+	}
+
+	// Start and complete login via second portal (zcode-bigmodel)
+	startRec := httptest.NewRecorder()
+	router.ServeHTTP(startRec, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=zcode-bigmodel", nil))
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start zcode-bigmodel status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startPayload struct {
+		URL   string `json:"url"`
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(startRec.Body.Bytes(), &startPayload); errUnmarshal != nil {
+		t.Fatalf("decode start payload: %v", errUnmarshal)
+	}
+	if startPayload.URL != "https://bigmodel.cn/login?appId=zcode" {
+		t.Fatalf("start URL = %q, want bigmodel portal URL", startPayload.URL)
+	}
+
+	pollRec := httptest.NewRecorder()
+	router.ServeHTTP(pollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+startPayload.State, nil))
+	if pollRec.Code != http.StatusOK || !strings.Contains(pollRec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("poll zcode-bigmodel status=%d body=%s", pollRec.Code, pollRec.Body.String())
+	}
+
+	// Simulate a cold-started host (no prior in-memory PollLogin state) with the saved "zcode" credential
+	pollEmail := "user@example.com"
+	coldHost := pluginhost.New()
+	coldHost.RegisterPluginForTest("omc-zcode-oauth", pluginapi.Plugin{
+		Metadata: pluginapi.Metadata{
+			Name:             "OMC ZCode OAuth",
+			Version:          "1.0.0",
+			Author:           "test",
+			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+		},
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: &testAuthProvider{
+				identifier:  "zcode-zai",
+				identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+				startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+					callCount++
+					state := fmt.Sprintf("state-zcode-cold-%s-%d", req.Provider, callCount)
+					t.Cleanup(func() { CancelOAuthSession(state) })
+					return pluginapi.AuthLoginStartResponse{
+						Provider:  req.Provider,
+						URL:       "https://portal.example/" + req.Provider,
+						State:     state,
+						ExpiresAt: time.Now().Add(time.Hour),
+					}, nil
+				},
+				pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+					return pluginapi.AuthLoginPollResponse{
+						Status: pluginapi.AuthLoginStatusSuccess,
+						Auth: pluginapi.AuthData{
+							Provider:    "zcode",
+							ID:          "zcode-zai-different-file.json",
+							FileName:    "zcode-zai-different-file.json",
+							Label:       "ZCode Relogin (" + req.Provider + ")",
+							StorageJSON: []byte(`{"type":"zcode","access_token":"tok-relogin"}`),
+							Metadata:    map[string]any{"type": "zcode", "email": pollEmail, "access_token": "tok-relogin"},
+							Attributes:  map[string]string{"path": filepath.Join(authDir, "zcode-zai-different-file.json")},
+						},
+					}, nil
+				},
+			},
+		},
+	})
+	h.SetPluginHost(coldHost)
+
+	_, _ = manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "zcode-account.json",
+		FileName: "zcode-account.json",
+		Provider: "zcode",
+		Metadata: map[string]any{"email": "user@example.com", "oauth_provider": "zcode-bigmodel"},
+	})
+	// 1. Re-login specifying an explicit portal ("zcode-zai") against canonical credential provider ("zcode") on cold start
+	reloginRec := httptest.NewRecorder()
+	router.ServeHTTP(reloginRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"zcode-account.json"}`)))
+	if reloginRec.Code != http.StatusOK {
+		t.Fatalf("relogin via zcode-zai portal for zcode credential status=%d body=%s, want 200", reloginRec.Code, reloginRec.Body.String())
+	}
+	var reloginStart struct {
+		State        string `json:"state"`
+		TargetAuthID string `json:"target_auth_id"`
+	}
+	if errUnmarshal := json.Unmarshal(reloginRec.Body.Bytes(), &reloginStart); errUnmarshal != nil {
+		t.Fatalf("decode relogin start payload: %v", errUnmarshal)
+	}
+	if reloginStart.TargetAuthID != "zcode-account.json" {
+		t.Fatalf("relogin target_auth_id = %q, want zcode-account.json", reloginStart.TargetAuthID)
+	}
+	reloginPollRec := httptest.NewRecorder()
+	router.ServeHTTP(reloginPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+reloginStart.State, nil))
+	if reloginPollRec.Code != http.StatusOK || !strings.Contains(reloginPollRec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("poll relogin status=%d body=%s, want ok", reloginPollRec.Code, reloginPollRec.Body.String())
+	}
+	if _, errStat := os.Stat(filepath.Join(authDir, "zcode-zai-different-file.json")); !os.IsNotExist(errStat) {
+		t.Fatalf("expected relogin to replace target file instead of writing zcode-zai-different-file.json, stat err=%v", errStat)
+	}
+	rawSaved, errRead := os.ReadFile(filepath.Join(authDir, "zcode-account.json"))
+	if errRead != nil {
+		t.Fatalf("read replaced target file: %v", errRead)
+	}
+	if !strings.Contains(string(rawSaved), `"oauth_provider":"zcode-zai"`) || !strings.Contains(string(rawSaved), `"access_token":"tok-relogin"`) {
+		t.Fatalf("replaced target file content = %s, want oauth_provider=zcode-zai and access_token=tok-relogin", string(rawSaved))
+	}
+	if strings.Contains(string(rawSaved), `"portal":"zcode-bigmodel"`) {
+		t.Fatalf("replaced target file retained stale portal metadata: %s", string(rawSaved))
+	}
+
+	// 2. Re-login omitting "provider" (only passing credential "name") on cold start, and verify mismatched email is rejected
+	pollEmail = "wrong-user@example.com"
+	reloginNoProviderRec := httptest.NewRecorder()
+	router.ServeHTTP(reloginNoProviderRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"name":"zcode-account.json"}`)))
+	if reloginNoProviderRec.Code != http.StatusOK {
+		t.Fatalf("relogin omitting provider for zcode credential status=%d body=%s, want 200", reloginNoProviderRec.Code, reloginNoProviderRec.Body.String())
+	}
+	var reloginNoProvStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(reloginNoProviderRec.Body.Bytes(), &reloginNoProvStart); errUnmarshal != nil {
+		t.Fatalf("decode reloginNoProvStart: %v", errUnmarshal)
+	}
+	mismatchPollRec := httptest.NewRecorder()
+	router.ServeHTTP(mismatchPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+reloginNoProvStart.State, nil))
+	if mismatchPollRec.Code != http.StatusOK || !strings.Contains(mismatchPollRec.Body.String(), "Authenticated account does not match target credential") {
+		t.Fatalf("mismatch poll status=%d body=%s, want mismatch error", mismatchPollRec.Code, mismatchPollRec.Body.String())
+	}
+
+	// 3. Target credential without email/account_id must reject blind overwrite when filename differs
+	_, _ = manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "zcode-anonymous.json",
+		FileName: "zcode-anonymous.json",
+		Provider: "zcode",
+		Metadata: map[string]any{"oauth_provider": "zcode-bigmodel"},
+	})
+	pollEmail = "user@example.com"
+	anonStartRec := httptest.NewRecorder()
+	router.ServeHTTP(anonStartRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"name":"zcode-anonymous.json"}`)))
+	if anonStartRec.Code != http.StatusOK {
+		t.Fatalf("anon relogin start status=%d body=%s, want 200", anonStartRec.Code, anonStartRec.Body.String())
+	}
+	var anonStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(anonStartRec.Body.Bytes(), &anonStart); errUnmarshal != nil {
+		t.Fatalf("decode anonStart: %v", errUnmarshal)
+	}
+	anonPollRec := httptest.NewRecorder()
+	router.ServeHTTP(anonPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+anonStart.State, nil))
+	if anonPollRec.Code != http.StatusOK || !strings.Contains(anonPollRec.Body.String(), "Authenticated account does not match target credential") {
+		t.Fatalf("anon poll status=%d body=%s, want mismatch error when target has no identity and filename differs", anonPollRec.Code, anonPollRec.Body.String())
+	}
+}
+
+func TestV8PluginReloginPreservesSubdirTargetAndRollsBackOverwriteSafely(t *testing.T) {
+	authDir := t.TempDir()
+	rootFile := filepath.Join(authDir, "account.json")
+	teamDir := filepath.Join(authDir, "team")
+	if errMkdir := os.MkdirAll(teamDir, 0o700); errMkdir != nil {
+		t.Fatalf("mkdir team: %v", errMkdir)
+	}
+	teamFile := filepath.Join(teamDir, "account.json")
+	rootOriginal := `{"type":"zcode","email":"root@example.com","access_token":"root-token"}`
+	teamOriginal := `{"type":"zcode","email":"user@example.com","oauth_provider":"zcode-bigmodel","access_token":"old-team-token"}`
+	if errWrite := os.WriteFile(rootFile, []byte(rootOriginal), 0o600); errWrite != nil {
+		t.Fatalf("write root file: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(teamFile, []byte(teamOriginal), 0o600); errWrite != nil {
+		t.Fatalf("write team file: %v", errWrite)
+	}
+
+	callCount := 0
+	currentToken := "team-relogin-token"
+	host := pluginhost.New()
+	host.RegisterPluginForTest("omc-zcode-oauth", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: &testAuthProvider{
+				identifier:  "zcode-zai",
+				identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+				startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+					callCount++
+					state := fmt.Sprintf("state-subdir-%d", callCount)
+					t.Cleanup(func() { CancelOAuthSession(state) })
+					return pluginapi.AuthLoginStartResponse{
+						Provider:  req.Provider,
+						URL:       "https://portal.example/" + req.Provider,
+						State:     state,
+						ExpiresAt: time.Now().Add(time.Hour),
+					}, nil
+				},
+				pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+					return pluginapi.AuthLoginPollResponse{
+						Status: pluginapi.AuthLoginStatusSuccess,
+						Auth: pluginapi.AuthData{
+							Provider:    "zcode",
+							ID:          "plugin-generated.json",
+							FileName:    "plugin-generated.json",
+							StorageJSON: []byte(fmt.Sprintf(`{"type":"zcode","access_token":%q}`, currentToken)),
+							Metadata:    map[string]any{"type": "zcode", "email": "user@example.com", "access_token": currentToken},
+							Attributes:  map[string]string{"path": filepath.Join(authDir, "plugin-generated.json")},
+						},
+					}, nil
+				},
+			},
+		},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	_, _ = manager.Register(context.Background(), &coreauth.Auth{
+		ID:         "team/account.json",
+		FileName:   "account.json",
+		Provider:   "zcode",
+		Metadata:   map[string]any{"email": "user@example.com", "oauth_provider": "zcode-bigmodel", "access_token": "old-team-token"},
+		Attributes: map[string]string{"path": teamFile},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir, Port: 8317}, manager)
+	h.SetPluginHost(host)
+
+	router := gin.New()
+	router.POST("/v8/management/oauth/auth-url", h.StartOAuthV8)
+	router.GET("/v8/management/get-auth-status", h.GetAuthStatus)
+
+	// 1. Re-login targeting subdirectory credential "team/account.json" must update team/account.json, leave root account.json untouched,
+	// and pass persistedRecord.ID == "team/account.json" (not "account.json") to postAuthPersistHook.
+	var persistedIDs []string
+	h.postAuthPersistHook = func(_ context.Context, auth *coreauth.Auth) error {
+		if auth != nil {
+			persistedIDs = append(persistedIDs, auth.ID)
+		}
+		return nil
+	}
+	startRec := httptest.NewRecorder()
+	router.ServeHTTP(startRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"team/account.json"}`)))
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("start subdir relogin status=%d body=%s", startRec.Code, startRec.Body.String())
+	}
+	var startPayload struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(startRec.Body.Bytes(), &startPayload); errUnmarshal != nil {
+		t.Fatalf("decode start payload: %v", errUnmarshal)
+	}
+	pollRec := httptest.NewRecorder()
+	router.ServeHTTP(pollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+startPayload.State, nil))
+	if pollRec.Code != http.StatusOK || !strings.Contains(pollRec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("poll subdir relogin status=%d body=%s, want ok", pollRec.Code, pollRec.Body.String())
+	}
+	if !reflect.DeepEqual(persistedIDs, []string{"team/account.json"}) {
+		t.Fatalf("postAuthPersistHook received IDs = %#v, want [team/account.json]", persistedIDs)
+	}
+	rootBytes, errReadRoot := os.ReadFile(rootFile)
+	if errReadRoot != nil || string(rootBytes) != rootOriginal {
+		t.Fatalf("root account.json was modified: %q (err=%v), want %q", string(rootBytes), errReadRoot, rootOriginal)
+	}
+	teamBytes, errReadTeam := os.ReadFile(teamFile)
+	if errReadTeam != nil || !strings.Contains(string(teamBytes), `"access_token":"team-relogin-token"`) {
+		t.Fatalf("team/account.json content = %q (err=%v), want updated team-relogin-token", string(teamBytes), errReadTeam)
+	}
+
+	// 2. If postAuthPersistHook fails after overwriting team/account.json, rollback must restore the previous file and runtime auth instead of deleting them.
+	h.postAuthPersistHook = func(_ context.Context, _ *coreauth.Auth) error {
+		return fmt.Errorf("simulated post-persist failure")
+	}
+	currentToken = "broken-token"
+	failStartRec := httptest.NewRecorder()
+	router.ServeHTTP(failStartRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"team/account.json"}`)))
+	if failStartRec.Code != http.StatusOK {
+		t.Fatalf("failStartRec status=%d body=%s", failStartRec.Code, failStartRec.Body.String())
+	}
+	var failStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(failStartRec.Body.Bytes(), &failStart); errUnmarshal != nil {
+		t.Fatalf("decode failStart: %v", errUnmarshal)
+	}
+	failPollRec := httptest.NewRecorder()
+	router.ServeHTTP(failPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+failStart.State, nil))
+	if failPollRec.Code != http.StatusOK || !strings.Contains(failPollRec.Body.String(), "Failed to save authentication tokens") {
+		t.Fatalf("failPollRec status=%d body=%s, want save failure", failPollRec.Code, failPollRec.Body.String())
+	}
+	restoredBytes, errReadRestored := os.ReadFile(teamFile)
+	if errReadRestored != nil {
+		t.Fatalf("expected team/account.json to be preserved after failed overwrite, got err=%v", errReadRestored)
+	}
+	if !strings.Contains(string(restoredBytes), `"access_token":"team-relogin-token"`) || strings.Contains(string(restoredBytes), `"broken-token"`) {
+		t.Fatalf("restored team/account.json = %q, want previous team-relogin-token", string(restoredBytes))
+	}
+	if _, okAuth := manager.GetByID("team/account.json"); !okAuth {
+		t.Fatal("expected team/account.json to remain in runtime auth manager after failed overwrite")
+	}
+
+	// 3. If another session concurrently commits a newer credential before rollback runs, rollback must not clobber the newer file or runtime state.
+	concurrentWinnerJSON := `{"access_token":"concurrent-winner-token","disabled":false,"email":"user@example.com","oauth_provider":"zcode-zai","type":"zcode"}`
+	h.postAuthPersistHook = func(ctx context.Context, _ *coreauth.Auth) error {
+		if errWrite := os.WriteFile(teamFile, []byte(concurrentWinnerJSON), 0o600); errWrite != nil {
+			return errWrite
+		}
+		_, _ = manager.Update(ctx, &coreauth.Auth{
+			ID:         "team/account.json",
+			FileName:   "account.json",
+			Provider:   "zcode",
+			Metadata:   map[string]any{"email": "user@example.com", "oauth_provider": "zcode-zai", "access_token": "concurrent-winner-token"},
+			Attributes: map[string]string{"path": teamFile},
+		})
+		return fmt.Errorf("session A persist hook failed after concurrent session B succeeded")
+	}
+	currentToken = "session-a-stale-token"
+	raceStartRec := httptest.NewRecorder()
+	router.ServeHTTP(raceStartRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"team/account.json"}`)))
+	if raceStartRec.Code != http.StatusOK {
+		t.Fatalf("raceStartRec status=%d body=%s", raceStartRec.Code, raceStartRec.Body.String())
+	}
+	var raceStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(raceStartRec.Body.Bytes(), &raceStart); errUnmarshal != nil {
+		t.Fatalf("decode raceStart: %v", errUnmarshal)
+	}
+	racePollRec := httptest.NewRecorder()
+	router.ServeHTTP(racePollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+raceStart.State, nil))
+	if racePollRec.Code != http.StatusOK || !strings.Contains(racePollRec.Body.String(), "Failed to save authentication tokens") {
+		t.Fatalf("racePollRec status=%d body=%s, want save failure", racePollRec.Code, racePollRec.Body.String())
+	}
+	winnerBytes, errReadWinner := os.ReadFile(teamFile)
+	if errReadWinner != nil || !strings.Contains(string(winnerBytes), `"concurrent-winner-token"`) {
+		t.Fatalf("team/account.json after concurrent session = %q (err=%v), want concurrent-winner-token preserved", string(winnerBytes), errReadWinner)
+	}
+	if currentAuth, okAuth := manager.GetByID("team/account.json"); !okAuth || currentAuth == nil || currentAuth.Metadata["access_token"] != "concurrent-winner-token" {
+		t.Fatalf("runtime auth after concurrent session = %#v, want access_token=concurrent-winner-token", currentAuth)
+	}
+
+	// 4. When a plugin puts access_token only in StorageJSON (not Metadata) and a batch save fails on the second record,
+	// both disk and runtime auth for the first record must be restored to the previous state.
+	h.postAuthPersistHook = nil
+	batchRecords := []*coreauth.Auth{
+		host.AuthDataToCoreAuth(pluginapi.AuthData{
+			Provider:    "zcode",
+			ID:          "team/account.json",
+			FileName:    "account.json",
+			StorageJSON: []byte(`{"type":"zcode","email":"user@example.com","access_token":"storage-only-token"}`),
+			Metadata:    map[string]any{"type": "zcode", "email": "user@example.com", "oauth_provider": "zcode-zai"},
+			Attributes:  map[string]string{"path": teamFile},
+		}, teamFile, "account.json"),
+		{
+			ID:       "invalid-second-record",
+			Provider: "zcode",
+		},
+	}
+	if errBatch := h.savePluginLoginRecords(context.Background(), batchRecords); errBatch == nil {
+		t.Fatal("expected batch savePluginLoginRecords to fail on second record")
+	}
+	if currentAuth, okAuth := manager.GetByID("team/account.json"); !okAuth || currentAuth == nil || currentAuth.Metadata["access_token"] != "concurrent-winner-token" {
+		t.Fatalf("runtime auth after StorageJSON-only batch rollback = %#v, want access_token=concurrent-winner-token", currentAuth)
+	}
+
+	// 5. Targeted re-login succeeds when email is only present in StorageJSON (omitted from AuthData.Metadata).
+	records := []*coreauth.Auth{
+		host.AuthDataToCoreAuth(pluginapi.AuthData{
+			Provider:    "zcode",
+			ID:          "other-id.json",
+			FileName:    "other-id.json",
+			StorageJSON: []byte(`{"type":"zcode","email":"user@example.com","access_token":"storage-email-only"}`),
+			Metadata:    map[string]any{"type": "zcode"},
+		}, "", "other-id.json"),
+	}
+	if !applyPluginOAuthRecoveryTarget(oauthRecoveryTarget{
+		AuthID:   "team/account.json",
+		FileName: "account.json",
+		Path:     teamFile,
+		Provider: "zcode",
+		Email:    "user@example.com",
+	}, "zcode-zai", records) {
+		t.Fatal("applyPluginOAuthRecoveryTarget rejected matching email stored only in StorageJSON")
+	}
+
+	// 6. When the existing target credential itself only stores email in StorageJSON (omitted from Metadata),
+	// StartOAuthV8 must still populate target.Email from RawJSON so sibling-portal relogin with a different filename succeeds.
+	storageOnlyTarget := host.AuthDataToCoreAuth(pluginapi.AuthData{
+		Provider:    "zcode",
+		ID:          "storage-only-target.json",
+		FileName:    "storage-only-target.json",
+		StorageJSON: []byte(`{"type":"zcode","email":"user@example.com","oauth_provider":"zcode-bigmodel","access_token":"old-tok"}`),
+		Metadata:    map[string]any{"type": "zcode", "oauth_provider": "zcode-bigmodel"},
+	}, filepath.Join(authDir, "storage-only-target.json"), "storage-only-target.json")
+	_, _ = manager.Register(context.Background(), storageOnlyTarget)
+	currentToken = "storage-target-relogin-tok"
+	storageTargetStartRec := httptest.NewRecorder()
+	router.ServeHTTP(storageTargetStartRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"storage-only-target.json"}`)))
+	if storageTargetStartRec.Code != http.StatusOK {
+		t.Fatalf("storageTargetStartRec status=%d body=%s", storageTargetStartRec.Code, storageTargetStartRec.Body.String())
+	}
+	var storageTargetStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(storageTargetStartRec.Body.Bytes(), &storageTargetStart); errUnmarshal != nil {
+		t.Fatalf("decode storageTargetStart: %v", errUnmarshal)
+	}
+	storageTargetPollRec := httptest.NewRecorder()
+	router.ServeHTTP(storageTargetPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+storageTargetStart.State, nil))
+	if storageTargetPollRec.Code != http.StatusOK || !strings.Contains(storageTargetPollRec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("storageTargetPollRec status=%d body=%s, want ok", storageTargetPollRec.Code, storageTargetPollRec.Body.String())
+	}
+
+	// 7. When a newly created credential in a batch has record.ID != record.FileName and the second record fails,
+	// rollback must remove the runtime auth registered under the file-derived ID ("different-file-name.json").
+	mismatchIDRecords := []*coreauth.Auth{
+		host.AuthDataToCoreAuth(pluginapi.AuthData{
+			Provider:    "zcode",
+			ID:          "custom-logical-id",
+			FileName:    "different-file-name.json",
+			StorageJSON: []byte(`{"type":"zcode","email":"new@example.com","access_token":"temp-tok"}`),
+			Metadata:    map[string]any{"type": "zcode", "email": "new@example.com"},
+		}, "", "different-file-name.json"),
+		{
+			ID:       "invalid-second-record",
+			Provider: "zcode",
+		},
+	}
+	if errBatch := h.savePluginLoginRecords(context.Background(), mismatchIDRecords); errBatch == nil {
+		t.Fatal("expected mismatchIDRecords batch save to fail on second record")
+	}
+	if _, ok := manager.GetByID("different-file-name.json"); ok {
+		t.Fatal("expected different-file-name.json to be removed from runtime manager after batch rollback")
+	}
+	if _, ok := manager.GetByID("custom-logical-id"); ok {
+		t.Fatal("expected custom-logical-id to be absent from runtime manager after batch rollback")
+	}
+
+	// 8. When postAuthPersistHook is nil and an existing target credential has logical ID != FileName,
+	// relogin must update the existing logical ID in manager without creating a duplicate file-derived ID.
+	logicalTargetFile := filepath.Join(authDir, "custom-target-file.json")
+	if errWrite := os.WriteFile(logicalTargetFile, []byte(`{"type":"zcode","email":"user@example.com","oauth_provider":"zcode-bigmodel","access_token":"old-logical-tok"}`), 0o600); errWrite != nil {
+		t.Fatalf("write logicalTargetFile: %v", errWrite)
+	}
+	_, _ = manager.Register(context.Background(), &coreauth.Auth{
+		ID:         "custom-target-id",
+		FileName:   "custom-target-file.json",
+		Provider:   "zcode",
+		Metadata:   map[string]any{"email": "user@example.com", "oauth_provider": "zcode-bigmodel", "access_token": "old-logical-tok"},
+		Attributes: map[string]string{"path": logicalTargetFile},
+	})
+	currentToken = "updated-logical-tok"
+	logicalStartRec := httptest.NewRecorder()
+	router.ServeHTTP(logicalStartRec, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"zcode-zai","name":"custom-target-id"}`)))
+	if logicalStartRec.Code != http.StatusOK {
+		t.Fatalf("logicalStartRec status=%d body=%s", logicalStartRec.Code, logicalStartRec.Body.String())
+	}
+	var logicalStart struct {
+		State string `json:"state"`
+	}
+	if errUnmarshal := json.Unmarshal(logicalStartRec.Body.Bytes(), &logicalStart); errUnmarshal != nil {
+		t.Fatalf("decode logicalStart: %v", errUnmarshal)
+	}
+	logicalPollRec := httptest.NewRecorder()
+	router.ServeHTTP(logicalPollRec, httptest.NewRequest(http.MethodGet, "/v8/management/get-auth-status?state="+logicalStart.State, nil))
+	if logicalPollRec.Code != http.StatusOK || !strings.Contains(logicalPollRec.Body.String(), `"status":"ok"`) {
+		t.Fatalf("logicalPollRec status=%d body=%s, want ok", logicalPollRec.Code, logicalPollRec.Body.String())
+	}
+	if updatedLogical, ok := manager.GetByID("custom-target-id"); !ok || updatedLogical == nil || updatedLogical.Metadata["access_token"] != "updated-logical-tok" {
+		t.Fatalf("expected custom-target-id updated in manager, got %#v", updatedLogical)
+	}
+	if _, okDup := manager.GetByID("custom-target-file.json"); okDup {
+		t.Fatal("expected no duplicate file-derived ID custom-target-file.json in manager")
+	}
+
+	// 9. When an existing file-backed credential ("team/account.json") is overwritten by a batch record with a new logical ID
+	// ("new-logical-id-for-team") and the second record fails, rollback must remove "new-logical-id-for-team" and preserve exact disk bytes.
+	if errWrite := os.WriteFile(teamFile, []byte(`{"type":"zcode","email":"user@example.com","access_token":"newer-disk-token","custom_disk_only":"keep"}`), 0o600); errWrite != nil {
+		t.Fatalf("write teamFile: %v", errWrite)
+	}
+	overwriteWithNewID := []*coreauth.Auth{
+		host.AuthDataToCoreAuth(pluginapi.AuthData{
+			Provider:    "zcode",
+			ID:          "new-logical-id-for-team",
+			FileName:    "account.json",
+			StorageJSON: []byte(`{"type":"zcode","email":"user@example.com","access_token":"failed-batch-token"}`),
+			Metadata:    map[string]any{"type": "zcode", "email": "user@example.com"},
+			Attributes:  map[string]string{"path": teamFile},
+		}, teamFile, "account.json"),
+		{
+			ID:       "invalid-second-record",
+			Provider: "zcode",
+		},
+	}
+	if errBatch := h.savePluginLoginRecords(context.Background(), overwriteWithNewID); errBatch == nil {
+		t.Fatal("expected overwriteWithNewID batch save to fail on second record")
+	}
+	if _, okNewLogical := manager.GetByID("new-logical-id-for-team"); okNewLogical {
+		t.Fatal("expected new-logical-id-for-team to be removed from runtime manager after failed overwrite")
+	}
+	afterDiskBytes, errReadAfter := os.ReadFile(teamFile)
+	if errReadAfter != nil || !strings.Contains(string(afterDiskBytes), `"custom_disk_only":"keep"`) || !strings.Contains(string(afterDiskBytes), `"newer-disk-token"`) {
+		t.Fatalf("expected exact pre-save disk bytes preserved, got %q (err=%v)", string(afterDiskBytes), errReadAfter)
 	}
 }

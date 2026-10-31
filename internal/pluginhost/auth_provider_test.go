@@ -710,3 +710,364 @@ func TestRefreshAuth_MergesAttributesAndPreservesPath_Issue6119(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthProviderMultiPortalRegistrationAndRouting(t *testing.T) {
+	t.Run("multi_identifier_provider_with_shared_executor", func(t *testing.T) {
+		var startedProviders []string
+		var polledProviders []string
+		var refreshedProviders []string
+		host := newHostWithRecords(capabilityRecord{
+			id:       "omc-zcode-oauth",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier:  " ZCode-ZAI ",
+						identifiers: []string{" ZCode-ZAI ", "zcode-bigmodel", "zcode-zai"},
+						parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+							return pluginapi.AuthParseResponse{
+								Handled: true,
+								Auth: pluginapi.AuthData{
+									Provider: "zcode",
+									ID:       "zcode-auth-1",
+								},
+							}, nil
+						},
+						startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+							startedProviders = append(startedProviders, req.Provider)
+							return pluginapi.AuthLoginStartResponse{
+								Provider: req.Provider,
+								URL:      "https://portal.example/" + req.Provider,
+								State:    "state-" + req.Provider,
+							}, nil
+						},
+						pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+							polledProviders = append(polledProviders, req.Provider)
+							return pluginapi.AuthLoginPollResponse{
+								Status: pluginapi.AuthLoginStatusSuccess,
+								Auth: pluginapi.AuthData{
+									Provider: "zcode",
+									ID:       "zcode-auth-" + req.Provider,
+								},
+							}, nil
+						},
+						refreshAuth: func(_ context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+							refreshedProviders = append(refreshedProviders, req.AuthProvider)
+							return pluginapi.AuthRefreshResponse{
+								Auth: pluginapi.AuthData{
+									Provider: req.AuthProvider,
+									ID:       req.AuthID,
+									Metadata: map[string]any{"access_token": "refreshed"},
+								},
+							}, nil
+						},
+					},
+					Executor:           &fakeExecutor{identifier: "zcode"},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(_ context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+							return pluginapi.ModelResponse{
+								Provider: req.AuthProvider,
+								Models:   []pluginapi.ModelInfo{{ID: "glm-5"}},
+							}, nil
+						},
+					},
+				},
+			},
+		})
+
+		infos := host.RegisteredPlugins()
+		if len(infos) != 1 {
+			t.Fatalf("RegisteredPlugins() len = %d, want 1", len(infos))
+		}
+		if !infos[0].SupportsOAuth || infos[0].OAuthProvider != "zcode-zai" {
+			t.Fatalf("RegisteredPlugins()[0] = %#v, want SupportsOAuth=true OAuthProvider=zcode-zai", infos[0])
+		}
+		wantProviders := []string{"zcode-zai", "zcode-bigmodel"}
+		if !reflect.DeepEqual(infos[0].OAuthProviders, wantProviders) {
+			t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want %#v", infos[0].OAuthProviders, wantProviders)
+		}
+		if got := host.AuthProviderIdentifiers(); !reflect.DeepEqual(got, wantProviders) {
+			t.Fatalf("AuthProviderIdentifiers() = %#v, want %#v", got, wantProviders)
+		}
+		for _, portal := range wantProviders {
+			if !host.HasAuthProvider(portal) {
+				t.Fatalf("HasAuthProvider(%q) = false, want true", portal)
+			}
+			startResp, handled, errStart := host.StartLogin(context.Background(), portal, "http://127.0.0.1:8317/v8/management/oauth/callback")
+			if errStart != nil || !handled || startResp.Provider != portal {
+				t.Fatalf("StartLogin(%q) = (%#v, %v, %v), want handled response", portal, startResp, handled, errStart)
+			}
+			pollResp, handled, errPoll := host.PollLogin(context.Background(), portal, startResp.State)
+			if errPoll != nil || !handled || pollResp.Status != pluginapi.AuthLoginStatusSuccess {
+				t.Fatalf("PollLogin(%q) = (%#v, %v, %v), want success", portal, pollResp, handled, errPoll)
+			}
+		}
+		if !reflect.DeepEqual(startedProviders, wantProviders) || !reflect.DeepEqual(polledProviders, wantProviders) {
+			t.Fatalf("started=%#v polled=%#v, want %#v", startedProviders, polledProviders, wantProviders)
+		}
+		if !host.SameAuthProvider("zcode", "zcode-bigmodel") || !host.SameAuthProvider("zcode-zai", "zcode-bigmodel") {
+			t.Fatal("SameAuthProvider() = false, want true for providers owned by the same plugin")
+		}
+		for _, credProvider := range []string{"zcode", "zcode-zai", "zcode-bigmodel"} {
+			if !host.HasAuthModelProvider(credProvider) {
+				t.Fatalf("HasAuthModelProvider(%q) = false, want true", credProvider)
+			}
+			refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), &coreauth.Auth{
+				ID:       "auth-" + credProvider,
+				Provider: credProvider,
+			})
+			if errRefresh != nil || !handled || refreshed == nil {
+				t.Fatalf("RefreshAuth(%q) = (%#v, %v, %v), want handled refresh", credProvider, refreshed, handled, errRefresh)
+			}
+		}
+	})
+
+	t.Run("plural_auth_providers_capability", func(t *testing.T) {
+		var calledPortal string
+		host := newHostWithRecords(capabilityRecord{
+			id:       "multi-cap-plugin",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProviders: []pluginapi.AuthProvider{
+						fakeAuthProvider{
+							identifier: "portal-one",
+							startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+								calledPortal = "one:" + req.Provider
+								return pluginapi.AuthLoginStartResponse{Provider: req.Provider, URL: "https://one.example", State: "state-1"}, nil
+							},
+						},
+						fakeAuthProvider{
+							identifier: "portal-two",
+							startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+								calledPortal = "two:" + req.Provider
+								return pluginapi.AuthLoginStartResponse{Provider: req.Provider, URL: "https://two.example", State: "state-2"}, nil
+							},
+						},
+					},
+				},
+			},
+		})
+
+		infos := host.RegisteredPlugins()
+		if len(infos) != 1 || !infos[0].SupportsOAuth || infos[0].OAuthProvider != "portal-one" {
+			t.Fatalf("RegisteredPlugins() = %#v, want portal-one primary", infos)
+		}
+		if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"portal-one", "portal-two"}) {
+			t.Fatalf("OAuthProviders = %#v, want [portal-one portal-two]", infos[0].OAuthProviders)
+		}
+		_, handled, errStart := host.StartLogin(context.Background(), "portal-two", "http://127.0.0.1:8317/callback")
+		if errStart != nil || !handled || calledPortal != "two:portal-two" {
+			t.Fatalf("StartLogin(portal-two) handled=%v err=%v calledPortal=%q, want two:portal-two", handled, errStart, calledPortal)
+		}
+	})
+
+	t.Run("plural_auth_providers_interleaved_shared_credential_refresh_and_parse", func(t *testing.T) {
+		refreshedBy := ""
+		parsedBy := ""
+		host := newHostWithRecords(capabilityRecord{
+			id:       "multi-handler-plugin",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProviders: []pluginapi.AuthProvider{
+						fakeAuthProvider{
+							identifier: "portal-one",
+							pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+								return pluginapi.AuthLoginPollResponse{
+									Status: pluginapi.AuthLoginStatusSuccess,
+									Auth: pluginapi.AuthData{
+										Provider: "vendor-shared",
+										ID:       "cred-one",
+									},
+								}, nil
+							},
+							parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+								parsedBy = "one"
+								return pluginapi.AuthParseResponse{
+									Handled: true,
+									Auth:    pluginapi.AuthData{Provider: "vendor-shared", ID: "cred-one"},
+								}, nil
+							},
+							refreshAuth: func(_ context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+								refreshedBy = "one"
+								return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{Provider: req.AuthProvider, ID: req.AuthID}}, nil
+							},
+						},
+						fakeAuthProvider{
+							identifier: "portal-two",
+							pollLogin: func(_ context.Context, req pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+								return pluginapi.AuthLoginPollResponse{
+									Status: pluginapi.AuthLoginStatusSuccess,
+									Auth: pluginapi.AuthData{
+										Provider: "vendor-shared",
+										ID:       "cred-two",
+									},
+								}, nil
+							},
+							parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+								parsedBy = "two"
+								return pluginapi.AuthParseResponse{
+									Handled: true,
+									Auth:    pluginapi.AuthData{Provider: "vendor-shared", ID: "cred-two"},
+								}, nil
+							},
+							refreshAuth: func(_ context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+								refreshedBy = "two"
+								return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{Provider: req.AuthProvider, ID: req.AuthID}}, nil
+							},
+						},
+					},
+				},
+			},
+		})
+
+		// Log in via portal-one first, then portal-two; portal-two must NOT overwrite portal-one's credential handler.
+		pollOne, handled, errPoll := host.PollLogin(context.Background(), "portal-one", "state-1")
+		if errPoll != nil || !handled || pollOne.Status != pluginapi.AuthLoginStatusSuccess {
+			t.Fatalf("PollLogin(portal-one) = (%#v, %v, %v), want success", pollOne, handled, errPoll)
+		}
+		pollTwo, handled, errPoll := host.PollLogin(context.Background(), "portal-two", "state-2")
+		if errPoll != nil || !handled || pollTwo.Status != pluginapi.AuthLoginStatusSuccess {
+			t.Fatalf("PollLogin(portal-two) = (%#v, %v, %v), want success", pollTwo, handled, errPoll)
+		}
+		credOne := host.AuthDataToCoreAuth(pollOne.Auth, "", "cred-one.json")
+		credTwo := host.AuthDataToCoreAuth(pollTwo.Auth, "", "cred-two.json")
+
+		_, handled, errRefresh := host.RefreshAuth(context.Background(), credOne)
+		if errRefresh != nil || !handled || refreshedBy != "one" {
+			t.Fatalf("RefreshAuth(credOne) handled=%v err=%v refreshedBy=%q, want one", handled, errRefresh, refreshedBy)
+		}
+		_, handled, errRefresh = host.RefreshAuth(context.Background(), credTwo)
+		if errRefresh != nil || !handled || refreshedBy != "two" {
+			t.Fatalf("RefreshAuth(credTwo) handled=%v err=%v refreshedBy=%q, want two", handled, errRefresh, refreshedBy)
+		}
+		parsedOne, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: "vendor-shared",
+			RawJSON:  []byte(`{"type":"vendor-shared","oauth_provider":"portal-one"}`),
+		})
+		if errParse != nil || !handled || parsedBy != "one" || parsedOne == nil {
+			t.Fatalf("ParseAuth(portal-one) handled=%v err=%v parsedBy=%q auth=%#v, want one", handled, errParse, parsedBy, parsedOne)
+		}
+		parsedTwo, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: "vendor-shared",
+			RawJSON:  []byte(`{"type":"vendor-shared","oauth_provider":"portal-two"}`),
+		})
+		if errParse != nil || !handled || parsedBy != "two" || parsedTwo == nil {
+			t.Fatalf("ParseAuth(portal-two) handled=%v err=%v parsedBy=%q auth=%#v, want two", handled, errParse, parsedBy, parsedTwo)
+		}
+		refreshedBy = ""
+		_, handled, errRefresh = host.RefreshAuth(context.Background(), parsedOne)
+		if errRefresh != nil || !handled || refreshedBy != "one" {
+			t.Fatalf("RefreshAuth(parsedOne) handled=%v err=%v refreshedBy=%q, want one", handled, errRefresh, refreshedBy)
+		}
+		refreshedBy = ""
+		_, handled, errRefresh = host.RefreshAuth(context.Background(), parsedTwo)
+		if errRefresh != nil || !handled || refreshedBy != "two" {
+			t.Fatalf("RefreshAuth(parsedTwo) handled=%v err=%v refreshedBy=%q, want two", handled, errRefresh, refreshedBy)
+		}
+	})
+
+	t.Run("no_prefix_hijack_or_unrelated_parse_broadcast", func(t *testing.T) {
+		unrelatedParseCalled := false
+		host := newHostWithRecords(capabilityRecord{
+			id:       "vendor-cn-plugin",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "vendor-cn",
+						parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+							unrelatedParseCalled = true
+							return pluginapi.AuthParseResponse{Handled: true, Auth: pluginapi.AuthData{Provider: req.Provider, ID: "hijacked"}}, nil
+						},
+					},
+				},
+			},
+		})
+
+		// "vendor-cn" must NOT implicitly claim "vendor" via prefix guessing
+		if host.HasAuthProvider("vendor") {
+			t.Fatal("HasAuthProvider(vendor) = true for vendor-cn plugin, want false")
+		}
+		if host.SameAuthProvider("vendor", "vendor-cn") {
+			t.Fatal("SameAuthProvider(vendor, vendor-cn) = true without ownership declaration, want false")
+		}
+		// ParseAuth with an explicit unrelated provider ("claude" or "vendor") must NOT broadcast to vendor-cn
+		_, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: "claude",
+			RawJSON:  []byte(`{"type":"claude","access_token":"tok"}`),
+		})
+		if errParse != nil || handled || unrelatedParseCalled {
+			t.Fatalf("ParseAuth(claude) = (handled=%v, err=%v), unrelatedParseCalled=%v, want not called", handled, errParse, unrelatedParseCalled)
+		}
+	})
+
+	t.Run("cold_start_parse_and_refresh_without_executor", func(t *testing.T) {
+		// Simulate a fresh Host after restart where an auth-only plugin has portal identifiers
+		// ("zai", "bigmodel") and either persisted oauth_provider metadata in RawJSON or declared CredentialProviders.
+		refreshed := false
+		host := newHostWithRecords(capabilityRecord{
+			id:       "omc-zcode-oauth",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier:  "zai",
+						identifiers: []string{"zai", "bigmodel"},
+						parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+							if req.Provider != "zcode" {
+								return pluginapi.AuthParseResponse{Handled: false}, nil
+							}
+							return pluginapi.AuthParseResponse{
+								Handled: true,
+								Auth: pluginapi.AuthData{
+									Provider: "zcode",
+									ID:       "zcode-cold.json",
+									Metadata: map[string]any{"oauth_provider": "bigmodel"},
+								},
+							}, nil
+						},
+						refreshAuth: func(_ context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+							refreshed = true
+							return pluginapi.AuthRefreshResponse{
+								Auth: pluginapi.AuthData{
+									Provider: req.AuthProvider,
+									ID:       req.AuthID,
+								},
+							}, nil
+						},
+					},
+				},
+			},
+		})
+
+		auth, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: "zcode",
+			FileName: "zcode-cold.json",
+			RawJSON:  []byte(`{"type":"zcode","oauth_provider":"bigmodel","token":"abc"}`),
+		})
+		if errParse != nil || !handled || auth == nil || auth.Provider != "zcode" {
+			t.Fatalf("cold-start ParseAuth(zcode) = (%#v, %v, %v), want handled zcode auth", auth, handled, errParse)
+		}
+		authNoRawHint, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+			Provider: "zcode",
+			FileName: "zcode-cold-nohint.json",
+			RawJSON:  []byte(`{"type":"zcode","token":"abc"}`),
+		})
+		if errParse != nil || !handled || authNoRawHint == nil {
+			t.Fatalf("cold-start ParseAuth without raw hint = (%#v, %v, %v), want handled", authNoRawHint, handled, errParse)
+		}
+		if authNoRawHint.Metadata["oauth_provider"] != "bigmodel" || authNoRawHint.Attributes["oauth_provider"] != "bigmodel" {
+			t.Fatalf("cold-start ParseAuth without raw hint attribution = (meta=%#v, attr=%q), want both bigmodel", authNoRawHint.Metadata["oauth_provider"], authNoRawHint.Attributes["oauth_provider"])
+		}
+		if !host.SameAuthProvider("zcode", "zai") || !host.SameAuthProvider("zcode", "bigmodel") {
+			t.Fatal("SameAuthProvider after cold-start ParseAuth = false, want true")
+		}
+		_, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+		if errRefresh != nil || !handled || !refreshed {
+			t.Fatalf("RefreshAuth(zcode) after cold-start ParseAuth = (%v, %v), refreshed=%v", handled, errRefresh, refreshed)
+		}
+	})
+}

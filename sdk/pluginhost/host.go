@@ -156,9 +156,22 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.
 	return h.inner.RefreshAuth(ctx, auth)
 }
 
+// AuthProviderIdentifiers returns the provider identifiers handled by active auth-provider plugins.
+func (h *Host) AuthProviderIdentifiers() []string {
+	if h == nil || h.inner == nil {
+		return nil
+	}
+	return h.inner.AuthProviderIdentifiers()
+}
+
 // HasAuthProvider reports whether an active plugin handles provider auth for provider.
 func (h *Host) HasAuthProvider(provider string) bool {
 	return h != nil && h.inner != nil && h.inner.HasAuthProvider(provider)
+}
+
+// SameAuthProvider reports whether two provider keys belong to the same active auth-provider plugin.
+func (h *Host) SameAuthProvider(providerA, providerB string) bool {
+	return h != nil && h.inner != nil && h.inner.SameAuthProvider(providerA, providerB)
 }
 
 // StartLogin starts a provider login flow through an active auth-provider plugin.

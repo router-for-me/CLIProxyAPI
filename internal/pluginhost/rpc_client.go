@@ -25,7 +25,9 @@ type rpcPluginAdapter struct {
 
 type rpcAuthProvider struct {
 	*rpcPluginAdapter
-	identifier string
+	identifier          string
+	identifiers         []string
+	credentialProviders []string
 }
 
 type rpcFrontendAuthProvider struct {
@@ -135,13 +137,15 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
 		}
-		identifier := callPluginIdentifier(ctx, adapter.client, pluginabi.MethodAuthIdentifier)
+		identifier, identifiers, credentialProviders := callPluginAuthIdentifiers(ctx, adapter.client)
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
 		}
 		plugin.Capabilities.AuthProvider = rpcAuthProvider{
-			rpcPluginAdapter: adapter,
-			identifier:       identifier,
+			rpcPluginAdapter:    adapter,
+			identifier:          identifier,
+			identifiers:         identifiers,
+			credentialProviders: credentialProviders,
 		}
 	}
 	if resp.Capabilities.FrontendAuthProvider {
@@ -503,8 +507,48 @@ func callPluginIdentifier(ctx context.Context, client pluginClient, method strin
 	return strings.TrimSpace(resp.Identifier)
 }
 
+func callPluginAuthIdentifiers(ctx context.Context, client pluginClient) (string, []string, []string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, errCall := callPlugin[rpcIdentifierResponse](ctx, client, pluginabi.MethodAuthIdentifier, rpcEmptyResponse{})
+	if errCall != nil {
+		return "", nil, nil
+	}
+	primary := strings.TrimSpace(resp.Identifier)
+	identifiers := make([]string, 0, 1+len(resp.Identifiers))
+	if primary != "" {
+		identifiers = append(identifiers, primary)
+	}
+	for _, item := range resp.Identifiers {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if primary == "" {
+			primary = trimmed
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+	credentialProviders := make([]string, 0, len(resp.CredentialProviders))
+	for _, item := range resp.CredentialProviders {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			credentialProviders = append(credentialProviders, trimmed)
+		}
+	}
+	return primary, identifiers, credentialProviders
+}
+
 func (a rpcAuthProvider) Identifier() string {
 	return a.identifier
+}
+
+func (a rpcAuthProvider) Identifiers() []string {
+	return append([]string(nil), a.identifiers...)
+}
+
+func (a rpcAuthProvider) CredentialProviders() []string {
+	return append([]string(nil), a.credentialProviders...)
 }
 
 func (a rpcFrontendAuthProvider) Identifier() string {

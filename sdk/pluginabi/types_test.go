@@ -28,8 +28,11 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if SchemaVersion != 9 {
-		t.Fatalf("SchemaVersion = %d, want 9", SchemaVersion)
+	if SchemaVersion != 10 {
+		t.Fatalf("SchemaVersion = %d, want 10", SchemaVersion)
+	}
+	if SchemaVersionMultiAuthProviders != 10 {
+		t.Fatalf("SchemaVersionMultiAuthProviders = %d, want 10", SchemaVersionMultiAuthProviders)
 	}
 	if SchemaVersionWebSocketResponseObserver != 4 {
 		t.Fatalf("SchemaVersionWebSocketResponseObserver = %d, want 4", SchemaVersionWebSocketResponseObserver)

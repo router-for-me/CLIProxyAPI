@@ -3926,15 +3926,25 @@ func (panicFrontendAuthProvider) Authenticate(ctx context.Context, req pluginapi
 }
 
 type fakeAuthProvider struct {
-	identifier  string
-	parseAuth   func(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error)
-	startLogin  func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
-	pollLogin   func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
-	refreshAuth func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error)
+	identifier          string
+	identifiers         []string
+	credentialProviders []string
+	parseAuth           func(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error)
+	startLogin          func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
+	pollLogin           func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
+	refreshAuth         func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error)
 }
 
 func (p fakeAuthProvider) Identifier() string {
 	return p.identifier
+}
+
+func (p fakeAuthProvider) Identifiers() []string {
+	return append([]string(nil), p.identifiers...)
+}
+
+func (p fakeAuthProvider) CredentialProviders() []string {
+	return append([]string(nil), p.credentialProviders...)
 }
 
 func (p fakeAuthProvider) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
