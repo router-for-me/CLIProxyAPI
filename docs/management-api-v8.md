@@ -118,6 +118,38 @@ retain the corresponding business operation's fields.
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
+### Usage event timing and throughput
+
+Usage events, read from `/observability/usage/queue` or the Redis usage queue,
+carry timing and token usage. CLIProxyAPI does not compute throughput from
+them.
+
+| Field | Meaning |
+| --- | --- |
+| `latency_ms` | Time from the start of the attempt until its usage is published. |
+| `ttft_ms` | Time from sending the upstream request until the first frame carrying model output: text, a refusal, tool-call arguments, or reasoning text the provider streams. Encrypted-only reasoning does not count. Without such a frame it falls back to the first response packet. |
+| `token_breakdown.output` | `total_tokens` includes reasoning; `reasoning_tokens` and `non_reasoning_tokens` split it. `token_breakdown.quality` reports whether the buckets are complete. |
+
+No field records when the model started generating. On reasoning models,
+`ttft_ms` marks the first output the client can see, and that can come long
+after generation starts. If the provider hides reasoning (for example, OpenAI
+Responses without a reasoning summary), `ttft_ms` lands on the first answer
+token. If reasoning summaries stream, it lands on the first summary delta, which
+can arrive many seconds into reasoning. Because `total_tokens` still counts the
+reasoning, `total_tokens / (latency_ms - ttft_ms)` overstates speed. One
+observed record had 288 output tokens, `latency_ms = 80802` and
+`ttft_ms = 80546`, which gives 1125 tok/s.
+
+| Rate | Formula | Valid when |
+| --- | --- | --- |
+| Decode speed | `total_tokens / (latency_ms - ttft_ms)` | `reasoning_tokens` is 0, `generate` and `stream` are true, and `latency_ms > ttft_ms > 0`. Skip attempts with reasoning tokens instead of estimating them. |
+| End-to-end output rate | `total_tokens / latency_ms` | `generate` is true and `latency_ms > 0`. Includes queueing, prefill and reasoning, so it never exceeds generation speed and reads lowest for long-input, short-output attempts. |
+| Visible output rate | `non_reasoning_tokens / (latency_ms - ttft_ms)` | Reasoning is known not to stream. When summaries stream, the window includes the reasoning after the first summary, so the rate reads too low. The event does not record whether reasoning streamed. |
+
+Every rate assumes `token_breakdown.quality` is `complete`. Report decode speed
+and the end-to-end rate as separate metrics. Tokenizers differ between
+providers, so compare token rates only within one provider.
+
 ## OAuth
 
 The login URL is shared by all providers. Set the required `provider` query
