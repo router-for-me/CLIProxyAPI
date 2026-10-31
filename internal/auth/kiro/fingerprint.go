@@ -91,3 +91,17 @@ func SetOIDCHeaders(req *http.Request) {
 	req.Header.Set("amz-sdk-invocation-id", uuid.New().String())
 	req.Header.Set("amz-sdk-request", "attempt=1; max=4")
 }
+
+func setRuntimeHeaders(req *http.Request, accessToken string, accountKey string) {
+	fp := GlobalFingerprintManager().GetFingerprint(accountKey)
+	machineID := fp.KiroHash
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/%s KiroIDE-%s-%s",
+		fp.RuntimeSDKVersion, fp.KiroVersion, machineID))
+	req.Header.Set("User-Agent", fmt.Sprintf(
+		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererruntime#%s m/N,E KiroIDE-%s-%s",
+		fp.RuntimeSDKVersion, fp.OSType, fp.OSVersion, fp.NodeVersion, fp.RuntimeSDKVersion,
+		fp.KiroVersion, machineID))
+	req.Header.Set("amz-sdk-invocation-id", uuid.New().String())
+	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
+}

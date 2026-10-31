@@ -32,6 +32,7 @@ type KiroTokenData struct {
 	Email        string `json:"email,omitempty"`
 	StartURL     string `json:"startUrl,omitempty"`
 	Region       string `json:"region,omitempty"`
+	BaseURL      string `json:"baseUrl,omitempty"`
 }
 
 type KiroAuthBundle struct {
@@ -145,36 +146,48 @@ func LoadKiroIDEToken() (*KiroTokenData, error) {
 	return &token, nil
 }
 
-func loadDeviceRegistration(homeDir, clientIDHash string, token *KiroTokenData) error {
+func LoadDeviceRegistrationCredentials(clientIDHash string) (clientID, clientSecret string, err error) {
 	if clientIDHash == "" {
-		return fmt.Errorf("clientIdHash is empty")
+		return "", "", fmt.Errorf("clientIdHash is empty")
 	}
 	if strings.Contains(clientIDHash, "/") || strings.Contains(clientIDHash, "\\") || strings.Contains(clientIDHash, "..") {
-		return fmt.Errorf("invalid clientIdHash: contains path separator")
+		return "", "", fmt.Errorf("invalid clientIdHash: contains path separator")
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
 	deviceRegPath := filepath.Join(homeDir, ".aws", "sso", "cache", clientIDHash+".json")
 	data, err := os.ReadFile(deviceRegPath)
 	if err != nil {
-		return fmt.Errorf("failed to read device registration file (%s): %w", deviceRegPath, err)
+		return "", "", fmt.Errorf("failed to read device registration file (%s): %w", deviceRegPath, err)
 	}
 
 	var deviceReg struct {
 		ClientID     string `json:"clientId"`
 		ClientSecret string `json:"clientSecret"`
-		ExpiresAt    string `json:"expiresAt"`
 	}
 
 	if err := json.Unmarshal(data, &deviceReg); err != nil {
-		return fmt.Errorf("failed to parse device registration: %w", err)
+		return "", "", fmt.Errorf("failed to parse device registration: %w", err)
 	}
 
 	if deviceReg.ClientID == "" || deviceReg.ClientSecret == "" {
-		return fmt.Errorf("device registration missing clientId or clientSecret")
+		return "", "", fmt.Errorf("device registration missing clientId or clientSecret")
 	}
 
-	token.ClientID = deviceReg.ClientID
-	token.ClientSecret = deviceReg.ClientSecret
+	return deviceReg.ClientID, deviceReg.ClientSecret, nil
+}
+
+func loadDeviceRegistration(homeDir, clientIDHash string, token *KiroTokenData) error {
+	cID, cSec, err := LoadDeviceRegistrationCredentials(clientIDHash)
+	if err != nil {
+		return err
+	}
+	token.ClientID = cID
+	token.ClientSecret = cSec
 	return nil
 }
 
@@ -324,6 +337,11 @@ func ExtractRegionFromProfileArn(profileArn string) string {
 		return ""
 	}
 	return parsed.Region
+}
+
+func GetKiroAPIEndpointFromProfileArn(profileArn string) string {
+	region := ExtractRegionFromProfileArn(profileArn)
+	return GetKiroAPIEndpoint(region)
 }
 
 func GetKiroAPIEndpoint(region string) string {
