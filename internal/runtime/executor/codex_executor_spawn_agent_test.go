@@ -211,6 +211,35 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorSIWCConvertsAgentMessage(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		upstreamBody, _ = io.ReadAll(request.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[]}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": server.URL, "use_siwc": "true"},
+		Metadata:   map[string]any{"siwc": map[string]any{"access_token": "siwc-token"}},
+	}
+	runner := NewCodexExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: codexSpawnAgentTestPayload()}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
+	if _, errExecute := runner.Execute(codexSpawnAgentTestContext(), auth, req, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	message := gjson.GetBytes(upstreamBody, "input.1")
+	if message.Get("type").String() != "message" || message.Get("role").String() != "user" {
+		t.Fatalf("SIWC upstream still received agent_message: %s", upstreamBody)
+	}
+	if message.Get("author").Exists() || message.Get("recipient").Exists() {
+		t.Fatalf("SIWC upstream received agent_message metadata: %s", upstreamBody)
+	}
+}
+
 func TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel(t *testing.T) {
 	capturedPayload := make(chan []byte, 1)
 	upgrader := websocket.Upgrader{}
