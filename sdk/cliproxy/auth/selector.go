@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
@@ -1927,15 +1928,17 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 	if systemPrompt == "" {
 		topSystem := gjson.GetBytes(payload, "system")
 		if topSystem.Exists() {
+			// The attribution block carries a per-request cch, so hashing it would
+			// give every request of one conversation a new identity.
 			if topSystem.IsArray() {
 				topSystem.ForEach(func(_, part gjson.Result) bool {
-					if text := part.Get("text").String(); text != "" && systemPrompt == "" {
+					if text := part.Get("text").String(); text != "" && systemPrompt == "" && !util.IsClaudeCodeAttributionSystemText(text) {
 						systemPrompt = truncateString(text, 100)
 						return false
 					}
 					return true
 				})
-			} else if topSystem.Type == gjson.String {
+			} else if topSystem.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(topSystem.String()) {
 				systemPrompt = truncateString(topSystem.String(), 100)
 			}
 		}
