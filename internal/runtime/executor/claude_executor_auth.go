@@ -166,6 +166,13 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if err != nil {
 		return nil, err
 	}
+	applyClaudeRefreshedTokens(auth, td)
+	return auth, nil
+}
+
+// applyClaudeRefreshedTokens stores a successful token refresh result in the
+// credential metadata.
+func applyClaudeRefreshedTokens(auth *cliproxyauth.Auth, td *claudeauth.ClaudeTokenData) {
 	claudeauth.EnsureMetadataMap(&auth.Metadata)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", td.AccessToken)
 	claudeauth.StoreMetadataString(&auth.Metadata, "refresh_token", td.RefreshToken)
@@ -176,7 +183,8 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", td.OrganizationUUID)
 	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", td.OrganizationName)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "expired", td.Expire)
+	// The refresh token end of life is fixed at sign-in; keep the stored value when omitted.
+	claudeauth.StoreMetadataString(&auth.Metadata, claudeauth.RefreshTokenExpiresAtMetadataKey, td.RefreshTokenExpiresAt)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "type", "claude")
 	claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", time.Now().Format(time.RFC3339))
-	return auth, nil
 }

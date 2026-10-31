@@ -13,6 +13,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// RefreshTokenExpiresAtMetadataKey is the credential metadata key holding the
+// RFC3339 UTC time at which the refresh token expires.
+const RefreshTokenExpiresAtMetadataKey = "refresh_token_expires_at"
+
 // ClaudeTokenStorage stores OAuth2 token information for Anthropic Claude API authentication.
 // It maintains compatibility with the existing auth system while adding Claude-specific fields
 // for managing access tokens, refresh tokens, and user account information.
@@ -49,6 +53,11 @@ type ClaudeTokenStorage struct {
 
 	// Expire is the timestamp when the current access token expires.
 	Expire string `json:"expired"`
+
+	// RefreshTokenExpiresAt is the RFC3339 UTC time after which the refresh token
+	// stops working and the credential must be re-authenticated. Refreshing does
+	// not extend it. Empty when the OAuth server did not report it.
+	RefreshTokenExpiresAt string `json:"refresh_token_expires_at,omitempty"`
 
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
