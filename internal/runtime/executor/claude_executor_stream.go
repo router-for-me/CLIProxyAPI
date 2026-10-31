@@ -207,11 +207,16 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForTranslation := body
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
+	var currentToolAliases map[string]string
 	if fp.MCPAlias && cloaked {
+		currentAllocation := !claudeThreadContinuationNeedsAliasState(bodyForUpstream)
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx, opts.Metadata, req.Metadata)
 		bodyForUpstream, oauthToolNamesReverseMap, err = e.prepareClaudeOAuthToolNamesForRequest(bodyForUpstream, mcpAliases)
 		if err != nil {
 			return nil, err
+		}
+		if currentAllocation {
+			currentToolAliases = oauthToolNamesReverseMap
 		}
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))
@@ -260,6 +265,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, errMidSystem
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
+	bareToolAliases := helps.BuildClaudeMCPBareAliasMap(bodyForTranslation, bodyForUpstream, currentToolAliases)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
@@ -411,7 +417,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				reporter.ObserveResponseModel(line)
 				streamUsage.ObserveClaudeStream(line)
-				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap, bareToolAliases)
 				if errRestore != nil {
 					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
 					return
@@ -483,7 +489,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
 			streamUsage.ObserveClaudeStream(line)
-			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap, bareToolAliases)
 			if errRestore != nil {
 				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
 				return

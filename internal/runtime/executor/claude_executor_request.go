@@ -1718,12 +1718,12 @@ func prepareClaudeOAuthToolNamesForUpstream(body []byte, mcpAliases claudeMCPAli
 	return remapOAuthToolNamesWithOptions(body, mcpAliases)
 }
 
-func restoreClaudeOAuthToolNamesFromResponse(body []byte, reverseMap map[string]string) ([]byte, error) {
-	return reverseRemapOAuthToolNames(body, reverseMap)
+func restoreClaudeOAuthToolNamesFromResponse(body []byte, reverseMap, bareAliases map[string]string) ([]byte, error) {
+	return reverseRemapOAuthToolNames(body, reverseMap, bareAliases)
 }
 
-func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string) ([]byte, error) {
-	return reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+func restoreClaudeOAuthToolNamesFromStreamLine(line []byte, reverseMap, bareAliases map[string]string) ([]byte, error) {
+	return reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, bareAliases)
 }
 
 // remapOAuthToolNames represents every declared third-party client tool as a
@@ -2298,6 +2298,7 @@ type claudeMCPAliasEntry struct {
 
 type claudeMCPAliasResolver struct {
 	exact        map[string]string
+	bare         map[string]string
 	aliases      []claudeMCPAliasEntry
 	servers      map[string]struct{}
 	passthroughs []string
@@ -2315,9 +2316,10 @@ func (claudeMCPAliasRestoreError) IsRequestScoped() bool {
 	return true
 }
 
-func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResolver {
+func newClaudeMCPAliasResolver(reverseMap, bareAliases map[string]string) claudeMCPAliasResolver {
 	resolver := claudeMCPAliasResolver{
 		exact:        reverseMap,
+		bare:         bareAliases,
 		aliases:      make([]claudeMCPAliasEntry, 0, len(reverseMap)),
 		servers:      make(map[string]struct{}),
 		passthroughs: make([]string, 0),
@@ -2404,7 +2406,7 @@ func recordPassthroughMCPTools(recordRename func(original, renamed string), forw
 	}
 }
 
-func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error) {
+func (resolver claudeMCPAliasResolver) resolve(name string, allowBare bool) (string, bool, error) {
 	if original, ok := resolver.exact[name]; ok {
 		if original == name {
 			// Caller-owned MCP tool: forward it exactly as the client declared it.
@@ -2413,6 +2415,11 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return original, true, nil
 	}
 
+	if allowBare && !strings.HasPrefix(name, "mcp__") {
+		if original, ok := resolver.bare[name]; ok {
+			return original, true, nil
+		}
+	}
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
 		return "", false, nil
@@ -2555,8 +2562,9 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
 // using the per-request map produced by remapOAuthToolNames. Names outside the
-// request-local generated MCP server are passed through unchanged.
-func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]byte, error) {
+// request-local generated MCP server are passed through unchanged unless their
+// exact bare component has separate final-declaration proof.
+func reverseRemapOAuthToolNames(body []byte, reverseMap, bareAliases map[string]string) ([]byte, error) {
 	if len(reverseMap) == 0 {
 		return body, nil
 	}
@@ -2564,14 +2572,15 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 	if !content.Exists() || !content.IsArray() {
 		return body, nil
 	}
-	resolver := newClaudeMCPAliasResolver(reverseMap)
+	resolver := newClaudeMCPAliasResolver(reverseMap, bareAliases)
+	allowBare := len(bareAliases) > 0 && helps.ClaudeMCPBareResponseEligible(body, false)
 	var resolveErr error
 	content.ForEach(func(index, part gjson.Result) bool {
 		partType := part.Get("type").String()
 		switch partType {
 		case "tool_use":
 			name := part.Get("name").String()
-			origName, matched, errResolve := resolver.resolve(name)
+			origName, matched, errResolve := resolver.resolve(name, allowBare)
 			if errResolve != nil {
 				resolveErr = errResolve
 				return false
@@ -2582,7 +2591,7 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 			}
 		case "tool_reference":
 			toolName := part.Get("tool_name").String()
-			origName, matched, errResolve := resolver.resolve(toolName)
+			origName, matched, errResolve := resolver.resolve(toolName, allowBare)
 			if errResolve != nil {
 				resolveErr = errResolve
 				return false
@@ -2599,7 +2608,7 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 						return true
 					}
 					toolName := nestedPart.Get("tool_name").String()
-					origName, matched, errResolve := resolver.resolve(toolName)
+					origName, matched, errResolve := resolver.resolve(toolName, allowBare)
 					if errResolve != nil {
 						resolveErr = errResolve
 						return false
@@ -2619,7 +2628,7 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 						return true
 					}
 					toolName := refPart.Get("tool_name").String()
-					origName, matched, errResolve := resolver.resolve(toolName)
+					origName, matched, errResolve := resolver.resolve(toolName, allowBare)
 					if errResolve != nil {
 						resolveErr = errResolve
 						return false
@@ -2639,7 +2648,7 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 
 // reverseRemapOAuthToolNamesFromStreamLine reverses the tool name mapping for SSE
 // stream lines, using the per-request reverseMap produced by remapOAuthToolNames.
-func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string]string) ([]byte, error) {
+func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap, bareAliases map[string]string) ([]byte, error) {
 	if len(reverseMap) == 0 {
 		return line, nil
 	}
@@ -2653,31 +2662,35 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 		return line, nil
 	}
 
-	resolver := newClaudeMCPAliasResolver(reverseMap)
+	resolver := newClaudeMCPAliasResolver(reverseMap, bareAliases)
+	allowBare := len(bareAliases) > 0 && helps.ClaudeMCPBareResponseEligible(payload, true)
 	blockType := contentBlock.Get("type").String()
 	var updated []byte
 	var err error
+	bareChanged := false
 
 	switch blockType {
 	case "tool_use":
 		name := contentBlock.Get("name").String()
-		origName, matched, errResolve := resolver.resolve(name)
+		origName, matched, errResolve := resolver.resolve(name, allowBare)
 		if errResolve != nil {
 			return line, errResolve
 		}
 		if !matched {
 			return line, nil
 		}
+		_, bareChanged = bareAliases[name]
 		updated, err = sjson.SetBytes(payload, "content_block.name", origName)
 	case "tool_reference":
 		toolName := contentBlock.Get("tool_name").String()
-		origName, matched, errResolve := resolver.resolve(toolName)
+		origName, matched, errResolve := resolver.resolve(toolName, allowBare)
 		if errResolve != nil {
 			return line, errResolve
 		}
 		if !matched {
 			return line, nil
 		}
+		_, bareChanged = bareAliases[toolName]
 		updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
 	case "tool_search_tool_result":
 		toolRefs := contentBlock.Get("content.tool_references")
@@ -2692,12 +2705,15 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 				return true
 			}
 			toolName := refPart.Get("tool_name").String()
-			origName, matched, errResolve := resolver.resolve(toolName)
+			origName, matched, errResolve := resolver.resolve(toolName, allowBare)
 			if errResolve != nil {
 				resolveErr = errResolve
 				return false
 			}
 			if matched {
+				if _, bare := bareAliases[toolName]; bare {
+					bareChanged = true
+				}
 				path := fmt.Sprintf("content_block.content.tool_references.%d.tool_name", refIndex.Int())
 				updatedPayload, err = sjson.SetBytes(updatedPayload, path, origName)
 				if err != nil {
@@ -2722,6 +2738,10 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 	}
 	if err != nil {
 		return line, fmt.Errorf("rewrite Claude OAuth MCP tool alias: %w", err)
+	}
+	if bareChanged {
+		// Preserve the original SSE framing for the new exact-component path.
+		return bytes.Replace(line, payload, updated, 1), nil
 	}
 
 	trimmed := bytes.TrimSpace(line)
