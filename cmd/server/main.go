@@ -276,6 +276,7 @@ func main() {
 			homeJWT = v
 		}
 	}
+	password = resolveLocalManagementPassword(password, lookupEnv)
 
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
@@ -835,6 +836,19 @@ func main() {
 			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
 		}
 	}
+}
+
+// resolveLocalManagementPassword returns the -password value, or else LOCAL_MANAGEMENT_PASSWORD from the
+// environment: other (non-root) users can read a process's arguments with ps, but not its environment.
+// Like -password, it also enables the /keep-alive endpoint.
+func resolveLocalManagementPassword(flagValue string, lookupEnv func(keys ...string) (string, bool)) string {
+	if strings.TrimSpace(flagValue) != "" {
+		return flagValue
+	}
+	if value, ok := lookupEnv("LOCAL_MANAGEMENT_PASSWORD", "local_management_password"); ok {
+		return value
+	}
+	return flagValue
 }
 
 // resolveManagementBaseURL determines the management API base URL for TUI client mode.
