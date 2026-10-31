@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,8 +51,30 @@ func (s *Service) applyWatcherConfigUpdate(newCfg *config.Config) {
 }
 
 type configCommit struct {
-	cfg      *config.Config
-	sequence uint64
+	cfg              *config.Config
+	sequence         uint64
+	preparedSelector *preparedRoutingSelector
+}
+
+type preparedRoutingSelector struct {
+	selector coreauth.Selector
+}
+
+func (p *preparedRoutingSelector) stop() {
+	if p == nil || p.selector == nil {
+		return
+	}
+	selector := p.selector
+	p.selector = nil
+	if stoppable, ok := selector.(coreauth.StoppableSelector); ok {
+		stoppable.Stop()
+	}
+}
+
+// Called with configRuntimeMu held, including during shutdown.
+func (s *Service) stopPendingRoutingSelector() {
+	s.pendingRoutingSelector.stop()
+	s.pendingRoutingSelector = nil
 }
 
 type routingRuntimeState struct {
@@ -97,15 +120,40 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	return state
 }
 
+// NewRoutingSelector applies native routing and session-affinity settings. A
+// non-nil fallback replaces only the built-in account policy beneath affinity.
+func NewRoutingSelector(cfg *config.Config, fallback coreauth.Selector) coreauth.Selector {
+	return routingSelector(normalizedRoutingRuntimeState(cfg), fallback)
+}
+
 func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
-	var selector coreauth.Selector
-	switch state.strategy {
-	case "weighted-round-robin":
-		selector = &coreauth.WeightedRoundRobinSelector{}
-	case "fill-first":
-		selector = &coreauth.FillFirstSelector{}
-	default:
-		selector = &coreauth.RoundRobinSelector{}
+	return routingSelector(state, nil)
+}
+
+func buildRoutingSelector(cfg *config.Config, factory SelectorFactory) (coreauth.Selector, error) {
+	if factory == nil {
+		return NewRoutingSelector(cfg, nil), nil
+	}
+	selector, err := factory(cfg.CloneForRuntime())
+	if err != nil {
+		return nil, fmt.Errorf("cliproxy: construct routing selector: %w", err)
+	}
+	if selector == nil {
+		return nil, fmt.Errorf("cliproxy: selector factory returned nil")
+	}
+	return selector, nil
+}
+
+func routingSelector(state routingRuntimeState, selector coreauth.Selector) coreauth.Selector {
+	if selector == nil {
+		switch state.strategy {
+		case "weighted-round-robin":
+			selector = &coreauth.WeightedRoundRobinSelector{}
+		case "fill-first":
+			selector = &coreauth.FillFirstSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
+		}
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
@@ -127,12 +175,17 @@ func (s *Service) applyConfigUpdateWithAuthSynthesis(ctx context.Context, newCfg
 	return s.applyConfigRuntime(ctx, commit, synthesizeConfigAuths)
 }
 
-// commitConfigUpdate applies only in-memory configuration state. Runtime work that
-// may block on plugins, storage, or networking is deliberately deferred. Catalog
-// source generations change here so an older commit cannot restart stale readers.
+// commitConfigUpdate validates custom selectors before publishing configuration.
+// Other runtime work remains deferred. Catalog source generations change here so
+// an older commit cannot restart stale readers.
 func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if s == nil {
 		return configCommit{}
+	}
+	if s.selectorFactory != nil {
+		// Match applyConfigRuntime's lock order while inspecting applied routing.
+		s.configRuntimeMu.Lock()
+		defer s.configRuntimeMu.Unlock()
 	}
 
 	s.configUpdateMu.Lock()
@@ -155,13 +208,27 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
 		return configCommit{}
 	}
+	var prepared *preparedRoutingSelector
+	if s.selectorFactory != nil && s.coreManager != nil {
+		routingState := normalizedRoutingRuntimeState(newCfg)
+		if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
+			selector, errSelector := buildRoutingSelector(newCfg, s.selectorFactory)
+			if errSelector != nil {
+				log.WithError(errSelector).Error("rejected config update with invalid routing selector")
+				return configCommit{}
+			}
+			prepared = &preparedRoutingSelector{selector: selector}
+		}
+		s.stopPendingRoutingSelector()
+		s.pendingRoutingSelector = prepared
+	}
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
 	s.cancelStaleAntigravityProbes("")
 	s.configSequence++
 	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
-	return configCommit{cfg: newCfg, sequence: s.configSequence}
+	return configCommit{cfg: newCfg, sequence: s.configSequence, preparedSelector: prepared}
 }
 
 func (s *Service) configCommitCurrent(commit configCommit) bool {
@@ -181,6 +248,7 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	}
 	s.configRuntimeMu.Lock()
 	defer s.configRuntimeMu.Unlock()
+	defer commit.preparedSelector.stop()
 	if !s.configCommitCurrent(commit) {
 		return false
 	}
@@ -258,7 +326,27 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		var selector coreauth.Selector
+		if commit.preparedSelector != nil {
+			selector = commit.preparedSelector.selector
+			if selector == nil {
+				return false
+			}
+		} else {
+			var errSelector error
+			selector, errSelector = buildRoutingSelector(commit.cfg, s.selectorFactory)
+			if errSelector != nil {
+				log.WithError(errSelector).Error("routing config application failed; retaining previous selector")
+				return false
+			}
+		}
+		s.coreManager.SetSelector(selector)
+		if commit.preparedSelector != nil {
+			commit.preparedSelector.selector = nil
+			if s.pendingRoutingSelector == commit.preparedSelector {
+				s.pendingRoutingSelector = nil
+			}
+		}
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)

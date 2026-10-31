@@ -333,6 +333,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				shutdownErr = err
 			}
 		}
+		s.configRuntimeMu.Lock()
+		s.stopPendingRoutingSelector()
+		s.configRuntimeMu.Unlock()
 		if s.wsGateway != nil {
 			if err := s.wsGateway.Stop(ctx); err != nil {
 				log.Errorf("failed to stop websocket gateway: %v", err)
