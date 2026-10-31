@@ -58,11 +58,11 @@ func TestRTKFilterSelection(t *testing.T) {
 		"-old",
 		"+new",
 	}, "\n") + "\n"
-	if got := selectRTKFilter(diff); got == nil || got.id != "git-diff" {
+	if got := selectRTKFilter(diff, ""); got == nil || got.id != "git-diff" {
 		t.Fatalf("git diff output selected %v", got)
 	}
 
-	if got := selectRTKFilter("Error: boom\nException: fake\n"); got == nil || !got.hasType("generic-error") {
+	if got := selectRTKFilter("Error: boom\nException: fake\n", ""); got == nil || !got.hasType("generic-error") {
 		t.Fatalf("error output selected %v", got)
 	}
 
@@ -72,7 +72,7 @@ func TestRTKFilterSelection(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		read.WriteString("func handler() error { return nil }\n")
 	}
-	if got := selectRTKFilter(read.String()); got != nil {
+	if got := selectRTKFilter(read.String(), ""); got != nil {
 		t.Fatalf("a plain file read must not be filtered, selected %s", got.id)
 	}
 }
@@ -101,5 +101,60 @@ func TestRTKEngineAppliesFilters(t *testing.T) {
 	}
 	if strings.Contains(out, "npm warn deprecated") {
 		t.Fatalf("filter did not drop install warnings:\n%s", out)
+	}
+}
+
+// Upstream picks an rtk filter by the command that produced the output. Without
+// that, a build log with no distinctive marker lines reaches no filter at all
+// and the payload keeps its ANSI escapes and blank runs.
+func TestRTKFilterUsesTheOriginatingCommand(t *testing.T) {
+	output := strings.Repeat("\x1b[31mFAIL\x1b[0m TestFoo\n\n\n\n", 30)
+	command := "go test ./internal/..."
+
+	byCommand := selectRTKFilter(output, command)
+	if byCommand == nil || byCommand.id != "test-go" {
+		t.Fatalf("command %q selected %v, want test-go", command, byCommand)
+	}
+	if byContent := selectRTKFilter(output, ""); byContent != nil && byContent.id == byCommand.id {
+		t.Fatal("this output is meant to be unrecognizable without its command")
+	}
+
+	stripped, ok := applyRTKFilters(output, command)
+	if !ok || strings.Contains(stripped, "\x1b") {
+		t.Fatalf("command filter did not strip ANSI:\n%q", stripped)
+	}
+}
+
+// The command lives in a different place in each protocol, so the pairing is
+// pinned for all three: a segment carrying the wrong command runs a filter that
+// was meant for a different tool.
+func TestRTKCommandPickedFromEveryProtocol(t *testing.T) {
+	cases := map[string]string{
+		"chat": `{"messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"arguments":"{\"command\":\"go test ./...\"}"}}]},` +
+			`{"role":"tool","tool_call_id":"c1","content":"out"}]}`,
+		"anthropic": `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"bash","input":{"command":"git status"}}]},` +
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"On branch main"}]}]}`,
+		"responses": `{"input":[{"type":"function_call","call_id":"r1","name":"shell","arguments":"{\"command\":\"npm test\"}"},` +
+			`{"type":"function_call_output","call_id":"r1","output":"PASS"}]}`,
+	}
+	want := map[string]string{
+		"chat":      "go test ./...",
+		"anthropic": "git status",
+		"responses": "npm test",
+	}
+	for name, body := range cases {
+		s := &scanner{body: []byte(body)}
+		if !s.scan() {
+			t.Fatalf("%s: no segments", name)
+		}
+		found := ""
+		for _, seg := range s.segs {
+			if seg.kind == kindToolOutput && seg.command != "" {
+				found = seg.command
+			}
+		}
+		if found != want[name] {
+			t.Fatalf("%s: tool command = %q, want %q", name, found, want[name])
+		}
 	}
 }

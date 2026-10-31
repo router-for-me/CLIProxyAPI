@@ -74,6 +74,14 @@ type kindAware interface {
 	compressKind(kind segmentKind, text string) (string, bool)
 }
 
+// commandAware is implemented by engines that pick their transform from the
+// shell command behind a tool result. The command is empty for prose and for
+// tool results whose originating call is not in the payload, and an engine
+// implementing this must treat that as "decide from the text alone".
+type commandAware interface {
+	compressCommand(command, text string) (string, bool)
+}
+
 // bodyEngine rewrites the whole payload at once, for transforms that depend on
 // repeated content across segments. It returns replacement text by segment index.
 type bodyEngine interface {
@@ -114,9 +122,11 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 
 	texts := make([]string, len(s.segs))
 	kinds := make([]segmentKind, len(s.segs))
+	commands := make([]string, len(s.segs))
 	for i := range s.segs {
 		texts[i] = s.segs[i].value.String()
 		kinds[i] = s.segs[i].kind
+		commands[i] = s.segs[i].command
 	}
 	changed := make([]bool, len(texts))
 	dirty := false
@@ -131,6 +141,16 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 				}
 				saved += len(texts[i]) - len(repl)
 				texts[i] = repl
+				changed[i] = true
+			}
+		case commandAware:
+			for i := range texts {
+				out, hit := typed.compressCommand(commands[i], texts[i])
+				if !hit || out == texts[i] {
+					continue
+				}
+				saved += len(texts[i]) - len(out)
+				texts[i] = out
 				changed[i] = true
 			}
 		case kindAware:
