@@ -707,7 +707,98 @@ func logAntigravityClaudeGeminiSignatureSanitize(modelName, action, reason strin
 // FunctionCallGroup represents a group of function calls and their responses
 type FunctionCallGroup struct {
 	ResponsesNeeded int
+	CallIDs         []string // ordered function call IDs for matching responses when extras exist
 	CallNames       []string // ordered function call names for backfilling empty response names
+}
+
+func selectGroupResponses(collected []gjson.Result, group *FunctionCallGroup) ([]gjson.Result, []gjson.Result) {
+	needed := group.ResponsesNeeded
+	if len(collected) <= needed {
+		return collected, nil
+	}
+
+	hasCallID := false
+	for _, id := range group.CallIDs {
+		if id != "" {
+			hasCallID = true
+			break
+		}
+	}
+	if !hasCallID {
+		return collected[:needed], collected[needed:]
+	}
+
+	used := make([]bool, len(collected))
+	selected := make([]gjson.Result, needed)
+	matchedSlot := make([]bool, needed)
+
+	for slot := 0; slot < needed; slot++ {
+		callID := ""
+		if slot < len(group.CallIDs) {
+			callID = group.CallIDs[slot]
+		}
+		if callID == "" {
+			continue
+		}
+		for idx, resp := range collected {
+			if used[idx] {
+				continue
+			}
+			if resp.Get("functionResponse.id").String() == callID {
+				used[idx] = true
+				selected[slot] = resp
+				matchedSlot[slot] = true
+				break
+			}
+		}
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] {
+			continue
+		}
+		callName := ""
+		if slot < len(group.CallNames) {
+			callName = group.CallNames[slot]
+		}
+		if callName == "" {
+			continue
+		}
+		for idx, resp := range collected {
+			if used[idx] {
+				continue
+			}
+			respName := resp.Get("functionResponse.name").String()
+			if respName == callName || respName == "" {
+				used[idx] = true
+				selected[slot] = resp
+				matchedSlot[slot] = true
+				break
+			}
+		}
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] {
+			continue
+		}
+		for idx, resp := range collected {
+			if !used[idx] {
+				used[idx] = true
+				selected[slot] = resp
+				matchedSlot[slot] = true
+				break
+			}
+		}
+	}
+
+	remaining := make([]gjson.Result, 0, len(collected)-needed)
+	for idx, resp := range collected {
+		if !used[idx] {
+			remaining = append(remaining, resp)
+		}
+	}
+	return selected, remaining
 }
 
 func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
@@ -901,10 +992,15 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				pendingGroups = pendingGroups[1:]
 
 				// Take the needed responses for this group
-				groupResponses := collectedResponses[:group.ResponsesNeeded]
-				collectedResponses = collectedResponses[group.ResponsesNeeded:]
+				var groupResponses []gjson.Result
+				groupResponses, collectedResponses = selectGroupResponses(collectedResponses, group)
 
 				appendFunctionResponses(groupResponses, group.CallNames)
+			}
+			if len(pendingGroups) == 0 {
+				// Any remaining responses in this turn have no preceding functionCall group
+				// to match and must not leak into subsequent model turns.
+				collectedResponses = nil
 			}
 
 			return true // Skip adding this content, responses are merged
@@ -912,9 +1008,11 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 
 		// If this is a model with function calls, create a new group
 		if role == "model" {
+			var callIDs []string
 			var callNames []string
 			parts.ForEach(func(_, part gjson.Result) bool {
 				if part.Get("functionCall").Exists() {
+					callIDs = append(callIDs, part.Get("functionCall.id").String())
 					callNames = append(callNames, part.Get("functionCall.name").String())
 				}
 				return true
@@ -931,6 +1029,7 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
 					ResponsesNeeded: len(callNames),
+					CallIDs:         callIDs,
 					CallNames:       callNames,
 				}
 				pendingGroups = append(pendingGroups, group)
