@@ -690,6 +690,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 		}
 
+		// OpenAI Responses continuations identify the conversation by the prior response.
+		responseID := normalizedSessionCandidate(root.Get("previous_response_id").String())
+		if responseID == "" && hasNestedReq {
+			responseID = normalizedSessionCandidate(reqRoot.Get("previous_response_id").String())
+		}
+		if responseID != "" {
+			info.ClientType = "openai-response"
+			info.SessionID = "response:" + responseID
+			info.AgentName = "main"
+			return finalizeSessionInfo(info)
+		}
+
 		// Generic session in payload
 		agentID := normalizedSessionCandidate(root.Get("metadata.agent_id").String())
 		if agentID == "" {

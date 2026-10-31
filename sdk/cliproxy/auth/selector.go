@@ -1724,11 +1724,21 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		}
 	}
 
+	responseAffinityID := ""
+	if res.Options.Metadata != nil {
+		if raw, ok := res.Options.Metadata[cliproxyexecutor.ResponseAffinityIDMetadataKey].(string); ok {
+			responseAffinityID = normalizedSessionCandidate(raw)
+		}
+	}
 	if s.cache == nil {
 		return
 	}
 	if explicitID == "" && s.matcher != nil && res.Options.Metadata != nil {
 		if _, isLCP := res.Options.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey]; isLCP {
+			if res.Success && responseAffinityID != "" {
+				responseKey := ns + "::" + cliproxysession.BoundSessionIdentity("response:"+responseAffinityID) + "::" + nsModel
+				s.cache.SetAliases(res.AuthID, responseKey)
+			}
 			return
 		}
 	}
@@ -1752,9 +1762,19 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		fallbackKey = ns + "::" + fallbackID + "::" + nsModel
 	}
 	if res.Success {
-		s.cache.Touch(cacheKey, res.AuthID)
-		if fallbackKey != "" {
-			s.cache.Touch(fallbackKey, res.AuthID)
+		if responseAffinityID != "" {
+			aliases := []string{cacheKey}
+			if fallbackKey != "" {
+				aliases = append(aliases, fallbackKey)
+			}
+			responseKey := ns + "::" + cliproxysession.BoundSessionIdentity("response:"+responseAffinityID) + "::" + nsModel
+			aliases = append(aliases, responseKey)
+			s.cache.SetAliases(res.AuthID, aliases...)
+		} else {
+			s.cache.Touch(cacheKey, res.AuthID)
+			if fallbackKey != "" {
+				s.cache.Touch(fallbackKey, res.AuthID)
+			}
 		}
 		return
 	}

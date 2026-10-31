@@ -383,6 +383,43 @@ func TestHomeDispatchSessionIDsExtractsParentSessionID(t *testing.T) {
 	}
 }
 
+func TestHomeDispatchSessionIDsReusesPreviousResponseAlias(t *testing.T) {
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+	manager := NewManager(nil, selector, nil)
+	manager.SetConfig(&internalconfig.Config{
+		Home:    internalconfig.HomeConfig{Enabled: true},
+		Routing: internalconfig.RoutingConfig{SessionAffinityTTL: "1h"},
+	})
+	firstOptions := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey:             "home-caller",
+			cliproxyexecutor.CanonicalSessionIDMetadataKey:      "lcp:v1:home-caller",
+			cliproxyexecutor.LCPAffinitySessionIDMetadataKey:    "lcp:v1:home-caller",
+			cliproxyexecutor.SessionAffinityProviderMetadataKey: "openai",
+			cliproxyexecutor.SessionAffinityModelMetadataKey:    "gpt-6-astra",
+			cliproxyexecutor.ResponseAffinityIDMetadataKey:      "resp-home-alias",
+		},
+	}
+	firstSessionID, _ := manager.homeDispatchSessionIDs(firstOptions)
+	firstOptions.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = firstSessionID
+	manager.updateSessionAffinity(Result{
+		AuthID:   "auth-home",
+		Provider: "openai",
+		Model:    "gpt-6-astra",
+		Success:  true,
+		Options:  firstOptions,
+	})
+
+	continuation := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"model":"gpt-6-astra","previous_response_id":"resp-home-alias","input":[]}`),
+	}
+	continuedSessionID, _ := manager.homeDispatchSessionIDs(continuation)
+	if continuedSessionID != firstSessionID {
+		t.Fatalf("continuation Home session = %q, want first-turn session %q", continuedSessionID, firstSessionID)
+	}
+}
+
 type hierarchyCaptureDispatcher struct {
 	mu         sync.Mutex
 	sessionIDs []string
