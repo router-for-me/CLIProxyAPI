@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Claude subscription quota for CLIProxyAPI
+After=cliproxyapi.service
+
+[Service]
+Type=oneshot
+ExecStart=@NODE@ %h/.local/share/cliproxyapi-quota/snapshot.mjs
+Environment=CLIPROXY_MANAGEMENT_KEY_FILE=%h/.config/cliproxyapi/management-key
+Environment=CLAUDE_QUOTA_SNAPSHOT=%h/.local/share/cliproxyapi-quota/quota.json
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=60

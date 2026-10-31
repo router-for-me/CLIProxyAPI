@@ -458,7 +458,8 @@ type QuotaExceeded struct {
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
-	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	Strategy            string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	ClaudeQuotaSnapshot string `yaml:"claude-quota-snapshot,omitempty" json:"claude-quota-snapshot,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
