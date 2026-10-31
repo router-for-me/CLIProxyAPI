@@ -72,6 +72,7 @@ func cooldownFieldsOf(q QuotaState) QuotaState {
 		Reason:        q.Reason,
 		NextRecoverAt: q.NextRecoverAt,
 		BackoffLevel:  q.BackoffLevel,
+		RecheckUntil:  q.RecheckUntil,
 	}
 }
 
@@ -86,6 +87,15 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	// A cleared cooldown drops the recheck hint. A new quota block keeps a
+	// longer hint already stored, unless the caller supplies a later one.
+	if !cooldown.Exceeded && cooldown.NextRecoverAt.IsZero() && cooldown.RecheckUntil.IsZero() {
+		dst.RecheckUntil = time.Time{}
+		return
+	}
+	if cooldown.RecheckUntil.After(dst.RecheckUntil) {
+		dst.RecheckUntil = cooldown.RecheckUntil
+	}
 }
 
 // collectQuotaSignals builds the bounded snapshot for a single response.

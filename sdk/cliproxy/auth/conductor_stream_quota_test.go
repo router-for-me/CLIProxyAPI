@@ -89,11 +89,15 @@ func TestExecuteStreamQuotaFailurePreservesCooldownAndScope(t *testing.T) {
 				}
 				high, _ := manager.GetByID(highID)
 				state := high.ModelStates[model]
-				if state == nil || state.NextRetryAfter.Before(before.Add(retryAfter)) {
-					t.Errorf("model cooldown lost upstream RetryAfter: state=%+v", state)
+				limit := retryAfter
+				if limit > quotaRecheckInterval {
+					limit = quotaRecheckInterval
 				}
-				if credentialScoped && (high.Quota.Reason != "credential_quota" || high.Quota.NextRecoverAt.Before(before.Add(retryAfter))) {
-					t.Errorf("credential cooldown lost scope or RetryAfter: quota=%+v", high.Quota)
+				if state == nil || state.NextRetryAfter.Before(before.Add(limit-time.Second)) || state.NextRetryAfter.After(before.Add(limit+time.Second)) {
+					t.Errorf("model cooldown = %v, want about %s from %v", state, limit, before)
+				}
+				if credentialScoped && (high.Quota.Reason != "credential_quota" || high.Quota.NextRecoverAt.Before(before.Add(limit-time.Second)) || high.Quota.NextRecoverAt.After(before.Add(limit+time.Second))) {
+					t.Errorf("credential cooldown lost scope or recheck deadline: quota=%+v", high.Quota)
 				}
 				for _, requestedModel := range []string{model, siblingModel} {
 					wantID := lowID

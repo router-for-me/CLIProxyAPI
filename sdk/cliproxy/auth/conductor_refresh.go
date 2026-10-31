@@ -37,7 +37,11 @@ const (
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
 	minQuotaCooldownFloor     = 10 * time.Second
-	transientErrorCooldown    = time.Minute
+	// quotaRecheckInterval caps Codex quota cooldowns. Upstream resets_at moves
+	// irregularly, so a longer hint must not keep the credential out until then.
+	// The next request after this interval is the release check.
+	quotaRecheckInterval   = 5 * time.Minute
+	transientErrorCooldown = time.Minute
 )
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
