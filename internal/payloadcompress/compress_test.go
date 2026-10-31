@@ -277,6 +277,28 @@ func TestLiteStripsANSI(t *testing.T) {
 	}
 }
 
+// A tool result must be cleaned before it is capped. Upstream orders
+// collapseWhitespace ahead of compressToolResults, so blank runs never consume
+// the character budget; capping first strands the cleaner's savings.
+func TestLiteCollapsesBlankRunsBeforeCappingToolOutput(t *testing.T) {
+	kept := "payload line"
+	text := strings.Repeat(kept+"   \n\n\n\n", 400)
+	e := liteEngine{opts: StepOptions{MaxToolLength: 500}}
+	out, ok := e.compressKind(kindToolOutput, text)
+	if !ok {
+		t.Fatal("expected compression")
+	}
+	if strings.Contains(out, "\n\n\n") {
+		t.Fatalf("blank runs survived the cap:\n%q", out[:120])
+	}
+	if !strings.Contains(out, kept) {
+		t.Fatalf("content was lost: %q", out)
+	}
+	if got := charLen(out); got > 500 {
+		t.Fatalf("capped result is %d chars, want <= 500", got)
+	}
+}
+
 func TestRTKCollapsesRuns(t *testing.T) {
 	out, ok := rtkEngine{}.compress(shellOutput())
 	if !ok {
