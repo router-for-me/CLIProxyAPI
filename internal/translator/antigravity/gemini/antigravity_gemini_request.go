@@ -231,47 +231,7 @@ func removeEmptyGeminiFunctionTools(rawJSON []byte) []byte {
 }
 
 func removeEmptyGeminiSystemInstructionParts(rawJSON []byte) []byte {
-	parts := util.GetGJSONBytesNoCopy(rawJSON, "request.systemInstruction.parts")
-	if !parts.IsArray() {
-		return rawJSON
-	}
-	hasEmptyPart := false
-	parts.ForEach(func(_, part gjson.Result) bool {
-		if isEmptyGeminiPartObject(part) {
-			hasEmptyPart = true
-			return false
-		}
-		return true
-	})
-	if !hasEmptyPart {
-		return rawJSON
-	}
-	var cleanedParts [][]byte
-	parts.ForEach(func(_, part gjson.Result) bool {
-		if isEmptyGeminiPartObject(part) {
-			return true
-		}
-		cleanedParts = append(cleanedParts, []byte(part.Raw))
-		return true
-	})
-	if len(cleanedParts) == 0 {
-		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.systemInstruction")
-		return rawJSON
-	}
-	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.systemInstruction.parts", translatorcommon.JoinRawArray(cleanedParts))
-	return rawJSON
-}
-
-func isEmptyGeminiPartObject(part gjson.Result) bool {
-	if !part.IsObject() {
-		return false
-	}
-	hasField := false
-	part.ForEach(func(_, _ gjson.Result) bool {
-		hasField = true
-		return false
-	})
-	return !hasField
+	return signature.SanitizeGeminiSystemInstruction(rawJSON, "request.contents")
 }
 
 // geminiFunctionNameFields lists the part fields that can carry a function name.
@@ -728,67 +688,87 @@ func selectGroupResponses(collected []gjson.Result, group *FunctionCallGroup) ([
 		return collected[:needed], collected[needed:]
 	}
 
+	// Single O(M) pass over collected responses to index id and name once per part.
+	byID := make(map[string][]int, len(collected))
+	byName := make(map[string][]int, len(collected))
+	var emptyNameIdxs []int
+	for idx, resp := range collected {
+		funcResp := resp.Get("functionResponse")
+		if id := funcResp.Get("id").String(); id != "" {
+			byID[id] = append(byID[id], idx)
+		}
+		if name := funcResp.Get("name").String(); name != "" {
+			byName[name] = append(byName[name], idx)
+		} else {
+			emptyNameIdxs = append(emptyNameIdxs, idx)
+		}
+	}
+
 	used := make([]bool, len(collected))
 	selected := make([]gjson.Result, needed)
 	matchedSlot := make([]bool, needed)
-
-	for slot := 0; slot < needed; slot++ {
-		callID := ""
-		if slot < len(group.CallIDs) {
-			callID = group.CallIDs[slot]
-		}
-		if callID == "" {
-			continue
-		}
-		for idx, resp := range collected {
-			if used[idx] {
-				continue
-			}
-			if resp.Get("functionResponse.id").String() == callID {
-				used[idx] = true
-				selected[slot] = resp
-				matchedSlot[slot] = true
-				break
-			}
-		}
-	}
-
-	for slot := 0; slot < needed; slot++ {
-		if matchedSlot[slot] {
-			continue
-		}
-		callName := ""
-		if slot < len(group.CallNames) {
-			callName = group.CallNames[slot]
-		}
-		if callName == "" {
-			continue
-		}
-		for idx, resp := range collected {
-			if used[idx] {
-				continue
-			}
-			respName := resp.Get("functionResponse.name").String()
-			if respName == callName || respName == "" {
-				used[idx] = true
-				selected[slot] = resp
-				matchedSlot[slot] = true
-				break
-			}
-		}
-	}
-
-	for slot := 0; slot < needed; slot++ {
-		if matchedSlot[slot] {
-			continue
-		}
-		for idx, resp := range collected {
+	popUnused := func(queue []int) (int, []int, bool) {
+		for len(queue) > 0 {
+			idx := queue[0]
+			queue = queue[1:]
 			if !used[idx] {
-				used[idx] = true
-				selected[slot] = resp
-				matchedSlot[slot] = true
-				break
+				return idx, queue, true
 			}
+		}
+		return 0, queue, false
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if slot >= len(group.CallIDs) || group.CallIDs[slot] == "" {
+			continue
+		}
+		callID := group.CallIDs[slot]
+		if idx, rest, ok := popUnused(byID[callID]); ok {
+			byID[callID] = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+		} else {
+			delete(byID, callID)
+		}
+	}
+
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] || slot >= len(group.CallNames) || group.CallNames[slot] == "" {
+			continue
+		}
+		callName := group.CallNames[slot]
+		if idx, rest, ok := popUnused(byName[callName]); ok {
+			byName[callName] = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+			continue
+		}
+		delete(byName, callName)
+		if idx, rest, ok := popUnused(emptyNameIdxs); ok {
+			emptyNameIdxs = rest
+			used[idx] = true
+			selected[slot] = collected[idx]
+			matchedSlot[slot] = true
+		} else {
+			emptyNameIdxs = nil
+		}
+	}
+
+	freeCursor := 0
+	for slot := 0; slot < needed; slot++ {
+		if matchedSlot[slot] {
+			continue
+		}
+		for freeCursor < len(collected) && used[freeCursor] {
+			freeCursor++
+		}
+		if freeCursor < len(collected) {
+			used[freeCursor] = true
+			selected[slot] = collected[freeCursor]
+			matchedSlot[slot] = true
+			freeCursor++
 		}
 	}
 

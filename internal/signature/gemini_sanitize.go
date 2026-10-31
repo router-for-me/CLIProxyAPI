@@ -97,24 +97,35 @@ func SanitizeGeminiSystemInstruction(payload []byte, contentsPath string) []byte
 		if !parts.IsArray() {
 			continue
 		}
+		var keptParts [][]byte
 		hasEmptyPart := false
+		seenIndex := 0
 		parts.ForEach(func(_, part gjson.Result) bool {
 			if isEmptyGeminiPartObject(part) {
-				hasEmptyPart = true
-				return false
+				if !hasEmptyPart {
+					hasEmptyPart = true
+					idx := 0
+					parts.ForEach(func(_, prev gjson.Result) bool {
+						if idx >= seenIndex {
+							return false
+						}
+						keptParts = append(keptParts, []byte(prev.Raw))
+						idx++
+						return true
+					})
+				}
+				seenIndex++
+				return true
 			}
+			if hasEmptyPart {
+				keptParts = append(keptParts, []byte(part.Raw))
+			}
+			seenIndex++
 			return true
 		})
 		if !hasEmptyPart {
 			continue
 		}
-		keptParts := make([][]byte, 0, int(parts.Get("#").Int()))
-		parts.ForEach(func(_, part gjson.Result) bool {
-			if !isEmptyGeminiPartObject(part) {
-				keptParts = append(keptParts, []byte(part.Raw))
-			}
-			return true
-		})
 		if len(keptParts) == 0 {
 			if updated, errDelete := sjson.DeleteBytes(payload, sysPath); errDelete == nil {
 				payload = updated
