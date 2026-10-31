@@ -77,6 +77,7 @@ func buildV8Paths() []configPath {
 		{"github-token", "server.github-token"},
 		{"tls", "server.tls"}, {"commercial-mode", "server.commercial-mode"}, {"discovery", "server.discovery"},
 		{"remote-management", "management"}, {"api-keys", "access.api-keys"},
+		{"api-key-policies", "access.api-key-policies"},
 		{"credential-concurrency", "credentials.concurrency"}, {"credential-in-flight", "credentials.in-flight"},
 		{"force-model-prefix", "routing.force-model-prefix"},
 		{"request-retry", "routing.retry.request-retry"}, {"max-retry-credentials", "routing.retry.max-retry-credentials"},
@@ -281,6 +282,9 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	if errValidate := decoded.Models.Validate(); errValidate != nil {
+		return errValidate
+	}
+	if errValidate := decoded.ValidateAPIKeyPolicies(); errValidate != nil {
 		return errValidate
 	}
 	*cfg = Config(decoded)

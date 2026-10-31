@@ -24,13 +24,27 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newConfiguredProvider(sdkaccess.DefaultAccessProviderName, keys, cfg),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name                string
+	keys                map[string]struct{}
+	policies            map[string]sdkconfig.APIKeyPolicy
+	maxRequestBodyBytes int64
+}
+
+func newConfiguredProvider(name string, keys []string, cfg *sdkconfig.SDKConfig) *provider {
+	p := newProvider(name, keys)
+	p.maxRequestBodyBytes = cfg.MaxRequestBodyBytes
+	p.policies = make(map[string]sdkconfig.APIKeyPolicy, len(cfg.APIKeyPolicies))
+	for _, policy := range cfg.APIKeyPolicies {
+		policy.AllowedModels = append([]string(nil), policy.AllowedModels...)
+		policy.BlockedModels = append([]string(nil), policy.BlockedModels...)
+		p.policies[strings.TrimSpace(policy.APIKey)] = policy
+	}
+	return p
 }
 
 func newProvider(name string, keys []string) *provider {
@@ -90,12 +104,20 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
+			policy, hasPolicy := p.policies[candidate.value]
+			if hasPolicy {
+				if errPolicy := p.authorizeRequest(policy, r); errPolicy != nil {
+					return nil, errPolicy
+				}
+			}
+			metadata := map[string]string{"source": candidate.source}
+			if policy.Name != "" {
+				metadata["name"] = policy.Name
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  metadata,
 			}, nil
 		}
 	}
