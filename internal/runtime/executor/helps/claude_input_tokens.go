@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/maphash"
 	"strings"
 	"sync"
 
@@ -108,11 +109,86 @@ func countClaudeInputTokens(enc tokenizer.Codec, payload []byte) (int64, error) 
 	if len(segments) == 0 {
 		return 0, nil
 	}
-	count, err := enc.Count(strings.Join(segments, "\n"))
+
+	// Short segments are tokenized together exactly as before. Long segments (tool definitions,
+	// system prompt, history) are tokenized individually through a cache, because clients resend
+	// them unchanged on every request. Each boundary between pieces counts as one "\n" token.
+	total, pieces := 0, 0
+	var pending []string
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		count, errCount := enc.Count(strings.Join(pending, "\n"))
+		if errCount != nil {
+			return errCount
+		}
+		total += count
+		pieces++
+		pending = pending[:0]
+		return nil
+	}
+	for _, segment := range segments {
+		if len(segment) < segmentTokenCacheMinBytes {
+			pending = append(pending, segment)
+			continue
+		}
+		if err = flush(); err != nil {
+			return 0, err
+		}
+		count, errCount := countSegmentTokens(enc, segment)
+		if errCount != nil {
+			return 0, errCount
+		}
+		total += count
+		pieces++
+	}
+	if err = flush(); err != nil {
+		return 0, err
+	}
+	if pieces > 1 {
+		total += pieces - 1
+	}
+	return int64(total), nil
+}
+
+const (
+	segmentTokenCacheMinBytes   = 512
+	segmentTokenCacheMaxEntries = 8192
+)
+
+type segmentTokenCacheKey struct {
+	hash uint64
+	size int
+}
+
+var (
+	segmentTokenCacheSeed = maphash.MakeSeed()
+	segmentTokenCacheMu   sync.Mutex
+	segmentTokenCache     = make(map[segmentTokenCacheKey]int, 256)
+)
+
+// countSegmentTokens returns the token count of one long segment, memoized by content.
+// Only the hash and the count are stored, so the cache stays small.
+func countSegmentTokens(enc tokenizer.Codec, segment string) (int, error) {
+	key := segmentTokenCacheKey{hash: maphash.String(segmentTokenCacheSeed, segment), size: len(segment)}
+	segmentTokenCacheMu.Lock()
+	count, ok := segmentTokenCache[key]
+	segmentTokenCacheMu.Unlock()
+	if ok {
+		return count, nil
+	}
+	count, err := enc.Count(segment)
 	if err != nil {
 		return 0, err
 	}
-	return int64(count), nil
+	segmentTokenCacheMu.Lock()
+	if len(segmentTokenCache) >= segmentTokenCacheMaxEntries {
+		clear(segmentTokenCache)
+	}
+	segmentTokenCache[key] = count
+	segmentTokenCacheMu.Unlock()
+	return count, nil
 }
 
 func collectClaudeInputTokenSegments(payload []byte) ([]string, error) {
