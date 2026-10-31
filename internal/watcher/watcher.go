@@ -31,14 +31,17 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath                 string
-	authDir                    string
-	config                     *config.Config
-	clientsMutex               sync.RWMutex
-	authRescanMu               sync.Mutex
-	configReloadMu             sync.Mutex
-	configReloadTimer          *time.Timer
-	configApplyMu              sync.Mutex // Serializes config file reloads so they apply in file order.
+	configPath        string
+	authDir           string
+	config            *config.Config
+	clientsMutex      sync.RWMutex
+	authRescanMu      sync.Mutex
+	configReloadMu    sync.Mutex
+	configReloadTimer *time.Timer
+	configApplyMu     sync.Mutex // Serializes config file reloads so they apply in file order.
+	// plaintextSecrets holds the plaintext management secrets a reload hashed into
+	// the file. Guarded by configApplyMu.
+	plaintextSecrets           []string
 	serverUpdateMu             sync.Mutex
 	serverUpdateTimer          *time.Timer
 	serverUpdateLast           time.Time
