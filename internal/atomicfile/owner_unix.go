@@ -3,6 +3,7 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -32,4 +33,11 @@ func keepOwner(tmp *os.File, existing os.FileInfo) error {
 		return nil
 	}
 	return tmp.Chown(int(want.Uid), int(want.Gid))
+}
+
+// syncUnsupported reports an fsync error meaning the file cannot be synced at
+// all (EINVAL for a file that does not support it, ENOSYS/ENOTSUP/EOPNOTSUPP),
+// rather than a failed flush.
+func syncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, errors.ErrUnsupported)
 }

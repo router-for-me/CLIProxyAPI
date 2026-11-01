@@ -13,8 +13,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// rename, exchange, exchangeAvailable, matchOwner, statTarget and chmodTemp are
-// replaced in tests to exercise the fallbacks.
+// rename, exchange, exchangeAvailable, matchOwner, statTarget, chmodTemp and
+// syncTemp are replaced in tests to exercise the fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
@@ -22,6 +22,7 @@ var (
 	matchOwner        = keepOwner
 	statTarget        = os.Stat
 	chmodTemp         = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+	syncTemp          = func(file *os.File) error { return file.Sync() }
 )
 
 // beforeCommit runs after the temp file is complete, right before it replaces the
@@ -150,9 +151,15 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		_ = tmp.Close()
 		return fmt.Errorf("atomicfile: write temp file: %w", errWrite)
 	}
-	if errSync := tmp.Sync(); errSync != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("atomicfile: sync temp file: %w", errSync)
+	if errSync := syncTemp(tmp); errSync != nil {
+		if !syncUnsupported(errSync) {
+			_ = tmp.Close()
+			return fmt.Errorf("atomicfile: sync temp file: %w", errSync)
+		}
+		// Some writable mounts (FUSE, object-backed) cannot fsync a regular file.
+		// The replacement stays atomic for readers; it is only not flushed first,
+		// as the writers this package replaced did not flush either.
+		log.WithError(errSync).Debugf("atomicfile: cannot sync the temp file for %s, replacing without the flush", target)
 	}
 	if errClose := tmp.Close(); errClose != nil {
 		return fmt.Errorf("atomicfile: close temp file: %w", errClose)

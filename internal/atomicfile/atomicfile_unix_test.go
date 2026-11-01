@@ -240,3 +240,37 @@ func TestWriteFileSkipsChmodWhenModeMatches(t *testing.T) {
 	}
 	assertNoTempFiles(t, filepath.Dir(path))
 }
+
+// A mount that cannot fsync a regular file must not make every save fail: the
+// replacement goes ahead without the flush. A real flush failure still fails.
+func TestWriteFileReplacesWithoutUnsupportedSync(t *testing.T) {
+	original := syncTemp
+	t.Cleanup(func() { syncTemp = original })
+	for _, errUnsupported := range []error{syscall.EINVAL, syscall.ENOSYS, syscall.ENOTSUP} {
+		path := filepath.Join(t.TempDir(), "auth.json")
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		syncTemp = func(*os.File) error { return errUnsupported }
+		if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+			t.Fatalf("WriteFile() with fsync %v error = %v, want the replacement", errUnsupported, err)
+		}
+		if got, _ := os.ReadFile(path); string(got) != "new" {
+			t.Fatalf("content with fsync %v = %q, want new", errUnsupported, got)
+		}
+		assertNoTempFiles(t, filepath.Dir(path))
+	}
+
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	syncTemp = func(*os.File) error { return syscall.EIO }
+	if err := WriteFile(path, []byte("new"), 0o600); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("WriteFile() with a failed flush = %v, want EIO", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "old" {
+		t.Fatalf("content after a failed flush = %q, want old kept", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
