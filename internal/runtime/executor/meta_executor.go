@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -24,7 +25,29 @@ var (
 
 var metaRefreshGroup singleflight.Group
 
-const metaUserAgent = "muse-build/1.3.0 (interactive; macos-aarch64; build ac7280f2aca67769d1455a8847bb502b617d50f6)"
+// Captured from Muse Code 1.4.14-R7309.1 (build dec7d7497fecdad135ec5835a8161dbc92e55b58)
+// on linux-x86_64. Header parity alone does not satisfy subscription-key
+// attestation for tool-bearing requests; see helps.EnsureMetaMuseToolNamespace.
+const (
+	metaClientVersion = "1.4.14"
+	metaClientBuild   = "dec7d7497fecdad135ec5835a8161dbc92e55b58"
+	metaClientSurface = "tbh:exec"
+)
+
+func metaUserAgent() string {
+	goos := runtime.GOOS
+	if goos == "darwin" {
+		goos = "macos"
+	}
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x86_64"
+	case "arm64":
+		arch = "aarch64"
+	}
+	return fmt.Sprintf("muse-build/%s (non-interactive; %s-%s; build %s)", metaClientVersion, goos, arch, metaClientBuild)
+}
 
 // MetaExecutor implements the cliproxyauth.ProviderExecutor for Meta Muse models (api.meta.ai).
 type MetaExecutor struct {
@@ -52,8 +75,7 @@ func (e *MetaExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	} else {
 		req.Header.Del("Authorization")
 	}
-	req.Header.Set("User-Agent", metaUserAgent)
-	req.Header.Set("X-Client-Id", "tbh:tui")
+	applyMetaClientIdentity(req)
 
 	var attrs map[string]string
 	if auth != nil {
@@ -257,7 +279,7 @@ func (e *MetaExecutor) enrichAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
 		cloned.Attributes["api_key"] = token
 	}
 	if _, hasHeader := cloned.Attributes["header:User-Agent"]; !hasHeader {
-		cloned.Attributes["header:User-Agent"] = metaUserAgent
+		cloned.Attributes["header:User-Agent"] = metaUserAgent()
 	}
 	return cloned
 }

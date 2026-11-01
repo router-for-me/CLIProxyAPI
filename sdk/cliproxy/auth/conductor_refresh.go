@@ -882,6 +882,10 @@ func shouldPreserveRejectedAccessToken(existing, updated *Auth, isRefresh bool) 
 		if updated.CodexRefreshPatch != nil {
 			return !updated.CodexRefreshPatch.RefreshedOuter()
 		}
+		if (existing.RejectedRefreshToken != "" && authRefreshToken(updated) == existing.RejectedRefreshToken) ||
+			existing.RequiresSignIn || updated.RequiresSignIn {
+			return true
+		}
 		return false
 	}
 	return false
@@ -1323,6 +1327,24 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.queueRefreshReschedule(id)
 		return nil, err
 	}
+	if err == nil {
+		probe := updated
+		if probe == nil {
+			probe = base.Clone()
+		} else {
+			probe = probe.Clone()
+		}
+		applyPreservedRenewalState(base, probe, updateModeRefresh, now)
+		if !secretGrantChanged(base, probe) && authHasUnchangedRejectedRefreshToken(probe) {
+			if probe.RefreshError != nil {
+				err = probe.RefreshError
+			} else if base != nil && base.LastError != nil {
+				err = base.LastError
+			} else {
+				err = &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
+			}
+		}
+	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
@@ -1525,7 +1547,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 	}
 	applyPreservedRejectedTokens(base, updated, true)
-	if updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken {
+	canServeWithAccessToken := !updated.RequiresSignIn || updated.HasValidAccessToken(now)
+	if canServeWithAccessToken && (updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken) {
 		updated.LastError = nil
 		updated.StatusMessage = ""
 		updated.Unavailable = false
@@ -1534,6 +1557,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			updated.Status = StatusActive
 		}
 		_ = clearUnauthorizedModelStates(updated, now)
+	} else if !canServeWithAccessToken && !updated.Disabled && updated.Status != StatusDisabled {
+		updated.Unavailable = true
+		updated.Status = StatusError
+		if updated.StatusMessage == "" {
+			updated.StatusMessage = "unauthorized (refresh token invalid)"
+		}
+		if updated.LastError == nil && updated.RefreshError != nil {
+			updated.LastError = &Error{Code: "unauthorized", Message: updated.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+		}
 	}
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {

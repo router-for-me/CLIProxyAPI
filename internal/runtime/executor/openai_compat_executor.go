@@ -62,6 +62,11 @@ func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatE
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
 
+// UsesConfig reports whether the executor is bound to the provided config snapshot.
+func (e *OpenAICompatExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.cfg == cfg
+}
+
 // PrepareRequest injects OpenAI-compatible credentials into the outgoing HTTP request.
 func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {

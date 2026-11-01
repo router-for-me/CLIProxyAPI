@@ -292,10 +292,18 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			needSIWC = hasSIWC
 		}
 	}
+	suppressedRejectedOuter := false
 	if !diskRotatedOuter && auth.RejectedRefreshToken != "" && outerRefreshToken == strings.TrimSpace(auth.RejectedRefreshToken) {
+		if needOuter {
+			suppressedRejectedOuter = true
+		}
 		needOuter = false
 	}
+	suppressedRejectedSIWC := false
 	if !diskRotatedSIWC && auth.RejectedSIWCRefreshToken != "" && siwcRefreshToken == strings.TrimSpace(auth.RejectedSIWCRefreshToken) {
+		if needSIWC {
+			suppressedRejectedSIWC = true
+		}
 		needSIWC = false
 	}
 
@@ -309,6 +317,13 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 				clonedStorage.RefreshPatch = patch
 				auth.Storage = &clonedStorage
 			}
+			return auth, nil
+		}
+		if suppressedRejectedOuter || suppressedRejectedSIWC {
+			if auth.RefreshError != nil {
+				return nil, auth.RefreshError
+			}
+			return nil, statusErr{code: http.StatusUnauthorized, msg: "codex executor: refresh token is invalid; sign-in required"}
 		}
 		return auth, nil
 	}

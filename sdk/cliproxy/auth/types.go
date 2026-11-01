@@ -83,6 +83,10 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyConnectionPool carries the connection-pool block of this api-key
+	// credential. Nil means no pooling, which is the default. Pools are per
+	// credential, so an override here never shares connections with another auth.
+	ProxyConnectionPool *ProxyConnectionPoolOverride `json:"proxy_connection_pool,omitempty"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).
@@ -490,6 +494,9 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.Attributes[key] = value
 		}
 	}
+	if a.ProxyConnectionPool != nil {
+		copyAuth.ProxyConnectionPool = a.ProxyConnectionPool.Clone()
+	}
 	if a.Metadata != nil {
 		copyAuth.Metadata = cloneMetadataMap(a.Metadata)
 	}
@@ -501,6 +508,31 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+// ProxyConnectionPoolOverride holds the per-api-key connection-pool settings.
+// Omitted fields fall back to the pool defaults (300s idle, 2 idle per host).
+type ProxyConnectionPoolOverride struct {
+	Enabled             *bool  `json:"enabled,omitempty"`
+	IdleConnTimeout     string `json:"idle-conn-timeout,omitempty"`
+	MaxIdleConnsPerHost *int   `json:"max-idle-conns-per-host,omitempty"`
+}
+
+// Clone deep copies the override so auth snapshots never share mutable state.
+func (o *ProxyConnectionPoolOverride) Clone() *ProxyConnectionPoolOverride {
+	if o == nil {
+		return nil
+	}
+	out := &ProxyConnectionPoolOverride{IdleConnTimeout: o.IdleConnTimeout}
+	if o.Enabled != nil {
+		enabled := *o.Enabled
+		out.Enabled = &enabled
+	}
+	if o.MaxIdleConnsPerHost != nil {
+		maxIdle := *o.MaxIdleConnsPerHost
+		out.MaxIdleConnsPerHost = &maxIdle
+	}
+	return out
 }
 
 func cloneMetadataMap(src map[string]any) map[string]any {

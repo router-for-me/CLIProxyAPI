@@ -142,7 +142,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if (updated.Status == StatusActive || updated.Status == "") && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
+		} else if (updated.Status == StatusActive || updated.Status == "") && (!merged.RequiresSignIn || merged.HasValidAccessToken(time.Now())) && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false

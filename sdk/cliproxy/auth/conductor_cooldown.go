@@ -2350,6 +2350,10 @@ func isTerminalRefreshError(auth *Auth, err error) bool {
 		return isTerminalRefreshError(auth, partErr.OuterRefreshError()) ||
 			isTerminalRefreshError(auth, partErr.SIWCRefreshError())
 	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil && isTerminalRefreshGrantMessage(authErr.Code) {
+		return true
+	}
 	if isUnauthorizedError(err) || isTerminalRefreshGrantMessage(err.Error()) {
 		return true
 	}
@@ -2408,8 +2412,13 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 		}
 	}
 	terminal := isTerminalRefreshError(auth, err)
+	code := terminalRefreshErrorCode(raw, statusCode)
+	var existingAuthErr *Error
+	if errors.As(err, &existingAuthErr) && existingAuthErr != nil && isKnownSafeOAuthErrorCode(existingAuthErr.Code) {
+		code = strings.ToLower(strings.TrimSpace(existingAuthErr.Code))
+	}
 	return &Error{
-		Code:       terminalRefreshErrorCode(raw, statusCode),
+		Code:       code,
 		Message:    sanitizeRenewalMessage(raw),
 		HTTPStatus: statusCode,
 		Retryable:  !terminal,

@@ -131,6 +131,13 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// ProxyPoolPublisher identifies the runtime that published this snapshot, so a
+	// reload in one runtime never retires another runtime's snapshots.
+	ProxyPoolPublisher uint64 `yaml:"-" json:"-"`
+
+	// ProxyPoolGeneration fences obsolete runtime snapshots from the shared transport cache.
+	ProxyPoolGeneration uint64 `yaml:"-" json:"-"`
+
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
 
