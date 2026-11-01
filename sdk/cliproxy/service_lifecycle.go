@@ -252,6 +252,9 @@ func (s *Service) Run(ctx context.Context) error {
 // Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving.
 // A later call waits again, with its own ctx, for refreshes an earlier call's
 // deadline cut short, and returns ctx.Err() if one is still saving when it ends.
+// A call made while the first one is still tearing down waits for it: the
+// teardown (server, websocket gateway, plugins and the refresh wait) is bounded
+// by the first call's ctx.
 // Do not call it from a refresh callback (such as a core auth manager hook's
 // OnAuthUpdated, which runs on a refresh worker) with a context that has no
 // deadline: that worker cannot return until Shutdown does. Hand it to another
