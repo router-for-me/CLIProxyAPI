@@ -449,6 +449,11 @@ func TestPersistConfigSkipsMirrorWhenFenceNoLongerHolds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open workspace repo: %v", err)
 		}
+		defer func() {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close workspace repo: %v", errClose)
+			}
+		}()
 		before, err := repo.Head()
 		if err != nil {
 			t.Fatalf("head: %v", err)
