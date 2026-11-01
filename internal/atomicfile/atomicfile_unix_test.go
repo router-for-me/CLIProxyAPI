@@ -337,3 +337,40 @@ func TestReplaceFileReportsPreviousContentLeftBehind(t *testing.T) {
 		t.Fatalf("clean up leftover: %v", err)
 	}
 }
+
+// Replacing an owner-only credential, the new content must never sit in a temp
+// file others can read, even though the caller asks for 0666 (less the umask)
+// as os.Create did for a new file.
+func TestWriteFileTempIsOwnerOnlyWhileHoldingNewContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old-token"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	original := matchOwner
+	t.Cleanup(func() { matchOwner = original })
+	var tempMode os.FileMode
+	var tempContent string
+	matchOwner = func(tmp *os.File, existing os.FileInfo) error {
+		// Runs after the data is written, before the file's own mode is applied.
+		if info, err := tmp.Stat(); err == nil {
+			tempMode = info.Mode().Perm()
+		}
+		if raw, err := os.ReadFile(tmp.Name()); err == nil {
+			tempContent = string(raw)
+		}
+		return original(tmp, existing)
+	}
+
+	if err := WriteFile(path, []byte("new-token"), 0o666); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if tempContent != "new-token" {
+		t.Fatalf("temp content at the check = %q, want the new token (the check ran too early)", tempContent)
+	}
+	if tempMode&0o077 != 0 {
+		t.Fatalf("temp mode while holding the new token = %v, want owner-only", tempMode)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Fatalf("final mode = %v, want the existing 0600", info.Mode().Perm())
+	}
+}
