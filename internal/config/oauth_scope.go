@@ -26,6 +26,21 @@ func (cfg *Config) ForAPIKey() *Config {
 	return &filtered
 }
 
+// ForConfiguredKey combines static-key scoping with the selected owner's filters.
+func (cfg *Config) ForConfiguredKey(source PayloadFilterSource) *Config {
+	scoped := cfg.ForAPIKey()
+	if scoped == nil || len(PayloadFiltersFor(source)) == 0 {
+		return scoped
+	}
+
+	// Allocate independent storage so appending local rules cannot change shared capacity.
+	view := *scoped
+	view.Payload.Filter = make([]PayloadFilterRule, len(scoped.Payload.Filter)+len(PayloadFiltersFor(source)))
+	copy(view.Payload.Filter, scoped.Payload.Filter)
+	copy(view.Payload.Filter[len(scoped.Payload.Filter):], PayloadFiltersFor(source))
+	return &view
+}
+
 // MarshalYAML preserves OAuth scope across watcher/server YAML snapshots. A
 // legacy-only Config still produces its original layout. Persistence explicitly
 // marshals legacyConfig before reconciling the on-disk layout.

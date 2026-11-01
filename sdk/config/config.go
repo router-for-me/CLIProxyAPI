@@ -31,6 +31,9 @@ type PayloadReplaceRule = internalconfig.PayloadReplaceRule
 type PayloadReplaceTarget = internalconfig.PayloadReplaceTarget
 type PayloadReplacement = internalconfig.PayloadReplacement
 type PayloadModelRule = internalconfig.PayloadModelRule
+type PayloadFilterSource = internalconfig.PayloadFilterSource
+type KeyPayloadConfig = internalconfig.KeyPayloadConfig
+type KeyPayloadPolicy = internalconfig.KeyPayloadPolicy
 
 type ProxyConnectionPoolConfig = internalconfig.ProxyConnectionPoolConfig
 type GeminiKey = internalconfig.GeminiKey

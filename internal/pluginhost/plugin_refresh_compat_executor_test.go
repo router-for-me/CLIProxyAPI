@@ -198,7 +198,7 @@ func TestPluginRefreshApplyPatchOptionalDelegation(t *testing.T) {
 		if !okSupport || support.SupportsApplyPatch() != tc.want {
 			t.Errorf("%T: capability mismatch", tc.inner)
 		}
-		scoped := wrapped.(coreauth.APIKeyConfigExecutor).ForAPIKey()
+		scoped := wrapped.(coreauth.APIKeyConfigExecutor).ForAPIKey(nil)
 		if scoped.(coreauth.ApplyPatchSupport).SupportsApplyPatch() != tc.want {
 			t.Fatal("ForAPIKey lost inner capability")
 		}

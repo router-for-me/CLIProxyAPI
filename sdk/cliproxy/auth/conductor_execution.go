@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -987,13 +988,27 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	return out
 }
 
-func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
-	if auth.AuthKind() == AuthKindAPIKey {
-		if scoped, ok := executor.(APIKeyConfigExecutor); ok {
-			return scoped.ForAPIKey()
-		}
+// executorForAuth binds a selected key without changing the registered provider.
+func executorForAuth(executor ProviderExecutor, auth *Auth) (ProviderExecutor, error) {
+	if auth == nil || auth.AuthKind() != AuthKindAPIKey {
+		return executor, nil
 	}
-	return executor
+	var source internalconfig.PayloadFilterSource
+	if IsConfigAPIKeyAuth(auth) {
+		source = auth.ConfigKey
+	}
+	scoped, ok := executor.(APIKeyConfigExecutor)
+	if !ok {
+		if len(internalconfig.PayloadFiltersFor(source)) != 0 {
+			return nil, &Error{Code: "payload_policy_unsupported", Message: "selected key payload filters require a key-scoping provider"}
+		}
+		return executor, nil
+	}
+	bound := scoped.ForAPIKey(source)
+	if bound == nil {
+		return nil, &Error{Code: "payload_policy_unsupported", Message: "provider could not bind selected key payload filters"}
+	}
+	return bound, nil
 }
 
 // syncPreferredUpstreamError refreshes the error that terminal selection
@@ -1102,7 +1117,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
 		}
-		executor = executorForAuth(executor, auth)
+		var errBind error
+		executor, errBind = executorForAuth(executor, auth)
+		if errBind != nil {
+			return cliproxyexecutor.Response{}, errBind
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -1343,7 +1362,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
 		}
-		executor = executorForAuth(executor, auth)
+		var errBind error
+		executor, errBind = executorForAuth(executor, auth)
+		if errBind != nil {
+			return cliproxyexecutor.Response{}, errBind
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -2881,7 +2904,11 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if executor == nil {
 		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
 	}
-	executor = executorForAuth(executor, auth)
+	var errBind error
+	executor, errBind = executorForAuth(executor, auth)
+	if errBind != nil {
+		return auth, errBind
+	}
 
 	routeModel := strings.TrimSpace(model)
 	if routeModel == "" {
