@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"net"
 	"runtime"
 	"sync/atomic"
@@ -18,6 +19,7 @@ type heldRefreshSaveStore struct {
 	armed   atomic.Bool
 	entered chan struct{}
 	release chan struct{}
+	done    atomic.Bool // set once the held save has been released
 }
 
 func (*heldRefreshSaveStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -26,6 +28,7 @@ func (s *heldRefreshSaveStore) Save(_ context.Context, auth *coreauth.Auth) (str
 	if s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
+		s.done.Store(true)
 	}
 	return auth.ID, nil
 }
@@ -160,8 +163,8 @@ func TestServiceShutdown_StopsSelectorOnce(t *testing.T) {
 }
 
 // When the first Shutdown's deadline ends while a refresh is still saving, a later
-// Shutdown with a fresh context must wait for that save instead of returning at
-// once because the teardown already ran.
+// Shutdown must still join that save instead of returning at once because the
+// teardown already ran.
 func TestServiceShutdown_RepeatedCallWaitsForRefreshSave(t *testing.T) {
 	store := &heldRefreshSaveStore{entered: make(chan struct{}), release: make(chan struct{})}
 	released := false
@@ -198,26 +201,31 @@ func TestServiceShutdown_RepeatedCallWaitsForRefreshSave(t *testing.T) {
 	if errShutdown := service.Shutdown(expired); errShutdown != nil {
 		t.Fatalf("first Shutdown error = %v", errShutdown)
 	}
-
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- service.Shutdown(context.Background()) }()
-	select {
-	case errShutdown := <-shutdownDone:
-		t.Fatalf("second Shutdown returned (err %v) while the refresh save was still held", errShutdown)
-	case <-time.After(50 * time.Millisecond):
+	// The save is still held, so a repeated call can only return once its ctx
+	// has ended, and must say so; returning nil means it did not wait at all.
+	if errShutdown := service.Shutdown(expired); !errors.Is(errShutdown, context.Canceled) {
+		t.Fatalf("repeated Shutdown with an ended ctx = %v while a save is held, want context.Canceled", errShutdown)
 	}
+
+	shutdownDone := make(chan bool, 1)
+	go func() {
+		errShutdown := service.Shutdown(context.Background())
+		if errShutdown != nil {
+			t.Errorf("Shutdown after release error = %v, want nil", errShutdown)
+		}
+		shutdownDone <- store.done.Load()
+	}()
 	releaseSave()
 	select {
-	case errShutdown := <-shutdownDone:
-		if errShutdown != nil {
-			t.Fatalf("second Shutdown error = %v, want nil", errShutdown)
+	case saveDone := <-shutdownDone:
+		if !saveDone {
+			t.Fatal("repeated Shutdown returned before the held save finished")
 		}
 	case <-hangGuard.C:
-		t.Fatal("second Shutdown did not return after the refresh save was released")
+		t.Fatal("repeated Shutdown did not return after the refresh save was released")
 	}
-
 	// With nothing left to join, a later call returns nil even with an ended ctx.
 	if errShutdown := service.Shutdown(expired); errShutdown != nil {
-		t.Fatalf("third Shutdown error = %v, want nil with nothing left to join", errShutdown)
+		t.Fatalf("Shutdown with nothing left to join = %v, want nil", errShutdown)
 	}
 }
