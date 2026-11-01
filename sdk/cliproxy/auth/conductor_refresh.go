@@ -98,6 +98,8 @@ func (m *Manager) StopAutoRefresh() {
 // returns ctx.Err() and the loops keep winding down in the background.
 // Do not call it from a refresh callback: the worker running the callback cannot
 // return until the call does, so it waits until ctx ends.
+// Like StopAutoRefresh, every call stops the selector. To wait again after ctx
+// ended, call WaitAutoRefresh, which stops nothing.
 func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
 	return m.waitRefreshLoops(ctx, m.stopAutoRefresh())
 }
