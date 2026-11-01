@@ -894,6 +894,10 @@ func TestHasPlaintextSecretKey(t *testing.T) {
 		{"management: {secret-key: null}\n", false},
 		{"remote-management: {secret-key: ~}\n", false},
 		{"management: {secret-key: 'null'}\n", true},
+		// A key name given through an alias is the key the loader decodes.
+		{"key: &k secret-key\nmanagement:\n  *k : plain-secret\n", true},
+		{"key: &k secret-key\nremote-management:\n  *k : plain-secret\n", true},
+		{"key: &k secret-key\nmanagement:\n  *k : '" + hashed + "'\n", false},
 	} {
 		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
 			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)
