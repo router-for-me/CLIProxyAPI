@@ -1067,13 +1067,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// A 429 from a call dispatched after the reset was recorded (above the
 					// watermark) is the upstream's newest word and replaces it, shorter or
 					// not; an explicit zero (Retry-After: 0) clears it. One dispatched
-					// before it, completing out of order, may only extend it, so a stale
-					// result never shortens a newer hint.
+					// before it, completing out of order, may only extend a live reset, so
+					// a stale result never shortens a newer hint or revives a cleared one.
 					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
 						newer := result.ExecutionSeq > state.coolingDisabledRetrySeq
+						stale := result.ExecutionSeq > 0 && !newer
 						if *result.RetryAfter > 0 {
 							until := now.Add(*result.RetryAfter)
-							if newer || until.After(state.coolingDisabledRetryAt) {
+							if newer || (until.After(state.coolingDisabledRetryAt) && (!stale || state.coolingDisabledRetryAt.After(now))) {
 								state.coolingDisabledRetryAt = until
 								state.coolingDisabledRetrySeq = m.currentExecutionSeq()
 							}
@@ -1368,6 +1369,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if state := existingModelState(auth, modelKey); state != nil {
 				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = staleSuccessRetryAt, staleSuccessRetrySeq
 			}
+		} else if result.Success && modelKey != "" && result.ExecutionSeq > 0 {
+			// A success dispatched after the reset was recorded clears it, even where
+			// a newer ordinary cooldown keeps the rest of the state above. The
+			// watermark stays, so a 429 dispatched earlier cannot bring it back.
+			if state := existingModelState(auth, modelKey); state != nil && result.ExecutionSeq > state.coolingDisabledRetrySeq &&
+				!state.coolingDisabledRetryAt.IsZero() {
+				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = time.Time{}, m.currentExecutionSeq()
+			}
 		}
 
 		if rejectsToken {
@@ -1637,15 +1646,14 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.cooldownRecordedSeq > merged.cooldownRecordedSeq {
 		merged.cooldownRecordedSeq = source.cooldownRecordedSeq
 	}
-	// Keep the later cooling-disabled reset and the stronger watermark, so an
-	// alias migration cannot drop a live Retry-After.
-	merged.coolingDisabledRetryAt = target.coolingDisabledRetryAt
-	if source.coolingDisabledRetryAt.After(merged.coolingDisabledRetryAt) {
-		merged.coolingDisabledRetryAt = source.coolingDisabledRetryAt
-	}
-	merged.coolingDisabledRetrySeq = target.coolingDisabledRetrySeq
-	if source.coolingDisabledRetrySeq > merged.coolingDisabledRetrySeq {
-		merged.coolingDisabledRetrySeq = source.coolingDisabledRetrySeq
+	// Keep the cooling-disabled reset recorded last (the higher watermark), with
+	// its own deadline: pairing an older, longer deadline with a newer watermark
+	// would revive a hint the upstream has since replaced or cleared. On a tie
+	// the later deadline wins, so an alias migration cannot drop a live reset.
+	merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq = target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq
+	if source.coolingDisabledRetrySeq > target.coolingDisabledRetrySeq ||
+		(source.coolingDisabledRetrySeq == target.coolingDisabledRetrySeq && source.coolingDisabledRetryAt.After(target.coolingDisabledRetryAt)) {
+		merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq = source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq
 	}
 	if merged.StatusMessage == "" {
 		merged.StatusMessage = fallback.StatusMessage

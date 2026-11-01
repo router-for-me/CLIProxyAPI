@@ -3055,3 +3055,72 @@ func TestManager_ReconcileRegistryModelStates_MigratesCleanStateWithLiveReset(t 
 		t.Fatalf("ModelStates[%q] = %+v, want the migrated reset %v", targetModel, target, reset)
 	}
 }
+
+// A success dispatched after the 429 clears its reset even when a newer ordinary
+// cooldown (recorded before that success completed) keeps the rest of the state.
+func TestManager_MarkResult_DisableCooling_FreshSuccessClearsResetUnderRetainedCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-fresh-success-retained", "test-model-fresh-success-retained"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 2,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.executionSeq.Store(4)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 4,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusInternalServerError, Message: "forced"}})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 3, Success: true})
+
+	m.mu.RLock()
+	state := m.auths[id].ModelStates[model]
+	if state == nil || !isModelStateActiveCooldown(state, time.Now()) {
+		m.mu.RUnlock()
+		t.Fatalf("state = %+v, want the forced cooldown kept", state)
+	}
+	cleared := state.coolingDisabledRetryAt
+	m.mu.RUnlock()
+	if !cleared.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by the success dispatched after the 429", cleared)
+	}
+
+	// A 429 dispatched before all of these, completing last, must not bring it back.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 1,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if revived := m.auths[id].ModelStates[model].coolingDisabledRetryAt; !revived.IsZero() {
+		t.Fatalf("reset = %v after a 429 dispatched before the success, want it to stay cleared", revived)
+	}
+}
+
+// Merging keeps the reset recorded last with its own deadline, not the longest
+// deadline beside the highest watermark.
+func TestMergeModelStatePairsResetWithItsWatermark(t *testing.T) {
+	now := time.Now()
+	// mergeModelState may update its target in place, so each case builds its own.
+	stale := func() *ModelState {
+		return &ModelState{coolingDisabledRetryAt: now.Add(2 * time.Hour), coolingDisabledRetrySeq: 3}
+	}
+	newer := func() *ModelState {
+		return &ModelState{coolingDisabledRetryAt: now.Add(time.Second), coolingDisabledRetrySeq: 7}
+	}
+	cleared := func() *ModelState { return &ModelState{coolingDisabledRetrySeq: 7} }
+	for _, tc := range []struct {
+		name           string
+		target, source func() *ModelState
+		want           func() *ModelState
+	}{
+		{"newer shorter source", stale, newer, newer},
+		{"newer shorter target", newer, stale, newer},
+		{"newer explicit clear", stale, cleared, cleared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged, want := mergeModelState(tc.target(), tc.source()), tc.want()
+			if !merged.coolingDisabledRetryAt.Equal(want.coolingDisabledRetryAt) || merged.coolingDisabledRetrySeq != want.coolingDisabledRetrySeq {
+				t.Fatalf("merged reset = %v seq %d, want %v seq %d", merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, want.coolingDisabledRetryAt, want.coolingDisabledRetrySeq)
+			}
+		})
+	}
+}
