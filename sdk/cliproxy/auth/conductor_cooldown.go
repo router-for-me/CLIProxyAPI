@@ -1066,12 +1066,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					statusCode := statusCodeFromResult(result.Error)
 					// A 429 from a call dispatched after the reset was recorded (above the
 					// watermark) is the upstream's newest word and replaces it, shorter or
-					// not. One dispatched before it, completing out of order, may only
-					// extend it, so a stale result never shortens a newer hint.
-					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil && *result.RetryAfter > 0 {
-						until := now.Add(*result.RetryAfter)
-						if result.ExecutionSeq > state.coolingDisabledRetrySeq || until.After(state.coolingDisabledRetryAt) {
-							state.coolingDisabledRetryAt = until
+					// not; an explicit zero (Retry-After: 0) clears it. One dispatched
+					// before it, completing out of order, may only extend it, so a stale
+					// result never shortens a newer hint.
+					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
+						newer := result.ExecutionSeq > state.coolingDisabledRetrySeq
+						if *result.RetryAfter > 0 {
+							until := now.Add(*result.RetryAfter)
+							if newer || until.After(state.coolingDisabledRetryAt) {
+								state.coolingDisabledRetryAt = until
+								state.coolingDisabledRetrySeq = m.currentExecutionSeq()
+							}
+						} else if newer {
+							state.coolingDisabledRetryAt = time.Time{}
 							state.coolingDisabledRetrySeq = m.currentExecutionSeq()
 						}
 					}

@@ -396,7 +396,8 @@ type ModelState struct {
 	// select the auth. Only retry scheduling honours it: the auth is skipped in a
 	// request's retry rounds until then, and one credential's reset never delays
 	// retrying another. A 429 from a call dispatched after it was recorded
-	// replaces it; an older, out-of-order one may only extend it. A success
+	// replaces it (an explicit zero hint clears it); an older, out-of-order one
+	// may only extend it. A success
 	// clears it unless it was dispatched before the 429 was recorded (at or
 	// below coolingDisabledRetrySeq). Runtime only.
 	coolingDisabledRetryAt  time.Time `json:"-"`
