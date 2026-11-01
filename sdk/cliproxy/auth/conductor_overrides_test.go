@@ -2904,3 +2904,42 @@ func TestMergeModelStateKeepsLaterCoolingDisabledReset(t *testing.T) {
 		t.Fatalf("merged reset = %v seq %d, want %v seq 5", merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, later)
 	}
 }
+
+// A long reset recorded by an earlier request must not outlive the upstream's
+// newer word: a fresh request whose 429 announces a short reset retries after
+// it, as on dev, instead of stopping on the stale 2h hint.
+func TestManager_Execute_DisableCooling_NewerShortResetReplacesStaleLongOne(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const id, model = "auth-newer-short-reset", "test-model-newer-short-reset"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 5 * time.Millisecond}},
+		},
+	}
+	m.RegisterExecutor(executor)
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	// An earlier request left a 2h reset.
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want a retry after the newer 5ms reset", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
+		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
+	}
+}
