@@ -10,6 +10,42 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+func TestKeyPayloadSynthesizedOwners(t *testing.T) {
+	const secret = "syntheticSharedKey123"
+	cfg := &config.Config{}
+	cfg.GeminiKey = []config.GeminiKey{{APIKey: secret}}
+	cfg.InteractionsKey = []config.GeminiKey{{APIKey: secret}}
+	cfg.ClaudeKey = []config.ClaudeKey{{APIKey: secret}}
+	cfg.CodexKey = []config.CodexKey{{APIKey: secret}}
+	cfg.XAIKey = []config.XAIKey{{APIKey: secret}}
+	cfg.MetaKey = []config.MetaKey{{APIKey: secret}}
+	cfg.VertexCompatAPIKey = []config.VertexCompatKey{{APIKey: secret}}
+	cfg.OpenAICompatibility = []config.OpenAICompatibility{{Name: "custom-fixture", BaseURL: "https://synthetic.invalid", APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: secret}, {APIKey: secret}}}}
+	cfg.ClaudeKey[0].Payload = &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "claude-*"}}, Params: []string{"system.0"}}}}
+	cfg.OpenAICompatibility[0].APIKeyEntries[0].Payload = &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{"messages.0"}}}}
+	owners := map[config.PayloadFilterSource]int{
+		&cfg.GeminiKey[0]: 0, &cfg.InteractionsKey[0]: 0, &cfg.ClaudeKey[0]: 1,
+		&cfg.CodexKey[0]: 0, &cfg.XAIKey[0]: 0, &cfg.MetaKey[0]: 0,
+		&cfg.VertexCompatAPIKey[0]:                   0,
+		&cfg.OpenAICompatibility[0].APIKeyEntries[0]: 1,
+		&cfg.OpenAICompatibility[0].APIKeyEntries[1]: 0,
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{Config: cfg, IDGenerator: NewStableIDGenerator()})
+	if err != nil || len(auths) != len(owners) {
+		t.Fatalf("synthesis count: got %d, expected %d: %v", len(auths), len(owners), err)
+	}
+	for _, auth := range auths {
+		expected, exists := owners[auth.ConfigKey]
+		if !exists || !coreauth.IsConfigAPIKeyAuth(auth) || len(config.PayloadFiltersFor(auth.ConfigKey)) != expected || auth.Clone().ConfigKey != auth.ConfigKey {
+			t.Fatalf("auth %s lost its exact configuration owner", auth.ID)
+		}
+		delete(owners, auth.ConfigKey)
+	}
+	if len(owners) != 0 {
+		t.Fatal("synthesis omitted an actual key owner")
+	}
+}
+
 func TestNewConfigSynthesizer(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	if synth == nil {

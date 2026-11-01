@@ -8,6 +8,58 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
+func TestKeyPayloadChangesAreRedacted(t *testing.T) {
+	for _, family := range []string{"gemini", "interactions", "claude", "codex", "xai", "meta", "vertex", "openai-compatibility"} {
+		t.Run(family, func(t *testing.T) {
+			raw := "api-keys:\n  " + family + ":\n    - name: custom-fixture\n      base-url: https://synthetic.invalid\n      keys:\n        - {api-key: syntheticSecret123}\n"
+			oldCfg, err := config.ParseConfigBytes([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := "        - {api-key: syntheticSecret123, payload: {filter: [{models: [{name: private-model, headers: {Authorization: private-header}}], params: [private-path]}]}}\n"
+			newCfg, err := config.ParseConfigBytes([]byte(strings.Replace(raw, "        - {api-key: syntheticSecret123}\n", local, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := family + "[0].payload.filter"
+			if family == "openai-compatibility" {
+				path = "openai-compatibility[0].api-key-entries[0].payload.filter"
+			}
+			for _, test := range []struct {
+				old, current *config.Config
+				counts       string
+			}{
+				{old: oldCfg, current: newCfg, counts: "0 -> 1"},
+				{old: newCfg, current: oldCfg, counts: "1 -> 0"},
+				{old: &config.Config{}, current: newCfg, counts: "0 -> 1"},
+				{old: newCfg, current: &config.Config{}, counts: "1 -> 0"},
+			} {
+				report := strings.Join(BuildConfigChangeDetails(test.old, test.current), "\n")
+				if !strings.Contains(report, path+": updated ("+test.counts+" rules)") {
+					t.Fatalf("missing local update: %s", report)
+				}
+				for _, secret := range []string{"syntheticSecret123", "private-model", "private-header", "private-path"} {
+					if strings.Contains(report, secret) {
+						t.Fatal("diff exposed key policy contents")
+					}
+				}
+			}
+		})
+	}
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.ClaudeKey = []config.ClaudeKey{{KeyPayloadPolicy: config.KeyPayloadPolicy{Payload: &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{}}}}}
+	oldCfg.ClaudeKey = []config.ClaudeKey{{}}
+	if changes := BuildConfigChangeDetails(oldCfg, newCfg); len(changes) != 0 {
+		t.Fatalf("empty local container reported operations: %v", changes)
+	}
+	newCfg.ClaudeKey = nil
+	oldCfg.ClaudeKey = nil
+	newCfg.Payload.Filter = []config.PayloadFilterRule{}
+	if changes := BuildConfigChangeDetails(oldCfg, newCfg); len(changes) != 1 || changes[0] != "payload.filter: updated (0 -> 0 rules)" {
+		t.Fatalf("global formatter changed its nil/empty baseline: %v", changes)
+	}
+}
+
 func TestBuildConfigChangeDetailsClientCodexEnableApplyPatch(t *testing.T) {
 	oldCfg, newCfg := &config.Config{}, &config.Config{}
 	newCfg.Client.Codex.EnableApplyPatch = true

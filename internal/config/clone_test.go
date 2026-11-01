@@ -8,6 +8,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestKeyPayloadRuntimeClone(t *testing.T) {
+	cfg := &Config{}
+	cfg.ClaudeKey = []ClaudeKey{{KeyPayloadPolicy: KeyPayloadPolicy{Payload: &KeyPayloadConfig{Filter: []PayloadFilterRule{{Models: []PayloadModelRule{{Name: "*", Headers: map[string]string{"X-Role": "target"}, Match: []map[string]any{{"mode": map[string]any{"name": "original"}}}}}, Params: []string{"system.0"}}}}}}}
+	clone := cfg.CloneForRuntime()
+	if clone.ClaudeKey[0].Payload == cfg.ClaudeKey[0].Payload || !reflect.DeepEqual(clone.ForAPIKey(), cfg.ForAPIKey()) {
+		t.Fatal("runtime clone lost or shared the optional policy container")
+	}
+	clone.ClaudeKey[0].Payload.Filter[0].Params[0] = "changed"
+	clone.ClaudeKey[0].Payload.Filter[0].Models[0].Headers["X-Role"] = "other"
+	clone.ClaudeKey[0].Payload.Filter[0].Models[0].Match[0]["mode"].(map[string]any)["name"] = "changed"
+	original := cfg.ClaudeKey[0].Payload.Filter[0]
+	if original.Params[0] != "system.0" || original.Models[0].Headers["X-Role"] != "target" || original.Models[0].Match[0]["mode"].(map[string]any)["name"] != "original" {
+		t.Fatal("runtime clone shares nested policy values")
+	}
+}
+
 func TestCloneForRuntimeNil(t *testing.T) {
 	var cfg *Config
 	if got := cfg.CloneForRuntime(); got != nil {
