@@ -75,7 +75,11 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 	planType := ""
 	accountID := strings.TrimSpace(source.Tokens.AccountID)
 	expire := ""
-	if claims, errParse := codex.ParseJWTToken(source.Tokens.IDToken); errParse == nil && claims != nil {
+	claims, errParse := codex.ParseJWTToken(source.Tokens.IDToken)
+	if errParse != nil {
+		return "", fmt.Errorf("invalid ID token in Codex auth.json: %w", errParse)
+	}
+	if claims != nil {
 		email = strings.TrimSpace(claims.Email)
 		planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
 		if accountID == "" {
@@ -99,7 +103,7 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 
 	digest := sha256.Sum256([]byte(accountID))
 	accountHash := hex.EncodeToString(digest[:])[:8]
-	fileName := codexImportFileName(email, planType, accountHash, runtime.GOOS)
+	fileName := codex.PlatformCredentialFileName(email, planType, accountHash, runtime.GOOS)
 	storage := &codex.CodexTokenStorage{
 		IDToken:      source.Tokens.IDToken,
 		AccessToken:  source.Tokens.AccessToken,
@@ -153,32 +157,6 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 
 // sameFile reports whether both paths resolve to one existing file. Symlinks are
 // followed, so a link to the file counts as the file.
-// windowsForbiddenFileNameChars are the characters that are legal in a file name
-// on other systems but make the create fail on Windows. Path separators and
-// colons are already replaced by codex.CredentialFileName.
-const windowsForbiddenFileNameChars = `<>"|?*`
-
-// codexImportFileName returns the name the import writes for an account. It is
-// codex.CredentialFileName, the name the login paths use, so that an import and a
-// later login of one account resolve to one credential file. On Windows only, the
-// characters in windowsForbiddenFileNameChars additionally become "_", so the
-// import of such an account does not fail. The rule lives here and not in the
-// shared helper so the login paths, the deprecated /v0 flow included, keep their
-// file names on every OS. goos is a parameter so the Windows rule can be tested
-// anywhere.
-func codexImportFileName(email, planType, hashAccountID, goos string) string {
-	name := codex.CredentialFileName(email, planType, hashAccountID, true)
-	if goos != "windows" {
-		return name
-	}
-	return strings.Map(func(r rune) rune {
-		if strings.ContainsRune(windowsForbiddenFileNameChars, r) {
-			return '_'
-		}
-		return r
-	}, name)
-}
-
 func sameFile(first, second string) bool {
 	firstInfo, errFirst := os.Stat(first)
 	if errFirst != nil {

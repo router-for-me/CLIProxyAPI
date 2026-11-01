@@ -297,3 +297,41 @@ func testJWT(t *testing.T, claims map[string]any) string {
 	encode := base64.RawURLEncoding.EncodeToString
 	return encode([]byte(`{"alg":"none"}`)) + "." + encode(payload) + ".signature"
 }
+
+// TestImportCodexAuthRejectsMalformedIDToken: with tokens.account_id present a
+// corrupt id_token must fail the import, not save the account with an empty
+// email, the default plan and no expiry under a name a later login never uses.
+func TestImportCodexAuthRejectsMalformedIDToken(t *testing.T) {
+	t.Cleanup(func() { sdkAuth.RegisterTokenStore(nil) })
+	sdkAuth.RegisterTokenStore(sdkAuth.NewFileTokenStore())
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "auth.json")
+	authDir := filepath.Join(root, "imported")
+	native, errMarshal := json.Marshal(map[string]any{
+		"tokens": map[string]any{
+			"id_token":      "not-a-jwt",
+			"access_token":  "access-secret",
+			"refresh_token": "refresh-secret",
+			"account_id":    "account-from-source",
+		},
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if errWrite := os.WriteFile(sourcePath, native, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	savedPath, errImport := importCodexAuth(&config.Config{AuthDir: authDir}, sourcePath)
+	if errImport == nil || !strings.Contains(errImport.Error(), "invalid ID token in Codex auth.json") {
+		t.Fatalf("importCodexAuth() = (%q, %v), want invalid ID token error", savedPath, errImport)
+	}
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil && !os.IsNotExist(errReadDir) {
+		t.Fatal(errReadDir)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("auth dir holds %d entries after a rejected import, want 0", len(entries))
+	}
+}
