@@ -16,6 +16,7 @@ import (
 
 	tls "github.com/refraction-networking/utls"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 )
 
 type claudeTestDialer struct {
@@ -142,6 +143,29 @@ func TestClaudeOAuthTLSResumptionIsWireSafe(t *testing.T) {
 	}
 	if cacheOf(NewClaudeAuthWithProxyURL(nil, "http://127.0.0.1:11")) != cacheOf(NewClaudeAuthWithProxyURL(nil, "http://127.0.0.1:11")) {
 		t.Fatal("per-operation ClaudeAuth instances do not share a session cache, so refresh can never resume")
+	}
+}
+
+func TestNewUtlsRoundTripperUsesEnvironmentProxyWhenConfigEmpty(t *testing.T) {
+	proxyutil.ClearProxyEnvironment()
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:3128")
+	t.Setenv("http_proxy", "")
+
+	fromEnv := newUtlsRoundTripper(nil)
+	fromEnvAgain := newUtlsRoundTripper(nil)
+	if fromEnv.sessionCache != fromEnvAgain.sessionCache {
+		t.Fatal("environment proxy should reuse OAuth session cache")
+	}
+
+	configured := newUtlsRoundTripper(&sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:3100"})
+	other := newUtlsRoundTripper(&sdkconfig.SDKConfig{ProxyURL: "http://127.0.0.1:3100"})
+	if configured.sessionCache == fromEnv.sessionCache {
+		t.Fatal("explicit ProxyURL should override environment proxy for session cache key")
+	}
+	if configured.sessionCache != other.sessionCache {
+		t.Fatal("same explicit proxy should share session cache")
 	}
 }
 

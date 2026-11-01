@@ -56,17 +56,19 @@ func (b *closeConnectionBody) Close() error {
 	return b.err
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
-	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
-		if errBuild != nil {
-			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
-		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
-			dialer = proxyDialer
-		}
+func newUtlsRoundTripper(proxyCacheKey string) *utlsRoundTripper {
+	return &utlsRoundTripper{dialer: utlsDialerForCacheKey(proxyCacheKey)}
+}
+
+func utlsDialerForCacheKey(proxyCacheKey string) proxy.Dialer {
+	switch proxyCacheKey {
+	case "":
+		return proxy.Direct
+	case proxyutil.EnvironmentProxyCacheKey:
+		return proxyutil.EnvironmentDialer{}
+	default:
+		return proxyutil.ProxyDialer(proxyCacheKey)
 	}
-	return &utlsRoundTripper{dialer: dialer}
 }
 
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
@@ -327,17 +329,8 @@ func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	})
 }
 
-func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
-	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
-		if errBuild != nil {
-			log.Errorf("claude tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
-		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
-			dialer = proxyDialer
-		}
-	}
-	return newClaudeCodeRoundTripperForDialer(dialer)
+func newClaudeCodeRoundTripper(proxyCacheKey string) http.RoundTripper {
+	return newClaudeCodeRoundTripperForDialer(utlsDialerForCacheKey(proxyCacheKey))
 }
 
 // newClaudeCodeRoundTripperForDialer builds the Claude Code transport on top
@@ -437,24 +430,28 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			clientOut.Transport = &tlsHandshakeTimeoutRoundTripper{base: clientOut.Transport, timeout: handshakeTimeout}
 		}
 	}()
-	proxyURL := effectiveProxyURL(ctx, cfg, auth)
+	explicitProxy := explicitProxyURL(ctx, cfg, auth)
+	proxyCacheKey := proxyutil.ProxyCacheKey(explicitProxy)
 
 	var ctxRoundTripper http.RoundTripper
 	if ctx != nil {
 		ctxRoundTripper, _ = ctx.Value("cliproxy.roundtripper").(http.RoundTripper)
 	}
 
-	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
-	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyCacheKey)
+	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyCacheKey)
 	var standardTransport http.RoundTripper = http.DefaultTransport
-	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
+	switch {
+	case explicitProxy != "":
+		if transport := buildProxyTransport(explicitProxy); transport != nil {
 			standardTransport = transport
 		}
-	} else if ctxRoundTripper != nil {
+	case ctxRoundTripper != nil:
 		chromeRT = ctxRoundTripper
 		anthropicRT = ctxRoundTripper
 		standardTransport = ctxRoundTripper
+	case proxyCacheKey == proxyutil.EnvironmentProxyCacheKey:
+		standardTransport = proxyutil.CachedEnvironmentHTTPTransport()
 	}
 
 	client := &http.Client{

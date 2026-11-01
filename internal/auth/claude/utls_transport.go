@@ -175,21 +175,19 @@ type utlsRoundTripper struct {
 }
 
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
-	var dialer proxy.Dialer = proxy.Direct
-	var proxyURL string
+	explicitProxy := ""
 	if cfg != nil {
-		proxyURL = cfg.ProxyURL
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
-		if errBuild != nil {
-			log.Errorf("failed to configure proxy dialer for %q: %v", proxyutil.Redact(cfg.ProxyURL), errBuild)
-		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
-			dialer = proxyDialer
-		}
+		explicitProxy = strings.TrimSpace(cfg.ProxyURL)
+	}
+	proxyCacheKey := proxyutil.ProxyCacheKey(explicitProxy)
+	dialer := proxyutil.ProxyDialer(explicitProxy)
+	if proxyCacheKey == proxyutil.EnvironmentProxyCacheKey {
+		dialer = proxyutil.EnvironmentDialer{}
 	}
 
 	roundTripper := &utlsRoundTripper{
 		dialer:       dialer,
-		sessionCache: claudeOAuthSessionCache(proxyURL),
+		sessionCache: claudeOAuthSessionCache(proxyCacheKey),
 	}
 	roundTripper.transport = &http.Transport{
 		ForceAttemptHTTP2: false,
