@@ -29,7 +29,8 @@ var beforeCommit = func() {}
 // WriteFile writes data to path like os.WriteFile, but through a temp file in the
 // same directory that is synced and then renamed over path.
 //
-// A symlinked path is resolved so the link itself stays in place. An existing file
+// A symlinked path is resolved so the link itself stays in place; for a new
+// file, a symlinked parent directory is resolved the same way. An existing file
 // keeps its permission bits and, on Unix, its owner and group; a new file gets perm
 // less the umask, as with os.WriteFile. Other inode metadata (extended attributes,
 // POSIX ACLs, SELinux labels, Windows DACLs) is not copied: the new file gets the
@@ -65,6 +66,14 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		// A dangling symlink: a rename would replace the link. Writing through it
 		// creates its target, as os.WriteFile does (ReplaceFile fails instead).
 		return writeInPlace(path, data, perm, mustExist)
+	} else if errors.Is(errLstat, os.ErrNotExist) {
+		// Only the final component is missing. Resolve the parent so the temp file
+		// and the rename use one real directory: through a symlinked parent that is
+		// retargeted meanwhile, the rename and the cleanup would reach another
+		// directory and leave the finished temp file behind.
+		if dir, errDir := filepath.EvalSymlinks(filepath.Dir(path)); errDir == nil {
+			target = filepath.Join(dir, filepath.Base(path))
+		}
 	}
 	existing, errStat := os.Stat(target)
 	if errStat == nil {
