@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -251,10 +252,16 @@ func TestDevinRefresh_PropagatedSiblingKeepsPreExistingBlock(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	m, auth, model, sibling := devinRefreshAuthFixture(t, "devin-propagated-sibling-6690")
 
-	// Sibling first earns an unrelated long block (404 -> 12h).
+	// Sibling first earns an unrelated long block. A structured 404 that
+	// explicitly names the model keeps the 12h model-support cooldown; plain
+	// single 404s only cool for minutes (#5514).
 	m.MarkResult(context.Background(), Result{
 		AuthID: auth.ID, Provider: "devin", Model: sibling, Success: false,
-		Error: &Error{Code: "not_found", Message: "model missing", HTTPStatus: http.StatusNotFound},
+		Error: &Error{
+			Code:       "not_found",
+			Message:    fmt.Sprintf(`{"type":"not_found_error","message":"model %s was not found"}`, sibling),
+			HTTPStatus: http.StatusNotFound,
+		},
 	})
 	seeded, _ := m.GetByID(auth.ID)
 	sibState := seeded.ModelStates[sibling]

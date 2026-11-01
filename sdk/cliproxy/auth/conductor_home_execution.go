@@ -196,6 +196,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = meta
 			}
+			// A sessionless retry reuses the same metadata map across credentials:
+			// drop the previous attempt's wire-model report so a rewriting first
+			// attempt cannot masquerade as the second attempt's executed model.
+			execOpts.Metadata = ensureExecutionAttemptMetadata(execOpts.Metadata)
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
@@ -259,7 +263,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, UpstreamModel: executedUpstreamModel(execReq, execOpts), RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()

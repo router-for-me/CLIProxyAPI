@@ -25,6 +25,7 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 	}
 	return func(body []byte) []byte {
 		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		RecordWireModelMetadata(opts, out, req.Model)
 		if formatCallback != nil {
 			formatCallback(strings.TrimSpace(gjson.GetBytes(out, buildPayloadPath(root, "response_format")).String()))
 		}

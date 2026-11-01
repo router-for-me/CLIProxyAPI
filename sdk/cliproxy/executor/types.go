@@ -48,6 +48,12 @@ const (
 	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// WireModelMetadataKey stores the final upstream model name the executor put
+	// on the wire. Payload override rules can rewrite the request body's "model"
+	// field after the conductor snapshots the request model, so structured 404
+	// classification reads this key to match the model the provider actually
+	// received.
+	WireModelMetadataKey = "wire_model"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
 	// It may be used to derive a provider session identity.
 	DerivedSessionIDMetadataKey = "derived_session_id"

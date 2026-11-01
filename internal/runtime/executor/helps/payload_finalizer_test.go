@@ -120,3 +120,64 @@ func TestPayloadRulesMatchFinalBodyAndTrackPaths(t *testing.T) {
 		t.Fatalf("final tracking lost: %v", touched)
 	}
 }
+
+// Payload override rules that rewrite the body's "model" field must report the
+// final wire model through Options.Metadata so the conductor's structured 404
+// classification can match the model the provider actually received (#5514
+// review).
+func TestPayloadFinalizerRecordsRewrittenWireModel(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "original"}}, Params: map[string]any{"model": "configured"}}}}}
+	req := cliproxyexecutor.Request{Model: "original", Payload: []byte(`{"model":"original"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	finalize := NewPayloadFinalizer(cfg, "openai", "original", "openai", "", req.Payload, req, opts)
+	out := finalize([]byte(`{"model":"original"}`))
+	if gjson.GetBytes(out, "model").String() != "configured" {
+		t.Fatalf("override did not rewrite the model: %s", out)
+	}
+	if got, ok := opts.Metadata[cliproxyexecutor.WireModelMetadataKey].(string); !ok || got != "configured" {
+		t.Fatalf("wire model not recorded, got %v", opts.Metadata[cliproxyexecutor.WireModelMetadataKey])
+	}
+}
+
+func TestPayloadFinalizerLeavesUnrewrittenWireModelUnrecorded(t *testing.T) {
+	req := cliproxyexecutor.Request{Model: "original", Payload: []byte(`{"model":"original"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{}}
+	finalize := NewPayloadFinalizer(nil, "openai", "original", "openai", "", req.Payload, req, opts)
+	finalize([]byte(`{"model":"original"}`))
+	if _, exists := opts.Metadata[cliproxyexecutor.WireModelMetadataKey]; exists {
+		t.Fatalf("wire model recorded without a rewrite: %v", opts.Metadata)
+	}
+}
+
+func TestApplyMediaPayloadConfigRecordsRewrittenWireModel(t *testing.T) {
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	writer.WriteField("model", "original")
+	file, errFile := writer.CreateFormFile("image", "input.png")
+	if errFile != nil {
+		t.Fatal(errFile)
+	}
+	if _, errWrite := file.Write([]byte{0, 255, 13, 10}); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "original"}}, Params: map[string]any{"model": "configured"}}}}}
+	req := cliproxyexecutor.Request{Model: "original", Payload: buffer.Bytes()}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"Content-Type": {writer.FormDataContentType()}}, Metadata: map[string]any{}}
+	body, contentType, errFinalize := ApplyMediaPayloadConfig(cfg, "openai", "original", "openai", req.Payload, writer.FormDataContentType(), req, opts)
+	if errFinalize != nil {
+		t.Fatal(errFinalize)
+	}
+	view, _, errView := mediaPayloadJSON(body, contentType)
+	if errView != nil {
+		t.Fatal(errView)
+	}
+	if gjson.GetBytes(view, "model").String() != "configured" {
+		t.Fatalf("media override did not rewrite the model: %s", view)
+	}
+	if got, ok := opts.Metadata[cliproxyexecutor.WireModelMetadataKey].(string); !ok || got != "configured" {
+		t.Fatalf("media wire model not recorded, got %v", opts.Metadata[cliproxyexecutor.WireModelMetadataKey])
+	}
+}

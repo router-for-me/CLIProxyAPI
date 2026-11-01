@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"sync"
@@ -631,4 +632,133 @@ func TestHomeForceMappingAliasResultRequiresExplicitFlag(t *testing.T) {
 	if result.ForceMapping || result.OriginalAlias != "" {
 		t.Fatalf("homeForceMappingAliasResult() = %+v, want no force mapping", result)
 	}
+}
+
+// Auth-selection metadata replaces execReq.Model with the execution model after
+// the alias candidates are built, so the Home result reported to hooks must
+// carry the model actually sent upstream — not the unrelated alias candidate
+// from the dispatch selection (#5514 review).
+func TestHomeAuthSelectionResultReportsExecutedUpstreamModel(t *testing.T) {
+	registry := executionregistry.New()
+	dispatcher := &authSelectionAliasDispatcher{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(authSelectionAliasExecutor{})
+	t.Cleanup(func() { manager.CloseExecutionSession("auth-selection-upstream-model") })
+
+	hook := &recordingHook{}
+	manager.hook = hook
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.AuthSelectionModelMetadataKey: "route-model",
+		cliproxyexecutor.ExecutionSessionMetadataKey:   "auth-selection-upstream-model",
+		cliproxyexecutor.PinnedAuthMetadataKey:         "auth-selection-route-auth",
+	}}
+	if _, errExecute := manager.Execute(ctx, []string{"force-mapping"}, cliproxyexecutor.Request{Model: "execution-model"}, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	result := hook.lastResult.Load()
+	if result == nil {
+		t.Fatal("no home result reported")
+	}
+	if got := result.UpstreamModel; got != "execution-model" {
+		t.Fatalf("reported UpstreamModel = %q, want the executed model sent upstream", got)
+	}
+}
+
+// A sessionless Home request reuses the options metadata map across retry
+// credentials, so a model-rewriting first attempt must not leak its wire model
+// into the second attempt's result; the reset mirrors the local rotation path
+// (#5514 review).
+func TestHomeRetryResetsWireModelBetweenAttempts(t *testing.T) {
+	registry := executionregistry.New()
+	dispatcher := &homeWireRetryDispatcher{}
+	executor := &homeWireRetryExecutor{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(5, 0, 6)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.PublishHomeDispatch(dispatcher, registry, 1)
+	manager.RegisterExecutor(executor)
+	t.Cleanup(func() { manager.CloseExecutionSession("home-wire-retry") })
+
+	hook := &recordingHook{}
+	manager.hook = hook
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	// No execution-session metadata: the sessionless home path reuses the same
+	// options metadata map across retry credentials, which is where the stale
+	// wire model leaks (#5514 review).
+	opts := cliproxyexecutor.Options{}
+	if _, errExecute := manager.Execute(ctx, []string{"home-wire-retry"}, cliproxyexecutor.Request{Model: "route-model"}, opts); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if got := dispatcher.calls.Load(); got != 2 {
+		t.Fatalf("Home RPOP calls = %d, want a retry onto the second credential", got)
+	}
+	result := hook.lastResult.Load()
+	if result == nil {
+		t.Fatal("no home result reported")
+	}
+	if !result.Success {
+		t.Fatalf("expected the second attempt to succeed, got %+v", result)
+	}
+	if got := result.UpstreamModel; got != "target-b" {
+		t.Fatalf("second attempt UpstreamModel = %q, want the second attempt's own model target-b", got)
+	}
+}
+
+type homeWireRetryDispatcher struct {
+	calls atomic.Int32
+}
+
+func (*homeWireRetryDispatcher) HeartbeatOK() bool { return true }
+
+func (d *homeWireRetryDispatcher) RPopAuth(_ context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+	call := d.calls.Add(1)
+	id := "home-wire-retry-1"
+	model := "target-a"
+	if call == 2 {
+		id = "home-wire-retry-2"
+		model = "target-b"
+	}
+	return json.Marshal(map[string]any{
+		"model":       model,
+		"auth_index":  id,
+		"auth":        Auth{ID: id, Provider: "home-wire-retry", Status: StatusActive},
+		"concurrency": homeConcurrencyTuple{Accounted: true, CredentialID: id, Model: model},
+	})
+}
+
+func (*homeWireRetryDispatcher) AbortAmbiguousDispatch() {}
+
+type homeWireRetryExecutor struct{ attempts atomic.Int32 }
+
+func (e *homeWireRetryExecutor) Identifier() string { return "home-wire-retry" }
+
+func (e *homeWireRetryExecutor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.attempts.Add(1) == 1 {
+		if opts.Metadata != nil {
+			opts.Metadata[cliproxyexecutor.WireModelMetadataKey] = "configured-wire"
+		}
+		return cliproxyexecutor.Response{}, overloadStatusError()
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+}
+
+func (e *homeWireRetryExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (e *homeWireRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *homeWireRetryExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, errors.New("not supported")
+}
+
+func (e *homeWireRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not supported")
 }

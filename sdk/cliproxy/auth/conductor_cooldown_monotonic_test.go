@@ -87,10 +87,14 @@ func TestManager_MarkResult_CredentialScope_DoesNotPromoteSiblingDeadlineToQuota
 
 	m, auth := newCooldownMonotonicManager(t, "model-a", "model-b")
 
-	// 1. Model B gets a 404 (12h deadline).
+	// 1. Model B gets an explicit model-not-found 404 (12h deadline).
 	m.MarkResult(context.Background(), Result{
 		AuthID: auth.ID, Provider: auth.Provider, Model: "model-b",
-		Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "model not found"},
+		Success: false, Error: &Error{
+			Code:       "model_not_found",
+			HTTPStatus: http.StatusNotFound,
+			Message:    "model model-b was not found",
+		},
 	})
 	before := time.Now()
 
@@ -259,15 +263,15 @@ func TestManager_ApplyAuthFailureState_PreservesLongerCredentialDeadline(t *test
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			m, auth := newCooldownMonotonicManager(t, "model-a")
-			// Credential-wide 404 (12h deadline).
+			// Credential-wide 404 (10-minute transient deadline).
 			m.MarkResult(context.Background(), Result{
 				AuthID: auth.ID, Provider: auth.Provider, Model: "",
 				Success: false, Error: &Error{HTTPStatus: http.StatusNotFound, Message: "credential not found"},
 			})
 			before := time.Now()
 			snap, _ := m.GetByID(auth.ID)
-			if !snap.Unavailable || snap.NextRetryAfter.Before(before.Add(11*time.Hour)) {
-				t.Fatalf("precondition failed: expected ~12h deadline, got: %v", snap.NextRetryAfter.Sub(before))
+			if !snap.Unavailable || snap.NextRetryAfter.Before(before.Add(9*time.Minute)) {
+				t.Fatalf("precondition failed: expected ~10m deadline, got: %v", snap.NextRetryAfter.Sub(before))
 			}
 
 			// Follow up with a shorter credential failure.
@@ -277,7 +281,7 @@ func TestManager_ApplyAuthFailureState_PreservesLongerCredentialDeadline(t *test
 			})
 
 			updated, _ := m.GetByID(auth.ID)
-			if updated.NextRetryAfter.Before(before.Add(11 * time.Hour)) {
+			if updated.NextRetryAfter.Before(before.Add(9 * time.Minute)) {
 				t.Fatalf("shorter failure shortened credential-level deadline to %v", updated.NextRetryAfter.Sub(before))
 			}
 		})
