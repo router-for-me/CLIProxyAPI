@@ -13,8 +13,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// rename, exchange, exchangeAvailable, matchOwner, statTarget, chmodTemp and
-// syncTemp are replaced in tests to exercise the fallbacks.
+// rename, exchange, exchangeAvailable, matchOwner, statTarget, chmodTemp,
+// syncTemp and removeFile are replaced in tests to exercise the fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
@@ -23,7 +23,12 @@ var (
 	statTarget        = os.Stat
 	chmodTemp         = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 	syncTemp          = func(file *os.File) error { return file.Sync() }
+	removeFile        = os.Remove
 )
+
+// keptModeBits are the mode bits a replacement carries over from the file it
+// replaces: permissions plus setuid, setgid and sticky.
+const keptModeBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
 
 // beforeCommit runs after the temp file is complete, right before it replaces the
 // target; tests use it to land a concurrent deletion in that window.
@@ -34,7 +39,8 @@ var beforeCommit = func() {}
 //
 // A symlinked path is resolved so the link itself stays in place; for a new
 // file, a symlinked parent directory is resolved the same way. An existing file
-// keeps its permission bits and, on Unix, its owner and group; a new file gets perm
+// keeps its permission, setuid, setgid and sticky bits and, on Unix, its owner and
+// group; a new file gets perm
 // less the umask, as with os.WriteFile. Other inode metadata (extended attributes,
 // POSIX ACLs, SELinux labels, Windows DACLs) is not copied: the new file gets the
 // defaults for its directory.
@@ -129,27 +135,32 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		}
 	}()
 
+	// Write before setting owner and mode: on Linux an unprivileged write, like a
+	// chown, clears setuid and setgid.
+	if _, errWrite := tmp.Write(data); errWrite != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("atomicfile: write temp file: %w", errWrite)
+	}
 	if existing != nil {
-		// Owner first: a chown can clear mode bits.
+		// Owner before mode: a chown can clear mode bits.
 		if errOwner := matchOwner(tmp, existing); errOwner != nil {
 			_ = tmp.Close()
 			log.WithError(errOwner).Debugf("atomicfile: cannot keep the owner of %s, writing in place", target)
 			return writeInPlace(target, data, perm, mustExist)
 		}
-		// Skip the chmod when the temp already has the mode: some writable mounts
-		// (FUSE, CIFS) reject chmod. Where one is needed and fails, write in place
-		// as for an owner that cannot be kept, as the previous writers did.
-		if info, errInfo := tmp.Stat(); errInfo != nil || info.Mode().Perm() != existing.Mode().Perm() {
-			if errChmod := chmodTemp(tmp, existing.Mode().Perm()); errChmod != nil {
+		// Keep the permissions and the setuid, setgid and sticky bits. Skip the
+		// chmod when the temp already has them: some writable mounts (FUSE, CIFS)
+		// reject chmod. Where one is needed and fails (including a platform that
+		// refuses one of the special bits), write in place as for an owner that
+		// cannot be kept, as the previous writers did.
+		wantMode := existing.Mode() & keptModeBits
+		if info, errInfo := tmp.Stat(); errInfo != nil || info.Mode()&keptModeBits != wantMode {
+			if errChmod := chmodTemp(tmp, wantMode); errChmod != nil {
 				_ = tmp.Close()
 				log.WithError(errChmod).Debugf("atomicfile: cannot keep the mode of %s, writing in place", target)
 				return writeInPlace(target, data, perm, mustExist)
 			}
 		}
-	}
-	if _, errWrite := tmp.Write(data); errWrite != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("atomicfile: write temp file: %w", errWrite)
 	}
 	if errSync := syncTemp(tmp); errSync != nil {
 		if !syncUnsupported(errSync) {
@@ -182,8 +193,10 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		switch {
 		case errSwap == nil:
 			committed = true
-			if errRemove := os.Remove(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
-				log.WithError(errRemove).Debugf("atomicfile: failed to remove replaced file %s", tmpPath)
+			// tmpPath now holds the previous content, an old credential for an auth
+			// file. If it cannot be removed, say so: the save itself went through.
+			if errRemove := removeFile(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
+				return fmt.Errorf("atomicfile: replaced %s, but could not remove its previous content at %s: %w", target, tmpPath, errRemove)
 			}
 			return nil
 		case errors.Is(errSwap, os.ErrNotExist):
