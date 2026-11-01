@@ -1,10 +1,13 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +116,33 @@ func TestStripCodexSIWCUnsupportedFieldsConfigurationUpdates(t *testing.T) {
 			t.Fatalf("body changed: got %s, want %s", got, body)
 		}
 	})
+}
+
+func TestCodexSIWCBodyRulesSkipAbsentFieldsWithoutCopying(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fields  string
+		prepare func([]byte, bool, ...cliproxyexecutor.Options) []byte
+	}{
+		{"request", `,"store":false,"stream":true`, applyCodexSIWCRequestBodyRules},
+		{"websocket", `,"store":false`, applyCodexSIWCWebsocketBodyRules},
+		{"compact", "", applyCodexSIWCCompactBodyRules},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"instructions":"` + strings.Repeat("A", 8<<20) + `","input":"hello"` + tc.fields + `}`)
+			want := bytes.Clone(body)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got := tc.prepare(body, true)
+			runtime.ReadMemStats(&after)
+			if !bytes.Equal(got, want) || !bytes.Equal(body, want) {
+				t.Fatal("body rules changed an already normalized request")
+			}
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= uint64(len(body)/2) {
+				t.Fatalf("body rules allocated %d bytes for a %d-byte request with no fields to remove", allocated, len(body))
+			}
+		})
+	}
 }
 
 func codexSIWCAuthForUpdateTest(baseURL string) *cliproxyauth.Auth {

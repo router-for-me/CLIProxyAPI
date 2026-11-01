@@ -376,14 +376,14 @@ func applyCodexSIWCRequestBodyRules(body []byte, hasExplicitInstructions bool, o
 
 func applyCodexSIWCWebsocketBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	body = helps.SetBoolIfDifferent(body, "store", false)
-	body, _ = sjson.DeleteBytes(body, "stream")
-	body, _ = sjson.DeleteBytes(body, "background")
+	body, _ = util.DeleteJSONBytesIfExists(body, "stream")
+	body, _ = util.DeleteJSONBytesIfExists(body, "background")
 	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
 func applyCodexSIWCCompactBodyRules(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
-	body, _ = sjson.DeleteBytes(body, "stream")
-	body, _ = sjson.DeleteBytes(body, "store")
+	body, _ = util.DeleteJSONBytesIfExists(body, "stream")
+	body, _ = util.DeleteJSONBytesIfExists(body, "store")
 	return stripCodexSIWCUnsupportedFields(body, hasExplicitInstructions, opts...)
 }
 
@@ -394,14 +394,14 @@ func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool, 
 	// layer has already resolved it into the top-level effort, so only the
 	// unsupported items are removed in that case.
 	body = thinking.CollapseConfigurationUpdates(body, len(opts) > 0 && opts[0].KeepTopLevelEffort)
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_options")
-	body, _ = sjson.DeleteBytes(body, "max_output_tokens")
-	body, _ = sjson.DeleteBytes(body, "max_completion_tokens")
-	body, _ = sjson.DeleteBytes(body, "temperature")
+	body, _ = util.DeleteJSONBytesIfExists(body, "prompt_cache_retention")
+	body, _ = util.DeleteJSONBytesIfExists(body, "prompt_cache_options")
+	body, _ = util.DeleteJSONBytesIfExists(body, "max_output_tokens")
+	body, _ = util.DeleteJSONBytesIfExists(body, "max_completion_tokens")
+	body, _ = util.DeleteJSONBytesIfExists(body, "temperature")
 	if !hasExplicitInstructions {
 		if inst := gjson.GetBytes(body, "instructions"); inst.Exists() && strings.TrimSpace(inst.String()) == "" {
-			body, _ = sjson.DeleteBytes(body, "instructions")
+			body, _ = util.DeleteJSONBytesIfExists(body, "instructions")
 		}
 	}
 	return body
@@ -727,7 +727,7 @@ func normalizeCodexParallelToolCallsForTools(body []byte) []byte {
 		return body
 	}
 
-	body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	body, _ = util.DeleteJSONBytesIfExists(body, "parallel_tool_calls")
 	return body
 }
 
