@@ -518,16 +518,28 @@ func ensureAntigravityGeminiTrailingUserContent(modelName string, payload []byte
 	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
 }
 
+// prepareAntigravityGeminiWireAndReplayPayloads returns the wire payload (with
+// leading/trailing boundary normalization and terminal Argon tool-result
+// labeling) alongside the pre-boundary replay payload whose content roles and
+// parts match what prepareAntigravityGeminiReasoningReplayPayload will index on
+// subsequent turns once the current terminal turn becomes historical.
+func prepareAntigravityGeminiWireAndReplayPayloads(modelName string, payload []byte) (wirePayload, replayPayload []byte) {
+	if strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload, payload
+	}
+	replayPayload = helps.DropGeminiTrailingThoughtOnlyContent(payload, "request.contents")
+	wirePayload = helps.EnsureAntigravityGeminiToolResultBoundary(modelName, replayPayload, "request.contents")
+	wirePayload = helps.EnsureGeminiBoundaryUserContent(wirePayload, "request.contents")
+	return wirePayload, replayPayload
+}
+
 // ensureAntigravityGeminiBoundaryUserContent normalizes both leading and trailing
 // turns for Gemini targets. A trailing reasoning-only model turn is dropped first
 // so the request does not rely only on a synthetic empty user turn (#6530).
 // Claude targets are left unchanged.
 func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte) []byte {
-	if strings.Contains(strings.ToLower(modelName), "claude") {
-		return payload
-	}
-	payload = helps.DropGeminiTrailingThoughtOnlyContent(payload, "request.contents")
-	return helps.EnsureGeminiBoundaryUserContent(payload, "request.contents")
+	wirePayload, _ := prepareAntigravityGeminiWireAndReplayPayloads(modelName, payload)
+	return wirePayload
 }
 
 type antigravityContentEdit struct {
