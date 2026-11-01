@@ -250,11 +250,11 @@ func (s *Service) Run(ctx context.Context) error {
 // The shutdown is idempotent and can be called multiple times safely.
 //
 // Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving.
-// A later call waits again, with its own ctx, for refreshes an earlier call's
-// deadline cut short, and returns ctx.Err() if one is still saving when it ends.
-// A call made while the first one is still tearing down waits for it: the
-// teardown (server, websocket gateway, plugins and the refresh wait) is bounded
-// by the first call's ctx.
+// Only the first call tears the service down: a later call returns nil at once,
+// without waiting for refreshes the first call's deadline cut short (call the
+// core auth manager's WaitAutoRefresh for that). A call made while the
+// first one is still tearing down waits for it: the teardown (server, websocket
+// gateway, plugins and the refresh wait) is bounded by the first call's ctx.
 // Do not call it from a refresh callback (such as a core auth manager hook's
 // OnAuthUpdated, which runs on a refresh worker) with a context that has no
 // deadline: that worker cannot return until Shutdown does. Hand it to another
@@ -270,9 +270,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	var shutdownErr error
-	tornDown := false
 	s.shutdownOnce.Do(func() {
-		tornDown = true
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -416,12 +414,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
 		usage.StopDefault()
 	})
-	if !tornDown && s.coreManager != nil {
-		// An earlier call tore down the service; a later one (typically with a
-		// fresh context after the first one's deadline) only joins the refreshes
-		// still saving. WaitAutoRefresh stops nothing again.
-		return s.coreManager.WaitAutoRefresh(ctx)
-	}
 	return shutdownErr
 }
 
