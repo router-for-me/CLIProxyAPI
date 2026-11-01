@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -98,7 +99,7 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 
 	digest := sha256.Sum256([]byte(accountID))
 	accountHash := hex.EncodeToString(digest[:])[:8]
-	fileName := codex.CredentialFileName(email, planType, accountHash, true)
+	fileName := codexImportFileName(email, planType, accountHash, runtime.GOOS)
 	storage := &codex.CodexTokenStorage{
 		IDToken:      source.Tokens.IDToken,
 		AccessToken:  source.Tokens.AccessToken,
@@ -152,6 +153,32 @@ func importCodexAuth(cfg *config.Config, authPath string) (string, error) {
 
 // sameFile reports whether both paths resolve to one existing file. Symlinks are
 // followed, so a link to the file counts as the file.
+// windowsForbiddenFileNameChars are the characters that are legal in a file name
+// on other systems but make the create fail on Windows. Path separators and
+// colons are already replaced by codex.CredentialFileName.
+const windowsForbiddenFileNameChars = `<>"|?*`
+
+// codexImportFileName returns the name the import writes for an account. It is
+// codex.CredentialFileName, the name the login paths use, so that an import and a
+// later login of one account resolve to one credential file. On Windows only, the
+// characters in windowsForbiddenFileNameChars additionally become "_", so the
+// import of such an account does not fail. The rule lives here and not in the
+// shared helper so the login paths, the deprecated /v0 flow included, keep their
+// file names on every OS. goos is a parameter so the Windows rule can be tested
+// anywhere.
+func codexImportFileName(email, planType, hashAccountID, goos string) string {
+	name := codex.CredentialFileName(email, planType, hashAccountID, true)
+	if goos != "windows" {
+		return name
+	}
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(windowsForbiddenFileNameChars, r) {
+			return '_'
+		}
+		return r
+	}, name)
+}
+
 func sameFile(first, second string) bool {
 	firstInfo, errFirst := os.Stat(first)
 	if errFirst != nil {
