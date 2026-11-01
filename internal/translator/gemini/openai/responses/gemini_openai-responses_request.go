@@ -350,10 +350,13 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			case "function_call_output", "custom_tool_call_output":
 				hasEncounteredConversation = true
 				orderedOutputs, consumedIndexes, _ := collectOpenAIResponsesFunctionCallOutputs(normalized, i, pendingFunctionCallIDs)
+				end := i + 1
 				for consumedIndex := range consumedIndexes {
 					consumedFunctionOutputIndexes[consumedIndex] = true
+					if consumedIndex >= end {
+						end = consumedIndex + 1
+					}
 				}
-				end := i + len(consumedIndexes)
 				hasSubsequent := responsesHasSubsequentTurn(normalized[end:])
 
 				outputByCallID := make(map[string]gjson.Result)
@@ -1779,16 +1782,30 @@ func buildOpenAIResponsesFunctionResponseParts(item gjson.Result, functionNamesB
 }
 
 func collectOpenAIResponsesFunctionCallOutputs(items []gjson.Result, start int, pendingCallIDs []string) ([]gjson.Result, map[int]bool, []string) {
-	end := start + 1
-	for end < len(items) && (items[end].Get("type").String() == "function_call_output" || items[end].Get("type").String() == "custom_tool_call_output") {
-		end++
+	var outputs []gjson.Result
+	consumed := make(map[int]bool)
+	pending := make(map[string]bool, len(pendingCallIDs))
+	for _, callID := range pendingCallIDs {
+		pending[callID] = true
 	}
-	outputs := items[start:end]
+	for itemIndex := start; itemIndex < len(items); itemIndex++ {
+		item := items[itemIndex]
+		itemType := item.Get("type").String()
+		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			outputs = append(outputs, item)
+			consumed[itemIndex] = true
+			delete(pending, extractOpenAIResponsesCallID(item))
+			continue
+		}
+		// Keep one parallel result turn across notices; the caller preserves the notices.
+		role := item.Get("role").String()
+		if len(pending) > 0 && (itemType == "message" || itemType == "") &&
+			(strings.EqualFold(role, "developer") || strings.EqualFold(role, "system")) {
+			continue
+		}
+		break
+	}
 	ordered, remainingPending := orderOpenAIResponsesFunctionCallOutputs(outputs, pendingCallIDs)
-	consumed := make(map[int]bool, len(outputs))
-	for itemIndex := start; itemIndex < end; itemIndex++ {
-		consumed[itemIndex] = true
-	}
 	return ordered, consumed, remainingPending
 }
 
