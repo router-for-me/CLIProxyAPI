@@ -157,3 +157,44 @@ func TestHomeCredentialScopedTerminalResponseFailsOver(t *testing.T) {
 		})
 	}
 }
+
+func TestHomeTerminalResponseHonorsConfiguredContinue(t *testing.T) {
+	for _, action := range []string{RequestScopedActionContinue, RequestScopedActionContinueAndCooldown} {
+		for _, mode := range []string{"execute", "count_tokens", "stream"} {
+			t.Run(action+"/"+mode, func(t *testing.T) {
+				failure := &cliproxyexecutor.RequestTerminatedError{
+					HTTPStatus: http.StatusBadRequest,
+					Body:       []byte(`{"error":"context_length_exceeded"}`),
+				}
+				dispatcher := &retryContractHomeDispatcher{
+					authIDs: []string{"home-retry-a", "home-retry-b"},
+					metadata: map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+						{Status: http.StatusBadRequest, Match: []string{"context_length_exceeded"}, Action: action},
+					}},
+				}
+				executor := &retryContractHomeExecutor{failure: failure}
+				manager := NewManager(nil, nil, nil)
+				manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+				manager.SetRetryConfig(2, time.Second, 2)
+				manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+				manager.RegisterExecutor(executor)
+				req := cliproxyexecutor.Request{Model: "gpt"}
+				var errExecute error
+				switch mode {
+				case "execute":
+					_, errExecute = manager.Execute(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{})
+				case "count_tokens":
+					_, errExecute = manager.ExecuteCount(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{})
+				default:
+					_, errExecute = manager.ExecuteStream(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{Stream: true})
+				}
+				if errExecute != nil {
+					t.Fatalf("error = %v, want the second credential's success", errExecute)
+				}
+				if got := executor.Calls(); len(got) != 2 || got[0] != "home-retry-a" || got[1] != "home-retry-b" {
+					t.Fatalf("executor calls = %v, want the configured continue to reach the second credential", got)
+				}
+			})
+		}
+	}
+}

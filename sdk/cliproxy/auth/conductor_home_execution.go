@@ -278,7 +278,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
-			if stopsCredentialFailover(errExecute) {
+			if stopsCredentialFailover(errExecute, action, okAction) {
 				releaseAttempt()
 				selection.End("request_terminated")
 				return cliproxyexecutor.Response{}, errExecute

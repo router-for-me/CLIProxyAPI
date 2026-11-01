@@ -336,8 +336,12 @@ func isRequestTerminatedError(err error) bool {
 }
 
 // stopsCredentialFailover reports a terminal response that no other credential may replace. A
-// credential-scoped rejection, such as an authoritative quota 429, is safe to retry elsewhere.
-func stopsCredentialFailover(err error) bool {
+// credential-scoped rejection, such as an authoritative quota 429, is safe to retry elsewhere, and
+// so is one an operator's request-scoped-errors rule sends on to the next credential.
+func stopsCredentialFailover(err error, action string, okAction bool) bool {
+	if okAction && (action == RequestScopedActionContinue || action == RequestScopedActionContinueAndCooldown) {
+		return false
+	}
 	return isRequestTerminatedError(err) && !isCredentialScopedError(err)
 }
 
@@ -1245,9 +1249,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				lastHomeAuthID = auth.ID
 				homeSameAuthRetryPending = !excludeAuth
 			}
+			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			// A terminal result is never redispatched, so end the selection without waiting for the
 			// release acknowledgement, whose timeout would replace the plugin's response.
-			if stopsCredentialFailover(errStream) {
+			if stopsCredentialFailover(errStream, action, okAction) {
 				if selection != nil {
 					releaseAttempt()
 					selection.End("request_terminated")
@@ -1263,7 +1268,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
 			}
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(errStream)
