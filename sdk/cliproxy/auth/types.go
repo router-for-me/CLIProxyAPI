@@ -392,10 +392,14 @@ type ModelState struct {
 	// cooldowns can still be cleared by any success.
 	cooldownRecordedSeq uint64 `json:"-"`
 	// coolingDisabledRetryAt is the upstream reset a 429 announced while cooling
-	// is disabled for the auth. It is not a cooldown: selection ignores it. Only
-	// the retry scheduler honours it, for this auth after it was attempted, so
-	// one credential's hint never delays retrying another. Runtime only.
-	coolingDisabledRetryAt time.Time `json:"-"`
+	// is disabled for the auth. It is not a cooldown: a fresh request may still
+	// select the auth. Only retry scheduling honours it: the auth is skipped in a
+	// request's retry rounds until then, and one credential's reset never delays
+	// retrying another. A later failure only extends it; a success clears it
+	// unless it was dispatched before the 429 was recorded (at or below
+	// coolingDisabledRetrySeq). Runtime only.
+	coolingDisabledRetryAt  time.Time `json:"-"`
+	coolingDisabledRetrySeq uint64    `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop

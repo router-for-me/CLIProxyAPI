@@ -967,6 +967,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+		// A success dispatched before a cooling-disabled 429 was recorded proves
+		// nothing about its reset; keep the reset across the state reset below.
+		var staleSuccessRetryAt time.Time
+		var staleSuccessRetrySeq uint64
+		if result.Success && modelKey != "" && result.ExecutionSeq > 0 {
+			if existing := existingModelState(auth, modelKey); existing != nil && existing.coolingDisabledRetryAt.After(now) &&
+				result.ExecutionSeq <= existing.coolingDisabledRetrySeq {
+				staleSuccessRetryAt, staleSuccessRetrySeq = existing.coolingDisabledRetryAt, existing.coolingDisabledRetrySeq
+			}
+		}
 
 		if result.Success {
 			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown {
@@ -1054,9 +1064,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
-					state.coolingDisabledRetryAt = time.Time{}
+					// A failure only extends the reset: an earlier-dispatched call that
+					// completes late must not shorten or clear a newer 429's hint.
 					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil && *result.RetryAfter > 0 {
-						state.coolingDisabledRetryAt = now.Add(*result.RetryAfter)
+						if until := now.Add(*result.RetryAfter); until.After(state.coolingDisabledRetryAt) {
+							state.coolingDisabledRetryAt = until
+						}
+						state.coolingDisabledRetrySeq = m.currentExecutionSeq()
 					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
@@ -1338,6 +1352,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 					auth.cooldownRecordedSeq = m.currentExecutionSeq()
 				}
+			}
+		}
+		if !staleSuccessRetryAt.IsZero() {
+			if state := existingModelState(auth, modelKey); state != nil {
+				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = staleSuccessRetryAt, staleSuccessRetrySeq
 			}
 		}
 
@@ -1654,6 +1673,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
 	state.coolingDisabledRetryAt = time.Time{}
+	state.coolingDisabledRetrySeq = 0
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now
