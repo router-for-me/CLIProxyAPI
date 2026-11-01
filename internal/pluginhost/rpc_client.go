@@ -194,6 +194,10 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.RequestLifecyclePlugin {
 		plugin.Capabilities.RequestLifecyclePlugin = adapter
 	}
+	// One flag covers ResponseTranslator, ResponseBeforeTranslator and
+	// ResponseAfterTranslator, so it is copied independently of which hooks the
+	// plugin declares. The schema gate is applied where the bodies are built.
+	plugin.Capabilities.ResponseTransformOmitRequestBody = resp.Capabilities.ResponseTransformOmitRequestBody
 	if resp.Capabilities.ResponseTranslator {
 		plugin.Capabilities.ResponseTranslator = adapter
 	}

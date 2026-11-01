@@ -46,6 +46,7 @@ type rpcCapabilities struct {
 	ResponseTranslator                bool                         `json:"response_translator"`
 	ResponseBeforeTranslator          bool                         `json:"response_before_translator"`
 	ResponseAfterTranslator           bool                         `json:"response_after_translator"`
+	ResponseTransformOmitRequestBody  bool                         `json:"response_transform_omit_request_body,omitempty"`
 	ResponseInterceptor               bool                         `json:"response_interceptor"`
 	StreamChunkInterceptor            bool                         `json:"response_stream_interceptor"`
 	WebSocketResponseObserver         bool                         `json:"websocket_response_observer"`
@@ -246,6 +247,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		ResponseTranslator:                caps.ResponseTranslator != nil,
 		ResponseBeforeTranslator:          caps.ResponseBeforeTranslator != nil,
 		ResponseAfterTranslator:           caps.ResponseAfterTranslator != nil,
+		ResponseTransformOmitRequestBody:  caps.ResponseTransformOmitRequestBody,
 		ResponseInterceptor:               caps.ResponseInterceptor != nil,
 		StreamChunkInterceptor:            caps.StreamChunkInterceptor != nil,
 		WebSocketResponseObserver:         caps.WebSocketResponseObserver != nil,

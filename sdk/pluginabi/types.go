@@ -33,7 +33,12 @@ const (
 	// publish model catalogs for multiple providers in one response via Registrations.
 	// Version 10 lets a plugin expose multiple OAuth/auth provider identifiers via
 	// auth.identifier (identifiers) or Capabilities.AuthProviders / MultiAuthProvider.
-	SchemaVersion uint32 = 10
+	// Version 11 lets response translators and normalizers opt out of receiving the
+	// client and upstream request bodies on streaming response transform calls via
+	// the response_transform_omit_request_body capability. The host invokes those
+	// hooks once per SSE frame, so shipping both bodies per frame made the cost of
+	// one stream O(frames * request size). Non-streaming calls still carry them.
+	SchemaVersion uint32 = 11
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -61,6 +66,10 @@ const (
 	// SchemaVersionMultiAuthProviders is the first schema version where a plugin
 	// may register multiple auth provider identifiers.
 	SchemaVersionMultiAuthProviders uint32 = 10
+	// SchemaVersionResponseTransformOmitRequestBody is the first schema version where
+	// response translators and normalizers may opt out of receiving
+	// OriginalRequest/TranslatedRequest on streaming response transform calls.
+	SchemaVersionResponseTransformOmitRequestBody uint32 = 11
 )
 
 const (
