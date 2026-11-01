@@ -80,7 +80,15 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	if l == nil {
 		return
 	}
-	defer close(l.done)
+	defer func() {
+		close(l.done)
+		if l.manager != nil {
+			// A stop that did not wait (StopAutoRefresh) or a replacing start left
+			// this loop retired; drop it now that it is finished, so a manager kept
+			// after the stop does not retain its heap, index and jobs.
+			l.manager.pruneRetiredRefreshLoops()
+		}
+	}()
 	if l.manager == nil {
 		return
 	}

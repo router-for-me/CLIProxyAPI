@@ -565,3 +565,39 @@ func TestAutoRefreshWaitPrunesJoinedLoops(t *testing.T) {
 		})
 	}
 }
+
+// A manager kept after a non-waiting StopAutoRefresh must not retain the stopped
+// loop once its workers finish, even if no later start, stop or wait prunes it.
+func TestStopAutoRefreshDropsLoopOnceItFinishes(t *testing.T) {
+	h := newHeldSave(t)
+	manager := startRefreshWithHeldSave(t, h.store)
+
+	manager.StopAutoRefresh()
+	manager.mu.RLock()
+	retained := len(manager.retiredRefreshLoops)
+	manager.mu.RUnlock()
+	if retained == 0 {
+		t.Fatal("StopAutoRefresh dropped a loop whose save is still held")
+	}
+	h.release()
+
+	// The loop prunes itself right after its workers return; the timer only
+	// guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		manager.mu.RLock()
+		retained = len(manager.retiredRefreshLoops)
+		manager.mu.RUnlock()
+		if retained == 0 {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-hangGuard.C:
+			t.Fatalf("retiredRefreshLoops still holds %d finished loops after StopAutoRefresh", retained)
+		}
+	}
+}
