@@ -1239,6 +1239,15 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				lastHomeAuthID = auth.ID
 				homeSameAuthRetryPending = !excludeAuth
 			}
+			// A terminal result is never redispatched, so end the selection without waiting for the
+			// release acknowledgement, whose timeout would replace the plugin's response.
+			if isRequestTerminatedError(errStream) {
+				if selection != nil {
+					releaseAttempt()
+					selection.End("request_terminated")
+				}
+				return nil, errStream
+			}
 			if selection != nil {
 				releaseAttempt()
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "stream_start_failed"); errEnd != nil {
@@ -1247,9 +1256,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
-			}
-			if isRequestTerminatedError(errStream) {
-				return nil, errStream
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
 			if okAction {
