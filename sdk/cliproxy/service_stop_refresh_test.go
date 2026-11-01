@@ -158,47 +158,60 @@ func TestServiceShutdown_StopsSelectorOnce(t *testing.T) {
 	}
 }
 
-// When ctx ends while a refresh is still saving, Shutdown must say so: later calls
-// return at once, so the first call's result is the caller's only signal that
-// cleanup is incomplete (for example before removing the auth directory).
+// When ctx ends while a refresh is still saving, Shutdown must say so, even if an
+// earlier teardown step already failed: later calls return at once, so the first
+// call's result is the caller's only signal that cleanup is incomplete (for
+// example before removing the auth directory).
 func TestServiceShutdown_ReportsRefreshSaveStillRunning(t *testing.T) {
-	store := &heldRefreshSaveStore{entered: make(chan struct{}), release: make(chan struct{})}
-	released := false
-	releaseSave := func() {
-		if !released {
-			released = true
-			close(store.release)
-		}
-	}
-	t.Cleanup(releaseSave)
-	manager := coreauth.NewManager(store, nil, nil)
-	manager.RegisterExecutor(&syncTestExecutor{})
-	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
-		ID:       "shutdown-unfinished-refresh",
-		Provider: "codex",
-		Runtime:  alwaysRefreshRuntime{},
-	}); errRegister != nil {
-		t.Fatalf("Register error: %v", errRegister)
-	}
-	store.armed.Store(true)
-	manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
-	// The timer only guards against a hang.
-	hangGuard := time.NewTimer(30 * time.Second)
-	defer hangGuard.Stop()
-	select {
-	case <-store.entered:
-	case <-hangGuard.C:
-		t.Fatal("auto-refresh never saved the refreshed credential")
-	}
+	errWatcherStop := errors.New("watcher stop failed")
+	for name, earlier := range map[string]error{"alone": nil, "after an earlier error": errWatcherStop} {
+		t.Run(name, func(t *testing.T) {
+			store := &heldRefreshSaveStore{entered: make(chan struct{}), release: make(chan struct{})}
+			released := false
+			releaseSave := func() {
+				if !released {
+					released = true
+					close(store.release)
+				}
+			}
+			t.Cleanup(releaseSave)
+			manager := coreauth.NewManager(store, nil, nil)
+			manager.RegisterExecutor(&syncTestExecutor{})
+			if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "shutdown-unfinished-refresh",
+				Provider: "codex",
+				Runtime:  alwaysRefreshRuntime{},
+			}); errRegister != nil {
+				t.Fatalf("Register error: %v", errRegister)
+			}
+			store.armed.Store(true)
+			manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
+			// The timer only guards against a hang.
+			hangGuard := time.NewTimer(30 * time.Second)
+			defer hangGuard.Stop()
+			select {
+			case <-store.entered:
+			case <-hangGuard.C:
+				t.Fatal("auto-refresh never saved the refreshed credential")
+			}
 
-	service := &Service{cfg: &config.Config{}, coreManager: manager}
-	expired, cancel := context.WithCancel(context.Background())
-	cancel()
-	// The save is held, so the wait can only end with ctx.
-	if errShutdown := service.Shutdown(expired); !errors.Is(errShutdown, context.Canceled) {
-		t.Fatalf("Shutdown with a save still held = %v, want an error wrapping context.Canceled", errShutdown)
-	}
-	if errShutdown := service.Shutdown(context.Background()); errShutdown != nil {
-		t.Fatalf("later Shutdown = %v, want nil at once", errShutdown)
+			service := &Service{cfg: &config.Config{}, coreManager: manager}
+			if earlier != nil {
+				service.watcher = &WatcherWrapper{stop: func() error { return earlier }}
+			}
+			expired, cancel := context.WithCancel(context.Background())
+			cancel()
+			// The save is held, so the wait can only end with ctx.
+			errShutdown := service.Shutdown(expired)
+			if !errors.Is(errShutdown, context.Canceled) {
+				t.Fatalf("Shutdown with a save still held = %v, want an error wrapping context.Canceled", errShutdown)
+			}
+			if earlier != nil && !errors.Is(errShutdown, earlier) {
+				t.Fatalf("Shutdown = %v, want it to keep the earlier teardown error too", errShutdown)
+			}
+			if errLater := service.Shutdown(context.Background()); errLater != nil {
+				t.Fatalf("later Shutdown = %v, want nil at once", errLater)
+			}
+		})
 	}
 }
