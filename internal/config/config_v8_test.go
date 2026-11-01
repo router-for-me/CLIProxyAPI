@@ -845,7 +845,9 @@ func TestLoadConfigDataWarnsWhenSecretWriteBackFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	if f, errOpen := os.OpenFile(path, os.O_WRONLY, 0); errOpen == nil {
-		_ = f.Close()
+		if errClose := f.Close(); errClose != nil {
+			t.Fatalf("close writability probe: %v", errClose)
+		}
 		t.Skip("file stays writable (running as root)")
 	}
 	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
