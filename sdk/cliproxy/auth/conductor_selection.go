@@ -1181,6 +1181,22 @@ func (m *Manager) requestRetryRoundExclusions(retryRound int, defaultRequestRetr
 	return excluded
 }
 
+// coolingDisabledRetryAt returns the latest upstream reset a 429 recorded for
+// auth and model while cooling was disabled, or zero.
+func coolingDisabledRetryAt(auth *Auth, model string) time.Time {
+	modelKey := canonicalModelKey(model)
+	if auth == nil || modelKey == "" {
+		return time.Time{}
+	}
+	var latest time.Time
+	for stateModel, state := range auth.ModelStates {
+		if state != nil && canonicalModelKey(stateModel) == modelKey && state.coolingDisabledRetryAt.After(latest) {
+			latest = state.coolingDisabledRetryAt
+		}
+	}
+	return latest
+}
+
 func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (bool, time.Time) {
 	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
 	if !blocked {
@@ -1280,14 +1296,6 @@ func (m *Manager) closestCooldownWait(providers []string, model string, attempt 
 }
 
 func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int, status int, attempted map[string]struct{}) (time.Duration, bool) {
-	return m.closestCooldownWaitWithRetryHint(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, nil)
-}
-
-// closestCooldownWaitWithRetryHint is closestCooldownWaitWithAttempted plus the
-// upstream reset hint carried by the error that ended the round. Cooling-disabled
-// auths keep no deadline in their state, so for one that was just attempted and
-// answered 429 the hint is the only evidence that an immediate retry would fail too.
-func (m *Manager) closestCooldownWaitWithRetryHint(providers []string, model string, attempt int, eligibility authSelectionEligibility, pinnedAuthID string, defaultRequestRetry int, status int, attempted map[string]struct{}, retryHint *time.Duration) (time.Duration, bool) {
 	if m == nil || len(providers) == 0 {
 		return 0, false
 	}
@@ -1345,14 +1353,17 @@ func (m *Manager) closestCooldownWaitWithRetryHint(providers []string, model str
 			_, wasAttempted = attempted[auth.ID]
 		}
 		coolingDisabled := m.cooldownDisabledForAuth(auth)
-		if wasAttempted && coolingDisabled && status == http.StatusTooManyRequests && retryHint != nil && *retryHint > 0 {
+		if wasAttempted && coolingDisabled {
 			// The auth stays selectable (no cooldown is recorded), but the caller
-			// must not re-send to it before the upstream reset hint has elapsed.
-			if !found || *retryHint < minWait {
-				minWait = *retryHint
-				found = true
+			// must not re-send to it before the reset its own last 429 announced.
+			// Each auth keeps its own: another credential's hint never delays it.
+			if until := coolingDisabledRetryAt(auth, checkModel); until.After(now) {
+				if wait := until.Sub(now); !found || wait < minWait {
+					minWait = wait
+					found = true
+				}
+				continue
 			}
-			continue
 		}
 		// A transient capacity rejection cools only until its provider hint,
 		// so an attempted credential whose last failure was transient and
@@ -1517,7 +1528,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if !isRequestRetryRoundError(err) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
 		return 0, false
 	}
-	wait, found := m.closestCooldownWaitWithRetryHint(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, retryAfterFromError(err))
+	wait, found := m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
 			return 0, false
