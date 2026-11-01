@@ -885,6 +885,30 @@ func TestConvertClaudeRequestToCodex_IgnoresMuseTaggedSignatureForNonMuseTargets
 	}
 }
 
+// On compat routes the unknown-signature fallback preserves opaque blobs for
+// third-party models, but a tagged Muse envelope is known-foreign (Meta
+// family), not unknown, so it must still be dropped for non-Muse targets.
+func TestConvertClaudeRequestToCodexWithCompat_DropsMuseTaggedSignatureForNonMuseTargets(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"summary","signature":""},{"type":"text","text":"answer"}]},{"role":"user","content":"next"}]}`)
+	payload, _ = sjson.SetBytes(payload, "messages.0.content.0.signature", testMuseTaggedSignature)
+
+	for _, modelName := range []string{"gpt-5.4", "deepseek-v4", "claude-sonnet-4-6", "grok-4.5", "gemini-3-pro"} {
+		t.Run(modelName, func(t *testing.T) {
+			out, _ := ConvertClaudeRequestToCodexWithCompat(modelName, payload, false)
+			if got := countRequestInputItemsByType(out, "reasoning"); got != 0 {
+				t.Fatalf("got %d reasoning items for non-Muse compat target, want 0; output=%s", got, out)
+			}
+		})
+	}
+
+	t.Run("muse target keeps the tag", func(t *testing.T) {
+		out, _ := ConvertClaudeRequestToCodexWithCompat("muse-spark-1.3", payload, false)
+		if got := gjson.GetBytes(out, "input.0.encrypted_content").String(); got != testMuseTaggedSignature {
+			t.Fatalf("encrypted_content = %q, want the tagged signature unchanged; output=%s", got, out)
+		}
+	})
+}
+
 func TestConvertClaudeRequestToCodex_IgnoresNonCodexThinkingSignatures(t *testing.T) {
 	tests := []struct {
 		name      string

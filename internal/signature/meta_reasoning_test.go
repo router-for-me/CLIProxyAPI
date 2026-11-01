@@ -62,19 +62,18 @@ func TestMetaTagParticipatesInProviderPrefixMechanism(t *testing.T) {
 	}
 }
 
-// A tagged Muse envelope must be exactly as unreplayable on every non-Meta lane
-// as the raw envelope was before the tag existed. This is what keeps the change
-// from reaching the Claude, GPT, Gemini, Kimi and Grok lanes.
+// A tagged Muse envelope must be known-foreign on every non-Meta lane: it
+// detects as its Meta family (never Unknown, so compatibility fallbacks cannot
+// mistake it for an opaque blob worth preserving) and no lane finds it
+// replayable. This is what keeps the change from reaching the Claude, GPT,
+// Gemini, Kimi and Grok lanes.
 func TestMetaTagIsForeignToEveryOtherLane(t *testing.T) {
 	tagged := TagMetaReasoning("acct", testMetaEnvelope)
-	if got := DetectSignatureProvider(tagged); got != SignatureProviderUnknown {
-		t.Fatalf("DetectSignatureProvider(tagged) = %q, want unknown", got)
+	if got := DetectSignatureProvider(tagged); got != SignatureProviderMeta {
+		t.Fatalf("DetectSignatureProvider(tagged) = %q, want meta", got)
 	}
-	if got, raw := DetectSignatureProvider(tagged), DetectSignatureProvider(testMetaEnvelope); got != raw {
-		t.Fatalf("tagged detects as %q but the raw envelope detects as %q", got, raw)
-	}
-	if IsRecognizedReasoningSignature(tagged) {
-		t.Fatal("tagged Muse envelope is recognized as a replayable reasoning signature")
+	if !IsRecognizedReasoningSignature(tagged) {
+		t.Fatal("tagged Muse envelope is not recognized as a Meta-family signature")
 	}
 	for _, target := range []SignatureProvider{
 		SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT,
@@ -100,16 +99,17 @@ func TestMetaTagIsForeignToEveryOtherLane(t *testing.T) {
 }
 
 // Upstream recognizes native Muse envelopes by shape. A tagged envelope, even
-// with a shape-valid inner value, must stay unrecognized everywhere: only the
-// Meta executor may unwrap it after checking the selected account.
+// with a shape-valid inner value, detects as its Meta family but must decide
+// exactly like the raw envelope on every lane: only the Meta executor may
+// unwrap it after checking the selected account.
 func TestMetaTagWithShapeValidEnvelopeIsNotReplayableAnywhere(t *testing.T) {
 	native := testMetaReasoningSignature(1024)
 	if DetectSignatureProvider(native) != SignatureProviderMeta {
 		t.Fatalf("fixture is not a recognized Meta envelope")
 	}
 	tagged := TagMetaReasoning("acct", native)
-	if got := DetectSignatureProvider(tagged); got != SignatureProviderUnknown {
-		t.Fatalf("DetectSignatureProvider(tagged) = %q, want unknown", got)
+	if got := DetectSignatureProvider(tagged); got != SignatureProviderMeta {
+		t.Fatalf("DetectSignatureProvider(tagged) = %q, want meta", got)
 	}
 	for _, target := range []SignatureProvider{
 		SignatureProviderMeta, SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT,
@@ -117,6 +117,23 @@ func TestMetaTagWithShapeValidEnvelopeIsNotReplayableAnywhere(t *testing.T) {
 	} {
 		if got, ok := CompatibleSignatureForProvider(target, tagged); ok {
 			t.Fatalf("target %q accepted the tagged envelope as %q", target, got)
+		}
+		got := DecideSignatureCompatibility(target, tagged, SignatureBlockKindUnknown)
+		if got.Compatible || got.NormalizedSignature != "" {
+			t.Fatalf("target %q: tagged decision %+v claims the envelope is replayable", target, got)
+		}
+		if target == SignatureProviderMeta {
+			// Unlike the raw envelope, the tag must not replay through the
+			// generic Meta lane either: only the Meta executor unwraps it,
+			// after checking the selected account.
+			if got.Action != SignatureActionDropBlock {
+				t.Fatalf("meta target: tagged decision %+v, want a drop", got)
+			}
+			continue
+		}
+		want := DecideSignatureCompatibility(target, native, SignatureBlockKindUnknown)
+		if got.Action != want.Action || got.ReplacementSignature != want.ReplacementSignature {
+			t.Fatalf("target %q: tagged decision %+v differs from raw decision %+v", target, got, want)
 		}
 	}
 	key, envelope, ok := ParseMetaReasoningTag(tagged)

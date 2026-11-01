@@ -37,7 +37,7 @@ type metaPreparedRequest struct {
 	// applyPayload applies user payload rules exactly once to one attempt's body.
 	applyPayload func([]byte) []byte
 	// replay carries the account-bound Muse reasoning policy for this request.
-	replay metaReasoningReplay
+	replay helps.MetaReasoningReplay
 	// replayRetried records that the one-shot retry without reasoning envelopes ran.
 	replayRetried bool
 }
@@ -46,19 +46,19 @@ type metaPreparedRequest struct {
 // with every reasoning envelope removed, and prepares that body. It only fires
 // when envelopes were actually forwarded and Meta rejected them as foreign.
 func (p *metaPreparedRequest) retryWithoutReplay(ctx context.Context, statusCode int, errBody []byte) bool {
-	if p.replayRetried || p.replay.stats == nil || p.replay.stats.kept == 0 || !isMetaReasoningNotIssued(statusCode, errBody) {
+	if p.replayRetried || p.replay.Stats == nil || p.replay.Stats.Kept == 0 || !helps.IsMetaReasoningNotIssued(statusCode, errBody) {
 		return false
 	}
 	p.replayRetried = true
 	// Re-derive the retry body from the pre-payload-rules payload: stripping the
 	// envelopes is built-in cleanup, so user payload rules must be applied after
 	// it, exactly once, as the final step before this attempt is sent.
-	retryBody := p.replay.withoutReplay().sanitizeRequest(ctx, bytes.Clone(p.bodyBeforePayload))
+	retryBody := sanitizeMetaReasoningRequest(ctx, p.replay.WithoutReplay(), bytes.Clone(p.bodyBeforePayload))
 	if p.applyPayload != nil {
 		retryBody = p.applyPayload(retryBody)
 	}
 	p.body = retryBody
-	helps.LogWithRequestID(ctx).Warnf("meta reasoning replay: Meta rejected %d replayed reasoning envelope(s) as not issued to this caller; retrying once without reasoning", p.replay.stats.kept)
+	helps.LogWithRequestID(ctx).Warnf("meta reasoning replay: Meta rejected %d replayed reasoning envelope(s) as not issued to this caller; retrying once without reasoning", p.replay.Stats.Kept)
 	return true
 }
 
@@ -105,7 +105,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	}
 	body = normalizeCodexInstructions(body)
 	replay := e.newMetaReasoningReplay(opts, req.Model, baseModel, auth)
-	body = replay.sanitizeRequest(ctx, body)
+	body = sanitizeMetaReasoningRequest(ctx, replay, body)
 	body = helps.SanitizeMetaWebSearchTools(body)
 	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
 	body = helps.EnsureMetaMuseToolNamespace(body)
@@ -150,7 +150,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
-	prepared.replay.recordRequest(ctx, prepared.baseModel, enriched.ID)
+	prepared.replay.RecordRequest(ctx, prepared.baseModel, enriched.ID)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, enriched)
 	defer reporter.TrackFailure(ctx, &err)
@@ -290,7 +290,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		if errEvent := metaStreamEventError(eventData); errEvent != nil {
 			return metaCompletedTranslation{}, errEvent
 		}
-		eventData = prepared.replay.tagResponseEvent(eventData)
+		eventData = prepared.replay.TagResponseEvent(eventData)
 		events, errBridge := prepared.applyPatch.Transform(eventData)
 		if errBridge != nil {
 			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
@@ -318,7 +318,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		if detail, okUsage := helps.ParseCodexUsage(completedData); okUsage {
 			upstreamUsage.Observe(detail, true)
 		}
-		completedData = prepared.replay.tagResponseEvent(completedData)
+		completedData = prepared.replay.TagResponseEvent(completedData)
 		completedData = patchCodexCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
 		var errBridge error
 		completedData, errBridge = prepared.applyPatch.Bridge.TransformNonStream(completedData)

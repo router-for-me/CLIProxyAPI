@@ -15,6 +15,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -295,7 +296,7 @@ func museReplayHistoryPayload(t *testing.T, signature string) []byte {
 func TestMetaReasoningReplay_TagsReasoningReturnedToClaudeClients(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a")
 	auth := upstream.auth("a")
-	key := metaReasoningAccountKey(auth)
+	key := helps.MetaReasoningAccountKey(auth)
 	if key == "" {
 		t.Fatal("no account key derived")
 	}
@@ -336,7 +337,7 @@ func TestMetaReasoningReplay_TagsReasoningReturnedToClaudeClients(t *testing.T) 
 func TestMetaReasoningReplay_TagsReasoningReturnedToResponsesClients(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a")
 	auth := upstream.auth("a")
-	key := metaReasoningAccountKey(auth)
+	key := helps.MetaReasoningAccountKey(auth)
 	payload := []byte(`{"model":"` + museReplayModel + `","input":"list the files"}`)
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")}
 	assertTagged := func(t *testing.T, label, got string) {
@@ -407,7 +408,7 @@ func TestMetaReasoningReplay_DisabledLeavesResponsesUntaggedAndDropsReplay(t *te
 	}
 
 	// A tagged envelope from a time the feature was on must not reach Meta either.
-	tagged := signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("a", 99))
+	tagged := signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 99))
 	if _, err := museReplayExecute(t, exec, auth, museReplayHistoryPayload(t, tagged)); err != nil {
 		t.Fatalf("disabled feature surfaced an error for a tagged envelope: %v", err)
 	}
@@ -422,7 +423,7 @@ func TestMetaReasoningReplay_ReplaysOnlySameAccountEnvelope(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a", "b")
 	authA, authB := upstream.auth("a"), upstream.auth("b")
 	exec := NewMetaExecutor(museReplayConfig(true))
-	keyA, keyB := metaReasoningAccountKey(authA), metaReasoningAccountKey(authB)
+	keyA, keyB := helps.MetaReasoningAccountKey(authA), helps.MetaReasoningAccountKey(authB)
 	if keyA == keyB {
 		t.Fatal("distinct accounts share an account key")
 	}
@@ -469,7 +470,7 @@ func TestMetaReasoningReplay_ResponsesClientHistory(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a", "b")
 	authA := upstream.auth("a")
 	exec := NewMetaExecutor(museReplayConfig(true))
-	keyA, keyB := metaReasoningAccountKey(authA), metaReasoningAccountKey(upstream.auth("b"))
+	keyA, keyB := helps.MetaReasoningAccountKey(authA), helps.MetaReasoningAccountKey(upstream.auth("b"))
 
 	input := []any{
 		map[string]any{"type": "message", "role": "user", "content": "list the files"},
@@ -513,7 +514,7 @@ func TestMetaReasoningReplay_RetriesOnceWithoutReasoningWhenMetaRejects(t *testi
 			upstream := newMuseReplayUpstream(t, "a")
 			upstream.alwaysDeny = true // rejects any replayed envelope, including the matching account's
 			auth := upstream.auth("a")
-			signed := signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("a", 7))
+			signed := signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 7))
 			payload := museReplayHistoryPayload(t, signed)
 			exec := NewMetaExecutor(museReplayConfig(true))
 
@@ -548,7 +549,7 @@ func TestMetaReasoningReplay_PayloadRulesStayFinalOnRetry(t *testing.T) {
 	upstream := newMuseReplayUpstream(t, "a")
 	upstream.alwaysDeny = true
 	auth := upstream.auth("a")
-	signed := signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("a", 7))
+	signed := signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 7))
 	cfg := museReplayConfig(true)
 	cfg.Payload = config.PayloadConfig{
 		Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: museReplayModel}}, Params: map[string]any{"max_output_tokens": 321}}},
@@ -627,7 +628,7 @@ func TestMetaReasoningReplay_RetryHappensOnceAndOnlyForThisRejection(t *testing.
 		}))
 		defer server.Close()
 		auth := &cliproxyauth.Auth{ID: "meta-x", Provider: "meta", Attributes: map[string]string{"api_key": "t", "base_url": server.URL}}
-		payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("x", 1)))
+		payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("x", 1)))
 		if _, err := museReplayExecute(t, NewMetaExecutor(museReplayConfig(true)), auth, payload); err == nil {
 			t.Fatal("expected the persistent rejection to surface")
 		}
@@ -663,7 +664,7 @@ func TestMetaReasoningReplay_RetryHappensOnceAndOnlyForThisRejection(t *testing.
 		}))
 		defer server.Close()
 		auth := &cliproxyauth.Auth{ID: "meta-x", Provider: "meta", Attributes: map[string]string{"api_key": "t", "base_url": server.URL}}
-		payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("x", 1)))
+		payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("x", 1)))
 		if _, err := museReplayExecute(t, NewMetaExecutor(museReplayConfig(true)), auth, payload); err == nil {
 			t.Fatal("expected the error to surface")
 		}
@@ -690,7 +691,7 @@ func TestMetaReasoningReplay_TagsPlainJSONResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	key, envelope, ok := signature.ParseMetaReasoningTag(gjson.GetBytes(response, `content.#(type=="thinking").signature`).String())
-	if !ok || key != metaReasoningAccountKey(auth) || envelope != museEnv("a", 1) {
+	if !ok || key != helps.MetaReasoningAccountKey(auth) || envelope != museEnv("a", 1) {
 		t.Fatalf("plain JSON response was not tagged: %s", response)
 	}
 }
@@ -707,7 +708,7 @@ func TestMetaReasoningReplay_StreamRetryHappensOnce(t *testing.T) {
 	}))
 	defer server.Close()
 	auth := &cliproxyauth.Auth{ID: "meta-x", Provider: "meta", Attributes: map[string]string{"api_key": "t", "base_url": server.URL}}
-	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("x", 1)))
+	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("x", 1)))
 	if _, err := museReplayStream(t, NewMetaExecutor(museReplayConfig(true)), auth, payload, "claude"); err == nil {
 		t.Fatal("expected the persistent rejection to surface")
 	}
@@ -737,10 +738,46 @@ func TestMetaReasoningReplay_RetriesWhenTheRejectionIsAnErrorEvent(t *testing.T)
 	}))
 	defer server.Close()
 	auth := &cliproxyauth.Auth{ID: "meta-a", Provider: "meta", Attributes: map[string]string{"api_key": "token-a", "base_url": server.URL}}
-	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(metaReasoningAccountKey(auth), museEnv("a", 1)))
+	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 1)))
 
 	if _, err := museReplayExecute(t, NewMetaExecutor(museReplayConfig(true)), auth, payload); err != nil {
 		t.Fatalf("the rejection event reached the caller: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 || !bytes.Contains(bodies[0], []byte(`"encrypted_content"`)) || bytes.Contains(bodies[1], []byte(`"encrypted_content"`)) {
+		t.Fatalf("upstream saw %d requests; want the replay, then a retry without any envelope", len(bodies))
+	}
+}
+
+// A streaming request whose 200 body opens with the rejection as its first
+// error event must recover the same way: no chunk has reached the client yet,
+// so it is retried once without reasoning before the stream is handed out.
+func TestMetaReasoningReplay_StreamRetriesWhenTheRejectionIsTheFirstEvent(t *testing.T) {
+	var mu sync.Mutex
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if bytes.Contains(body, []byte(`"encrypted_content"`)) {
+			_, _ = w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"reasoning encrypted_content was not issued to this caller\"}}\n\n"))
+			return
+		}
+		writeMetaResponsesOK(w, "recovered")
+	}))
+	defer server.Close()
+	auth := &cliproxyauth.Auth{ID: "meta-a", Provider: "meta", Attributes: map[string]string{"api_key": "token-a", "base_url": server.URL}}
+	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 1)))
+
+	got, err := museReplayStream(t, NewMetaExecutor(museReplayConfig(true)), auth, payload, "claude")
+	if err != nil {
+		t.Fatalf("the bootstrap rejection reached the caller: %v", err)
+	}
+	if !strings.Contains(got, "message_stop") {
+		t.Fatalf("stream did not complete after the retry, got %q", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -821,27 +858,8 @@ func TestMetaReasoningReplay_CanaryAliasThroughManager(t *testing.T) {
 	}
 }
 
-func TestMetaReasoningAccountKey(t *testing.T) {
-	a := metaReasoningAccountKey(&cliproxyauth.Auth{ID: "meta-a"})
-	if a == "" || a != metaReasoningAccountKey(&cliproxyauth.Auth{ID: "meta-a", Attributes: map[string]string{"api_key": "rotated"}}) {
-		t.Fatalf("account key must depend on identity only and survive token rotation, got %q", a)
-	}
-	if a == metaReasoningAccountKey(&cliproxyauth.Auth{ID: "meta-b"}) {
-		t.Fatal("distinct accounts share a key")
-	}
-	if _, _, ok := signature.ParseMetaReasoningTag(signature.TagMetaReasoning(a, "x")); !ok {
-		t.Fatalf("account key %q is not a valid tag key", a)
-	}
-	if got := metaReasoningAccountKey(nil); got != "" {
-		t.Fatalf("nil auth produced key %q", got)
-	}
-	if got := metaReasoningAccountKey(&cliproxyauth.Auth{}); got != "" {
-		t.Fatalf("anonymous auth produced key %q", got)
-	}
-	if got := metaReasoningAccountKey(&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "k"}}); got != "" {
-		t.Fatalf("a key must never be derived from the API key, got %q", got)
-	}
-}
+// The account-key derivation itself is standalone support code, so its unit
+// test lives with the implementation in helps/meta_reasoning_replay_test.go.
 
 // museReplayPool registers one Meta credential per account behind a real Manager,
 // so the executor sees whichever account the conductor selects, exactly like
@@ -914,7 +932,7 @@ func TestMetaReasoningReplay_LongConversationAcrossAccounts(t *testing.T) {
 			}
 			for i, sig := range clientSignatures {
 				key, envelope, ok := signature.ParseMetaReasoningTag(sig)
-				if !ok || envelope != calls[i].issued || key != metaReasoningAccountKey(&cliproxyauth.Auth{ID: "meta-pool-" + t.Name() + "-" + calls[i].account}) {
+				if !ok || envelope != calls[i].issued || key != helps.MetaReasoningAccountKey(&cliproxyauth.Auth{ID: "meta-pool-" + t.Name() + "-" + calls[i].account}) {
 					t.Fatalf("turn %d: client received %q, want a tag for account %s around %s", i, sig, calls[i].account, calls[i].issued)
 				}
 			}
