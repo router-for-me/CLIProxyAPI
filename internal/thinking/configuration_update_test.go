@@ -2,6 +2,8 @@ package thinking
 
 import (
 	"bytes"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -37,10 +39,10 @@ func TestCollapseConfigurationUpdatesBoundaries(t *testing.T) {
 
 func TestStripConfigurationUpdatesExported(t *testing.T) {
 	t.Run("items removed without changing top level effort", func(t *testing.T) {
-		body := []byte(`{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"hi"}]}`)
+		body := []byte(`{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"hi\nthere"},{"type":"function_call_output","call_id":"call_1","output":"{\"ok\":true}"}]}`)
 		got := StripConfigurationUpdates(body)
-		if input := gjson.GetBytes(got, "input").Raw; input != `[{"role":"user","content":"hi"}]` {
-			t.Fatalf("input = %s, want user message; body=%s", input, got)
+		if input := gjson.GetBytes(got, "input").Raw; input != `[{"role":"user","content":"hi\nthere"},{"type":"function_call_output","call_id":"call_1","output":"{\"ok\":true}"}]` {
+			t.Fatalf("input = %s, want preserved message and tool output; body=%s", input, got)
 		}
 		if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "medium" {
 			t.Fatalf("reasoning.effort = %q, want medium; body=%s", effort, got)
@@ -60,6 +62,47 @@ func TestStripConfigurationUpdatesExported(t *testing.T) {
 				t.Fatalf("body changed: got %s, want %s", got, body)
 			}
 		})
+	}
+}
+
+func TestConfigurationUpdatesLargeInputNoOpAllocations(t *testing.T) {
+	body := []byte(`{"input":[{"role":"user","content":"` + strings.Repeat("x", 8<<20) + `"}]}`)
+	for _, tc := range []struct {
+		name string
+		run  func([]byte) []byte
+	}{
+		{name: "collapse", run: func(body []byte) []byte { return CollapseConfigurationUpdates(body) }},
+		{name: "strip", run: StripConfigurationUpdates},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(body)
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got := tc.run(body)
+			runtime.ReadMemStats(&after)
+			if &got[0] != &body[0] {
+				t.Fatal("no-op did not reuse the original body")
+			}
+			allocated := after.TotalAlloc - before.TotalAlloc
+			t.Logf("allocated %d bytes for %d-byte body", allocated, len(body))
+			if allocated >= uint64(len(body)/8) {
+				t.Fatalf("no-op allocated %d bytes for %d-byte body", allocated, len(body))
+			}
+		})
+	}
+}
+
+func TestExtractConfigurationUpdateConfigOwnsEffort(t *testing.T) {
+	body := []byte(`{"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"configuration_update","reasoning":{"effort":" high "}},{"type":"configuration_update","reasoning":{"effort":" "}}]}`)
+	got := extractConfigurationUpdateConfig(body)
+	if got.Mode != ModeLevel || got.Level != "high" {
+		t.Fatalf("config = %+v, want level high", got)
+	}
+	offset := bytes.Index(body, []byte("high"))
+	copy(body[offset:], "xxxx")
+	if got.Level != "high" {
+		t.Fatalf("saved effort changed with input: %q", got.Level)
 	}
 }
 
