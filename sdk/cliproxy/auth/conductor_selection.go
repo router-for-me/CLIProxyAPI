@@ -1431,7 +1431,12 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 			// Each auth keeps its own: another credential's hint never delays it.
 			// This covers auths attempted in earlier rounds too: retry rounds
 			// exclude every auth with a live reset, so the wait must count them.
+			// An ordinary block that outlasts the reset still gates selection, so the
+			// auth is ready only at the later of the two.
 			if until := m.coolingDisabledRetryAtForRoute(auth, model, checkModel, now); !until.IsZero() {
+				if next.After(until) {
+					until = next
+				}
 				if wait := until.Sub(now); !found || wait < minWait {
 					minWait = wait
 					found = true

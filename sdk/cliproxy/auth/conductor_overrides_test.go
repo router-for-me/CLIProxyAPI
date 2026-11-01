@@ -2943,3 +2943,36 @@ func TestManager_Execute_DisableCooling_NewerShortResetReplacesStaleLongOne(t *t
 		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
 	}
 }
+
+// A cooling-disabled reset must not schedule a retry before an ordinary block
+// on the same model that outlasts it (a forced cooldown applies one even with
+// cooling disabled): selection rejects the model until then, so the earlier
+// wait would spend a retry round on nothing.
+func TestCoolingDisabledRetryWaitHonoursLongerOrdinaryBlock(t *testing.T) {
+	model := "test-model-reset-and-block"
+	auth := &Auth{ID: "auth-reset-and-block", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+	manager, eligibility := issue7017WaitSetup(t, auth, model)
+
+	retryAfter := 5 * time.Second
+	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	now := time.Now()
+	manager.mu.Lock()
+	state := manager.auths[auth.ID].ModelStates[model]
+	if state == nil || !state.coolingDisabledRetryAt.After(now) {
+		manager.mu.Unlock()
+		t.Fatal("429 did not record a cooling-disabled reset")
+	}
+	// The ordinary block a forced cooldown leaves, longer than the reset.
+	state.Unavailable = true
+	state.NextRetryAfter = now.Add(time.Minute)
+	manager.mu.Unlock()
+
+	attempted := map[string]struct{}{auth.ID: {}}
+	wait, found := manager.closestCooldownWaitWithAttempted([]string{"codex"}, model, 0, eligibility, "", 5, http.StatusTooManyRequests, attempted)
+	if !found {
+		t.Fatal("expected a retry candidate")
+	}
+	if wait < 50*time.Second {
+		t.Fatalf("wait = %v, want the 1m ordinary block, not the 5s reset", wait)
+	}
+}
