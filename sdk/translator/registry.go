@@ -2,9 +2,11 @@ package translator
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -169,14 +171,14 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 // configurationUpdates captures only Responses update items before and after a plugin
 // normalizer. A native cross-protocol translation removing updates is not a plugin edit.
 func configurationUpdates(body []byte) []string {
-	input := gjson.GetBytes(body, "input")
+	input := util.GetGJSONBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return nil
 	}
 	var updates []string
 	input.ForEach(func(_, item gjson.Result) bool {
 		if item.Get("type").String() == "configuration_update" {
-			updates = append(updates, item.Raw)
+			updates = append(updates, strings.Clone(item.Raw))
 		}
 		return true
 	})

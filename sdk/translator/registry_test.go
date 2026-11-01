@@ -1,8 +1,10 @@
 package translator
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -61,6 +63,34 @@ func hasCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestConfigurationUpdatesCopiesOnlyUpdateItems(t *testing.T) {
+	body := append([]byte(`{"input":[{"type":"message","content":"`), bytes.Repeat([]byte("x"), 8<<20)...)
+	body = append(body, []byte(`"},{"type":"configuration_update","reasoning":{"effort":"high"}},{"type":"configuration_update","reasoning":{"effort":"low"}}]}`)...)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	updates := configurationUpdates(body)
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= uint64(len(body)/2) {
+		t.Fatalf("configuration update snapshot allocated %d bytes for a %d-byte input", allocated, len(body))
+	}
+	want := []string{
+		`{"type":"configuration_update","reasoning":{"effort":"high"}}`,
+		`{"type":"configuration_update","reasoning":{"effort":"low"}}`,
+	}
+	if len(updates) != len(want) {
+		t.Fatalf("configurationUpdates() = %q, want %q", updates, want)
+	}
+	// A later normalizer may overwrite the request backing storage.
+	for i := range body {
+		body[i] = 'X'
+	}
+	for i := range want {
+		if updates[i] != want[i] {
+			t.Fatalf("snapshot item %d = %q, want %q", i, updates[i], want[i])
+		}
+	}
 }
 
 func TestHasPluginHooks(t *testing.T) {
