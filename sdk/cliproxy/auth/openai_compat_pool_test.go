@@ -933,3 +933,33 @@ func TestManagerExecute_DisableCooling_AliasPoolSkipsMemberWithLiveReset(t *test
 		t.Fatalf("pool calls = %v, want up-a once (its 2h reset is live) and up-b retried", got)
 	}
 }
+
+// A pool member under an ordinary block is not used, so it must not count as
+// free: with up-a blocked and up-b on a live reset, the auth's reset is up-b's.
+func TestCoolingDisabledRetryAtForRouteIgnoresBlockedPoolMembers(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-blocked-member"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, nil)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour)
+	m.mu.Lock()
+	var auth *Auth
+	for _, candidate := range m.auths {
+		auth = candidate
+	}
+	auth.ModelStates = map[string]*ModelState{
+		"up-a": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+		"up-b": {Status: StatusError, coolingDisabledRetryAt: reset},
+	}
+	got := m.coolingDisabledRetryAtForRoute(auth, alias, m.selectionModelForAuth(auth, alias), now)
+	m.mu.Unlock()
+	if !got.Equal(reset) {
+		t.Fatalf("reset = %v, want up-b's %v: blocked up-a is not a free member", got, reset)
+	}
+}

@@ -1627,6 +1627,16 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.cooldownRecordedSeq > merged.cooldownRecordedSeq {
 		merged.cooldownRecordedSeq = source.cooldownRecordedSeq
 	}
+	// Keep the later cooling-disabled reset and the stronger watermark, so an
+	// alias migration cannot drop a live Retry-After.
+	merged.coolingDisabledRetryAt = target.coolingDisabledRetryAt
+	if source.coolingDisabledRetryAt.After(merged.coolingDisabledRetryAt) {
+		merged.coolingDisabledRetryAt = source.coolingDisabledRetryAt
+	}
+	merged.coolingDisabledRetrySeq = target.coolingDisabledRetrySeq
+	if source.coolingDisabledRetrySeq > merged.coolingDisabledRetrySeq {
+		merged.coolingDisabledRetrySeq = source.coolingDisabledRetrySeq
+	}
 	if merged.StatusMessage == "" {
 		merged.StatusMessage = fallback.StatusMessage
 	}
