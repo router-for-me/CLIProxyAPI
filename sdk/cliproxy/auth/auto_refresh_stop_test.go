@@ -601,3 +601,40 @@ func TestStopAutoRefreshDropsLoopOnceItFinishes(t *testing.T) {
 		}
 	}
 }
+
+// A loop whose parent context ended has finished and pruned itself while it was
+// still the current loop; a later stop or replacing start must not retire it again.
+func TestFinishedCurrentLoopIsNotRetired(t *testing.T) {
+	for name, retire := range map[string]func(*Manager){
+		"StopAutoRefresh": func(m *Manager) { m.StopAutoRefresh() },
+		"StartAutoRefresh": func(m *Manager) {
+			m.StartAutoRefresh(context.Background(), time.Hour)
+			t.Cleanup(m.StopAutoRefresh)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			parent, cancel := context.WithCancel(context.Background())
+			manager.StartAutoRefresh(parent, time.Hour)
+			manager.mu.RLock()
+			loop := manager.refreshLoop
+			manager.mu.RUnlock()
+			cancel()
+			hangGuard := time.NewTimer(30 * time.Second)
+			defer hangGuard.Stop()
+			select {
+			case <-loop.done:
+			case <-hangGuard.C:
+				t.Fatal("loop did not finish after its parent context ended")
+			}
+
+			retire(manager)
+			manager.mu.RLock()
+			retained := containsLoop(manager.retiredRefreshLoops, loop)
+			manager.mu.RUnlock()
+			if retained {
+				t.Fatal("a finished loop was retired again")
+			}
+		})
+	}
+}
