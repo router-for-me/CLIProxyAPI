@@ -179,3 +179,64 @@ func TestWriteFileNewFileResolvesSymlinkedParent(t *testing.T) {
 	assertNoTempFiles(t, first)
 	assertNoTempFiles(t, second)
 }
+
+// On a mount that rejects chmod, updating a file whose mode the temp lacks must
+// still succeed, in place, instead of failing every refresh.
+func TestWriteFileWritesInPlaceWhenChmodIsRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+	before, errBefore := os.Stat(path)
+	if errBefore != nil {
+		t.Fatal(errBefore)
+	}
+	original := chmodTemp
+	t.Cleanup(func() { chmodTemp = original })
+	chmodTemp = func(*os.File, os.FileMode) error { return syscall.EPERM }
+
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v, want an in-place write", err)
+	}
+	after, errAfter := os.Stat(path)
+	if errAfter != nil {
+		t.Fatal(errAfter)
+	}
+	if !os.SameFile(before, after) || after.Mode().Perm() != 0o640 {
+		t.Fatalf("want the same file with mode 0640, got same=%v mode=%v", os.SameFile(before, after), after.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
+
+// A temp that already has the target's mode needs no chmod, so such a mount keeps
+// the atomic replacement.
+func TestWriteFileSkipsChmodWhenModeMatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+	original := chmodTemp
+	t.Cleanup(func() { chmodTemp = original })
+	var calls int
+	chmodTemp = func(*os.File, os.FileMode) error { calls++; return syscall.EPERM }
+
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("chmod calls = %d, want 0 when the temp already has the mode", calls)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}

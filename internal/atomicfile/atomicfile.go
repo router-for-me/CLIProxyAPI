@@ -13,13 +13,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// rename, exchange, exchangeAvailable and matchOwner are replaced in tests to
-// exercise the fallbacks.
+// rename, exchange, exchangeAvailable, matchOwner, statTarget and chmodTemp are
+// replaced in tests to exercise the fallbacks.
 var (
 	rename            = os.Rename
 	exchange          = exchangeFiles
 	exchangeAvailable = exchangeSupported
 	matchOwner        = keepOwner
+	statTarget        = os.Stat
+	chmodTemp         = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 )
 
 // beforeCommit runs after the temp file is complete, right before it replaces the
@@ -38,8 +40,9 @@ var beforeCommit = func() {}
 //
 // It writes in place, which is what os.WriteFile does, when a rename would change
 // what path refers to: a dangling symlink (the link would be replaced), a special
-// file such as a device or FIFO, a file with other hard links (Unix), or an existing
-// file whose owner the process cannot give the temp file. It also writes in place
+// file such as a device or FIFO, a file with other hard links (Unix), an existing
+// file whose owner or mode the process cannot give the temp file, or a target it
+// cannot inspect. It also writes in place
 // when no temp file can be created next to the target, or the rename fails (a
 // single-file bind mount returns EBUSY, Windows refuses to replace an open file).
 func WriteFile(path string, data []byte, perm os.FileMode) error {
@@ -75,7 +78,15 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 			target = filepath.Join(dir, filepath.Base(path))
 		}
 	}
-	existing, errStat := os.Stat(target)
+	existing, errStat := statTarget(target)
+	if errStat != nil && !errors.Is(errStat, os.ErrNotExist) {
+		// The target exists but cannot be inspected (for example a Windows or ACL
+		// filesystem denying metadata access). A rename, authorized by the
+		// directory, could replace a file this process may not write. Write in
+		// place instead, which fails exactly when os.WriteFile would.
+		log.WithError(errStat).Debugf("atomicfile: cannot inspect %s, writing in place", target)
+		return writeInPlace(target, data, perm, mustExist)
+	}
 	if errStat == nil {
 		if !existing.Mode().IsRegular() {
 			// A device, FIFO or other special file: a rename would replace the node.
@@ -124,9 +135,15 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 			log.WithError(errOwner).Debugf("atomicfile: cannot keep the owner of %s, writing in place", target)
 			return writeInPlace(target, data, perm, mustExist)
 		}
-		if errChmod := tmp.Chmod(existing.Mode().Perm()); errChmod != nil {
-			_ = tmp.Close()
-			return fmt.Errorf("atomicfile: chmod temp file: %w", errChmod)
+		// Skip the chmod when the temp already has the mode: some writable mounts
+		// (FUSE, CIFS) reject chmod. Where one is needed and fails, write in place
+		// as for an owner that cannot be kept, as the previous writers did.
+		if info, errInfo := tmp.Stat(); errInfo != nil || info.Mode().Perm() != existing.Mode().Perm() {
+			if errChmod := chmodTemp(tmp, existing.Mode().Perm()); errChmod != nil {
+				_ = tmp.Close()
+				log.WithError(errChmod).Debugf("atomicfile: cannot keep the mode of %s, writing in place", target)
+				return writeInPlace(target, data, perm, mustExist)
+			}
 		}
 	}
 	if _, errWrite := tmp.Write(data); errWrite != nil {

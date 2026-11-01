@@ -289,3 +289,35 @@ func TestWriteFileWritesInPlaceWhenOwnerCannotBeKept(t *testing.T) {
 	}
 	assertNoTempFiles(t, filepath.Dir(path))
 }
+
+// A target that exists but cannot be inspected must not be replaced by a rename,
+// which the directory alone authorizes: the write goes in place, failing or
+// succeeding exactly as os.WriteFile would.
+func TestWriteFileWritesInPlaceWhenTargetCannotBeInspected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	before, errBefore := os.Stat(path)
+	if errBefore != nil {
+		t.Fatal(errBefore)
+	}
+	original := statTarget
+	t.Cleanup(func() { statTarget = original })
+	statTarget = func(string) (os.FileInfo, error) { return nil, os.ErrPermission }
+
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	after, errAfter := os.Stat(path)
+	if errAfter != nil {
+		t.Fatal(errAfter)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("WriteFile() replaced a target it could not inspect with a new file")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
