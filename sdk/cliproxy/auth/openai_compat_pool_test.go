@@ -936,7 +936,7 @@ func TestManagerExecute_DisableCooling_AliasPoolSkipsMemberWithLiveReset(t *test
 
 // A pool member under an ordinary block is not used, so it must not count as
 // free: with up-a blocked and up-b on a live reset, the auth's reset is up-b's.
-func TestCoolingDisabledRetryAtForRouteIgnoresBlockedPoolMembers(t *testing.T) {
+func TestCoolingDisabledRetryAtForRouteLongerBlockDoesNotReopenPool(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(true)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
@@ -954,12 +954,55 @@ func TestCoolingDisabledRetryAtForRouteIgnoresBlockedPoolMembers(t *testing.T) {
 		auth = candidate
 	}
 	auth.ModelStates = map[string]*ModelState{
-		"up-a": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(time.Hour)},
+		"up-a": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(3 * time.Hour)},
 		"up-b": {Status: StatusError, coolingDisabledRetryAt: reset},
 	}
 	got := m.coolingDisabledRetryAtForRoute(auth, alias, m.selectionModelForAuth(auth, alias), now)
 	m.mu.Unlock()
 	if !got.Equal(reset) {
-		t.Fatalf("reset = %v, want up-b's %v: blocked up-a is not a free member", got, reset)
+		t.Fatalf("reset = %v, want up-b's %v: up-a's longer block neither frees nor shortens the pool", got, reset)
+	}
+}
+
+// A pool member under an ordinary block that ends before another member's
+// reset is the one execution can use first; one under a block with no end is
+// left out, and a pool with only ordinary blocks is left to cooldown scheduling.
+func TestCoolingDisabledRetryAtForRouteCountsBlockedMemberReadyTime(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-member-ready-time"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, nil)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour)
+	blockEnd := now.Add(5 * time.Second)
+	for _, tc := range []struct {
+		name string
+		upA  *ModelState
+		upB  *ModelState
+		want time.Time
+	}{
+		{"short block beats long reset", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, &ModelState{Status: StatusError, coolingDisabledRetryAt: reset}, blockEnd},
+		{"block with no end is left out", &ModelState{Status: StatusDisabled}, &ModelState{Status: StatusError, coolingDisabledRetryAt: reset}, reset},
+		{"reset and longer block on one member", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(3 * time.Hour), coolingDisabledRetryAt: reset}, &ModelState{Status: StatusError, coolingDisabledRetryAt: now.Add(4 * time.Hour)}, now.Add(3 * time.Hour)},
+		{"only ordinary blocks", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.mu.Lock()
+			var auth *Auth
+			for _, candidate := range m.auths {
+				auth = candidate
+			}
+			auth.ModelStates = map[string]*ModelState{"up-a": tc.upA, "up-b": tc.upB}
+			got := m.coolingDisabledRetryAtForRoute(auth, alias, m.selectionModelForAuth(auth, alias), now)
+			m.mu.Unlock()
+			if !got.Equal(tc.want) {
+				t.Fatalf("ready = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -2976,3 +2976,82 @@ func TestCoolingDisabledRetryWaitHonoursLongerOrdinaryBlock(t *testing.T) {
 		t.Fatalf("wait = %v, want the 1m ordinary block, not the 5s reset", wait)
 	}
 }
+
+// An explicit Retry-After: 0 from a newer call is the upstream saying "retry
+// now"; a stale long reset must not outlive it.
+func TestManager_Execute_DisableCooling_NewerExplicitZeroClearsStaleReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const id, model = "auth-newer-zero-reset", "test-model-newer-zero-reset"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 0}},
+		},
+	}
+	m.RegisterExecutor(executor)
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	// An earlier request left a 2h reset.
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want an immediate retry after the newer Retry-After: 0", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
+		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
+	}
+}
+
+// Alias migration in reconciliation must carry a state whose only content is a
+// live cooling-disabled reset (left by a stale success after the 429).
+func TestManager_ReconcileRegistryModelStates_MigratesCleanStateWithLiveReset(t *testing.T) {
+	const (
+		provider    = "antigravity"
+		routeModel  = "[ant]gemini-3.7-flash-high"
+		targetModel = "gemini-3.7-flash-high"
+	)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&noForkAliasTestExecutor{id: provider})
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{Name: targetModel, Alias: routeModel, Fork: false}},
+	})
+	auth := &Auth{ID: "auth-migrate-live-reset", Provider: provider, Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	reset := time.Now().Add(time.Hour)
+	manager.mu.Lock()
+	manager.auths[auth.ID].ModelStates = map[string]*ModelState{
+		routeModel: {Status: StatusActive, coolingDisabledRetryAt: reset, coolingDisabledRetrySeq: 1},
+	}
+	manager.mu.Unlock()
+
+	manager.ReconcileRegistryModelStates(context.Background(), auth.ID)
+
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	states := manager.auths[auth.ID].ModelStates
+	if _, legacy := states[routeModel]; legacy {
+		t.Fatalf("legacy ModelStates[%q] was not migrated", routeModel)
+	}
+	if target := states[targetModel]; target == nil || !target.coolingDisabledRetryAt.Equal(reset) {
+		t.Fatalf("ModelStates[%q] = %+v, want the migrated reset %v", targetModel, target, reset)
+	}
+}

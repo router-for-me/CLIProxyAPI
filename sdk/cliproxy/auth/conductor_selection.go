@@ -287,7 +287,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 						}
 						for _, aliasKey := range aliasKeys {
 							if state, hasAliasState := candidateAuth.ModelStates[aliasKey]; hasAliasState {
-								if state != nil && (!modelStateIsClean(state) || isModelStateActiveCooldown(state, now)) {
+								// A state that holds only a live cooling-disabled reset looks
+								// clean, but the reset is the only record of the Retry-After.
+								if state != nil && (!modelStateIsClean(state) || isModelStateActiveCooldown(state, now) || state.coolingDisabledRetryAt.After(now)) {
 									if existingTarget, exists := candidateAuth.ModelStates[targetKey]; exists && existingTarget != nil {
 										candidateAuth.ModelStates[targetKey] = mergeModelState(existingTarget, state)
 									} else {
@@ -1206,35 +1208,47 @@ func (m *Manager) coolingDisabledRetryExclusions(retryRound int, routeModel stri
 }
 
 // coolingDisabledRetryAtForRoute returns when auth may be re-sent routeModel after
-// a 429 recorded while cooling was disabled, or zero when it may be re-sent now.
-// A pooled alias records failures per upstream model, so every pool member that
-// execution would use (blocked members are left out, as execution leaves them
-// out) must still carry a live reset, and the earliest one wins.
+// a 429 recorded while cooling was disabled, or zero when it may be re-sent now
+// or no such reset applies. A pooled alias records failures per upstream model:
+// each member is ready at the later of its own reset and the end of an ordinary
+// block on it, a member under a block with no end is left out (as execution
+// leaves it out), and the earliest ready member wins.
 func (m *Manager) coolingDisabledRetryAtForRoute(auth *Auth, routeModel, selectionModel string, now time.Time) time.Time {
-	keys := []string{selectionModel}
-	if pool := m.pooledStateModels(auth, routeModel); len(pool) > 0 {
-		// Only members execution would use count: one under an ordinary block is
-		// filtered out (filterExecutionModels) and must not reopen the pool.
-		keys = keys[:0]
-		for _, upstreamModel := range pool {
-			stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, true)
-			if blocked, _, _ := isAuthBlockedForModel(auth, stateModel, now); !blocked {
-				keys = append(keys, stateModel)
-			}
+	pool := m.pooledStateModels(auth, routeModel)
+	if len(pool) == 0 {
+		if until := coolingDisabledRetryAt(auth, selectionModel); until.After(now) {
+			return until
 		}
-		if len(keys) == 0 {
-			return time.Time{}
-		}
+		return time.Time{}
 	}
 	var earliest time.Time
-	for _, key := range keys {
-		until := coolingDisabledRetryAt(auth, key)
-		if !until.After(now) {
+	hasReset := false
+	for _, upstreamModel := range pool {
+		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, true)
+		ready := coolingDisabledRetryAt(auth, stateModel)
+		if ready.After(now) {
+			hasReset = true
+		} else {
+			ready = time.Time{}
+		}
+		if blocked, _, next := isAuthBlockedForModel(auth, stateModel, now); blocked {
+			if next.IsZero() {
+				continue
+			}
+			if next.After(ready) {
+				ready = next
+			}
+		}
+		if !ready.After(now) {
 			return time.Time{}
 		}
-		if earliest.IsZero() || until.Before(earliest) {
-			earliest = until
+		if earliest.IsZero() || ready.Before(earliest) {
+			earliest = ready
 		}
+	}
+	if !hasReset {
+		// Only ordinary blocks: the usual cooldown scheduling handles them.
+		return time.Time{}
 	}
 	return earliest
 }
