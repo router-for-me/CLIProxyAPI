@@ -118,6 +118,7 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 	"internal/client/codex/live/tcp_proxy.go":                       {1, "copies header and payload into a freshly allocated frame"},
 	"internal/home/client.go":                                       {1, "zeroes a secret buffer after json.Unmarshal has copied every value out"},
 	"internal/pluginstore/auth.go":                                  {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
+	"internal/config/oauth_scope.go":                                {1, "copies []PayloadFilterRule entries into a freshly allocated request-local slice; no payload bytes are rewritten"},
 	"sdk/cliproxy/auth/selector_weighted.go":                        {2, "shifts weightedPoolMember bookkeeping structs when inserting or removing members; no byte of any JSON payload is rewritten"},
 }
 

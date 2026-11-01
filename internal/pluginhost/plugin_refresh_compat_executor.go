@@ -74,9 +74,18 @@ func (e *pluginRefreshCompatExecutor) Identifier() string {
 	return ""
 }
 
-func (e pluginRefreshCompatExecutor) ForAPIKey() coreauth.ProviderExecutor {
-	if scoped, ok := e.inner.(coreauth.APIKeyConfigExecutor); ok {
-		e.inner = scoped.ForAPIKey()
+// ForAPIKey preserves refresh delegation while binding the original inner provider.
+func (e pluginRefreshCompatExecutor) ForAPIKey(source config.PayloadFilterSource) coreauth.ProviderExecutor {
+	scoped, ok := e.inner.(coreauth.APIKeyConfigExecutor)
+	if !ok {
+		if len(config.PayloadFiltersFor(source)) != 0 {
+			return nil
+		}
+		return &e
+	}
+	e.inner = scoped.ForAPIKey(source)
+	if e.inner == nil {
+		return nil
 	}
 	return &e
 }

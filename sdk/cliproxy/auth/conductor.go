@@ -32,10 +32,11 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
-// APIKeyConfigExecutor provides an execution-local view without OAuth-only
-// configuration. The registered executor and its shared session state stay intact.
+// APIKeyConfigExecutor provides a request-local view with selected-key filters
+// and without OAuth-only configuration. Shared session state stays intact.
 type APIKeyConfigExecutor interface {
-	ForAPIKey() ProviderExecutor
+	// ForAPIKey returns nil when the selected key policy cannot be bound.
+	ForAPIKey(source internalconfig.PayloadFilterSource) ProviderExecutor
 }
 
 // RequestAuthPreparer lets an executor update missing auth metadata immediately

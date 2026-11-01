@@ -104,12 +104,12 @@ func TestV8ScopedExecutorsPreserveWebsocketStores(t *testing.T) {
 		t.Fatal(err)
 	}
 	codex := NewCodexAutoExecutor(cfg)
-	boundCodex := codex.ForAPIKey().(*CodexAutoExecutor)
+	boundCodex := codex.ForAPIKey(nil).(*CodexAutoExecutor)
 	if boundCodex.wsExec.store != codex.wsExec.store || !boundCodex.httpExec.cfg.Codex.ResponseSteering || !boundCodex.wsExec.cfg.Codex.ResponseSteering || boundCodex.httpExec.cfg.CodexHeaderDefaults.UserAgent != "" {
 		t.Fatal("scoped Codex executor lost sessions or inherited OAuth settings")
 	}
 	xai := NewXAIAutoExecutor(cfg)
-	boundXAI := xai.ForAPIKey().(*XAIAutoExecutor)
+	boundXAI := xai.ForAPIKey(nil).(*XAIAutoExecutor)
 	if boundXAI.wsExec.store != xai.wsExec.store || boundXAI.wsExec.idStore != xai.wsExec.idStore || !boundXAI.httpExec.cfg.XAI.InjectXSearch || !boundXAI.wsExec.cfg.XAI.InjectXSearch || boundXAI.httpExec.cfg.CodexHeaderDefaults.UserAgent != "" {
 		t.Fatal("scoped xAI executor lost sessions or inherited OAuth settings")
 	}

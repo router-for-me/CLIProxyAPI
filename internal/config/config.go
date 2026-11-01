@@ -158,19 +158,19 @@ type Config struct {
 	Devin DevinConfig `yaml:"devin" json:"devin"`
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
-	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
+	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key" payload-protocols:"gemini"`
 
 	// InteractionsKey defines native Google Interactions API key configurations.
-	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key"`
+	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key" payload-protocols:"gemini,interactions"`
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
-	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
+	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key" payload-protocols:"codex,openai-response"`
 
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
-	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
+	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key" payload-protocols:"codex,openai-response,openai"`
 
 	// MetaKey defines Meta API key configurations using the same structure as Codex API keys.
-	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
+	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key" payload-protocols:"meta"`
 
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
@@ -186,7 +186,7 @@ type Config struct {
 	Claude ClaudeConfig `yaml:"claude" json:"claude"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
-	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
+	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key" payload-protocols:"claude"`
 
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
@@ -201,11 +201,11 @@ type Config struct {
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
-	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
+	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility" payload-protocols:"openai,openai-response"`
 
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
-	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key" payload-protocols:"gemini,interactions"`
 
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`

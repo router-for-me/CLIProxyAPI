@@ -1779,8 +1779,8 @@ func normalizeKimiTemperatureDoc(doc *ojson.Doc) bool {
 func (e *KimiExecutor) SupportsApplyPatch() bool { return e != nil }
 
 // ForAPIKey preserves Kimi's actual Responses/Chat routing while scoping its config.
-func (e KimiExecutor) ForAPIKey() cliproxyauth.ProviderExecutor {
-	e.cfg = e.cfg.ForAPIKey()
-	e.ClaudeExecutor = *e.ClaudeExecutor.ForAPIKey().(*ClaudeExecutor)
+func (e KimiExecutor) ForAPIKey(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.ForConfiguredKey(source)
+	e.ClaudeExecutor = *e.ClaudeExecutor.ForAPIKey(source).(*ClaudeExecutor)
 	return &e
 }
