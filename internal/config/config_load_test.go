@@ -326,3 +326,21 @@ func TestPlaintextManagementSecretsRecordsShadowedMergeValue(t *testing.T) {
 		}
 	}
 }
+
+// The hashed write-back keeps a value's comments, so a comment repeating the
+// plaintext still holds it.
+func TestHoldsAnyScalarValueFindsPlaintextInComments(t *testing.T) {
+	secrets := []string{"plain-secret"}
+	for _, data := range []string{
+		"management:\n  secret-key: '$2a$10$hash' # plain-secret\n",
+		"management:\n  # was plain-secret\n  secret-key: x\n",
+		"management:\n  secret-key: x\n# plain-secret\n",
+	} {
+		if !HoldsAnyScalarValue([]byte(data), secrets) {
+			t.Errorf("HoldsAnyScalarValue(%q) = false, want the comment's plaintext found", data)
+		}
+	}
+	if HoldsAnyScalarValue([]byte("management:\n  secret-key: x # other\n"), secrets) {
+		t.Error("HoldsAnyScalarValue() = true for an unrelated comment")
+	}
+}
