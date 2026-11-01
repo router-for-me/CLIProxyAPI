@@ -447,7 +447,7 @@ func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gj
 }
 
 func cleanGeminiCodexToolParameters(parameters gjson.Result) []byte {
-	cleaned := []byte(parameters.Raw)
+	cleaned := []byte(util.NormalizeJSONSchemaNumericConstraints(parameters.Raw))
 	if parameters.Get("$schema").Exists() {
 		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
 	}

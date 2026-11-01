@@ -9,6 +9,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -279,9 +280,9 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 				entry["description"] = desc.String()
 			}
 			if params := tool.Get("parameters"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
+				entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 			} else if params := tool.Get("parametersJsonSchema"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
+				entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 			}
 			normalized = append(normalized, entry)
 			return true
@@ -300,9 +301,9 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 					entry["description"] = desc.String()
 				}
 				if params := decl.Get("parameters"); params.Exists() {
-					entry["parameters"] = json.RawMessage(params.Raw)
+					entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 				} else if params := decl.Get("parametersJsonSchema"); params.Exists() {
-					entry["parameters"] = json.RawMessage(params.Raw)
+					entry["parameters"] = json.RawMessage(util.NormalizeJSONSchemaNumericConstraints(params.Raw))
 				}
 				normalized = append(normalized, entry)
 			}

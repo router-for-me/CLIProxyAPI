@@ -1398,3 +1398,67 @@ func TestConvertGeminiRequestToAntigravity_RemovesEmptySystemInstructionParts(t 
 		})
 	}
 }
+
+func TestConvertGeminiRequestToAntigravity_NormalizesParametersNumericConstraints_Issue7149(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+		"tools": [{
+			"functionDeclarations": [{
+				"name": "run_command",
+				"parameters": {
+					"type": "OBJECT",
+					"minProperties": "1",
+					"maxProperties": "5",
+					"properties": {
+						"Message": {
+							"type": "STRING",
+							"minLength": "1",
+							"maxLength": "100",
+							"enum": ["1", "2"],
+							"default": "1"
+						},
+						"Items": {
+							"type": "ARRAY",
+							"minItems": "1",
+							"maxItems": "3",
+							"items": {"type": "STRING", "minLength": "2"}
+						}
+					}
+				}
+			}]
+		}]
+	}`)
+
+	out, err := ConvertGeminiRequestToAntigravity("gemini-3-flash", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity returned error: %v", err)
+	}
+
+	schema := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.parametersJsonSchema")
+	if !schema.Exists() {
+		t.Fatalf("expected parametersJsonSchema to exist, got: %s", out)
+	}
+	for _, tc := range []struct {
+		path string
+		want int64
+	}{
+		{"minProperties", 1},
+		{"maxProperties", 5},
+		{"properties.Message.minLength", 1},
+		{"properties.Message.maxLength", 100},
+		{"properties.Items.minItems", 1},
+		{"properties.Items.maxItems", 3},
+		{"properties.Items.items.minLength", 2},
+	} {
+		got := schema.Get(tc.path)
+		if got.Type != gjson.Number || got.Int() != tc.want {
+			t.Errorf("parametersJsonSchema.%s = %s (type %v), want number %d; schema=%s", tc.path, got.Raw, got.Type, tc.want, schema.Raw)
+		}
+	}
+	if got := schema.Get("properties.Message.enum.0"); got.Type != gjson.String || got.String() != "1" {
+		t.Errorf("enum.0 = %s (type %v), want string \"1\"", got.Raw, got.Type)
+	}
+	if got := schema.Get("properties.Message.default"); got.Type != gjson.String || got.String() != "1" {
+		t.Errorf("default = %s (type %v), want string \"1\"", got.Raw, got.Type)
+	}
+}

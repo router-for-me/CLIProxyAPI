@@ -4523,3 +4523,126 @@ func TestIssue6950_ArrayItemsFromAllOfPreserved(t *testing.T) {
 		}
 	}
 }
+
+func TestIssue7149_CleanJSONSchemaForGeminiJSONSchemaNormalizesNumericConstraintStrings(t *testing.T) {
+	input := `{
+		"type": "OBJECT",
+		"minProperties": "1",
+		"maxProperties": "8",
+		"$defs": {
+			"Tag": {
+				"type": "STRING",
+				"minLength": "2",
+				"maxLength": "16"
+			}
+		},
+		"properties": {
+			"Message": {
+				"type": "STRING",
+				"minLength": "1",
+				"maxLength": "100",
+				"enum": ["1", "2"],
+				"default": "1",
+				"example": "1",
+				"examples": ["1", {"minLength": "1"}]
+			},
+			"Items": {
+				"type": "ARRAY",
+				"minItems": "1",
+				"maxItems": "4",
+				"items": {
+					"$ref": "#/$defs/Tag"
+				}
+			},
+			"EqualRef": {
+				"$ref": "#/$defs/Tag",
+				"minLength": 2
+			}
+		}
+	}`
+
+	got := CleanJSONSchemaForGeminiJSONSchema(input)
+	parsed := gjson.Parse(got)
+
+	for _, tc := range []struct {
+		path string
+		want int64
+	}{
+		{"minProperties", 1},
+		{"maxProperties", 8},
+		{"properties.Message.minLength", 1},
+		{"properties.Message.maxLength", 100},
+		{"properties.Items.minItems", 1},
+		{"properties.Items.maxItems", 4},
+		{"properties.Items.items.minLength", 2},
+		{"properties.Items.items.maxLength", 16},
+		{"properties.EqualRef.minLength", 2},
+		{"properties.EqualRef.maxLength", 16},
+	} {
+		val := parsed.Get(tc.path)
+		if val.Type != gjson.Number || val.Int() != tc.want {
+			t.Errorf("%s = %s (type %v), want number %d; output=%s", tc.path, val.Raw, val.Type, tc.want, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"properties.Message.enum.0", "1"},
+		{"properties.Message.enum.1", "2"},
+		{"properties.Message.default", "1"},
+		{"properties.Message.example", "1"},
+		{"properties.Message.examples.0", "1"},
+		{"properties.Message.examples.1.minLength", "1"},
+	} {
+		val := parsed.Get(tc.path)
+		if val.Type != gjson.String || val.String() != tc.want {
+			t.Errorf("%s = %s (type %v), want string %q; output=%s", tc.path, val.Raw, val.Type, tc.want, got)
+		}
+	}
+
+	extInput := `{"type":"string","minLength":"1","x-metadata":{"minLength":"2","maxItems":"3"},"customAnnotation":{"minProperties":"4"},"schema":{"minLength":"5"},"defs":{"metadata":{"minLength":"9"}},"properties":{"a\\b":{"type":"string","minLength":"6"},"a.b":{"type":"string","maxLength":"7"}},"patternProperties":{"^\\d+$":{"type":"string","minLength":"8"}}}`
+	extGot := NormalizeJSONSchemaNumericConstraints(extInput)
+	extParsed := gjson.Parse(extGot)
+	if got := extParsed.Get("minLength"); got.Type != gjson.Number || got.Int() != 1 {
+		t.Errorf("minLength = %s (type %v), want number 1; output=%s", got.Raw, got.Type, extGot)
+	}
+	if got := extParsed.Get("properties").Map()[`a\b`].Get("minLength"); got.Type != gjson.Number || got.Int() != 6 {
+		t.Errorf(`properties["a\\b"].minLength = %s (type %v), want number 6; output=%s`, got.Raw, got.Type, extGot)
+	}
+	if _, BogusExists := extParsed.Get("properties").Map()["ab"]; BogusExists {
+		t.Errorf(`unexpected fabricated property "ab" in output: %s`, extGot)
+	}
+	if got := extParsed.Get("properties").Map()["a.b"].Get("maxLength"); got.Type != gjson.Number || got.Int() != 7 {
+		t.Errorf(`properties["a.b"].maxLength = %s (type %v), want number 7; output=%s`, got.Raw, got.Type, extGot)
+	}
+	if got := extParsed.Get("patternProperties").Map()[`^\d+$`].Get("minLength"); got.Type != gjson.Number || got.Int() != 8 {
+		t.Errorf(`patternProperties["^\\d+$"].minLength = %s (type %v), want number 8; output=%s`, got.Raw, got.Type, extGot)
+	}
+	for _, path := range []struct {
+		path string
+		want string
+	}{
+		{"x-metadata.minLength", "2"},
+		{"x-metadata.maxItems", "3"},
+		{"customAnnotation.minProperties", "4"},
+		{"schema.minLength", "5"},
+		{"defs.metadata.minLength", "9"},
+	} {
+		got := extParsed.Get(path.path)
+		if got.Type != gjson.String || got.String() != path.want {
+			t.Errorf("%s = %s (type %v), want string %q; output=%s", path.path, got.Raw, got.Type, path.want, extGot)
+		}
+	}
+
+	unicodeEscapedInput := `{"type":"string","\u006dinLength":"1","\u0070roperties":{"Msg":{"type":"string","\u006daxLength":"2"}}}`
+	unicodeEscapedGot := NormalizeJSONSchemaNumericConstraints(unicodeEscapedInput)
+	unicodeParsed := gjson.Parse(unicodeEscapedGot)
+	if got := unicodeParsed.Get("minLength"); got.Type != gjson.Number || got.Int() != 1 {
+		t.Errorf("unicode-escaped minLength = %s (type %v), want number 1; output=%s", got.Raw, got.Type, unicodeEscapedGot)
+	}
+	if got := unicodeParsed.Get("properties.Msg.maxLength"); got.Type != gjson.Number || got.Int() != 2 {
+		t.Errorf("unicode-escaped properties.Msg.maxLength = %s (type %v), want number 2; output=%s", got.Raw, got.Type, unicodeEscapedGot)
+	}
+}

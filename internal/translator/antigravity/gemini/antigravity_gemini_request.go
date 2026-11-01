@@ -122,9 +122,15 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						declarationsChanged = true
 					}
 					if parameters := declaration.Get("parameters"); parameters.Exists() {
-						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(parameters.Raw))
+						normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parameters.Raw)
+						declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(normalizedParams))
 						declarationJSON, _ = sjson.DeleteBytes(declarationJSON, "parameters")
 						declarationsChanged = true
+					} else if parametersJSONSchema := declaration.Get("parametersJsonSchema"); parametersJSONSchema.Exists() {
+						if normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parametersJSONSchema.Raw); normalizedParams != parametersJSONSchema.Raw {
+							declarationJSON, _ = sjson.SetRawBytes(declarationJSON, "parametersJsonSchema", []byte(normalizedParams))
+							declarationsChanged = true
+						}
 					}
 					declarationItems = append(declarationItems, declarationJSON)
 					return true

@@ -428,7 +428,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 }
 
 func normalizeClaudeToolSchema(parameters gjson.Result) []byte {
-	cleaned := []byte(parameters.Raw)
+	cleaned := []byte(util.NormalizeJSONSchemaNumericConstraints(parameters.Raw))
 	if parameters.Get("additionalProperties").Type != gjson.False {
 		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
 	}

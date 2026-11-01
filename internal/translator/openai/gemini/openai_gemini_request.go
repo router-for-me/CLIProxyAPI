@@ -13,6 +13,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -333,9 +334,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 					// Convert parameters schema
 					if parameters := funcDecl.Get("parameters"); parameters.Exists() {
-						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(parameters.Raw))
+						normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parameters.Raw)
+						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(normalizedParams))
 					} else if parameters := funcDecl.Get("parametersJsonSchema"); parameters.Exists() {
-						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(parameters.Raw))
+						normalizedParams := util.NormalizeJSONSchemaNumericConstraints(parameters.Raw)
+						openAITool, _ = sjson.SetRawBytes(openAITool, "function.parameters", []byte(normalizedParams))
 					}
 
 					toolItems = append(toolItems, openAITool)
