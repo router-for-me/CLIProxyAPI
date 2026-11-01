@@ -334,7 +334,9 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				if modelStateIsClean(state) {
 					continue
 				}
-				if isModelStateActiveCooldown(state, now) {
+				// A live cooling-disabled reset has no cooldown deadline, but it is
+				// still the only record of the upstream's Retry-After; keep it.
+				if isModelStateActiveCooldown(state, now) || state.coolingDisabledRetryAt.After(now) {
 					continue
 				}
 				clonedState := state.Clone()
@@ -1205,12 +1207,24 @@ func (m *Manager) coolingDisabledRetryExclusions(retryRound int, routeModel stri
 
 // coolingDisabledRetryAtForRoute returns when auth may be re-sent routeModel after
 // a 429 recorded while cooling was disabled, or zero when it may be re-sent now.
-// A pooled alias records failures per upstream model, so every pool member must
-// still carry a live reset, and the earliest one wins.
+// A pooled alias records failures per upstream model, so every pool member that
+// execution would use (blocked members are left out, as execution leaves them
+// out) must still carry a live reset, and the earliest one wins.
 func (m *Manager) coolingDisabledRetryAtForRoute(auth *Auth, routeModel, selectionModel string, now time.Time) time.Time {
-	keys := m.pooledStateModels(auth, routeModel)
-	if len(keys) == 0 {
-		keys = []string{selectionModel}
+	keys := []string{selectionModel}
+	if pool := m.pooledStateModels(auth, routeModel); len(pool) > 0 {
+		// Only members execution would use count: one under an ordinary block is
+		// filtered out (filterExecutionModels) and must not reopen the pool.
+		keys = keys[:0]
+		for _, upstreamModel := range pool {
+			stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, true)
+			if blocked, _, _ := isAuthBlockedForModel(auth, stateModel, now); !blocked {
+				keys = append(keys, stateModel)
+			}
+		}
+		if len(keys) == 0 {
+			return time.Time{}
+		}
 	}
 	var earliest time.Time
 	for _, key := range keys {
@@ -1411,10 +1425,12 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 			_, wasAttempted = attempted[auth.ID]
 		}
 		coolingDisabled := m.cooldownDisabledForAuth(auth)
-		if wasAttempted && coolingDisabled {
+		if coolingDisabled {
 			// The auth stays selectable (no cooldown is recorded), but the caller
 			// must not re-send to it before the reset its own last 429 announced.
 			// Each auth keeps its own: another credential's hint never delays it.
+			// This covers auths attempted in earlier rounds too: retry rounds
+			// exclude every auth with a live reset, so the wait must count them.
 			if until := m.coolingDisabledRetryAtForRoute(auth, model, checkModel, now); !until.IsZero() {
 				if wait := until.Sub(now); !found || wait < minWait {
 					minWait = wait
