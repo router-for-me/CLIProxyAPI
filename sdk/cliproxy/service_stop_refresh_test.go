@@ -149,10 +149,75 @@ func TestServiceShutdown_StopsSelectorOnce(t *testing.T) {
 	manager := coreauth.NewManager(nil, selector, nil)
 	manager.StartAutoRefresh(context.Background(), time.Hour)
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
-	if errShutdown := service.Shutdown(context.Background()); errShutdown != nil {
-		t.Fatalf("Shutdown error = %v", errShutdown)
+	for i := 0; i < 2; i++ {
+		if errShutdown := service.Shutdown(context.Background()); errShutdown != nil {
+			t.Fatalf("Shutdown #%d error = %v", i+1, errShutdown)
+		}
 	}
 	if got := selector.stops.Load(); got != 1 {
 		t.Fatalf("selector Stop calls = %d, want 1", got)
+	}
+}
+
+// When the first Shutdown's deadline ends while a refresh is still saving, a later
+// Shutdown with a fresh context must wait for that save instead of returning at
+// once because the teardown already ran.
+func TestServiceShutdown_RepeatedCallWaitsForRefreshSave(t *testing.T) {
+	store := &heldRefreshSaveStore{entered: make(chan struct{}), release: make(chan struct{})}
+	released := false
+	releaseSave := func() {
+		if !released {
+			released = true
+			close(store.release)
+		}
+	}
+	t.Cleanup(releaseSave)
+	manager := coreauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "shutdown-repeated-refresh",
+		Provider: "codex",
+		Runtime:  alwaysRefreshRuntime{},
+	}); errRegister != nil {
+		t.Fatalf("Register error: %v", errRegister)
+	}
+	store.armed.Store(true)
+	manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
+	// The timer only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case <-store.entered:
+	case <-hangGuard.C:
+		t.Fatal("auto-refresh never saved the refreshed credential")
+	}
+
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if errShutdown := service.Shutdown(expired); errShutdown != nil {
+		t.Fatalf("first Shutdown error = %v", errShutdown)
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- service.Shutdown(context.Background()) }()
+	select {
+	case errShutdown := <-shutdownDone:
+		t.Fatalf("second Shutdown returned (err %v) while the refresh save was still held", errShutdown)
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseSave()
+	select {
+	case errShutdown := <-shutdownDone:
+		if errShutdown != nil {
+			t.Fatalf("second Shutdown error = %v, want nil", errShutdown)
+		}
+	case <-hangGuard.C:
+		t.Fatal("second Shutdown did not return after the refresh save was released")
+	}
+
+	// With nothing left to join, a later call returns nil even with an ended ctx.
+	if errShutdown := service.Shutdown(expired); errShutdown != nil {
+		t.Fatalf("third Shutdown error = %v, want nil with nothing left to join", errShutdown)
 	}
 }
