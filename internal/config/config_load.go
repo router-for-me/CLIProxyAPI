@@ -264,8 +264,10 @@ func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
 }
 
 // yamlKeyValues returns the values key has in mapping, its own and those merged
-// in, each resolved through aliases to the node that defines it. seen stops a
-// merge that refers back to a mapping being searched.
+// in, each resolved through aliases to the node that defines it. Key names are
+// resolved too: `*k : value` with `k` anchoring "secret-key" sets secret-key, as
+// the loader decodes it. seen stops a merge that refers back to a mapping being
+// searched.
 func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*yaml.Node {
 	mapping = resolveYAMLAlias(mapping)
 	if mapping == nil || mapping.Kind != yaml.MappingNode || seen[mapping] {
@@ -274,7 +276,10 @@ func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*
 	seen[mapping] = true
 	var values []*yaml.Node
 	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		name, value := mapping.Content[i], resolveYAMLAlias(mapping.Content[i+1])
+		name, value := resolveYAMLAlias(mapping.Content[i]), resolveYAMLAlias(mapping.Content[i+1])
+		if name == nil {
+			continue
+		}
 		if name.Tag != "!!merge" {
 			if name.Value == key && value != nil {
 				values = append(values, value)
