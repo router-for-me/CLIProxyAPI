@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/go-git/go-git/v6"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // A save can leave config.yaml empty for a moment. Mirroring that state would wipe
@@ -396,4 +397,74 @@ func TestWithoutStagedContentChangedKeepsJoinedErrors(t *testing.T) {
 	if err := withoutStagedContentChanged(errOther); err != errOther {
 		t.Fatalf("unrelated error = %v, want it unchanged", err)
 	}
+}
+
+// A mirror whose fence no longer holds (the watcher queued it before a reload that
+// hashed a plaintext secret) must not upload or commit the file it reads.
+func TestPersistConfigSkipsMirrorWhenFenceNoLongerHolds(t *testing.T) {
+	stale := internalconfig.WithMirrorFence(context.Background(), func() bool { return false })
+	const content = "port: 8317\n"
+
+	t.Run("object", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var puts int
+		store := &ObjectTokenStore{configPath: configPath, putObjectFn: func(context.Context, string, []byte, string) error {
+			puts++
+			return nil
+		}}
+		if err := store.PersistConfig(stale); err != nil {
+			t.Fatalf("PersistConfig() error = %v", err)
+		}
+		if puts != 0 {
+			t.Fatalf("uploaded %d times past a stale fence, want 0", puts)
+		}
+	})
+
+	t.Run("postgres", func(t *testing.T) {
+		configPath := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// No database is configured, so an upsert would fail here.
+		store := &PostgresStore{configPath: configPath}
+		if err := store.PersistConfig(stale); err != nil {
+			t.Fatalf("PersistConfig() error = %v, want the stale mirror skipped", err)
+		}
+	})
+
+	t.Run("git", func(t *testing.T) {
+		root := t.TempDir()
+		remoteDir := setupGitRemoteRepository(t, root, "master",
+			testBranchSpec{name: "master", contents: "remote master branch\n"},
+		)
+		store := NewGitTokenStore(remoteDir, "", "", "")
+		store.SetBaseDir(filepath.Join(root, "workspace", "auths"))
+		if err := store.EnsureRepository(); err != nil {
+			t.Fatalf("EnsureRepository: %v", err)
+		}
+		repo, err := git.PlainOpen(filepath.Join(root, "workspace"))
+		if err != nil {
+			t.Fatalf("open workspace repo: %v", err)
+		}
+		before, err := repo.Head()
+		if err != nil {
+			t.Fatalf("head: %v", err)
+		}
+		if err := os.WriteFile(store.ConfigPath(), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PersistConfig(stale); err != nil {
+			t.Fatalf("PersistConfig() error = %v", err)
+		}
+		after, err := repo.Head()
+		if err != nil {
+			t.Fatalf("head: %v", err)
+		}
+		if after.Hash() != before.Hash() {
+			t.Fatal("committed the config past a stale fence")
+		}
+	})
 }

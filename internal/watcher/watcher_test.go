@@ -2153,10 +2153,14 @@ type recordingConfigPersister struct {
 	mirrored chan []byte
 }
 
-func (p *recordingConfigPersister) PersistConfig(context.Context) error {
+// PersistConfig honours the watcher's mirror fence after reading, as the stores do.
+func (p *recordingConfigPersister) PersistConfig(ctx context.Context) error {
 	data, err := os.ReadFile(p.path)
 	if err != nil {
 		return err
+	}
+	if !config.MirrorFenceHolds(ctx) {
+		return nil
 	}
 	p.mirrored <- data
 	return nil
@@ -2287,5 +2291,54 @@ func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
 				t.Fatal("the config was not mirrored once the plaintext was gone")
 			}
 		})
+	}
+}
+
+// A mirror queued by an earlier reload reads the file only when it runs. If a later
+// reload has meanwhile hashed an aliased plaintext secret, the file's secret key is
+// hashed while the anchor still holds the plaintext; the queued mirror must not
+// publish it.
+func TestQueuedConfigMirrorSkipsFileRewrittenByPlaintextReload(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	var queued []func()
+	runConfigPersist = func(persist func()) { queued = append(queued, persist) }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	if len(queued) != 1 {
+		t.Fatalf("queued mirrors after the clean reload = %d, want 1", len(queued))
+	}
+	aliased := "password: &password " + secret + "\nremote-management:\n  secret-key: *password\nauth-dir: " + authDir + "\n"
+	if err := os.WriteFile(configPath, []byte(aliased), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	saved, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if config.HasPlaintextSecretKey(saved) || !strings.Contains(string(saved), secret) {
+		t.Fatalf("want the key hashed and the plaintext left at its anchor, got %q", saved)
+	}
+
+	queued[0]()
+	select {
+	case mirrored := <-persister.mirrored:
+		t.Fatalf("a mirror queued before the plaintext reload published %q", mirrored)
+	default:
 	}
 }

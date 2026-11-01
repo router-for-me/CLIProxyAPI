@@ -458,6 +458,10 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 		log.Warn("postgres store: local config holds a plaintext management secret, keeping the stored copy")
 		return nil
 	}
+	if !config.MirrorFenceHolds(ctx) {
+		log.Info("postgres store: config changed after this mirror was queued, leaving it to the newer reload")
+		return nil
+	}
 	return s.persistConfig(ctx, data)
 }
 

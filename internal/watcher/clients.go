@@ -589,9 +589,11 @@ func (w *Watcher) persistConfigAsync() {
 	if w == nil || w.storePersister == nil {
 		return
 	}
+	gen := w.mirrorGen.Load()
 	runConfigPersist(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		ctx = config.WithMirrorFence(ctx, func() bool { return w.mirrorGen.Load() == gen })
 		if err := w.storePersister.PersistConfig(ctx); err != nil {
 			log.Errorf("failed to persist config change: %v", err)
 		}

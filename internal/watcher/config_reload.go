@@ -83,6 +83,12 @@ func (w *Watcher) reloadConfigIfChanged() {
 		return
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
+	holdsPlaintext := config.HasPlaintextSecretKey(data)
+	if holdsPlaintext {
+		// Fence off mirrors already queued before the load writes the hash back:
+		// one reading the rewritten file would not see an aliased plaintext.
+		w.mirrorGen.Add(1)
+	}
 	// Load the bytes that were hashed: a save that truncates and rewrites the file
 	// between two reads would otherwise apply an empty config.
 	if w.reloadConfigData(data) {
@@ -100,7 +106,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		// it. Reload that write without waiting for its file event and mirror then;
 		// mirroring now could publish the plaintext to a remote store. If the file
 		// could not be written, the reload finds it unchanged and stops.
-		if config.HasPlaintextSecretKey(data) {
+		if holdsPlaintext {
 			// Hashing replaces only the effective key: a YAML anchor or merge source
 			// keeps the plaintext, and the hashed key no longer shows it, so remember
 			// the values for the reload of the write-back.
