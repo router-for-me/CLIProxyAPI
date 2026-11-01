@@ -2043,7 +2043,7 @@ func (s *GitTokenStore) maybeRunGC(repoDir string) {
 }
 
 // PersistConfig commits and pushes configuration changes to git.
-func (s *GitTokenStore) PersistConfig(_ context.Context) error {
+func (s *GitTokenStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2071,6 +2071,10 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 		// Git history would keep the plaintext for good. A hot reload hashes the
 		// secret into the file; that write is committed.
 		log.Warn("git token store: local config holds a plaintext management secret, keeping the committed copy")
+		return nil
+	}
+	if !internalconfig.MirrorFenceHolds(ctx) {
+		log.Info("git token store: config changed after this mirror was queued, leaving it to the newer reload")
 		return nil
 	}
 	rel, err := s.relativeToRepo(configPath)
