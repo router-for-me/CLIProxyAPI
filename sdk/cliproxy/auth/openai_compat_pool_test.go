@@ -899,3 +899,37 @@ func TestManagerExecute_DisableCooling_AliasPoolHonoursMemberResets(t *testing.T
 		t.Fatalf("pool calls = %v, want each member once: both resets exceed max-retry-interval", got)
 	}
 }
+
+// When pool members announce different resets, a member whose reset is still live
+// is left out of the retry rounds while another member is free: here up-b's short
+// reset reopens the pool, but up-a's 2h reset keeps it from being probed again.
+func TestManagerExecute_DisableCooling_AliasPoolSkipsMemberWithLiveReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-live-member"
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{
+		"up-a": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+		"up-b": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 20 * time.Millisecond},
+	}}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, executor)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("expected execute error")
+	}
+	got := executor.ExecuteModels()
+	sentToA := 0
+	for _, model := range got {
+		if model == "up-a" {
+			sentToA++
+		}
+	}
+	if sentToA != 1 || len(got) < 3 {
+		t.Fatalf("pool calls = %v, want up-a once (its 2h reset is live) and up-b retried", got)
+	}
+}
