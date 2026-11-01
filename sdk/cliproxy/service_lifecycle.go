@@ -389,13 +389,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			// Wait for in-flight refreshes to finish saving, within the shutdown
 			// deadline, before plugin executors they may use are shut down. The
 			// StopAutoRefresh above already stopped the loop and the selector.
-			// Report an unfinished wait: later calls return at once, so this is the
-			// only call that can tell the caller a save may still be running.
+			// Report an unfinished wait even after an earlier step failed: later calls
+			// return at once, so this is the only call that can tell the caller a
+			// save may still be running (errors.Is(err, context.DeadlineExceeded)).
 			if errStop := s.coreManager.WaitAutoRefresh(ctx); errStop != nil {
 				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
-				if shutdownErr == nil {
-					shutdownErr = fmt.Errorf("wait for auth refresh saves: %w", errStop)
-				}
+				shutdownErr = errors.Join(shutdownErr, fmt.Errorf("wait for auth refresh saves: %w", errStop))
 			}
 		}
 
