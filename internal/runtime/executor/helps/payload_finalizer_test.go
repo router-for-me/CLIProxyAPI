@@ -5,6 +5,7 @@ import (
 	"context"
 	"mime/multipart"
 	"net/http"
+	"runtime"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -28,6 +29,78 @@ func TestPayloadFinalizerDefaultsUseOriginalAndNormalizeBeforeRules(t *testing.T
 	out := FinalizePayload(WithPayloadFinalizer(context.Background(), finalize), body)
 	if gjson.GetBytes(out, "missing").String() != "user default" || gjson.GetBytes(out, "present").String() != "caller" || gjson.GetBytes(out, "late").Exists() || gjson.GetBytes(out, "tools.0.function.parameters.properties.count.type").String() != "number" {
 		t.Fatalf("unexpected final payload: %s", out)
+	}
+}
+
+func TestPayloadFinalizerWithoutDefaultsDoesNotCopyOriginal(t *testing.T) {
+	original := append([]byte(`{"input":"`), bytes.Repeat([]byte("x"), 8<<20)...)
+	original = append(original, []byte(`"}`)...)
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{name: "nil"},
+		{name: "empty", cfg: &config.Config{}},
+		{name: "override", cfg: &config.Config{Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: map[string]any{"response_format": "b64_json"}}},
+			Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{"late"}}},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var responseFormat string
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAIResponse,
+				OriginalRequest: original,
+				Metadata: map[string]any{
+					cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey: func(value string) { responseFormat = value },
+				},
+			}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			finalize := NewPayloadFinalizer(tc.cfg, "codex", "model", "codex", "", original, cliproxyexecutor.Request{Model: "model", Payload: original}, opts)
+			runtime.ReadMemStats(&after)
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated >= uint64(len(original)/2) {
+				t.Fatalf("finalizer without defaults allocated %d bytes for a %d-byte original request", allocated, len(original))
+			}
+			out := finalize([]byte(`{"response_format":"url","late":true}`))
+			wantFormat := "url"
+			if tc.name == "override" {
+				wantFormat = "b64_json"
+				if gjson.GetBytes(out, "late").Exists() {
+					t.Fatalf("filter was skipped: %s", out)
+				}
+			}
+			if responseFormat != wantFormat {
+				t.Fatalf("response format callback = %q, want %q", responseFormat, wantFormat)
+			}
+		})
+	}
+}
+
+func TestPayloadFinalizerDefaultsKeepOriginalSnapshot(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		name := "default"
+		if raw {
+			name = "default-raw"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{}
+			rule := config.PayloadRule{Models: []config.PayloadModelRule{{Name: "*"}}, Params: map[string]any{"present": "default", "missing": "default"}}
+			if raw {
+				cfg.Payload.DefaultRaw = []config.PayloadRule{{Models: rule.Models, Params: map[string]any{"present": `"default"`, "missing": `"default"`}}}
+			} else {
+				cfg.Payload.Default = []config.PayloadRule{rule}
+			}
+			original := []byte(`{"present":"caller"}`)
+			finalize := NewPayloadFinalizer(cfg, "codex", "model", "codex", "", original, cliproxyexecutor.Request{Model: "model"}, cliproxyexecutor.Options{})
+			copy(original, []byte(`{"changed":"caller"}`))
+			for range 2 {
+				out := finalize([]byte(`{"present":"built-in","missing":"built-in"}`))
+				if gjson.GetBytes(out, "present").String() != "built-in" || gjson.GetBytes(out, "missing").String() != "default" {
+					t.Fatalf("defaults did not use the original snapshot: %s", out)
+				}
+			}
+		})
 	}
 }
 
