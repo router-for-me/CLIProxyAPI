@@ -29,6 +29,7 @@ type catalogUpdater struct {
 	cancel          context.CancelFunc
 	ctx             context.Context
 	parentDone      <-chan struct{}
+	startupDone     chan struct{}
 	fetch           func(context.Context, string) ([]byte, error)
 	fetchWithSource func(context.Context, string) ([]byte, string, error)
 	publish         func([]byte) ([]string, error)
@@ -58,12 +59,16 @@ func (u *catalogUpdater) configure(ctx context.Context, source string) {
 	u.cancel = cancel
 	u.ctx = refreshCtx
 	u.parentDone = ctx.Done()
+	startupDone := make(chan struct{})
+	u.startupDone = startupDone
 	if source == "disabled" {
+		close(startupDone)
 		return
 	}
 	generation := u.generation
 	go func() {
 		u.refresh(refreshCtx, source, generation)
+		close(startupDone)
 		if source == embeddedCatalogSource {
 			return
 		}
@@ -78,6 +83,37 @@ func (u *catalogUpdater) configure(ctx context.Context, source string) {
 			}
 		}
 	}()
+}
+
+// waitForStartup follows source changes while waiting for the first refresh.
+// The refresh includes synchronous model-registration callbacks and completes
+// even when a fetch fails, since the last valid catalog remains available.
+func (u *catalogUpdater) waitForStartup(ctx context.Context) error {
+	for {
+		u.mu.Lock()
+		done, refreshCtx := u.startupDone, u.ctx
+		u.mu.Unlock()
+		if done == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var err error
+		select {
+		case <-done:
+		case <-refreshCtx.Done():
+			err = refreshCtx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		u.mu.Lock()
+		current := u.startupDone == done
+		u.mu.Unlock()
+		if current {
+			return err
+		}
+	}
 }
 
 // CatalogSourceStatus reports the outcome of refreshing a single model catalog.

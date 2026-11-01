@@ -73,6 +73,13 @@ func StartModelsUpdater(ctx context.Context) {
 	generalCatalogUpdater.configure(ctx, "")
 }
 
+// WaitForStartupModelRefresh waits for the initial configured catalog fetch,
+// including its model-registration callback. If no updater has been started,
+// there is nothing to wait for. A failed fetch retains the last valid catalog.
+func WaitForStartupModelRefresh(ctx context.Context) error {
+	return generalCatalogUpdater.waitForStartup(ctx)
+}
+
 // detectChangedProviders compares two model catalogs and returns provider names
 // whose model definitions differ. Gemini changes affect both Gemini protocols,
 // while Codex tiers (free/team/plus/pro) are grouped under one "codex" provider.
