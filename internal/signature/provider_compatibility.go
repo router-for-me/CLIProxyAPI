@@ -577,6 +577,12 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 			return payload
 		}
 	case SignatureProviderMeta:
+		if IsMetaReasoningTagged(rawSignature) {
+			// Keep the provenance tag intact. Only the Meta executor knows which
+			// credential it selected, so it alone decides whether the envelope is
+			// replayable and strips the tag before the upstream call.
+			return strings.TrimSpace(rawSignature)
+		}
 		if IsValidMetaReasoningSignature(payload) {
 			return payload
 		}

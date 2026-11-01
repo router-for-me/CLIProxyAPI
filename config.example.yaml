@@ -537,13 +537,14 @@ upstream:
     # several pool accounts end up mixed in one request. When enabled the proxy tags every
     # envelope it returns (Anthropic thinking signature or Responses encrypted_content, streaming
     # or not) with the issuing account, forwards an envelope only when the credential selected for
-    # the request is the one that issued it, and drops every other or untagged one - the behavior
-    # without this feature. If Meta still rejects a replayed envelope the request is retried once
+    # the request is the one that issued it, and drops every other or untagged one. Without this
+    # feature an untagged envelope is forwarded as is and is rejected whenever the turn lands on
+    # another account. Either way, if Meta rejects a replayed envelope the request is retried once
     # without any, so the 400 never reaches the client. Each request that carried envelopes logs
     # "meta reasoning replay: kept=N dropped_foreign=N dropped_untagged=N" for measuring the hit rate.
     # Turning it off again is safe: tagged envelopes from earlier turns are dropped like any other.
     reasoning-replay:
-      enabled: false # default false: envelopes are neither tagged nor replayed
+      enabled: false # default false: nothing is tagged and untagged envelopes are forwarded as before
       # Limit the feature to matching models for a canary ("*" wildcards, case-insensitive; both the
       # requested name, including an oauth.model-alias, and the upstream model are tested).
       # Empty or omitted means every Meta model once enabled.

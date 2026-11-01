@@ -68,7 +68,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
-			if metaStreamBootstrapRetryWithoutReplay(ctx, prepared, httpResp) {
+			if prepared.canRetryWithoutReplay() && metaStreamBootstrapRetryWithoutReplay(ctx, prepared, httpResp) {
 				continue
 			}
 			break
@@ -308,6 +308,12 @@ func metaStreamBootstrapRetryWithoutReplay(ctx context.Context, prepared *metaPr
 		peeked.Write(line)
 		if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, dataTag) {
 			eventData := bytes.TrimSpace(trimmed[len(dataTag):])
+			if isMetaSubscriptionUsageEvent(gjson.GetBytes(eventData, "type").String(), eventData) {
+				if errRead != nil {
+					break
+				}
+				continue
+			}
 			var upstreamErr statusErr
 			if errEvent := metaStreamEventError(eventData); errEvent != nil &&
 				errors.As(errEvent, &upstreamErr) &&

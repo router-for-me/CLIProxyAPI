@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -753,36 +754,44 @@ func TestMetaReasoningReplay_RetriesWhenTheRejectionIsAnErrorEvent(t *testing.T)
 // A streaming request whose 200 body opens with the rejection as its first
 // error event must recover the same way: no chunk has reached the client yet,
 // so it is retried once without reasoning before the stream is handed out.
+// Meta's subscription usage event may precede it and is not a business event.
 func TestMetaReasoningReplay_StreamRetriesWhenTheRejectionIsTheFirstEvent(t *testing.T) {
-	var mu sync.Mutex
-	var bodies [][]byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		bodies = append(bodies, body)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "text/event-stream")
-		if bytes.Contains(body, []byte(`"encrypted_content"`)) {
-			_, _ = w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"reasoning encrypted_content was not issued to this caller\"}}\n\n"))
-			return
-		}
-		writeMetaResponsesOK(w, "recovered")
-	}))
-	defer server.Close()
-	auth := &cliproxyauth.Auth{ID: "meta-a", Provider: "meta", Attributes: map[string]string{"api_key": "token-a", "base_url": server.URL}}
-	payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 1)))
+	for name, prefix := range map[string]string{
+		"first event":                    "",
+		"after subscription usage event": "event: response.subscription_usage\ndata: {\"type\":\"response.subscription_usage\",\"subscription\":{}}\n\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bodies [][]byte
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				bodies = append(bodies, body)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/event-stream")
+				if bytes.Contains(body, []byte(`"encrypted_content"`)) {
+					_, _ = w.Write([]byte(prefix + "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"reasoning encrypted_content was not issued to this caller\"}}\n\n"))
+					return
+				}
+				writeMetaResponsesOK(w, "recovered")
+			}))
+			defer server.Close()
+			auth := &cliproxyauth.Auth{ID: "meta-a", Provider: "meta", Attributes: map[string]string{"api_key": "token-a", "base_url": server.URL}}
+			payload := museReplayHistoryPayload(t, signature.TagMetaReasoning(helps.MetaReasoningAccountKey(auth), museEnv("a", 1)))
 
-	got, err := museReplayStream(t, NewMetaExecutor(museReplayConfig(true)), auth, payload, "claude")
-	if err != nil {
-		t.Fatalf("the bootstrap rejection reached the caller: %v", err)
-	}
-	if !strings.Contains(got, "message_stop") {
-		t.Fatalf("stream did not complete after the retry, got %q", got)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(bodies) != 2 || !bytes.Contains(bodies[0], []byte(`"encrypted_content"`)) || bytes.Contains(bodies[1], []byte(`"encrypted_content"`)) {
-		t.Fatalf("upstream saw %d requests; want the replay, then a retry without any envelope", len(bodies))
+			got, err := museReplayStream(t, NewMetaExecutor(museReplayConfig(true)), auth, payload, "claude")
+			if err != nil {
+				t.Fatalf("the bootstrap rejection reached the caller: %v", err)
+			}
+			if !strings.Contains(got, "message_stop") {
+				t.Fatalf("stream did not complete after the retry, got %q", got)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(bodies) != 2 || !bytes.Contains(bodies[0], []byte(`"encrypted_content"`)) || bytes.Contains(bodies[1], []byte(`"encrypted_content"`)) {
+				t.Fatalf("upstream saw %d requests; want the replay, then a retry without any envelope", len(bodies))
+			}
+		})
 	}
 }
 
@@ -1022,5 +1031,51 @@ func TestMetaReasoningReplay_StreamingConversationAcrossAccounts(t *testing.T) {
 	}
 	if kept == 0 {
 		t.Fatal("no envelope was ever replayed on the same account; the test did not exercise replay")
+	}
+}
+
+func museReplayReasoningEnvelopes(body []byte) []string {
+	var envelopes []string
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if item.Get("type").String() == "reasoning" && item.Get("encrypted_content").Exists() {
+			envelopes = append(envelopes, item.Get("encrypted_content").String())
+		}
+	}
+	return envelopes
+}
+
+// The Claude-to-Codex translation keeps the provenance tag verbatim for Muse
+// targets, because only the Meta executor knows which account it selected, and
+// drops it for every other target, including compatibility routes whose
+// unknown-signature fallback would otherwise forward the literal tag.
+func TestMetaReasoningTag_ClaudeHistoryThroughCodexTranslation(t *testing.T) {
+	tagged := signature.TagMetaReasoning("4f9a1c2b7d3e", museEnv("a", 1))
+	payload := museReplayHistoryPayload(t, tagged)
+	for _, model := range []string{museReplayModel, "muse-spark-1.2-contributor", "Muse-Spark-1.3(high)"} {
+		for _, compat := range []bool{false, true} {
+			convert := codexclaude.ConvertClaudeRequestToCodex
+			if compat {
+				convert = codexclaude.ConvertClaudeRequestToCodexWithCompat
+			}
+			out, _ := convert(model, payload, false)
+			if got := museReplayReasoningEnvelopes(out); len(got) != 1 || got[0] != tagged {
+				t.Fatalf("%s compat=%v: envelopes = %q, want the tagged value unchanged", model, compat, got)
+			}
+		}
+	}
+	for _, model := range []string{"gpt-5.4", "deepseek-v4", "claude-sonnet-4-6", "grok-4.5", "gemini-3-pro"} {
+		// The client asks for this model too; otherwise an unmapped upstream name
+		// resolves back to the Muse model named in the client payload.
+		clientPayload, _ := sjson.SetBytes(payload, "model", model)
+		for _, compat := range []bool{false, true} {
+			convert := codexclaude.ConvertClaudeRequestToCodex
+			if compat {
+				convert = codexclaude.ConvertClaudeRequestToCodexWithCompat
+			}
+			out, _ := convert(model, clientPayload, false)
+			if got := museReplayReasoningEnvelopes(out); len(got) != 0 {
+				t.Fatalf("%s compat=%v: forwarded %q to a non-Muse target", model, compat, got)
+			}
+		}
 	}
 }

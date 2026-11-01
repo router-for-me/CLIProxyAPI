@@ -99,10 +99,10 @@ func TestMetaTagIsForeignToEveryOtherLane(t *testing.T) {
 }
 
 // Upstream recognizes native Muse envelopes by shape. A tagged envelope, even
-// with a shape-valid inner value, detects as its Meta family but must decide
-// exactly like the raw envelope on every lane: only the Meta executor may
-// unwrap it after checking the selected account.
-func TestMetaTagWithShapeValidEnvelopeIsNotReplayableAnywhere(t *testing.T) {
+// with a shape-valid inner value, detects as its Meta family: it decides exactly
+// like the raw envelope on every non-Meta lane, and a Meta target keeps it
+// verbatim so that only the Meta executor unwraps it after checking the account.
+func TestMetaTagWithShapeValidEnvelopeIsReplayableOnlyToMetaVerbatim(t *testing.T) {
 	native := testMetaReasoningSignature(1024)
 	if DetectSignatureProvider(native) != SignatureProviderMeta {
 		t.Fatalf("fixture is not a recognized Meta envelope")
@@ -111,8 +111,14 @@ func TestMetaTagWithShapeValidEnvelopeIsNotReplayableAnywhere(t *testing.T) {
 	if got := DetectSignatureProvider(tagged); got != SignatureProviderMeta {
 		t.Fatalf("DetectSignatureProvider(tagged) = %q, want meta", got)
 	}
+	// A Meta target keeps the tag verbatim: translation cannot know which
+	// account the request will be routed to, so only the Meta executor may
+	// check the account and unwrap the envelope.
+	if got, ok := CompatibleSignatureForProvider(SignatureProviderMeta, tagged); !ok || got != tagged {
+		t.Fatalf("meta target got (%q, %v), want the tagged value unchanged", got, ok)
+	}
 	for _, target := range []SignatureProvider{
-		SignatureProviderMeta, SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT,
+		SignatureProviderClaude, SignatureProviderGemini, SignatureProviderGPT,
 		SignatureProviderKimi, SignatureProviderGrok, SignatureProviderSWE,
 	} {
 		if got, ok := CompatibleSignatureForProvider(target, tagged); ok {
@@ -121,15 +127,6 @@ func TestMetaTagWithShapeValidEnvelopeIsNotReplayableAnywhere(t *testing.T) {
 		got := DecideSignatureCompatibility(target, tagged, SignatureBlockKindUnknown)
 		if got.Compatible || got.NormalizedSignature != "" {
 			t.Fatalf("target %q: tagged decision %+v claims the envelope is replayable", target, got)
-		}
-		if target == SignatureProviderMeta {
-			// Unlike the raw envelope, the tag must not replay through the
-			// generic Meta lane either: only the Meta executor unwraps it,
-			// after checking the selected account.
-			if got.Action != SignatureActionDropBlock {
-				t.Fatalf("meta target: tagged decision %+v, want a drop", got)
-			}
-			continue
 		}
 		want := DecideSignatureCompatibility(target, native, SignatureBlockKindUnknown)
 		if got.Action != want.Action || got.ReplacementSignature != want.ReplacementSignature {

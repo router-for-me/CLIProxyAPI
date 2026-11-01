@@ -206,11 +206,13 @@ type MetaConfig struct {
 // turns. Muse reasoning is an encrypted envelope that Meta binds to the account that
 // issued it, so the proxy tags every envelope it returns with that account and only
 // forwards an envelope when the credential selected for the next turn is the one that
-// issued it. Anything else is dropped, which is the behavior without this feature.
-// If Meta still rejects a replayed envelope the request is retried once without any.
+// issued it. Anything else is dropped. Without this feature an untagged envelope is
+// forwarded as is. Either way, if Meta rejects a replayed envelope the request is
+// retried once without any.
 type MetaReasoningReplayConfig struct {
-	// Enabled turns the feature on. Default false: reasoning envelopes are neither
-	// tagged nor replayed, and a tagged envelope from an earlier run is dropped.
+	// Enabled turns the feature on. Default false: responses are not tagged,
+	// untagged envelopes are forwarded as before, and a tagged envelope from an
+	// earlier run is dropped.
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Models limits the feature to matching model names for a canary. Patterns are
 	// case-insensitive and support "*" wildcards; both the requested name (including
