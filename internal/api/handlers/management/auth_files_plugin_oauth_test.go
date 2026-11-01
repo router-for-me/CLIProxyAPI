@@ -265,6 +265,7 @@ func (s *pluginLoginRollbackStore) SetBaseDir(string) {}
 type testAuthProvider struct {
 	identifier  string
 	identifiers []string
+	entries     []pluginapi.AuthProviderEntry
 	startLogin  func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
 	pollLogin   func(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error)
 }
@@ -275,6 +276,10 @@ func (p *testAuthProvider) Identifier() string {
 
 func (p *testAuthProvider) Identifiers() []string {
 	return append([]string(nil), p.identifiers...)
+}
+
+func (p *testAuthProvider) AuthEntries() []pluginapi.AuthProviderEntry {
+	return append([]pluginapi.AuthProviderEntry(nil), p.entries...)
 }
 
 func (p *testAuthProvider) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
@@ -506,6 +511,9 @@ func TestV8PluginMultiPortalOAuthListLoginPollAndRelogin(t *testing.T) {
 	}
 	if !reflect.DeepEqual(listBody.Plugins[0].OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
 		t.Fatalf("oauth_providers = %#v, want [zcode-zai zcode-bigmodel]", listBody.Plugins[0].OAuthProviders)
+	}
+	if strings.Contains(listRec.Body.String(), "oauth_provider_entries") {
+		t.Fatalf("expected plugin without AuthEntries to omit oauth_provider_entries, got body=%s", listRec.Body.String())
 	}
 
 	// Start and complete login via second portal (zcode-bigmodel)
@@ -1001,5 +1009,98 @@ func TestV8PluginReloginPreservesSubdirTargetAndRollsBackOverwriteSafely(t *test
 	afterDiskBytes, errReadAfter := os.ReadFile(teamFile)
 	if errReadAfter != nil || !strings.Contains(string(afterDiskBytes), `"custom_disk_only":"keep"`) || !strings.Contains(string(afterDiskBytes), `"newer-disk-token"`) {
 		t.Fatalf("expected exact pre-save disk bytes preserved, got %q (err=%v)", string(afterDiskBytes), errReadAfter)
+	}
+}
+
+func TestListPluginsExposesOAuthProviderEntriesWithFallbackAndSanitization(t *testing.T) {
+	pluginsDir := writeManagementPluginFile(t, "omc-zcode-oauth")
+	enabled := true
+	host := pluginhost.New()
+	host.RegisterPluginForTest("omc-zcode-oauth", pluginapi.Plugin{
+		Metadata: pluginapi.Metadata{
+			Name:             "OMC ZCode OAuth",
+			Version:          "1.0.0",
+			Author:           "test",
+			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			Logo:             "https://default.example/logo.svg?x=1&y=2",
+		},
+		Capabilities: pluginapi.Capabilities{
+			AuthProvider: &testAuthProvider{
+				identifier:  "zcode-zai",
+				identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+				entries: []pluginapi.AuthProviderEntry{
+					{
+						Identifier: " ZCode-ZAI ",
+						Name:       "Z.ai <International>",
+						Logo:       "https://chat.z.ai/logo.svg?a=1&b=2",
+					},
+					{
+						Identifier: "zcode-bigmodel",
+						Name:       "",
+						Logo:       "",
+					},
+				},
+			},
+		},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: t.TempDir(),
+		Port:    8317,
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"omc-zcode-oauth": {Enabled: &enabled},
+			},
+		},
+	}, nil)
+	h.SetPluginHost(host)
+
+	router := gin.New()
+	router.GET("/v8/management/plugins", h.ListPlugins)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v8/management/plugins", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v8/management/plugins status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var listBody struct {
+		Plugins []struct {
+			ID                   string   `json:"id"`
+			SupportsOAuth        bool     `json:"supports_oauth"`
+			OAuthProvider        string   `json:"oauth_provider"`
+			OAuthProviders       []string `json:"oauth_providers"`
+			Logo                 string   `json:"logo"`
+			OAuthProviderEntries []struct {
+				Identifier string `json:"identifier"`
+				Name       string `json:"name"`
+				Logo       string `json:"logo"`
+			} `json:"oauth_provider_entries"`
+		} `json:"plugins"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &listBody); errUnmarshal != nil {
+		t.Fatalf("decode plugins list: %v", errUnmarshal)
+	}
+	if len(listBody.Plugins) != 1 {
+		t.Fatalf("plugins len = %d, want 1", len(listBody.Plugins))
+	}
+	p := listBody.Plugins[0]
+	if p.OAuthProvider != "zcode-zai" || !reflect.DeepEqual(p.OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
+		t.Fatalf("oauth_provider=%q oauth_providers=%#v", p.OAuthProvider, p.OAuthProviders)
+	}
+	if len(p.OAuthProviderEntries) != 2 {
+		t.Fatalf("oauth_provider_entries = %#v, want 2 entries", p.OAuthProviderEntries)
+	}
+	if p.OAuthProviderEntries[0].Identifier != "zcode-zai" ||
+		p.OAuthProviderEntries[0].Name != "Z.ai &lt;International&gt;" ||
+		p.OAuthProviderEntries[0].Logo != "https://chat.z.ai/logo.svg?a=1&amp;b=2" {
+		t.Fatalf("entry[0] = %#v, want sanitized Z.ai entry", p.OAuthProviderEntries[0])
+	}
+	if p.OAuthProviderEntries[1].Identifier != "zcode-bigmodel" ||
+		p.OAuthProviderEntries[1].Name != "OMC ZCode OAuth" ||
+		p.OAuthProviderEntries[1].Logo != "https://default.example/logo.svg?x=1&amp;y=2" {
+		t.Fatalf("entry[1] = %#v, want fallback to Metadata.Name and Metadata.Logo", p.OAuthProviderEntries[1])
 	}
 }

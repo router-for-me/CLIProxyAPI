@@ -58,6 +58,9 @@ type RegisteredPluginInfo = internalpluginhost.RegisteredPluginInfo
 // RegisteredPluginMenu describes a plugin-owned resource menu entry.
 type RegisteredPluginMenu = internalpluginhost.RegisteredPluginMenu
 
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry = pluginapi.AuthProviderEntry
+
 // Host wraps the internal plugin host behind a public SDK surface.
 type Host struct {
 	inner *internalpluginhost.Host

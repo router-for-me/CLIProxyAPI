@@ -346,15 +346,22 @@ func (h *Host) recordAuthProviderForTarget(record capabilityRecord, target strin
 }
 
 func (h *Host) callRecordAuthProviderIdentifiers(record capabilityRecord) ([]string, bool) {
+	identifiers, _, ok := h.callRecordAuthProviderMetadata(record)
+	return identifiers, ok
+}
+
+func (h *Host) callRecordAuthProviderMetadata(record capabilityRecord) ([]string, []pluginapi.AuthProviderEntry, bool) {
 	if h == nil || !hasRecordAuthProvider(record) || h.isPluginFused(record.id) {
-		return nil, false
+		return nil, nil, false
 	}
 	var out []string
 	seen := make(map[string]struct{})
+	byID := make(map[string]pluginapi.AuthProviderEntry)
+	hasDeclaredEntries := false
 	for _, prov := range recordAuthProviders(record) {
-		identifiers, okIDs := h.callAuthProviderIdentifiers(record.id, prov)
+		identifiers, entries, okIDs := h.callAuthProviderMetadata(record.id, prov)
 		if !okIDs {
-			return nil, false
+			return nil, nil, false
 		}
 		for _, identifier := range identifiers {
 			if identifier == "" {
@@ -366,18 +373,65 @@ func (h *Host) callRecordAuthProviderIdentifiers(record capabilityRecord) ([]str
 			seen[identifier] = struct{}{}
 			out = append(out, identifier)
 		}
+		for _, entry := range entries {
+			if entry.Identifier == "" {
+				continue
+			}
+			hasDeclaredEntries = true
+			existing, exists := byID[entry.Identifier]
+			if !exists {
+				byID[entry.Identifier] = entry
+				continue
+			}
+			if existing.Name == "" && entry.Name != "" {
+				existing.Name = entry.Name
+			}
+			if existing.Logo == "" && entry.Logo != "" {
+				existing.Logo = entry.Logo
+			}
+			byID[entry.Identifier] = existing
+		}
 	}
-	return out, true
+	if !hasDeclaredEntries || len(out) == 0 {
+		return out, nil, true
+	}
+	defaultName := strings.TrimSpace(record.meta.Name)
+	if defaultName == "" {
+		defaultName = strings.TrimSpace(record.plugin.Metadata.Name)
+	}
+	defaultLogo := strings.TrimSpace(record.meta.Logo)
+	if defaultLogo == "" {
+		defaultLogo = strings.TrimSpace(record.plugin.Metadata.Logo)
+	}
+	entries := make([]pluginapi.AuthProviderEntry, 0, len(out))
+	for _, id := range out {
+		entry := byID[id]
+		entry.Identifier = id
+		if entry.Name == "" {
+			entry.Name = defaultName
+		}
+		if entry.Logo == "" {
+			entry.Logo = defaultLogo
+		}
+		entries = append(entries, entry)
+	}
+	return out, entries, true
 }
 
 func (h *Host) callAuthProviderIdentifiers(pluginID string, provider pluginapi.AuthProvider) (identifiers []string, ok bool) {
+	identifiers, _, ok = h.callAuthProviderMetadata(pluginID, provider)
+	return identifiers, ok
+}
+
+func (h *Host) callAuthProviderMetadata(pluginID string, provider pluginapi.AuthProvider) (identifiers []string, entries []pluginapi.AuthProviderEntry, ok bool) {
 	if h == nil || provider == nil || h.isPluginFused(pluginID) {
-		return nil, false
+		return nil, nil, false
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(pluginID, "AuthProvider.Identifier", recovered)
 			identifiers = nil
+			entries = nil
 			ok = false
 		}
 	}()
@@ -385,7 +439,27 @@ func (h *Host) callAuthProviderIdentifiers(pluginID string, provider pluginapi.A
 	if multi, okMulti := provider.(interface{ Identifiers() []string }); okMulti && multi != nil {
 		raw = append(raw, multi.Identifiers()...)
 	}
-	return normalizeAuthProviderIdentifiers(raw...), true
+	if withEntries, okEntries := provider.(interface {
+		AuthEntries() []pluginapi.AuthProviderEntry
+	}); okEntries && withEntries != nil {
+		for _, entry := range withEntries.AuthEntries() {
+			raw = append(raw, entry.Identifier)
+			ids := normalizeAuthProviderIdentifiers(entry.Identifier)
+			if len(ids) == 0 {
+				continue
+			}
+			name := strings.TrimSpace(entry.Name)
+			logo := strings.TrimSpace(entry.Logo)
+			for _, id := range ids {
+				entries = append(entries, pluginapi.AuthProviderEntry{
+					Identifier: id,
+					Name:       name,
+					Logo:       logo,
+				})
+			}
+		}
+	}
+	return normalizeAuthProviderIdentifiers(raw...), entries, true
 }
 
 func (h *Host) callAuthProviderCredentialProviders(pluginID string, provider pluginapi.AuthProvider) (providers []string, ok bool) {

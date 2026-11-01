@@ -324,6 +324,23 @@ type MultiAuthProvider interface {
 	Identifiers() []string
 }
 
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry struct {
+	// Identifier is the provider key used for login and callback routing.
+	Identifier string `json:"identifier"`
+	// Name is the user-facing display label for this entry; falls back to Metadata.Name when empty.
+	Name string `json:"name,omitempty"`
+	// Logo is the display asset reference for this entry; falls back to Metadata.Logo when empty.
+	Logo string `json:"logo,omitempty"`
+}
+
+// AuthProviderEntries is an optional extension implemented by an AuthProvider
+// that publishes per-entry display metadata (name and logo).
+type AuthProviderEntries interface {
+	AuthProvider
+	AuthEntries() []AuthProviderEntry
+}
+
 // AuthLoginStartRequest asks a plugin to start a provider login flow.
 type AuthLoginStartRequest struct {
 	// Provider is the provider key for the login flow.

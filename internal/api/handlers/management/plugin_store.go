@@ -47,34 +47,35 @@ type pluginStoreSourceErr struct {
 }
 
 type pluginStoreListEntry struct {
-	StoreID             string                `json:"store_id"`
-	SourceID            string                `json:"source_id"`
-	SourceName          string                `json:"source_name"`
-	SourceURL           string                `json:"source_url"`
-	ID                  string                `json:"id"`
-	Name                string                `json:"name"`
-	Description         string                `json:"description"`
-	Author              string                `json:"author"`
-	Version             string                `json:"version"`
-	Repository          string                `json:"repository"`
-	InstallType         string                `json:"install_type"`
-	AuthRequired        bool                  `json:"auth_required"`
-	AuthConfigured      bool                  `json:"auth_configured"`
-	Platforms           []pluginStorePlatform `json:"platforms,omitempty"`
-	Logo                string                `json:"logo,omitempty"`
-	Homepage            string                `json:"homepage,omitempty"`
-	License             string                `json:"license,omitempty"`
-	Tags                []string              `json:"tags,omitempty"`
-	Installed           bool                  `json:"installed"`
-	InstalledVersion    string                `json:"installed_version"`
-	InstalledSourceID   string                `json:"installed_source_id,omitempty"`
-	InstallSourceStatus string                `json:"install_source_status,omitempty"`
-	Path                string                `json:"path"`
-	Configured          bool                  `json:"configured"`
-	Registered          bool                  `json:"registered"`
-	Enabled             bool                  `json:"enabled"`
-	EffectiveEnabled    bool                  `json:"effective_enabled"`
-	UpdateAvailable     bool                  `json:"update_available"`
+	StoreID             string                              `json:"store_id"`
+	SourceID            string                              `json:"source_id"`
+	SourceName          string                              `json:"source_name"`
+	SourceURL           string                              `json:"source_url"`
+	ID                  string                              `json:"id"`
+	Name                string                              `json:"name"`
+	Description         string                              `json:"description"`
+	Author              string                              `json:"author"`
+	Version             string                              `json:"version"`
+	Repository          string                              `json:"repository"`
+	InstallType         string                              `json:"install_type"`
+	AuthRequired        bool                                `json:"auth_required"`
+	AuthConfigured      bool                                `json:"auth_configured"`
+	Platforms           []pluginStorePlatform               `json:"platforms,omitempty"`
+	Logo                string                              `json:"logo,omitempty"`
+	Homepage            string                              `json:"homepage,omitempty"`
+	License             string                              `json:"license,omitempty"`
+	Tags                []string                            `json:"tags,omitempty"`
+	Locales             map[string]pluginstore.PluginLocale `json:"locales,omitempty"`
+	Installed           bool                                `json:"installed"`
+	InstalledVersion    string                              `json:"installed_version"`
+	InstalledSourceID   string                              `json:"installed_source_id,omitempty"`
+	InstallSourceStatus string                              `json:"install_source_status,omitempty"`
+	Path                string                              `json:"path"`
+	Configured          bool                                `json:"configured"`
+	Registered          bool                                `json:"registered"`
+	Enabled             bool                                `json:"enabled"`
+	EffectiveEnabled    bool                                `json:"effective_enabled"`
+	UpdateAvailable     bool                                `json:"update_available"`
 }
 
 type pluginStorePlatform struct {
@@ -196,6 +197,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			Homepage:            htmlsanitize.String(plugin.Homepage),
 			License:             htmlsanitize.String(plugin.License),
 			Tags:                htmlsanitize.Strings(plugin.Tags),
+			Locales:             sanitizePluginStoreLocales(plugin.Locales),
 			Installed:           status.Installed,
 			InstalledVersion:    htmlsanitize.String(installedVersion),
 			InstalledSourceID:   htmlsanitize.String(installedSourceID),
@@ -678,6 +680,25 @@ func sanitizePluginStoreSourceErrors(sourceErrors []pluginStoreSourceErr) []plug
 			SourceURL:  htmlsanitize.String(sourceError.SourceURL),
 			Message:    htmlsanitize.String(sourceError.Message),
 		})
+	}
+	return out
+}
+
+func sanitizePluginStoreLocales(locales map[string]pluginstore.PluginLocale) map[string]pluginstore.PluginLocale {
+	normalized := pluginstore.NormalizePluginLocales(locales)
+	if len(normalized) == 0 {
+		return nil
+	}
+	out := make(map[string]pluginstore.PluginLocale, len(normalized))
+	for locale, item := range normalized {
+		out[htmlsanitize.String(locale)] = pluginstore.PluginLocale{
+			Name:        htmlsanitize.String(item.Name),
+			Description: htmlsanitize.String(item.Description),
+			Author:      htmlsanitize.String(item.Author),
+			Homepage:    htmlsanitize.String(item.Homepage),
+			License:     htmlsanitize.String(item.License),
+			Tags:        htmlsanitize.Strings(item.Tags),
+		}
 	}
 	return out
 }

@@ -132,7 +132,7 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 
 	l.manager.mu.RLock()
 	for id, auth := range l.manager.auths {
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := l.manager.nextRefreshCheckAt(now, auth, l.interval)
 		if !ok {
 			continue
 		}
@@ -275,7 +275,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		manager.mu.RUnlock()
 		return
 	}
-	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
+	next, shouldSchedule := manager.nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
 	exec, _ := manager.executorLocked(executorKeyFromAuth(auth))
 	registrationEpoch := auth.RegistrationEpoch
@@ -300,7 +300,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if job == nil {
 		manager.mu.RLock()
 		auth = manager.auths[authID]
-		next, shouldSchedule = nextRefreshCheckAt(now, auth, l.interval)
+		next, shouldSchedule = manager.nextRefreshCheckAt(now, auth, l.interval)
 		manager.mu.RUnlock()
 		if shouldSchedule {
 			if !next.After(now) {
@@ -336,7 +336,7 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 	for _, authID := range dirty {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := l.manager.nextRefreshCheckAt(now, auth, l.interval)
 		l.manager.mu.RUnlock()
 
 		if !ok {
@@ -390,6 +390,15 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	}
 	heap.Remove(&l.queue, item.index)
 	delete(l.index, authID)
+}
+
+// nextRefreshCheckAt excludes local Codex credentials that cannot renew before
+// evaluating generic expiry-based scheduling. Home can renew without a local RT.
+func (m *Manager) nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
+	if m.codexAutoRefreshUnavailable(auth, now) {
+		return time.Time{}, false
+	}
+	return nextRefreshCheckAt(now, auth, interval)
 }
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {

@@ -3928,6 +3928,7 @@ func (panicFrontendAuthProvider) Authenticate(ctx context.Context, req pluginapi
 type fakeAuthProvider struct {
 	identifier          string
 	identifiers         []string
+	entries             []pluginapi.AuthProviderEntry
 	credentialProviders []string
 	parseAuth           func(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error)
 	startLogin          func(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error)
@@ -3941,6 +3942,10 @@ func (p fakeAuthProvider) Identifier() string {
 
 func (p fakeAuthProvider) Identifiers() []string {
 	return append([]string(nil), p.identifiers...)
+}
+
+func (p fakeAuthProvider) AuthEntries() []pluginapi.AuthProviderEntry {
+	return append([]pluginapi.AuthProviderEntry(nil), p.entries...)
 }
 
 func (p fakeAuthProvider) CredentialProviders() []string {

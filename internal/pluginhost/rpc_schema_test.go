@@ -486,11 +486,104 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersion)
 	}
+	if !lookup.lastLifecycle.MultiAuthProviders {
+		t.Fatal("lifecycle multi_auth_providers = false, want true")
+	}
 	if registered.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
+	}
+}
+
+func TestRPCAuthIdentifierEntriesAndMetadataFallback(t *testing.T) {
+	lookup := newTestSymbolLookup(&testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: pluginapi.Metadata{
+				Name:             "OMC ZCode OAuth",
+				Version:          "1.0.0",
+				Author:           "test",
+				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+				Logo:             "https://default.example/zcode.svg",
+			},
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: " ZCode-ZAI ",
+					entries: []pluginapi.AuthProviderEntry{
+						{Identifier: " ZCode-ZAI ", Name: "Z.ai", Logo: "https://chat.z.ai/logo.svg"},
+						{Identifier: "zcode-bigmodel", Name: "", Logo: ""},
+					},
+				},
+			},
+		},
+	})
+
+	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "omc-zcode-oauth", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	host := newHostWithRecords(capabilityRecord{
+		id:       "omc-zcode-oauth",
+		priority: 10,
+		meta:     plugin.Metadata,
+		plugin:   plugin,
+	})
+	infos := host.RegisteredPlugins()
+	if len(infos) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(infos))
+	}
+	if infos[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("OAuthProvider = %q, want zcode-zai", infos[0].OAuthProvider)
+	}
+	wantProviders := []string{"zcode-zai", "zcode-bigmodel"}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, wantProviders) {
+		t.Fatalf("OAuthProviders = %#v, want %#v", infos[0].OAuthProviders, wantProviders)
+	}
+	wantEntries := []pluginapi.AuthProviderEntry{
+		{Identifier: "zcode-zai", Name: "Z.ai", Logo: "https://chat.z.ai/logo.svg"},
+		{Identifier: "zcode-bigmodel", Name: "OMC ZCode OAuth", Logo: "https://default.example/zcode.svg"},
+	}
+	if !reflect.DeepEqual(infos[0].OAuthProviderEntries, wantEntries) {
+		t.Fatalf("OAuthProviderEntries = %#v, want %#v", infos[0].OAuthProviderEntries, wantEntries)
+	}
+
+	// Verify wire-level tolerance when auth.identifier returns only entries (empty identifier/identifiers) and unknown keys.
+	rawWireClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return marshalRPCResult(rpcRegistration{
+				SchemaVersion: pluginabi.SchemaVersion,
+				Metadata: pluginapi.Metadata{
+					Name:             "OMC ZCode OAuth",
+					Version:          "1.0.0",
+					Author:           "test",
+					GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+					Logo:             "https://default.example/zcode.svg",
+				},
+				Capabilities: rpcCapabilities{
+					AuthProvider: true,
+				},
+			})
+		case pluginabi.MethodAuthIdentifier:
+			return []byte(`{"ok":true,"result":{"identifier":"","entries":[{"identifier":" zcode-zai ","name":"Z.ai","logo":"https://chat.z.ai/logo.svg","extra_future_field":true},{"identifier":"zcode-bigmodel","unknown_key":"ignored"}],"future_top_level":"ignored"}}`), nil
+		default:
+			return marshalRPCResult(rpcEmptyResponse{})
+		}
+	}}
+	wirePlugin, errWire := registerRPCPlugin(context.Background(), nil, "omc-wire", rawWireClient, pluginabi.MethodPluginRegister, nil)
+	if errWire != nil {
+		t.Fatalf("registerRPCPlugin(wirePlugin) error = %v", errWire)
+	}
+	wireHost := newHostWithRecords(capabilityRecord{
+		id:       "omc-wire",
+		priority: 10,
+		meta:     wirePlugin.Metadata,
+		plugin:   wirePlugin,
+	})
+	wireInfos := wireHost.RegisteredPlugins()
+	if len(wireInfos) != 1 || wireInfos[0].OAuthProvider != "zcode-zai" || !reflect.DeepEqual(wireInfos[0].OAuthProviders, wantProviders) || !reflect.DeepEqual(wireInfos[0].OAuthProviderEntries, wantEntries) {
+		t.Fatalf("wireInfos = %#v, want primary=zcode-zai providers=%#v entries=%#v", wireInfos, wantProviders, wantEntries)
 	}
 }
 

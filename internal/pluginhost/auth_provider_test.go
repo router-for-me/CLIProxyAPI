@@ -787,6 +787,9 @@ func TestAuthProviderMultiPortalRegistrationAndRouting(t *testing.T) {
 		if !reflect.DeepEqual(infos[0].OAuthProviders, wantProviders) {
 			t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want %#v", infos[0].OAuthProviders, wantProviders)
 		}
+		if infos[0].OAuthProviderEntries != nil {
+			t.Fatalf("RegisteredPlugins()[0].OAuthProviderEntries = %#v, want nil when AuthEntries is not declared", infos[0].OAuthProviderEntries)
+		}
 		if got := host.AuthProviderIdentifiers(); !reflect.DeepEqual(got, wantProviders) {
 			t.Fatalf("AuthProviderIdentifiers() = %#v, want %#v", got, wantProviders)
 		}
@@ -1070,4 +1073,181 @@ func TestAuthProviderMultiPortalRegistrationAndRouting(t *testing.T) {
 			t.Fatalf("RefreshAuth(zcode) after cold-start ParseAuth = (%v, %v), refreshed=%v", handled, errRefresh, refreshed)
 		}
 	})
+
+	t.Run("auth_entries_projection_and_metadata_fallback", func(t *testing.T) {
+		var started []string
+		host := newHostWithRecords(capabilityRecord{
+			id:       "omc-zcode-oauth",
+			priority: 10,
+			meta: pluginapi.Metadata{
+				Name: "OMC ZCode OAuth",
+				Logo: "https://default.example/zcode.svg",
+			},
+			plugin: pluginapi.Plugin{
+				Metadata: pluginapi.Metadata{
+					Name: "OMC ZCode OAuth",
+					Logo: "https://default.example/zcode.svg",
+				},
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: " ZCode-ZAI ",
+						entries: []pluginapi.AuthProviderEntry{
+							{
+								Identifier: " ZCode-ZAI ",
+								Name:       "Z.ai",
+								Logo:       "https://chat.z.ai/logo.svg",
+							},
+							{
+								Identifier: " ZCode-BigModel ",
+								Name:       "BigModel",
+								Logo:       "",
+							},
+							{
+								Identifier: "zcode-trial",
+								Name:       "",
+								Logo:       "https://trial.example/logo.svg",
+							},
+						},
+						startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+							started = append(started, req.Provider)
+							return pluginapi.AuthLoginStartResponse{
+								Provider: req.Provider,
+								URL:      "https://portal.example/" + req.Provider,
+								State:    "state-" + req.Provider,
+							}, nil
+						},
+					},
+				},
+			},
+		})
+
+		infos := host.RegisteredPlugins()
+		if len(infos) != 1 {
+			t.Fatalf("RegisteredPlugins() len = %d, want 1", len(infos))
+		}
+		wantProviders := []string{"zcode-zai", "zcode-bigmodel", "zcode-trial"}
+		if infos[0].OAuthProvider != "zcode-zai" || !reflect.DeepEqual(infos[0].OAuthProviders, wantProviders) {
+			t.Fatalf("OAuthProvider=%q OAuthProviders=%#v, want %#v", infos[0].OAuthProvider, infos[0].OAuthProviders, wantProviders)
+		}
+		wantEntries := []pluginapi.AuthProviderEntry{
+			{
+				Identifier: "zcode-zai",
+				Name:       "Z.ai",
+				Logo:       "https://chat.z.ai/logo.svg",
+			},
+			{
+				Identifier: "zcode-bigmodel",
+				Name:       "BigModel",
+				Logo:       "https://default.example/zcode.svg",
+			},
+			{
+				Identifier: "zcode-trial",
+				Name:       "OMC ZCode OAuth",
+				Logo:       "https://trial.example/logo.svg",
+			},
+		}
+		if !reflect.DeepEqual(infos[0].OAuthProviderEntries, wantEntries) {
+			t.Fatalf("OAuthProviderEntries = %#v, want %#v", infos[0].OAuthProviderEntries, wantEntries)
+		}
+		for _, portal := range wantProviders {
+			if !host.HasAuthProvider(portal) {
+				t.Fatalf("HasAuthProvider(%q) = false, want true", portal)
+			}
+			resp, handled, errStart := host.StartLogin(context.Background(), portal, "http://127.0.0.1:8317/callback")
+			if errStart != nil || !handled || resp.Provider != portal {
+				t.Fatalf("StartLogin(%q) = (%#v, %v, %v), want handled", portal, resp, handled, errStart)
+			}
+		}
+		if !reflect.DeepEqual(started, wantProviders) {
+			t.Fatalf("started = %#v, want %#v", started, wantProviders)
+		}
+	})
+
+	t.Run("plural_auth_providers_mixed_entries_and_legacy_type_without_auth_entries", func(t *testing.T) {
+		host := newHostWithRecords(
+			capabilityRecord{
+				id:       "mixed-cap-plugin",
+				priority: 20,
+				meta: pluginapi.Metadata{
+					Name: "Mixed Portal Plugin",
+					Logo: "https://default.example/mixed.svg",
+				},
+				plugin: pluginapi.Plugin{
+					Capabilities: pluginapi.Capabilities{
+						AuthProviders: []pluginapi.AuthProvider{
+							fakeAuthProvider{
+								identifier: "portal-one",
+								entries: []pluginapi.AuthProviderEntry{
+									{Identifier: " , "},
+									{Identifier: "Portal-One", Name: "", Logo: "https://one.example/logo.svg"},
+									{Identifier: "portal-one", Name: "Portal One Filled", Logo: ""},
+								},
+							},
+							legacySingleAuthProvider{identifier: "portal-two"},
+						},
+					},
+				},
+			},
+			capabilityRecord{
+				id:       "strict-legacy-plugin",
+				priority: 10,
+				meta: pluginapi.Metadata{
+					Name: "Strict Legacy Plugin",
+					Logo: "https://default.example/legacy.svg",
+				},
+				plugin: pluginapi.Plugin{
+					Capabilities: pluginapi.Capabilities{
+						AuthProvider: legacySingleAuthProvider{identifier: "strict-legacy"},
+					},
+				},
+			},
+		)
+
+		infos := host.RegisteredPlugins()
+		if len(infos) != 2 {
+			t.Fatalf("RegisteredPlugins() len = %d, want 2", len(infos))
+		}
+		wantMixedEntries := []pluginapi.AuthProviderEntry{
+			{
+				Identifier: "portal-one",
+				Name:       "Portal One Filled",
+				Logo:       "https://one.example/logo.svg",
+			},
+			{
+				Identifier: "portal-two",
+				Name:       "Mixed Portal Plugin",
+				Logo:       "https://default.example/mixed.svg",
+			},
+		}
+		if !reflect.DeepEqual(infos[0].OAuthProviderEntries, wantMixedEntries) {
+			t.Fatalf("mixed plugin OAuthProviderEntries = %#v, want %#v", infos[0].OAuthProviderEntries, wantMixedEntries)
+		}
+		if infos[1].OAuthProvider != "strict-legacy" || infos[1].OAuthProviderEntries != nil {
+			t.Fatalf("strict legacy plugin = %#v, want OAuthProvider=strict-legacy and OAuthProviderEntries=nil", infos[1])
+		}
+	})
+}
+
+type legacySingleAuthProvider struct {
+	identifier string
+}
+
+func (p legacySingleAuthProvider) Identifier() string {
+	return p.identifier
+}
+
+func (legacySingleAuthProvider) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+	return pluginapi.AuthParseResponse{}, nil
+}
+
+func (legacySingleAuthProvider) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	return pluginapi.AuthLoginStartResponse{}, nil
+}
+
+func (legacySingleAuthProvider) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	return pluginapi.AuthLoginPollResponse{}, nil
+}
+
+func (legacySingleAuthProvider) RefreshAuth(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+	return pluginapi.AuthRefreshResponse{}, nil
 }
