@@ -395,9 +395,10 @@ type ModelState struct {
 	// is disabled for the auth. It is not a cooldown: a fresh request may still
 	// select the auth. Only retry scheduling honours it: the auth is skipped in a
 	// request's retry rounds until then, and one credential's reset never delays
-	// retrying another. A later failure only extends it; a success clears it
-	// unless it was dispatched before the 429 was recorded (at or below
-	// coolingDisabledRetrySeq). Runtime only.
+	// retrying another. A 429 from a call dispatched after it was recorded
+	// replaces it; an older, out-of-order one may only extend it. A success
+	// clears it unless it was dispatched before the 429 was recorded (at or
+	// below coolingDisabledRetrySeq). Runtime only.
 	coolingDisabledRetryAt  time.Time `json:"-"`
 	coolingDisabledRetrySeq uint64    `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
