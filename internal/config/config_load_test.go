@@ -310,3 +310,19 @@ func TestHoldsAnyScalarValueFindsPlaintextLeftByWriteBack(t *testing.T) {
 		t.Fatal("HoldsAnyScalarValue() = true with no values to look for")
 	}
 }
+
+// A merged secret a direct key shadows is recorded too: hashing replaces only the
+// effective key, and the rewrite can leave the shadowed source as a plain setting.
+func TestPlaintextManagementSecretsRecordsShadowedMergeValue(t *testing.T) {
+	data := []byte("defaults: &d\n  secret-key: shadow-secret\nmanagement:\n  <<: *d\n  secret-key: active-secret\n")
+	secrets := PlaintextManagementSecrets(data)
+	for _, want := range []string{"active-secret", "shadow-secret"} {
+		found := false
+		for _, secret := range secrets {
+			found = found || secret == want
+		}
+		if !found {
+			t.Errorf("PlaintextManagementSecrets() = %q, missing %q", secrets, want)
+		}
+	}
+}

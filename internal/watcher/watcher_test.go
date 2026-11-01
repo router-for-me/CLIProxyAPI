@@ -2239,6 +2239,8 @@ func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
 		"scalar anchor":      "password: &password " + secret + "\nremote-management:\n  secret-key: *password\n",
 		"merge key":          "defaults: &management\n  secret-key: " + secret + "\nmanagement:\n  <<: *management\n  allow-remote: true\n",
 		"mapping-key anchor": "&password " + secret + ": value\nremote-management:\n  secret-key: *password\n",
+		// The write-back drops the merge, leaving the shadowed source a plain setting.
+		"shadowed merge": "defaults: &d\n  secret-key: " + secret + "\nmanagement:\n  <<: *d\n  secret-key: active-other-secret\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			tmpDir := t.TempDir()
