@@ -890,6 +890,10 @@ func TestHasPlaintextSecretKey(t *testing.T) {
 		{"defaults: &d {secret-key: plain-secret}\nmanagement: {<<: *d, secret-key: '" + hashed + "'}\n", true},
 		{"management: {secret-key: {value: plain-secret}}\n", true},
 		{"management: [secret-key: plain-secret\n", false},
+		// An explicit YAML null loads as an empty secret; a quoted 'null' is a string.
+		{"management: {secret-key: null}\n", false},
+		{"remote-management: {secret-key: ~}\n", false},
+		{"management: {secret-key: 'null'}\n", true},
 	} {
 		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
 			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)

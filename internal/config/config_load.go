@@ -204,9 +204,12 @@ func HasPlaintextSecretKey(data []byte) bool {
 			nodes = next
 		}
 		for _, secret := range nodes {
-			if secret.Kind != yaml.ScalarNode || (secret.Value != "" && !looksLikeBcrypt(secret.Value)) {
-				return true
+			// An explicit YAML null (`null`, `~`) decodes as an empty secret, as an
+			// empty value does; a quoted 'null' is a string and still counts.
+			if secret.Kind == yaml.ScalarNode && (secret.ShortTag() == "!!null" || secret.Value == "" || looksLikeBcrypt(secret.Value)) {
+				continue
 			}
+			return true
 		}
 	}
 	return false

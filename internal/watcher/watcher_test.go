@@ -2396,3 +2396,31 @@ func TestQueuedConfigMirrorSkipsUnvalidatedSave(t *testing.T) {
 		t.Fatal("the validated config was not mirrored")
 	}
 }
+
+// An explicit YAML null secret loads as an empty one, with no write-back, so the
+// reload must mirror the config like any other; refusing it would leave the remote
+// copy stale for good.
+func TestReloadConfigMirrorsExplicitNullSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("management:\n  secret-key: null\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	runConfigPersist = func(persist func()) { persist() }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	select {
+	case <-persister.mirrored:
+	default:
+		t.Fatal("a config with an explicit null secret was not mirrored")
+	}
+}
