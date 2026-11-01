@@ -41,11 +41,7 @@ type Watcher struct {
 	configApplyMu     sync.Mutex // Serializes config file reloads so they apply in file order.
 	// plaintextSecrets holds the plaintext management secrets a reload hashed into
 	// the file. Guarded by configApplyMu.
-	plaintextSecrets []string
-	// mirrorGen is bumped before a reload that holds back a plaintext secret
-	// writes the hash back, so a config mirror queued earlier skips the rewritten
-	// file, which a YAML anchor or merge source can leave holding the plaintext.
-	mirrorGen                  atomic.Uint64
+	plaintextSecrets           []string
 	serverUpdateMu             sync.Mutex
 	serverUpdateTimer          *time.Timer
 	serverUpdateLast           time.Time

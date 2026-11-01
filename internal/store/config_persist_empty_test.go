@@ -399,10 +399,10 @@ func TestWithoutStagedContentChangedKeepsJoinedErrors(t *testing.T) {
 	}
 }
 
-// A mirror whose fence no longer holds (the watcher queued it before a reload that
-// hashed a plaintext secret) must not upload or commit the file it reads.
+// A mirror whose fence does not hold (the file no longer holds the bytes the
+// watcher's reload validated) must not upload or commit the file it reads.
 func TestPersistConfigSkipsMirrorWhenFenceNoLongerHolds(t *testing.T) {
-	stale := internalconfig.WithMirrorFence(context.Background(), func() bool { return false })
+	stale := internalconfig.WithMirrorFence(context.Background(), func([]byte) bool { return false })
 	const content = "port: 8317\n"
 
 	t.Run("object", func(t *testing.T) {

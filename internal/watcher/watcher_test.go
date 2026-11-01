@@ -1013,11 +1013,11 @@ func TestSetAuthUpdateQueueNilResetsDispatch(t *testing.T) {
 
 func TestPersistAsyncEarlyReturns(t *testing.T) {
 	var nilWatcher *Watcher
-	nilWatcher.persistConfigAsync()
+	nilWatcher.persistConfigAsync(nil)
 	nilWatcher.persistAuthAsync("msg", "a")
 
 	w := &Watcher{}
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", "   ", "")
 }
 
@@ -1039,7 +1039,7 @@ func (p *errorPersister) PersistAuthFiles(context.Context, string, ...string) er
 func TestPersistAsyncErrorPaths(t *testing.T) {
 	p := &errorPersister{}
 	w := &Watcher{storePersister: p}
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", "a")
 	time.Sleep(30 * time.Millisecond)
 	if atomic.LoadInt32(&p.configCalls) != 1 {
@@ -1973,7 +1973,7 @@ func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
 		storePersister: store,
 	}
 
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
 	for range 2 {
@@ -2159,7 +2159,7 @@ func (p *recordingConfigPersister) PersistConfig(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !config.MirrorFenceHolds(ctx) {
+	if !config.MirrorFenceHolds(ctx, data) {
 		return nil
 	}
 	p.mirrored <- data
@@ -2340,5 +2340,59 @@ func TestQueuedConfigMirrorSkipsFileRewrittenByPlaintextReload(t *testing.T) {
 	case mirrored := <-persister.mirrored:
 		t.Fatalf("a mirror queued before the plaintext reload published %q", mirrored)
 	default:
+	}
+}
+
+// A mirror mirrors only the bytes its reload validated. A save landing before the
+// queued mirror runs (here an invalid document) is left to the reload of that
+// save, which rejects it, instead of being uploaded unvalidated.
+func TestQueuedConfigMirrorSkipsUnvalidatedSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	var queued []func()
+	runConfigPersist = func(persist func()) { queued = append(queued, persist) }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	if len(queued) != 1 {
+		t.Fatalf("queued mirrors after the reload = %d, want 1", len(queued))
+	}
+	if err := os.WriteFile(configPath, []byte("port: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	queued[0]()
+	select {
+	case mirrored := <-persister.mirrored:
+		t.Fatalf("mirrored bytes no reload validated: %q", mirrored)
+	default:
+	}
+
+	// Unchanged bytes still mirror.
+	if err := os.WriteFile(configPath, []byte("port: 8318\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.reloadConfigIfChanged()
+	if len(queued) != 2 {
+		t.Fatalf("queued mirrors after the second reload = %d, want 2", len(queued))
+	}
+	queued[1]()
+	select {
+	case mirrored := <-persister.mirrored:
+		if !strings.Contains(string(mirrored), "port: 8318") {
+			t.Fatalf("mirrored %q, want the validated config", mirrored)
+		}
+	default:
+		t.Fatal("the validated config was not mirrored")
 	}
 }

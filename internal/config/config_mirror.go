@@ -4,24 +4,25 @@ import "context"
 
 type mirrorFenceKey struct{}
 
-// WithMirrorFence returns a copy of ctx carrying current, which reports whether a
-// config mirror is still current. A store's PersistConfig calls MirrorFenceHolds
-// after it reads config.yaml, under its own lock, and skips the mirror when the
-// fence no longer holds. The watcher uses it so a mirror queued before a reload
-// that hashed a plaintext secret does not publish the rewritten file, in which a
-// YAML anchor or merge source can still hold that plaintext.
-func WithMirrorFence(ctx context.Context, current func() bool) context.Context {
-	if current == nil {
+// WithMirrorFence returns a copy of ctx carrying fence. A store's PersistConfig
+// reads config.yaml when the mirror runs, under its own lock, and calls
+// MirrorFenceHolds with those bytes; it mirrors them only if the fence holds. The
+// watcher fences each mirror on the bytes its reload validated, so a save landing
+// after that reload (an invalid or partial document, or a hashed write-back that
+// leaves a plaintext secret at a YAML anchor) is left to the reload of that save.
+func WithMirrorFence(ctx context.Context, fence func(data []byte) bool) context.Context {
+	if fence == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, mirrorFenceKey{}, current)
+	return context.WithValue(ctx, mirrorFenceKey{}, fence)
 }
 
-// MirrorFenceHolds reports whether the fence ctx carries, if any, still holds.
-func MirrorFenceHolds(ctx context.Context) bool {
+// MirrorFenceHolds reports whether the fence ctx carries, if any, allows mirroring
+// data.
+func MirrorFenceHolds(ctx context.Context, data []byte) bool {
 	if ctx == nil {
 		return true
 	}
-	current, ok := ctx.Value(mirrorFenceKey{}).(func() bool)
-	return !ok || current()
+	fence, ok := ctx.Value(mirrorFenceKey{}).(func([]byte) bool)
+	return !ok || fence(data)
 }
