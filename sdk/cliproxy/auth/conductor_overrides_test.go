@@ -2654,3 +2654,70 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
 	}
 }
+
+// sequencedErrorExecutor returns, per auth, the queued errors in order and then
+// succeeds.
+type sequencedErrorExecutor struct {
+	authFallbackExecutor
+	queued map[string][]error
+}
+
+func (e *sequencedErrorExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, auth.ID)
+	var err error
+	if queue := e.queued[auth.ID]; len(queue) > 0 {
+		err, e.queued[auth.ID] = queue[0], queue[1:]
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+}
+
+// A 429 reset hint belongs to the credential that returned it. With cooling
+// disabled, one credential's hint beyond max-retry-interval must not stop the
+// request when another attempted credential failed with no hint and can retry
+// now.
+func TestManager_Execute_DisableCooling_RetryHintStaysWithItsCredential(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const authA, authB = "auth-hint-scope-a", "auth-hint-scope-b"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			authA: {&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"}},
+			authB: {
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-hint-scope"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		id := id
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want a retry of %s, whose own failure carried no hint", errExecute, executor.ExecuteCalls(), authA)
+	}
+	if string(resp.Payload) != authA {
+		t.Fatalf("response from %q, want %s", resp.Payload, authA)
+	}
+}

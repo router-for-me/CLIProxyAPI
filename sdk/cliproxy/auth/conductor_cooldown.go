@@ -1054,6 +1054,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					state.coolingDisabledRetryAt = time.Time{}
+					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil && *result.RetryAfter > 0 {
+						state.coolingDisabledRetryAt = now.Add(*result.RetryAfter)
+					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -1649,6 +1653,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
+	state.coolingDisabledRetryAt = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now
