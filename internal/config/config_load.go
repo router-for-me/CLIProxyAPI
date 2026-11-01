@@ -194,8 +194,21 @@ func HasPlaintextSecretKey(data []byte) bool {
 	if yaml.Unmarshal(data, &root) != nil || len(root.Content) == 0 {
 		return false
 	}
+	for _, secret := range managementSecretNodes(root.Content[0]) {
+		if !emptyOrHashedSecret(secret) {
+			return true
+		}
+	}
+	return false
+}
+
+// managementSecretNodes returns every value either secret path can read in the
+// document root: own and merged-in values, aliases resolved, including merged
+// values a direct key shadows.
+func managementSecretNodes(root *yaml.Node) []*yaml.Node {
+	var secrets []*yaml.Node
 	for _, path := range [][]string{{"management", "secret-key"}, {"remote-management", "secret-key"}} {
-		nodes := []*yaml.Node{root.Content[0]}
+		nodes := []*yaml.Node{root}
 		for _, key := range path {
 			var next []*yaml.Node
 			for _, node := range nodes {
@@ -203,30 +216,41 @@ func HasPlaintextSecretKey(data []byte) bool {
 			}
 			nodes = next
 		}
-		for _, secret := range nodes {
-			// An explicit YAML null (`null`, `~`) decodes as an empty secret, as an
-			// empty value does; a quoted 'null' is a string and still counts.
-			if secret.Kind == yaml.ScalarNode && (secret.ShortTag() == "!!null" || secret.Value == "" || looksLikeBcrypt(secret.Value)) {
-				continue
-			}
-			return true
-		}
+		secrets = append(secrets, nodes...)
 	}
-	return false
+	return secrets
+}
+
+// emptyOrHashedSecret reports whether a secret value node holds no plaintext: an
+// empty value, an explicit YAML null (`null`, `~`, which decodes as empty) or a
+// bcrypt hash. A quoted 'null' is a string and holds plaintext.
+func emptyOrHashedSecret(secret *yaml.Node) bool {
+	return secret.Kind == yaml.ScalarNode && (secret.ShortTag() == "!!null" || secret.Value == "" || looksLikeBcrypt(secret.Value))
 }
 
 // PlaintextManagementSecrets returns the plaintext management secrets config YAML
 // holds: the effective one and the values at both secret paths, with aliases and
-// merge keys resolved. Hashing replaces only the effective key, so a caller that
-// must keep the plaintext out of a remote mirror records these before the hashed
-// write-back and checks the rewritten file with HoldsAnyScalarValue. YAML that does
-// not decode as a Config returns none.
+// merge keys resolved, plus every raw scalar either path can read, including a
+// merged value a direct key shadows. Hashing replaces only the effective key and
+// the rewrite can drop the merge, leaving a shadowed source as a plain setting, so
+// a caller that must keep the plaintext out of a remote mirror records these
+// before the hashed write-back and checks the rewritten file with
+// HoldsAnyScalarValue. YAML that does not decode as a Config returns none.
 func PlaintextManagementSecrets(data []byte) []string {
 	var cfg Config
 	if yaml.Unmarshal(data, &cfg) != nil {
 		return nil
 	}
-	return plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey)
+	secrets := plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey)
+	var root yaml.Node
+	if yaml.Unmarshal(data, &root) == nil && len(root.Content) > 0 {
+		for _, secret := range managementSecretNodes(root.Content[0]) {
+			if secret.Kind == yaml.ScalarNode && !emptyOrHashedSecret(secret) {
+				secrets = append(secrets, secret.Value)
+			}
+		}
+	}
+	return secrets
 }
 
 // HoldsAnyScalarValue reports whether config YAML holds any of values as a scalar
