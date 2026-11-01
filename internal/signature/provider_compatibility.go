@@ -243,6 +243,10 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 			if strings.HasPrefix(unprefixed, "sealed.v1.") {
 				return SignatureProviderSWE
 			}
+		case SignatureProviderMeta:
+			// A Muse envelope is only replayable to the account that issued it, which
+			// only the Meta executor can verify. Every other target must treat it as
+			// foreign, exactly as it treated the raw envelope before the tag existed.
 		}
 		return SignatureProviderUnknown
 	}
@@ -426,6 +430,8 @@ func SignatureProviderFromCachePrefix(prefix string) SignatureProvider {
 		return SignatureProviderGPT
 	case "swe", "sealed":
 		return SignatureProviderSWE
+	case "meta":
+		return SignatureProviderMeta
 	default:
 		return SignatureProviderUnknown
 	}

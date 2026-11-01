@@ -37,6 +37,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	prepared.replay.recordRequest(ctx, prepared.baseModel, enriched.ID)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, enriched)
 	defer reporter.TrackFailure(ctx, &err)
@@ -48,22 +49,27 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if errRequest != nil {
-		return nil, errRequest
-	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
-	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
+	var httpResp *http.Response
+	for {
+		httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
+		e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
-	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return nil, errDo
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
+		httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+		var errDo error
+		httpResp, errDo = httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			return nil, errDo
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("meta executor: close response body error: %v", errClose)
@@ -74,7 +80,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, wrapMetaUpstreamError(httpResp.StatusCode, data)
+		if !prepared.retryWithoutReplay(ctx, httpResp.StatusCode, data) {
+			return nil, wrapMetaUpstreamError(httpResp.StatusCode, data)
+		}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -209,6 +217,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				return
 			}
+			eventData = prepared.replay.tagResponseEvent(eventData)
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)

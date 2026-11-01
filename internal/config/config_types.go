@@ -196,6 +196,78 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// MetaConfig configures provider-wide Meta (Muse) request behavior.
+type MetaConfig struct {
+	// ReasoningReplay controls account-safe replay of Muse reasoning across tool turns.
+	ReasoningReplay MetaReasoningReplayConfig `yaml:"reasoning-replay" json:"reasoning-replay"`
+}
+
+// MetaReasoningReplayConfig replays a Muse model's own reasoning back to it on later
+// turns. Muse reasoning is an encrypted envelope that Meta binds to the account that
+// issued it, so the proxy tags every envelope it returns with that account and only
+// forwards an envelope when the credential selected for the next turn is the one that
+// issued it. Anything else is dropped, which is the behavior without this feature.
+// If Meta still rejects a replayed envelope the request is retried once without any.
+type MetaReasoningReplayConfig struct {
+	// Enabled turns the feature on. Default false: reasoning envelopes are neither
+	// tagged nor replayed, and a tagged envelope from an earlier run is dropped.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Models limits the feature to matching model names for a canary. Patterns are
+	// case-insensitive and support "*" wildcards; both the requested name (including
+	// any oauth-model-alias) and the upstream model are tested. Empty means every
+	// Meta model when Enabled is true.
+	Models []string `yaml:"models,omitempty" json:"models,omitempty"`
+}
+
+// AppliesToModel reports whether reasoning replay is on for any of the given model names.
+func (c MetaReasoningReplayConfig) AppliesToModel(modelNames ...string) bool {
+	if !c.Enabled {
+		return false
+	}
+	patterns := make([]string, 0, len(c.Models))
+	for _, pattern := range c.Models {
+		if pattern = strings.ToLower(strings.TrimSpace(pattern)); pattern != "" {
+			patterns = append(patterns, pattern)
+		}
+	}
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, name := range modelNames {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		for _, pattern := range patterns {
+			if matchModelGlob(pattern, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchModelGlob matches value against a pattern whose only metacharacter is "*".
+func matchModelGlob(pattern, value string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == value
+	}
+	if !strings.HasPrefix(value, parts[0]) {
+		return false
+	}
+	value = value[len(parts[0]):]
+	last := parts[len(parts)-1]
+	for _, part := range parts[1 : len(parts)-1] {
+		idx := strings.Index(value, part)
+		if idx < 0 {
+			return false
+		}
+		value = value[idx+len(part):]
+	}
+	return strings.HasSuffix(value, last)
+}
+
 // DevinConfig configures provider-wide Devin request behavior.
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.

@@ -42,6 +42,12 @@ func CodexReplaySignatureForTarget(modelName, rawSignature string) (string, bool
 		return "", false
 	}
 	target := sigcompat.SignatureProviderFromModelName(thinking.ParseSuffix(modelName).ModelName)
+	if target == sigcompat.SignatureProviderMeta && sigcompat.IsMetaReasoningTagged(rawSignature) {
+		// Keep the proxy's account provenance tag intact. Only the Meta executor
+		// knows which credential it selected, so it alone decides whether the
+		// envelope is replayable and strips the tag before the upstream call.
+		return rawSignature, true
+	}
 	detected := sigcompat.DetectSignatureProvider(rawSignature)
 	if detected != sigcompat.SignatureProviderUnknown {
 		effectiveTarget := target
