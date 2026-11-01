@@ -977,11 +977,6 @@ func TestWriteErrorResponseUsageLimitHeaders(t *testing.T) {
 			if got := recorder.Header().Get("X-Codex-Primary-Reset-At"); got != strconv.FormatInt(resetAt.Unix(), 10) {
 				t.Fatalf("X-Codex-Primary-Reset-At = %q, want %d", got, resetAt.Unix())
 			}
-			if name == "wrapped" {
-				// The headers follow the cooldown through wrapping; the body is
-				// built from the wrapped text, as for any wrapped error.
-				return
-			}
 			var payload struct {
 				Error struct {
 					Code     string `json:"code"`

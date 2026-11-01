@@ -60,9 +60,6 @@ func TestResponsesWebsocketUsageLimitPayloadCarriesCodexHeaders(t *testing.T) {
 			if headers.Get("Retry-After").Exists() {
 				t.Fatalf("headers.Retry-After is set: %s", payload)
 			}
-			if name == "wrapped" {
-				return
-			}
 			if got := gjson.GetBytes(payload, "error.type").String(); got != "usage_limit_reached" {
 				t.Fatalf("error.type = %q, want usage_limit_reached: %s", got, payload)
 			}

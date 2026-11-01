@@ -735,6 +735,9 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
 			errText = errMsg.Error.Error()
 		}
+		if usageLimit, ok := coreauth.UsageLimitResponseText(errMsg.Error); ok {
+			errText = usageLimit
+		}
 	}
 
 	var errCause error

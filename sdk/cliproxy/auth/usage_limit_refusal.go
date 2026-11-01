@@ -40,6 +40,17 @@ func IsUsageLimitReachedError(err error) bool {
 	return errors.As(err, &cooldown) && cooldown.IsUsageLimitReached()
 }
 
+// UsageLimitResponseText returns the response body of the usage-limit cooldown
+// in err's chain, so a wrapped error still answers with error.type
+// usage_limit_reached.
+func UsageLimitResponseText(err error) (string, bool) {
+	var cooldown *modelCooldownError
+	if !errors.As(err, &cooldown) || !cooldown.IsUsageLimitReached() {
+		return "", false
+	}
+	return cooldown.Error(), true
+}
+
 // usageLimitRefusalFor reports the usage limit that blocks every candidate, or
 // nil when any candidate is blocked for another reason, is not blocked, or the
 // first reset is too close for the client to stop on. Codex's
@@ -108,8 +119,9 @@ func codexUsageLimitEvidence(auth *Auth, model string, now time.Time) (int64, bo
 }
 
 // codexUsageLimitWindow reports whether err records Codex's 429
-// usage_limit_reached body, over HTTP or as a WebSocket error event, and the
-// window it names in minutes (0 when absent).
+// usage_limit_reached refusal, in any envelope the Codex executor stores it in
+// (HTTP body, top-level object, WebSocket or SSE error event), and the window
+// it names in minutes (0 when absent).
 func codexUsageLimitWindow(err *Error) (int64, bool) {
 	if err == nil || err.HTTPStatus != http.StatusTooManyRequests {
 		return 0, false
@@ -124,15 +136,18 @@ func codexUsageLimitWindow(err *Error) (int64, bool) {
 	if !gjson.Valid(body) {
 		return 0, false
 	}
-	errorNode := gjson.Get(body, "error")
-	if !errorNode.IsObject() || !strings.EqualFold(strings.TrimSpace(errorNode.Get("type").String()), "usage_limit_reached") {
-		return 0, false
+	root := gjson.Parse(body)
+	for _, node := range []gjson.Result{root.Get("error"), root, root.Get("body.error"), root.Get("response.error")} {
+		if !node.IsObject() || !strings.EqualFold(strings.TrimSpace(node.Get("type").String()), "usage_limit_reached") {
+			continue
+		}
+		window := node.Get("limit_window_minutes").Int()
+		if window < 0 {
+			window = 0
+		}
+		return window, true
 	}
-	window := errorNode.Get("limit_window_minutes").Int()
-	if window < 0 {
-		window = 0
-	}
-	return window, true
+	return 0, false
 }
 
 // codexRateLimitHeaders carries the exhausted window in the rate-limit headers

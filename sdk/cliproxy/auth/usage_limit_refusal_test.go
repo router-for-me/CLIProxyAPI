@@ -179,6 +179,9 @@ func TestCodexUsageLimitWindowReadsEveryBodyForm(t *testing.T) {
 		"spaced":          `{"error": {"type": "usage_limit_reached", "limit_window_minutes": 300}}`,
 		"prefixed":        `status 429: {"error":{"type":"usage_limit_reached","limit_window_minutes":300}}`,
 		"websocket event": `{"status":429,"error":{"type":"usage_limit_reached","limit_window_minutes":300}}`,
+		"top level":       `{"type":"usage_limit_reached","limit_window_minutes":300}`,
+		"websocket body":  `{"type":"error","status":429,"body":{"error":{"type":"usage_limit_reached","limit_window_minutes":300}}}`,
+		"response failed": `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","limit_window_minutes":300}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			window, ok := codexUsageLimitWindow(&Error{HTTPStatus: http.StatusTooManyRequests, Message: message})

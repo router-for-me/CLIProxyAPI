@@ -148,6 +148,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		if v := strings.TrimSpace(msg.Error.Error()); v != "" {
 			errText = v
 		}
+		if usageLimit, ok := coreauth.UsageLimitResponseText(msg.Error); ok {
+			errText = usageLimit
+		}
 	}
 
 	var errCause error
