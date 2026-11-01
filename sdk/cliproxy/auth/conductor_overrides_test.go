@@ -2721,3 +2721,101 @@ func TestManager_Execute_DisableCooling_RetryHintStaysWithItsCredential(t *testi
 		t.Fatalf("response from %q, want %s", resp.Payload, authA)
 	}
 }
+
+// A credential whose 429 announced a reset that has not passed is skipped in the
+// request's next retry round, even when another credential's hint-less failure
+// made that round start at once.
+func TestManager_Execute_DisableCooling_RetryRoundSkipsCredentialWithLiveReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const authA, authB = "auth-live-reset-a", "auth-live-reset-b"
+	limited := &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour}
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			authA: {limited, limited, limited, limited},
+			authB: {&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"}},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-live-reset"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		id := id
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v)", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != authB {
+		t.Fatalf("response from %q, want %s", resp.Payload, authB)
+	}
+	sentToA := 0
+	for _, id := range executor.ExecuteCalls() {
+		if id == authA {
+			sentToA++
+		}
+	}
+	if sentToA != 1 {
+		t.Fatalf("calls %v sent %s %d times, want once: its 2h reset had not passed", executor.ExecuteCalls(), authA, sentToA)
+	}
+}
+
+// Out-of-order completions must not shorten or clear a newer 429's reset: a
+// failure only extends it, and a success dispatched before it was recorded
+// leaves it in place. A later success clears it.
+func TestManager_MarkResult_DisableCooling_RetryResetSurvivesStaleResults(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reset-order", "test-model-reset-order"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reset := func() time.Time {
+		t.Helper()
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	result := func(seq uint64, success bool, status int, retryAfter time.Duration) Result {
+		r := Result{AuthID: id, Provider: "claude", Model: model, Success: success, ExecutionSeq: seq}
+		if !success {
+			r.Error = &Error{HTTPStatus: status, Message: "failed"}
+			if retryAfter > 0 {
+				r.RetryAfter = &retryAfter
+			}
+		}
+		return r
+	}
+
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), result(2, false, http.StatusTooManyRequests, 2*time.Hour))
+	recorded := reset()
+	if !recorded.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset after the 2h 429 = %v, want about 2h ahead", recorded)
+	}
+	m.MarkResult(context.Background(), result(1, false, http.StatusInternalServerError, 0))
+	m.MarkResult(context.Background(), result(1, false, http.StatusTooManyRequests, time.Minute))
+	if got := reset(); !got.Equal(recorded) {
+		t.Fatalf("reset after late failures = %v, want %v kept", got, recorded)
+	}
+	m.MarkResult(context.Background(), result(1, true, 0, 0))
+	if got := reset(); !got.Equal(recorded) {
+		t.Fatalf("reset after a success dispatched before the 429 = %v, want %v kept", got, recorded)
+	}
+	m.executionSeq.Store(3)
+	m.MarkResult(context.Background(), result(3, true, 0, 0))
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after a later success = %v, want cleared", got)
+	}
+}

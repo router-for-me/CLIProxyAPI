@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -871,5 +872,30 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolPreservesEarlierUpstreamError
 	}
 	if hasUpstreamExecutionAttempt(chunk.Err) {
 		t.Fatalf("stream error leaked internal upstream-attempt marker: %T/%v", chunk.Err, chunk.Err)
+	}
+}
+
+// A pooled alias records each member's 429 under its upstream model. When every
+// member announced a reset beyond max-retry-interval, the request must stop
+// instead of probing the whole pool again at once.
+func TestManagerExecute_DisableCooling_AliasPoolHonoursMemberResets(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-member-resets"
+	limited := &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour}
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{"up-a": limited, "up-b": limited}}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, executor)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("expected execute error")
+	}
+	if got := executor.ExecuteModels(); len(got) != 2 {
+		t.Fatalf("pool calls = %v, want each member once: both resets exceed max-retry-interval", got)
 	}
 }
