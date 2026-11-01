@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -92,6 +94,29 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 }
 
+func (w *Watcher) purgeStaleAuthDirStateLocked(nextAuthDir string) {
+	for _, existing := range w.currentAuths {
+		if existing != nil && existing.HasFileSnapshot() && !w.matchesAuthDir(filepath.Dir(existing.FileSnapshotPath()), nextAuthDir) {
+			existing.InvalidateFileSnapshot()
+		}
+	}
+	for trackedPath := range w.fileAuthsByPath {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.fileAuthsByPath, trackedPath)
+		}
+	}
+	for trackedPath := range w.lastAuthHashes {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.lastAuthHashes, trackedPath)
+		}
+	}
+	for trackedPath := range w.lastAuthContents {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.lastAuthContents, trackedPath)
+		}
+	}
+}
+
 func (w *Watcher) reloadConfig() bool {
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
@@ -112,12 +137,23 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
+	w.authRescanMu.Lock()
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
+	oldAuthDir := w.authDir
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
+	if strings.TrimSpace(newConfig.AuthDir) != "" {
+		w.authDir = newConfig.AuthDir
+	}
+	nextAuthDir := w.authDir
+	if !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
+		w.authDirGeneration++
+		w.purgeStaleAuthDirStateLocked(nextAuthDir)
+	}
 	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
@@ -141,7 +177,10 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
-	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
+	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir || oldAuthDir != nextAuthDir
+	if nextAuthDir != "" {
+		w.rewatchAuthDir(nextAuthDir)
+	}
 	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || !reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged)
 

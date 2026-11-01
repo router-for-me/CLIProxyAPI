@@ -33,6 +33,8 @@ type authDirProvider interface {
 type Watcher struct {
 	configPath                 string
 	authDir                    string
+	watchedAuthDir             string
+	authDirGeneration          uint64
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
 	authRescanMu               sync.Mutex
@@ -168,10 +170,29 @@ func (w *Watcher) Stop() error {
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	cloned := cfg.CloneForRuntime()
+	var nextAuthDir string
+	if cloned != nil {
+		if w.mirroredAuthDir != "" {
+			cloned.AuthDir = w.mirroredAuthDir
+			nextAuthDir = w.mirroredAuthDir
+		} else if trimmed := strings.TrimSpace(cloned.AuthDir); trimmed != "" {
+			nextAuthDir = trimmed
+		}
+	}
+	w.authRescanMu.Lock()
 	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
+	oldAuthDir := w.authDir
 	w.config = cloned
+	if nextAuthDir != "" {
+		w.authDir = nextAuthDir
+	}
+	if nextAuthDir != "" && !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
+		w.authDirGeneration++
+		w.purgeStaleAuthDirStateLocked(nextAuthDir)
+	}
 	w.oldConfigYaml, _ = yaml.Marshal(cloned)
+	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.

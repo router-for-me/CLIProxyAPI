@@ -1885,3 +1885,98 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
 }
+
+func TestReloadConfigUpdatesAuthDirSnapshotsAndWatchesNewDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	authDirA := filepath.Join(tmp, "auth-a")
+	authDirB := filepath.Join(tmp, "auth-b")
+	if err := os.MkdirAll(authDirA, 0o700); err != nil {
+		t.Fatalf("mkdir auth-a: %v", err)
+	}
+	if err := os.MkdirAll(authDirB, 0o700); err != nil {
+		t.Fatalf("mkdir auth-b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDirA, "a.json"), []byte(`{"type":"probe-a","access_token":"tok-a"}`), 0o600); err != nil {
+		t.Fatalf("write a.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDirB, "b.json"), []byte(`{"type":"probe-b","access_token":"tok-b"}`), 0o600); err != nil {
+		t.Fatalf("write b.json: %v", err)
+	}
+
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirA))), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	w, err := NewWatcher(cfgPath, authDirA, nil)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	w.SetConfig(&config.Config{AuthDir: authDirA})
+
+	before := w.SnapshotCoreAuths()
+	if len(before) != 1 || before[0].Provider != "probe-a" {
+		t.Fatalf("initial snapshot = %+v, want [probe-a]", before)
+	}
+
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirB))), 0o600); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+	if !w.reloadConfig() {
+		t.Fatal("reloadConfig() returned false")
+	}
+
+	if gotDir := w.currentAuthDir(); gotDir != authDirB {
+		t.Fatalf("currentAuthDir() after reload = %q, want %q", gotDir, authDirB)
+	}
+	after := w.SnapshotCoreAuths()
+	if len(after) != 1 || after[0].Provider != "probe-b" {
+		t.Fatalf("snapshot after auth-dir reload = %+v, want [probe-b]", after)
+	}
+
+	// Events in the old directory must be ignored, while events in the new directory must be processed.
+	lateOld := filepath.Join(authDirA, "late-old.json")
+	if err := os.WriteFile(lateOld, []byte(`{"type":"probe-old-late","access_token":"tok-old"}`), 0o600); err != nil {
+		t.Fatalf("write late-old.json: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: lateOld, Op: fsnotify.Create})
+	if w.isKnownAuthFile(lateOld) {
+		t.Fatal("expected event from old auth-dir to be ignored after reload")
+	}
+
+	lateNew := filepath.Join(authDirB, "late-new.json")
+	if err := os.WriteFile(lateNew, []byte(`{"type":"probe-new-late","access_token":"tok-new"}`), 0o600); err != nil {
+		t.Fatalf("write late-new.json: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: lateNew, Op: fsnotify.Create})
+	if !w.isKnownAuthFile(lateNew) {
+		t.Fatal("expected event from new auth-dir to be processed after reload")
+	}
+
+	// Switching to a directory that does not exist yet creates and watches it
+	// when an initial watch is active, and SetConfig preserves raw paths as given.
+	w.clientsMutex.Lock()
+	w.watchedAuthDir = authDirB
+	w.clientsMutex.Unlock()
+	authDirC := filepath.Join(tmp, "auth-c-uncreated")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirC))), 0o600); err != nil {
+		t.Fatalf("write config for auth-c: %v", err)
+	}
+	if !w.reloadConfig() {
+		t.Fatal("reloadConfig() for auth-c returned false")
+	}
+	w.clientsMutex.RLock()
+	watchedAfter := w.watchedAuthDir
+	w.clientsMutex.RUnlock()
+	if watchedAfter != authDirC {
+		t.Fatalf("watchedAuthDir = %q, want %q", watchedAfter, authDirC)
+	}
+	w.SetConfig(&config.Config{AuthDir: "~/.cli-proxy-api"})
+	if gotRaw := w.currentAuthDir(); gotRaw != "~/.cli-proxy-api" {
+		t.Fatalf("SetConfig expanded raw AuthDir to %q, want ~/.cli-proxy-api", gotRaw)
+	}
+	if _, errStat := os.Stat("~"); !os.IsNotExist(errStat) {
+		t.Fatalf("SetConfig must not create a literal ~ directory in the working tree: err=%v", errStat)
+	}
+}
