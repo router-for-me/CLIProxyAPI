@@ -96,6 +96,16 @@ previous rules and any saved environment value. Client history is unchanged.
 
 ## Measurements and limits
 
+Effort routing is separate from task authorization. A protocol-compatible
+backend can interpret the native Auto Mode policy differently: a channel event
+or delegated subagent task is not automatically equivalent to direct terminal
+user intent. Renaming the model does not change that provenance. Diagnose
+concrete denials and use the client's supported
+[environment and allow-rule configuration](https://code.claude.com/docs/en/auto-mode-config)
+to express the operator's intended channel and delegation scope. Such changes
+are explicit permission-policy choices; they are not wire-format fixes. Keep
+built-in deny rules and test out-of-scope and forged-approval cases separately.
+
 Measured on 2026-10-31 with GPT-6.1 Sol at Standard speed, an OAuth Codex backend
 and a stage-one fixture captured from native Claude Code 2.1.314. The live
 backport used CLIProxyAPI v8.0.47; the regression below also exercises current
