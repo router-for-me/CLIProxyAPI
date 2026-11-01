@@ -646,7 +646,12 @@ func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabili
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model != nil {
-			if _, ok := hints.ModelIDs[normalizeAntigravityFetchedModelID(model.ID)]; ok {
+			id := normalizeAntigravityFetchedModelID(model.ID)
+			_, ok := hints.ModelIDs[id]
+			if !ok && (id == "gemini-4-argon-medium" || id == "gemini-4-argon-low") {
+				_, ok = hints.ModelIDs["gemini-4-argon-high"]
+			}
+			if ok {
 				filtered = append(filtered, model)
 			}
 		}

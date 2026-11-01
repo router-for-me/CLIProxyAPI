@@ -1011,3 +1011,23 @@ func TestAntigravityConcurrentAuthUpdatePreservesBothNewTokenAndPersistedHints(t
 		t.Fatalf("expected version 2 hints to survive preemption and stale-snapshot Update, got %v", loadedHints.ModelIDs)
 	}
 }
+
+func TestFilterAntigravityModelsDerivesArgonMediumAndLowFromHigh(t *testing.T) {
+	hints := antigravityModelCapabilityHints{
+		ModelIDs: map[string]struct{}{
+			"gemini-4-argon-high": {},
+		},
+	}
+	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
+	got := make(map[string]bool, len(models))
+	for _, m := range models {
+		if m != nil {
+			got[m.ID] = true
+		}
+	}
+	for _, want := range []string{"gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"} {
+		if !got[want] {
+			t.Fatalf("expected %s to be included when gemini-4-argon-high is in capability hints; got=%v", want, got)
+		}
+	}
+}

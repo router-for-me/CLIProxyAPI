@@ -96,6 +96,16 @@ func ConvertBudgetToLevel(budget int) (string, bool) {
 	}
 }
 
+// ConvertBudgetToSupportedLevel converts a budget value to the nearest thinking level
+// supported by modelInfo, clamping to modelInfo.Thinking.Levels when defined.
+func ConvertBudgetToSupportedLevel(budget int, modelInfo *registry.ModelInfo, provider string) (ThinkingLevel, bool) {
+	level, ok := ConvertBudgetToLevel(budget)
+	if !ok {
+		return "", false
+	}
+	return clampLevel(ThinkingLevel(level), modelInfo, provider), true
+}
+
 // HasLevel reports whether the given target level exists in the levels slice.
 // Matching is case-insensitive with leading/trailing whitespace trimmed.
 func HasLevel(levels []string, target string) bool {
