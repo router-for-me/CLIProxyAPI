@@ -139,3 +139,43 @@ func TestWriteFileKeepsOwnerAsRoot(t *testing.T) {
 		})
 	}
 }
+
+// A new file under a symlinked parent goes into the directory the link named when
+// the write started: retargeting the link before the commit must not split the
+// rename and the temp cleanup across two directories and leave a temp file behind.
+func TestWriteFileNewFileResolvesSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	for _, dir := range []string{first, second} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	parent := filepath.Join(root, "auths")
+	if err := os.Symlink(first, parent); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	original := beforeCommit
+	t.Cleanup(func() { beforeCommit = original })
+	beforeCommit = func() {
+		// Retarget the parent link the way a directory rotation would.
+		next := filepath.Join(root, "auths.next")
+		if err := os.Symlink(second, next); err != nil {
+			t.Errorf("symlink: %v", err)
+			return
+		}
+		if err := os.Rename(next, parent); err != nil {
+			t.Errorf("retarget: %v", err)
+		}
+	}
+
+	if err := WriteFile(filepath.Join(parent, "auth.json"), []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(first, "auth.json")); err != nil || string(got) != "new" {
+		t.Fatalf("file in the original directory = %q, %v; want new", got, err)
+	}
+	assertNoTempFiles(t, first)
+	assertNoTempFiles(t, second)
+}
