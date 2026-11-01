@@ -2232,8 +2232,9 @@ func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
 func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
 	const secret = "plain-anchored-secret"
 	for name, references := range map[string]string{
-		"scalar anchor": "password: &password " + secret + "\nremote-management:\n  secret-key: *password\n",
-		"merge key":     "defaults: &management\n  secret-key: " + secret + "\nmanagement:\n  <<: *management\n  allow-remote: true\n",
+		"scalar anchor":      "password: &password " + secret + "\nremote-management:\n  secret-key: *password\n",
+		"merge key":          "defaults: &management\n  secret-key: " + secret + "\nmanagement:\n  <<: *management\n  allow-remote: true\n",
+		"mapping-key anchor": "&password " + secret + ": value\nremote-management:\n  secret-key: *password\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			tmpDir := t.TempDir()

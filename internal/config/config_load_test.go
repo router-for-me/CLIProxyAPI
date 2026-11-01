@@ -300,8 +300,8 @@ func TestHoldsAnyScalarValueFindsPlaintextLeftByWriteBack(t *testing.T) {
 	if HoldsAnyScalarValue([]byte("password: other\nmanagement:\n  secret-key: x\n"), secrets) {
 		t.Fatal("HoldsAnyScalarValue() = true without the plaintext")
 	}
-	if HoldsAnyScalarValue([]byte(secret+": key-only\n"), secrets) {
-		t.Fatal("HoldsAnyScalarValue() counted a mapping key")
+	if !HoldsAnyScalarValue([]byte("&password "+secret+": value\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as an anchored mapping key")
 	}
 	if !HoldsAnyScalarValue([]byte("a: [unclosed\n"), secrets) {
 		t.Fatal("HoldsAnyScalarValue() = false for YAML that does not parse")
