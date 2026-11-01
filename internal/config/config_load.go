@@ -256,7 +256,7 @@ func PlaintextManagementSecrets(data []byte) []string {
 // HoldsAnyScalarValue reports whether config YAML holds any of values as a scalar
 // anywhere, such as at a YAML anchor a hashed key no longer refers to. Mapping keys
 // count too: an anchor on a key (`&pw plaintext: x` with `secret-key: *pw`) leaves
-// the plaintext as that key. YAML that does not parse reports true, so unreadable
+// the plaintext as that key. So do comments, which the write-back keeps. YAML that does not parse reports true, so unreadable
 // bytes never count as clean.
 func HoldsAnyScalarValue(data []byte, values []string) bool {
 	if len(values) == 0 {
@@ -274,8 +274,13 @@ func HoldsAnyScalarValue(data []byte, values []string) bool {
 	return false
 }
 
-// yamlScalarOrKeyExists is yamlScalarExists with mapping keys included.
+// yamlScalarOrKeyExists is yamlScalarExists with mapping keys and comments
+// included: the hashed write-back keeps a value's comments, so a comment that
+// repeats the plaintext (`secret-key: s3cret # s3cret`) still holds it.
 func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
+	if strings.Contains(node.HeadComment, value) || strings.Contains(node.LineComment, value) || strings.Contains(node.FootComment, value) {
+		return true
+	}
 	if node.Kind == yaml.ScalarNode {
 		return node.ShortTag() != "!!null" && node.Value == value
 	}
