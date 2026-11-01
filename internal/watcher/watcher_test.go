@@ -24,6 +24,87 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestKeyPayloadAuthComparison(t *testing.T) {
+	first := &config.ClaudeKey{APIKey: "syntheticFirst123", KeyPayloadPolicy: config.KeyPayloadPolicy{Payload: &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{{Params: []string{"system.0"}}}}}}
+	second := &config.ClaudeKey{APIKey: "syntheticOther123", KeyPayloadPolicy: first.KeyPayloadPolicy}
+	a := &coreauth.Auth{ID: "fixture", ConfigKey: first}
+	b := a.Clone()
+	b.ConfigKey = second
+	if !authEqual(a, b) {
+		t.Fatal("owner address or unrelated key content manufactured an auth update")
+	}
+	second.Payload = &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{{Params: []string{"system.1"}}}}
+	if authEqual(a, b) {
+		t.Fatal("changed local policy did not publish an auth update")
+	}
+	a.ConfigKey, b.ConfigKey = &config.ClaudeKey{}, &config.ClaudeKey{KeyPayloadPolicy: config.KeyPayloadPolicy{Payload: &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{}}}}
+	if !authEqual(a, b) {
+		t.Fatal("empty policy manufactured an auth update")
+	}
+}
+
+func TestKeyPayloadReloadRetentionAndReorder(t *testing.T) {
+	dir := t.TempDir()
+	authDir := filepath.Join(dir, "auth")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	prefix := fmt.Sprintf("oauth: {auth-dir: %q}\napi-keys:\n  claude:\n    - keys:\n", authDir)
+	target := "        - {api-key: syntheticSharedKey123, headers: {X-Role: target}, payload: {filter: [{models: [{name: '*'}], params: [system.0]}]}}\n"
+	control := "        - {api-key: syntheticSharedKey123, headers: {X-Role: other}}\n"
+	raw := []byte(prefix + target + control)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.ParseConfigBytes(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published *config.Config
+	updates := 0
+	w, err := NewWatcher(path, authDir, func(cfg *config.Config) { published = cfg; updates++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Error(errStop)
+		}
+	})
+	w.SetConfig(initial)
+	w.ReloadConfigIfChanged()
+	if published == nil || updates != 1 || len(published.ClaudeKey[0].PayloadFilters()) != 1 {
+		t.Fatal("valid initial policy did not reach the reload consumer")
+	}
+	active := published
+	invalid := strings.Replace(string(raw), "name: '*'", "name: '*', protocol: codex", 1)
+	if err = os.WriteFile(path, []byte(invalid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w.ReloadConfigIfChanged()
+	if published != active || updates != 1 || len(active.ClaudeKey[0].PayloadFilters()) != 1 {
+		t.Fatal("invalid reload replaced the active configuration")
+	}
+	if err = os.WriteFile(path, []byte(prefix+control+target), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w.ReloadConfigIfChanged()
+	if published == active || updates != 2 {
+		t.Fatal("valid reordered policy did not replace its snapshot")
+	}
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: published, IDGenerator: synthesizer.NewStableIDGenerator()})
+	if err != nil || len(auths) != len(published.ClaudeKey) {
+		t.Fatalf("reordered synthesis failed: %v", err)
+	}
+	if auths[1].ConfigKey != &published.ClaudeKey[1] || auths[1].Attributes["config_index"] != "1" || len(config.PayloadFiltersFor(auths[0].ConfigKey)) != 0 || len(config.PayloadFiltersFor(auths[1].ConfigKey)) != 1 {
+		t.Fatal("reordered indexes and exact owners diverged")
+	}
+	if len(active.ClaudeKey[0].PayloadFilters()) != 1 {
+		t.Fatal("retired snapshot changed while still referenced")
+	}
+}
+
 func TestApplyAuthExcludedModelsMeta_APIKey(t *testing.T) {
 	auth := &coreauth.Auth{Attributes: map[string]string{}}
 	perKey := []string{" Model-1 ", "model-2"}

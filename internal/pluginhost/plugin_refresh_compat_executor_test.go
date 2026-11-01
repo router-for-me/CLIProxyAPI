@@ -47,6 +47,28 @@ func (e *stubCompatExecutor) PrepareRequest(*http.Request, *coreauth.Auth) error
 	return nil
 }
 
+func TestKeyPayloadPluginBindingContract(t *testing.T) {
+	key := &config.OpenAICompatibilityAPIKey{KeyPayloadPolicy: config.KeyPayloadPolicy{Payload: &config.KeyPayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{"messages.0"}}}}}}
+	unsupported := NewPluginRefreshCompatExecutor(&stubCompatExecutor{id: "synthetic-provider"}, nil, &config.Config{})
+	if unsupported.(coreauth.APIKeyConfigExecutor).ForAPIKey(key) != nil {
+		t.Fatal("refresh wrapper hid its inner provider's unsupported policy")
+	}
+	if unsupported.(coreauth.APIKeyConfigExecutor).ForAPIKey(nil) == nil {
+		t.Fatal("absent policy changed the existing refresh-wrapper contract")
+	}
+	cfg := &config.Config{}
+	inner := runtimeexecutor.NewOpenAICompatExecutor("synthetic-provider", cfg)
+	wrapped := NewPluginRefreshCompatExecutor(inner, nil, cfg)
+	bound := wrapped.(coreauth.APIKeyConfigExecutor).ForAPIKey(key)
+	if bound == nil || bound == wrapped {
+		t.Fatal("supported provider did not receive a request-local wrapper")
+	}
+	scoped, ok := UnwrapPluginRefreshCompatExecutor(bound)
+	if !ok || scoped == inner || scoped.Identifier() != inner.Identifier() {
+		t.Fatal("wrapper lost its scoped inner provider contract")
+	}
+}
+
 func TestPluginRefreshCompatExecutorDelegatesExecuteAndRefresh(t *testing.T) {
 	refreshCalls := 0
 	host := newHostWithRecords(capabilityRecord{
