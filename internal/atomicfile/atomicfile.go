@@ -119,8 +119,16 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	}
 
 	// The temp name must not match what watchers and scanners pick up (*.json, the
-	// config file name), so it is hidden and ends in a random suffix.
-	tmp, errCreate := createTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-", perm)
+	// config file name), so it is hidden and ends in a random suffix. Replacing an
+	// existing file, the temp starts owner-only: the data is written before the
+	// file's own mode is applied, and must not be readable by others meanwhile,
+	// or left readable after a crash. A new file gets perm less the umask, as
+	// os.WriteFile gives it.
+	tempPerm := perm
+	if existing != nil {
+		tempPerm = 0o600
+	}
+	tmp, errCreate := createTemp(filepath.Dir(target), "."+filepath.Base(target)+".tmp-", tempPerm)
 	if errCreate != nil {
 		log.WithError(errCreate).Debugf("atomicfile: cannot create temp file next to %s, writing in place", target)
 		return writeInPlace(target, data, perm, mustExist)
