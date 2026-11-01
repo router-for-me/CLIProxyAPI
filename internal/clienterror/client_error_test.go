@@ -235,6 +235,26 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "anthropic credit balance too low is payment failure",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`),
+			want:   false,
+		},
+		{
+			name: "anthropic credit balance too low in response body is payment failure",
+			err: responseBodyError{
+				status: http.StatusBadRequest,
+				body:   `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`,
+			},
+			want: false,
+		},
+		{
+			name:   "anthropic ordinary invalid_request_error remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}`),
+			want:   true,
+		},
+		{
 			name:   "structured model_not_found is not request fault",
 			status: http.StatusBadRequest,
 			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`),

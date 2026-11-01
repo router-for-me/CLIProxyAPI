@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -356,6 +359,84 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	}
 	if got := status.StatusCode(); got != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+}
+
+func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T) {
+	sseResponse := "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n"
+	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
+		for _, level := range []string{"low", "medium", "high"} {
+			for _, stream := range []bool{false, true} {
+				modeName := "non_stream"
+				if stream {
+					modeName = "stream"
+				}
+				t.Run(model+"/"+level+"/"+modeName, func(t *testing.T) {
+					var capturedBody []byte
+					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						raw, errRead := io.ReadAll(req.Body)
+						if errRead != nil {
+							return nil, errRead
+						}
+						if errClose := req.Body.Close(); errClose != nil {
+							return nil, errClose
+						}
+						capturedBody = raw
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": {"text/event-stream"}},
+							Body:       io.NopCloser(strings.NewReader(sseResponse)),
+							Request:    req,
+						}, nil
+					}))
+
+					executor := NewAntigravityExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{
+						ID:       "ag-claude-55-test",
+						Provider: "antigravity",
+						Metadata: map[string]any{
+							"access_token": "token",
+							"project_id":   "project-1",
+							"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+						},
+					}
+					payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"maxOutputTokens":128000,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + level + `"}}}`)
+					req := cliproxyexecutor.Request{Model: model, Payload: payload}
+					opts := cliproxyexecutor.Options{
+						SourceFormat:    sdktranslator.FormatGemini,
+						ResponseFormat:  sdktranslator.FormatGemini,
+						OriginalRequest: payload,
+						Stream:          stream,
+					}
+
+					if stream {
+						res, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+						if errStream != nil {
+							t.Fatalf("ExecuteStream() error = %v", errStream)
+						}
+						for chunk := range res.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("stream chunk error = %v", chunk.Err)
+							}
+						}
+					} else {
+						if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+							t.Fatalf("Execute() error = %v", errExec)
+						}
+					}
+
+					if got := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
+						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, capturedBody)
+					}
+					if budget := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+						t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
+					}
+					if include := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+						t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, capturedBody)
+					}
+				})
+			}
+		}
 	}
 }
 

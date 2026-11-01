@@ -101,6 +101,12 @@ func IsRequestFault(status int, err error) bool {
 	if IsClaudeThreadNotFound(status, err) {
 		return true
 	}
+	// Anthropic reports an exhausted API credit balance as 400 with an
+	// invalid_request_error body. Preserve credential cooldown and rotation
+	// without weakening generic 400 request-fault handling.
+	if IsCreditBalanceTooLow(status, err) {
+		return false
+	}
 	// Model not found indicates a credential-model capability mismatch rather than
 	// a caller request error. Preserve rotation and cooldown for the model.
 	if hasModelNotFoundErrorBody(err) {
@@ -163,6 +169,42 @@ func IsClaudeThreadNotFound(status int, err error) bool {
 	}
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
+}
+
+// IsCreditBalanceTooLow reports the Anthropic 400 response returned when a
+// credential's API credit balance is exhausted.
+func IsCreditBalanceTooLow(status int, err error) bool {
+	if status <= 0 && err != nil {
+		status = HTTPStatusFromError(err)
+	}
+	if status != http.StatusBadRequest || err == nil {
+		return false
+	}
+	return hasCreditBalanceTooLowBody(err)
+}
+
+func hasCreditBalanceTooLowBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !json.Valid([]byte(body)) {
+		return false
+	}
+	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+		msg := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		if strings.HasPrefix(msg, "your credit balance is too low") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasModelNotFoundErrorBody(err error) bool {

@@ -130,3 +130,42 @@ func TestApplyThinkingWithSourcePayload_AntigravityResponsesReasoningSummaryAuto
 		t.Fatalf("thinkingLevel = %q, want low: %s", level, out)
 	}
 }
+
+func TestApplyRequestThinking_AntigravityClaude55PreservesThinkingLevel(t *testing.T) {
+	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
+		for _, level := range []string{"low", "medium", "high"} {
+			t.Run(model+"/"+level, func(t *testing.T) {
+				source := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"maxOutputTokens":128000,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + level + `"}}}`)
+				translated := sdktranslator.TranslateRequest(
+					sdktranslator.FormatGemini,
+					sdktranslator.FormatAntigravity,
+					model,
+					source,
+					true,
+				)
+
+				out, err := helps.ApplyThinkingWithSourcePayload(
+					translated,
+					source,
+					source,
+					model,
+					sdktranslator.FormatGemini.String(),
+					sdktranslator.FormatAntigravity.String(),
+					"antigravity",
+				)
+				if err != nil {
+					t.Fatalf("ApplyThinkingWithSourcePayload() error = %v", err)
+				}
+				if got := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
+					t.Fatalf("thinkingLevel = %q, want %q: %s", got, level, out)
+				}
+				if budget := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+					t.Fatalf("thinkingBudget should be absent, got %s: %s", budget.Raw, out)
+				}
+				if include := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+					t.Fatalf("includeThoughts = %s, want true: %s", include.Raw, out)
+				}
+			})
+		}
+	}
+}
