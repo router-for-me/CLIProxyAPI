@@ -252,12 +252,10 @@ func convertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "message", "":
 				// Handle regular message conversion
 				role := item.Get("role").String()
-				// Only a real user turn can be refused; developer text is sent as user text
-				// but never counts as the user's own turn.
+				// Chat Completions supports developer messages. Preserve their role and
+				// position so mid-session instructions retain their original authority.
+				// Only real user turns participate in unsupported-content refusal.
 				isUserTurn := role == "user"
-				if role == "developer" {
-					role = "user"
-				}
 				mergeableAssistantIndex = -1
 				if role != "assistant" {
 					appendPendingReasoningMessage()
