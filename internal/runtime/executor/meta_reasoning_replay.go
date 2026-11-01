@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -40,7 +41,10 @@ func (e *MetaExecutor) newMetaReasoningReplay(opts cliproxyexecutor.Options, req
 		return replay
 	}
 	requested := helps.PayloadRequestedModel(opts, requestModel)
-	if !e.cfg.Meta.ReasoningReplay.AppliesToModel(requested, requestModel, baseModel) {
+	// The requested alias may carry a thinking suffix such as "(high)"; match its
+	// suffix-free form too, as the payload model matcher does.
+	requestedBase := thinking.ParseSuffix(requested).ModelName
+	if !e.cfg.Meta.ReasoningReplay.AppliesToModel(requested, requestedBase, requestModel, baseModel) {
 		return replay
 	}
 	replay.AccountKey = helps.MetaReasoningAccountKey(auth)

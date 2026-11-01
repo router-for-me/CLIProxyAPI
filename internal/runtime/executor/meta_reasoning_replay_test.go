@@ -820,17 +820,19 @@ func TestMetaReasoningReplay_ModelScope(t *testing.T) {
 		})
 	}
 
-	t.Run("an alias on the canary list enables it for the requested name", func(t *testing.T) {
-		opts := museReplayClaudeOptions()
-		opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: "muse-canary"}
-		resp, err := NewMetaExecutor(museReplayConfig(true, "muse-canary")).Execute(context.Background(), auth, cliproxyexecutor.Request{Model: museReplayModel, Payload: newMuseReplayConversation(t).payload()}, opts)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if sig := gjson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String(); !signature.IsMetaReasoningTagged(sig) {
-			t.Fatalf("alias on the canary list was not tagged: %q", sig)
-		}
-	})
+	for _, requested := range []string{"muse-canary", "muse-canary(high)"} {
+		t.Run("an alias on the canary list enables it for "+requested, func(t *testing.T) {
+			opts := museReplayClaudeOptions()
+			opts.Metadata = map[string]any{cliproxyexecutor.RequestedModelMetadataKey: requested}
+			resp, err := NewMetaExecutor(museReplayConfig(true, "muse-canary")).Execute(context.Background(), auth, cliproxyexecutor.Request{Model: museReplayModel, Payload: newMuseReplayConversation(t).payload()}, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sig := gjson.GetBytes(resp.Payload, `content.#(type=="thinking").signature`).String(); !signature.IsMetaReasoningTagged(sig) {
+				t.Fatalf("alias %q on the canary list was not tagged: %q", requested, sig)
+			}
+		})
+	}
 }
 
 // The canary needs a control group on the very same pool: an alias on the model list
