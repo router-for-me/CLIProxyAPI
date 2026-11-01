@@ -457,7 +457,11 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "soonest-reset" (aliases "soonestreset", "reset-first", "resetfirst"). soonest-reset
+	// prefers the credential whose weekly quota window resets soonest, as reported by the
+	// last Claude or Codex response headers; a credential whose reset is unknown gets one
+	// request to learn it (once per restart or weekly rollover), matching cliproxy-rs.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
