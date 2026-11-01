@@ -2084,13 +2084,33 @@ func (s *GitTokenStore) PersistConfig(_ context.Context) error {
 	errCommit := s.commitAndPushWithOptionsLocked(context.Background(), "Update config", false, expected, rel)
 	if errors.Is(errCommit, errStagedContentChanged) {
 		log.Warn("git token store: config changed while committing, leaving it to the newer save")
-		return nil
+		return withoutStagedContentChanged(errCommit)
 	}
 	return errCommit
 }
 
 // errStagedContentChanged reports that a file changed between the check and git staging it.
 var errStagedContentChanged = errors.New("git token store: staged content changed")
+
+// withoutStagedContentChanged drops errStagedContentChanged from err, which the
+// caller treats as a skipped commit. Any error joined with it, such as a failed
+// repository close, is returned so it is not silently lost.
+func withoutStagedContentChanged(err error) error {
+	if err == errStagedContentChanged {
+		return nil
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err
+	}
+	var rest []error
+	for _, errPart := range joined.Unwrap() {
+		if errPart != errStagedContentChanged {
+			rest = append(rest, errPart)
+		}
+	}
+	return errors.Join(rest...)
+}
 
 // beforeConfigCommit runs between reading config.yaml and staging it; tests use it
 // to land a concurrent save in that window.

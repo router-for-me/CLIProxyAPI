@@ -379,3 +379,21 @@ func TestGitTokenStorePersistConfigDoesNotCommitPlaintextSecret(t *testing.T) {
 		t.Fatal("committed a config holding a plaintext management secret")
 	}
 }
+
+// PersistConfig skips a commit whose staged config changed, but a repository close
+// failure joined to that sentinel must still reach the caller.
+func TestWithoutStagedContentChangedKeepsJoinedErrors(t *testing.T) {
+	errClose := errors.New("git token store: close repo: boom")
+	errOther := errors.New("git token store: push: rejected")
+
+	if err := withoutStagedContentChanged(errStagedContentChanged); err != nil {
+		t.Fatalf("bare sentinel = %v, want nil", err)
+	}
+	joined := withoutStagedContentChanged(errors.Join(errStagedContentChanged, errClose))
+	if !errors.Is(joined, errClose) || errors.Is(joined, errStagedContentChanged) {
+		t.Fatalf("joined close error = %v, want only the close error", joined)
+	}
+	if err := withoutStagedContentChanged(errOther); err != errOther {
+		t.Fatalf("unrelated error = %v, want it unchanged", err)
+	}
+}
