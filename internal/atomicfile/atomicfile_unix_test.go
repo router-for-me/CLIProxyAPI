@@ -274,3 +274,66 @@ func TestWriteFileReplacesWithoutUnsupportedSync(t *testing.T) {
 	}
 	assertNoTempFiles(t, filepath.Dir(path))
 }
+
+// An existing file's setgid bit (an operator-applied policy) survives the
+// replacement, as with the in-place writers it replaced.
+func TestWriteFileKeepsSetgidBit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Chmod(path, 0o640|os.ModeSetgid); err != nil {
+		t.Fatalf("chmod seed: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("this platform or account cannot set setgid on the file")
+	}
+	if err := WriteFile(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode() & keptModeBits; got != 0o640|os.ModeSetgid {
+		t.Fatalf("mode after replacement = %v, want %v", got, 0o640|os.ModeSetgid)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new" {
+		t.Fatalf("content = %q, want new", got)
+	}
+	assertNoTempFiles(t, filepath.Dir(path))
+}
+
+// After an atomic exchange the temp path holds the previous content (an old
+// credential). If it cannot be removed, the save must say so instead of
+// reporting a clean success.
+func TestReplaceFileReportsPreviousContentLeftBehind(t *testing.T) {
+	if !exchangeAvailable() {
+		t.Skip("no atomic exchange on this platform")
+	}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte("old-token"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	original := removeFile
+	t.Cleanup(func() { removeFile = original })
+	var leftover string
+	removeFile = func(name string) error {
+		leftover = name
+		return syscall.EACCES
+	}
+
+	err := ReplaceFile(path, []byte("new-token"), 0o600)
+	if !errors.Is(err, syscall.EACCES) {
+		t.Fatalf("ReplaceFile() error = %v, want the failed removal reported", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new-token" {
+		t.Fatalf("content = %q, want the replacement to have gone through", got)
+	}
+	if got, _ := os.ReadFile(leftover); string(got) != "old-token" {
+		t.Fatalf("leftover %s holds %q, want the previous content", leftover, got)
+	}
+	if err := os.Remove(leftover); err != nil {
+		t.Fatalf("clean up leftover: %v", err)
+	}
+}
