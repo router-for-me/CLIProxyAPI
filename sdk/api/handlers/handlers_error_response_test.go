@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -944,5 +946,76 @@ func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
 
 	if recorder.Code != clienterror.StatusClientClosedRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+	}
+}
+
+func TestWriteErrorResponseUsageLimitHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetAt := time.Now().Add(3 * time.Hour)
+	for name, errUsage := range map[string]error{
+		"direct":  coreauth.NewUsageLimitModelCooldownError("gpt-6-astra", "codex", resetAt, 300),
+		"wrapped": fmt.Errorf("select credential: %w", coreauth.NewUsageLimitModelCooldownError("gpt-6-astra", "codex", resetAt, 300)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+			NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errUsage})
+			if recorder.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "" {
+				t.Fatalf("Retry-After = %q, want none", got)
+			}
+			if got := recorder.Header().Get("X-Should-Retry"); got != "false" {
+				t.Fatalf("X-Should-Retry = %q, want false", got)
+			}
+			if got := recorder.Header().Get("X-Codex-Primary-Used-Percent"); got != "100" {
+				t.Fatalf("X-Codex-Primary-Used-Percent = %q, want 100", got)
+			}
+			if got := recorder.Header().Get("X-Codex-Primary-Reset-At"); got != strconv.FormatInt(resetAt.Unix(), 10) {
+				t.Fatalf("X-Codex-Primary-Reset-At = %q, want %d", got, resetAt.Unix())
+			}
+			if name == "wrapped" {
+				// The headers follow the cooldown through wrapping; the body is
+				// built from the wrapped text, as for any wrapped error.
+				return
+			}
+			var payload struct {
+				Error struct {
+					Code     string `json:"code"`
+					Type     string `json:"type"`
+					ResetsAt int64  `json:"resets_at"`
+				} `json:"error"`
+			}
+			if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &payload); errUnmarshal != nil {
+				t.Fatalf("decode body %s: %v", recorder.Body.String(), errUnmarshal)
+			}
+			if payload.Error.Code != "model_cooldown" || payload.Error.Type != "usage_limit_reached" || payload.Error.ResetsAt != resetAt.Unix() {
+				t.Fatalf("error = %+v, want model_cooldown with type usage_limit_reached and resets_at %d", payload.Error, resetAt.Unix())
+			}
+		})
+	}
+}
+
+func TestWriteErrorResponseModelCooldownKeepsRetryAfter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	NewBaseAPIHandlers(nil, nil).WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error:      coreauth.NewModelCooldownError("gpt-6-astra", "codex", 90*time.Second),
+	})
+	if got := recorder.Header().Get("Retry-After"); got != "90" {
+		t.Fatalf("Retry-After = %q, want 90", got)
+	}
+	if got := recorder.Header().Get("X-Should-Retry"); got != "" {
+		t.Fatalf("X-Should-Retry = %q, want none", got)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
 	}
 }

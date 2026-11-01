@@ -400,6 +400,11 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
+	// Every credential is out of quota until a known reset: a reconnect cannot
+	// succeed, and the client stops on the usage limit only if it sees it.
+	if coreauth.IsUsageLimitReachedError(errMsg.Error) {
+		return true
+	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
 
@@ -748,10 +753,27 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	var eventHeaders http.Header
+	if errMsg != nil {
+		eventHeaders = errMsg.Addon
+		if coreauth.IsUsageLimitReachedError(errMsg.Error) {
+			// The event carries the usage limit's headers as an HTTP response
+			// would: Codex reads its rate-limit window from them.
+			eventHeaders = eventHeaders.Clone()
+			if eventHeaders == nil {
+				eventHeaders = make(http.Header)
+			}
+			for key, values := range coreauth.SafeResponseHeaders(errMsg.Error) {
+				if http.CanonicalHeaderKey(key) != "Content-Type" {
+					eventHeaders[key] = values
+				}
+			}
+		}
+	}
+	if eventHeaders != nil {
 		headers := []byte(`{}`)
 		hasHeaders := false
-		for key, values := range errMsg.Addon {
+		for key, values := range eventHeaders {
 			if len(values) == 0 {
 				continue
 			}
