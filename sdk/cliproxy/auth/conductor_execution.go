@@ -335,6 +335,12 @@ func isRequestTerminatedError(err error) bool {
 	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err)
 }
 
+// stopsCredentialFailover reports a terminal response that no other credential may replace. A
+// credential-scoped rejection, such as an authoritative quota 429, is safe to retry elsewhere.
+func stopsCredentialFailover(err error) bool {
+	return isRequestTerminatedError(err) && !isCredentialScopedError(err)
+}
+
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	if opts.RequestAfterAuthInterceptor == nil {
 		return req, opts, nil
@@ -1241,7 +1247,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			// A terminal result is never redispatched, so end the selection without waiting for the
 			// release acknowledgement, whose timeout would replace the plugin's response.
-			if isRequestTerminatedError(errStream) {
+			if stopsCredentialFailover(errStream) {
 				if selection != nil {
 					releaseAttempt()
 					selection.End("request_terminated")

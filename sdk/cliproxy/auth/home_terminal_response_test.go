@@ -113,3 +113,47 @@ func TestHomeTerminalResponseSurvivesUnacknowledgedRelease(t *testing.T) {
 		})
 	}
 }
+
+// credentialScopedTerminalError is a terminal response that one credential's quota caused, like
+// Claude Fast's authoritative unified-quota 429.
+type credentialScopedTerminalError struct {
+	response *cliproxyexecutor.RequestTerminatedError
+}
+
+func (e *credentialScopedTerminalError) Error() string            { return "credential rejected the request" }
+func (e *credentialScopedTerminalError) Unwrap() error            { return e.response }
+func (e *credentialScopedTerminalError) IsCredentialScoped() bool { return true }
+
+func TestHomeCredentialScopedTerminalResponseFailsOver(t *testing.T) {
+	for _, mode := range []string{"execute", "count_tokens", "stream", "stream_bootstrap"} {
+		t.Run(mode, func(t *testing.T) {
+			failure := &credentialScopedTerminalError{response: &cliproxyexecutor.RequestTerminatedError{
+				HTTPStatus: http.StatusTooManyRequests,
+				Body:       []byte(`{"type":"error","error":{"type":"rate_limit_error"}}`),
+			}}
+			dispatcher := &retryContractHomeDispatcher{authIDs: []string{"home-retry-a", "home-retry-b"}}
+			executor := &retryContractHomeExecutor{failure: failure, streamBootstrap: mode == "stream_bootstrap"}
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.SetRetryConfig(2, time.Second, 2)
+			manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+			manager.RegisterExecutor(executor)
+			req := cliproxyexecutor.Request{Model: "gpt"}
+			var errExecute error
+			switch mode {
+			case "execute":
+				_, errExecute = manager.Execute(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{})
+			case "count_tokens":
+				_, errExecute = manager.ExecuteCount(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{})
+			default:
+				_, errExecute = manager.ExecuteStream(context.Background(), []string{executor.Identifier()}, req, cliproxyexecutor.Options{Stream: true})
+			}
+			if errExecute != nil {
+				t.Fatalf("error = %v, want the second credential's success", errExecute)
+			}
+			if got := executor.Calls(); len(got) != 2 || got[0] != "home-retry-a" || got[1] != "home-retry-b" {
+				t.Fatalf("executor calls = %v, want failover to the second credential", got)
+			}
+		})
+	}
+}
