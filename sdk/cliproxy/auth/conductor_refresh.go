@@ -55,8 +55,9 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Lock()
 	cancelPrev := m.refreshCancel
 	if m.refreshLoop != nil {
-		// Its workers may still be saving; a later stop must wait for them.
-		m.retiredRefreshLoops = append(unfinishedRefreshLoops(m.retiredRefreshLoops), m.refreshLoop)
+		// Its workers may still be saving; a later stop must wait for them. A loop
+		// whose parent context already ended has finished and pruned itself.
+		m.retiredRefreshLoops = unfinishedRefreshLoops(append(m.retiredRefreshLoops, m.refreshLoop))
 	}
 	m.refreshCancel = nil
 	m.refreshLoop = nil
@@ -149,10 +150,13 @@ func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
 	m.refreshStartMu.Lock()
 	m.mu.Lock()
 	cancel := m.refreshCancel
-	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
+	loops := m.retiredRefreshLoops
 	if m.refreshLoop != nil {
 		loops = append(loops, m.refreshLoop)
 	}
+	// Skip finished loops, including the current one if its parent context ended:
+	// it already ran its self-prune, and nothing would prune it again.
+	loops = unfinishedRefreshLoops(loops)
 	m.retiredRefreshLoops = loops
 	m.refreshCancel = nil
 	m.refreshLoop = nil
