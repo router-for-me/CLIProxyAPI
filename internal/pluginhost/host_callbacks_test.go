@@ -1509,6 +1509,59 @@ func hostModelStreamCountForTest(t *testing.T, host *Host) int {
 	return len(host.modelStreams.streams)
 }
 
+func TestHostModelStreamsArePluginAndInstanceScoped(t *testing.T) {
+	host := New()
+	chunks := make(chan handlers.ModelExecutionChunk, 1)
+	chunks <- handlers.ModelExecutionChunk{Payload: []byte("owner payload")}
+	ownerInstance := &hostCallbackInstance{}
+	otherInstance := &hostCallbackInstance{}
+	streamID := host.modelStreams.open("plugin-a", ownerInstance, "", chunks, nil)
+
+	readReq, errMarshal := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal read request: %v", errMarshal)
+	}
+	closeReq, errMarshal := json.Marshal(pluginapi.HostModelStreamCloseRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal close request: %v", errMarshal)
+	}
+
+	pluginBCtx := withHostCallbackIdentity(context.Background(), "plugin-b", ownerInstance)
+	if _, errRead := host.callFromPlugin(pluginBCtx, pluginabi.MethodHostModelStreamRead, readReq); errRead == nil {
+		t.Fatal("plugin-b read plugin-a's model stream")
+	}
+	if _, errClose := host.callFromPlugin(pluginBCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("foreign plugin close callback error = %v", errClose)
+	}
+
+	otherInstanceCtx := withHostCallbackIdentity(context.Background(), "plugin-a", otherInstance)
+	if _, errRead := host.callFromPlugin(otherInstanceCtx, pluginabi.MethodHostModelStreamRead, readReq); errRead == nil {
+		t.Fatal("other callback instance read owner's model stream")
+	}
+	if _, errClose := host.callFromPlugin(otherInstanceCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("foreign instance close callback error = %v", errClose)
+	}
+
+	ownerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", ownerInstance)
+	rawRead, errRead := host.callFromPlugin(ownerCtx, pluginabi.MethodHostModelStreamRead, readReq)
+	if errRead != nil {
+		t.Fatalf("owner stream read error = %v", errRead)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostModelStreamReadResponse](rawRead)
+	if errDecode != nil {
+		t.Fatalf("decode stream read response: %v", errDecode)
+	}
+	if string(resp.Payload) != "owner payload" || resp.Done {
+		t.Fatalf("owner stream read = %#v, want owner payload without done", resp)
+	}
+	if _, errClose := host.callFromPlugin(ownerCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("owner stream close error = %v", errClose)
+	}
+	if got := hostModelStreamCountForTest(t, host); got != 0 {
+		t.Fatalf("remaining model streams = %d, want 0", got)
+	}
+}
+
 func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	host := New()
 	ctx := logging.WithRequestID(context.Background(), "request-123")
