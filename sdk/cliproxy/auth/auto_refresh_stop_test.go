@@ -523,3 +523,45 @@ func TestWaitAutoRefreshWaitsWithoutStoppingSelectorAgain(t *testing.T) {
 		t.Fatalf("selector Stop calls = %d, want 1", got)
 	}
 }
+
+// Once a wait has joined the stopped loops, the manager must not keep them: an
+// embedder that keeps a stopped manager alive would otherwise retain each loop's
+// heap and jobs.
+func TestAutoRefreshWaitPrunesJoinedLoops(t *testing.T) {
+	cases := map[string]func(*Manager) error{
+		"StopAutoRefreshContext": func(m *Manager) error { return m.StopAutoRefreshContext(context.Background()) },
+		"WaitAutoRefresh": func(m *Manager) error {
+			m.StopAutoRefresh()
+			return m.WaitAutoRefresh(context.Background())
+		},
+	}
+	for name, wait := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHeldSave(t)
+			manager := startRefreshWithHeldSave(t, h.store)
+			replaceRefreshLoop(manager, h.store)
+
+			errCh := make(chan error, 1)
+			go func() { errCh <- wait(manager) }()
+			<-h.waiting
+			h.release()
+			hangGuard := time.NewTimer(30 * time.Second)
+			defer hangGuard.Stop()
+			select {
+			case err := <-errCh:
+				if err != nil {
+					t.Fatalf("wait error = %v", err)
+				}
+			case <-hangGuard.C:
+				t.Fatal("wait did not return after the save was released")
+			}
+
+			manager.mu.RLock()
+			retained := len(manager.retiredRefreshLoops)
+			manager.mu.RUnlock()
+			if retained != 0 {
+				t.Fatalf("retiredRefreshLoops holds %d joined loops after the wait, want 0", retained)
+			}
+		})
+	}
+}

@@ -99,7 +99,7 @@ func (m *Manager) StopAutoRefresh() {
 // Do not call it from a refresh callback: the worker running the callback cannot
 // return until the call does, so it waits until ctx ends.
 func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
-	return waitRefreshLoops(ctx, m.stopAutoRefresh())
+	return m.waitRefreshLoops(ctx, m.stopAutoRefresh())
 }
 
 // WaitAutoRefresh waits, like StopAutoRefreshContext, for the workers of loops
@@ -112,16 +112,21 @@ func (m *Manager) WaitAutoRefresh(ctx context.Context) error {
 	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
 	m.retiredRefreshLoops = loops
 	m.mu.Unlock()
-	return waitRefreshLoops(ctx, loops)
+	return m.waitRefreshLoops(ctx, loops)
 }
 
-func waitRefreshLoops(ctx context.Context, loops []*authAutoRefreshLoop) error {
+// waitRefreshLoops waits for the workers of loops, then drops every finished
+// loop from retiredRefreshLoops, so a stopped manager an embedder keeps alive
+// does not retain the loops it has already joined. It prunes on an early ctx
+// return too, dropping the loops that finished before it.
+func (m *Manager) waitRefreshLoops(ctx context.Context, loops []*authAutoRefreshLoop) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if len(loops) == 0 {
 		return nil
 	}
+	defer m.pruneRetiredRefreshLoops()
 	beforeAutoRefreshStopWait(loops)
 	for _, loop := range loops {
 		select {
@@ -160,6 +165,13 @@ func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
 		stoppable.Stop()
 	}
 	return loops
+}
+
+// pruneRetiredRefreshLoops drops the retired loops whose workers have all returned.
+func (m *Manager) pruneRetiredRefreshLoops() {
+	m.mu.Lock()
+	m.retiredRefreshLoops = unfinishedRefreshLoops(m.retiredRefreshLoops)
+	m.mu.Unlock()
 }
 
 // unfinishedRefreshLoops returns the loops whose workers have not all returned.
