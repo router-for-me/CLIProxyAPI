@@ -249,7 +249,8 @@ func (s *Service) Run(ctx context.Context) error {
 // It ensures all resources are properly cleaned up and connections are closed.
 // The shutdown is idempotent and can be called multiple times safely.
 //
-// Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving.
+// Shutdown waits, until ctx ends, for in-flight auth refreshes to finish saving,
+// and returns an error wrapping ctx.Err() if one may still be saving then.
 // Only the first call tears the service down: a later call returns nil at once,
 // without waiting for refreshes the first call's deadline cut short (call the
 // core auth manager's WaitAutoRefresh for that). A call made while the
@@ -388,8 +389,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			// Wait for in-flight refreshes to finish saving, within the shutdown
 			// deadline, before plugin executors they may use are shut down. The
 			// StopAutoRefresh above already stopped the loop and the selector.
+			// Report an unfinished wait: later calls return at once, so this is the
+			// only call that can tell the caller a save may still be running.
 			if errStop := s.coreManager.WaitAutoRefresh(ctx); errStop != nil {
 				log.WithError(errStop).Warn("auth auto-refresh did not finish before shutdown deadline")
+				if shutdownErr == nil {
+					shutdownErr = fmt.Errorf("wait for auth refresh saves: %w", errStop)
+				}
 			}
 		}
 
