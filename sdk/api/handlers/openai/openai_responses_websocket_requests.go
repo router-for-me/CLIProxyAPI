@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -339,6 +340,149 @@ type responsesWebsocketMergeInputItem struct {
 	callID   string
 }
 
+// responsesWebsocketReplayPassthroughPath is the passthrough object that can
+// carry output-only upstream fields on response items.
+const responsesWebsocketReplayPassthroughPath = "internal_chat_message_metadata_passthrough"
+
+// responsesWebsocketReplaySanitizedItem removes every output-only
+// content_token_count member from a valid response item that CPA replays as
+// input, along with every passthrough object left empty. Parent and child
+// members are matched by their decoded key names, including duplicates and
+// escaped spellings. Retained members are rebuilt from raw field slices
+// without reserializing values; invalid items return unchanged.
+func responsesWebsocketReplaySanitizedItem(raw string) string {
+	if !responsesWebsocketReplayMayContainPassthroughKey(raw) || !json.Valid([]byte(raw)) {
+		return raw
+	}
+	item := gjson.Parse(raw)
+	if !item.IsObject() || item.Raw != raw {
+		return raw
+	}
+	cleaned, changed := responsesWebsocketSanitizeReplayResult(item)
+	if !changed {
+		return raw
+	}
+	return unsafe.String(unsafe.SliceData(cleaned), len(cleaned))
+}
+
+// responsesWebsocketReplaySanitizedBytes is the []byte form used by upstream
+// cache recording entries. Unchanged items return the caller's slice so the
+// storage layer still performs its single detached ownership copy.
+func responsesWebsocketReplaySanitizedBytes(raw []byte) []byte {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return raw
+	}
+	rawText := unsafe.String(unsafe.SliceData(raw), len(raw))
+	if !responsesWebsocketReplayMayContainPassthroughKey(rawText) {
+		return raw
+	}
+	item := util.ParseGJSONBytesNoCopy(raw)
+	if !item.IsObject() || item.Raw != rawText {
+		return raw
+	}
+	cleaned, changed := responsesWebsocketSanitizeReplayResult(item)
+	if !changed {
+		return raw
+	}
+	return cleaned
+}
+
+// responsesWebsocketReplayMayContainPassthroughKey is a conservative,
+// copy-free screen. A decoded passthrough key contains an underscore and the
+// fragments on either side of one underscore; Unicode escapes therefore
+// require the universal \\u prefix, while literal spellings contain either
+// "internal" or "chat_message_metadata_passthrough".
+func responsesWebsocketReplayMayContainPassthroughKey(raw string) bool {
+	return strings.Contains(raw, "internal") ||
+		strings.Contains(raw, "chat_message_metadata_passthrough") ||
+		strings.Contains(raw, `\u`)
+}
+
+func responsesWebsocketSanitizeReplayResult(item gjson.Result) ([]byte, bool) {
+	memberCount := len(item.Map())
+	if memberCount == 0 {
+		return nil, false
+	}
+	members := make([]struct{ key, value string }, 0, memberCount)
+	changed := false
+	invalid := false
+	item.ForEach(func(key, value gjson.Result) bool {
+		if key.Raw == "" || value.Raw == "" {
+			invalid = true
+			return false
+		}
+		valueRaw := value.Raw
+		if key.String() == responsesWebsocketReplayPassthroughPath && value.IsObject() {
+			cleaned, valueChanged, keep := responsesWebsocketSanitizePassthroughObject(value)
+			if valueChanged {
+				changed = true
+				if !keep {
+					return true
+				}
+				valueRaw = cleaned
+			}
+		}
+		members = append(members, struct{ key, value string }{key: key.Raw, value: valueRaw})
+		return true
+	})
+	if invalid || !changed {
+		return nil, false
+	}
+
+	out := make([]byte, 0, len(item.Raw))
+	out = append(out, '{')
+	for index, member := range members {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, member.key...)
+		out = append(out, ':')
+		out = append(out, member.value...)
+	}
+	out = append(out, '}')
+	return out, true
+}
+
+// responsesWebsocketSanitizePassthroughObject drops every decoded
+// content_token_count member from a passthrough object. Members are collected
+// as raw slices and materialized only after a removal is confirmed.
+func responsesWebsocketSanitizePassthroughObject(passthrough gjson.Result) (string, bool, bool) {
+	members := make([]struct{ key, value string }, 0, len(passthrough.Map()))
+	removed := false
+	invalid := false
+	passthrough.ForEach(func(key, value gjson.Result) bool {
+		if key.String() == "content_token_count" {
+			removed = true
+			return true
+		}
+		if key.Raw == "" || value.Raw == "" {
+			invalid = true
+			return false
+		}
+		members = append(members, struct{ key, value string }{key: key.Raw, value: value.Raw})
+		return true
+	})
+	if invalid || !removed {
+		return "", false, len(passthrough.Map()) > 0
+	}
+	if len(members) == 0 {
+		return "{}", true, false
+	}
+
+	out := make([]byte, 0, len(passthrough.Raw))
+	out = append(out, '{')
+	for index, member := range members {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, member.key...)
+		out = append(out, ':')
+		out = append(out, member.value...)
+	}
+	out = append(out, '}')
+	return unsafe.String(unsafe.SliceData(out), len(out)), true, true
+}
+
 func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
 	previousInput, errPrevious := responsesWebsocketPreviousInputNoCopy(lastRequest)
 	if errPrevious != nil {
@@ -357,10 +501,17 @@ func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte,
 				return item.itemType == "compaction_trigger"
 			})
 		}
+		itemCountBeforeResponse := len(items)
 		var errResponse error
 		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
 		if errResponse != nil {
 			return nil, fmt.Errorf("invalid previous response output: %w", errResponse)
+		}
+		// Replayed response items become upstream input. Drop output-only
+		// fields the client never sends so another credential cannot reject
+		// them; previous-request and appended client items stay untouched.
+		for index := itemCountBeforeResponse; index < len(items); index++ {
+			items[index].raw = responsesWebsocketReplaySanitizedItem(items[index].raw)
 		}
 	}
 

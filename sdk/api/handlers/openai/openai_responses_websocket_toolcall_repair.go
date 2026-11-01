@@ -83,6 +83,9 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 	if _, exists := session.outputs[callID]; !exists {
 		session.order = append(session.order, callID)
 	}
+	// Do not sanitize here: client-originated items also reach this method
+	// (repair first pass, turn commit) and must round-trip unchanged.
+	// Upstream items are sanitized at their recording entry points.
 	session.outputs[callID] = append(json.RawMessage(nil), item...)
 
 	for len(session.order) > c.maxPerSession {
@@ -275,6 +278,11 @@ func (t *responsesWebsocketToolCacheTurn) recordItem(payload []byte, item gjson.
 	rawItem, ok := responsesWebsocketRawMessageForResult(payload, item)
 	if !ok {
 		return
+	}
+	if rawItem != nil {
+		// Upstream response items are sanitized once here; recordRawItem
+		// still owns the single detached copy for turn storage.
+		rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 	}
 	t.recordRawItem(item.Get("type").String(), item.Get("call_id").String(), rawItem)
 }
@@ -643,6 +651,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 			if !ok {
 				return false
 			}
+			rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 			callID := strings.TrimSpace(item.Get("call_id").String())
 			cache.record(sessionKey, callID, rawItem)
 			return true
@@ -656,6 +665,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 		if !ok {
 			return
 		}
+		rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		cache.record(sessionKey, callID, rawItem)
 	}

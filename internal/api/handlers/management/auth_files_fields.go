@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -1035,6 +1036,38 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth)
 	if legacyClaudeCredential != nil {
 		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
 	}
+	legacyXAICredential, errLegacyXAI := xaiauth.FindMatchingLegacyCredential(ctx, store, record)
+	if errLegacyXAI != nil {
+		return "", errLegacyXAI
+	}
+	adoptXAICredential := legacyXAICredential != nil &&
+		strings.EqualFold(strings.TrimSpace(record.Provider), "xai") &&
+		metadataStringValue(record.Metadata, "email") == "" &&
+		metadataStringValue(record.Metadata, "sub") != "" &&
+		metadataStringValue(legacyXAICredential.Metadata, "email") != ""
+	if adoptXAICredential {
+		// The upstream stopped returning the email; keep the account on its
+		// richer email-named credential (richest-known name wins) so the next
+		// login that returns the email finds the same file again. Renaming is
+		// limited to stores that resolve the save path from the record name;
+		// every built-in backend (file, git, Postgres, object) exposes the
+		// SetBaseDir capability, so unknown stores keep the ordinary
+		// migration instead of risking a rename they cannot honor.
+		if _, isFileNameStore := store.(interface{ SetBaseDir(string) }); !isFileNameStore {
+			adoptXAICredential = false
+		} else if disabled, hasDisabled := record.Metadata["disabled"].(bool); hasDisabled && disabled {
+			// The destination file deliberately disables this credential; renaming
+			// would leave it disabled while the richer file gets deleted, losing
+			// the operator's opt-out and the saved credential on re-login.
+			adoptXAICredential = false
+		}
+	}
+	if legacyXAICredential != nil {
+		coreauth.MergeExistingAuthMetadata(record, legacyXAICredential.Metadata)
+	}
+	if adoptXAICredential {
+		adoptLegacyXAIFileName(record, legacyXAICredential)
+	}
 	if h.postAuthHook != nil {
 		if err := h.postAuthHook(ctx, record); err != nil {
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
@@ -1055,6 +1088,18 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth)
 		}
 		if errDelete := store.Delete(ctx, legacyID); errDelete != nil {
 			return savedPath, fmt.Errorf("canonical Claude credential saved but legacy credential cleanup failed: %w", errDelete)
+		}
+	}
+	if legacyXAICredential != nil && !adoptXAICredential {
+		if strings.TrimSpace(savedPath) == "" {
+			return "", fmt.Errorf("canonical xAI credential was not persisted; legacy credential retained")
+		}
+		legacyID := strings.TrimSpace(legacyXAICredential.ID)
+		if legacyID == "" {
+			legacyID = strings.TrimSpace(legacyXAICredential.FileName)
+		}
+		if errDelete := store.Delete(ctx, legacyID); errDelete != nil {
+			return savedPath, fmt.Errorf("canonical xAI credential saved but legacy credential cleanup failed: %w", errDelete)
 		}
 	}
 	return savedPath, nil
@@ -1107,4 +1152,41 @@ func (h *Handler) notifyPersistedTokenRecord(ctx context.Context, savedPath stri
 		}
 	}
 	return nil
+}
+
+func metadataStringValue(metadata map[string]any, key string) string {
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+// adoptLegacyXAIFileName points a subject-only xAI record at the existing
+// email-named credential so the save refreshes that file in place. The token
+// storage email is backfilled because SaveTokenToFile merges the record
+// metadata over the serialized storage and would otherwise drop the email.
+// Path attributes pointing at the superseded subject-named file are cleared
+// so the store resolves the adopted name.
+func adoptLegacyXAIFileName(record, legacy *coreauth.Auth) {
+	legacyFileName := strings.TrimSpace(legacy.FileName)
+	if legacyFileName == "" {
+		legacyFileName = strings.TrimSpace(legacy.ID)
+	}
+	if legacyFileName == "" {
+		return
+	}
+	oldBaseName := filepath.Base(strings.TrimSpace(record.FileName))
+	if oldBaseName == "" || oldBaseName == "." {
+		oldBaseName = filepath.Base(strings.TrimSpace(record.ID))
+	}
+	record.ID = legacyFileName
+	record.FileName = legacyFileName
+	if storage, ok := record.Storage.(*xaiauth.TokenStorage); ok && storage != nil {
+		if email := metadataStringValue(legacy.Metadata, "email"); email != "" {
+			storage.Email = email
+		}
+	}
+	for key, value := range record.Attributes {
+		if strings.TrimSpace(value) != "" && strings.EqualFold(filepath.Base(strings.TrimSpace(value)), oldBaseName) {
+			delete(record.Attributes, key)
+		}
+	}
 }
