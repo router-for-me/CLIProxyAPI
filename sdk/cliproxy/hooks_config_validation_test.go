@@ -158,6 +158,11 @@ func TestHooksConfigValidationRejectsWatcherReloadBeforeCallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := wrapper.Stop(); err != nil {
+			t.Errorf("stop watcher fixture: %v", err)
+		}
+	})
 	wrapper.SetConfigValidator(func(next *config.Config) error {
 		if next.RequestRetry > 3 {
 			return errors.New("request-retry above application limit")
