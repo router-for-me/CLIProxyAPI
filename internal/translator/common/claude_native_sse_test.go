@@ -6,7 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestClaudeMessagesJSONToSSEPassthrough(t *testing.T) {
@@ -42,16 +43,16 @@ func TestClaudeMessagesJSONToSSEEvents(t *testing.T) {
 	if model != "claude-native" {
 		t.Errorf("model = %q, want claude-native", model)
 	}
-	var events []gjson.Result
+	var events []ojson.Result
 	for _, line := range bytes.Split(out, []byte("\n")) {
 		if !bytes.HasPrefix(line, []byte("data: ")) {
 			continue
 		}
 		payload := bytes.TrimPrefix(line, []byte("data: "))
-		if !gjson.ValidBytes(payload) {
+		if !ojson.ValidBytes(payload) {
 			t.Fatalf("invalid SSE JSON: %s", payload)
 		}
-		events = append(events, gjson.ParseBytes(payload))
+		events = append(events, util.ParseGJSONBytesNoCopy(payload))
 	}
 	wantTypes := []string{
 		"message_start",
@@ -70,7 +71,7 @@ func TestClaudeMessagesJSONToSSEEvents(t *testing.T) {
 			t.Errorf("event %d type = %q, want %q", i, got, want)
 		}
 	}
-	root := gjson.ParseBytes(raw)
+	root := util.ParseGJSONBytesNoCopy(raw)
 	for _, path := range []string{"id", "model", "role", "usage"} {
 		if got, want := events[0].Get("message."+path).Value(), root.Get(path).Value(); !reflect.DeepEqual(got, want) {
 			t.Errorf("message_start %s = %#v, want %#v", path, got, want)
@@ -123,7 +124,7 @@ func TestClaudeMessagesJSONToSSECitations(t *testing.T) {
 	out, _ := ClaudeMessagesJSONToSSE(raw)
 	count := 0
 	for _, line := range bytes.Split(out, []byte("\n")) {
-		event := gjson.ParseBytes(bytes.TrimPrefix(line, []byte("data: ")))
+		event := util.ParseGJSONBytesNoCopy(bytes.TrimPrefix(line, []byte("data: ")))
 		if event.Get("delta.type").String() == "citations_delta" {
 			count++
 			if event.Get("index").Int() != 0 || event.Get("delta.citation.encrypted_index").String() != "IDX" {

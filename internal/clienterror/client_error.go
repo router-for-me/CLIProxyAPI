@@ -3,12 +3,11 @@ package clienterror
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // StatusClientClosedRequest is the nginx-style status used when the client
@@ -162,10 +161,11 @@ func IsClaudeThreadNotFound(status int, err error) bool {
 	if body == "" {
 		return false
 	}
-	if json.Valid([]byte(body)) {
-		return strings.EqualFold(strings.TrimSpace(gjson.Get(body, "error.type").String()), "not_found_error") &&
-			strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "thread state") &&
-			strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "previous_message_id")
+	if ojson.Valid(body) {
+		msg := strings.ToLower(ojson.Get(body, "error.message").String())
+		return strings.EqualFold(strings.TrimSpace(ojson.Get(body, "error.type").String()), "not_found_error") &&
+			strings.Contains(msg, "thread state") &&
+			strings.Contains(msg, "previous_message_id")
 	}
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
@@ -195,11 +195,11 @@ func hasCreditBalanceTooLowBody(err error) bool {
 	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
 		body = strings.TrimSpace(string(responseBody.ResponseBody()))
 	}
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
-		msg := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		msg := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if strings.HasPrefix(msg, "your credit balance is too low") {
 			return true
 		}
@@ -212,11 +212,11 @@ func hasModelNotFoundErrorBody(err error) bool {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if code == "model_not_found" || code == "model_not_found_error" {
 			return true
 		}
@@ -229,11 +229,11 @@ func hasAuthenticationErrorBody(err error) bool {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+		if errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())); errType == "authentication_error" {
 			return true
 		}
 	}
@@ -245,17 +245,17 @@ func hasRequestFaultBody(err error) bool {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if _, ok := requestFaultCodes[code]; ok {
 			return true
 		}
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-		errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if _, ok := requestFaultTypes[errType]; ok {
 			return true
 		}

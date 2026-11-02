@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 var claudeWebSearchToolResultMarker = []byte(`"web_search_tool_result"`)
@@ -29,8 +29,8 @@ func RecordClaudeWebSearchResultsContext(ctx context.Context, sessionKey string,
 	if strings.TrimSpace(sessionKey) == "" || !bytes.Contains(data, claudeWebSearchToolResultMarker) {
 		return
 	}
-	if content := gjson.GetBytes(data, "content"); content.IsArray() {
-		content.ForEach(func(_, block gjson.Result) bool {
+	if content := ojson.GetBytesNoCopy(data, "content"); content.IsArray() {
+		content.ForEach(func(_, block ojson.Result) bool {
 			recordClaudeWebSearchResultBlock(ctx, sessionKey, block, ttl, limit)
 			return true
 		})
@@ -41,14 +41,14 @@ func RecordClaudeWebSearchResultsContext(ctx context.Context, sessionKey string,
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		event := gjson.ParseBytes(bytes.TrimSpace(line[len("data:"):]))
+		event := util.ParseGJSONBytesNoCopy(bytes.TrimSpace(line[len("data:"):]))
 		if event.Get("type").String() == "content_block_start" {
 			recordClaudeWebSearchResultBlock(ctx, sessionKey, event.Get("content_block"), ttl, limit)
 		}
 	}
 }
 
-func recordClaudeWebSearchResultBlock(ctx context.Context, sessionKey string, block gjson.Result, ttl time.Duration, limit int) {
+func recordClaudeWebSearchResultBlock(ctx context.Context, sessionKey string, block ojson.Result, ttl time.Duration, limit int) {
 	if block.Get("type").String() != "web_search_tool_result" {
 		return
 	}
@@ -56,7 +56,7 @@ func recordClaudeWebSearchResultBlock(ctx context.Context, sessionKey string, bl
 	if !content.Exists() || claudeWebSearchResultContentEmpty(content) {
 		return
 	}
-	cache.CacheClaudeWebSearchResultBestEffort(ctx, sessionKey, block.Get("tool_use_id").String(), []byte(content.Raw), ttl, limit)
+	cache.CacheClaudeWebSearchResultBestEffort(ctx, sessionKey, strings.Clone(block.Get("tool_use_id").String()), []byte(content.Raw), ttl, limit)
 }
 
 // RestoreClaudeWebSearchResults fills assistant web_search_tool_result blocks
@@ -67,6 +67,12 @@ func RestoreClaudeWebSearchResults(body []byte, sessionKey string, ttl ...time.D
 	return RestoreClaudeWebSearchResultsContext(context.Background(), body, sessionKey, ttl...)
 }
 
+// RestoreClaudeWebSearchResultsDoc fills assistant web_search_tool_result blocks
+// in doc whose content is missing or empty with the content stored for sessionKey.
+func RestoreClaudeWebSearchResultsDoc(doc *ojson.Doc, sessionKey string, ttl ...time.Duration) bool {
+	return RestoreClaudeWebSearchResultsContextDoc(context.Background(), doc, sessionKey, ttl...)
+}
+
 // RestoreClaudeWebSearchResultsContext fills assistant web_search_tool_result
 // blocks whose content is missing or empty with the content stored for
 // sessionKey using ctx for Home KV operations.
@@ -74,9 +80,23 @@ func RestoreClaudeWebSearchResultsContext(ctx context.Context, body []byte, sess
 	if strings.TrimSpace(sessionKey) == "" || !bytes.Contains(body, claudeWebSearchToolResultMarker) {
 		return body
 	}
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !RestoreClaudeWebSearchResultsContextDoc(ctx, doc, sessionKey, ttl...) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+// RestoreClaudeWebSearchResultsContextDoc fills assistant web_search_tool_result
+// blocks in doc whose content is missing or empty with the content stored for
+// sessionKey using ctx for Home KV operations.
+func RestoreClaudeWebSearchResultsContextDoc(ctx context.Context, doc *ojson.Doc, sessionKey string, ttl ...time.Duration) bool {
+	if doc == nil || doc.Len() == 0 || strings.TrimSpace(sessionKey) == "" {
+		return false
+	}
+	messages := doc.Get("messages")
+	if !messages.IsArray() {
+		return false
 	}
 	restored := 0
 	for i, message := range messages.Array() {
@@ -91,23 +111,22 @@ func RestoreClaudeWebSearchResultsContext(ctx context.Context, body []byte, sess
 			if errGet != nil || !ok {
 				continue
 			}
-			updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content.%d.content", i, j), cached)
-			if errSet != nil {
+			if errSet := doc.SetRawBytes(fmt.Sprintf("messages.%d.content.%d.content", i, j), cached); errSet != nil {
 				log.Debugf("claude web search results: restore messages.%d.content.%d failed: %v", i, j, errSet)
 				continue
 			}
-			body = updated
 			restored++
 		}
 	}
 	if restored > 0 {
 		log.Debugf("claude web search results: restored %d result block(s) from cache", restored)
+		return true
 	}
-	return body
+	return false
 }
 
-func claudeWebSearchResultContentEmpty(content gjson.Result) bool {
-	if !content.Exists() || content.Type == gjson.Null {
+func claudeWebSearchResultContentEmpty(content ojson.Result) bool {
+	if !content.Exists() || content.Type == ojson.Null {
 		return true
 	}
 	return content.IsArray() && len(content.Array()) == 0

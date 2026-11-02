@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // nativeToolSearchResponsesPayload is a Codex Responses turn after one client
@@ -92,14 +92,14 @@ func captureNativeToolSearchBody(t *testing.T, cfg *config.Config, send nativeTo
 
 func assertNativeToolSearchBody(t *testing.T, body []byte) {
 	t.Helper()
-	calendar := gjson.GetBytes(body, `tools.#(name=="`+nativeToolSearchCalendar+`")`)
+	calendar := ojson.GetBytes(body, `tools.#(name=="`+nativeToolSearchCalendar+`")`)
 	if !calendar.Get("defer_loading").Bool() {
-		t.Fatalf("discovered tool is not deferred: %s", gjson.GetBytes(body, "tools").Raw)
+		t.Fatalf("discovered tool is not deferred: %s", ojson.GetBytes(body, "tools").Raw)
 	}
 	if !bytes.Contains(body, []byte(`{"type":"tool_reference","tool_name":"`+nativeToolSearchCalendar+`"}`)) {
-		t.Fatalf("tool_reference missing: %s", gjson.GetBytes(body, "messages").Raw)
+		t.Fatalf("tool_reference missing: %s", ojson.GetBytes(body, "messages").Raw)
 	}
-	gjson.GetBytes(body, "tools").ForEach(func(_, tool gjson.Result) bool {
+	ojson.GetBytes(body, "tools").ForEach(func(_, tool ojson.Result) bool {
 		if tool.Get("defer_loading").Bool() && tool.Get("cache_control").Exists() {
 			t.Fatalf("deferred tool carries cache_control: %s", tool.Raw)
 		}
@@ -109,7 +109,7 @@ func assertNativeToolSearchBody(t *testing.T, body []byte) {
 
 func assertDevToolSearchBody(t *testing.T, body []byte) {
 	t.Helper()
-	if gjson.GetBytes(body, `tools.#(name=="tool_search")`).Exists() || bytes.Contains(body, []byte(`"tool_reference"`)) || bytes.Contains(body, []byte(`"defer_loading"`)) {
+	if ojson.GetBytes(body, `tools.#(name=="tool_search")`).Exists() || bytes.Contains(body, []byte(`"tool_reference"`)) || bytes.Contains(body, []byte(`"defer_loading"`)) {
 		t.Fatalf("fallback body still uses tool search: %s", body)
 	}
 }
@@ -236,11 +236,11 @@ func TestClaudeExecutor_NativeToolSearchPayloadRuleIsFinal(t *testing.T) {
 		Params: map[string]any{"tools.3.defer_loading": false},
 	}}
 	body := captureNativeToolSearchBody(t, cfg, sendNativeToolSearchExecute, nativeToolSearchAuth(nil), "claude-sonnet-4-5", []byte(nativeToolSearchResponsesPayload), nil)
-	if got := gjson.GetBytes(body, "tools.3.name").String(); got != nativeToolSearchCalendar {
-		t.Fatalf("tools.3.name = %q, want %s: %s", got, nativeToolSearchCalendar, gjson.GetBytes(body, "tools").Raw)
+	if got := ojson.GetBytes(body, "tools.3.name").String(); got != nativeToolSearchCalendar {
+		t.Fatalf("tools.3.name = %q, want %s: %s", got, nativeToolSearchCalendar, ojson.GetBytes(body, "tools").Raw)
 	}
-	if deferred := gjson.GetBytes(body, "tools.3.defer_loading"); !deferred.Exists() || deferred.Bool() {
-		t.Fatalf("payload rule did not win over native tool search: %s", gjson.GetBytes(body, "tools.3").Raw)
+	if deferred := ojson.GetBytes(body, "tools.3.defer_loading"); !deferred.Exists() || deferred.Bool() {
+		t.Fatalf("payload rule did not win over native tool search: %s", ojson.GetBytes(body, "tools.3").Raw)
 	}
 }
 
@@ -252,14 +252,14 @@ func TestClaudeExecutor_NativeToolSearchOAuthAliasesReferences(t *testing.T) {
 	}
 	body := captureNativeToolSearchBody(t, &config.Config{}, sendNativeToolSearchExecute, auth, "claude-sonnet-4-5", []byte(nativeToolSearchResponsesPayload), nil)
 	declared := map[string]bool{}
-	gjson.GetBytes(body, "tools").ForEach(func(_, tool gjson.Result) bool {
+	ojson.GetBytes(body, "tools").ForEach(func(_, tool ojson.Result) bool {
 		declared[tool.Get("name").String()] = true
 		return true
 	})
 	references := 0
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
-			block.Get("content").ForEach(func(_, part gjson.Result) bool {
+	ojson.GetBytes(body, "messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
+			block.Get("content").ForEach(func(_, part ojson.Result) bool {
 				if part.Get("type").String() != "tool_reference" {
 					return true
 				}
@@ -274,7 +274,7 @@ func TestClaudeExecutor_NativeToolSearchOAuthAliasesReferences(t *testing.T) {
 		return true
 	})
 	if references == 0 {
-		t.Fatalf("no tool_reference in OAuth body: %s", gjson.GetBytes(body, "messages").Raw)
+		t.Fatalf("no tool_reference in OAuth body: %s", ojson.GetBytes(body, "messages").Raw)
 	}
 }
 
@@ -295,11 +295,11 @@ func TestClaudeExecutor_NativeToolSearchOAuthAliasesRenamedReferences(t *testing
 		Metadata:   map[string]any{"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
 	}
 	body := captureNativeToolSearchBody(t, &config.Config{}, sendNativeToolSearchExecute, auth, "claude-sonnet-4-5", payload, nil)
-	if gjson.GetBytes(body, `tools.#(name=="lookup_order")`).Exists() {
-		t.Fatalf("OAuth request kept the unaliased tool name: %s", gjson.GetBytes(body, "tools").Raw)
+	if ojson.GetBytes(body, `tools.#(name=="lookup_order")`).Exists() {
+		t.Fatalf("OAuth request kept the unaliased tool name: %s", ojson.GetBytes(body, "tools").Raw)
 	}
 	var deferred []string
-	gjson.GetBytes(body, "tools").ForEach(func(_, tool gjson.Result) bool {
+	ojson.GetBytes(body, "tools").ForEach(func(_, tool ojson.Result) bool {
 		// The constant deferred anchor is aliased too but never referenced.
 		if tool.Get("defer_loading").Bool() && !strings.HasSuffix(tool.Get("name").String(), "tool_search_deferred_anchor") {
 			deferred = append(deferred, tool.Get("name").String())
@@ -310,9 +310,9 @@ func TestClaudeExecutor_NativeToolSearchOAuthAliasesRenamedReferences(t *testing
 		t.Fatalf("deferred tools = %v, want exactly the aliased lookup_order", deferred)
 	}
 	var references []string
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
-			block.Get("content").ForEach(func(_, part gjson.Result) bool {
+	ojson.GetBytes(body, "messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
+			block.Get("content").ForEach(func(_, part ojson.Result) bool {
 				if part.Get("type").String() == "tool_reference" {
 					references = append(references, part.Get("tool_name").String())
 				}

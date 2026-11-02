@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertCodexResponseToGemini_IncompleteTerminal(t *testing.T) {
@@ -18,12 +18,12 @@ func TestConvertCodexResponseToGemini_IncompleteTerminal(t *testing.T) {
 	if len(streamOut) != 1 {
 		t.Fatalf("expected 1 streaming terminal chunk, got %d", len(streamOut))
 	}
-	if got := gjson.GetBytes(streamOut[0], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+	if got := ojson.GetBytesNoCopy(streamOut[0], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
 		t.Fatalf("stream finishReason = %q, want MAX_TOKENS; payload=%s", got, streamOut[0])
 	}
 
 	nonStreamOut := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", nil, nil, terminal, nil)
-	if got := gjson.GetBytes(nonStreamOut, "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
 		t.Fatalf("non-stream finishReason = %q, want MAX_TOKENS; payload=%s", got, nonStreamOut)
 	}
 }
@@ -45,7 +45,7 @@ func TestConvertCodexResponseToGemini_StreamEmptyOutputUsesOutputItemDoneMessage
 
 	found := false
 	for _, out := range outputs {
-		if gjson.GetBytes(out, "candidates.0.content.parts.0.text").String() == "ok" {
+		if ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.text").String() == "ok" {
 			found = true
 			break
 		}
@@ -66,12 +66,12 @@ func TestConvertCodexResponseToGemini_StreamPartialImageEmitsInlineData(t *testi
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	got := gjson.GetBytes(out[0], "candidates.0.content.parts.0.inlineData.data").String()
+	got := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.inlineData.data").String()
 	if got != "aGVsbG8=" {
 		t.Fatalf("expected inlineData.data %q, got %q; chunk=%s", "aGVsbG8=", got, string(out[0]))
 	}
 
-	gotMime := gjson.GetBytes(out[0], "candidates.0.content.parts.0.inlineData.mimeType").String()
+	gotMime := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.inlineData.mimeType").String()
 	if gotMime != "image/png" {
 		t.Fatalf("expected inlineData.mimeType %q, got %q; chunk=%s", "image/png", gotMime, string(out[0]))
 	}
@@ -102,12 +102,12 @@ func TestConvertCodexResponseToGemini_StreamImageGenerationCallDoneEmitsInlineDa
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	got := gjson.GetBytes(out[0], "candidates.0.content.parts.0.inlineData.data").String()
+	got := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.inlineData.data").String()
 	if got != "Ymll" {
 		t.Fatalf("expected inlineData.data %q, got %q; chunk=%s", "Ymll", got, string(out[0]))
 	}
 
-	gotMime := gjson.GetBytes(out[0], "candidates.0.content.parts.0.inlineData.mimeType").String()
+	gotMime := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.inlineData.mimeType").String()
 	if gotMime != "image/jpeg" {
 		t.Fatalf("expected inlineData.mimeType %q, got %q; chunk=%s", "image/jpeg", gotMime, string(out[0]))
 	}
@@ -120,12 +120,12 @@ func TestConvertCodexResponseToGemini_NonStreamImageGenerationCallAddsInlineData
 	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]},{"type":"image_generation_call","output_format":"png","result":"aGVsbG8="}]}}`)
 	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", originalRequest, nil, raw, nil)
 
-	got := gjson.GetBytes(out, "candidates.0.content.parts.1.inlineData.data").String()
+	got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.1.inlineData.data").String()
 	if got != "aGVsbG8=" {
 		t.Fatalf("expected inlineData.data %q, got %q; chunk=%s", "aGVsbG8=", got, string(out))
 	}
 
-	gotMime := gjson.GetBytes(out, "candidates.0.content.parts.1.inlineData.mimeType").String()
+	gotMime := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.1.inlineData.mimeType").String()
 	if gotMime != "image/png" {
 		t.Fatalf("expected inlineData.mimeType %q, got %q; chunk=%s", "image/png", gotMime, string(out))
 	}
@@ -148,7 +148,7 @@ func TestConvertCodexResponseToGemini_StreamPreservesFunctionCallID(t *testing.T
 
 	got := ""
 	for _, chunk := range out {
-		if value := gjson.GetBytes(chunk, "candidates.0.content.parts.0.functionCall.id").String(); value != "" {
+		if value := ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts.0.functionCall.id").String(); value != "" {
 			got = value
 			break
 		}
@@ -165,7 +165,7 @@ func TestConvertCodexResponseToGemini_ReasoningThoughtSignature(t *testing.T) {
 	t.Run("non-stream summary carries signature", func(t *testing.T) {
 		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-spark-1.3","created_at":1,"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"reasoning","encrypted_content":"` + signature + `","summary":[{"type":"summary_text","text":"thinking summary"}]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}]}}`)
 		out := ConvertCodexResponseToGeminiNonStream(ctx, "muse-spark-1.3", nil, nil, raw, nil)
-		part := gjson.GetBytes(out, "candidates.0.content.parts.0")
+		part := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0")
 		if !part.Get("thought").Bool() || part.Get("text").String() != "thinking summary" {
 			t.Fatalf("part.0 = %s, want thought summary part; payload=%s", part.Raw, out)
 		}
@@ -183,7 +183,7 @@ func TestConvertCodexResponseToGemini_ReasoningThoughtSignature(t *testing.T) {
 		if got := decodeGeminiCodexThoughtSignature(part.Get("thoughtSignature").String()); got != signature {
 			t.Fatalf("carrier round-trip = %q, want raw Meta signature", got)
 		}
-		if got := gjson.GetBytes(out, "candidates.0.content.parts.1.text").String(); got != "answer" {
+		if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.1.text").String(); got != "answer" {
 			t.Fatalf("part.1 text = %q, want answer; payload=%s", got, out)
 		}
 	})
@@ -191,7 +191,7 @@ func TestConvertCodexResponseToGemini_ReasoningThoughtSignature(t *testing.T) {
 	t.Run("non-stream empty summary still carries signature", func(t *testing.T) {
 		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-spark-1.3","created_at":1,"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"reasoning","encrypted_content":"` + signature + `","summary":[]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}]}}`)
 		out := ConvertCodexResponseToGeminiNonStream(ctx, "muse-spark-1.3", nil, nil, raw, nil)
-		part := gjson.GetBytes(out, "candidates.0.content.parts.0")
+		part := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0")
 		if !part.Get("thought").Bool() || part.Get("thoughtSignature").String() != encodeGeminiCodexThoughtSignature(signature) {
 			t.Fatalf("part.0 = %s, want empty thought carrier with signature; payload=%s", part.Raw, out)
 		}
@@ -207,7 +207,7 @@ func TestConvertCodexResponseToGemini_ReasoningThoughtSignature(t *testing.T) {
 		if len(out) != 1 {
 			t.Fatalf("text delta emitted %d chunks, want 1", len(out))
 		}
-		part := gjson.GetBytes(out[0], "candidates.0.content.parts.0")
+		part := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0")
 		if part.Get("text").String() != "answer" || part.Get("thoughtSignature").String() != encodeGeminiCodexThoughtSignature(signature) {
 			t.Fatalf("text part = %s, want answer with Meta thoughtSignature", part.Raw)
 		}
@@ -231,7 +231,7 @@ func TestConvertCodexResponseToGemini_StreamMultipleFunctionCallsKeepSignatureAn
 	var names []string
 	signatureOnAlpha := false
 	for _, chunk := range outputs {
-		for _, part := range gjson.GetBytes(chunk, "candidates.0.content.parts").Array() {
+		for _, part := range ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts").Array() {
 			name := part.Get("functionCall.name").String()
 			if name == "" {
 				continue
@@ -256,11 +256,11 @@ func TestConvertCodexResponseToGeminiNonStream_MultiSummaryRoundTrip(t *testing.
 	raw := []byte(`{"type":"response.completed","response":{"id":"resp_multi","model":"muse-spark-1.3","created_at":1,"usage":{"input_tokens":1,"output_tokens":2},"output":[{"type":"reasoning","encrypted_content":"` + signature + `","summary":[{"type":"summary_text","text":"step A"},{"type":"summary_text","text":"step B"}]},{"type":"message","content":[{"type":"output_text","text":"final answer"}]}]}}`)
 	geminiOut := ConvertCodexResponseToGeminiNonStream(ctx, "muse-spark-1.3", nil, nil, raw, nil)
 
-	partsRaw := gjson.GetBytes(geminiOut, "candidates.0.content.parts").Raw
+	partsRaw := ojson.GetBytesNoCopy(geminiOut, "candidates.0.content.parts").Raw
 	reqPayload := []byte(`{"model":"muse-spark-1.3","contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":` + partsRaw + `},{"role":"user","parts":[{"text":"next"}]}]}`)
 	codexIn, _ := ConvertGeminiRequestToCodex("deployment-alias", reqPayload, false)
 
-	reasoning := gjson.GetBytes(codexIn, "input.1")
+	reasoning := ojson.GetBytesNoCopy(codexIn, "input.1")
 	if reasoning.Get("type").String() != "reasoning" || reasoning.Get("encrypted_content").String() != signature {
 		t.Fatalf("round-trip reasoning item = %s, want Meta signature", reasoning.Raw)
 	}
@@ -274,11 +274,11 @@ func TestConvertCodexResponseToGeminiNonStream_MultiSummaryRoundTrip(t *testing.
 	var streamParam any
 	doneOnly := []byte(`data: {"type":"response.output_item.done","item":{"id":"rs_done_only","type":"reasoning","encrypted_content":"` + signature + `","summary":[{"type":"summary_text","text":"done-only thought"}]}}`)
 	doneChunks := ConvertCodexResponseToGemini(ctx, "muse-spark-1.3", nil, nil, doneOnly, &streamParam)
-	if len(doneChunks) != 1 || !gjson.GetBytes(doneChunks[0], "candidates.0.content.parts.0.thought").Bool() || gjson.GetBytes(doneChunks[0], "candidates.0.content.parts.0.text").String() != "done-only thought" {
+	if len(doneChunks) != 1 || !ojson.GetBytesNoCopy(doneChunks[0], "candidates.0.content.parts.0.thought").Bool() || ojson.GetBytesNoCopy(doneChunks[0], "candidates.0.content.parts.0.text").String() != "done-only thought" {
 		t.Fatalf("done-only reasoning chunks = %q, want thought summary chunk", doneChunks)
 	}
 	textChunks := ConvertCodexResponseToGemini(ctx, "muse-spark-1.3", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"visible"}`), &streamParam)
-	if len(textChunks) != 1 || decodeGeminiCodexThoughtSignature(gjson.GetBytes(textChunks[0], "candidates.0.content.parts.0.thoughtSignature").String()) != signature {
+	if len(textChunks) != 1 || decodeGeminiCodexThoughtSignature(ojson.GetBytesNoCopy(textChunks[0], "candidates.0.content.parts.0.thoughtSignature").String()) != signature {
 		t.Fatalf("text chunk after done-only reasoning = %q, want carrier signature", textChunks)
 	}
 
@@ -296,14 +296,14 @@ func TestConvertCodexResponseToGeminiNonStream_MultiSummaryRoundTrip(t *testing.
 		[]byte(`data: {"type":"response.output_text.delta","delta":"answer"}`),
 	} {
 		for _, chunk := range ConvertCodexResponseToGemini(ctx, "muse-spark-1.3", nil, nil, ev, &consecutiveParam) {
-			for _, p := range gjson.GetBytes(chunk, "candidates.0.content.parts").Array() {
+			for _, p := range ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts").Array() {
 				streamedParts = append(streamedParts, p.Raw)
 			}
 		}
 	}
 	replayReq := []byte(`{"model":"muse-spark-1.3","contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[` + strings.Join(streamedParts, ",") + `]},{"role":"user","parts":[{"text":"next"}]}]}`)
 	replayCodex, _ := ConvertGeminiRequestToCodex("muse-spark-1.3", replayReq, false)
-	if gjson.GetBytes(replayCodex, "input.1.summary.0.text").String() != "first summary" || gjson.GetBytes(replayCodex, "input.2.summary.0.text").String() != "second summary" {
+	if ojson.GetBytesNoCopy(replayCodex, "input.1.summary.0.text").String() != "first summary" || ojson.GetBytesNoCopy(replayCodex, "input.2.summary.0.text").String() != "second summary" {
 		t.Fatalf("replayed consecutive reasoning items = %s, want separate summaries", replayCodex)
 	}
 
@@ -319,16 +319,16 @@ func TestConvertCodexResponseToGeminiNonStream_MultiSummaryRoundTrip(t *testing.
 		[]byte(`data: {"type":"response.output_text.delta","delta":"ok"}`),
 	} {
 		for _, chunk := range ConvertCodexResponseToGemini(ctx, "muse-spark-1.3", nil, nil, ev, &wsParam) {
-			for _, p := range gjson.GetBytes(chunk, "candidates.0.content.parts").Array() {
+			for _, p := range ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts").Array() {
 				wsParts = append(wsParts, p.Raw)
 			}
 		}
 	}
 	wsReplayReq := []byte(`{"model":"muse-spark-1.3","contents":[{"role":"user","parts":[{"text":"q"}]},{"role":"model","parts":[` + strings.Join(wsParts, ",") + `]},{"role":"user","parts":[{"text":"next"}]}]}`)
 	wsReplayCodex, _ := ConvertGeminiRequestToCodex("muse-spark-1.3", wsReplayReq, false)
-	wsSummaries := gjson.GetBytes(wsReplayCodex, "input.1.summary").Array()
+	wsSummaries := ojson.GetBytesNoCopy(wsReplayCodex, "input.1.summary").Array()
 	if len(wsSummaries) != 3 || wsSummaries[0].Get("text").String()+wsSummaries[1].Get("text").String()+wsSummaries[2].Get("text").String() != "Hello world" {
-		t.Fatalf("whitespace thought chunks round-trip = %s, want ['Hello',' ','world']", gjson.GetBytes(wsReplayCodex, "input.1.summary").Raw)
+		t.Fatalf("whitespace thought chunks round-trip = %s, want ['Hello',' ','world']", ojson.GetBytesNoCopy(wsReplayCodex, "input.1.summary").Raw)
 	}
 }
 
@@ -339,7 +339,7 @@ func TestConvertCodexResponseToGeminiNonStreamPreservesFunctionCallID(t *testing
 	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","created_at":1700000000,"usage":{"input_tokens":1,"output_tokens":1},"output":[{"type":"function_call","call_id":"call_gateway","name":"lookup","arguments":"{\"query\":\"status\"}"}]}}`)
 	out := ConvertCodexResponseToGeminiNonStream(ctx, "gemini-2.5-pro", originalRequest, nil, raw, nil)
 
-	got := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.id").String()
+	got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.id").String()
 	if got != "call_gateway" {
 		t.Fatalf("expected functionCall.id %q, got %q; chunk=%s", "call_gateway", got, string(out))
 	}
@@ -349,7 +349,7 @@ func TestConvertCodexResponseToGemini_CompletedTerminalSetsStop(t *testing.T) {
 	var param any
 	terminal := []byte(`{"type":"response.completed","response":{"id":"r1","status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}`)
 	out := ConvertCodexResponseToGemini(context.Background(), "gpt-test", nil, nil, append([]byte("data: "), terminal...), &param)
-	if len(out) != 1 || gjson.GetBytes(out[0], "candidates.0.finishReason").String() != "STOP" {
+	if len(out) != 1 || ojson.GetBytesNoCopy(out[0], "candidates.0.finishReason").String() != "STOP" {
 		t.Fatalf("want one chunk with finishReason STOP, got %q", out)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -25,7 +26,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -1852,9 +1852,9 @@ func TestStripUsageMetadataPreservesToolArguments(t *testing.T) {
 				prefix = "response."
 			}
 			out, changed := StripUsageMetadataFromJSON([]byte(raw))
-			if !changed || !gjson.ValidBytes(out) || gjson.GetBytes(out, prefix+"usageMetadata").Exists() ||
-				gjson.GetBytes(out, prefix+"cpaUsageMetadata.promptTokenCount").Int() != 5 ||
-				gjson.GetBytes(out, prefix+"candidates.0.content.parts.0.functionCall.args.usageMetadata.value").Int() != 1 {
+			if !changed || !ojson.ValidBytes(out) || ojson.GetBytes(out, prefix+"usageMetadata").Exists() ||
+				ojson.GetBytes(out, prefix+"cpaUsageMetadata.promptTokenCount").Int() != 5 ||
+				ojson.GetBytes(out, prefix+"candidates.0.content.parts.0.functionCall.args.usageMetadata.value").Int() != 1 {
 				t.Fatalf("metadata rename changed the wrong field: %s", out)
 			}
 		})
@@ -2076,5 +2076,36 @@ func TestObserveResponsesStreamPreservesOutputItemDoneToolUsageWhenCompletedOutp
 	pd, pok := pluginBuf.Detail()
 	if !pok || pd.ToolUsageDetails == nil || pd.ToolUsageDetails.ToolCallsRequested == nil || *pd.ToolUsageDetails.ToolCallsRequested != 1 {
 		t.Fatalf("ObservePluginExecutorStreamUsage lost output_item.done tool usage: %+v", pd.ToolUsageDetails)
+	}
+}
+
+func TestImageDetailsCloneStringsFromReusableBuffer(t *testing.T) {
+	reqBuf := []byte(`{"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","response_format":"b64_json","mime_type":"image/png","input_fidelity":"high"}`)
+	reqDetails := ParseRequestImageDetails(reqBuf)
+	for i := range reqBuf {
+		reqBuf[i] = 'X'
+	}
+	if reqDetails == nil || reqDetails.Size != "1024x1024" || reqDetails.Quality != "high" || reqDetails.Background != "transparent" || reqDetails.OutputFormat != "png" || reqDetails.ResponseFormat != "b64_json" || reqDetails.MimeType != "image/png" || reqDetails.InputFidelity != "high" {
+		t.Fatalf("ParseRequestImageDetails corrupted after buffer overwrite: %+v", reqDetails)
+	}
+
+	toolReqBuf := []byte(`{"tools":[{"type":"image_generation","size":"1536x1024","quality":"medium","background":"opaque","output_format":"webp"}]}`)
+	toolDetails := ParseRequestImageDetails(toolReqBuf)
+	for i := range toolReqBuf {
+		toolReqBuf[i] = 'X'
+	}
+	if toolDetails == nil || toolDetails.Size != "1536x1024" || toolDetails.Quality != "medium" || toolDetails.Background != "opaque" || toolDetails.OutputFormat != "webp" {
+		t.Fatalf("ParseRequestImageDetails (tool) corrupted after buffer overwrite: %+v", toolDetails)
+	}
+
+	streamBuf := []byte(`data: {"type":"image_generation.completed","size":"1024x1536","quality":"high","background":"transparent","output_format":"png","usage":{"input_tokens":5,"output_tokens":10,"total_tokens":15}}`)
+	var b StreamUsageBuffer
+	b.ObserveOpenAIStream(streamBuf)
+	for i := range streamBuf {
+		streamBuf[i] = 'X'
+	}
+	d, ok := b.Detail()
+	if !ok || d.ImageDetails == nil || d.ImageDetails.Size != "1024x1536" || d.ImageDetails.Quality != "high" || d.ImageDetails.Background != "transparent" || d.ImageDetails.OutputFormat != "png" {
+		t.Fatalf("ObserveOpenAIStream ImageDetails corrupted after buffer overwrite: %+v", d.ImageDetails)
 	}
 }

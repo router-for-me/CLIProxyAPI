@@ -3,8 +3,8 @@ package executor
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net"
 	"net/http"

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
@@ -17,7 +18,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundary(t *testing.T) {
@@ -38,17 +38,34 @@ func TestPrepareCodexMultiAgentV2ToolsAtResponsesBoundary(t *testing.T) {
     }`)
 	got := handler.prepareCodexMultiAgentV2Tools(ginContext, payload)
 
-	if namespace := gjson.GetBytes(got, "tools.0.name").String(); namespace != "collaboration" {
+	if namespace := ojson.GetBytesNoCopy(got, "tools.0.name").String(); namespace != "collaboration" {
 		t.Fatalf("namespace = %q, want collaboration", namespace)
 	}
 	for _, path := range []string{"tools.0.tools.0", "tools.0.tools.1"} {
-		if encrypted := gjson.GetBytes(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
+		if encrypted := ojson.GetBytesNoCopy(got, path+".parameters.properties.message.encrypted"); encrypted.Exists() {
 			t.Fatalf("%s message.encrypted was not removed: %s", path, encrypted.Raw)
 		}
 	}
 	prepared, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey)
 	if !exists || prepared != true {
 		t.Fatalf("prepared marker = %#v, want true", prepared)
+	}
+}
+
+func TestPrepareCodexRequestPayloadUnchangedReturnsSameSlice(t *testing.T) {
+	t.Parallel()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{Client: sdkconfig.ClientConfig{Codex: sdkconfig.CodexClientConfig{OptimizeMultiAgentV2: true}}}, nil)
+	handler := NewOpenAIResponsesAPIHandler(base)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.Header.Set("User-Agent", "codex_cli_rs/0.144.1")
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = request
+
+	payload := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	got := handler.prepareCodexRequestPayload(ginContext, payload)
+	if len(got) == 0 || &got[0] != &payload[0] {
+		t.Fatal("expected prepareCodexRequestPayload to return original payload slice without reallocating when unchanged")
 	}
 }
 
@@ -76,10 +93,10 @@ func TestResponsesPreparesCodexMultiAgentV2ToolsForHTTPAndSSE(t *testing.T) {
 				t.Fatalf("captured payload count = %d, want 1", len(payloads))
 			}
 			captured := payloads[0]
-			if encrypted := gjson.GetBytes(captured, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
+			if encrypted := ojson.GetBytesNoCopy(captured, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
 				t.Fatalf("message.encrypted was not removed: %s", captured)
 			}
-			if namespace := gjson.GetBytes(captured, "tools.0.name").String(); namespace != "collaboration" {
+			if namespace := ojson.GetBytesNoCopy(captured, "tools.0.name").String(); namespace != "collaboration" {
 				t.Fatalf("namespace = %q, want collaboration", namespace)
 			}
 		})
@@ -169,10 +186,10 @@ func TestResponsesWebsocketPreparesCodexMultiAgentV2Tools(t *testing.T) {
 		t.Fatalf("captured payload count = %d, want 1", len(payloads))
 	}
 	captured := payloads[0]
-	if encrypted := gjson.GetBytes(captured, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
+	if encrypted := ojson.GetBytesNoCopy(captured, "tools.0.tools.0.parameters.properties.message.encrypted"); encrypted.Exists() {
 		t.Fatalf("message.encrypted was not removed: %s", captured)
 	}
-	if namespace := gjson.GetBytes(captured, "tools.0.name").String(); namespace != "collaboration" {
+	if namespace := ojson.GetBytesNoCopy(captured, "tools.0.name").String(); namespace != "collaboration" {
 		t.Fatalf("namespace = %q, want collaboration", namespace)
 	}
 }
@@ -213,10 +230,10 @@ func TestClientMultiAgentPreparationDoesNotWaitForOAuthCredential(t *testing.T) 
 	payload := []byte(`{"input":[{"type":"function_call_output","name":"create_thread","namespace":"codex_app","output":"<codex_delegation>task</codex_delegation>"}],"tools":[{"type":"function","name":"send_message","parameters":{"properties":{"message":{"encrypted":true}}}}]}`)
 	got := handler.prepareCodexMultiAgentV2Tools(ginContext, payload)
 	got = handler.prepareCodexOrphanDelegation(ginContext, got)
-	if gjson.GetBytes(got, "tools.0.parameters.properties.message.encrypted").Exists() {
+	if ojson.GetBytesNoCopy(got, "tools.0.parameters.properties.message.encrypted").Exists() {
 		t.Fatalf("client preparation did not remove encryption: %s", got)
 	}
-	if gjson.GetBytes(got, "input.0.type").String() != "message" {
+	if ojson.GetBytesNoCopy(got, "input.0.type").String() != "message" {
 		t.Fatalf("shared orphan preparation waited for credential selection: %s", got)
 	}
 	if _, exists := ginContext.Get(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey); !exists {
@@ -284,7 +301,7 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 		t.Fatalf("captured payload count = %d, want 1", len(payloads))
 	}
 	captured := payloads[0]
-	parsed := gjson.ParseBytes(captured)
+	parsed := ojson.GetBytesNoCopy(captured, "@this")
 	if itemType := parsed.Get("input.0.type").String(); itemType != "message" {
 		t.Fatalf("input.0.type = %q, want message; captured=%s", itemType, captured)
 	}
@@ -308,7 +325,7 @@ func TestResponsesOrphanCodexDelegationCompatibility(t *testing.T) {
 		t.Fatalf("captured payload count = %d, want 2", len(payloads))
 	}
 	capturedNoHeader := payloads[1]
-	parsedNoHeader := gjson.ParseBytes(capturedNoHeader)
+	parsedNoHeader := ojson.GetBytesNoCopy(capturedNoHeader, "@this")
 	if itemType := parsedNoHeader.Get("input.0.type").String(); itemType != "function_call_output" {
 		t.Fatalf("input.0.type = %q, want function_call_output without header; captured=%s", itemType, capturedNoHeader)
 	}
