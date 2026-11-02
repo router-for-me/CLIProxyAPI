@@ -111,6 +111,12 @@ func ClaudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
 	return *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile
 }
 
+// ClaudeNativeIdentityPreserved reports whether confirmed native Claude Code
+// callers keep their own metadata.user_id instead of the per-credential identity.
+func ClaudeNativeIdentityPreserved(cfg *config.Config) bool {
+	return cfg != nil && cfg.ClaudeHeaderDefaults.PreserveNativeIdentity
+}
+
 func ResetClaudeDeviceProfileCache() {
 	claudeDeviceProfileCacheMu.Lock()
 	claudeDeviceProfileCache = make(map[string]claudeDeviceProfileCacheEntry)

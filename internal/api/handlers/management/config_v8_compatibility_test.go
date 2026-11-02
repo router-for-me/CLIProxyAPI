@@ -31,6 +31,7 @@ func TestConfigV8HistoricalFieldPaths(t *testing.T) {
 		{"oauth/providers/claude/header-defaults/timeout", "upstream/claude/header-defaults/timeout", `"300"`},
 		{"oauth/providers/claude/header-defaults/timezone", "upstream/claude/header-defaults/timezone", `"Asia/Shanghai"`},
 		{"oauth/providers/claude/header-defaults/stabilize-device-profile", "upstream/claude/header-defaults/stabilize-device-profile", "true"},
+		{"oauth/providers/claude/header-defaults/preserve-native-identity", "upstream/claude/header-defaults/preserve-native-identity", "true"},
 		{"oauth/providers/claude/claude-code/disable-cloaking-model-list", "upstream/claude/disable-cloaking-model-list", "false"},
 		{"oauth/providers/xai/inject-x-search", "upstream/xai/inject-x-search", "true"},
 		{"oauth/providers/codex/optimize-multi-agent-v2", "client/codex/optimize-multi-agent-v2", "true"},
