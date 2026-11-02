@@ -270,3 +270,21 @@ func TestConvertGeminiRequestToCodex_DeterministicCallIDs(t *testing.T) {
 		t.Fatalf("expected second tool pair to have id %q, got call=%q, resp=%q", wantID2, gotCall2, gotResp2)
 	}
 }
+
+func TestConvertGeminiRequestToCodex_DefaultsOmittedContentRoleToUser(t *testing.T) {
+	raw := []byte(`{"contents":[{"parts":[{"text":"Reply with exactly: OK"}]}]}`)
+
+	out, err := ConvertGeminiRequestToCodex("gpt-5.1-codex", raw, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToCodex() error = %v", err)
+	}
+	if got := gjson.GetBytes(out, "input.0.role").String(); got != "user" {
+		t.Fatalf("input.0.role = %q, want user; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("input.0.content.0.type = %q, want input_text; out=%s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "input.0.content.0.text").String(); got != "Reply with exactly: OK" {
+		t.Fatalf("input.0.content.0.text = %q, want Reply with exactly: OK; out=%s", got, string(out))
+	}
+}
