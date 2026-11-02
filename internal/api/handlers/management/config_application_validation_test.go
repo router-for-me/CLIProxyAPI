@@ -15,13 +15,17 @@ import (
 
 func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	for _, tc := range []struct{ name, method, path, body string }{
-		{"v8 json", http.MethodPatch, "/v8/management/config", `{"server":{"host":"0.0.0.0"}}`},
-		{"v8 yaml", http.MethodPut, "/v8/management/config.yaml", "config-version: 8\nserver: {host: 0.0.0.0, port: 8317}\n"},
-		{"legacy yaml", http.MethodPut, "/legacy/config.yaml", "host: 0.0.0.0\nport: 8317\n"},
-		{"scalar", http.MethodPut, "/legacy/request-retry", `{"value":8}`},
-		{"api keys", http.MethodPut, "/legacy/api-keys", `[]`},
-		{"plugin", http.MethodPatch, "/plugins/probe/enabled", `{"enabled":true}`},
+	for _, tc := range []struct {
+		name, method, path, body string
+		legacy                   bool
+	}{
+		{"v8 json", http.MethodPatch, "/v8/management/config", `{"server":{"host":"0.0.0.0"}}`, false},
+		{"v8 yaml", http.MethodPut, "/v8/management/config.yaml", "config-version: 8\nserver: {host: 0.0.0.0, port: 8317}\n", false},
+		// Deprecated v0 endpoints keep their contract and skip application validation.
+		{"legacy yaml", http.MethodPut, "/legacy/config.yaml", "host: 0.0.0.0\nport: 8317\n", true},
+		{"scalar", http.MethodPut, "/legacy/request-retry", `{"value":8}`, true},
+		{"api keys", http.MethodPut, "/legacy/api-keys", `[]`, true},
+		{"plugin", http.MethodPatch, "/legacy/plugins/probe/enabled", `{"enabled":true}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
@@ -41,12 +45,13 @@ func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing
 				return nil
 			})
 			router := gin.New()
-			router.PATCH("/v8/management/config", h.ConfigV8)
-			router.PUT("/v8/management/config.yaml", h.ConfigV8)
+			v8 := router.Group("/v8/management", func(c *gin.Context) { c.Set(ConfigV8ContextKey, true) })
+			v8.PATCH("/config", h.ConfigV8)
+			v8.PUT("/config.yaml", h.ConfigV8)
 			router.PUT("/legacy/config.yaml", h.PutConfigYAML)
 			router.PUT("/legacy/request-retry", h.PutRequestRetry)
 			router.PUT("/legacy/api-keys", h.PutAPIKeys)
-			router.PATCH("/plugins/:id/enabled", h.PatchPluginEnabled)
+			router.PATCH("/legacy/plugins/:id/enabled", h.PatchPluginEnabled)
 			// A successful mutation becomes the baseline; a rejection must not revert it.
 			good := httptest.NewRecorder()
 			router.ServeHTTP(good, httptest.NewRequest(http.MethodPut, "/legacy/request-retry", strings.NewReader(`{"value":2}`)))
@@ -59,6 +64,12 @@ func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing
 			}
 			rejected := httptest.NewRecorder()
 			router.ServeHTTP(rejected, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			if tc.legacy {
+				if rejected.Code != http.StatusOK {
+					t.Fatalf("deprecated endpoint changed behavior: %d %s", rejected.Code, rejected.Body.String())
+				}
+				return
+			}
 			if rejected.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("invalid application config acknowledged: %d %s", rejected.Code, rejected.Body.String())
 			}
@@ -73,5 +84,54 @@ func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing
 				t.Fatal("rejected mutation changed handler configuration")
 			}
 		})
+	}
+}
+
+func TestApplicationValidationRejectsPluginDeleteBeforeRemovingArtifact(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pluginsDir := writeManagementPluginFile(t, "sample")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("plugins:\n  configs:\n    sample:\n      enabled: true\n")
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{"sample": pluginConfigFromYAML(t, "enabled: true\n")},
+		}},
+		configFilePath: configPath,
+	}
+	h.SetConfigValidator(func(next *config.Config) error {
+		if _, ok := next.Plugins.Configs["sample"]; !ok {
+			return errors.New("sample plugin is required")
+		}
+		return nil
+	})
+	artifact, err := pluginFilePath(pluginsDir, "sample")
+	if err != nil || artifact == "" {
+		t.Fatalf("plugin path %q: %v", artifact, err)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(ConfigV8ContextKey, true)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v8/management/plugins/sample", nil)
+	h.DeletePlugin(c)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		t.Fatalf("rejected delete removed the plugin artifact: %v", err)
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample"]; !ok {
+		t.Fatal("rejected delete changed handler configuration")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(raw) {
+		t.Fatal("rejected delete changed persisted configuration")
 	}
 }

@@ -212,7 +212,12 @@ func (b *Builder) Build() (*Service, error) {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
 	if b.hooks.ValidateConfig != nil {
-		if errValidate := b.hooks.ValidateConfig(b.cfg.CloneForRuntime()); errValidate != nil {
+		// Validate what Run will publish: Home mode rewrites several runtime controls.
+		snapshot := b.cfg.CloneForRuntime()
+		if snapshot.Home.Enabled {
+			forceHomeRuntimeConfig(snapshot)
+		}
+		if errValidate := b.hooks.ValidateConfig(snapshot); errValidate != nil {
 			return nil, fmt.Errorf("cliproxy: validate application config: %w", errValidate)
 		}
 	}

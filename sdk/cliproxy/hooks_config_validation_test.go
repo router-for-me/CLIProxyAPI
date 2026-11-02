@@ -118,3 +118,55 @@ func TestHooksConfigValidationReachesManagementSaveBoundary(t *testing.T) {
 		t.Fatal("management persisted configuration rejected by embedding application")
 	}
 }
+
+func TestHooksConfigValidationSeesHomeRuntimeConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.APIKeys = []string{"client"}
+	cfg.Home.Enabled = true
+	rejected := errors.New("proxy API key required")
+	_, err := NewBuilder().WithConfig(cfg).WithConfigPath("unused-config.yaml").
+		WithHooks(Hooks{ValidateConfig: func(snapshot *config.Config) error {
+			if len(snapshot.APIKeys) == 0 {
+				return rejected
+			}
+			return nil
+		}}).Build()
+	if !errors.Is(err, rejected) {
+		t.Fatalf("Build error=%v, want rejection of the Home runtime config", err)
+	}
+	if len(cfg.APIKeys) != 1 {
+		t.Fatal("validation snapshot mutated caller configuration")
+	}
+}
+
+func TestHooksConfigValidationRejectsWatcherReloadBeforeCallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	authDir := filepath.Join(dir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(retry string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte("auth-dir: "+authDir+"\nrequest-retry: "+retry+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1")
+	reloads := 0
+	wrapper, err := defaultWatcherFactory(path, authDir, func(*config.Config) { reloads++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapper.SetConfigValidator(func(next *config.Config) error {
+		if next.RequestRetry > 3 {
+			return errors.New("request-retry above application limit")
+		}
+		return nil
+	})
+	write("9")
+	wrapper.ReloadConfigIfChanged()
+	if reloads != 0 {
+		t.Fatal("watcher published a config rejected by the embedding application")
+	}
+}

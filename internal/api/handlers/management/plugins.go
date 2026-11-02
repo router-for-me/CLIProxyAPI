@@ -362,6 +362,18 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	if configured {
+		// Validate before unloading or removing the artifact; neither can be rolled back.
+		h.mu.Lock()
+		candidate := h.cfg.CloneForRuntime()
+		delete(candidate.Plugins.Configs, id)
+		accepted := h.validateConfigLocked(c, candidate)
+		h.mu.Unlock()
+		if !accepted {
+			return
+		}
+	}
+
 	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":            "plugin_delete_requires_restart",
@@ -386,10 +398,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	h.mu.Lock()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
-		if !h.validateConfigLocked(c, h.cfg) {
-			h.mu.Unlock()
-			return
-		}
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{

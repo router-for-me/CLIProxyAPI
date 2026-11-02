@@ -140,11 +140,13 @@ The embedded server calls this automatically for built‑in providers; for custo
 ## Config validation hook
 
 `Hooks.ValidateConfig` lets an embedding application reject configuration on
-startup, every watcher reload, and management saves, before it is persisted or
-published. The callback receives an isolated snapshot, must not perform blocking
-runtime work, and returns an error to reject the update. Rejected management
-saves leave the file and the handler's config unchanged. Without a validator,
-behavior is unchanged.
+startup (after Home mode's runtime overrides), every watcher reload, and v8
+management saves, before it is persisted or published. The callback receives an
+isolated snapshot, must not perform blocking runtime work, and returns an error
+to reject the update. Rejected management saves leave the file and the handler's
+config unchanged. A rejected config file is not adopted by the watcher, so no
+credentials are refreshed from it. Deprecated `/v0/management` endpoints are not
+validated. Without a validator, behavior is unchanged.
 
 ```go
 builder.WithHooks(cliproxy.Hooks{ValidateConfig: func(cfg *config.Config) error {

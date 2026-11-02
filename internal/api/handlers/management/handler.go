@@ -225,9 +225,10 @@ func (h *Handler) SetConfigValidator(validate func(*config.Config) error) {
 	h.acceptedConfig = h.cfg.CloneForRuntime()
 }
 
-// Caller holds h.mu. Legacy mutations already changed h.cfg, so restore the last accepted clone on rejection.
+// Caller holds h.mu. Mutations may already have changed h.cfg, so restore the last accepted clone on rejection.
+// Deprecated v0 endpoints keep their contract and are not validated.
 func (h *Handler) validateConfigLocked(c *gin.Context, candidate *config.Config) bool {
-	if h.configValidator == nil {
+	if h.configValidator == nil || !c.GetBool(ConfigV8ContextKey) {
 		return true
 	}
 	if err := h.configValidator(candidate.CloneForRuntime()); err != nil {
