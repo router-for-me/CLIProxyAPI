@@ -523,11 +523,25 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
 	output, _ := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
-	if gjson.Get(outputStr, "context_management").Exists() {
-		t.Fatalf("context_management should be removed for Codex compatibility")
+	rule := gjson.Get(outputStr, "context_management")
+	if len(rule.Array()) != 1 || rule.Get("0.type").String() != "compaction" || rule.Get("0.compact_threshold").Int() != 12000 {
+		t.Fatalf("context_management = %s, want the compaction rule forwarded unchanged", rule.Raw)
 	}
 	if gjson.Get(outputStr, "truncation").Exists() {
 		t.Fatalf("truncation should be removed for Codex compatibility")
+	}
+
+	for name, value := range map[string]string{
+		"unknown strategy":      `[{"type":"compaction"},{"type":"clear_tool_uses"}]`,
+		"object form":           `{"type":"compaction"}`,
+		"empty list":            `[]`,
+		"non-numeric threshold": `[{"type":"compaction","compact_threshold":"12000"}]`,
+	} {
+		input := []byte(`{"model":"gpt-5.2","context_management":` + value + `,"input":[{"role":"user","content":"hello"}]}`)
+		output, _ := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", input, false)
+		if got := gjson.GetBytes(output, "context_management"); got.Exists() {
+			t.Errorf("%s: context_management = %s, want removed", name, got.Raw)
+		}
 	}
 }
 

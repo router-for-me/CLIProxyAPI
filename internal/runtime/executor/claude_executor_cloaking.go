@@ -1510,6 +1510,17 @@ func claudeThinkingAcceptsClearThinking(payload []byte) bool {
 	}
 }
 
+// claudeCodeContextManagementFits reports whether CPA may supply its
+// context_management object. Besides the thinking requirement, Anthropic
+// rejects an on-demand compaction request (top-level "compaction", beta
+// compact-2026-09-04) that also carries context_management.
+func claudeCodeContextManagementFits(payload []byte) bool {
+	if compaction := gjson.GetBytes(payload, "compaction"); compaction.Exists() && compaction.Type != gjson.Null {
+		return false
+	}
+	return claudeThinkingAcceptsClearThinking(payload)
+}
+
 // injectClaudeCodeContextManagement supplies context_management when the caller
 // omitted it. CPA already claims context-management-2025-06-27 in Anthropic-Beta,
 // so a missing body field is an observable inconsistency with the real client. A
@@ -1518,7 +1529,7 @@ func injectClaudeCodeContextManagement(payload []byte) ([]byte, bool) {
 	if gjson.GetBytes(payload, "context_management").Exists() {
 		return payload, false
 	}
-	if !claudeThinkingAcceptsClearThinking(payload) {
+	if !claudeCodeContextManagementFits(payload) {
 		return payload, false
 	}
 	updated, err := sjson.SetRawBytes(payload, "context_management", []byte(claudeCodeContextManagement))
@@ -1543,7 +1554,7 @@ func reconcileClaudeCodeContextManagement(payload []byte, state claudeCodeContex
 	// injected itself. disableThinkingIfToolChoiceForced deletes the whole
 	// thinking field after injection, so this also covers a request that was
 	// still eligible when injectClaudeCodeContextManagement ran.
-	if !claudeThinkingAcceptsClearThinking(payload) {
+	if !claudeCodeContextManagementFits(payload) {
 		if state.callerOwned || !state.automaticallyInjected {
 			return payload
 		}
