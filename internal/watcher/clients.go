@@ -263,6 +263,7 @@ func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
 		w.clientsMutex.Unlock()
 		return
 	}
+	path = w.rebaseAuthFilePathLocked(path, w.authDir)
 	existing := w.currentAuths[auth.ID]
 	if existing == nil || !existing.SameFileSnapshot(auth) {
 		w.clientsMutex.Unlock()
@@ -322,6 +323,7 @@ func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
 }
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
+	path = w.rebaseAuthFilePath(path)
 	w.observeAuthFile(path)
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -357,6 +359,8 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 		w.clientsMutex.Unlock()
 		return
 	}
+	path = w.rebaseAuthFilePathLocked(path, authDir)
+	normalized = w.normalizeAuthPath(path)
 	parser := w.pluginAuthParser
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
@@ -440,6 +444,7 @@ func (w *Watcher) removeClient(path string) {
 }
 
 func (w *Watcher) removeClientLocked(path string) {
+	path = w.rebaseAuthFilePath(path)
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()

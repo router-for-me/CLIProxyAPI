@@ -94,6 +94,49 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 }
 
+func (w *Watcher) rebaseAuthDirStateLocked(nextAuthDir string) {
+	resolvedNext := strings.TrimSpace(nextAuthDir)
+	if resolvedNext == "" {
+		return
+	}
+	if resolved, errResolve := util.ResolveAuthDir(resolvedNext); errResolve == nil && strings.TrimSpace(resolved) != "" {
+		resolvedNext = resolved
+	}
+	rebasedKey := func(trackedPath string) (string, bool) {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), resolvedNext) {
+			return "", false
+		}
+		target := w.normalizeAuthPath(filepath.Join(resolvedNext, filepath.Base(trackedPath)))
+		return target, target != "" && target != trackedPath
+	}
+	for trackedPath, set := range w.fileAuthsByPath {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.fileAuthsByPath, trackedPath)
+			w.fileAuthsByPath[target] = set
+		}
+	}
+	for trackedPath, hash := range w.lastAuthHashes {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.lastAuthHashes, trackedPath)
+			w.lastAuthHashes[target] = hash
+		}
+	}
+	for trackedPath, content := range w.lastAuthContents {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.lastAuthContents, trackedPath)
+			w.lastAuthContents[target] = content
+		}
+	}
+	for trackedPath, obs := range w.fileObservations {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.fileObservations, trackedPath)
+			if obs > w.fileObservations[target] {
+				w.fileObservations[target] = obs
+			}
+		}
+	}
+}
+
 func (w *Watcher) purgeStaleAuthDirStateLocked(nextAuthDir string) {
 	for _, existing := range w.currentAuths {
 		if existing != nil && existing.HasFileSnapshot() && !w.matchesAuthDir(filepath.Dir(existing.FileSnapshotPath()), nextAuthDir) {
@@ -144,11 +187,16 @@ func (w *Watcher) reloadConfig() bool {
 	oldAuthDir := w.authDir
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
-	if strings.TrimSpace(newConfig.AuthDir) != "" {
-		w.authDir = newConfig.AuthDir
+	candidateAuthDir := strings.TrimSpace(newConfig.AuthDir)
+	realDirSwitch := false
+	if candidateAuthDir != "" {
+		if oldAuthDir == "" || !w.matchesAuthDir(oldAuthDir, candidateAuthDir) {
+			w.authDir = candidateAuthDir
+			realDirSwitch = oldAuthDir != ""
+		}
 	}
 	nextAuthDir := w.authDir
-	if !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
+	if realDirSwitch {
 		w.authDirGeneration++
 		w.purgeStaleAuthDirStateLocked(nextAuthDir)
 	}
@@ -177,7 +225,7 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
-	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir || oldAuthDir != nextAuthDir
+	authDirChanged := oldConfig == nil || realDirSwitch || oldAuthDir != nextAuthDir
 	if nextAuthDir != "" {
 		w.rewatchAuthDir(nextAuthDir)
 	}

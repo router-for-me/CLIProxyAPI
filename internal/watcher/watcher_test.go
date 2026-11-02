@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1979,4 +1980,180 @@ func TestReloadConfigUpdatesAuthDirSnapshotsAndWatchesNewDirectory(t *testing.T)
 	if _, errStat := os.Stat("~"); !os.IsNotExist(errStat) {
 		t.Fatalf("SetConfig must not create a literal ~ directory in the working tree: err=%v", errStat)
 	}
+}
+
+func TestReloadConfigEquivalentAuthDirSpellingPreservesStableCredentialIDs(t *testing.T) {
+	t.Run("relative to absolute switch", func(t *testing.T) {
+		tmp := t.TempDir()
+		absAuthDir := filepath.Join(tmp, "auths")
+		if err := os.MkdirAll(absAuthDir, 0o700); err != nil {
+			t.Fatalf("mkdir auths: %v", err)
+		}
+		credPath := filepath.Join(absAuthDir, "x.json")
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-1"}`), 0o600); err != nil {
+			t.Fatalf("write x.json: %v", err)
+		}
+		cfgPath := filepath.Join(tmp, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", "auths")), 0o600); err != nil {
+			t.Fatalf("write initial config: %v", err)
+		}
+
+		origWD, errWD := os.Getwd()
+		if errWD != nil {
+			t.Fatalf("Getwd: %v", errWD)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("Chdir(%s): %v", tmp, err)
+		}
+		defer func() { _ = os.Chdir(origWD) }()
+
+		w, err := NewWatcher(cfgPath, "auths", nil)
+		if err != nil {
+			t.Fatalf("NewWatcher: %v", err)
+		}
+		defer func() { _ = w.Stop() }()
+		updates := make(chan AuthUpdate, 16)
+		w.SetAuthUpdateQueue(updates)
+		w.SetConfig(&config.Config{AuthDir: "auths"})
+		w.clientsMutex.Lock()
+		w.watchedAuthDir = "auths"
+		w.clientsMutex.Unlock()
+		w.reloadClients(true, nil, false)
+		expectOneUpdate := func() AuthUpdate {
+			t.Helper()
+			select {
+			case u := <-updates:
+				return u
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for auth update")
+				return AuthUpdate{}
+			}
+		}
+		assertNoQueuedUpdates := func() {
+			t.Helper()
+			w.dispatchMu.Lock()
+			for len(w.pendingOrder) > 0 {
+				w.dispatchMu.Unlock()
+				runtime.Gosched()
+				w.dispatchMu.Lock()
+			}
+			w.dispatchMu.Unlock()
+			select {
+			case u := <-updates:
+				t.Fatalf("unexpected auth update: %+v", u)
+			default:
+			}
+		}
+		initial := expectOneUpdate()
+		if initial.Action != AuthUpdateActionAdd || initial.ID != "x.json" {
+			t.Fatalf("initial update = %+v, want add x.json", initial)
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(absAuthDir))), 0o600); err != nil {
+			t.Fatalf("write abs config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-2"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json: %v", err)
+		}
+		// fsnotify registered with relative "auths" emits relative paths.
+		w.handleEvent(fsnotify.Event{Name: filepath.Join("auths", "x.json"), Op: fsnotify.Write})
+		afterEdit := expectOneUpdate()
+		if afterEdit.Action != AuthUpdateActionModify || afterEdit.ID != "x.json" {
+			t.Fatalf("update after relative event edit = %+v, want modify x.json", afterEdit)
+		}
+		assertNoQueuedUpdates()
+	})
+
+	t.Run("symlink alias switch and subsequent reload", func(t *testing.T) {
+		tmp := t.TempDir()
+		realDir := filepath.Join(tmp, "real")
+		linkDir := filepath.Join(tmp, "link")
+		if err := os.MkdirAll(realDir, 0o700); err != nil {
+			t.Fatalf("mkdir real: %v", err)
+		}
+		if err := os.Symlink(realDir, linkDir); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		credPath := filepath.Join(realDir, "x.json")
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-1"}`), 0o600); err != nil {
+			t.Fatalf("write x.json: %v", err)
+		}
+		cfgPath := filepath.Join(tmp, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(realDir))), 0o600); err != nil {
+			t.Fatalf("write initial config: %v", err)
+		}
+
+		w, err := NewWatcher(cfgPath, realDir, nil)
+		if err != nil {
+			t.Fatalf("NewWatcher: %v", err)
+		}
+		defer func() { _ = w.Stop() }()
+		updates := make(chan AuthUpdate, 16)
+		w.SetAuthUpdateQueue(updates)
+		w.SetConfig(&config.Config{AuthDir: realDir})
+		w.clientsMutex.Lock()
+		w.watchedAuthDir = realDir
+		w.clientsMutex.Unlock()
+		w.reloadClients(true, nil, false)
+		expectOneUpdate := func() AuthUpdate {
+			t.Helper()
+			select {
+			case u := <-updates:
+				return u
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for auth update")
+				return AuthUpdate{}
+			}
+		}
+		assertNoQueuedUpdates := func() {
+			t.Helper()
+			w.dispatchMu.Lock()
+			for len(w.pendingOrder) > 0 {
+				w.dispatchMu.Unlock()
+				runtime.Gosched()
+				w.dispatchMu.Lock()
+			}
+			w.dispatchMu.Unlock()
+			select {
+			case u := <-updates:
+				t.Fatalf("unexpected auth update: %+v", u)
+			default:
+			}
+		}
+		_ = expectOneUpdate()
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(linkDir))), 0o600); err != nil {
+			t.Fatalf("write symlink config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-2"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json: %v", err)
+		}
+		w.handleEvent(fsnotify.Event{Name: credPath, Op: fsnotify.Write})
+		afterEdit := expectOneUpdate()
+		if afterEdit.Action != AuthUpdateActionModify || afterEdit.ID != "x.json" {
+			t.Fatalf("update after symlink edit = %+v, want modify x.json", afterEdit)
+		}
+		assertNoQueuedUpdates()
+
+		// Subsequent unrelated config reload must not flip the credential ID back.
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\ndebug: true\n", filepath.ToSlash(linkDir))), 0o600); err != nil {
+			t.Fatalf("write unrelated config update: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("unrelated reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+	})
 }

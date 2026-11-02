@@ -184,11 +184,13 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	oldAuthDir := w.authDir
 	w.config = cloned
 	if nextAuthDir != "" {
-		w.authDir = nextAuthDir
-	}
-	if nextAuthDir != "" && !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
-		w.authDirGeneration++
-		w.purgeStaleAuthDirStateLocked(nextAuthDir)
+		if oldAuthDir == "" || !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
+			w.authDir = nextAuthDir
+			if oldAuthDir != "" {
+				w.authDirGeneration++
+				w.purgeStaleAuthDirStateLocked(nextAuthDir)
+			}
+		}
 	}
 	w.oldConfigYaml, _ = yaml.Marshal(cloned)
 	w.clientsMutex.Unlock()
@@ -218,6 +220,11 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchPersistedAuthUpdate(update)
+}
+
+// AcceptsPersistedAuth reports whether a file-backed auth belongs to the current auth directory.
+func (w *Watcher) AcceptsPersistedAuth(auth *coreauth.Auth) bool {
+	return w.acceptsPersistedAuth(auth)
 }
 
 // DispatchPersistedAuthUpdateWithRevision pushes already-persisted file auth updates through the watcher queue

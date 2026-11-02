@@ -69,6 +69,32 @@ func (w *Watcher) isCurrentAuthDir(dir string) bool {
 	return false
 }
 
+func (w *Watcher) rebaseAuthFilePathLocked(path, authDir string) string {
+	trimmedPath := strings.TrimSpace(path)
+	trimmedAuthDir := strings.TrimSpace(authDir)
+	if trimmedPath == "" || trimmedAuthDir == "" {
+		return trimmedPath
+	}
+	dir := filepath.Dir(trimmedPath)
+	if w.matchesAuthDir(dir, trimmedAuthDir) {
+		return filepath.Join(trimmedAuthDir, filepath.Base(trimmedPath))
+	}
+	if w.watchedAuthDir != "" && w.matchesAuthDir(trimmedAuthDir, w.watchedAuthDir) && w.matchesAuthDir(dir, w.watchedAuthDir) {
+		return filepath.Join(trimmedAuthDir, filepath.Base(trimmedPath))
+	}
+	return trimmedPath
+}
+
+func (w *Watcher) rebaseAuthFilePath(path string) string {
+	if w == nil {
+		return path
+	}
+	w.clientsMutex.RLock()
+	rebased := w.rebaseAuthFilePathLocked(path, w.authDir)
+	w.clientsMutex.RUnlock()
+	return rebased
+}
+
 func (w *Watcher) rewatchAuthDir(nextAuthDir string) {
 	if w == nil || w.watcher == nil || w.stopped.Load() {
 		return
@@ -89,14 +115,14 @@ func (w *Watcher) rewatchAuthDir(nextAuthDir string) {
 	if w.matchesAuthDir(prevWatched, nextTrimmed) {
 		// Retain prevWatched as the registered fsnotify path spelling so a future
 		// transition to a distinct directory removes the exact registered watch,
-		// while isCurrentAuthDir accepts events emitted under either spelling.
+		// while incoming events are rebased onto the active authDir spelling.
 		return
 	}
 	if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
 		log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
 		return
 	}
-	if !w.matchesAuthDir(prevWatched, w.configPath) {
+	if !w.matchesAuthDir(prevWatched, filepath.Dir(w.configPath)) {
 		if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
 			log.Debugf("failed to remove old auth directory watch %s: %v", prevWatched, errRemove)
 		}
@@ -178,6 +204,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	if !w.isCurrentAuthDir(filepath.Dir(normalizedName)) {
 		return
 	}
+	event.Name = w.rebaseAuthFilePath(event.Name)
+	normalizedName = w.normalizeAuthPath(event.Name)
 	w.observeAuthFile(event.Name)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
@@ -233,6 +261,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 // observeAuthFile invalidates in-flight scans even if hash or content deduplication
 // suppresses an update. It must not invalidate an otherwise valid queued auth event.
 func (w *Watcher) observeAuthFile(path string) {
+	path = w.rebaseAuthFilePath(path)
 	normalized := w.normalizeAuthPath(path)
 	if normalized == "" {
 		return
@@ -253,6 +282,7 @@ func (w *Watcher) observeAuthFile(path string) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
+	path = w.rebaseAuthFilePath(path)
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		return false, errRead
@@ -274,6 +304,7 @@ func (w *Watcher) authFileUnchanged(path string) (bool, error) {
 }
 
 func (w *Watcher) isKnownAuthFile(path string) bool {
+	path = w.rebaseAuthFilePath(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.RLock()
 	defer w.clientsMutex.RUnlock()

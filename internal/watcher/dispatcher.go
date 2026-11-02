@@ -87,6 +87,30 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return true
 }
 
+func (w *Watcher) acceptsPersistedAuth(auth *coreauth.Auth) bool {
+	if w == nil || auth == nil || len(auth.Attributes) == 0 {
+		return true
+	}
+	path := auth.Attributes["path"]
+	if path == "" {
+		path = auth.Attributes["source"]
+	}
+	if strings.TrimSpace(path) == "" || strings.HasPrefix(path, "config:") {
+		return true
+	}
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return true
+	}
+	w.clientsMutex.RLock()
+	authDir := strings.TrimSpace(w.authDir)
+	w.clientsMutex.RUnlock()
+	if authDir == "" {
+		return true
+	}
+	return w.matchesAuthDir(filepath.Dir(normalized), authDir)
+}
+
 func (w *Watcher) dispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	ok, _ := w.dispatchPersistedAuthUpdateWithRevision(&update)
 	return ok
@@ -116,6 +140,7 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 		w.clientsMutex.Unlock()
 		return false, 0
 	}
+	normalized = w.normalizeAuthPath(w.rebaseAuthFilePathLocked(normalized, w.authDir))
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
