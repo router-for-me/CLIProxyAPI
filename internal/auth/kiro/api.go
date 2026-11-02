@@ -214,3 +214,41 @@ func PersistKiroCredentials(cfg *config.Config, creds *KiroCredentials, email, u
 	path := filepath.Join(cfg.AuthDir, fileName)
 	return path, SaveTokenToFile(creds, path)
 }
+
+// NeedsTokenRefresh reports whether a Kiro OAuth credential has a refresh token and its access token is missing or near expiry.
+func NeedsTokenRefresh(creds *KiroCredentials, now time.Time) bool {
+	if creds == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") {
+		return false
+	}
+	if strings.TrimSpace(creds.RefreshToken) == "" {
+		return false
+	}
+	if strings.TrimSpace(creds.AccessToken) == "" {
+		return true
+	}
+	if creds.ExpiresAt > 0 && now.Unix() >= creds.ExpiresAt-120 {
+		return true
+	}
+	return false
+}
+
+// IsInvalidBearerTokenError reports whether an upstream Kiro HTTP status and response body indicate an expired or invalid bearer token.
+// AWS Kiro/CodeWhisperer endpoints return HTTP 403 with "The bearer token included in the request is invalid." when an access token expires.
+func IsInvalidBearerTokenError(statusCode int, body []byte) bool {
+	if statusCode == http.StatusUnauthorized {
+		return true
+	}
+	if statusCode != http.StatusForbidden {
+		return false
+	}
+	lower := strings.ToLower(string(body))
+	return strings.Contains(lower, "bearer token included in the request is invalid") ||
+		strings.Contains(lower, "security token included in the request is invalid") ||
+		strings.Contains(lower, "security token included in the request is expired") ||
+		strings.Contains(lower, "expiredtoken") ||
+		strings.Contains(lower, "invalid bearer token")
+}
+

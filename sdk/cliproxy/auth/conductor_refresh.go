@@ -292,12 +292,12 @@ func authLastRefreshTimestamp(a *Auth) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if a.Metadata != nil {
-		if ts, ok := lookupMetadataTime(a.Metadata, "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"); ok {
+		if ts, ok := lookupMetadataTime(a.Metadata, "last_refresh", "lastRefresh", "last_refreshed", "lastRefreshed", "last_refreshed_at", "lastRefreshedAt"); ok {
 			return ts, true
 		}
 	}
 	if a.Attributes != nil {
-		for _, key := range []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"} {
+		for _, key := range []string{"last_refresh", "lastRefresh", "last_refreshed", "lastRefreshed", "last_refreshed_at", "lastRefreshedAt"} {
 			if val := strings.TrimSpace(a.Attributes[key]); val != "" {
 				if ts, ok := parseTimeValue(val); ok {
 					return ts, true

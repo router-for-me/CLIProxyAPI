@@ -107,11 +107,43 @@ func (s *Service) fetchKiroModelCatalog(ctx context.Context) ([]registry.KiroMod
 			continue
 		}
 		creds := kiroauth.CredentialsFromAuth(auth)
-		if creds == nil || strings.TrimSpace(creds.AccessToken) == "" {
+		if creds == nil {
+			continue
+		}
+		canRefresh := !strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") && strings.TrimSpace(creds.RefreshToken) != ""
+		refreshedAlready := false
+		refreshAndPersist := func() bool {
+			oldRefresh := creds.RefreshToken
+			refreshed, errRefresh := authSvc.RefreshToken(ctx, creds)
+			if errRefresh != nil || refreshed == nil || strings.TrimSpace(refreshed.AccessToken) == "" {
+				return false
+			}
+			if refreshed.RefreshToken == "" {
+				refreshed.RefreshToken = oldRefresh
+			}
+			creds = refreshed
+			updated := auth.Clone()
+			kiroauth.ApplyCredentialsToAuth(updated, refreshed)
+			kiroauth.SetRefreshFingerprints(updated, refreshed.RefreshToken, oldRefresh)
+			updated.LastRefreshedAt = time.Now()
+			updated.UpdatedAt = time.Now()
+			_, _ = s.coreManager.Update(ctx, updated)
+			return true
+		}
+
+		if kiroauth.NeedsTokenRefresh(creds, time.Now()) && canRefresh {
+			refreshedAlready = refreshAndPersist()
+		}
+		if strings.TrimSpace(creds.AccessToken) == "" {
 			continue
 		}
 
 		models, err := authSvc.ListAvailableModels(ctx, creds)
+		if err != nil && canRefresh && !refreshedAlready {
+			if refreshAndPersist() {
+				models, err = authSvc.ListAvailableModels(ctx, creds)
+			}
+		}
 		if err != nil {
 			log.Debugf("Kiro model catalog fetch failed for auth %s: %v", auth.ID, err)
 			continue

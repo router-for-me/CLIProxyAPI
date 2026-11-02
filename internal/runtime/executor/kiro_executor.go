@@ -306,6 +306,48 @@ func setKiroPayloadOrigin(payload []byte, origin string) ([]byte, error) {
 	return json.Marshal(raw)
 }
 
+func (e *KiroExecutor) authServiceForAuth(ctx context.Context, auth *cliproxyauth.Auth) *kiroauth.KiroAuth {
+	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
+		return kiroauth.NewKiroAuth(e.cfg, helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+	}
+	if e.authSvc != nil {
+		return e.authSvc
+	}
+	return kiroauth.NewKiroAuth(e.cfg, e.httpClient)
+}
+
+func (e *KiroExecutor) refreshKiroCredentialsInPlace(ctx context.Context, auth *cliproxyauth.Auth, creds *kiroauth.KiroCredentials) (*kiroauth.KiroCredentials, error) {
+	if creds == nil {
+		return nil, fmt.Errorf("kiro executor: missing credentials")
+	}
+	authSvc := e.authServiceForAuth(ctx, auth)
+	oldRefresh := creds.RefreshToken
+	refreshed, err := authSvc.RefreshToken(ctx, creds)
+	if err != nil {
+		return nil, err
+	}
+	if refreshed == nil {
+		return creds, nil
+	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = creds.RefreshToken
+	}
+	if refreshed.ProfileArn == "" {
+		refreshed.ProfileArn = creds.ProfileArn
+	}
+	if refreshed.ExpiresAt == 0 && creds.ExpiresAt > 0 {
+		refreshed.ExpiresAt = creds.ExpiresAt
+	}
+	if refreshed.LastRefreshed == 0 {
+		refreshed.LastRefreshed = time.Now().Unix()
+	}
+	if auth != nil {
+		kiroauth.ApplyCredentialsToAuth(auth, refreshed)
+		kiroauth.SetRefreshFingerprints(auth, refreshed.RefreshToken, oldRefresh)
+	}
+	return refreshed, nil
+}
+
 func (e *KiroExecutor) executeRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, reporter *helps.UsageReporter) (*http.Response, http.Header, string, string, error) {
 	if e == nil {
 		return nil, nil, "", "", fmt.Errorf("kiro executor: executor is nil")
@@ -317,9 +359,19 @@ func (e *KiroExecutor) executeRequest(ctx context.Context, auth *cliproxyauth.Au
 	if creds == nil {
 		return nil, nil, "", "", fmt.Errorf("kiro executor: missing credentials")
 	}
+	refreshedInRequest := false
+	if kiroauth.NeedsTokenRefresh(creds, time.Now()) {
+		if refreshed, errRefresh := e.refreshKiroCredentialsInPlace(ctx, auth, creds); errRefresh == nil && refreshed != nil {
+			creds = refreshed
+			refreshedInRequest = true
+		} else if errRefresh != nil {
+			log.Warnf("kiro executor: proactive token refresh failed for %s: %v", auth.ID, errRefresh)
+		}
+	}
+	authSvc := e.authServiceForAuth(ctx, auth)
 	profileArn := strings.TrimSpace(creds.ProfileArn)
 	if profileArn == "" {
-		if resolved, errResolve := e.authSvc.ResolveProfileArn(ctx, creds); errResolve == nil {
+		if resolved, errResolve := authSvc.ResolveProfileArn(ctx, creds); errResolve == nil {
 			profileArn = strings.TrimSpace(resolved)
 		}
 	}
@@ -348,27 +400,46 @@ func (e *KiroExecutor) executeRequest(ctx context.Context, auth *cliproxyauth.Au
 			lastErr = errOrigin
 			continue
 		}
-		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL, bytes.NewReader(requestPayload))
-		if errReq != nil {
-			lastErr = errReq
-			continue
-		}
-		httpReq.Header = e.buildHeadersForEndpoint(endpoint, strings.TrimSpace(creds.AccessToken), strings.ToLower(strings.TrimSpace(creds.AuthMethod)), 1, 1)
-		resp, errReq := client.Do(httpReq)
-		if errReq != nil {
-			lastErr = errReq
-			helps.RecordAPIResponseError(ctx, e.cfg, errReq)
-			continue
-		}
-		helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
-		if resp.StatusCode == http.StatusOK {
-			return resp, resp.Header.Clone(), cleanModel, endpoint.URL, nil
-		}
-		body, _ := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		lastErr = statusErr{code: resp.StatusCode, msg: fmt.Sprintf("kiro api %s returned status %d: %s", endpoint.Name, resp.StatusCode, string(body))}
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusPaymentRequired {
+		for attempt := 0; attempt < 2; attempt++ {
+			httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.URL, bytes.NewReader(requestPayload))
+			if errReq != nil {
+				lastErr = errReq
+				break
+			}
+			httpReq.Header = e.buildHeadersForEndpoint(endpoint, strings.TrimSpace(creds.AccessToken), strings.ToLower(strings.TrimSpace(creds.AuthMethod)), 1, 1)
+			resp, errReq := client.Do(httpReq)
+			if errReq != nil {
+				lastErr = errReq
+				helps.RecordAPIResponseError(ctx, e.cfg, errReq)
+				break
+			}
+			helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
+			if resp.StatusCode == http.StatusOK {
+				return resp, resp.Header.Clone(), cleanModel, endpoint.URL, nil
+			}
+			body, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+
+			invalidBearer := kiroauth.IsInvalidBearerTokenError(resp.StatusCode, body)
+			if invalidBearer && !refreshedInRequest && !strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") && strings.TrimSpace(creds.RefreshToken) != "" {
+				refreshedInRequest = true
+				if refreshed, errRefresh := e.refreshKiroCredentialsInPlace(ctx, auth, creds); errRefresh == nil && refreshed != nil && strings.TrimSpace(refreshed.AccessToken) != "" {
+					creds = refreshed
+					continue
+				}
+			}
+
+			errCode := resp.StatusCode
+			if invalidBearer {
+				errCode = http.StatusUnauthorized
+			}
+			lastErr = statusErr{code: errCode, msg: fmt.Sprintf("kiro api %s returned status %d: %s", endpoint.Name, resp.StatusCode, string(body))}
 			break
+		}
+		if se, ok := lastErr.(statusErr); ok {
+			if se.code == http.StatusUnauthorized || se.code == http.StatusForbidden || se.code == http.StatusPaymentRequired {
+				break
+			}
 		}
 	}
 	if lastErr == nil {
@@ -814,6 +885,9 @@ func (e *KiroExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // Refresh implements ProviderExecutor interface.
 func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, nil
 	}
@@ -824,28 +898,10 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") {
 		return auth.Clone(), nil
 	}
-	refreshed, err := e.authSvc.RefreshToken(ctx, creds)
-	if err != nil {
+	updated := auth.Clone()
+	if _, err := e.refreshKiroCredentialsInPlace(ctx, updated, creds); err != nil {
 		return nil, err
 	}
-	if refreshed == nil {
-		return auth.Clone(), nil
-	}
-	if refreshed.RefreshToken == "" {
-		refreshed.RefreshToken = creds.RefreshToken
-	}
-	if refreshed.ProfileArn == "" {
-		refreshed.ProfileArn = creds.ProfileArn
-	}
-	if refreshed.ExpiresAt == 0 && creds.ExpiresAt > 0 {
-		refreshed.ExpiresAt = creds.ExpiresAt
-	}
-	if refreshed.LastRefreshed == 0 {
-		refreshed.LastRefreshed = time.Now().Unix()
-	}
-	updated := auth.Clone()
-	kiroauth.ApplyCredentialsToAuth(updated, refreshed)
-	kiroauth.SetRefreshFingerprints(updated, refreshed.RefreshToken, creds.RefreshToken)
 	return updated, nil
 }
 

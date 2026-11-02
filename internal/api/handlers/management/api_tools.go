@@ -125,6 +125,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders = map[string]string{}
 	}
 
+	rawHeaders := make(map[string]string, len(reqHeaders))
+	for k, v := range reqHeaders {
+		rawHeaders[k] = v
+	}
+
 	var hostOverride string
 	var token string
 	var tokenResolved bool
@@ -151,27 +156,35 @@ func (h *Handler) APICall(c *gin.Context) {
 		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 	}
 
-	var requestBody io.Reader
-	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
+	buildHTTPRequest := func(headers map[string]string) (*http.Request, error) {
+		var requestBody io.Reader
+		if body.Data != "" {
+			requestBody = strings.NewReader(body.Data)
+		}
+		req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+		if errNewRequest != nil {
+			return nil, errNewRequest
+		}
+		var hOverride string
+		for key, value := range headers {
+			if strings.EqualFold(key, "host") {
+				hOverride = strings.TrimSpace(value)
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		if hOverride != "" {
+			req.Host = hOverride
+		}
+		return req, nil
 	}
 
-	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
+	req, errNewRequest := buildHTTPRequest(reqHeaders)
 	if errNewRequest != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to build request"})
 		return
 	}
-
-	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
-		}
-		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
-	}
+	_ = hostOverride
 
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
@@ -184,16 +197,37 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("response body close error: %v", errClose)
-		}
-	}()
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
+	if errClose := resp.Body.Close(); errClose != nil {
+		log.Errorf("response body close error: %v", errClose)
+	}
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
+	}
+
+	if tokenResolved && auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "kiro") && kiro.IsInvalidBearerTokenError(resp.StatusCode, respBody) {
+		if refreshedToken, errRefresh := h.refreshKiroOAuthAccessTokenWithForce(c.Request.Context(), auth, true); errRefresh == nil && refreshedToken != "" && refreshedToken != token {
+			retryHeaders := make(map[string]string, len(rawHeaders))
+			for key, value := range rawHeaders {
+				if strings.Contains(value, "$TOKEN$") {
+					retryHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", refreshedToken)
+				} else {
+					retryHeaders[key] = value
+				}
+			}
+			if retryReq, errRetryReq := buildHTTPRequest(retryHeaders); errRetryReq == nil {
+				if retryResp, errRetryDo := httpClient.Do(retryReq); errRetryDo == nil {
+					retryBody, errRetryRead := io.ReadAll(retryResp.Body)
+					_ = retryResp.Body.Close()
+					if errRetryRead == nil {
+						resp = retryResp
+						respBody = retryBody
+					}
+				}
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, apiCallResponse{
@@ -255,6 +289,10 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 }
 
 func (h *Handler) refreshKiroOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	return h.refreshKiroOAuthAccessTokenWithForce(ctx, auth, false)
+}
+
+func (h *Handler) refreshKiroOAuthAccessTokenWithForce(ctx context.Context, auth *coreauth.Auth, force bool) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -268,17 +306,23 @@ func (h *Handler) refreshKiroOAuthAccessToken(ctx context.Context, auth *coreaut
 	if strings.EqualFold(strings.TrimSpace(creds.AuthMethod), "api_key") {
 		return tokenValueForAuth(auth), nil
 	}
-	if creds.ExpiresAt > 0 && time.Now().Unix() < creds.ExpiresAt-120 && creds.AccessToken != "" {
+	if !force && !kiro.NeedsTokenRefresh(creds, time.Now()) {
 		return creds.AccessToken, nil
 	}
 	if creds.RefreshToken == "" {
 		return tokenValueForAuth(auth), nil
 	}
 	var cfg *config.Config
+	var httpClient *http.Client
 	if h != nil {
 		cfg = h.cfg
+		httpClient = &http.Client{
+			Timeout:   defaultAPICallTimeout,
+			Transport: h.apiCallTransport(auth),
+		}
 	}
-	authSvc := kiro.NewKiroAuth(cfg, nil)
+	oldRefresh := creds.RefreshToken
+	authSvc := kiro.NewKiroAuth(cfg, httpClient)
 	refreshed, err := authSvc.RefreshToken(ctx, creds)
 	if err != nil {
 		return "", err
@@ -286,7 +330,11 @@ func (h *Handler) refreshKiroOAuthAccessToken(ctx context.Context, auth *coreaut
 	if refreshed == nil || refreshed.AccessToken == "" {
 		return tokenValueForAuth(auth), nil
 	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = oldRefresh
+	}
 	kiro.ApplyCredentialsToAuth(auth, refreshed)
+	kiro.SetRefreshFingerprints(auth, refreshed.RefreshToken, oldRefresh)
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = time.Now()
 		auth.UpdatedAt = time.Now()
