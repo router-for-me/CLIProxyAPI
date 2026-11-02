@@ -1259,6 +1259,9 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 	if retryAfter := parseRetryAfterHeader(headers, now); retryAfter != nil {
 		return retryAfter
 	}
+	if resetAfter := openAICompatBodyRateLimitReset(body, now); resetAfter != nil {
+		return resetAfter
+	}
 
 	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
 	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
@@ -1268,6 +1271,40 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 		return &delay
 	}
 	return nil
+}
+
+// openAICompatMaxBodyRateLimitReset bounds body-reported resets so a malformed
+// value cannot park a credential indefinitely.
+const openAICompatMaxBodyRateLimitReset = 7 * 24 * time.Hour
+
+// OpenRouter sends no Retry-After; its reset is error.metadata.headers["X-RateLimit-Reset"] in epoch ms.
+func openAICompatBodyRateLimitReset(body []byte, now time.Time) *time.Duration {
+	limits := gjson.GetBytes(body, "error.metadata.headers")
+	if !limits.IsObject() {
+		return nil
+	}
+	var reset, remaining gjson.Result
+	limits.ForEach(func(key, value gjson.Result) bool {
+		switch strings.ToLower(strings.TrimSpace(key.String())) {
+		case "x-ratelimit-reset":
+			reset = value
+		case "x-ratelimit-remaining":
+			remaining = value
+		}
+		return true
+	})
+	if remaining.Exists() && strings.TrimSpace(remaining.String()) != "0" {
+		return nil
+	}
+	resetMillis := reset.Int()
+	if resetMillis <= 0 {
+		return nil
+	}
+	delay := time.UnixMilli(resetMillis).Sub(now)
+	if delay <= 0 || delay > openAICompatMaxBodyRateLimitReset {
+		return nil
+	}
+	return &delay
 }
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
