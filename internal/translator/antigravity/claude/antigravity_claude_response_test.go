@@ -1918,3 +1918,40 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchBufferedTextDrainedOn
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRespectsFinishReason(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	for _, tc := range []struct {
+		finishReason string
+		wantReason   string
+	}{
+		{finishReason: "SAFETY", wantReason: "refusal"},
+		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
+		{finishReason: "STOP", wantReason: "end_turn"},
+	} {
+		t.Run(tc.finishReason, func(t *testing.T) {
+			rawJSON := []byte(`{
+				"response": {
+					"modelVersion": "gemini-3.1-flash-lite",
+					"responseId": "resp-web-search-grounding-finish",
+					"candidates": [{
+						"content": {"parts": [{"text": "Partial grounded text."}]},
+						"groundingMetadata": {
+							"webSearchQueries": ["query"],
+							"groundingChunks": [{"web": {"uri": "https://example.com", "title": "Example"}}]
+						},
+						"finishReason": "` + tc.finishReason + `"
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14}
+				}
+			}`)
+			output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, rawJSON, nil)
+			if got := gjson.GetBytes(output, "stop_reason").String(); got != tc.wantReason {
+				t.Fatalf("stop_reason = %q, want %q: %s", got, tc.wantReason, string(output))
+			}
+		})
+	}
+}

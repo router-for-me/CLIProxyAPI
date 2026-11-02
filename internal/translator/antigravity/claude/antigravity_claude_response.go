@@ -658,7 +658,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
 			toolUseID := newClaudeWebSearchToolUseID()
 			responseJSON, _ = sjson.SetRawBytes(responseJSON, "content", buildClaudeWebSearchContent(toolUseID, antigravityTextContent(root), groundingMetadata))
-			responseJSON, _ = sjson.SetBytes(responseJSON, "stop_reason", "end_turn")
+			stopReason := resolveAntigravityClaudeStopReason(root.Get("response.candidates.0.finishReason").String(), false)
+			responseJSON, _ = sjson.SetBytes(responseJSON, "stop_reason", stopReason)
 			responseJSON, _ = sjson.SetBytes(responseJSON, "usage.server_tool_use.web_search_requests", 1)
 			return responseJSON
 		}
