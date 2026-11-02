@@ -3,9 +3,13 @@ package helps
 import "github.com/tidwall/gjson"
 
 const (
-	developerRoleJSON = `"developer"`
-	systemRoleJSON    = `"system"`
+	systemRoleJSON = `"system"`
 )
+
+type developerRoleReplacement struct {
+	index int
+	raw   string
+}
 
 // NormalizeDeveloperRole converts developer-role messages in a Chat Completions
 // payload to system-role messages. Strict OpenAI-compatible providers, including
@@ -22,11 +26,11 @@ func NormalizeDeveloperRole(payload []byte) []byte {
 		return payload
 	}
 
-	replacements := make([]int, 0, 2)
+	replacements := make([]developerRoleReplacement, 0, 2)
 	messages.ForEach(func(_, message gjson.Result) bool {
 		role := message.Get("role")
 		if role.Exists() && role.String() == "developer" && role.Index >= 0 {
-			replacements = append(replacements, role.Index)
+			replacements = append(replacements, developerRoleReplacement{index: role.Index, raw: role.Raw})
 		}
 		return true
 	})
@@ -34,15 +38,20 @@ func NormalizeDeveloperRole(payload []byte) []byte {
 		return payload
 	}
 
-	out := make([]byte, 0, len(payload)+(len(systemRoleJSON)-len(developerRoleJSON))*len(replacements))
+	delta := 0
+	for _, replacement := range replacements {
+		delta += len(systemRoleJSON) - len(replacement.raw)
+	}
+	out := make([]byte, 0, len(payload)+delta)
 	last := 0
-	for _, index := range replacements {
-		if index < last || index+len(developerRoleJSON) > len(payload) || string(payload[index:index+len(developerRoleJSON)]) != developerRoleJSON {
+	for _, replacement := range replacements {
+		end := replacement.index + len(replacement.raw)
+		if replacement.index < last || end > len(payload) || string(payload[replacement.index:end]) != replacement.raw {
 			return payload
 		}
-		out = append(out, payload[last:index]...)
+		out = append(out, payload[last:replacement.index]...)
 		out = append(out, systemRoleJSON...)
-		last = index + len(developerRoleJSON)
+		last = end
 	}
 	out = append(out, payload[last:]...)
 	return out

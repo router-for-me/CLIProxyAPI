@@ -43,6 +43,24 @@ func TestNormalizeDeveloperRole(t *testing.T) {
 		}
 	})
 
+	t.Run("converts escaped developer roles", func(t *testing.T) {
+		payload := []byte(`{"messages":[{"role":"\u0064eveloper","content":"escaped"},{"role":"developer","content":"plain"}]}`)
+
+		got := NormalizeDeveloperRole(payload)
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("message count = %d, want 2; output=%s", len(messages), got)
+		}
+		for index, message := range messages {
+			if role := message.Get("role").String(); role != "system" {
+				t.Fatalf("message %d role = %q, want system; output=%s", index, role, got)
+			}
+		}
+		if gotContent := messages[0].Get("content").String(); gotContent != "escaped" {
+			t.Fatalf("escaped message content changed to %q", gotContent)
+		}
+	})
+
 	t.Run("returns payload unchanged without a messages array", func(t *testing.T) {
 		payload := []byte(`{"input":[{"role":"developer","content":"instructions"}]}`)
 		if got := NormalizeDeveloperRole(payload); !bytes.Equal(got, payload) {
