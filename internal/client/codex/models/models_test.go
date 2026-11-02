@@ -1823,20 +1823,24 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 	available := []map[string]any{
 		{"id": "gpt-6.1-sol"},
 		{"id": "kimi-k3"},
+		{"id": "kimi-k3.1-pro"},
+		{"id": "kimi-k3.1-pro-highspeed"},
 		{"id": "muse-wonder-1.0"},
 	}
 	providers := map[string][]string{
-		"gpt-6.1-sol":     {"codex"},
-		"kimi-k3":         {"kimi"},
-		"muse-wonder-1.0": {"meta"},
+		"gpt-6.1-sol":             {"codex"},
+		"kimi-k3":                 {"kimi"},
+		"kimi-k3.1-pro":           {"kimi"},
+		"kimi-k3.1-pro-highspeed": {"kimi"},
+		"muse-wonder-1.0":         {"meta"},
 	}
 
 	resp := BuildResponseForClient(available, func(id string) []string {
 		return providers[id]
 	}, false, "0.163.0-alpha.10.2")
 	models, ok := resp["models"].([]map[string]any)
-	if !ok || len(models) != 3 {
-		t.Fatalf("models = %#v, want 3 entries", resp["models"])
+	if !ok || len(models) != 5 {
+		t.Fatalf("models = %#v, want 5 entries", resp["models"])
 	}
 
 	bySlug := make(map[string]map[string]any, len(models))
@@ -1858,13 +1862,54 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 		t.Errorf("gpt-6.1-sol supports_reasoning_effort_updates = %#v, want true", native["supports_reasoning_effort_updates"])
 	}
 
-	for _, slug := range []string{"kimi-k3", "muse-wonder-1.0"} {
+	for _, slug := range []string{"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"} {
+		kimiPro := bySlug[slug]
+		if kimiPro == nil {
+			t.Fatalf("missing %s entry", slug)
+		}
+		if got := stringModelValue(kimiPro, "shell_type"); got != "shell_command" {
+			t.Errorf("%s shell_type = %#v, want shell_command", slug, kimiPro["shell_type"])
+		}
+		if got := stringModelValue(kimiPro, "tool_mode"); got != "code_mode_only" {
+			t.Errorf("%s tool_mode = %#v, want code_mode_only so resumed GPT exec calls have a handler", slug, kimiPro["tool_mode"])
+		}
+		if got := stringModelValue(kimiPro, "apply_patch_tool_type"); got != "freeform" {
+			t.Errorf("%s apply_patch_tool_type = %#v, want freeform", slug, kimiPro["apply_patch_tool_type"])
+		}
+		if got, ok := kimiPro["use_responses_lite"].(bool); !ok || got {
+			t.Errorf("%s use_responses_lite = %#v, want false", slug, kimiPro["use_responses_lite"])
+		}
+		if got := stringModelValue(kimiPro, "default_reasoning_level"); got != "max" {
+			t.Errorf("%s default_reasoning_level = %q, want template-supported max", slug, got)
+		}
+		if got := stringModelValue(kimiPro, "default_reasoning_summary"); got != "none" {
+			t.Errorf("%s default_reasoning_summary = %q, want none", slug, got)
+		}
+		if got, ok := kimiPro["supports_reasoning_summaries"].(bool); !ok || !got {
+			t.Errorf("%s supports_reasoning_summaries = %#v, want true", slug, kimiPro["supports_reasoning_summaries"])
+		}
+		if got := stringModelValue(kimiPro, "base_instructions"); got != "" {
+			t.Errorf("%s base_instructions = %q, want empty", slug, got)
+		}
+		modelMessages, ok := kimiPro["model_messages"].(map[string]any)
+		if !ok || stringModelValue(modelMessages, "instructions_template") != "" {
+			t.Errorf("%s model_messages.instructions_template = %#v, want empty", slug, modelMessages)
+		}
+	}
+
+	for _, slug := range []string{"kimi-k3"} {
 		entry := bySlug[slug]
 		if entry == nil {
 			t.Fatalf("missing %s entry", slug)
 		}
-		if got := stringModelValue(entry, "tool_mode"); got != "direct" {
-			t.Errorf("%s tool_mode = %#v, want direct", slug, entry["tool_mode"])
+		if got := stringModelValue(entry, "shell_type"); got != "shell_command" {
+			t.Errorf("%s shell_type = %#v, want shell_command", slug, entry["shell_type"])
+		}
+		if got := stringModelValue(entry, "tool_mode"); got != "code_mode_only" {
+			t.Errorf("%s tool_mode = %#v, want code_mode_only", slug, entry["tool_mode"])
+		}
+		if got := stringModelValue(entry, "apply_patch_tool_type"); got != "freeform" {
+			t.Errorf("%s apply_patch_tool_type = %#v, want freeform", slug, entry["apply_patch_tool_type"])
 		}
 		if got, ok := entry["use_responses_lite"].(bool); !ok || got {
 			t.Errorf("%s use_responses_lite = %#v, want false", slug, entry["use_responses_lite"])
@@ -1872,5 +1917,19 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 		if got, ok := entry["supports_reasoning_effort_updates"].(bool); !ok || got {
 			t.Errorf("%s supports_reasoning_effort_updates = %#v, want false", slug, entry["supports_reasoning_effort_updates"])
 		}
+	}
+
+	meta := bySlug["muse-wonder-1.0"]
+	if meta == nil {
+		t.Fatal("missing muse-wonder-1.0 entry")
+	}
+	if got := stringModelValue(meta, "tool_mode"); got != "direct" {
+		t.Errorf("muse-wonder-1.0 tool_mode = %#v, want direct", meta["tool_mode"])
+	}
+	if got, ok := meta["use_responses_lite"].(bool); !ok || got {
+		t.Errorf("muse-wonder-1.0 use_responses_lite = %#v, want false", meta["use_responses_lite"])
+	}
+	if got, ok := meta["supports_reasoning_effort_updates"].(bool); !ok || got {
+		t.Errorf("muse-wonder-1.0 supports_reasoning_effort_updates = %#v, want false", meta["supports_reasoning_effort_updates"])
 	}
 }

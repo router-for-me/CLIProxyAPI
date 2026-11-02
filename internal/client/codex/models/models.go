@@ -153,6 +153,7 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
+		applyCodexClientProviderCapabilities(entry, id, providersForModel)
 		applyCodexClientSearchToolSupport(entry, id, false, searchToolProvidersForModel, toolSearchCapabilityForModel)
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
@@ -559,16 +560,28 @@ func applyCPAWebSearchCapability(entry map[string]any, id string, capabilityForM
 }
 
 func applyCodexClientProviderCapabilities(entry map[string]any, id string, providersForModel ProvidersForModelFunc) {
-	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
-		entry["prefer_websockets"] = false
-		entry["service_tiers"] = []any{}
-		nullCodexClientRequiredOptions(entry)
+	if providersForModel == nil {
+		return
 	}
+
+	providers := codexClientModelProviders(id, providersForModel)
+	if allCodexClientProvidersAre(providers, "codex") {
+		return
+	}
+
+	entry["prefer_websockets"] = false
+	entry["service_tiers"] = []any{}
+	if allKimiClientProvidersAre(providers) {
+		restoreKimiClientRequiredOptions(entry, id)
+		return
+	}
+	nullCodexClientRequiredOptions(entry)
 }
 
 // nullCodexClientRequiredOptions clears capabilities that non-Codex models must not advertise.
 // Codex requires these keys to be present; omitting them rejects the entire catalog.
 func nullCodexClientRequiredOptions(entry map[string]any) {
+	entry["shell_type"] = "disabled"
 	entry["apply_patch_tool_type"] = nil
 	entry["tool_mode"] = "direct"
 	entry["use_responses_lite"] = false
@@ -577,14 +590,37 @@ func nullCodexClientRequiredOptions(entry map[string]any) {
 	entry["availability_nux"] = nil
 }
 
+// restoreKimiClientRequiredOptions enables the local code-mode dispatcher used
+// by GPT conversations. The Kimi executor bridges its custom tools to functions.
+func restoreKimiClientRequiredOptions(entry map[string]any, id string) {
+	entry["shell_type"] = "shell_command"
+	entry["apply_patch_tool_type"] = "freeform"
+	entry["tool_mode"] = "code_mode_only"
+	entry["use_responses_lite"] = false
+	entry["supports_reasoning_effort_updates"] = false
+	entry["supports_reasoning_summaries"] = true
+	entry["default_reasoning_summary"] = "none"
+	entry["experimental_supported_tools"] = []any{}
+	entry["support_verbosity"] = false
+	delete(entry, "web_search_tool_type")
+	entry["upgrade"] = nil
+	entry["availability_nux"] = nil
+	useCodexClientInstructions(entry, "")
+	applyKimiDefaultReasoningLevel(entry, id)
+}
+
 const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
 
 // useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
 // Both the legacy and canonical instruction fields must be present for catalog decoding.
 func useCompactCodexClientInstructions(entry map[string]any) {
-	entry["base_instructions"] = codexClientFallbackInstructions
+	useCodexClientInstructions(entry, codexClientFallbackInstructions)
+}
+
+func useCodexClientInstructions(entry map[string]any, instructions string) {
+	entry["base_instructions"] = instructions
 	entry["model_messages"] = map[string]any{
-		"instructions_template":  codexClientFallbackInstructions,
+		"instructions_template":  instructions,
 		"instructions_variables": nil,
 		"approvals":              nil,
 		"collaboration_modes":    nil,
@@ -594,11 +630,56 @@ func useCompactCodexClientInstructions(entry map[string]any) {
 	}
 }
 
+func kimiDefaultReasoningLevel(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if slash := strings.LastIndex(id, "/"); slash >= 0 {
+		id = strings.TrimSpace(id[slash+1:])
+	}
+	switch id {
+	case "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed":
+		return "max"
+	default:
+		return ""
+	}
+}
+
+func applyKimiDefaultReasoningLevel(entry map[string]any, id string) {
+	desired := kimiDefaultReasoningLevel(id)
+	if desired == "" {
+		return
+	}
+	rawLevels, ok := entry["supported_reasoning_levels"].([]any)
+	if !ok {
+		return
+	}
+	for _, rawLevel := range rawLevels {
+		level, ok := rawLevel.(map[string]any)
+		if ok && strings.EqualFold(stringModelValue(level, "effort"), desired) {
+			entry["default_reasoning_level"] = desired
+			return
+		}
+	}
+}
+
 func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
 	if providersForModel == nil {
 		return true
 	}
 	return allCodexClientProvidersAre(codexClientModelProviders(id, providersForModel), "codex")
+}
+
+func allKimiClientProvidersAre(providers []string) bool {
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // codexClientModelProviders resolves the providers serving a model, falling
