@@ -340,13 +340,14 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
 		next, ok := l.manager.nextRefreshCheckAt(now, auth, l.interval)
+		shouldRefresh := l.manager.shouldRefresh(auth, now)
 		l.manager.mu.RUnlock()
 
 		if !ok {
 			l.remove(authID)
 			continue
 		}
-		if !next.After(now) {
+		if !shouldRefresh && !next.After(now) {
 			next = now.Add(l.interval)
 		}
 		l.upsert(authID, next)
