@@ -26,6 +26,8 @@ type callbackForwarder struct {
 	done     chan struct{}
 }
 
+var startWebUICallbackForwarder = startCallbackForwarder
+
 func isWebUIRequest(c *gin.Context) bool {
 	if c == nil {
 		return false
@@ -104,6 +106,18 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	log.Infof("callback forwarder for %s listening on %s", provider, addr)
 
 	return forwarder, nil
+}
+
+func startOptionalWebUICallbackForwarder(port int, provider, targetBase string) *callbackForwarder {
+	forwarder, err := startWebUICallbackForwarder(port, provider, targetBase)
+	if err != nil {
+		log.WithError(err).Warnf(
+			"callback forwarder for %s is unavailable; continuing with manual callback submission",
+			provider,
+		)
+		return nil
+	}
+	return forwarder
 }
 
 func stopCallbackForwarderInstance(port int, forwarder *callbackForwarder) {
