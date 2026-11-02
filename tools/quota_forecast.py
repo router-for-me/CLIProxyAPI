@@ -18,6 +18,7 @@ tested and back-tested without the proxy or Fork. The method:
 from __future__ import annotations
 
 import bisect
+import copy
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -247,6 +248,71 @@ def agent_rate(usage: list[Usage], now: int) -> tuple[int, float | None]:
     return len(active), (tokens / agent_hours if agent_hours else None)
 
 
+def simulate(sims: list[AccountSim], demand, fable_share: float, now: int) -> tuple[int | None, int | None, int]:
+    """Step through the horizon, mutating `sims`. Returns when the pool first runs dry, when it
+    first comes back, and how many steps it spent dry in total."""
+    dry_from = dry_until = None
+    dry_steps = 0
+    for at in range(now, now + HORIZON, STEP):
+        for sim in sims:
+            was_out = not sim.available()
+            for w in sim.windows:
+                if w.reset_at and w.reset_at <= at:
+                    w.used = 0.0
+                    w.reset_at += PERIOD[w.window]
+            if was_out and sim.available() and sim.back_at is None:
+                sim.back_at = at
+        live = [s for s in sims if s.available()]
+        if not live:
+            dry_steps += 1
+            if dry_from is None:
+                dry_from = at
+            continue
+        if dry_from is not None and dry_until is None:
+            dry_until = at
+        share = demand(at) * STEP / HOUR / len(live)
+        for sim in live:
+            for w in sim.windows:
+                if w.cost is None:
+                    continue
+                part = share * (fable_share if w.window == "seven_day_fable" else 1.0)
+                if part > 0 and not w.reset_at:
+                    # An unstarted window opens with its first request.
+                    w.reset_at = at + PERIOD[w.window]
+                w.used = min(FULL, w.used + w.cost * part)
+            if not sim.available() and sim.run_out_at is None:
+                sim.run_out_at = at + STEP
+                sim.run_out_window = next(w.window for w in sim.windows
+                                          if w.window in GATING and w.used >= FULL)
+    return dry_from, dry_until, dry_steps
+
+
+def safe_agent_count(sims: list[AccountSim], per_agent: float, fable_share: float, now: int) -> int | None:
+    """Most agents, at the measured tokens per agent-hour, that add no dry time over the week.
+
+    Time the pool is dry even with no agents (every account already out) is unavoidable and
+    does not count against the answer.
+    """
+    def dry(count: int) -> int:
+        return simulate(copy.deepcopy(sims), lambda at: count * per_agent, fable_share, now)[2]
+
+    # Without a limit that stops all requests, more agents never run an account dry.
+    if per_agent <= 0 or any(not any(w.window in GATING for w in s.windows) for s in sims):
+        return None
+    baseline = dry(0)
+    low, high = 0, 1
+    # Grow until the pool runs dry; with a stopping limit on every account it always does.
+    while dry(high) == baseline:
+        low, high = high, high * 2
+    while high - low > 1:
+        middle = (low + high) // 2
+        if dry(middle) == baseline:
+            low = middle
+        else:
+            high = middle
+    return low
+
+
 def forecast_pool(provider: str, accounts: list[Account], readings: list[Reading], usage: list[Usage],
                   now: int, agents: int | None = None) -> dict:
     keys = [a.account for a in accounts]
@@ -304,37 +370,11 @@ def forecast_pool(provider: str, accounts: list[Account], readings: list[Reading
                                      "reset_at": w.reset_at, "cost_source": w.cost_source or None}
                                     for w in s.windows] for s in sims}
     dry_from = dry_until = None
+    safe_agents = None
     if demand is not None and not learning and sims:
-        for at in range(now, now + HORIZON, STEP):
-            for sim in sims:
-                was_out = not sim.available()
-                for w in sim.windows:
-                    if w.reset_at and w.reset_at <= at:
-                        w.used = 0.0
-                        w.reset_at += PERIOD[w.window]
-                if was_out and sim.available() and sim.back_at is None:
-                    sim.back_at = at
-            live = [s for s in sims if s.available()]
-            if not live:
-                if dry_from is None:
-                    dry_from = at
-                continue
-            if dry_from is not None and dry_until is None:
-                dry_until = at
-            share = demand(at) * STEP / HOUR / len(live)
-            for sim in live:
-                for w in sim.windows:
-                    if w.cost is None:
-                        continue
-                    part = share * (fable_share if w.window == "seven_day_fable" else 1.0)
-                    if part > 0 and not w.reset_at:
-                        # An unstarted window opens with its first request.
-                        w.reset_at = at + PERIOD[w.window]
-                    w.used = min(FULL, w.used + w.cost * part)
-                if not sim.available() and sim.run_out_at is None:
-                    sim.run_out_at = at + STEP
-                    sim.run_out_window = next(w.window for w in sim.windows
-                                              if w.window in GATING and w.used >= FULL)
+        if per_agent:
+            safe_agents = safe_agent_count(sims, per_agent, fable_share, now)
+        dry_from, dry_until, _ = simulate(sims, demand, fable_share, now)
 
     current = demand(now) if demand is not None else None
     return {
@@ -347,7 +387,7 @@ def forecast_pool(provider: str, accounts: list[Account], readings: list[Reading
         "demand_tokens_per_hour": round(current) if current is not None else None,
         "demand_source": demand_source,
         "agents": {"active": active, "tokens_per_agent_hour": round(per_agent) if per_agent else None,
-                   "what_if": agents},
+                   "what_if": agents, "safe": safe_agents},
         "unexplained_points": unexplained / 100,
         "accounts": [{
             "account": s.meta.account,

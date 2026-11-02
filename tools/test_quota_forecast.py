@@ -112,6 +112,17 @@ class PoolTest(unittest.TestCase):
         normal = forecast_pool("claude", self.accounts, self.readings, self.usage, NOW)
         self.assertLess(busy["dry_from"], normal["dry_from"])
 
+    def test_safe_agent_count_is_the_most_that_never_runs_the_pool_dry(self):
+        # Each agent sends ~1M tokens/h at 100 bp per 1M. Before the reset at +72 h the pool
+        # has 110M tokens left (20% + 90%): one agent needs 72M, two need 144M.
+        pool = forecast_pool("claude", self.accounts, self.readings, self.usage, NOW)
+        self.assertEqual(pool["agents"]["safe"], 1)
+
+    def test_no_safe_count_without_session_data(self):
+        usage = [Usage(u.account, u.model, u.minute, u.tokens) for u in self.usage]
+        pool = forecast_pool("claude", self.accounts, self.readings, usage, NOW)
+        self.assertIsNone(pool["agents"]["safe"])
+
     def test_uncalibrated_account_borrows_cost_by_plan(self):
         readings = self.readings + [Reading("c", "seven_day", 0, NOW + 3 * 86400, NOW - 60)]
         accounts = self.accounts + [Account("c", "claude", "C", "plan_max")]
