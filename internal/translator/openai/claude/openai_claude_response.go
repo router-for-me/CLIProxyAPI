@@ -339,24 +339,33 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				index := int(toolCall.Get("index").Int())
 				if !toolCall.Get("index").Exists() {
 					pos := int(arrayIndex.Int())
-					index = pos
-					if param.OmittedToolCallIndexes != nil {
-						if mapped, ok := param.OmittedToolCallIndexes[pos]; ok {
-							index = mapped
-						}
-					}
-					if existing, exists := param.ToolCallsAccumulator[index]; exists && existing != nil && incomingID != "" && existing.ID != "" && existing.ID != incomingID {
-						nextIndex := index + 1
-						for k := range param.ToolCallsAccumulator {
-							if k >= nextIndex {
-								nextIndex = k + 1
-							}
-						}
-						index = nextIndex
+
+					if k, ok := param.toolCallIndexByID(incomingID); incomingID != "" && ok {
+						index = k
 						if param.OmittedToolCallIndexes == nil {
 							param.OmittedToolCallIndexes = make(map[int]int)
 						}
-						param.OmittedToolCallIndexes[pos] = index
+						param.OmittedToolCallIndexes[pos] = k
+					} else {
+						index = pos
+						if param.OmittedToolCallIndexes != nil {
+							if mapped, ok := param.OmittedToolCallIndexes[pos]; ok {
+								index = mapped
+							}
+						}
+						if existing, exists := param.ToolCallsAccumulator[index]; exists && existing != nil && incomingID != "" && existing.ID != "" && existing.ID != incomingID {
+							nextIndex := index + 1
+							for k := range param.ToolCallsAccumulator {
+								if k >= nextIndex {
+									nextIndex = k + 1
+								}
+							}
+							index = nextIndex
+							if param.OmittedToolCallIndexes == nil {
+								param.OmittedToolCallIndexes = make(map[int]int)
+							}
+							param.OmittedToolCallIndexes[pos] = index
+						}
 					}
 				}
 
@@ -589,6 +598,18 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	p.NextContentBlockIndex++
 	p.ToolCallBlockIndexes[openAIToolIndex] = idx
 	return idx
+}
+
+func (p *ConvertOpenAIResponseToAnthropicParams) toolCallIndexByID(id string) (int, bool) {
+	if id == "" {
+		return 0, false
+	}
+	for k, acc := range p.ToolCallsAccumulator {
+		if acc != nil && acc.ID == id {
+			return k, true
+		}
+	}
+	return 0, false
 }
 
 func collectOpenAIObjectReasoningTexts(obj gjson.Result) []string {

@@ -1696,3 +1696,95 @@ func TestStreamingTool_OmittedToolCallIndexSeparateChunksWithFragmentedArgs(t *t
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
 	}
 }
+
+func TestStreamingTool_OmittedIndexResumeByID_InterleavedContinuation(t *testing.T) {
+	// Scenario A: two tool calls started in separate chunks at position 0,
+	// then continuation fragments for each arrive (also at position 0) carrying
+	// the same id. Without the fix the continuation creates a phantom third slot.
+	events := runStream(t, streamReq,
+		`{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"f","arguments":"{\"x\":"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","type":"function","function":{"name":"f","arguments":"{\"x\":"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"1}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","function":{"arguments":"2}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	assertSequentialContentBlocks(t, events)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 2 {
+		t.Fatalf("expected exactly two tool_use starts, got %d (events=%+v)", len(starts), events)
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("first tool id = %q, want %q", id, "call_a")
+	}
+	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_b" {
+		t.Fatalf("second tool id = %q, want %q", id, "call_b")
+	}
+
+	var deltas []sseEvent
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			deltas = append(deltas, e)
+		}
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
+	}
+	firstArgs := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondArgs := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+	if x := gjson.Get(firstArgs, "x").Int(); x != 1 {
+		t.Fatalf("first tool args x = %d, want 1 (json=%q)", x, firstArgs)
+	}
+	if x := gjson.Get(secondArgs, "x").Int(); x != 2 {
+		t.Fatalf("second tool args x = %d, want 2 (json=%q)", x, secondArgs)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreamingTool_OmittedIndexResumeByID_BatchedStartReorderedContinuation(t *testing.T) {
+	// Scenario B: both tool calls arrive in a single chunk (position 0 and 1),
+	// then continuations arrive in reverse order (b before a), each at position 0.
+	events := runStream(t, streamReq,
+		`{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call_a","type":"function","function":{"name":"f","arguments":"{\"x\":"}},{"id":"call_b","type":"function","function":{"name":"f","arguments":"{\"x\":"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_b","function":{"arguments":"2}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_a","function":{"arguments":"1}"}}]}}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	assertSequentialContentBlocks(t, events)
+
+	starts := toolUseStarts(events)
+	if len(starts) != 2 {
+		t.Fatalf("expected exactly two tool_use starts, got %d (events=%+v)", len(starts), events)
+	}
+	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+		t.Fatalf("first tool id = %q, want %q", id, "call_a")
+	}
+	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_b" {
+		t.Fatalf("second tool id = %q, want %q", id, "call_b")
+	}
+
+	var deltas []sseEvent
+	for _, e := range events {
+		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+			deltas = append(deltas, e)
+		}
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
+	}
+	firstArgs := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondArgs := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+	if x := gjson.Get(firstArgs, "x").Int(); x != 1 {
+		t.Fatalf("first tool args x = %d, want 1 (json=%q)", x, firstArgs)
+	}
+	if x := gjson.Get(secondArgs, "x").Int(); x != 2 {
+		t.Fatalf("second tool args x = %d, want 2 (json=%q)", x, secondArgs)
+	}
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
