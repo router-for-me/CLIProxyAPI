@@ -625,6 +625,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
+		// A self-contained create may leave a credential that cannot serve its tier;
+		// a continuation keeps the pin and fails selection instead of switching accounts.
+		if pinnedAuthID != "" && !responsesWebsocketRequestRequiresCurrentUpstream(payload) {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && !coreauth.AllowsServiceTier(pinnedAuth, gjson.GetBytes(payload, "service_tier").String()) {
+				forgetPinnedAuth()
+			}
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {
