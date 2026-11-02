@@ -1,0 +1,105 @@
+{
+  "project": "CLIProxyAPI",
+  "platforms": {
+    "codex": {
+      "enabled": true,
+      "auth": "chatgpt",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "maxEffort": "high",
+      "models": {
+        "sol": {
+          "id": "gpt-6.1-sol",
+          "label": "GPT-6.1 Sol"
+        }
+      },
+      "fallbackAtPercent": 95
+    },
+    "claude": {
+      "enabled": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "maxEffort": "xhigh",
+      "models": {
+        "opus": {
+          "id": "claude-opus-5-5",
+          "label": "Opus 5.5"
+        },
+        "sonnet": {
+          "id": "claude-sonnet-5-5",
+          "label": "Sonnet 5.5"
+        },
+        "haiku": {
+          "id": "claude-haiku-5-5",
+          "label": "Haiku 5.5"
+        }
+      }
+    }
+  },
+  "roles": {
+    "complex-coding": {
+      "platform": "claude",
+      "model": "sonnet",
+      "effort": [
+        "high",
+        "xhigh"
+      ],
+      "runs": "worktree",
+      "use": "Hard changes: architecture, tricky logic, root-cause debugging."
+    },
+    "standard-coding": {
+      "platform": "codex",
+      "model": "sol",
+      "effort": [
+        "medium",
+        "high"
+      ],
+      "runs": "worktree",
+      "use": "Well-specified, checkable changes.",
+      "fallback": {
+        "platform": "claude",
+        "model": "sonnet",
+        "effort": [
+          "medium",
+          "high"
+        ]
+      }
+    },
+    "review": {
+      "platform": "codex",
+      "model": "sol",
+      "effort": [
+        "medium",
+        "high"
+      ],
+      "runs": "read-only",
+      "use": "Reviews of a change against its brief before merging.",
+      "fallback": {
+        "platform": "claude",
+        "model": "sonnet",
+        "effort": [
+          "medium",
+          "high"
+        ]
+      }
+    },
+    "quick-decision": {
+      "platform": "claude",
+      "model": "haiku",
+      "effort": [
+        "low",
+        "medium"
+      ],
+      "runs": "read-only",
+      "use": "Fast triage and lookups."
+    }
+  }
+}
