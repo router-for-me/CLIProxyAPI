@@ -1460,14 +1460,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.Status = StatusDisabled
 				current.RefreshFailures = 0
 				current.StatusMessage = "disabled (refresh token invalid)"
-				if authHasUnchangedRejectedRefreshToken(current) {
-					if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
-						current.NextRefreshAfter = exp
-						shouldReschedule = true
-					} else {
-						current.NextRefreshAfter = time.Time{}
-						shouldUnschedule = true
-					}
+				if !authHasUnchangedRejectedRefreshToken(current) {
+					current.NextRefreshAfter = time.Time{}
+					shouldReschedule = true
+				} else if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+					current.NextRefreshAfter = exp
+					shouldReschedule = true
 				} else {
 					current.NextRefreshAfter = time.Time{}
 					shouldUnschedule = true
