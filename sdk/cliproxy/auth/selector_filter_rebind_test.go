@@ -13,7 +13,8 @@ type excludingPolicy struct {
 }
 
 func (p *excludingPolicy) FilterCandidates(_ context.Context, _, _ string, _ cliproxyexecutor.Options, auths []*Auth) ([]*Auth, error) {
-	var result []*Auth
+	// Compact in place, as a filter is allowed to.
+	result := auths[:0]
 	for _, a := range auths {
 		if a.ID != p.excluded {
 			result = append(result, a)
@@ -26,14 +27,13 @@ func TestAffinityRebindsFilteredAccountUnderQuotaOnlyRebind(t *testing.T) {
 	policy := &excludingPolicy{}
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: policy, RebindOn: SessionAffinityRebindOnQuota})
 	defer selector.Stop()
-	accounts := []*Auth{{ID: "a"}, {ID: "z"}}
 	// The manager marks both accounts as only transiently unavailable before the filter runs.
 	ctx := selectorContextForAvailableAuths(context.Background(), selector, "model")
 	ctx = withSessionAffinityTransientAuthIDs(ctx, map[string]struct{}{"a": {}, "z": {}})
 	opts := cliproxyexecutor.Options{Headers: map[string][]string{"Session_id": {"filter-rebind-session"}}}
 	pick := func() string {
 		t.Helper()
-		selected, err := selector.Pick(ctx, "codex", "model", opts, accounts)
+		selected, err := selector.Pick(ctx, "codex", "model", opts, []*Auth{{ID: "a"}, {ID: "z"}})
 		if err != nil || selected == nil {
 			t.Fatalf("pick: %v %v", selected, err)
 		}

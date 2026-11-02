@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1127,7 +1128,8 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	if filter, ok := s.fallback.(CandidateFilter); ok {
-		filtered, errFilter := filter.FilterCandidates(ctx, provider, model, opts, auths)
+		// Clone so an in-place filter cannot hide which accounts it excluded.
+		filtered, errFilter := filter.FilterCandidates(ctx, provider, model, opts, slices.Clone(auths))
 		if errFilter != nil {
 			return nil, errFilter
 		}
