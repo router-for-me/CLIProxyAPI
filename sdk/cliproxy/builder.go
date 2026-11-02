@@ -294,8 +294,8 @@ func (b *Builder) Build() (*Service, error) {
 		}
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
 		appliedRoutingState = &routingState
-	}
-	if customSelector != nil {
+	} else if customSelector != nil {
+		// Injected managers only: SetSelector would stop a selector NewManager already holds.
 		coreManager.SetSelector(customSelector)
 		routingState := normalizedRoutingRuntimeState(b.cfg)
 		appliedRoutingState = &routingState

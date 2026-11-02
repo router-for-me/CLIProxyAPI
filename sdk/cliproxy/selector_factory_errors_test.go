@@ -142,3 +142,32 @@ func TestSelectorFactorySupersededCommitStopsPreparedSelector(t *testing.T) {
 		t.Fatal("manager did not own installed selector cleanup")
 	}
 }
+
+// valueSelector is non-comparable, so SetSelector cannot recognize it as the
+// already-installed selector and would stop it.
+type valueSelector struct {
+	tags  []string
+	stops *atomic.Int32
+}
+
+func (valueSelector) Pick(context.Context, string, string, executor.Options, []*coreauth.Auth) (*coreauth.Auth, error) {
+	return nil, errors.New("not used")
+}
+func (s valueSelector) Stop() { s.stops.Add(1) }
+
+func TestSelectorFactoryBuildDoesNotStopSelectorInstalledByNewManager(t *testing.T) {
+	stops := &atomic.Int32{}
+	service, err := NewBuilder().WithConfig(&config.Config{}).WithConfigPath("unused-config.yaml").
+		WithSelectorFactory(func(*config.Config) (coreauth.Selector, error) {
+			return valueSelector{tags: []string{"policy"}, stops: stops}, nil
+		}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stops.Load(); got != 0 {
+		t.Fatalf("factory selector stopped %d times during Build", got)
+	}
+	if _, ok := service.coreManager.Selector().(valueSelector); !ok {
+		t.Fatalf("installed selector = %T, want factory selector", service.coreManager.Selector())
+	}
+}
