@@ -62,6 +62,48 @@ func TestClaudeAgentSessionUUIDIgnoresUnconfirmedClaudeSignals(t *testing.T) {
 	}
 }
 
+func TestClaudeAgentSessionUUIDIgnoresPerRequestAttributionForUnconfirmedCaller(t *testing.T) {
+	headers := http.Header{"X-Claude-Code-Session-Id": {"11111111-2222-4333-8444-555555555555"}}
+	billing := func(cch string) string {
+		return "x-anthropic-billing-header: cc_version=2.1.280.abc; cc_entrypoint=cli; cch=" + cch + ";"
+	}
+	user := `"messages":[{"role":"user","content":[{"type":"text","text":"fix the failing test"}]}]`
+	tests := []struct {
+		name   string
+		system func(cch string) string
+	}{
+		{
+			name: "array system",
+			system: func(cch string) string {
+				return `[{"type":"text","text":"` + billing(cch) + `"},{"type":"text","text":"You are a coding agent."}]`
+			},
+		},
+		{
+			name:   "string system",
+			system: func(cch string) string { return `"` + billing(cch) + `"` },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			first := []byte(`{"system":` + test.system("a1b2c") + `,` + user + `}`)
+			second := []byte(`{"system":` + test.system("d3e4f") + `,` + user + `}`)
+			firstID := ClaudeAgentSessionUUIDForRequest(headers, first, first, false)
+			if secondID := ClaudeAgentSessionUUIDForRequest(headers, second, second, false); secondID != firstID {
+				t.Fatalf("per-request cch changed the session: first=%q second=%q", firstID, secondID)
+			}
+		})
+	}
+
+	withSystem := func(text string) []byte {
+		return []byte(`{"system":[{"type":"text","text":"` + billing("a1b2c") + `"},{"type":"text","text":"` + text + `"}],` + user + `}`)
+	}
+	agentA := ClaudeAgentSessionUUIDForRequest(headers, withSystem("You are agent A."), nil, false)
+	agentB := ClaudeAgentSessionUUIDForRequest(headers, withSystem("You are agent B."), nil, false)
+	if agentA == agentB {
+		t.Fatalf("different system prompts after the attribution block share session %q", agentA)
+	}
+}
+
 func TestClaudeAgentSessionUUIDUsesExecutionAndDerivedIdentity(t *testing.T) {
 	tests := []struct {
 		name     string
