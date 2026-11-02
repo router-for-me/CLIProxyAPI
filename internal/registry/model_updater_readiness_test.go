@@ -9,9 +9,11 @@ import (
 
 func useStartupTestUpdater(t *testing.T, updater *catalogUpdater) {
 	t.Helper()
-	oldGeneral, oldDevin := generalCatalogUpdater, devinCatalogUpdater
-	generalCatalogUpdater, devinCatalogUpdater = updater, &catalogUpdater{}
-	t.Cleanup(func() { generalCatalogUpdater, devinCatalogUpdater = oldGeneral, oldDevin })
+	oldGeneral, oldCodex, oldDevin := generalCatalogUpdater, codexCatalogUpdater, devinCatalogUpdater
+	generalCatalogUpdater, codexCatalogUpdater, devinCatalogUpdater = updater, &catalogUpdater{}, &catalogUpdater{}
+	t.Cleanup(func() {
+		generalCatalogUpdater, codexCatalogUpdater, devinCatalogUpdater = oldGeneral, oldCodex, oldDevin
+	})
 }
 
 func awaitStartupTest(t *testing.T, ctx context.Context) {
@@ -152,7 +154,15 @@ func TestWaitForStartupModelRefreshFollowsSourceReload(t *testing.T) {
 	awaitStartupTest(t, ctx)
 }
 
-func TestWaitForStartupModelRefreshIncludesDevin(t *testing.T) {
+func TestWaitForStartupModelRefreshIncludesProviderCatalogs(t *testing.T) {
+	for _, provider := range []string{"devin", "codex"} {
+		t.Run(provider, func(t *testing.T) {
+			testStartupProviderCatalog(t, provider)
+		})
+	}
+}
+
+func testStartupProviderCatalog(t *testing.T, provider string) {
 	useStartupTestUpdater(t, &catalogUpdater{})
 	fetchEntered, releaseFetch := make(chan struct{}), make(chan struct{})
 	callbackEntered, releaseCallback := make(chan struct{}), make(chan struct{})
@@ -166,7 +176,7 @@ func TestWaitForStartupModelRefreshIncludesDevin(t *testing.T) {
 		refreshCallback, pendingRefreshChanges = oldCallback, oldPending
 		refreshCallbackMu.Unlock()
 	})
-	devinCatalogUpdater = &catalogUpdater{
+	updater := &catalogUpdater{
 		fetch: func(ctx context.Context, _ string) ([]byte, error) {
 			close(fetchEntered)
 			select {
@@ -176,18 +186,23 @@ func TestWaitForStartupModelRefreshIncludesDevin(t *testing.T) {
 				return nil, ctx.Err()
 			}
 		},
-		publish: func([]byte) ([]string, error) { return []string{"devin"}, nil },
+		publish: func([]byte) ([]string, error) { return []string{provider}, nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	devinCatalogUpdater.configure(ctx, embeddedCatalogSource)
+	if provider == "codex" {
+		codexCatalogUpdater = updater
+	} else {
+		devinCatalogUpdater = updater
+	}
+	updater.configure(ctx, embeddedCatalogSource)
 	<-fetchEntered
 	assertWaiting := func(stage string) {
 		t.Helper()
 		waitCtx, cancelWait := context.WithTimeout(ctx, 50*time.Millisecond)
 		defer cancelWait()
 		if err := WaitForStartupModelRefresh(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("startup did not wait for Devin %s: %v", stage, err)
+			t.Errorf("startup did not wait for %s %s: %v", provider, stage, err)
 		}
 	}
 	assertWaiting("fetch")
@@ -195,6 +210,6 @@ func TestWaitForStartupModelRefreshIncludesDevin(t *testing.T) {
 	<-callbackEntered
 	assertWaiting("registration callback")
 	close(releaseCallback)
-	<-devinCatalogUpdater.startupDone
+	<-updater.startupDone
 	awaitStartupTest(t, ctx)
 }

@@ -147,6 +147,35 @@ func TestServiceReadinessGateDoesNotChangeDirectServerConstruction(t *testing.T)
 	}
 }
 
+func TestServiceReadinessCORS(t *testing.T) {
+	service := &Service{}
+	server := api.NewServer(&config.Config{CommercialMode: true}, nil, nil, "", api.WithMiddleware(service.readinessMiddleware()))
+	for _, method := range []string{http.MethodPost, http.MethodOptions} {
+		t.Run(method, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			req := httptest.NewRequest(method, "/v1/responses", nil)
+			req.Header.Set("Origin", "https://example.com")
+			req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+			req.Header.Set("Access-Control-Request-Headers", "Authorization, Content-Type")
+			server.Handler().ServeHTTP(response, req)
+			wantStatus := http.StatusServiceUnavailable
+			if method == http.MethodOptions {
+				wantStatus = http.StatusNoContent
+			} else if response.Header().Get("Retry-After") != "1" {
+				t.Error("initializing response must retain Retry-After")
+			}
+			if response.Code != wantStatus {
+				t.Fatalf("status = %d, want %d", response.Code, wantStatus)
+			}
+			if response.Header().Get("Access-Control-Allow-Origin") != "*" ||
+				!strings.Contains(response.Header().Get("Access-Control-Allow-Methods"), http.MethodPost) ||
+				!strings.Contains(response.Header().Get("Access-Control-Allow-Headers"), "Authorization") {
+				t.Fatalf("missing CORS headers: %v", response.Header())
+			}
+		})
+	}
+}
+
 func TestServiceReadinessOnlyGatesModelRoutes(t *testing.T) {
 	service := &Service{}
 	engine := gin.New()
@@ -191,18 +220,14 @@ func TestServiceReadinessOnlyGatesModelRoutes(t *testing.T) {
 }
 
 func TestServiceStartupReadinessKeepAliveFailsOpenForStalledCatalogs(t *testing.T) {
-	fetchEntered := make(chan struct{}, 2)
+	fetchEntered := make(chan struct{}, 3)
 	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchEntered <- struct{}{}
 		<-r.Context().Done()
 	}))
 	t.Cleanup(stalled.Close)
-	fixture, err := filepath.Abs(filepath.Join("..", "..", "internal", "registry", "models", "codex_client_models.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg := &config.Config{Host: "127.0.0.1", AuthDir: t.TempDir(), CommercialMode: true,
-		Models: config.ModelCatalogs{Catalog: stalled.URL, CodexCatalog: fixture, DevinCatalog: stalled.URL},
+		Models: config.ModelCatalogs{Catalog: stalled.URL, CodexCatalog: stalled.URL, DevinCatalog: stalled.URL},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -250,11 +275,11 @@ func TestServiceStartupReadinessKeepAliveFailsOpenForStalledCatalogs(t *testing.
 	case <-time.After(5 * time.Second):
 		t.Fatal("service never started")
 	}
-	for range 2 {
+	for range 3 {
 		select {
 		case <-fetchEntered:
 		case <-time.After(5 * time.Second):
-			t.Fatal("both catalog fetches must be stalled")
+			t.Fatal("all three catalog fetches must be stalled")
 		}
 	}
 	request := func() *httptest.ResponseRecorder {
@@ -301,7 +326,7 @@ func TestServiceStartupReadinessKeepAliveFailsOpenForStalledCatalogs(t *testing.
 			if ctx.Err() != nil {
 				t.Fatal("keep-alive watchdog canceled the service")
 			}
-			t.Logf("readiness failed open after %s with both catalogs stalled and local-password watchdog active", time.Since(startTime))
+			t.Logf("readiness failed open after %s with all three catalogs stalled and local-password watchdog active", time.Since(startTime))
 			return
 		}
 	}
