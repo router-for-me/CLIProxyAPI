@@ -2,11 +2,27 @@ package helps
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/tidwall/gjson"
 )
+
+// ExplicitPromptCacheKey returns the first non-empty top-level prompt_cache_key
+// among payloads, in order. Callers pass the client payload and the original
+// request before the translated body: a Claude-to-Responses translation builds
+// a fresh template and drops the caller's key, which must still win over a
+// derived one.
+func ExplicitPromptCacheKey(payloads ...[]byte) string {
+	for _, payload := range payloads {
+		if key := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); key != "" {
+			return key
+		}
+	}
+	return ""
+}
 
 type CodexCache struct {
 	ID     string
