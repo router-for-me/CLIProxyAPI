@@ -391,6 +391,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
+			// The bound credential skipped selection; replay so an eligible one is chosen.
+			if !cliproxyauth.AllowsServiceTier(auth, gjson.GetBytes(payload, "service_tier").String()) {
+				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
+				return false
+			}
 			var turnHeaders http.Header
 			var allowed, keepOpen bool
 			payload, turnHeaders, allowed, keepOpen = interceptTurnPayload(payload, opts.Headers)
