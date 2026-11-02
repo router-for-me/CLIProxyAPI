@@ -268,11 +268,94 @@ func TestProviderAffinityPolicyTransientPreservationUsesEffectiveFallback(t *tes
 		manager := NewManager(nil, selector, nil)
 		auth := priorityPolicyAuth("zero-weight", "claude", 4)
 		auth.Attributes["weight"] = "0"
-		ids := manager.transientlyUnavailableSessionAffinityAuthIDs(selector, []*Auth{auth}, "mixed", "model", time.Now())
+		ids := manager.transientlyUnavailableSessionAffinityAuthIDs(context.Background(), selector, []*Auth{auth}, "mixed", "model", time.Now())
 		_, retained := ids[auth.ID]
 		selector.Stop()
 		if retained != globalWeighted {
 			t.Fatalf("globalWeighted=%v retained=%v; effective override ignored", globalWeighted, retained)
 		}
+		ctx := withSessionAffinityRequestedProviders(context.Background(), map[string]struct{}{"claude": {}, "gemini": {}})
+		ids = manager.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, []*Auth{auth}, "mixed", "model", time.Now())
+		_, retained = ids[auth.ID]
+		if retained == globalWeighted {
+			t.Fatalf("globalWeighted=%v retained=%v; heterogeneous request lost global fallback", globalWeighted, retained)
+		}
+	}
+}
+
+type mixedPriorityPolicyExecutor struct{ priorityPolicyExecutor }
+
+func (*mixedPriorityPolicyExecutor) Identifier() string { return "gemini" }
+
+func TestProviderAffinityPolicyRequestedMixedPoolRemainsGlobalAfterFiltering(t *testing.T) {
+	for _, exclusion := range []string{"cooldown", "tried", "disabled", "missing-executor", "missing-credential"} {
+		t.Run(exclusion, func(t *testing.T) {
+			selector := priorityPolicySelector(true)
+			defer selector.Stop()
+			manager := NewManager(nil, selector, nil)
+			manager.RegisterExecutor(&priorityPolicyExecutor{})
+			if exclusion != "missing-executor" {
+				manager.RegisterExecutor(&mixedPriorityPolicyExecutor{})
+			}
+			for _, auth := range []*Auth{priorityPolicyAuth("lower", "claude", 2), priorityPolicyAuth("gemini", "gemini", 0)} {
+				if auth.Provider == "gemini" && exclusion == "missing-credential" {
+					continue
+				}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := priorityPolicyOptions("heterogeneous-session")
+			providers := []string{"claude", "gemini"}
+			first, _, _, err := manager.pickNextMixed(context.Background(), providers, "", opts, nil)
+			if err != nil || first == nil || first.ID != "lower" {
+				t.Fatalf("initial binding = %v, %v", first, err)
+			}
+			if _, err = manager.Register(context.Background(), priorityPolicyAuth("higher", "claude", 4)); err != nil {
+				t.Fatal(err)
+			}
+			tried := map[string]struct{}{}
+			if exclusion == "tried" {
+				tried["gemini"] = struct{}{}
+			}
+			if exclusion == "cooldown" || exclusion == "disabled" {
+				gemini, _ := manager.GetByID("gemini")
+				_, committed, errUpdate := manager.Modify(context.Background(), gemini.ID, gemini.RegistrationEpoch, func(auth *Auth) error {
+					if exclusion == "disabled" {
+						auth.Disabled = true
+					} else {
+						auth.Unavailable = true
+						auth.NextRetryAfter = time.Now().Add(time.Hour)
+					}
+					return nil
+				})
+				if errUpdate != nil || !committed {
+					t.Fatalf("exclude Gemini: committed=%v err=%v", committed, errUpdate)
+				}
+			}
+			selected, _, _, err := manager.pickNextMixed(context.Background(), providers, "", opts, tried)
+			if err != nil || selected == nil || selected.ID != "lower" {
+				t.Fatalf("heterogeneous binding preempted after %s: %v, %v", exclusion, selected, err)
+			}
+		})
+	}
+}
+
+func TestProviderAffinityPolicyRequestedMixedPoolPreservesLCP(t *testing.T) {
+	selector := priorityPolicySelector(true)
+	defer selector.Stop()
+	ctx := withSessionAffinityRequestedProviders(context.Background(), map[string]struct{}{"claude": {}, "gemini": {}})
+	lower, higher := priorityPolicyAuth("lower", "claude", 2), priorityPolicyAuth("higher", "claude", 4)
+	opts := func(body string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: []byte(body), Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "synthetic-caller"}}
+	}
+	first := opts(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"first"}]}`)
+	if _, err := selector.Pick(ctx, "mixed", "model", first, []*Auth{lower}); err != nil {
+		t.Fatal(err)
+	}
+	grown := opts(`{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"first"},{"role":"assistant","content":"answer"},{"role":"user","content":"continue"}]}`)
+	selected, err := selector.Pick(ctx, "mixed", "model", grown, []*Auth{lower, higher})
+	if err != nil || selected == nil || selected.ID != "lower" {
+		t.Fatalf("heterogeneous LCP binding preempted: %v, %v", selected, err)
 	}
 }

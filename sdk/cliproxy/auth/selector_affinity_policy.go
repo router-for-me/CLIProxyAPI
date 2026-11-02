@@ -20,9 +20,32 @@ func affinityProviderKey(provider string) string {
 	return provider
 }
 
-func (s *SessionAffinitySelector) providerPolicy(provider string, candidates []*Auth) SessionAffinityProviderOverride {
+type sessionAffinityRequestedProviderKey struct{}
+
+// Resolve the requested pool before availability, retry and model filtering.
+// Keep this separate from the affinity namespace, which remains "mixed".
+func withSessionAffinityRequestedProviders(ctx context.Context, providers map[string]struct{}) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key := "mixed"
+	if len(providers) == 1 {
+		for provider := range providers {
+			key = affinityProviderKey(provider)
+		}
+	}
+	return context.WithValue(ctx, sessionAffinityRequestedProviderKey{}, key)
+}
+
+func (s *SessionAffinitySelector) providerPolicy(ctx context.Context, provider string, candidates []*Auth) SessionAffinityProviderOverride {
 	key := affinityProviderKey(provider)
-	if key == "mixed" {
+	requested := ""
+	if ctx != nil {
+		requested, _ = ctx.Value(sessionAffinityRequestedProviderKey{}).(string)
+	}
+	if key == "mixed" && requested != "" {
+		key = requested
+	} else if key == "mixed" {
 		// Execution uses the mixed entrypoint even for one provider. Keep its
 		// affinity namespace, but use the real provider's policy when unambiguous.
 		key = ""

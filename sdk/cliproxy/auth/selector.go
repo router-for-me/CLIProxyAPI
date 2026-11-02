@@ -1108,7 +1108,7 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	entry := selectorLogEntry(ctx)
-	policy := s.providerPolicy(provider, auths)
+	policy := s.providerPolicy(ctx, provider, auths)
 	fallback := policy.Fallback
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
@@ -1309,7 +1309,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if s == nil || s.matcher == nil {
 		return nil, false, nil
 	}
-	policy := s.providerPolicy(provider, auths)
+	policy := s.providerPolicy(ctx, provider, auths)
 	fallback := policy.Fallback
 	namespace := lcpAffinityNamespace(provider, model, opts.Metadata)
 	if namespace == "" {
