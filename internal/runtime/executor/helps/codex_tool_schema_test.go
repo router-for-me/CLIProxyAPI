@@ -1376,14 +1376,22 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 		t.Errorf("expected float_bounds.maximum == 3.14, got %s", got)
 	}
 
-	// Scientific/decimal integer bounds: in-range preserved, out-of-range dropped.
+	// Scientific/decimal integer bounds: in-range preserved; number-typed
+	// out-of-range non-exclusive bounds keep their keyword and clamp to the
+	// int64 edge so the schema stays at least as restrictive as the tool
+	// contract; out-of-range exclusive bounds rewrite to the non-exclusive edge,
+	// and a dominating in-range keyword leaves them simply redundant.
 	if got := optsProps.Get("scientific_bounds.minimum").Raw; got != "1e5" {
 		t.Errorf("expected scientific_bounds.minimum == 1e5, got %s", got)
 	}
-	for _, kw := range []string{"maximum", "exclusiveMinimum", "exclusiveMaximum"} {
-		if optsProps.Get("scientific_bounds." + kw).Exists() {
-			t.Errorf("expected scientific_bounds.%s to be removed, got %s", kw, optsProps.Get("scientific_bounds."+kw).Raw)
-		}
+	if got := optsProps.Get("scientific_bounds.maximum").Raw; got != "9223372036854775807" {
+		t.Errorf("expected scientific_bounds.maximum == 9223372036854775807, got %s", got)
+	}
+	if optsProps.Get("scientific_bounds.exclusiveMinimum").Exists() {
+		t.Errorf("expected scientific_bounds.exclusiveMinimum to be dropped, got %s", optsProps.Get("scientific_bounds.exclusiveMinimum").Raw)
+	}
+	if optsProps.Get("scientific_bounds.exclusiveMaximum").Exists() {
+		t.Errorf("expected scientific_bounds.exclusiveMaximum to be dropped, got %s", optsProps.Get("scientific_bounds.exclusiveMaximum").Raw)
 	}
 
 	// High-precision non-integer bound must not be rounded to an integer and dropped.
@@ -1396,8 +1404,8 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 	if got := optsProps.Get("extreme_exponents.minimum").Raw; got != "1.1e-9223372036854775808" {
 		t.Errorf("expected extreme_exponents.minimum preserved as 1.1e-9223372036854775808, got %s", got)
 	}
-	if optsProps.Get("extreme_exponents.maximum").Exists() {
-		t.Errorf("expected extreme_exponents.maximum (10e9223372036854775807) to be removed, got %s", optsProps.Get("extreme_exponents.maximum").Raw)
+	if got := optsProps.Get("extreme_exponents.maximum").Raw; got != "9223372036854775807" {
+		t.Errorf("expected extreme_exponents.maximum (10e9223372036854775807) clamped to MaxInt64, got %s", got)
 	}
 
 	// Non-schema user data under default/enum and property named "maximum" must be preserved.
@@ -1420,5 +1428,158 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 	outAgain := NormalizeCodexToolSchemas(out)
 	if string(outAgain) != string(out) {
 		t.Errorf("expected NormalizeCodexToolSchemas to be idempotent")
+	}
+}
+
+// Codex answers a tool schema whose numeric bound cannot be represented as int64
+// with an opaque HTTP 500 that cools the whole credential (#6579), but outright
+// dropping such a bound can weaken the tool contract (review on #6591): a bound
+// is only removed when it is a tautology over integer schemas. Bounds that still
+// restrict (number-typed or type-less schemas, or the opposite direction) are
+// clamped to the nearest int64 edge, and opposite-side bounds collapse to an
+// in-range unsatisfiable pair instead of re-admitting every int64.
+func TestNormalizeCodexToolSchemas_PreservesNumericBoundStrength(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-6-luna",
+		"tools": [{
+			"type": "function",
+			"name": "emulate_process",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"options": {
+						"type": "object",
+						"properties": {
+							"seed": {"type": "integer", "minimum": 0, "maximum": 18446744073709552000},
+							"negative": {"type": "integer", "minimum": -9223372036854775809},
+							"tag": {"type": "string", "default": {"maximum": 123}},
+							"ratio": {"type": "number", "exclusiveMinimum": 0.5, "maximum": 1e100},
+							"floor": {"type": "number", "minimum": -1e100},
+							"floor_x": {"type": "number", "exclusiveMinimum": -1e100},
+							"capped": {"type": "number", "exclusiveMaximum": 1e100},
+							"dominated": {"type": "number", "maximum": 100, "exclusiveMaximum": 1e100},
+							"frac_cap": {"type": "number", "maximum": 100000000000000000000.5, "exclusiveMaximum": 9223372036854775808},
+							"frac_floor": {"type": "number", "minimum": -100000000000000000000.5, "exclusiveMinimum": -9223372036854775809},
+							"tiny_floor": {"type": "number", "minimum": 1.1e-9223372036854775808, "exclusiveMinimum": -1e100},
+							"impossible_max": {"type": "integer", "minimum": 0, "maximum": -1e100},
+							"impossible_min": {"type": "number", "minimum": 1e100, "exclusiveMinimum": 2e100},
+							"typeless": {"maximum": 1e100},
+							"dead": {"type": "string", "maximum": 1e100},
+							"bounded": {"type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807}
+						}
+					}
+				}
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	props := gjson.GetBytes(out, "tools.0.parameters.properties.options.properties")
+
+	// Tautologies over int64 stay dropped on integer schemas (#6579 case).
+	if props.Get("seed.maximum").Exists() {
+		t.Fatalf("u64 maximum must be dropped, got %s", props.Get("seed.maximum").Raw)
+	}
+	if props.Get("seed.minimum").Int() != 0 {
+		t.Fatalf("in-range minimum must stay, got %s", props.Get("seed.minimum").Raw)
+	}
+	if props.Get("negative.minimum").Exists() {
+		t.Fatalf("below-int64 minimum must be dropped, got %s", props.Get("negative.minimum").Raw)
+	}
+
+	// Number-typed bounds out of int64 are real constraints: clamp, keep keyword.
+	if got := props.Get("ratio.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("number-typed out-of-int64 maximum must clamp to MaxInt64, got %s", got)
+	}
+	if got := props.Get("ratio.exclusiveMinimum").Raw; got != "0.5" {
+		t.Fatalf("non-integer exclusiveMinimum must stay, got %s", got)
+	}
+	if got := props.Get("floor.minimum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("number-typed below-int64 minimum must clamp to MinInt64, got %s", got)
+	}
+
+	// An out-of-int64 exclusive bound admits the int64 edge value, so the rewrite
+	// must land on the non-exclusive edge instead of rejecting a valid int64
+	// (codex review on #6591).
+	if got := props.Get("capped.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("out-of-int64 exclusiveMaximum must rewrite to a non-exclusive maximum, got %s", got)
+	}
+	if props.Get("capped.exclusiveMaximum").Exists() {
+		t.Fatalf("rewritten exclusiveMaximum must not keep the exclusive keyword")
+	}
+	if got := props.Get("floor_x.minimum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("out-of-int64 exclusiveMinimum must rewrite to a non-exclusive minimum, got %s", got)
+	}
+	if props.Get("floor_x.exclusiveMinimum").Exists() {
+		t.Fatalf("rewritten exclusiveMinimum must not keep the exclusive keyword")
+	}
+	// A present non-exclusive bound dominates the tautology, so the exclusive
+	// keyword is simply redundant.
+	if got := props.Get("dominated.maximum").Int(); got != 100 {
+		t.Fatalf("dominating in-range maximum must stay, got %d", got)
+	}
+	if props.Get("dominated.exclusiveMaximum").Exists() {
+		t.Fatalf("redundant tautological exclusiveMaximum must be dropped")
+	}
+	// A retained out-of-range fractional keyword is looser than the int64 edge,
+	// so the exclusive rewrite must install the edge instead of deferring to it
+	// (codex review on a9147fa5) — otherwise the schema re-admits the very
+	// out-of-int64 integers the original contract rejected.
+	if got := props.Get("frac_cap.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("fractional maximum must yield to the tighter int64 edge, got %s", got)
+	}
+	if props.Get("frac_cap.exclusiveMaximum").Exists() {
+		t.Fatalf("rewritten exclusiveMaximum must not keep the exclusive keyword")
+	}
+	if got := props.Get("frac_floor.minimum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("fractional minimum must yield to the tighter int64 edge, got %s", got)
+	}
+	if props.Get("frac_floor.exclusiveMinimum").Exists() {
+		t.Fatalf("rewritten exclusiveMinimum must not keep the exclusive keyword")
+	}
+	// An underflowed (≈0) minimum is stricter than the MinInt64 edge and stays.
+	if got := props.Get("tiny_floor.minimum").Raw; got != "1.1e-9223372036854775808" {
+		t.Fatalf("underflowed minimum is the stricter bound and must stay, got %s", got)
+	}
+	if props.Get("tiny_floor.exclusiveMinimum").Exists() {
+		t.Fatalf("tautological exclusiveMinimum under a stricter minimum must be dropped")
+	}
+	if got := props.Get("typeless.maximum").Raw; got != "9223372036854775807" {
+		t.Fatalf("type-less schemas must clamp conservatively, got %s", got)
+	}
+	if props.Get("dead.maximum").Exists() {
+		t.Fatalf("bounds cannot bind on string-typed schemas, got %s", props.Get("dead.maximum").Raw)
+	}
+
+	// Opposite-side bounds admit no int64: collapse to an unsatisfiable pair
+	// instead of re-admitting every value.
+	if got := props.Get("impossible_max.maximum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("opposite-side maximum must collapse to MinInt64, got %s", got)
+	}
+	if got := props.Get("impossible_max.minimum").Raw; got != "9223372036854775807" {
+		t.Fatalf("opposite-side maximum must be contradicted by minimum, got %s", got)
+	}
+	if got := props.Get("impossible_min.minimum").Raw; got != "9223372036854775807" {
+		t.Fatalf("opposite-side minimum must collapse to MaxInt64, got %s", got)
+	}
+	if got := props.Get("impossible_min.exclusiveMinimum").Raw; got != "9223372036854775807" {
+		t.Fatalf("opposite-side exclusiveMinimum must clamp, got %s", got)
+	}
+	if got := props.Get("impossible_min.maximum").Raw; got != "-9223372036854775808" {
+		t.Fatalf("opposite-side minimum must be contradicted by maximum, got %s", got)
+	}
+
+	// In-range edges stay verbatim and user data is untouched.
+	if got := props.Get("bounded.minimum").Raw; got != "-9223372036854775808" || props.Get("bounded.maximum").Raw != "9223372036854775807" {
+		t.Fatalf("int64 edge bounds must stay verbatim, got %s / %s", props.Get("bounded.minimum").Raw, props.Get("bounded.maximum").Raw)
+	}
+	if got := props.Get("tag.default.maximum").Int(); got != 123 {
+		t.Fatalf("bounds inside user data must stay, got %s", props.Get("tag.default").Raw)
+	}
+
+	// Idempotence: clamped and pair values are in-range, so a second pass is a no-op.
+	outAgain := NormalizeCodexToolSchemas(out)
+	if string(outAgain) != string(out) {
+		t.Fatalf("expected NormalizeCodexToolSchemas to be idempotent after clamping")
 	}
 }
