@@ -59,7 +59,8 @@ func startCallbackForwarder(bindHost string, port int, provider, targetBase stri
 		stopForwarderInstance(port, prev)
 	}
 
-	bindHost = strings.TrimSpace(bindHost)
+	// server.host may carry the bracketed IPv6 spelling; JoinHostPort adds its own brackets.
+	bindHost = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(bindHost), "["), "]")
 	if bindHost == "" {
 		bindHost = "0.0.0.0"
 	}

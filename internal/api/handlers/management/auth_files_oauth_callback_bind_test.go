@@ -15,7 +15,11 @@ func TestCallbackForwarderHonorsLoopbackBindAndPreservesRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer baseline.Close()
+	t.Cleanup(func() {
+		if err := baseline.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	addresses := []string{"127.0.0.2"}
 	interfaces, err := net.InterfaceAddrs()
 	if err != nil {
@@ -78,5 +82,28 @@ func TestCallbackForwarderHonorsLoopbackBindAndPreservesRedirect(t *testing.T) {
 			t.Error(err)
 		}
 		t.Fatalf("callback configured for 127.0.0.1 accepted connection on %s", alternate)
+	}
+}
+
+func TestCallbackForwarderAcceptsBracketedIPv6Host(t *testing.T) {
+	reservation, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	port := reservation.Addr().(*net.TCPAddr).Port
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forwarder, err := startCallbackForwarder("[::1]", port, "bind-test", "http://127.0.0.1:8317/codex/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopCallbackForwarderInstance(port, forwarder)
+	connection, err := net.DialTimeout("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connection.Close(); err != nil {
+		t.Error(err)
 	}
 }
