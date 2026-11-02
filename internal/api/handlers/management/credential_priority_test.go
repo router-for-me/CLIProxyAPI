@@ -9,11 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	fileauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -237,5 +239,80 @@ func TestCredentialPriorityCASDoesNotRecreateDeletedDisabledFile(t *testing.T) {
 	}
 	if _, err = os.Stat(file); !os.IsNotExist(err) {
 		t.Fatal("deleted credential was recreated")
+	}
+}
+
+func TestCredentialPriorityCASRejectsPendingCodexRefresh(t *testing.T) {
+	for _, original := range []string{"null", "0", "-7", "4"} {
+		for _, desired := range []string{"4", "0", "null"} {
+			t.Run(original+"-to-"+desired, func(t *testing.T) {
+				dir := t.TempDir()
+				file := filepath.Join(dir, "codex-fixture.json")
+				store := fileauth.NewFileTokenStore()
+				store.SetBaseDir(dir)
+				manager := coreauth.NewManager(store, &coreauth.RoundRobinSelector{}, nil)
+				metadata := map[string]any{"type": "codex", "access_token": "synthetic-old-access", "refresh_token": "synthetic-refresh", "fixture_marker": "preserved"}
+				initialPriority, err := decodeCredentialPriority(json.RawMessage(original))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if initialPriority != nil {
+					metadata["priority"] = *initialPriority
+				}
+				base, err := manager.Register(context.Background(), &coreauth.Auth{
+					ID: "codex-fixture.json", FileName: "codex-fixture.json", Provider: "codex",
+					Attributes: map[string]string{"path": file}, Metadata: metadata,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Reproduce the real pending state: an ordinary refresh publishes its
+				// new credentials even when its scoped patch could not reach storage.
+				manager.SetStore(&failingPriorityStore{})
+				refreshed := base.Clone()
+				refreshed.Metadata["access_token"] = "synthetic-new-access"
+				refreshed.CodexRefreshPatch = codex.NewCredentialRefreshPatch(base.Metadata, refreshed.Metadata, true, false)
+				before, err := manager.UpdateRefreshedAuth(context.Background(), base, refreshed)
+				if err != nil || before == nil || before.CodexRefreshPatch == nil {
+					t.Fatalf("pending refresh fixture not retained: %v", err)
+				}
+				storedBefore, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				manager.SetStore(store)
+				handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: dir}, manager)
+				body := fmt.Sprintf(`{"name":"codex-fixture.json","priority":%s,"expected_priority":%s}`, desired, original)
+				response := patchCredentialPriorityFixture(handler, body)
+				if response.Code != http.StatusConflict {
+					t.Fatalf("pending refresh acknowledged priority edit: %d", response.Code)
+				}
+				after, _ := manager.GetByID(base.ID)
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("rejected edit changed pending runtime credentials or priority")
+				}
+				storedAfter, err := os.ReadFile(file)
+				if err != nil || string(storedAfter) != string(storedBefore) {
+					t.Fatal("rejected edit changed stored credentials or priority")
+				}
+				// Once ordinary persistence recovers, a retry must be durable and
+				// preserve the now-saved refreshed credentials.
+				if _, err = manager.Update(context.Background(), after); err != nil {
+					t.Fatal(err)
+				}
+				response = patchCredentialPriorityFixture(handler, body)
+				if response.Code != http.StatusOK {
+					t.Fatalf("recovered edit rejected: %d", response.Code)
+				}
+				loaded, err := managerStoreRecords(file)
+				if err != nil || len(loaded) != 1 {
+					t.Fatalf("reload after recovered edit: %v", err)
+				}
+				want, _ := decodeCredentialPriority(json.RawMessage(desired))
+				if !sameCredentialPriority(credentialPriority(loaded[0]), want) || loaded[0].Metadata["access_token"] != "synthetic-new-access" || loaded[0].Metadata["fixture_marker"] != "preserved" {
+					t.Fatal("recovered edit lost priority or refreshed credentials")
+				}
+			})
+		}
 	}
 }

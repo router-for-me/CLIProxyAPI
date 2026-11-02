@@ -13,6 +13,7 @@ import (
 )
 
 var errCredentialPriorityConflict = errors.New("credential priority changed")
+var errCredentialPriorityRefreshPending = errors.New("credential refresh persistence is pending")
 
 // PatchCredentialPriority conditionally updates one file credential's priority.
 // The precondition runs inside Manager.Modify's per-credential mutation gate,
@@ -52,6 +53,12 @@ func (h *Handler) PatchCredentialPriority(c *gin.Context) {
 		if !sameCredentialPriority(actual, expected) {
 			return errCredentialPriorityConflict
 		}
+		// A retained Codex refresh patch persists only its credential partitions
+		// and can discard unrelated metadata edits. Leave it intact and retry
+		// after ordinary persistence recovers, rather than acknowledge a lost edit.
+		if current.CodexRefreshPatch != nil {
+			return errCredentialPriorityRefreshPending
+		}
 		if current.Metadata == nil {
 			current.Metadata = make(map[string]any)
 		}
@@ -65,6 +72,10 @@ func (h *Handler) PatchCredentialPriority(c *gin.Context) {
 	})
 	if errors.Is(errModify, errCredentialPriorityConflict) {
 		c.JSON(http.StatusConflict, gin.H{"error": "credential priority changed; refresh before retrying"})
+		return
+	}
+	if errors.Is(errModify, errCredentialPriorityRefreshPending) {
+		c.JSON(http.StatusConflict, gin.H{"error": "credential refresh persistence is pending; retry after the refresh is saved"})
 		return
 	}
 	if errModify != nil {
