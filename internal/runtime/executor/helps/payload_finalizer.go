@@ -18,13 +18,17 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 	requestedModel := PayloadRequestedModel(opts, req.Model)
 	requestPath := PayloadRequestPath(opts)
 	headers := opts.Headers.Clone()
-	source := append([]byte(nil), original...)
+	fromProtocol := opts.SourceFormat.String()
+	var source []byte
+	if cfg != nil && (len(cfg.Payload.Default) > 0 || len(cfg.Payload.DefaultRaw) > 0) {
+		source = append([]byte(nil), original...)
+	}
 	var formatCallback func(string)
 	if opts.Metadata != nil {
 		formatCallback, _ = opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string))
 	}
 	return func(body []byte) []byte {
-		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers)
+		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, fromProtocol, root, body, source, requestedModel, requestPath, headers)
 		if formatCallback != nil {
 			formatCallback(strings.TrimSpace(gjson.GetBytes(out, buildPayloadPath(root, "response_format")).String()))
 		}

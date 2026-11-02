@@ -1008,6 +1008,70 @@ func TestRegisterExecutorsCommitsManagerChangesOutsideHostLock(t *testing.T) {
 	}
 }
 
+func TestNormalizeRequestWithoutNormalizerReusesBody(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id:     "unrelated",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{}},
+	})
+	body := []byte("request body")
+	got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", body, false)
+	if len(got) != len(body) || &got[0] != &body[0] {
+		t.Fatal("NormalizeRequest() copied the body without a request normalizer")
+	}
+}
+
+func TestNormalizeRequestFailedMutationIsIsolated(t *testing.T) {
+	for _, failure := range []string{"error", "panic", "empty"} {
+		t.Run(failure, func(t *testing.T) {
+			var retained []byte
+			host := newHostWithRecords(
+				capabilityRecord{
+					id:       "failed",
+					priority: 20,
+					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+						RequestNormalizer: requestNormalizerFunc(func(ctx context.Context, req pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error) {
+							req.Body[0] = 'X'
+							if failure == "panic" {
+								panic("mutation panic")
+							}
+							if failure == "error" {
+								return pluginapi.PayloadResponse{Body: req.Body}, fmt.Errorf("mutation failed")
+							}
+							return pluginapi.PayloadResponse{}, nil
+						}),
+					}},
+				},
+				capabilityRecord{
+					id:       "next",
+					priority: 10,
+					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+						RequestNormalizer: requestNormalizerFunc(func(ctx context.Context, req pluginapi.RequestTransformRequest) (pluginapi.PayloadResponse, error) {
+							if string(req.Body) != "original" {
+								t.Fatalf("next normalizer received %q, want original", req.Body)
+							}
+							req.Body[0] = 'N'
+							retained = req.Body
+							return pluginapi.PayloadResponse{Body: req.Body}, nil
+						}),
+					}},
+				},
+			)
+			body := []byte("original")
+			got := host.NormalizeRequest(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", body, false)
+			if string(body) != "original" || string(got) != "Nriginal" {
+				t.Fatalf("NormalizeRequest() = %q, input = %q", got, body)
+			}
+			retained[0] = 'Y'
+			if string(got) != "Nriginal" {
+				t.Fatalf("plugin retained output aliases host result: %q", got)
+			}
+			if failure == "panic" && !host.isPluginFused("failed") {
+				t.Fatal("panicking normalizer was not fused")
+			}
+		})
+	}
+}
+
 func TestNormalizeRequestChainsByPriority(t *testing.T) {
 	host := newHostWithRecords(
 		capabilityRecord{
