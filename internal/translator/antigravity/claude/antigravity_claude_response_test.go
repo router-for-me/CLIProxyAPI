@@ -1884,3 +1884,37 @@ func TestConvertAntigravityResponseToClaudeStream_RefusalPreservedAcrossTrailing
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeStream_WebSearchBufferedTextDrainedOnEmptyFinishReason(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	chunk := []byte(`{
+		"response": {
+			"modelVersion": "gemini-3.1-flash-lite",
+			"responseId": "resp-web-search-empty-finish",
+			"candidates": [{
+				"content": {"parts": [{"text": "Direct answer without grounding."}]},
+				"finishReason": ""
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14}
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, "Direct answer without grounding.") {
+		t.Fatalf("buffered web-search text was lost on empty finishReason:\n%s", outputText)
+	}
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := gjson.Get(messageDelta, "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, messageDelta)
+	}
+}
+

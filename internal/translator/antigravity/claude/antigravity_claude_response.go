@@ -475,8 +475,8 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 	}
 
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
+		params.HasFinishReason = true
 		if finishReason := strings.TrimSpace(finishReasonResult.String()); finishReason != "" {
-			params.HasFinishReason = true
 			params.FinishReason = finishReason
 			flushPendingToolInput()
 		}
