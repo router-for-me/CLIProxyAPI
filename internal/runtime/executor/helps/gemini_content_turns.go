@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"strings"
+
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/tidwall/gjson"
@@ -158,4 +160,135 @@ func contentIsThoughtOnlyModelTurn(content gjson.Result) bool {
 func EnsureGeminiBoundaryUserContent(payload []byte, path string) []byte {
 	payload = EnsureGeminiLeadingUserContent(payload, path)
 	return EnsureGeminiTrailingUserContent(payload, path)
+}
+
+// StripClaudeDisabledThoughtContents strips historical thought parts from
+// request contents when the Antigravity target is Claude and thinking is
+// disabled (no thinkingConfig / ModeNone). Thought-only model turns are
+// dropped. Text, functionCall, functionResponse, and thoughtSignature on
+// non-thought parts are preserved. Non-Claude models and enabled thinking
+// are no-ops.
+func StripClaudeDisabledThoughtContents(modelName string, payload []byte, contentsPath string) []byte {
+	if !strings.Contains(strings.ToLower(modelName), "claude") {
+		return payload
+	}
+	if !antigravityClaudeThinkingDisabled(payload, contentsPath) {
+		return payload
+	}
+
+	contents := util.GetGJSONBytesNoCopy(payload, contentsPath)
+	if !contents.IsArray() {
+		return payload
+	}
+	contentArray := contents.Array()
+	if len(contentArray) == 0 {
+		return payload
+	}
+
+	changed := false
+	newContents := make([][]byte, 0, len(contentArray))
+
+	for _, content := range contentArray {
+		role := content.Get("role").String()
+		if role != "model" && role != "assistant" {
+			newContents = append(newContents, []byte(content.Raw))
+			continue
+		}
+
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			newContents = append(newContents, []byte(content.Raw))
+			continue
+		}
+
+		partsArray := parts.Array()
+		keptParts := make([][]byte, 0, len(partsArray))
+		for _, part := range partsArray {
+			if part.Get("thought").Bool() {
+				changed = true
+				continue
+			}
+			keptParts = append(keptParts, []byte(part.Raw))
+		}
+
+		if len(keptParts) == 0 {
+			// Entire turn had only thought parts; drop this turn.
+			changed = true
+			continue
+		}
+
+		if len(keptParts) == len(partsArray) {
+			newContents = append(newContents, []byte(content.Raw))
+			continue
+		}
+
+		// Some parts were removed; rebuild turn.
+		turnBytes, errSet := sjson.SetRawBytes([]byte(content.Raw), "parts", translatorcommon.JoinRawArray(keptParts))
+		if errSet != nil {
+			newContents = append(newContents, []byte(content.Raw))
+			continue
+		}
+		newContents = append(newContents, turnBytes)
+	}
+
+	if !changed {
+		return payload
+	}
+
+	out, errSet := sjson.SetRawBytes(payload, contentsPath, translatorcommon.JoinRawArray(newContents))
+	if errSet != nil {
+		return payload
+	}
+	return out
+}
+
+func antigravityClaudeThinkingDisabled(payload []byte, contentsPath string) bool {
+	thinkingPath := "request.generationConfig.thinkingConfig"
+	if !strings.HasPrefix(contentsPath, "request.") && !gjson.GetBytes(payload, thinkingPath).Exists() {
+		thinkingPath = "generationConfig.thinkingConfig"
+	}
+	cfg := gjson.GetBytes(payload, thinkingPath)
+	if !cfg.Exists() {
+		return true
+	}
+	if !cfg.IsObject() || len(cfg.Map()) == 0 {
+		return true
+	}
+
+	// Check if explicitly disabled via level.
+	levelResult := cfg.Get("thinkingLevel")
+	if !levelResult.Exists() {
+		levelResult = cfg.Get("thinking_level")
+	}
+	if levelResult.Exists() && strings.EqualFold(levelResult.String(), "none") {
+		return true
+	}
+
+	// Check for active enabling fields.
+	if levelResult.Exists() && strings.TrimSpace(levelResult.String()) != "" {
+		return false
+	}
+	budgetResult := cfg.Get("thinkingBudget")
+	if !budgetResult.Exists() {
+		budgetResult = cfg.Get("thinking_budget")
+	}
+	if budgetResult.Exists() {
+		budget := budgetResult.Int()
+		if budget > 0 || budget == -1 {
+			return false
+		}
+	}
+	incResult := cfg.Get("includeThoughts")
+	if !incResult.Exists() {
+		incResult = cfg.Get("include_thoughts")
+	}
+	if incResult.Exists() && incResult.Bool() {
+		return false
+	}
+
+	if budgetResult.Exists() && budgetResult.Int() == 0 {
+		return true
+	}
+
+	return true
 }
