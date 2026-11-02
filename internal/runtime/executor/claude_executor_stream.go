@@ -422,6 +422,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					return
 				}
 				line = e.restoreResponseModel(restoredLine, req.Model)
+				helps.RecordClaudeWebSearchOwners(webSearchOwner, line)
 				event.Write(line)
 				event.WriteByte('\n')
 				if len(bytes.TrimSpace(line)) == 0 {
