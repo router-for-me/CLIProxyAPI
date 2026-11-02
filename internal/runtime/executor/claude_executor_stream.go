@@ -100,8 +100,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); err != nil {
 		return nil, err
 	}
-	webSearchOwner := claudeWebSearchReplayOwner(auth, from)
-	helps.DropForeignClaudeWebSearchReplayDoc(doc, webSearchOwner)
+	webSearchOwner := claudeWebSearchResultCacheCredentialScope(auth)
+	helps.DropForeignClaudeWebSearchReplayDoc(doc, claudeWebSearchReplayOwner(auth, from))
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		rebuildMidSystemMessagesToTopLevelDoc(doc)
