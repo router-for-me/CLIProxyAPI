@@ -83,6 +83,23 @@ func TestServiceRun_RequestsRetryUntilInitialModelsAreRegistered(t *testing.T) {
 			t.Fatalf("initializing response = %d %s, retry = %q", response.Code, response.Body.String(), response.Header().Get("Retry-After"))
 		}
 	}
+	for _, entry := range []struct {
+		path string
+		want int
+	}{
+		{"/anthropic/callback", http.StatusOK},
+		{"/codex/callback", http.StatusOK},
+		{"/antigravity/callback", http.StatusOK},
+		{"/callback", http.StatusBadRequest},
+		{"/devin/callback", http.StatusBadRequest},
+		{"/healthz", http.StatusOK},
+		{"/", http.StatusOK},
+	} {
+		response := request(http.MethodGet, entry.path, "")
+		if response.Code != entry.want || response.Header().Get("Retry-After") != "" {
+			t.Errorf("non-model route %s while initializing = %d %s", entry.path, response.Code, response.Body.String())
+		}
+	}
 	close(allowLoad)
 	readyDeadline := time.After(5 * time.Second)
 	// A request must never receive an empty catalog or model_not_found while
@@ -130,14 +147,18 @@ func TestServiceReadinessGateDoesNotChangeDirectServerConstruction(t *testing.T)
 	}
 }
 
-func TestServiceReadinessManagementExemptions(t *testing.T) {
+func TestServiceReadinessOnlyGatesModelRoutes(t *testing.T) {
 	service := &Service{}
 	engine := gin.New()
 	engine.Use(service.readinessMiddleware())
 	engine.NoRoute(func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	for _, path := range []string{
 		"/v0/management", "/v0/management/config", "/v8/management", "/v8/management/config",
-		"/v0/resource/plugins/example", "/management.html",
+		"/v0/resource/plugins/example", "/management.html", "/keep-alive",
+		"/anthropic/callback", "/codex/callback", "/antigravity/callback", "/callback", "/devin/callback",
+		"/", "/healthz", "/assets/app.js", "/new-control-route",
+		"/v8/management-other", "/management.html/other", "/v1-other", "/v1beta-other",
+		"/openai/v1-other", "/backend-api/codex-other",
 	} {
 		t.Run(path, func(t *testing.T) {
 			response := httptest.NewRecorder()
@@ -147,18 +168,29 @@ func TestServiceReadinessManagementExemptions(t *testing.T) {
 			}
 		})
 	}
-	for _, path := range []string{"/v1/models", "/v1/responses", "/v8/management-other", "/management.html/other"} {
+	for _, path := range []string{
+		"/v1", "/v1/models", "/v1/responses", "/v1/realtime", "/v1/ws",
+		"/v1beta", "/v1beta/models", "/v1beta/interactions", "/v1beta/models/gemini:generateContent",
+		"/openai/v1", "/openai/v1/videos", "/backend-api/codex", "/backend-api/codex/responses",
+	} {
 		t.Run(path, func(t *testing.T) {
 			response := httptest.NewRecorder()
 			engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 			if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "1" {
 				t.Fatalf("model route not gated: status=%d retry=%q", response.Code, response.Header().Get("Retry-After"))
 			}
+			service.requestReady.Store(true)
+			defer service.requestReady.Store(false)
+			response = httptest.NewRecorder()
+			engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusNoContent || response.Header().Get("Retry-After") != "" {
+				t.Fatalf("ready model route gated: status=%d retry=%q", response.Code, response.Header().Get("Retry-After"))
+			}
 		})
 	}
 }
 
-func TestServiceStartupReadinessFailsOpenForStalledCatalogs(t *testing.T) {
+func TestServiceStartupReadinessKeepAliveFailsOpenForStalledCatalogs(t *testing.T) {
 	fetchEntered := make(chan struct{}, 2)
 	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetchEntered <- struct{}{}
@@ -172,7 +204,14 @@ func TestServiceStartupReadinessFailsOpenForStalledCatalogs(t *testing.T) {
 	cfg := &config.Config{Host: "127.0.0.1", AuthDir: t.TempDir(), CommercialMode: true,
 		Models: config.ModelCatalogs{Catalog: stalled.URL, CodexCatalog: fixture, DevinCatalog: stalled.URL},
 	}
-	service, err := NewBuilder().WithConfig(cfg).WithConfigPath(filepath.Join(cfg.AuthDir, "config.yaml")).Build()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Match local-password CLI mode: the watchdog starts in NewServer, before
+	// the shared 10-second catalog wait. Heartbeats must reset it during startup.
+	const localPassword = "startup-readiness-local-password"
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath(filepath.Join(cfg.AuthDir, "config.yaml")).
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, cancel)).Build()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +231,8 @@ func TestServiceStartupReadinessFailsOpenForStalledCatalogs(t *testing.T) {
 			},
 		}, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	startTime := time.Now()
 	go func() { done <- service.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -226,16 +265,32 @@ func TestServiceStartupReadinessFailsOpenForStalledCatalogs(t *testing.T) {
 	if response := request(); response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("must gate while catalog refreshes are pending, got %d", response.Code)
 	}
+	keepAlive := func(password string) *httptest.ResponseRecorder {
+		response := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/keep-alive", nil)
+		req.Header.Set("X-Local-Password", password)
+		service.server.Handler().ServeHTTP(response, req)
+		return response
+	}
+	if response := keepAlive("wrong-password"); response.Code != http.StatusUnauthorized {
+		t.Errorf("keep-alive must still authenticate while initializing, got %d", response.Code)
+	}
+	if response := keepAlive(localPassword); response.Code != http.StatusOK || response.Header().Get("Retry-After") != "" {
+		t.Errorf("keep-alive gated while catalog refreshes are stalled: %d %s", response.Code, response.Body.String())
+	}
 	// This is one shared 10-second budget, not 10 seconds for each catalog.
 	deadline := time.NewTimer(12 * time.Second)
 	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			t.Fatal("local-password keep-alive watchdog canceled startup before readiness could fail open")
 		case <-deadline.C:
 			t.Fatal("startup readiness did not fail open within the shared catalog wait bound")
 		case <-ticker.C:
+			keepAlive(localPassword)
 			if !service.requestReady.Load() {
 				continue
 			}
@@ -243,6 +298,10 @@ func TestServiceStartupReadinessFailsOpenForStalledCatalogs(t *testing.T) {
 			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "gpt-6-astra") {
 				t.Fatalf("last-valid catalog unavailable after startup deadline: %d %s", response.Code, response.Body.String())
 			}
+			if ctx.Err() != nil {
+				t.Fatal("keep-alive watchdog canceled the service")
+			}
+			t.Logf("readiness failed open after %s with both catalogs stalled and local-password watchdog active", time.Since(startTime))
 			return
 		}
 	}

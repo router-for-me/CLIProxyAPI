@@ -333,14 +333,6 @@ func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
 	}
 }
 
-// IsControlPlanePath reports whether a route must remain available independently
-// of Home heartbeat and startup model readiness.
-func IsControlPlanePath(path string) bool {
-	return path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") ||
-		path == "/v8/management" || strings.HasPrefix(path, "/v8/management/") ||
-		strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html"
-}
-
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := s.getConfig()
@@ -349,7 +341,8 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 			return
 		}
 		if c != nil && c.Request != nil {
-			if IsControlPlanePath(c.Request.URL.Path) {
+			path := c.Request.URL.Path
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v8/management/") || path == "/v8/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
 				c.Next()
 				return
 			}
@@ -384,7 +377,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 			s.serveExampleAPIKeyWarningPage(c)
 			return
 		}
-		if !isExampleAPIKeySafeModeProxyPath(path) {
+		if !IsModelServingPath(path) {
 			c.Next()
 			return
 		}
@@ -415,7 +408,10 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	c.Abort()
 }
 
-func isExampleAPIKeySafeModeProxyPath(path string) bool {
+// IsModelServingPath reports whether path is in a model-serving API group
+// registered by setupRoutes, including realtime and Codex direct aliases.
+// All other routes remain independent of startup model readiness.
+func IsModelServingPath(path string) bool {
 	switch {
 	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
 		return true

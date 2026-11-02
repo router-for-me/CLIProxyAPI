@@ -276,7 +276,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 func (s *Service) readinessMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !api.IsControlPlanePath(c.Request.URL.Path) && !s.requestReady.Load() {
+		if api.IsModelServingPath(c.Request.URL.Path) && !s.requestReady.Load() {
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(503, gin.H{"error": gin.H{"message": "proxy is initializing or shutting down", "type": "server_error", "code": "service_unavailable"}})
 			return
