@@ -81,6 +81,7 @@ type claudeWebSearchHit struct {
 	Title   string
 	URL     string
 	Snippet string
+	PageAge string
 }
 
 func (c *tavilyClient) search(ctx context.Context, query string, maxResults int) ([]claudeWebSearchHit, string, error) {

@@ -12,6 +12,9 @@ func defaultWebSearchFallbackChain() []routeBackend {
 		backendAntigravityGoogle,
 		backendCodexWebSearch,
 		backendXAIWebSearch,
+		backendKimiResponses,
+		backendKimiCoding,
+		backendKimiWebSearch,
 		backendTavily,
 	}
 }
@@ -72,6 +75,36 @@ func tryRouteBackend(backend routeBackend, cfg pluginConfig, req pluginapi.Model
 			Target:      "xai",
 			TargetModel: targetModel,
 			Reason:      "claude_code_web_search_xai",
+		}, true
+	case backendKimiResponses:
+		// The host canonicalizes kimi.ai credentials to "kimi-ai" (and kimi.com
+		// to "kimi"), so the whole provider family makes this backend runnable.
+		if !hasKimiProvider(req.AvailableProviders) {
+			return pluginapi.ModelRouteResponse{Handled: false, Reason: "kimi_responses_unavailable"}, false
+		}
+		return pluginapi.ModelRouteResponse{
+			Handled:    true,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Reason:     "claude_code_web_search_kimi_responses",
+		}, true
+	case backendKimiWebSearch:
+		client := newKimiClient(cfg.KimiAPIKeys, cfg.KimiBaseURL)
+		if !client.available() {
+			return pluginapi.ModelRouteResponse{Handled: false, Reason: "kimi_unavailable"}, false
+		}
+		return pluginapi.ModelRouteResponse{
+			Handled:    true,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Reason:     "claude_code_web_search_kimi",
+		}, true
+	case backendKimiCoding:
+		if !newKimiCodingClient(cfg).available() {
+			return pluginapi.ModelRouteResponse{Handled: false, Reason: "kimi_coding_unavailable"}, false
+		}
+		return pluginapi.ModelRouteResponse{
+			Handled:    true,
+			TargetKind: pluginapi.ModelRouteTargetSelf,
+			Reason:     "claude_code_web_search_kimi_coding",
 		}, true
 	case backendDefaultProvider:
 		provider := cfg.DefaultProvider
