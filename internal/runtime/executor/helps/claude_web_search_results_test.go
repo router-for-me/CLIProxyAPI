@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
-	"github.com/tidwall/gjson"
 )
 
 const claudeWebSearchTestResults = `[{"type":"web_search_result","url":"https://example.com/a","title":"A","encrypted_content":"enc-a","page_age":null},{"type":"web_search_result","url":"https://example.com/b","title":"B","encrypted_content":"enc-b","page_age":null}]`
@@ -32,10 +32,10 @@ func TestRecordClaudeWebSearchResultsFromStreamEventAndRestore(t *testing.T) {
 	RecordClaudeWebSearchResults("session-1", event, 30*time.Minute, 16)
 
 	got := RestoreClaudeWebSearchResults(claudeWebSearchRequestBody(`[]`), "session-1", 30*time.Minute)
-	if raw := gjson.GetBytes(got, "messages.1.content.1.content").Raw; raw != claudeWebSearchTestResults {
+	if raw := ojson.GetBytes(got, "messages.1.content.1.content").Raw; raw != claudeWebSearchTestResults {
 		t.Fatalf("restored content = %s, want original results", raw)
 	}
-	if gjson.GetBytes(got, "messages.1.content.2.text").String() != "answer" {
+	if ojson.GetBytes(got, "messages.1.content.2.text").String() != "answer" {
 		t.Fatalf("neighbouring blocks changed: %s", got)
 	}
 }
@@ -48,7 +48,7 @@ func TestRecordClaudeWebSearchResultsFromMessageResponse(t *testing.T) {
 	RecordClaudeWebSearchResults("session-1", response, 30*time.Minute, 16)
 
 	got := RestoreClaudeWebSearchResults(claudeWebSearchRequestBody(`[]`), "session-1", 30*time.Minute)
-	if raw := gjson.GetBytes(got, "messages.1.content.1.content").Raw; raw != claudeWebSearchTestResults {
+	if raw := ojson.GetBytes(got, "messages.1.content.1.content").Raw; raw != claudeWebSearchTestResults {
 		t.Fatalf("restored content = %s, want original results", raw)
 	}
 }

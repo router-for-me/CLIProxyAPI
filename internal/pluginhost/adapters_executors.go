@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -19,7 +20,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type executorManager interface {
@@ -553,13 +553,14 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	hasPluginThinkingTarget := modelInfo != nil ||
 		registry.LookupModelInfo(baseModel, a.provider) != nil ||
 		thinking.GetProviderApplier(a.provider) != nil
-	if hasPluginThinkingTarget && baseModel != "" && gjson.GetBytes(nativeReq.Payload, "model").Exists() {
-		nativeReq.Payload = helps.SetStringIfDifferent(nativeReq.Payload, "model", baseModel)
-	}
 	originalTranslated := nativeReq.Payload
-	if len(nativeReq.Payload) > 0 {
-		body, errThinking := helps.ApplyRequestThinkingWithModelInfo(
-			nativeReq.Payload,
+	doc := ojson.NewDoc(nativeReq.Payload)
+	if hasPluginThinkingTarget && baseModel != "" && doc.Get("model").Exists() {
+		_ = helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	}
+	if doc.Len() > 0 {
+		if errThinking := helps.ApplyRequestThinkingWithModelInfoDoc(
+			doc,
 			req,
 			opts,
 			inputRequested.String(),
@@ -567,11 +568,9 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 			a.provider,
 			modelInfo,
 			updatesChanged,
-		)
-		if errThinking != nil {
+		); errThinking != nil {
 			return preparedExecutorCall{}, errThinking
 		}
-		nativeReq.Payload = body
 	}
 	// User payload rules are the last host-side mutation before the plugin sees
 	// the request, matching on the suffix-free model like the built-in executors
@@ -590,8 +589,11 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 				root = "request"
 			}
 			finalize := helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), root, originalTranslated, req, finalizeOpts)
-			nativeReq.Payload = finalize(nativeReq.Payload)
+			helps.FinalizePayloadDoc(helps.WithPayloadFinalizer(context.Background(), finalize), doc)
 		}
+	}
+	if doc.Len() > 0 {
+		nativeReq.Payload = doc.Bytes()
 	}
 	if hasPluginThinkingTarget {
 		nativeReq.Model = baseModel
@@ -1245,7 +1247,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 
 func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int64, bool) {
 	for _, path := range []string{"choices", "content", "candidates", "output", "response.output"} {
-		if gjson.GetBytes(payload, path).Exists() {
+		if ojson.GetBytesNoCopy(payload, path).Exists() {
 			return 0, false
 		}
 	}
@@ -1255,8 +1257,8 @@ func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int6
 		paths = []string{"totalTokens", "usageMetadata.promptTokenCount", "input_tokens", "total_tokens"}
 	}
 	for _, path := range paths {
-		value := gjson.GetBytes(payload, path)
-		if value.Exists() && value.Type == gjson.Number {
+		value := ojson.GetBytesNoCopy(payload, path)
+		if value.Exists() && value.Type == ojson.Number {
 			count, errParse := strconv.ParseInt(value.Raw, 10, 64)
 			if errParse == nil && count >= 0 {
 				return count, true
