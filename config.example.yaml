@@ -530,6 +530,26 @@ upstream:
     # The injected tool is also added to tool_choice.allowed_tools when applicable.
     inject-x-search: false
 
+  meta:
+    # Replay a Muse model's own reasoning back to it on later tool turns, safely.
+    # Meta binds each reasoning envelope to the account that issued it and rejects a replay through
+    # any other account, and a client resends the whole history on every turn, so envelopes from
+    # several pool accounts end up mixed in one request. When enabled the proxy tags every
+    # envelope it returns (Anthropic thinking signature or Responses encrypted_content, streaming
+    # or not) with the issuing account, forwards an envelope only when the credential selected for
+    # the request is the one that issued it, and drops every other or untagged one. Without this
+    # feature an untagged envelope is forwarded as is and is rejected whenever the turn lands on
+    # another account. Either way, if Meta rejects a replayed envelope the request is retried once
+    # without any, so the 400 never reaches the client. Each request that carried envelopes logs
+    # "meta reasoning replay: kept=N dropped_foreign=N dropped_untagged=N" for measuring the hit rate.
+    # Turning it off again is safe: tagged envelopes from earlier turns are dropped like any other.
+    reasoning-replay:
+      enabled: false # default false: nothing is tagged and untagged envelopes are forwarded as before
+      # Limit the feature to matching models for a canary ("*" wildcards, case-insensitive; both the
+      # requested name, including an oauth.model-alias, and the upstream model are tested).
+      # Empty or omitted means every Meta model once enabled.
+      # models: ["muse-canary*"]
+
 # API-key upstreams are separate from access.api-keys (client authentication).
 # Each provider contains named groups: one base-url, shared settings, and a keys list.
 # Add another group for another endpoint; base-url belongs to the group, not a key.

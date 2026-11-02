@@ -217,6 +217,15 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 		return SignatureProviderUnknown
 	}
 
+	if IsMetaReasoningTagged(sig) {
+		// A proxy-minted meta#<account-key>#<envelope> tag names a Muse
+		// envelope whose issuing account only the Meta executor can verify.
+		// Every other lane must treat it as known-foreign, exactly like the
+		// raw envelope, so compatibility fallbacks never forward the literal
+		// tag to a non-Meta upstream.
+		return SignatureProviderMeta
+	}
+
 	if prefixedProvider, unprefixed, ok := SplitSignatureProviderPrefix(sig); ok {
 		// Validators may strip cache prefixes themselves; never let a second
 		// prefix make detection disagree with the payload used for replay.
@@ -243,6 +252,10 @@ func DetectSignatureProviderForBlock(rawSignature string, blockKind SignatureBlo
 			if strings.HasPrefix(unprefixed, "sealed.v1.") {
 				return SignatureProviderSWE
 			}
+		case SignatureProviderMeta:
+			// A Muse envelope is only replayable to the account that issued it, which
+			// only the Meta executor can verify. Every other target must treat it as
+			// foreign, exactly as it treated the raw envelope before the tag existed.
 		}
 		return SignatureProviderUnknown
 	}
@@ -426,6 +439,8 @@ func SignatureProviderFromCachePrefix(prefix string) SignatureProvider {
 		return SignatureProviderGPT
 	case "swe", "sealed":
 		return SignatureProviderSWE
+	case "meta":
+		return SignatureProviderMeta
 	default:
 		return SignatureProviderUnknown
 	}
@@ -562,6 +577,12 @@ func normalizeCompatibleSignatureForProvider(targetProvider SignatureProvider, r
 			return payload
 		}
 	case SignatureProviderMeta:
+		if IsMetaReasoningTagged(rawSignature) {
+			// Keep the provenance tag intact. Only the Meta executor knows which
+			// credential it selected, so it alone decides whether the envelope is
+			// replayable and strips the tag before the upstream call.
+			return strings.TrimSpace(rawSignature)
+		}
 		if IsValidMetaReasoningSignature(payload) {
 			return payload
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
@@ -435,6 +436,41 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel_StripsM
 				t.Fatalf("model=%s isCompat=%v: input[%d] Meta encrypted_content should be stripped; body=%s", tc.model, tc.isCompat, index, got)
 			}
 		}
+	}
+}
+
+// A proxy-minted meta# provenance tag is known-foreign (Meta family), so the
+// unknown-format exemptions on the compat and keepForeign routes must not
+// preserve it for a non-Meta upstream. Only the Meta executor unwraps it,
+// after checking the selected account.
+func TestSanitizeOpenAIResponsesReasoningEncryptedContent_TaggedMuseStrippedOnNonMetaRoutes(t *testing.T) {
+	tagged := signature.TagMetaReasoning("acct", validMetaReasoningEncryptedContentForTest())
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_tagged","type":"reasoning","summary":[],"content":null,"encrypted_content":"` + tagged + `"}` +
+		`]}`)
+
+	t.Run("generic keepForeign", func(t *testing.T) {
+		got := sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(context.Background(), "test", body)
+		if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+			t.Fatalf("tagged Muse encrypted_content should be stripped by generic keepForeign; body=%s", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		model    string
+		isCompat bool
+	}{
+		{"gpt-5.4", false},
+		{"gpt-5.4", true},
+		{"deepseek-v4", true},
+		{"muse-spark-1.3", true},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			got := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(context.Background(), "test", body, tc.isCompat, tc.model)
+			if gjson.GetBytes(got, "input.0.encrypted_content").Exists() {
+				t.Fatalf("model=%s isCompat=%v: tagged Muse encrypted_content should be stripped; body=%s", tc.model, tc.isCompat, got)
+			}
+		})
 	}
 }
 

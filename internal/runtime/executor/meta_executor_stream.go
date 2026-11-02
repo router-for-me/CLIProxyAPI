@@ -37,6 +37,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	prepared.replay.RecordRequest(ctx, prepared.baseModel, enriched.ID)
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, enriched)
 	defer reporter.TrackFailure(ctx, &err)
@@ -48,22 +49,30 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
-	httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
-	if errRequest != nil {
-		return nil, errRequest
-	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
-	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
+	var httpResp *http.Response
+	for {
+		httpReq, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
+		if errRequest != nil {
+			return nil, errRequest
+		}
+		applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
+		e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
 
-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
-	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
-		return nil, errDo
-	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
+		httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+		var errDo error
+		httpResp, errDo = httpClient.Do(httpReq)
+		if errDo != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+			return nil, errDo
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			if prepared.canRetryWithoutReplay() && metaStreamBootstrapRetryWithoutReplay(ctx, prepared, httpResp) {
+				continue
+			}
+			break
+		}
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("meta executor: close response body error: %v", errClose)
@@ -74,7 +83,9 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		return nil, wrapMetaUpstreamError(httpResp.StatusCode, data)
+		if !prepared.retryWithoutReplay(ctx, httpResp.StatusCode, data) {
+			return nil, wrapMetaUpstreamError(httpResp.StatusCode, data)
+		}
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -209,6 +220,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 				return
 			}
+			eventData = prepared.replay.TagResponseEvent(eventData)
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -272,4 +284,54 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// metaRewoundStreamBody replays bytes already read from an upstream stream body
+// back to the streaming scanner, so a bootstrap peek consumes nothing.
+type metaRewoundStreamBody struct {
+	io.Reader
+	io.Closer
+}
+
+// metaStreamBootstrapRetryWithoutReplay inspects the first SSE data event of a
+// 200 response before any chunk reaches the client. When Meta rejected the
+// replayed envelopes as an error event instead of an HTTP error, the request
+// is retried once without reasoning, exactly like the non-streaming path.
+// Anything already read is rewound onto the response body for the streaming
+// scanner. It reports whether the caller should resend the request.
+func metaStreamBootstrapRetryWithoutReplay(ctx context.Context, prepared *metaPreparedRequest, httpResp *http.Response) bool {
+	reader := bufio.NewReader(httpResp.Body)
+	var peeked bytes.Buffer
+	retry := false
+	for {
+		line, errRead := reader.ReadBytes('\n')
+		peeked.Write(line)
+		if trimmed := bytes.TrimSpace(line); bytes.HasPrefix(trimmed, dataTag) {
+			eventData := bytes.TrimSpace(trimmed[len(dataTag):])
+			if isMetaSubscriptionUsageEvent(gjson.GetBytes(eventData, "type").String(), eventData) {
+				if errRead != nil {
+					break
+				}
+				continue
+			}
+			var upstreamErr statusErr
+			if errEvent := metaStreamEventError(eventData); errEvent != nil &&
+				errors.As(errEvent, &upstreamErr) &&
+				prepared.retryWithoutReplay(ctx, upstreamErr.code, []byte(upstreamErr.msg)) {
+				retry = true
+			}
+			break
+		}
+		if errRead != nil {
+			break
+		}
+	}
+	if retry {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("meta executor: close response body error: %v", errClose)
+		}
+		return true
+	}
+	httpResp.Body = &metaRewoundStreamBody{Reader: io.MultiReader(bytes.NewReader(peeked.Bytes()), reader), Closer: httpResp.Body}
+	return false
 }
