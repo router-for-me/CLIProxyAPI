@@ -19,6 +19,11 @@ import (
 
 const claudeWebSearchExecutorResults = `[{"type":"web_search_result","url":"https://example.com/a","title":"A","encrypted_content":"enc-a","page_age":null},{"type":"web_search_result","url":"https://example.com/b","title":"B","encrypted_content":"enc-b","page_age":null}]`
 
+// claudeWebSearchExecutorCitation is the citation Anthropic attaches to the
+// answer of the search turn, so the proxy has seen the encrypted_index a later
+// history replays.
+const claudeWebSearchExecutorCitation = `{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"found two pages","encrypted_index":"IDX_A"}`
+
 // claudeWebSearchUpstream answers the first request with a native web search
 // and every later one with plain text, recording each request body.
 func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) http.Handler {
@@ -39,7 +44,7 @@ func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) htt
 			blocks = []string{
 				`{"type":"server_tool_use","id":"srvtoolu_01abc","name":"web_search","input":{"query":"q"}}`,
 				`{"type":"web_search_tool_result","tool_use_id":"srvtoolu_01abc","content":` + claudeWebSearchExecutorResults + `}`,
-				`{"type":"text","text":"found two pages"}`,
+				`{"type":"text","text":"found two pages","citations":[` + claudeWebSearchExecutorCitation + `]}`,
 			}
 		}
 		if !ojson.GetBytes(body, "stream").Bool() {
@@ -57,6 +62,10 @@ func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) htt
 				start = `{"type":"text","text":""}`
 			}
 			events = append(events, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":"+index+",\"content_block\":"+start+"}")
+			ojson.Get(block, "citations").ForEach(func(_, citation ojson.Result) bool {
+				events = append(events, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"+index+",\"delta\":{\"type\":\"citations_delta\",\"citation\":"+citation.Raw+"}}")
+				return true
+			})
 			if strings.Contains(block, `"type":"text"`) {
 				events = append(events, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"+index+",\"delta\":{\"type\":\"text_delta\",\"text\":"+ojson.Get(block, "text").Raw+"}}")
 			}

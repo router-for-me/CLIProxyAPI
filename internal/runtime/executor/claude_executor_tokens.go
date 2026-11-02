@@ -60,6 +60,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
+	helps.DropForeignClaudeWebSearchReplayDoc(doc, claudeWebSearchReplayOwner(auth, from))
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		rebuildMidSystemMessagesToTopLevelDoc(doc)
@@ -184,6 +185,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
 		return cliproxyexecutor.Response{}, errThinking
 	}
+	helps.DropForeignClaudeWebSearchReplayDoc(doc, claudeWebSearchReplayOwner(auth, from))
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		rebuildMidSystemMessagesToTopLevelDoc(doc)

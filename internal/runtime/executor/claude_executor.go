@@ -387,6 +387,15 @@ func claudeWebSearchResultCacheCredentialScope(auth *cliproxyauth.Auth) string {
 	return "claude:" + hex.EncodeToString(sum[:8])
 }
 
+// claudeWebSearchReplayOwner names the credential that owns the encrypted web
+// search values of a Responses-sourced request, or "" when they are not tracked.
+func claudeWebSearchReplayOwner(auth *cliproxyauth.Auth, from sdktranslator.Format) string {
+	if !sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		return ""
+	}
+	return claudeWebSearchResultCacheCredentialScope(auth)
+}
+
 var _ cliproxyauth.NativeToolSearchSupport = (*ClaudeExecutor)(nil)
 
 // SupportsNativeToolSearch reports whether a credential can receive Codex
