@@ -131,7 +131,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 	}
-	requestPayload = ensureAntigravityGeminiBoundaryUserContent(baseModel, requestPayload)
+	requestPayload, replayPayload := prepareAntigravityGeminiWireAndReplayPayloads(baseModel, requestPayload)
 	httpReq, errReq := e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
@@ -200,7 +200,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if useCredits {
 		clearAntigravityCreditsFailureState(auth)
 	}
-	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
+	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayPayload)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	stopDeliverySupport := usage.SupportStreamDelivery(ctx)
 	go func(resp *http.Response) {
