@@ -173,14 +173,11 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
 		msgIdx := 0
+		previousRole := ""
 		contents.ForEach(func(_, content gjson.Result) bool {
-			role := content.Get("role").String()
 			parts := content.Get("parts")
-
-			// Convert role: model -> assistant
-			if role == "model" {
-				role = "assistant"
-			}
+			role := translatorcommon.NormalizeGeminiTurnRole(content.Get("role").String(), parts, previousRole)
+			previousRole = role
 
 			msg := []byte(`{"role":"","content":""}`)
 			msg, _ = sjson.SetBytes(msg, "role", role)
@@ -190,6 +187,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			onlyTextContent := true
 			toolCallItems := make([][]byte, 0, 2)
 			droppedThought := false
+			hasFunctionResponse := false
 
 			if parts.Exists() && parts.IsArray() {
 				partIdx := 0
@@ -222,7 +220,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Handle function calls (Gemini) -> tool calls (OpenAI)
-					if functionCall := part.Get("functionCall"); functionCall.Exists() {
+					if functionCall := translatorcommon.GeminiPartFunctionCall(part); functionCall.Exists() {
 						funcName := functionCall.Get("name").String()
 						argsRaw := ""
 						if args := functionCall.Get("args"); args.Exists() {
@@ -252,7 +250,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Handle function responses (Gemini) -> tool role messages (OpenAI)
-					if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
+					if functionResponse := translatorcommon.GeminiPartFunctionResponse(part); functionResponse.Exists() {
 						funcName := functionResponse.Get("name").String()
 						// Create tool message for function response
 						toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
@@ -290,6 +288,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						}
 
 						messageItems = append(messageItems, toolMsg)
+						hasFunctionResponse = true
 					}
 
 					return true
@@ -310,7 +309,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				msg, _ = sjson.SetRawBytes(msg, "tool_calls", translatorcommon.JoinRawArray(toolCallItems))
 			}
 
-			if droppedThought && len(contentItems) == 0 && len(toolCallItems) == 0 {
+			if (droppedThought || hasFunctionResponse) && len(contentItems) == 0 && len(toolCallItems) == 0 {
 				msgIdx++
 				return true
 			}
