@@ -841,8 +841,18 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
 	}
-	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
-	if executorStreamTranslationFellBack(prepared, payload, frames) {
+	translationPayload := payload
+	if prepared.outputFormat == sdktranslator.FormatOpenAI && prepared.requestedFormat != "" &&
+		prepared.requestedFormat != prepared.outputFormat &&
+		executorNativeStreamResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat) {
+		// Built-in OpenAI executors supply SSE data lines to response translators.
+		// Plugins may instead emit complete JSON chunks; frame those at the host
+		// boundary so native converters and their hooks see the same wire format.
+		// Same-format passthrough and plugin-only translators stay untouched.
+		translationPayload = executorOpenAIStreamTranslationPayload(payload)
+	}
+	frames := sdktranslator.TranslateStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, translationPayload, param)
+	if executorStreamTranslationFellBack(prepared, translationPayload, frames) {
 		return nil
 	}
 	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
@@ -851,6 +861,26 @@ func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, pr
 		}
 	}
 	return frames
+}
+
+func executorOpenAIStreamTranslationPayload(payload []byte) []byte {
+	trimmed := bytes.TrimSpace(payload)
+	if !bytes.Equal(trimmed, []byte("[DONE]")) {
+		// Only complete JSON objects are plugin data chunks. Preserve SSE control
+		// lines, comments, partial/malformed JSON and unknown payloads verbatim.
+		// Usage-only objects need framing even when choices is omitted.
+		if len(trimmed) == 0 || trimmed[0] != '{' || !ojson.ValidBytes(trimmed) {
+			return payload
+		}
+		// Preserve opaque error payloads; typed plugin stream errors are
+		// forwarded separately, not converted into successful data chunks.
+		if upstreamError := ojson.GetBytes(trimmed, "error"); upstreamError.Exists() && upstreamError.Type != ojson.Null {
+			return payload
+		}
+	}
+	framed := make([]byte, 0, len("data: ")+len(trimmed))
+	framed = append(framed, "data: "...)
+	return append(framed, trimmed...)
 }
 
 func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {
