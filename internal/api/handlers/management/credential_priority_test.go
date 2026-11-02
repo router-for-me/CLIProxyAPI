@@ -177,3 +177,65 @@ func TestCredentialPriorityCASPersistenceFailureDoesNotPublish(t *testing.T) {
 		t.Fatal("failed durable mutation changed stored credential")
 	}
 }
+
+type skippedPriorityStore struct{ memoryAuthStore }
+
+func (*skippedPriorityStore) Save(context.Context, *coreauth.Auth) (string, error) {
+	return "", nil
+}
+
+func TestCredentialPriorityCASSkippedSaveDoesNotPublish(t *testing.T) {
+	handler, manager, file := credentialPriorityFixture(t)
+	before, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SetStore(&skippedPriorityStore{})
+	response := patchCredentialPriorityFixture(handler, `{"name":"claude-fixture.json","priority":4,"expected_priority":null}`)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("skipped save acknowledged: %d", response.Code)
+	}
+	current, _ := manager.GetByID("claude-fixture.json")
+	if credentialPriority(current) != nil {
+		t.Fatal("skipped durable mutation published to runtime")
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("skipped durable mutation changed stored credential")
+	}
+	// Ordinary mutations retain their pre-existing non-fatal persistence policy.
+	_, committed, err := manager.Modify(context.Background(), current.ID, current.RegistrationEpoch, func(auth *coreauth.Auth) error {
+		auth.Metadata["priority"] = 2
+		return nil
+	})
+	if err != nil || !committed {
+		t.Fatalf("ordinary skipped save changed behavior: committed=%v, err=%v", committed, err)
+	}
+}
+
+func TestCredentialPriorityCASDoesNotRecreateDeletedDisabledFile(t *testing.T) {
+	handler, manager, file := credentialPriorityFixture(t)
+	current, _ := manager.GetByID("claude-fixture.json")
+	_, committed, err := manager.Modify(context.Background(), current.ID, current.RegistrationEpoch, func(auth *coreauth.Auth) error {
+		auth.Disabled = true
+		auth.Status = coreauth.StatusDisabled
+		return nil
+	})
+	if err != nil || !committed {
+		t.Fatalf("disable fixture: committed=%v, err=%v", committed, err)
+	}
+	if err = os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	response := patchCredentialPriorityFixture(handler, `{"name":"claude-fixture.json","priority":4,"expected_priority":null}`)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("deleted disabled credential acknowledged: %d", response.Code)
+	}
+	current, _ = manager.GetByID("claude-fixture.json")
+	if !current.Disabled || credentialPriority(current) != nil {
+		t.Fatal("skipped mutation changed disabled runtime credential")
+	}
+	if _, err = os.Stat(file); !os.IsNotExist(err) {
+		t.Fatal("deleted credential was recreated")
+	}
+}
