@@ -280,6 +280,9 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err = root.Decode(&decoded); err != nil {
 		return err
 	}
+	if _, errValidate := decoded.Routing.NormalizedSessionAffinityOverrides(); errValidate != nil {
+		return errValidate
+	}
 	if errValidate := decoded.Models.Validate(); errValidate != nil {
 		return errValidate
 	}
@@ -973,6 +976,9 @@ func ValidateV8Config(data []byte) error {
 	var cfg legacyConfig
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
+	}
+	if _, errValidate := cfg.Routing.NormalizedSessionAffinityOverrides(); errValidate != nil {
+		return errValidate
 	}
 	return cfg.Models.Validate()
 }

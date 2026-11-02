@@ -682,12 +682,12 @@ func selectorContextForAvailableAuths(ctx context.Context, selector Selector, ro
 	return context.WithValue(ctx, prevalidatedAuthCandidatesKey{}, true)
 }
 
-func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(selector Selector, affinityCandidates []*Auth, routeModel string, now time.Time) map[string]struct{} {
+func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(selector Selector, affinityCandidates []*Auth, provider, routeModel string, now time.Time) map[string]struct{} {
 	affinity, ok := selector.(*SessionAffinitySelector)
 	if !ok || affinity == nil || !affinity.rebindOnQuotaOnly || len(affinityCandidates) == 0 {
 		return nil
 	}
-	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
+	if _, weighted := affinity.providerPolicy(provider, affinityCandidates).Fallback.(*WeightedRoundRobinSelector); weighted {
 		affinityCandidates = positiveWeightAuths(affinityCandidates)
 	}
 	var authIDs map[string]struct{}
@@ -1966,7 +1966,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errAvailable)
 		return nil, nil, errAvailable
 	}
-	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, model, now)
+	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, provider, model, now)
 	m.mu.RUnlock()
 
 	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
@@ -1977,6 +1977,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		selectorCtx = withSessionAffinityAuthPriorities(selectorCtx, affinityCandidates)
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -2315,7 +2316,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errAvailable)
 		return nil, nil, "", errAvailable
 	}
-	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, model, now)
+	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, "mixed", model, now)
 	m.mu.RUnlock()
 
 	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
@@ -2326,6 +2327,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		selectorCtx = withSessionAffinityAuthPriorities(selectorCtx, affinityCandidates)
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {

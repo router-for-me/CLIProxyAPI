@@ -169,7 +169,7 @@ routing:
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
   # Automatic failover is always enabled when bound auth becomes unavailable.
-  # An established binding outranks credential priority: once a session is bound, that
+  # By default an established binding outranks credential priority: once bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
@@ -193,6 +193,15 @@ routing:
   #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
+  # Optional provider-specific fallback and affinity precedence (local built-in routing).
+  # Session affinity must be enabled. Defaults remain unchanged when omitted.
+  # session-affinity-overrides:
+  #   claude:
+  #     strategy: round-robin
+  #     precedence: priority # session (default) or priority
+  # Priority precedence moves existing sessions to a higher eligible tier on
+  # their next request; equal-tier sessions remain sticky. It may lose prompt cache.
+  # Home/plugin schedulers and explicitly pinned credentials retain their authority.
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

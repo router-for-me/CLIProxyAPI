@@ -544,6 +544,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+		if requiresPersistedAuthMutation(ctx) {
+			m.mu.Unlock()
+			return nil, false, false, fmt.Errorf("persist auth mutation: %w", errPersist)
+		}
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
 			m.mu.Unlock()
@@ -817,6 +821,12 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	m.mu.RLock()
 	store := m.store
 	m.mu.RUnlock()
+	if requiresPersistedAuthMutation(ctx) &&
+		(store == nil || auth == nil || auth.Metadata == nil || shouldSkipPersist(ctx) ||
+			IsConfigAPIKeyAuth(auth) || IsPluginVirtualAuth(auth) ||
+			strings.EqualFold(auth.Attributes[AttributeRuntimeOnly], "true")) {
+		return fmt.Errorf("durable credential storage is unavailable for this mutation")
+	}
 	if store == nil || auth == nil {
 		return nil
 	}
@@ -845,6 +855,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		pLock.mu.Lock()
 		defer pLock.mu.Unlock()
 		if auth.RegistrationEpoch < pLock.lastEpoch || (auth.RegistrationEpoch == pLock.lastEpoch && auth.Generation < pLock.lastGeneration) {
+			if requiresPersistedAuthMutation(ctx) {
+				return fmt.Errorf("credential changed before durable mutation")
+			}
 			return nil
 		}
 		pLock.lastEpoch = auth.RegistrationEpoch
