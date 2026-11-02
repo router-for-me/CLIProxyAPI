@@ -107,7 +107,11 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 		var update yaml.Node
-		if err = yaml.Unmarshal(body, &update); err != nil || len(update.Content) == 0 {
+		if err = yaml.Unmarshal(body, &update); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": config.DescribeYAMLSyntaxError(body, err)})
+			return
+		}
+		if len(update.Content) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
 			return
 		}
