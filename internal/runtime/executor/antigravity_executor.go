@@ -527,6 +527,7 @@ func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte
 		return payload
 	}
 	payload = helps.DropGeminiTrailingThoughtOnlyContent(payload, "request.contents")
+	payload = helps.EnsureAntigravityGeminiToolResultBoundary(modelName, payload, "request.contents")
 	return helps.EnsureGeminiBoundaryUserContent(payload, "request.contents")
 }
 
