@@ -7917,7 +7917,7 @@ func TestRemapOAuthToolNames_AllClientNamesUseMCPAliases(t *testing.T) {
 				t.Fatalf("reverseMap = %v, want %q -> %q", reverseMap, alias, original)
 			}
 			resp := []byte(`{"content":[{"type":"tool_use","id":"toolu_01","name":` + fmt.Sprintf("%q", alias) + `,"input":{}}]}`)
-			reversed, errReverse := reverseRemapOAuthToolNames(resp, reverseMap)
+			reversed, errReverse := reverseRemapOAuthToolNames(resp, reverseMap, nil)
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
@@ -8019,7 +8019,7 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 		{"type":"tool_reference","tool_name":%q},
 		{"type":"tool_result","tool_use_id":"toolu_unknown","content":[{"type":"tool_reference","tool_name":%q}]}
 	]}`, searchAlias, caseAlias, searchAlias))
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -8034,7 +8034,7 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 	}
 
 	streamLine := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_unknown","name":%q,"input":{}}}`, searchAlias))
-	restoredLine, errReverse := reverseRemapOAuthToolNamesFromStreamLine(streamLine, reverseMap)
+	restoredLine, errReverse := reverseRemapOAuthToolNamesFromStreamLine(streamLine, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errReverse)
 	}
@@ -8138,7 +8138,7 @@ func TestRemapOAuthToolNames_SemanticAliasRestoresLongOriginal(t *testing.T) {
 		t.Fatalf("semantic alias is not stable across requests: %q != %q", got, alias)
 	}
 	response := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":` + fmt.Sprintf("%q", alias) + `,"input":{}}]}`)
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -8358,7 +8358,7 @@ func TestReverseRemapOAuthToolNamesFromStreamLine_HonorsPerRequestMap(t *testing
 
 	// Bash block was never renamed, must pass through as-is.
 	bashLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"Bash","input":{}}}`)
-	out, errReverse := reverseRemapOAuthToolNamesFromStreamLine(bashLine, reverseMap)
+	out, errReverse := reverseRemapOAuthToolNamesFromStreamLine(bashLine, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errReverse)
 	}
@@ -8371,7 +8371,7 @@ func TestReverseRemapOAuthToolNamesFromStreamLine_HonorsPerRequestMap(t *testing
 
 	// Glob block IS in the reverseMap, must be restored to `glob`.
 	globLine := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_02","name":"Glob","input":{}}}`)
-	out, errReverse = reverseRemapOAuthToolNamesFromStreamLine(globLine, reverseMap)
+	out, errReverse = reverseRemapOAuthToolNamesFromStreamLine(globLine, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errReverse)
 	}

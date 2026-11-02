@@ -37,7 +37,7 @@ func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.
 		t.Fatalf("prepare continuation request: %v", errPrepareContinuation)
 	}
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"tool-two","name":%q,"input":{}}]}`, alias))
-	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap)
+	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap, nil)
 	if errRestore != nil {
 		t.Fatalf("restore continuation tool name: %v", errRestore)
 	}
@@ -197,7 +197,7 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 		{"type":"tool_result","tool_use_id":"toolu_read","content":[{"type":"tool_reference","tool_name":%q}]}
 	]}`, repeatedAlias, mixedAlias, mixedAlias))
 
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -233,7 +233,7 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	for _, test := range streamTests {
 		t.Run(test.name, func(t *testing.T) {
 			line := []byte(`data: {"type":"content_block_start","index":0,"content_block":` + test.block + `}`)
-			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
@@ -267,7 +267,7 @@ func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAliases(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.responseAlias))
-			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
@@ -276,7 +276,7 @@ func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAliases(t *testing.T) {
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.responseAlias))
-			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
@@ -304,7 +304,7 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.responseAlias))
-			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
@@ -313,7 +313,7 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.responseAlias))
-			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
@@ -358,7 +358,7 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 		{"type":"tool_use","id":"toolu_4","name":%q,"input":{}}
 	]}`, bashAlias, repeatedAlias, mangledToolIDAlias, repeatedToolIDAlias, extraWordAlias))
 
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -419,7 +419,7 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, test.alias))
-			_, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			_, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 			if errReverse == nil || !strings.Contains(errReverse.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v, want %q", errReverse, test.wantError)
 			}
@@ -429,7 +429,7 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			}
 
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, test.alias))
-			_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			_, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream == nil || !strings.Contains(errStream.Error(), test.wantError) {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, test.wantError)
 			}
@@ -443,7 +443,7 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	t.Run("unrecoverable semantic suffix fails open", func(t *testing.T) {
 		unrecoverableAlias := "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool"
 		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, unrecoverableAlias))
-		restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+		restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 		if errReverse != nil {
 			t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 		}
@@ -452,7 +452,7 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 		}
 
 		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, unrecoverableAlias))
-		restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+		restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 		if errStream != nil {
 			t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 		}
@@ -481,7 +481,7 @@ func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 	driftedReadFile := "mcp__" + readFileParts.server + "__" + readFileParts.toolID + "_" + readFileParts.toolID + "_read_file"
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, driftedReadFile))
 
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -491,7 +491,7 @@ func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 
 	// Exact file alias still resolves to file
 	responseFile := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_2","name":%q,"input":{}}]}`, fileAlias))
-	restoredFile, errFile := reverseRemapOAuthToolNames(responseFile, reverseMap)
+	restoredFile, errFile := reverseRemapOAuthToolNames(responseFile, reverseMap, nil)
 	if errFile != nil {
 		t.Fatalf("reverseRemapOAuthToolNames(file) error = %v", errFile)
 	}
@@ -505,7 +505,7 @@ func TestReverseRemapOAuthToolNamesPreservesUnrelatedMCPName(t *testing.T) {
 	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "unrelated-mcp-caller"})
 	response := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__external__query","input":{}}]}`)
 
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
@@ -604,7 +604,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 
 	for _, name := range native {
 		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, name))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap, nil)
 		if err != nil {
 			t.Fatalf("caller MCP tool %q failed to restore: %v", name, err)
 		}
@@ -613,7 +613,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		}
 
 		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, name))
-		restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+		restoredLine, errLine := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 		if errLine != nil {
 			t.Fatalf("caller MCP tool %q failed to restore from stream: %v", name, errLine)
 		}
@@ -627,7 +627,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 	toolPart := strings.SplitN(alias, "__", 3)[2]
 	for _, drifted := range []string{alias, "mcp__" + server + "__" + server + "__" + toolPart, "mcp__" + server + "__abandon_read_file"} {
 		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, drifted))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(response, reverseMap, nil)
 		if err != nil {
 			t.Fatalf("proxied alias %q failed to restore: %v", drifted, err)
 		}
@@ -660,7 +660,7 @@ func TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup(t *testing.T) {
 	reverseMap := map[string]string{alias: "clear_thinking"}
 
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
-	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 	}
@@ -669,7 +669,7 @@ func TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup(t *testing.T) {
 	}
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
-	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 	if errStream != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
@@ -721,7 +721,7 @@ func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
 		]
 	}`, taskAlias, fetchAlias, taskAlias))
 
-	restored, err := reverseRemapOAuthToolNames(resp, reverseMap)
+	restored, err := reverseRemapOAuthToolNames(resp, reverseMap, nil)
 	if err != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", err)
 	}
@@ -757,7 +757,7 @@ func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
 		]
 	}`)
 
-	restoredErr, err := reverseRemapOAuthToolNames(errorResp, reverseMap)
+	restoredErr, err := reverseRemapOAuthToolNames(errorResp, reverseMap, nil)
 	if err != nil {
 		t.Fatalf("reverseRemapOAuthToolNames(errorResp) error = %v", err)
 	}
@@ -773,7 +773,7 @@ func TestReverseRemapOAuthToolNamesFromStreamLine_ToolSearchResult_Stream(t *tes
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":%q}]}}}`, taskAlias))
 
-	restoredLine, err := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	restoredLine, err := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 	if err != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", err)
 	}
@@ -1014,7 +1014,7 @@ func TestReverseRemapOAuthToolNamesRestoresHybridPassthroughMCPTools(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			// Non-stream response
 			resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, tc.hybridName))
-			restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+			restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, nil)
 			if err != nil {
 				t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want %q", err, tc.wantName)
 			}
@@ -1024,7 +1024,7 @@ func TestReverseRemapOAuthToolNamesRestoresHybridPassthroughMCPTools(t *testing.
 
 			// Streaming response
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, tc.hybridName))
-			restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream != nil {
 				t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, tc.wantName)
 			}
@@ -1045,7 +1045,7 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
 		}
 		// mcp__<virtual>__Bash is a semantic suffix match for Bash, should restore to Bash, NOT mcp__shell__Bash
 		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"Bash"))
-		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, nil)
 		if err != nil {
 			t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v", err)
 		}
@@ -1062,7 +1062,7 @@ func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *te
 		}
 		// mcp__<virtual>__query matches both srv1 and srv2, cannot disambiguate
 		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"query"))
-		_, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		_, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, nil)
 		if err == nil {
 			t.Fatal("restoreClaudeOAuthToolNamesFromResponse() expected error for ambiguous passthrough, got nil")
 		}
@@ -1087,7 +1087,7 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 
 	// 1. Non-stream response
 	resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, undeclaredToolName))
-	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap, nil)
 	if err != nil {
 		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want fail-open nil", err)
 	}
@@ -1097,7 +1097,7 @@ func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
 
 	// 2. Stream SSE line
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, undeclaredToolName))
-	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 	if errStream != nil {
 		t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
@@ -1128,7 +1128,7 @@ func TestReverseRemapRestoresCallerMCPToolWrappedInVirtualServer(t *testing.T) {
 	} {
 		t.Run(wrapped, func(t *testing.T) {
 			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, wrapped))
-			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil)
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
@@ -1136,7 +1136,7 @@ func TestReverseRemapRestoresCallerMCPToolWrappedInVirtualServer(t *testing.T) {
 				t.Fatalf("wrapped caller MCP tool restored to %q, want %q", got, recall)
 			}
 			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, wrapped))
-			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap, nil)
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
@@ -1157,7 +1157,7 @@ func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T)
 		}
 	}
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, "mcp__"+server+"__query"))
-	if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), "matches multiple declared tools") {
+	if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap, nil); errReverse == nil || !strings.Contains(errReverse.Error(), "matches multiple declared tools") {
 		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
 	}
 }
