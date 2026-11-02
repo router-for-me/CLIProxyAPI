@@ -480,3 +480,56 @@ func TestConvertGeminiRequestToOpenAI_PreservesFunctionCallThoughtSignature(t *t
 		t.Fatalf("expected unsigned sibling tool call not to have extra_content; out=%s", string(out))
 	}
 }
+
+func TestConvertGeminiRequestToOpenAI_FunctionResponseDoesNotAppendTrailingEmptyFunctionMessage(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"parts": [{"text": "What is the weather?"}]},
+			{"parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}}}]},
+			{"role": "function", "parts": [{"functionResponse": {"name": "get_weather", "response": {"result": "Sunny"}}}]}
+		]
+	}`)
+
+	out, err := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+	}
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("len(messages) = %d, want 3 (user, assistant, tool); out=%s", len(messages), string(out))
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user; out=%s", got, string(out))
+	}
+	if got := messages[1].Get("role").String(); got != "assistant" {
+		t.Fatalf("messages[1].role = %q, want assistant; out=%s", got, string(out))
+	}
+	if got := messages[2].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[2].role = %q, want tool; out=%s", got, string(out))
+	}
+}
+
+func TestConvertGeminiRequestToOpenAI_DefaultsOmittedContentRoleToUser(t *testing.T) {
+	inputJSON := []byte(`{"contents":[{"parts":[{"text":"Reply with exactly: OK"}]},{"role":"invalid","parts":[{"text":"OK"}]},{"parts":[{"function_call":{"name":"ping","args":{"x":1}}}]},{"parts":[{"function_response":{"name":"ping","response":{"result":"pong"}}}]}]}`)
+
+	out, err := ConvertGeminiRequestToOpenAI("test-model", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+	}
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 4 {
+		t.Fatalf("len(messages) = %d, want 4; out=%s", len(messages), string(out))
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user; out=%s", got, string(out))
+	}
+	if got := messages[1].Get("role").String(); got != "assistant" {
+		t.Fatalf("messages[1].role = %q, want assistant (alternated after user); out=%s", got, string(out))
+	}
+	if got := messages[2].Get("role").String(); got != "assistant" || messages[2].Get("tool_calls.0.function.name").String() != "ping" {
+		t.Fatalf("messages[2] = %s, want assistant tool_call ping", messages[2].Raw)
+	}
+	if got := messages[3].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[3].role = %q, want tool; out=%s", got, string(out))
+	}
+}

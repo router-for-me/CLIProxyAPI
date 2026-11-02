@@ -355,6 +355,9 @@ func TestConvertGeminiRequestToClaude_DefaultRoleDifferentContentProducesDiffere
 	if idA == idB {
 		t.Fatalf("different prompt texts without role produced identical metadata.user_id: %q", idA)
 	}
+	if got := gjson.GetBytes(outA, "messages.0.role").String(); got != "user" {
+		t.Fatalf("messages.0.role = %q, want user; out=%s", got, string(outA))
+	}
 }
 
 func TestConvertGeminiRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchema(t *testing.T) {
