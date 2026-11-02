@@ -96,6 +96,13 @@ func locateYAMLProblem(rendered, tree *yaml.Node, line int, problem string) *yam
 	return find(onLine, false)
 }
 
+func documentRoot(node *yaml.Node) *yaml.Node {
+	if node != nil && node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		return node.Content[0]
+	}
+	return node
+}
+
 // describeV8DecodeError restates the strict decode error of ValidateV8Config
 // with input lines, taken from flat, the flattened tree that encoded renders.
 // Flattening leaves only unknown keys in a v8 section, so each is reported at
@@ -185,4 +192,78 @@ func isV8Section(path string) bool {
 		}
 	}
 	return false
+}
+
+// DescribeYAMLErrorLines rewrites the yaml.TypeError lines in err, which point
+// into yaml.Marshal(doc), as field paths in doc. A field from submitted, the
+// request body doc was built from, reads "line L (path)" with the body's line
+// and spelling. Alias and merge-key copies get the path only, since their line
+// is the anchor's.
+func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
+	var typeErr *yaml.TypeError
+	if !errors.As(err, &typeErr) {
+		return err.Error()
+	}
+	encoded, errMarshal := yaml.Marshal(doc)
+	var rendered yaml.Node
+	if errMarshal != nil || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
+		return err.Error()
+	}
+	entries := make([]string, 0, len(typeErr.Errors))
+	for _, entry := range typeErr.Errors {
+		match := yamlTypeErrorEntry.FindStringSubmatch(entry)
+		var found *yamlLocation
+		if match != nil {
+			line, _ := strconv.Atoi(match[1])
+			found = locateYAMLProblem(rendered.Content[0], documentRoot(doc), line, match[2])
+		}
+		if found == nil {
+			entries = append(entries, yamlTypeErrorEntry.ReplaceAllString(entry, "$2"))
+			continue
+		}
+		if source := locateSubmitted(documentRoot(submitted), found.at); source != nil && !sharedYAMLPosition(documentRoot(doc), found.at) {
+			name := ""
+			if source.path != "" {
+				name = " (" + source.path + ")"
+			}
+			entries = append(entries, "line "+strconv.Itoa(found.at.Line)+name+": "+match[2])
+			continue
+		}
+		if found.path == "" {
+			entries = append(entries, match[2])
+		} else {
+			entries = append(entries, found.path+": "+match[2])
+		}
+	}
+	return strings.Replace(err.Error(), typeErr.Error(), (&yaml.TypeError{Errors: entries}).Error(), 1)
+}
+
+// locateSubmitted finds the node of submitted at the source position of at.
+func locateSubmitted(submitted, at *yaml.Node) *yamlLocation {
+	if submitted == nil || at == nil || at.Line == 0 {
+		return nil
+	}
+	var found *yamlLocation
+	walkYAMLTwins(yamlVisit{rendered: submitted, node: submitted}, func(visit yamlVisit) {
+		if found == nil && sameYAMLPosition(visit.node, at) {
+			found = &yamlLocation{path: visit.path, at: visit.node}
+		}
+	})
+	return found
+}
+
+// sharedYAMLPosition reports whether at's position appears more than once in
+// tree, as it does for alias and merge-key copies.
+func sharedYAMLPosition(tree, at *yaml.Node) bool {
+	count := 0
+	walkYAMLTwins(yamlVisit{rendered: tree, node: tree}, func(visit yamlVisit) {
+		if sameYAMLPosition(visit.node, at) {
+			count++
+		}
+	})
+	return count > 1
+}
+
+func sameYAMLPosition(node, at *yaml.Node) bool {
+	return node.Line == at.Line && node.Column == at.Column && node.Kind == at.Kind && node.Value == at.Value
 }

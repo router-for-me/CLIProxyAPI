@@ -86,6 +86,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		return
 	}
 	before := cloneConfigV8Node(root)
+	var submitted *yaml.Node
 	config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 	if c.Request.Method == http.MethodDelete {
 		if len(parts) == 0 {
@@ -114,6 +115,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		if len(update.Content) == 0 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
 			return
+		}
+		// Keep a whole-document body so validation errors can cite its lines.
+		if c.Request.Method == http.MethodPut && len(parts) == 0 {
+			submitted = cloneConfigV8Node(update.Content[0])
 		}
 		stripAPIKeysAuthIndexesFromUpdate(parts, &update)
 		if len(parts) == 0 && update.Content[0].Kind != yaml.MappingNode {
@@ -181,13 +186,15 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	// Validation errors point into the re-encoded data; restate them for the user.
+	describe := func(err error) string { return config.DescribeYAMLErrorLines(err, &doc, submitted) }
 	next, err := config.ParseConfigBytes(data)
 	if err != nil {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": describe(err)})
 		return
 	}
 	if err = config.ValidateV8Config(data); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": describe(err)})
 		return
 	}
 	data, _, err = config.NormalizeConfigLayout(data, true)
