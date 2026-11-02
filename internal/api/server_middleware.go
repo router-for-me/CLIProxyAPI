@@ -333,6 +333,14 @@ func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
 	}
 }
 
+// IsControlPlanePath reports whether a route must remain available independently
+// of Home heartbeat and startup model readiness.
+func IsControlPlanePath(path string) bool {
+	return path == "/v0/management" || strings.HasPrefix(path, "/v0/management/") ||
+		path == "/v8/management" || strings.HasPrefix(path, "/v8/management/") ||
+		strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html"
+}
+
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cfg := s.getConfig()
@@ -341,8 +349,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 			return
 		}
 		if c != nil && c.Request != nil {
-			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(path, "/v8/management/") || path == "/v8/management" || strings.HasPrefix(path, "/v0/resource/plugins/") || path == "/management.html" {
+			if IsControlPlanePath(c.Request.URL.Path) {
 				c.Next()
 				return
 			}

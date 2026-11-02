@@ -24,6 +24,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// startupModelRefreshTimeout bounds readiness waiting, not catalog fetching.
+// Slow sources may still update the catalog after startup serves the last valid models.
+const startupModelRefreshTimeout = 10 * time.Second
+
 // Run starts the service and blocks until the context is cancelled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is cancelled.
@@ -247,7 +251,15 @@ func (s *Service) Run(ctx context.Context) error {
 	s.registerModelRefreshCallback()
 	if !homeEnabled {
 		go s.runAntigravityModelRefresh(ctx)
-		if errWait := registry.WaitForStartupModelRefresh(ctx); errWait != nil {
+		startupCtx, cancelStartupWait := context.WithTimeout(ctx, startupModelRefreshTimeout)
+		errWait := registry.WaitForStartupModelRefresh(startupCtx)
+		cancelStartupWait()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if errors.Is(errWait, context.DeadlineExceeded) {
+			log.Warn("startup model catalog refresh timed out; serving the last valid catalog while refresh continues")
+		} else if errWait != nil {
 			return errWait
 		}
 	}
@@ -264,7 +276,7 @@ func (s *Service) Run(ctx context.Context) error {
 
 func (s *Service) readinessMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !s.requestReady.Load() {
+		if !api.IsControlPlanePath(c.Request.URL.Path) && !s.requestReady.Load() {
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(503, gin.H{"error": gin.H{"message": "proxy is initializing or shutting down", "type": "server_error", "code": "service_unavailable"}})
 			return

@@ -9,9 +9,9 @@ import (
 
 func useStartupTestUpdater(t *testing.T, updater *catalogUpdater) {
 	t.Helper()
-	old := generalCatalogUpdater
-	generalCatalogUpdater = updater
-	t.Cleanup(func() { generalCatalogUpdater = old })
+	oldGeneral, oldDevin := generalCatalogUpdater, devinCatalogUpdater
+	generalCatalogUpdater, devinCatalogUpdater = updater, &catalogUpdater{}
+	t.Cleanup(func() { generalCatalogUpdater, devinCatalogUpdater = oldGeneral, oldDevin })
 }
 
 func awaitStartupTest(t *testing.T, ctx context.Context) {
@@ -149,5 +149,52 @@ func TestWaitForStartupModelRefreshFollowsSourceReload(t *testing.T) {
 	default:
 	}
 	close(newRelease)
+	awaitStartupTest(t, ctx)
+}
+
+func TestWaitForStartupModelRefreshIncludesDevin(t *testing.T) {
+	useStartupTestUpdater(t, &catalogUpdater{})
+	fetchEntered, releaseFetch := make(chan struct{}), make(chan struct{})
+	callbackEntered, releaseCallback := make(chan struct{}), make(chan struct{})
+	refreshCallbackMu.Lock()
+	oldCallback, oldPending := refreshCallback, pendingRefreshChanges
+	refreshCallback = func([]string) { close(callbackEntered); <-releaseCallback }
+	pendingRefreshChanges = nil
+	refreshCallbackMu.Unlock()
+	t.Cleanup(func() {
+		refreshCallbackMu.Lock()
+		refreshCallback, pendingRefreshChanges = oldCallback, oldPending
+		refreshCallbackMu.Unlock()
+	})
+	devinCatalogUpdater = &catalogUpdater{
+		fetch: func(ctx context.Context, _ string) ([]byte, error) {
+			close(fetchEntered)
+			select {
+			case <-releaseFetch:
+				return nil, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+		publish: func([]byte) ([]string, error) { return []string{"devin"}, nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	devinCatalogUpdater.configure(ctx, embeddedCatalogSource)
+	<-fetchEntered
+	assertWaiting := func(stage string) {
+		t.Helper()
+		waitCtx, cancelWait := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancelWait()
+		if err := WaitForStartupModelRefresh(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("startup did not wait for Devin %s: %v", stage, err)
+		}
+	}
+	assertWaiting("fetch")
+	close(releaseFetch)
+	<-callbackEntered
+	assertWaiting("registration callback")
+	close(releaseCallback)
+	<-devinCatalogUpdater.startupDone
 	awaitStartupTest(t, ctx)
 }
