@@ -1562,6 +1562,135 @@ func TestHostModelStreamsArePluginAndInstanceScoped(t *testing.T) {
 	}
 }
 
+func TestHostModelStreamStartupRejectsClosedInstanceAndConcurrentTeardown(t *testing.T) {
+	t.Run("direct open on closed instance cancels and rejects", func(t *testing.T) {
+		host := New()
+		instance := &hostCallbackInstance{}
+		instance.closed.Store(true)
+		ctx, cancel := context.WithCancel(context.Background())
+		chunks := make(chan handlers.ModelExecutionChunk, 1)
+		if streamID := host.modelStreams.open("plugin-a", instance, "", chunks, cancel); streamID != "" {
+			t.Fatalf("open on closed instance returned streamID = %q, want empty", streamID)
+		}
+		if ctx.Err() == nil {
+			t.Fatal("expected stream cancel to run when open is rejected on closed instance")
+		}
+		if got := hostModelStreamCountForTest(t, host); got != 0 {
+			t.Fatalf("remaining model streams = %d, want 0", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		teardown func(host *Host, instance *hostCallbackInstance)
+	}{
+		{
+			name: "instance teardown during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPCallbackInstance("plugin-a", instance)
+			},
+		},
+		{
+			name: "plugin teardown with instance during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPPluginResources("plugin-a", instance)
+			},
+		},
+		{
+			name: "plugin teardown without instance during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPPluginResources("plugin-a", nil)
+			},
+		},
+		{
+			name: "host shutdown during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.ShutdownAllContext(context.Background())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New()
+			instance := &hostCallbackInstance{}
+			var streamCtx context.Context
+			host.SetModelExecutor(&fakeHostModelExecutor{
+				executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+					streamCtx = ctx
+					tc.teardown(host, instance)
+					chunks := make(chan handlers.ModelExecutionChunk, 1)
+					return handlers.ModelExecutionStream{
+						StatusCode: http.StatusOK,
+						Chunks:     chunks,
+					}, nil
+				},
+			})
+			rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+				HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+					EntryProtocol: "openai",
+					ExitProtocol:  "openai",
+					Model:         "model-1",
+					Stream:        true,
+					Body:          []byte(`{"stream":true}`),
+				},
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			callerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", instance)
+			if _, errCall := host.callFromPlugin(callerCtx, pluginabi.MethodHostModelExecuteStream, rawReq); errCall == nil {
+				t.Fatal("expected ExecuteModelStream overlapping teardown to fail")
+			}
+			if streamCtx == nil || streamCtx.Err() == nil {
+				t.Fatalf("streamCtx = %v (err=%v), want canceled context", streamCtx, streamCtx.Err())
+			}
+			if got := hostModelStreamCountForTest(t, host); got != 0 {
+				t.Fatalf("remaining model streams = %d, want 0", got)
+			}
+		})
+	}
+
+	t.Run("callback scope teardown during ExecuteModelStream", func(t *testing.T) {
+		host := New()
+		instance := &hostCallbackInstance{}
+		callbackID, closeCallback := host.openCallbackContextForPluginInstance(context.Background(), "plugin-a", instance)
+		var streamCtx context.Context
+		host.SetModelExecutor(&fakeHostModelExecutor{
+			executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+				streamCtx = ctx
+				closeCallback()
+				chunks := make(chan handlers.ModelExecutionChunk, 1)
+				return handlers.ModelExecutionStream{
+					StatusCode: http.StatusOK,
+					Chunks:     chunks,
+				}, nil
+			},
+		})
+		rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+				Stream:        true,
+				Body:          []byte(`{"stream":true}`),
+			},
+			HostCallbackID: callbackID,
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal request: %v", errMarshal)
+		}
+		callerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", instance)
+		if _, errCall := host.callFromPlugin(callerCtx, pluginabi.MethodHostModelExecuteStream, rawReq); errCall == nil {
+			t.Fatal("expected ExecuteModelStream overlapping callback scope close to fail")
+		}
+		if streamCtx == nil || streamCtx.Err() == nil {
+			t.Fatalf("streamCtx = %v (err=%v), want canceled context", streamCtx, streamCtx.Err())
+		}
+		if got := hostModelStreamCountForTest(t, host); got != 0 {
+			t.Fatalf("remaining model streams = %d, want 0", got)
+		}
+	})
+}
+
 func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	host := New()
 	ctx := logging.WithRequestID(context.Background(), "request-123")

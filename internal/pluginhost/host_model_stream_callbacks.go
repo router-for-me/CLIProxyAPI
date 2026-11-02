@@ -23,10 +23,16 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	if executor == nil {
 		return nil, fmt.Errorf("host model executor is unavailable")
 	}
+	if h == nil || h.modelStreams == nil {
+		return nil, fmt.Errorf("host model stream bridge is unavailable")
+	}
 	callerPluginID := hostCallbackPluginIDFromContext(ctx)
 	callerInstance := hostCallbackInstanceFromContext(ctx)
+	var callbackPluginID string
+	var callbackInstance *hostCallbackInstance
 	if req.HostCallbackID != "" {
-		if _, callbackPluginID, callbackInstance, exists := h.lookupCallbackContext(req.HostCallbackID); exists {
+		var exists bool
+		if _, callbackPluginID, callbackInstance, exists = h.lookupCallbackContext(req.HostCallbackID); exists {
 			if callerPluginID != "" && callbackPluginID != "" && callerPluginID != callbackPluginID {
 				return nil, fmt.Errorf("host callback ID does not belong to the calling plugin")
 			}
@@ -42,23 +48,27 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	}
 	// Detach request cancellation while preserving callback values; callback cleanup owns the model stream lifetime.
 	streamCtx, cancel := newStreamContext(context.WithoutCancel(callbackCtx))
+	inflightID, okBegin := h.modelStreams.begin(callerPluginID, callbackPluginID, callerInstance, callbackInstance, cancel)
+	if !okBegin {
+		return nil, fmt.Errorf("host plugin callback instance is closed")
+	}
 	stream, errMsg := executor.ExecuteModelStream(streamCtx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID))
 	if errMsg != nil {
-		cancel()
+		h.modelStreams.abort(inflightID)
 		return nil, modelExecutionError(errMsg)
 	}
-	streamID := ""
-	if h.modelStreams != nil {
-		streamID = h.modelStreams.open(callerPluginID, callerInstance, req.HostCallbackID, stream.Chunks, cancel)
-	}
+	streamID := h.modelStreams.complete(inflightID, callerPluginID, callerInstance, req.HostCallbackID, stream.Chunks, cancel)
 	if streamID == "" {
-		cancel()
-		return nil, fmt.Errorf("host model stream bridge is unavailable")
+		return nil, fmt.Errorf("host model stream closed during startup")
 	}
 	if req.HostCallbackID != "" {
-		h.addCallbackCleanup(req.HostCallbackID, func() {
+		stopScopeCleanup, attached := h.addCallbackCleanupHandle(req.HostCallbackID, func() {
 			h.modelStreams.close(callerPluginID, callerInstance, streamID)
 		})
+		if !attached || !h.modelStreams.setScopeCleanup(callerPluginID, callerInstance, streamID, stopScopeCleanup) {
+			h.modelStreams.close(callerPluginID, callerInstance, streamID)
+			return nil, fmt.Errorf("host callback context closed while opening model stream")
+		}
 	}
 	return marshalRPCResult(pluginapi.HostModelStreamResponse{
 		StatusCode: stream.StatusCode,
