@@ -972,7 +972,7 @@ func ValidateV8Config(data []byte) error {
 	decoder.KnownFields(true)
 	var cfg legacyConfig
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
-		return errDecode
+		return describeV8DecodeError(errDecode, encoded, flat)
 	}
 	return cfg.Models.Validate()
 }
