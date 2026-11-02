@@ -75,12 +75,9 @@ func (h *Handler) PatchCredentialPriority(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "credential changed during update; refresh before retrying"})
 		return
 	}
-	if h.postAuthPersistHook != nil {
-		if errHook := h.postAuthPersistHook(c.Request.Context(), updated); errHook != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to synchronize credential priority"})
-			return
-		}
-	}
+	// ModifyPersisted already publishes priority to the manager and scheduler.
+	// No model re-registration is needed for this metadata-only change: submitting
+	// the snapshot to the persistence hook could revive a later deleted credential.
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "priority": credentialPriority(updated)})
 }
 
