@@ -287,6 +287,9 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		if !next.After(now) {
+			next = now.Add(l.interval)
+		}
 		l.upsert(authID, next)
 		return
 	}
@@ -342,6 +345,9 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 		if !ok {
 			l.remove(authID)
 			continue
+		}
+		if !next.After(now) {
+			next = now.Add(l.interval)
 		}
 		l.upsert(authID, next)
 	}

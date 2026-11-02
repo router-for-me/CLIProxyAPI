@@ -1284,6 +1284,18 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		checkNow := time.Now()
 		accessTokenRejected := failedAccessToken != "" && authMatchesTokenPartition(auth, failedAccessToken)
 		if !accessTokenRejected && auth.HasValidAccessToken(checkNow) {
+			m.mu.Lock()
+			if current := m.auths[id]; current != nil &&
+				current.RegistrationEpoch == auth.RegistrationEpoch &&
+				current.CredentialVersion == auth.CredentialVersion &&
+				authHasUnchangedRejectedRefreshToken(current) {
+				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(checkNow) {
+					current.NextRefreshAfter = exp
+				} else {
+					current.NextRefreshAfter = checkNow.Add(refreshFailureBackoff)
+				}
+			}
+			m.mu.Unlock()
 			if auth.RefreshError != nil {
 				return nil, auth.RefreshError
 			}
@@ -1443,6 +1455,23 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.RefreshFailures = 0
 				current.StatusMessage = "disabled (invalid grant)"
 				shouldUnschedule = true
+			} else if isDisabled && terminalRefresh {
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				current.RefreshFailures = 0
+				current.StatusMessage = "disabled (refresh token invalid)"
+				if authHasUnchangedRejectedRefreshToken(current) {
+					if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+						current.NextRefreshAfter = exp
+						shouldReschedule = true
+					} else {
+						current.NextRefreshAfter = time.Time{}
+						shouldUnschedule = true
+					}
+				} else {
+					current.NextRefreshAfter = time.Time{}
+					shouldUnschedule = true
+				}
 			} else if isDisabled {
 				current.Unavailable = true
 				current.Status = StatusDisabled
