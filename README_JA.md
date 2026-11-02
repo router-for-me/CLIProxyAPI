@@ -101,7 +101,14 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 </tr>
 <tr>
 <td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>こちらのAIモデル中转サービスはいつでも返金可能で、どのユーザーも無料でインボイスを発行できます。法人のご利用も個人のご利用もどちらも対応可能で、主要なモデルはすべて揃っています。カスタマーサポートは長時間オンラインで皆様のご指示をお待ちしております。何かございましたらお気軽にご指示ください。お客様のご意見をしっかり取り入れるのがモットーです！！！<br><br>Xcode VIPエントランス→ <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
+<td>
+    🥚 <b>【タダポチ案件！】登録＆合言葉で $5 相当の無料クレジット + 初回チャージ 15% OFF！</b><br>
+    🚀 <b>単なる API 中継ではなく、オールインワンの Web ワークスペース：</b> フロントエンド構築不要で、Web チャット・AI 画像生成・動画生成・自動ワークフローがブラウザ上ですぐ使えます。<br>
+    ⚡ <b>主要モデル完全網羅：</b> Claude、GPT、Gemini、DeepSeek などの最先端モデルを高速集約。<br>
+    🛡️ <b>安心のサポート体制：</b> いつでも返金可能 ｜ 請求書・領収書対応 ｜ 法人・個人問わず利用可能 ｜ ユーザーの声を大切にする充実のサポート！<br><br>
+    👉 Xcode VIP 専用リンク：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
+    💬 チケット申請用合言葉：<code>CLIProxyAPI</code>（チケット送信で即時付与）
+  </td>
 </tr>
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>

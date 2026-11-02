@@ -101,7 +101,14 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 </tr>
 <tr>
 <td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>这个 AI 模型中转服务商可以随时退款；任意用户可免费开票；对公对私都能做；主流模型全都有。客服长时间在线等候您的差遣；有事儿您吩咐，主打一个听劝！<br><br>Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
+<td>
+    🥚 <b>【免费领鸡蛋！】注册提工单报暗号，白嫖 $5 额度 + 首充 85 折！</b><br>
+    🚀 <b>不只是 API 中转，更是全能 Web 工作台：</b>无需自建前端，网页直接用对话、AI绘图、视频生成、自动化工作流。<br>
+    ⚡ <b>全主流覆盖：</b>Claude、GPT、Gemini、DeepSeek 等顶尖模型极速聚合。<br>
+    🛡️ <b>服务保障：</b>随时退款 ｜ 免费开票 ｜ 对公对私 ｜ 客服长时在线，主打一个听劝！<br><br>
+    👉 Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best/register?aff=OuDv</a><br>
+    💬 工单暗号：<code>CLIProxyAPI</code>（提交工单即可直接到账）
+  </td>
 </tr>
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="陈局" width="150"></a></td>
