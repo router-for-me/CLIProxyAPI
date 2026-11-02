@@ -17,6 +17,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Ensure go.mod supports go install/run @version
+        run: |
+          if go mod edit -json | jq -e '((.Replace // []) + (.Exclude // [])) | length > 0' >/dev/null; then
+            echo "go.mod must not contain replace or exclude directives; they break 'go install/go run github.com/router-for-me/CLIProxyAPI/v8/cmd/server@<version>'."
+            go mod edit -json | jq '{Replace, Exclude}'
+            exit 1
+          fi
       - name: Refresh models catalog
         run: bash .github/scripts/refresh-model-catalogs.sh
       - name: Build

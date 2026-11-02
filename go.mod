@@ -41,8 +41,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-replace github.com/MoeForge/moego v0.1.0-alpha.1 => github.com/router-for-me/moego v0.1.1
-
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dlclark/regexp2/v2 v2.5.1 // indirect
