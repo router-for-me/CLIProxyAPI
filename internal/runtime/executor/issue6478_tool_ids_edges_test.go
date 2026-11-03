@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestIssue6478_DevinReservedPrefixStatelessFragmentedRoundTrip(t *testing.T) {
@@ -63,7 +63,7 @@ func TestIssue6478_DevinReservedPrefixStatelessFragmentedRoundTrip(t *testing.T)
 						t.Fatal(chunk.Err)
 					}
 					for _, line := range strings.Split(string(chunk.Payload), "\n") {
-						event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+						event := ojson.Parse(strings.TrimPrefix(line, "data: "))
 						if event.Get("content_block.type").String() == "tool_use" {
 							ids = append(ids, event.Get("content_block.id").String())
 							arguments = append(arguments, "")
@@ -78,7 +78,7 @@ func TestIssue6478_DevinReservedPrefixStatelessFragmentedRoundTrip(t *testing.T)
 				if errExecute != nil {
 					t.Fatal(errExecute)
 				}
-				for _, block := range gjson.GetBytes(result.Payload, "content").Array() {
+				for _, block := range ojson.GetBytes(result.Payload, "content").Array() {
 					if block.Get("type").String() == "tool_use" {
 						ids = append(ids, block.Get("id").String())
 						arguments = append(arguments, block.Get("input").Raw)
@@ -97,7 +97,7 @@ func TestIssue6478_DevinReservedPrefixStatelessFragmentedRoundTrip(t *testing.T)
 				if i < 3 && id == nativeIDs[i] {
 					t.Errorf("illegal or reserved native ID[%d] was not escaped: %q", i, id)
 				}
-				if gjson.Get(arguments[i], "literal_id").String() != "Write:1#abc" {
+				if ojson.Get(arguments[i], "literal_id").String() != "Write:1#abc" {
 					t.Errorf("fragmented arguments corrupted: %s", arguments[i])
 				}
 			}
@@ -128,10 +128,10 @@ func TestIssue6478_DevinReservedPrefixStatelessFragmentedRoundTrip(t *testing.T)
 				t.Fatal(errDecode)
 			}
 			for i, id := range nativeIDs {
-				if got := gjson.GetBytes(body, "prompts.1.tool_calls").Array()[i].Get("id").String(); got != id {
+				if got := ojson.GetBytes(body, "prompts.1.tool_calls").Array()[i].Get("id").String(); got != id {
 					t.Errorf("stateless call[%d] = %q, want original %q", i, got, id)
 				}
-				if got := gjson.GetBytes(body, "prompts").Array()[i+2].Get("tool_call_id").String(); got != id {
+				if got := ojson.GetBytes(body, "prompts").Array()[i+2].Get("tool_call_id").String(); got != id {
 					t.Errorf("stateless result[%d] = %q, want original %q", i, got, id)
 				}
 			}
@@ -146,8 +146,8 @@ func TestIssue6478_ClaudeLegacyEncodingCollision(t *testing.T) {
 	ids := []string{issue6478Calls[0].id, issue6478Calls[1].id, "cpa_tid_v1_V3JpdGU6MSNlMWYwZGE4MTE0MzY0OWYzYTM3OGQyNGFmNmZjM2VjOQ", "call_8jAZYBK5veMdr1DD2DqObARK"}
 	for _, stream := range []bool{false, true} {
 		body := executeClaudeContextManagementRequest(t, &config.Config{}, issue6478History(ids), stream)
-		uses := gjson.GetBytes(body, "messages.1.content").Array()
-		results := gjson.GetBytes(body, "messages.2.content").Array()
+		uses := ojson.GetBytes(body, "messages.1.content").Array()
+		results := ojson.GetBytes(body, "messages.2.content").Array()
 		if len(uses) != 4 || len(results) != 4 {
 			t.Fatalf("history lost calls/results: %s", body)
 		}
@@ -167,7 +167,7 @@ func TestIssue6478_ClaudeLegacyEncodingCollision(t *testing.T) {
 		}
 		// Repairing a repaired transcript must be byte-stable at schema ID fields.
 		again := executeClaudeContextManagementRequest(t, &config.Config{}, body, stream)
-		if gjson.GetBytes(again, "messages.1.content").Raw != gjson.GetBytes(body, "messages.1.content").Raw {
+		if ojson.GetBytes(again, "messages.1.content").Raw != ojson.GetBytes(body, "messages.1.content").Raw {
 			t.Errorf("history ID repair is not idempotent")
 		}
 	}
@@ -202,12 +202,12 @@ func TestIssue6478_ClaudeUpstreamCountTokensRepairBeforePayload(t *testing.T) {
 			t.Fatal(errCount)
 		}
 		if configured {
-			if gjson.GetBytes(body, "tools.0.description").String() != "observed repaired ID" || gjson.GetBytes(body, "messages.1.content.0.id").String() != "configured:id#override" || gjson.GetBytes(body, "messages.2.content.0.tool_use_id").String() != "configured:id#override" {
+			if ojson.GetBytes(body, "tools.0.description").String() != "observed repaired ID" || ojson.GetBytes(body, "messages.1.content.0.id").String() != "configured:id#override" || ojson.GetBytes(body, "messages.2.content.0.tool_use_id").String() != "configured:id#override" {
 				t.Errorf("count_tokens repair must precede final user rules: %s", body)
 			}
 		} else {
-			useIDs := gjson.GetBytes(body, "messages.1.content.#.id").Array()
-			resultIDs := gjson.GetBytes(body, "messages.2.content.#.tool_use_id").Array()
+			useIDs := ojson.GetBytes(body, "messages.1.content.#.id").Array()
+			resultIDs := ojson.GetBytes(body, "messages.2.content.#.tool_use_id").Array()
 			if len(useIDs) != 4 || len(resultIDs) != 4 {
 				t.Fatalf("count_tokens lost history calls/results: %s", body)
 			}
@@ -238,7 +238,7 @@ func TestIssue6478_DevinDoesNotDecodeOrdinaryNativeIDs(t *testing.T) {
 		}
 	}()
 	for i, id := range ids {
-		got := gjson.GetBytes(body, "prompts.1.tool_calls").Array()[i].Get("id").String()
+		got := ojson.GetBytes(body, "prompts.1.tool_calls").Array()[i].Get("id").String()
 		if got != id {
 			t.Errorf("ordinary native ID was misdecoded: %q, want %q", got, id)
 		}

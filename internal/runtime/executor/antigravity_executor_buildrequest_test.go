@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -425,13 +425,13 @@ func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T
 						}
 					}
 
-					if got := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
+					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
 						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, capturedBody)
 					}
-					if budget := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+					if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
 						t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
 					}
-					if include := gjson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+					if include := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
 						t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, capturedBody)
 					}
 				})
