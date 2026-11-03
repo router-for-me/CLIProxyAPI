@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 var benchmarkSanitizeCodexInputItemIDsOutput []byte
@@ -18,11 +18,11 @@ func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
 
 	got := SanitizeCodexInputItemIDs(body)
 
-	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != id64 {
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != id64 {
 		t.Fatalf("64-character ID changed: %q", actual)
 	}
 	for _, path := range []string{"input.1.id", "input.2.id"} {
-		actual := gjson.GetBytes(got, path).String()
+		actual := ojson.GetBytes(got, path).String()
 		if len([]rune(actual)) != 64 {
 			t.Fatalf("%s length = %d, want 64: %q", path, len([]rune(actual)), actual)
 		}
@@ -40,13 +40,13 @@ func TestSanitizeCodexInputItemIDsNormalizesMessageIDs(t *testing.T) {
 	first := SanitizeCodexInputItemIDs(body)
 	second := SanitizeCodexInputItemIDs(body)
 
-	if got := gjson.GetBytes(first, "input.0.id").String(); got != "msg_"+invalidID {
+	if got := ojson.GetBytes(first, "input.0.id").String(); got != "msg_"+invalidID {
 		t.Fatalf("message ID = %q, want msg-prefixed ID", got)
 	}
-	if got := gjson.GetBytes(first, "input.1.id").String(); got != "msg-1" {
+	if got := ojson.GetBytes(first, "input.1.id").String(); got != "msg-1" {
 		t.Fatalf("valid message ID changed: %q", got)
 	}
-	if got := gjson.GetBytes(first, "input.2.id").String(); got != "fc_item_call" {
+	if got := ojson.GetBytes(first, "input.2.id").String(); got != "fc_item_call" {
 		t.Fatalf("function_call ID was not normalized: %q", got)
 	}
 	if string(first) != string(second) {
@@ -92,7 +92,7 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 
 	for index, expected := range want {
 		path := fmt.Sprintf("input.%d.id", index)
-		if actual := gjson.GetBytes(got, path).String(); actual != expected {
+		if actual := ojson.GetBytes(got, path).String(); actual != expected {
 			t.Fatalf("%s = %q, want %q; payload=%s", path, actual, expected, got)
 		}
 	}
@@ -138,8 +138,8 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 					second := SanitizeCodexInputItemIDs(body)
 					normalizedAgain := SanitizeCodexInputItemIDs(first)
 					ids := [2]string{
-						gjson.GetBytes(first, "input.0.id").String(),
-						gjson.GetBytes(first, "input.1.id").String(),
+						ojson.GetBytes(first, "input.0.id").String(),
+						ojson.GetBytes(first, "input.1.id").String(),
 					}
 
 					if ids[0] == ids[1] {
@@ -181,19 +181,19 @@ func TestSanitizeCodexInputItemIDsNormalizesLegacyToolSearchCallIDs(t *testing.T
 	if string(original) != snapshot {
 		t.Fatalf("SanitizeCodexInputItemIDs mutated caller slice: got %s, want %s", original, snapshot)
 	}
-	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "rs_signed" {
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != "rs_signed" {
 		t.Fatalf("reasoning id = %q, want rs_signed", actual)
 	}
-	if actual := gjson.GetBytes(got, "input.0.encrypted_content").String(); actual != "gAAAA-opaque-signature" {
+	if actual := ojson.GetBytes(got, "input.0.encrypted_content").String(); actual != "gAAAA-opaque-signature" {
 		t.Fatalf("encrypted_content = %q, want gAAAA-opaque-signature", actual)
 	}
-	if actual := gjson.GetBytes(got, "input.1.id").String(); actual != "tsc_call_4000860" {
+	if actual := ojson.GetBytes(got, "input.1.id").String(); actual != "tsc_call_4000860" {
 		t.Fatalf("tool_search_call id = %q, want tsc_call_4000860", actual)
 	}
-	if actual := gjson.GetBytes(got, "input.1.call_id").String(); actual != "call_4000860" {
+	if actual := ojson.GetBytes(got, "input.1.call_id").String(); actual != "call_4000860" {
 		t.Fatalf("tool_search_call call_id = %q, want call_4000860", actual)
 	}
-	if actual := gjson.GetBytes(got, "input.2.call_id").String(); actual != "call_4000860" {
+	if actual := ojson.GetBytes(got, "input.2.call_id").String(); actual != "call_4000860" {
 		t.Fatalf("tool_search_output call_id = %q, want call_4000860", actual)
 	}
 
@@ -210,8 +210,8 @@ func TestSanitizeCodexInputItemIDsNormalizesLegacyToolSearchCallIDs(t *testing.T
 		first := SanitizeCodexInputItemIDs(collisionBody)
 		second := SanitizeCodexInputItemIDs(collisionBody)
 		again := SanitizeCodexInputItemIDs(first)
-		id0 := gjson.GetBytes(first, "input.0.id").String()
-		id1 := gjson.GetBytes(first, "input.1.id").String()
+		id0 := ojson.GetBytes(first, "input.0.id").String()
+		id1 := ojson.GetBytes(first, "input.1.id").String()
 		if id0 == id1 {
 			t.Fatalf("distinct tool_search_call IDs %v collided: %q; payload=%s", ids, id0, first)
 		}
@@ -229,7 +229,7 @@ func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallIDs(t *testing.T) {
 	body := []byte(`{"input":[{"type":"custom_tool_call","id":"` + invalidID + `","call_id":"call-1","name":"lookup","input":"{}"}]}`)
 
 	got := SanitizeCodexInputItemIDs(body)
-	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "ctc_"+invalidID {
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != "ctc_"+invalidID {
 		t.Fatalf("custom_tool_call ID = %q, want ctc-prefixed ID", actual)
 	}
 }
@@ -248,10 +248,10 @@ func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallOutputIDs(t *testing.T
 	second := SanitizeCodexInputItemIDs(body)
 	normalizedAgain := SanitizeCodexInputItemIDs(first)
 
-	if actual := gjson.GetBytes(first, "input.0.id").String(); actual != "ctco_"+invalidID {
+	if actual := ojson.GetBytes(first, "input.0.id").String(); actual != "ctco_"+invalidID {
 		t.Fatalf("custom_tool_call_output ID = %q, want ctco-prefixed ID", actual)
 	}
-	if actual := gjson.GetBytes(first, "input.1.id").String(); actual != validID {
+	if actual := ojson.GetBytes(first, "input.1.id").String(); actual != validID {
 		t.Fatalf("valid custom_tool_call_output ID changed: %q", actual)
 	}
 	if string(first) != string(second) {
@@ -274,7 +274,7 @@ func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing
 		`]}`)
 
 	got := SanitizeCodexInputItemIDs(body)
-	input := gjson.GetBytes(got, "input").Array()
+	input := ojson.GetBytes(got, "input").Array()
 
 	if len(input) != 3 {
 		t.Fatalf("input length = %d, want 3: %s", len(input), got)
@@ -304,7 +304,7 @@ func TestSanitizeCodexInputItemIDsShortensOverlongReasoningWithoutEncryptedConte
 			body := []byte(`{"input":[{"type":"reasoning","id":"` + longReasoningID + `"` + testCase.encryptedContent + `,"summary":[]}]}`)
 
 			got := SanitizeCodexInputItemIDs(body)
-			input := gjson.GetBytes(got, "input").Array()
+			input := ojson.GetBytes(got, "input").Array()
 			if len(input) != 1 {
 				t.Fatalf("input length = %d, want 1: %s", len(input), got)
 			}
@@ -324,17 +324,17 @@ func TestSanitizeCodexInputItemIDsAvoidsExistingIDCollision(t *testing.T) {
 	first := SanitizeCodexInputItemIDs(body)
 	second := SanitizeCodexInputItemIDs(body)
 
-	shortened := gjson.GetBytes(first, "input.0.id").String()
+	shortened := ojson.GetBytes(first, "input.0.id").String()
 	if shortened == collidingValidID {
 		t.Fatalf("shortened ID collided with an existing valid ID: %q", shortened)
 	}
 	if len([]rune(shortened)) > 64 {
 		t.Fatalf("shortened ID length = %d, want at most 64", len([]rune(shortened)))
 	}
-	if actual := gjson.GetBytes(first, "input.1.id").String(); actual != collidingValidID {
+	if actual := ojson.GetBytes(first, "input.1.id").String(); actual != collidingValidID {
 		t.Fatalf("existing valid ID changed: %q", actual)
 	}
-	if actual := gjson.GetBytes(second, "input.0.id").String(); actual != shortened {
+	if actual := ojson.GetBytes(second, "input.0.id").String(); actual != shortened {
 		t.Fatalf("collision resolution is not deterministic: first=%q second=%q", shortened, actual)
 	}
 }

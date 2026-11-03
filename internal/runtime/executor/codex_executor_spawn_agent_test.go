@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -16,7 +17,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorOptimizeMultiAgentV2(t *testing.T) {
@@ -37,13 +37,13 @@ func TestCodexExecutorOptimizeMultiAgentV2(t *testing.T) {
 		upstreamBody, _ = io.ReadAll(request.Body)
 		if request.URL.Path == "/responses/compact" {
 			w.Header().Set("Content-Type", "application/json")
-			namespace := gjson.GetBytes(upstreamBody, "input.0.tools.0.name").String()
+			namespace := ojson.GetBytes(upstreamBody, "input.0.tools.0.name").String()
 			compact := fmt.Sprintf(`{"id":"resp_1","object":"response.compaction","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}`, namespace)
 			_, _ = w.Write([]byte(compact))
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		namespace := gjson.GetBytes(upstreamBody, "input.0.tools.0.name").String()
+		namespace := ojson.GetBytes(upstreamBody, "input.0.tools.0.name").String()
 		completed := fmt.Sprintf(`data: {"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`+"\n\n", namespace)
 		_, _ = w.Write([]byte(completed))
 	}))
@@ -191,7 +191,7 @@ func TestCodexExecutorIsCompatConvertsAgentMessage(t *testing.T) {
 			if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
 				t.Fatalf("Execute() error = %v", errExecute)
 			}
-			message := gjson.GetBytes(upstreamBody, "input.1")
+			message := ojson.GetBytes(upstreamBody, "input.1")
 			if message.Get("type").String() != tt.wantType {
 				t.Fatalf("input.1.type = %q, want %q; body=%s", message.Get("type").String(), tt.wantType, upstreamBody)
 			}
@@ -309,7 +309,7 @@ func TestCodexExecutorsMultiAgentV2UsesSelectedHomeModel(t *testing.T) {
 					}
 				}
 				upstreamPayload := <-capturedPayload
-				message := gjson.GetBytes(upstreamPayload, "input.1")
+				message := ojson.GetBytes(upstreamPayload, "input.1")
 				if tc.isCompat {
 					if message.Get("type").String() != "message" || message.Get("role").String() != "user" {
 						t.Fatalf("selected compat model must receive a user message: %s", message.Raw)
@@ -372,7 +372,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
 			t.Fatalf("Execute() error = %v", errExecute)
 		}
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -409,7 +409,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 			for range streamResult.Chunks {
 			}
 		}
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("stream input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -438,7 +438,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
 			t.Fatalf("Execute() compact error = %v", errExecute)
 		}
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("compact input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -467,7 +467,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
 			t.Fatalf("Execute() error = %v", errExecute)
 		}
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -498,7 +498,7 @@ func TestCodexExecutor_IsCompat_StripsAuthorAndRecipient_Issue6136(t *testing.T)
 		if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
 			t.Fatalf("Execute() error = %v", errExecute)
 		}
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "agent_message" {
 			t.Fatalf("input.1.type = %q, want agent_message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -567,7 +567,7 @@ func TestCodexExecutor_IsCompat_V8Layout_ClientScope_Issue6233(t *testing.T) {
 			t.Fatalf("Execute() error = %v", errExecute)
 		}
 
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -599,7 +599,7 @@ func TestCodexExecutor_IsCompat_V8Layout_ClientScope_Issue6233(t *testing.T) {
 			}
 		}
 
-		message := gjson.GetBytes(upstreamBody, "input.1")
+		message := ojson.GetBytes(upstreamBody, "input.1")
 		if message.Get("type").String() != "message" {
 			t.Fatalf("stream input.1.type = %q, want message; body=%s", message.Get("type").String(), upstreamBody)
 		}
@@ -662,7 +662,7 @@ func assertCodexSpawnAgentClientNamespace(t *testing.T, payload []byte) {
 
 func assertCodexSpawnAgentRequestMessage(t *testing.T, payload []byte, enabled bool) {
 	t.Helper()
-	message := gjson.GetBytes(payload, "input.1")
+	message := ojson.GetBytes(payload, "input.1")
 	if message.Get("type").String() != "agent_message" || message.Get("role").Exists() {
 		t.Fatalf("Codex executor changed outer agent message: %s", payload)
 	}
@@ -685,9 +685,9 @@ func assertCodexSpawnAgentRequestMessage(t *testing.T, payload []byte, enabled b
 
 func assertCodexSpawnAgentOptimization(t *testing.T, payload []byte, modelID string, enabled bool) {
 	t.Helper()
-	namespace := gjson.GetBytes(payload, "input.0.tools.0.name").String()
-	description := gjson.GetBytes(payload, "input.0.tools.0.tools.0.description").String()
-	encrypted := gjson.GetBytes(payload, "input.0.tools.0.tools.0.parameters.properties.message.encrypted")
+	namespace := ojson.GetBytes(payload, "input.0.tools.0.name").String()
+	description := ojson.GetBytes(payload, "input.0.tools.0.tools.0.description").String()
+	encrypted := ojson.GetBytes(payload, "input.0.tools.0.tools.0.parameters.properties.message.encrypted")
 	if enabled {
 		if namespace != "collaboration-optimize" {
 			t.Fatalf("optimized namespace = %q, want collaboration-optimize", namespace)
@@ -742,7 +742,7 @@ func TestCodexExecutorOptimizeMultiAgentV2RestoresDottedFlatToolName(t *testing.
 		streamClientPayload = append(streamClientPayload, chunk.Payload...)
 	}
 	assertCodexSpawnAgentClientNamespace(t, streamClientPayload)
-	if name := gjson.GetBytes(streamClientPayload, "response.output.0.name").String(); name != "spawn_agent" {
+	if name := ojson.GetBytes(streamClientPayload, "response.output.0.name").String(); name != "spawn_agent" {
 		t.Fatalf("stream output name = %q, want spawn_agent", name)
 	}
 
@@ -752,9 +752,9 @@ func TestCodexExecutorOptimizeMultiAgentV2RestoresDottedFlatToolName(t *testing.
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 	assertCodexSpawnAgentClientNamespace(t, response.Payload)
-	executeName := gjson.GetBytes(response.Payload, "output.0.name").String()
+	executeName := ojson.GetBytes(response.Payload, "output.0.name").String()
 	if executeName == "" {
-		executeName = gjson.GetBytes(response.Payload, "response.output.0.name").String()
+		executeName = ojson.GetBytes(response.Payload, "response.output.0.name").String()
 	}
 	if executeName != "spawn_agent" {
 		t.Fatalf("execute output name = %q, want spawn_agent; payload=%s", executeName, response.Payload)

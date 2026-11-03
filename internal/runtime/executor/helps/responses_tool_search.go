@@ -1,10 +1,10 @@
 package helps
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const (
@@ -16,11 +16,11 @@ const (
 // ResponsesHasToolSearch reports whether a Responses payload carries a client
 // tool_search declaration or tool_search history items.
 func ResponsesHasToolSearch(payload []byte) bool {
-	if hasClientToolSearchDeclaration(gjson.GetBytes(payload, "tools")) {
+	if hasClientToolSearchDeclaration(ojson.GetBytesNoCopy(payload, "tools")) {
 		return true
 	}
 	found := false
-	gjson.GetBytes(payload, "input").ForEach(func(_, item gjson.Result) bool {
+	ojson.GetBytesNoCopy(payload, "input").ForEach(func(_, item ojson.Result) bool {
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case responsesToolSearchCallType, responsesToolSearchOutputType:
 			found = true
@@ -38,51 +38,69 @@ func ResponsesHasToolSearch(payload []byte) bool {
 // declarations are left for the translator. An unchanged payload is returned
 // as is.
 func StripResponsesToolSearch(payload []byte) []byte {
-	out := payload
-	if tools := gjson.GetBytes(out, "tools"); tools.IsArray() {
+	if len(payload) == 0 {
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !StripResponsesToolSearchDoc(doc) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// StripResponsesToolSearchDoc removes client tool_search declarations and every
+// tool_search_call/tool_search_output input item in place on doc.
+func StripResponsesToolSearchDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	modified := false
+	if tools := doc.Get("tools"); tools.IsArray() {
 		if kept, changed := withoutClientToolSearch(tools); changed {
-			out, _ = sjson.SetRawBytes(out, "tools", kept)
+			if errSet := doc.SetRawBytes("tools", kept); errSet == nil {
+				modified = true
+			}
 		}
 	}
-	input := gjson.GetBytes(out, "input")
+	input := doc.Get("input")
 	if !input.IsArray() {
-		return out
+		return modified
 	}
-	changed := false
-	items := make([]string, 0, len(input.Array()))
-	input.ForEach(func(_, item gjson.Result) bool {
+	dropped := make(map[int]bool)
+	for idx, item := range input.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
 		case responsesToolSearchCallType, responsesToolSearchOutputType:
-			changed = true
-			return true
+			dropped[idx] = true
+			modified = true
 		case "additional_tools":
 			if kept, keptChanged := withoutClientToolSearch(item.Get("tools")); keptChanged {
-				updated, errSet := sjson.SetRawBytes([]byte(item.Raw), "tools", kept)
-				if errSet == nil {
-					items = append(items, string(updated))
-					changed = true
-					return true
+				if errSet := doc.SetRawBytes(fmt.Sprintf("input.%d.tools", idx), kept); errSet == nil {
+					modified = true
 				}
 			}
 		}
-		items = append(items, item.Raw)
-		return true
-	})
-	if !changed {
-		return out
 	}
-	out, _ = sjson.SetRawBytes(out, "input", []byte("["+strings.Join(items, ",")+"]"))
-	return out
+	if len(dropped) > 0 {
+		updatedItems := doc.Get("input").Array()
+		items := make([]string, 0, len(updatedItems)-len(dropped))
+		for idx, item := range updatedItems {
+			if !dropped[idx] {
+				items = append(items, item.Raw)
+			}
+		}
+		_ = doc.SetRaw("input", "["+strings.Join(items, ",")+"]")
+	}
+	return modified
 }
 
-func isClientToolSearchDeclaration(tool gjson.Result) bool {
+func isClientToolSearchDeclaration(tool ojson.Result) bool {
 	return strings.TrimSpace(tool.Get("type").String()) == responsesToolSearchType &&
 		strings.TrimSpace(tool.Get("execution").String()) == "client"
 }
 
-func hasClientToolSearchDeclaration(tools gjson.Result) bool {
+func hasClientToolSearchDeclaration(tools ojson.Result) bool {
 	found := false
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		found = isClientToolSearchDeclaration(tool)
 		return !found
 	})
@@ -91,13 +109,13 @@ func hasClientToolSearchDeclaration(tools gjson.Result) bool {
 
 // withoutClientToolSearch rebuilds a tools array without client tool_search
 // declarations and reports whether anything was removed.
-func withoutClientToolSearch(tools gjson.Result) ([]byte, bool) {
+func withoutClientToolSearch(tools ojson.Result) ([]byte, bool) {
 	if !tools.IsArray() {
 		return nil, false
 	}
 	changed := false
 	kept := make([]string, 0, len(tools.Array()))
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		if isClientToolSearchDeclaration(tool) {
 			changed = true
 			return true
