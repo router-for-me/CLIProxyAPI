@@ -59,22 +59,37 @@ func joinYAMLPath(parent, key string) string {
 	return parent + "." + key
 }
 
+// yamlLines holds the visits of walkYAMLTwins by line in rendered, in document
+// order. A mapping key is also listed on its value's line.
+type yamlLines map[int][]yamlVisit
+
+func indexYAMLLines(rendered, tree *yaml.Node) yamlLines {
+	lines := yamlLines{}
+	walkYAMLTwins(yamlVisit{rendered: rendered, node: tree}, func(visit yamlVisit) {
+		lines[visit.rendered.Line] = append(lines[visit.rendered.Line], visit)
+		if visit.renderedValue != nil && visit.renderedValue.Line != visit.rendered.Line {
+			lines[visit.renderedValue.Line] = append(lines[visit.renderedValue.Line], visit)
+		}
+	})
+	return lines
+}
+
 // locateYAMLProblem finds the node of tree behind a yaml.TypeError entry at line
-// of rendered, the re-parsed yaml.Marshal(tree). Without a column, a collection
-// error names the innermost collection of that kind on the line, which is wrong
-// for same-kind collections nested on one line.
-func locateYAMLProblem(rendered, tree *yaml.Node, line int, problem string) *yamlLocation {
+// of rendered, the re-parsed yaml.Marshal(tree), indexed by indexYAMLLines.
+// Without a column, a collection error names the innermost collection of that
+// kind on the line, which is wrong for same-kind collections nested on one line.
+func locateYAMLProblem(lines yamlLines, line int, problem string) *yamlLocation {
 	find := func(match func(yamlVisit) bool, last bool) *yamlLocation {
 		var found *yamlLocation
-		walkYAMLTwins(yamlVisit{rendered: rendered, node: tree}, func(visit yamlVisit) {
+		for _, visit := range lines[line] {
 			if !match(visit) || found != nil && !last {
-				return
+				continue
 			}
 			found = &yamlLocation{path: visit.path, at: visit.node}
 			if visit.value != nil && visit.node.Line == 0 {
 				found.at = visit.value
 			}
-		})
+		}
 		return found
 	}
 	onLine := func(visit yamlVisit) bool { return visit.rendered.Line == line }
@@ -119,6 +134,7 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 		}
 		return "line " + strconv.Itoa(node.Line) + ": "
 	}
+	lines := indexYAMLLines(rendered.Content[0], flat)
 	entries := make([]string, 0, len(typeErr.Errors))
 	for _, entry := range typeErr.Errors {
 		match := yamlTypeErrorEntry.FindStringSubmatch(entry)
@@ -128,7 +144,7 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 		}
 		line, _ := strconv.Atoi(match[1])
 		problem := match[2]
-		found := locateYAMLProblem(rendered.Content[0], flat, line, problem)
+		found := locateYAMLProblem(lines, line, problem)
 		field := yamlUnknownField.FindStringSubmatch(problem)
 		switch {
 		case found == nil:
@@ -209,22 +225,25 @@ func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
 	if errMarshal != nil || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
 		return err.Error()
 	}
+	lines := indexYAMLLines(rendered.Content[0], documentRoot(doc))
+	submittedPaths, docPaths := indexYAMLPositions(documentRoot(submitted)), indexYAMLPositions(documentRoot(doc))
 	entries := make([]string, 0, len(typeErr.Errors))
 	for _, entry := range typeErr.Errors {
 		match := yamlTypeErrorEntry.FindStringSubmatch(entry)
 		var found *yamlLocation
 		if match != nil {
 			line, _ := strconv.Atoi(match[1])
-			found = locateYAMLProblem(rendered.Content[0], documentRoot(doc), line, match[2])
+			found = locateYAMLProblem(lines, line, match[2])
 		}
 		if found == nil {
 			entries = append(entries, yamlTypeErrorEntry.ReplaceAllString(entry, "$2"))
 			continue
 		}
-		if source := locateSubmitted(documentRoot(submitted), found.at); source != nil && !sharedYAMLPosition(documentRoot(doc), found.at) {
+		position := yamlPositionOf(found.at)
+		if source := submittedPaths[position]; found.at.Line != 0 && len(source) > 0 && len(docPaths[position]) == 1 {
 			name := ""
-			if source.path != "" {
-				name = " (" + source.path + ")"
+			if source[0] != "" {
+				name = " (" + source[0] + ")"
 			}
 			entries = append(entries, "line "+strconv.Itoa(found.at.Line)+name+": "+match[2])
 			continue
@@ -238,32 +257,23 @@ func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
 	return strings.Replace(err.Error(), typeErr.Error(), (&yaml.TypeError{Errors: entries}).Error(), 1)
 }
 
-// locateSubmitted finds the node of submitted at the source position of at.
-func locateSubmitted(submitted, at *yaml.Node) *yamlLocation {
-	if submitted == nil || at == nil || at.Line == 0 {
-		return nil
-	}
-	var found *yamlLocation
-	walkYAMLTwins(yamlVisit{rendered: submitted, node: submitted}, func(visit yamlVisit) {
-		if found == nil && sameYAMLPosition(visit.node, at) {
-			found = &yamlLocation{path: visit.path, at: visit.node}
-		}
-	})
-	return found
+type yamlPosition struct {
+	line, column int
+	kind         yaml.Kind
+	value        string
 }
 
-// sharedYAMLPosition reports whether at's position appears more than once in
-// tree, as it does for alias and merge-key copies.
-func sharedYAMLPosition(tree, at *yaml.Node) bool {
-	count := 0
+func yamlPositionOf(node *yaml.Node) yamlPosition {
+	return yamlPosition{node.Line, node.Column, node.Kind, node.Value}
+}
+
+// indexYAMLPositions lists the paths of the nodes of tree at each source
+// position, in document order. Alias and merge-key copies share a position.
+func indexYAMLPositions(tree *yaml.Node) map[yamlPosition][]string {
+	paths := map[yamlPosition][]string{}
 	walkYAMLTwins(yamlVisit{rendered: tree, node: tree}, func(visit yamlVisit) {
-		if sameYAMLPosition(visit.node, at) {
-			count++
-		}
+		position := yamlPositionOf(visit.node)
+		paths[position] = append(paths[position], visit.path)
 	})
-	return count > 1
-}
-
-func sameYAMLPosition(node, at *yaml.Node) bool {
-	return node.Line == at.Line && node.Column == at.Column && node.Kind == at.Kind && node.Value == at.Value
+	return paths
 }
