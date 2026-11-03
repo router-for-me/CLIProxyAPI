@@ -384,40 +384,44 @@ func TestSoonestResetSelector_ProbeRecordIsBounded(t *testing.T) {
 	}
 }
 
-// At the bound, a new credential's probe evicts only the record reserved longest ago;
-// every other credential stays probed.
-func TestSoonestResetSelector_ProbeRecordEvictsOldestAtBound(t *testing.T) {
+// At the bound, nothing is evicted: a credential without a record is not probed and ranks
+// as probed with an unknown reset, recorded credentials stay probed (and still get one
+// probe per rollover), and a slot freed by InvalidateAuth lets a new credential be probed.
+func TestSoonestResetSelector_FullProbeRecordStopsNewProbes(t *testing.T) {
 	t.Parallel()
 
 	wall := soonestResetTestNow
 	selector := &SoonestResetSelector{}
 	id := func(i int) string { return "auth-" + strconv.Itoa(i) }
-	for i := 0; i <= maxSoonestResetProbeEntries; i++ {
+	for i := 0; i < maxSoonestResetProbeEntries; i++ {
 		selector.pick([]*Auth{{ID: id(i), Provider: "claude"}}, wall)
 	}
-
-	selector.mu.Lock()
-	// Marking a later rollover on a recorded credential is not a new record.
-	selector.reserveProbeLocked(id(1), &quotaRollover{window: quotaWindowClaude7d, at: wall, gap: 84 * time.Hour})
-	size := len(selector.probes)
-	_, keptOldest := selector.probes[id(0)]
-	var missing []string
-	for i := 1; i <= maxSoonestResetProbeEntries; i++ {
-		if _, ok := selector.probes[id(i)]; !ok {
-			missing = append(missing, id(i))
-		}
+	records := func() (int, bool) {
+		selector.mu.Lock()
+		defer selector.mu.Unlock()
+		_, recordedFresh := selector.probes["fresh"]
+		return len(selector.probes), recordedFresh
 	}
-	selector.mu.Unlock()
-	if size != maxSoonestResetProbeEntries {
+	if size, _ := records(); size != maxSoonestResetProbeEntries {
 		t.Fatalf("probe records = %d, want %d", size, maxSoonestResetProbeEntries)
-	}
-	if keptOldest || len(missing) > 0 {
-		t.Fatalf("oldest record kept = %v, other records missing = %v; want only %s evicted", keptOldest, missing, id(0))
 	}
 
 	b := soonestResetClaude("b", wall, soonestResetDay, "allowed")
-	newest := &Auth{ID: id(maxSoonestResetProbeEntries), Provider: "claude"}
-	assertSoonestResetPicks(t, "newest record still probed", soonestResetPicks(selector, wall, 1, newest, b), "b")
-	assertSoonestResetPicks(t, "older surviving record still probed", soonestResetPicks(selector, wall, 1, &Auth{ID: id(1), Provider: "claude"}, b), "b")
-	assertSoonestResetPicks(t, "evicted record probed again", soonestResetPicks(selector, wall, 1, &Auth{ID: id(0), Provider: "claude"}, b), id(0))
+	fresh := &Auth{ID: "fresh", Provider: "claude"}
+	assertSoonestResetPicks(t, "no probe once full", soonestResetPicks(selector, wall, 3, fresh, b), "b", "b", "b")
+	assertSoonestResetPicks(t, "recorded credential still probed", soonestResetPicks(selector, wall, 1, &Auth{ID: id(0), Provider: "claude"}, b), "b")
+	// A recorded credential's weekly window rolled over: its probe re-arms once.
+	rolled := soonestResetAuth(id(1), "claude", wall.Add(-time.Hour), map[string]string{
+		"Anthropic-Ratelimit-Unified-7d-Reset": soonestResetEpoch(wall.Add(-time.Minute)),
+	})
+	assertSoonestResetPicks(t, "rollover still re-arms a recorded probe", soonestResetPicks(selector, wall, 2, rolled, b), id(1), "b")
+	if size, recordedFresh := records(); size != maxSoonestResetProbeEntries || recordedFresh {
+		t.Fatalf("probe records = %d (fresh recorded = %v), want %d without fresh", size, recordedFresh, maxSoonestResetProbeEntries)
+	}
+
+	selector.InvalidateAuth(id(0))
+	assertSoonestResetPicks(t, "freed slot allows one probe", soonestResetPicks(selector, wall, 3, fresh, b), "fresh", "b", "b")
+	if size, recordedFresh := records(); size != maxSoonestResetProbeEntries || !recordedFresh {
+		t.Fatalf("probe records = %d (fresh recorded = %v), want %d with fresh", size, recordedFresh, maxSoonestResetProbeEntries)
+	}
 }
