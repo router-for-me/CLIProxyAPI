@@ -2,13 +2,48 @@ package claude
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
+
+func TestConvertClaudeRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"max_output_tokens fallback", `{"max_output_tokens":2048}`, "2048"},
+		{"max_tokens takes precedence", `{"max_tokens":1024,"max_output_tokens":2048}`, "1024"},
+		{"zero takes precedence", `{"max_tokens":0,"max_output_tokens":2048}`, "0"},
+		{"string ignored", `{"max_tokens":"1024"}`, ""},
+		{"null ignored", `{"max_tokens":null}`, ""},
+		{"boolean ignored", `{"max_tokens":true}`, ""},
+		{"object ignored", `{"max_tokens":{}}`, ""},
+		{"invalid primary does not use fallback", `{"max_tokens":"1024","max_output_tokens":2048}`, ""},
+		{"null primary does not use fallback", `{"max_tokens":null,"max_output_tokens":2048}`, ""},
+		{"invalid fallback ignored", `{"max_output_tokens":"2048"}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertClaudeRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertClaudeRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+			if ojson.GetBytesNoCopy(out, "max_tokens").Exists() {
+				t.Fatalf("max_tokens should not be forwarded; output=%s", out)
+			}
+		})
+	}
+}
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
