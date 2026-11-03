@@ -130,7 +130,7 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 	// An entry that is not placed keeps no line, which would point into encoded.
 	lines := yamlLines{}
 	var rendered yaml.Node
-	if len(encoded) <= maxYAMLErrorDetailBytes && yaml.Unmarshal(encoded, &rendered) == nil && len(rendered.Content) > 0 {
+	if len(encoded) <= MaxYAMLErrorDetailBytes && yaml.Unmarshal(encoded, &rendered) == nil && len(rendered.Content) > 0 {
 		lines = indexYAMLLines(rendered.Content[0], flat)
 	}
 	at := func(node *yaml.Node) string {
@@ -222,7 +222,7 @@ func isV8Section(path string) bool {
 func DescribeYAMLErrorLines(err error, doc *yaml.Node, encoded, submitted []byte) string {
 	var typeErr *yaml.TypeError
 	var rendered yaml.Node
-	if !errors.As(err, &typeErr) || len(encoded) > maxYAMLErrorDetailBytes || len(submitted) > maxYAMLErrorDetailBytes ||
+	if !errors.As(err, &typeErr) || len(encoded) > MaxYAMLErrorDetailBytes || len(submitted) > MaxYAMLErrorDetailBytes ||
 		yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
 		return err.Error()
 	}

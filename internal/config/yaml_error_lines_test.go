@@ -61,7 +61,7 @@ func TestValidateV8ConfigReportsEveryUnknownFieldInASection(t *testing.T) {
 }
 
 func TestYAMLErrorDetailsLeaveLargeDocumentsToYAMLv3(t *testing.T) {
-	encoded := []byte("server:\n  port: x\npad: '" + strings.Repeat("a", maxYAMLErrorDetailBytes) + "'\n")
+	encoded := []byte("server:\n  port: x\npad: '" + strings.Repeat("a", MaxYAMLErrorDetailBytes) + "'\n")
 	var doc yaml.Node
 	if err := yaml.Unmarshal(encoded, &doc); err != nil {
 		t.Fatal(err)

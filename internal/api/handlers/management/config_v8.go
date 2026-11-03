@@ -117,7 +117,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			return
 		}
 		// Keep a whole-document body so validation errors can cite its lines.
-		if c.Request.Method == http.MethodPut && len(parts) == 0 {
+		if c.Request.Method == http.MethodPut && len(parts) == 0 && len(body) <= config.MaxYAMLErrorDetailBytes {
 			submitted = body
 		}
 		stripAPIKeysAuthIndexesFromUpdate(parts, &update)

@@ -10,9 +10,10 @@ import (
 
 var yamlSyntaxPrefix = regexp.MustCompile(`^yaml: (?:line (\d+): )?`)
 
-// Errors in larger documents keep yaml.v3's message, so describing one costs
-// at most a few parses of a normal-sized config.
-const maxYAMLErrorDetailBytes = 1 << 20
+// MaxYAMLErrorDetailBytes is the largest document whose YAML errors are
+// restated. Larger ones keep yaml.v3's message, so describing an error costs at
+// most a few parses of a normal-sized config.
+const MaxYAMLErrorDetailBytes = 1 << 20
 
 // DescribeYAMLSyntaxError restates err, from yaml.Unmarshal(body), with the
 // one-based line of the problem. yaml.v3's own line can be zero-based, missing,
@@ -20,7 +21,7 @@ const maxYAMLErrorDetailBytes = 1 << 20
 // lower bound when searching for the shortest line prefix that fails the same way.
 func DescribeYAMLSyntaxError(body []byte, err error) string {
 	match := yamlSyntaxPrefix.FindStringSubmatch(err.Error())
-	if match == nil || len(body) > maxYAMLErrorDetailBytes {
+	if match == nil || len(body) > MaxYAMLErrorDetailBytes {
 		return err.Error()
 	}
 	problem := err.Error()[len(match[0]):]
