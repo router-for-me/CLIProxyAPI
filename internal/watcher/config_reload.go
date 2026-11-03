@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 
 	log "github.com/sirupsen/logrus"
@@ -135,6 +136,32 @@ func (w *Watcher) rebaseAuthDirStateLocked(nextAuthDir string) {
 			}
 		}
 	}
+	rebaseAuthMapPaths := func(authMap map[string]*coreauth.Auth) {
+		for _, existing := range authMap {
+			if existing == nil || len(existing.Attributes) == 0 {
+				continue
+			}
+			rebased := false
+			for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource} {
+				raw := strings.TrimSpace(existing.Attributes[key])
+				if raw == "" || strings.HasPrefix(raw, "config:") {
+					continue
+				}
+				if w.matchesAuthDir(filepath.Dir(raw), resolvedNext) {
+					target := filepath.Join(resolvedNext, filepath.Base(raw))
+					if existing.Attributes[key] != target {
+						existing.Attributes[key] = target
+						rebased = true
+					}
+				}
+			}
+			if rebased {
+				existing.ClearFileSnapshot()
+			}
+		}
+	}
+	rebaseAuthMapPaths(w.currentAuths)
+	rebaseAuthMapPaths(w.pendingProviderReloadAuths)
 }
 
 func (w *Watcher) purgeStaleAuthDirStateLocked(nextAuthDir string) {
@@ -190,16 +217,18 @@ func (w *Watcher) reloadConfig() bool {
 	candidateAuthDir := strings.TrimSpace(newConfig.AuthDir)
 	realDirSwitch := false
 	if candidateAuthDir != "" {
-		if oldAuthDir == "" || !w.matchesAuthDir(oldAuthDir, candidateAuthDir) {
-			w.authDir = candidateAuthDir
-			realDirSwitch = oldAuthDir != ""
+		w.authDir = candidateAuthDir
+		if oldAuthDir != "" {
+			if !w.matchesAuthDir(oldAuthDir, candidateAuthDir) {
+				realDirSwitch = true
+				w.authDirGeneration++
+				w.purgeStaleAuthDirStateLocked(candidateAuthDir)
+			} else if oldAuthDir != candidateAuthDir {
+				w.rebaseAuthDirStateLocked(candidateAuthDir)
+			}
 		}
 	}
 	nextAuthDir := w.authDir
-	if realDirSwitch {
-		w.authDirGeneration++
-		w.purgeStaleAuthDirStateLocked(nextAuthDir)
-	}
 	w.clientsMutex.Unlock()
 	w.authRescanMu.Unlock()
 
@@ -225,7 +254,7 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
-	authDirChanged := oldConfig == nil || realDirSwitch || oldAuthDir != nextAuthDir
+	authDirChanged := oldConfig == nil || realDirSwitch
 	if nextAuthDir != "" {
 		w.rewatchAuthDir(nextAuthDir)
 	}

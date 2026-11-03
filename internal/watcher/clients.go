@@ -214,7 +214,15 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.lastAuthContents = newAuthContents
 		w.fileAuthsByPath = newFileAuthsByPath
 		w.clientsMutex.Unlock()
-		w.authRescanMu.Unlock()
+	} else {
+		w.authRescanMu.Lock()
+		w.clientsMutex.RLock()
+		stale := scanAuthDirGen != w.authDirGeneration
+		w.clientsMutex.RUnlock()
+		if stale {
+			w.authRescanMu.Unlock()
+			return
+		}
 	}
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
@@ -223,6 +231,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		log.Debugf("triggering server update callback before auth refresh")
 		w.reloadCallback(cfg)
 	}
+	w.authRescanMu.Unlock()
 
 	w.refreshAuthState(forceAuthRefresh)
 	redisqueue.NotifyUsageRefresh()

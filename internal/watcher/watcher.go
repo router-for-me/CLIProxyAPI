@@ -184,11 +184,13 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	oldAuthDir := w.authDir
 	w.config = cloned
 	if nextAuthDir != "" {
-		if oldAuthDir == "" || !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
-			w.authDir = nextAuthDir
-			if oldAuthDir != "" {
+		w.authDir = nextAuthDir
+		if oldAuthDir != "" {
+			if !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
 				w.authDirGeneration++
 				w.purgeStaleAuthDirStateLocked(nextAuthDir)
+			} else if oldAuthDir != nextAuthDir {
+				w.rebaseAuthDirStateLocked(nextAuthDir)
 			}
 		}
 	}

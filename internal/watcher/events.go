@@ -112,19 +112,32 @@ func (w *Watcher) rewatchAuthDir(nextAuthDir string) {
 	if errMkdir := os.MkdirAll(nextTrimmed, 0o700); errMkdir != nil {
 		log.Debugf("failed to ensure updated auth directory %s: %v", nextTrimmed, errMkdir)
 	}
+	removePrev := !w.matchesAuthDir(prevWatched, filepath.Dir(w.configPath))
 	if w.matchesAuthDir(prevWatched, nextTrimmed) {
-		// Retain prevWatched as the registered fsnotify path spelling so a future
-		// transition to a distinct directory removes the exact registered watch,
-		// while incoming events are rebased onto the active authDir spelling.
-		return
-	}
-	if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
-		log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
-		return
-	}
-	if !w.matchesAuthDir(prevWatched, filepath.Dir(w.configPath)) {
-		if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
-			log.Debugf("failed to remove old auth directory watch %s: %v", prevWatched, errRemove)
+		// For equivalent directory aliases (such as symlink -> real dir), remove the old
+		// alias first so platforms that deduplicate watches by inode do not drop the watch
+		// when removing prevWatched after adding nextTrimmed.
+		if removePrev {
+			if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
+				log.Debugf("failed to remove old auth directory alias watch %s: %v", prevWatched, errRemove)
+			}
+		}
+		if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
+			log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
+			if removePrev {
+				_ = w.watcher.Add(prevWatched)
+			}
+			return
+		}
+	} else {
+		if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
+			log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
+			return
+		}
+		if removePrev {
+			if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
+				log.Debugf("failed to remove old auth directory watch %s: %v", prevWatched, errRemove)
+			}
 		}
 	}
 	w.clientsMutex.Lock()

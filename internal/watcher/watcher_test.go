@@ -2155,5 +2155,88 @@ func TestReloadConfigEquivalentAuthDirSpellingPreservesStableCredentialIDs(t *te
 			t.Fatal("unrelated reloadConfig() returned false")
 		}
 		assertNoQueuedUpdates()
+
+		// Switching from symlink back to the real directory and removing the obsolete
+		// symlink must keep SnapshotCoreAuths and incremental events working.
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(realDir))), 0o600); err != nil {
+			t.Fatalf("write realDir config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() back to realDir returned false")
+		}
+		assertNoQueuedUpdates()
+		if gotDir := w.currentAuthDir(); gotDir != realDir {
+			t.Fatalf("currentAuthDir() = %q, want %q", gotDir, realDir)
+		}
+		if err := os.Remove(linkDir); err != nil {
+			t.Fatalf("remove obsolete symlink: %v", err)
+		}
+		snap := w.SnapshotCoreAuths()
+		if len(snap) != 1 || snap[0].ID != "x.json" {
+			t.Fatalf("SnapshotCoreAuths after removing obsolete symlink = %+v, want [x.json]", snap)
+		}
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-3"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json after removing symlink: %v", err)
+		}
+		w.handleEvent(fsnotify.Event{Name: credPath, Op: fsnotify.Write})
+		afterSymlinkRemoved := expectOneUpdate()
+		if afterSymlinkRemoved.Action != AuthUpdateActionModify || afterSymlinkRemoved.ID != "x.json" {
+			t.Fatalf("update after removing obsolete symlink = %+v, want modify x.json", afterSymlinkRemoved)
+		}
+		assertNoQueuedUpdates()
 	})
+}
+
+func TestReloadClientsStaleAuthDirGenerationSkipsReloadCallback(t *testing.T) {
+	tmp := t.TempDir()
+	authDirA := filepath.Join(tmp, "auth-a")
+	authDirB := filepath.Join(tmp, "auth-b")
+	if err := os.MkdirAll(authDirA, 0o700); err != nil {
+		t.Fatalf("mkdir auth-a: %v", err)
+	}
+	if err := os.MkdirAll(authDirB, 0o700); err != nil {
+		t.Fatalf("mkdir auth-b: %v", err)
+	}
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirA))), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	var callbackMu sync.Mutex
+	var callbackDirs []string
+	w, err := NewWatcher(cfgPath, authDirA, func(cfg *config.Config) {
+		callbackMu.Lock()
+		callbackDirs = append(callbackDirs, cfg.AuthDir)
+		callbackMu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	w.SetConfig(&config.Config{AuthDir: authDirA})
+
+	// Simulate an in-flight reloadClients(false, ...) that captured generation 0
+	// while a directory switch advances authDirGeneration before reloadCallback runs.
+	w.authRescanMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.reloadClients(false, nil, false)
+	}()
+	// Wait briefly for the goroutine to capture scanAuthDirGen and block on authRescanMu.
+	time.Sleep(20 * time.Millisecond)
+	w.clientsMutex.Lock()
+	w.config = &config.Config{AuthDir: authDirB}
+	w.authDir = authDirB
+	w.authDirGeneration++
+	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
+	<-done
+
+	callbackMu.Lock()
+	got := append([]string(nil), callbackDirs...)
+	callbackMu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("expected stale reloadClients to skip reloadCallback, got %v", got)
+	}
 }
