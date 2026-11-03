@@ -323,10 +323,20 @@ func observedQuotaWindows(provider string, signals map[string]string, observedAt
 		primary, secondary := window(quotaWindowCodexPrimary, "Primary"), window(quotaWindowCodexSecondary, "Secondary")
 		const day = 24 * time.Hour
 		switch {
-		// The longer window is the weekly one, whichever header carries it; without
-		// lengths, secondary is weekly.
+		// The longer window is the weekly one, whichever header carries it. When only one
+		// length is known, it decides (a day or more is weekly); without lengths,
+		// secondary is weekly.
 		case primary != nil && secondary != nil:
-			if primary.length > 0 && secondary.length > 0 && primary.length > secondary.length {
+			primaryLong := false
+			switch {
+			case primary.length > 0 && secondary.length > 0:
+				primaryLong = primary.length > secondary.length
+			case primary.length > 0:
+				primaryLong = primary.length >= day
+			case secondary.length > 0:
+				primaryLong = secondary.length < day
+			}
+			if primaryLong {
 				long, short = primary, secondary
 			} else {
 				long, short = secondary, primary

@@ -198,6 +198,45 @@ func TestSoonestResetSelector_ProbeMarkersArePerWindow(t *testing.T) {
 	assertSoonestResetPicks(t, "primary rolled over", soonestResetPicks(selector, r.Add(soonestResetDay+time.Second), 2, complete, b), "a", "b")
 }
 
+// With both Codex windows present and only one length known, that length decides which
+// window is weekly; secondary is weekly only when neither length is known.
+func TestObservedQuotaWindows_CodexPartialLengths(t *testing.T) {
+	t.Parallel()
+
+	now := soonestResetTestNow
+	primaryReset, secondaryReset := now.Add(5*soonestResetDay), now.Add(2*time.Hour)
+	tests := []struct {
+		name    string
+		lengths map[string]string
+		want    time.Time
+	}{
+		{"only primary length, weekly", map[string]string{"X-Codex-Primary-Window-Minutes": "10080"}, primaryReset},
+		{"only primary length, short", map[string]string{"X-Codex-Primary-Window-Minutes": "300"}, secondaryReset},
+		{"only secondary length, short", map[string]string{"X-Codex-Secondary-Window-Minutes": "300"}, primaryReset},
+		{"only secondary length, weekly", map[string]string{"X-Codex-Secondary-Window-Minutes": "10080"}, secondaryReset},
+		{"no lengths", map[string]string{}, secondaryReset},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			signals := map[string]string{
+				"X-Codex-Primary-Used-Percent":   "10",
+				"X-Codex-Primary-Reset-At":       soonestResetEpoch(primaryReset),
+				"X-Codex-Secondary-Used-Percent": "10",
+				"X-Codex-Secondary-Reset-At":     soonestResetEpoch(secondaryReset),
+			}
+			for k, v := range tt.lengths {
+				signals[k] = v
+			}
+			auth := soonestResetAuth("a", "codex", now, signals)
+			got := observedQuotaWindows("codex", auth.Quota.Signals, auth.Quota.ObservedAt, now.Add(time.Second))
+			if !got.weeklyReset.Equal(tt.want) {
+				t.Fatalf("weeklyReset = %v, want %v", got.weeklyReset, tt.want)
+			}
+		})
+	}
+}
+
 func TestObservedQuotaWindowsRollover(t *testing.T) {
 	t.Parallel()
 
