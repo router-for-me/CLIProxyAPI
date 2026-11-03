@@ -2215,16 +2215,20 @@ func TestReloadClientsStaleAuthDirGenerationSkipsReloadCallback(t *testing.T) {
 	defer func() { _ = w.Stop() }()
 	w.SetConfig(&config.Config{AuthDir: authDirA})
 
-	// Simulate an in-flight reloadClients(false, ...) that captured generation 0
-	// while a directory switch advances authDirGeneration before reloadCallback runs.
+	captured := make(chan struct{})
+	prevHook := testReloadClientsCapturedGenHook
+	testReloadClientsCapturedGenHook = func() {
+		close(captured)
+	}
+	t.Cleanup(func() { testReloadClientsCapturedGenHook = prevHook })
+
 	w.authRescanMu.Lock()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		w.reloadClients(false, nil, false)
 	}()
-	// Wait briefly for the goroutine to capture scanAuthDirGen and block on authRescanMu.
-	time.Sleep(20 * time.Millisecond)
+	<-captured
 	w.clientsMutex.Lock()
 	w.config = &config.Config{AuthDir: authDirB}
 	w.authDir = authDirB

@@ -25,6 +25,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var testReloadClientsCapturedGenHook func()
+
 func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
 	log.Debugf("starting full client load process")
 
@@ -32,6 +34,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	cfg := w.config
 	scanAuthDirGen := w.authDirGeneration
 	w.clientsMutex.RUnlock()
+	if hook := testReloadClientsCapturedGenHook; hook != nil {
+		hook()
+	}
 
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
