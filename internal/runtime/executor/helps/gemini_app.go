@@ -11,17 +11,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
 )
 
 // GeminiAppPrompt renders the complete text history for a stateless temporary chat.
 // Gemini App has no API-level system or tool roles, so role boundaries are explicit.
 func GeminiAppPrompt(body []byte) (string, error) {
-	if !gjson.ValidBytes(body) {
+	if !ojson.ValidBytes(body) {
 		return "", fmt.Errorf("gemini-app: invalid request JSON")
 	}
-	root := gjson.ParseBytes(body)
+	root := ojson.ParseBytes(body)
 	if len(root.Get("tools").Array()) > 0 {
 		return "", fmt.Errorf("gemini-app: tool calling is not supported")
 	}
@@ -29,7 +29,7 @@ func GeminiAppPrompt(body []byte) (string, error) {
 		return "", err
 	}
 	var prompt strings.Builder
-	appendParts := func(role string, parts gjson.Result) error {
+	appendParts := func(role string, parts ojson.Result) error {
 		var text strings.Builder
 		for _, part := range parts.Array() {
 			if !part.IsObject() {
@@ -43,7 +43,7 @@ func GeminiAppPrompt(body []byte) (string, error) {
 			if part.Get("thought").Bool() {
 				continue
 			}
-			if value := part.Get("text"); value.Type == gjson.String {
+			if value := part.Get("text"); value.Type == ojson.String {
 				text.WriteString(value.String())
 			}
 		}
@@ -77,7 +77,7 @@ func GeminiAppPrompt(body []byte) (string, error) {
 // ValidateGeminiAppOutput checks both native and OpenAI contracts, including
 // fields that translation may discard rather than preserve in generationConfig.
 func ValidateGeminiAppOutput(body []byte) error {
-	root := gjson.ParseBytes(body)
+	root := ojson.ParseBytes(body)
 	if mime := root.Get("generationConfig.responseMimeType").String(); mime != "" && mime != "text/plain" {
 		return fmt.Errorf("gemini-app: structured output is not supported")
 	}
@@ -118,7 +118,7 @@ func GeminiAppPayload(prompt string) []byte {
 
 // GeminiAppWirePayload wraps an already finalized business payload without rewriting it.
 func GeminiAppWirePayload(body []byte) ([]byte, error) {
-	if !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsArray() {
+	if !ojson.ValidBytes(body) || !ojson.ParseBytes(body).IsArray() {
 		return nil, fmt.Errorf("gemini-app: payload rules must preserve the request array")
 	}
 	return json.Marshal([]any{nil, string(body)})
@@ -164,7 +164,7 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 			}
 			return text, geminiAppError{http.StatusBadGateway, "gemini-app: unexpected upstream frame"}
 		}
-		for _, part := range gjson.ParseBytes(frame).Array() {
+		for _, part := range ojson.ParseBytes(frame).Array() {
 			if code := part.Get("5.2.0.1.0").Int(); code != 0 {
 				status := http.StatusBadGateway
 				if code == 1037 {
@@ -179,12 +179,12 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 			if inner == "" {
 				continue
 			}
-			if !gjson.Valid(inner) {
+			if !ojson.Valid(inner) {
 				return text, geminiAppError{http.StatusBadGateway, "gemini-app: invalid upstream response"}
 			}
-			result := gjson.Parse(inner)
+			result := ojson.Parse(inner)
 			candidate := result.Get("4.0")
-			if snapshot := candidate.Get("1.0"); snapshot.Type == gjson.String {
+			if snapshot := candidate.Get("1.0"); snapshot.Type == ojson.String {
 				next := snapshot.String()
 				if !strings.HasPrefix(next, text) {
 					return text, geminiAppError{http.StatusBadGateway, "gemini-app: upstream revised already delivered text"}

@@ -34,6 +34,16 @@ server:
   # Default is 0 (disabled / no limit).
   max-request-body-bytes: 0
 
+  # Negotiated compression of downstream HTTP responses (including SSE streams).
+  # Responses are compressed only when the client advertises zstd or gzip in
+  # Accept-Encoding; WebSocket upgrades are never wrapped. Encoder memory is
+  # retained for the lifetime of an open stream and depends on prior pool usage.
+  response-compression:
+    # Default: true.
+    enabled: true
+    # Non-streaming responses smaller than this many bytes are sent uncompressed.
+    min-bytes: 1024
+
   # Global token for GitHub requests (for example, release and asset downloads).
   # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
   # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
@@ -58,6 +68,9 @@ server:
 
   # Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
   # When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
+  # TXT records follow draft-su-ai-gateway-discovery-00:
+  #   txtvers, path, tls, auth, protocols, auth_type, product, id, role
+  # The TXT protocols list mirrors the advertised subtypes. Management endpoints are never advertised.
   # NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.
   # To broadcast across the physical LAN, run the container with host networking (--net=host / network_mode: host).
   discovery:
@@ -70,12 +83,12 @@ server:
     #   - "_messages"
     #   - "_generate-content"
     #   - "_interactions"
+    #   # Optional extended subtypes: _completions, _responses-ws, _realtime, _images,
+    #   # _videos, _audio, _count-tokens, _search
     # interfaces:
     #   include: []                     # White-listed interfaces (empty: auto-detect physical interfaces)
     #   exclude: []                     # Additional interface patterns to exclude
-    # auth-required: true               # Advertise that credentials are required
-
-    # advertise-management: false      # Advertise management availability
+    # auth-required: true               # Advertise auth=1 (credentials required)
 
 # Management API settings
 management:
@@ -226,6 +239,10 @@ requests:
   # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
   # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.
   proxy-url: ""
+  # Connection pooling has no global switch: it is enabled per api-key credential with
+  # `connection-pool` on an api-keys entry (group level, overridable per key). See the
+  # api-keys section below. OAuth credentials are never pooled by this setting;
+  # Antigravity keeps its own antigravity.connection-pool switch.
 
   # Maximum time, in seconds, for upstream TLS handshakes made by the shared built-in
   # uTLS client. It applies to both the Claude Code Anthropic transport and the Chrome
@@ -336,12 +353,29 @@ client:
       ttl: "24h"
       limit: 1024
 
+  claude:
+    # Show public Codex commentary as visible Claude text, retaining phase markers
+    # for replay. Genuine reasoning summaries remain thinking blocks.
+    # Default false preserves existing behavior for clients such as TTS consumers.
+    show-codex-commentary: false
+
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
   codex:
     # Experimental full-duplex Codex Responses WebSocket steering (default: false).
     # Keeps one upstream account/model per socket; accepted input is never replayed.
     response-steering: false
+    # Compress request bodies sent to the ChatGPT Codex backend with zstd,
+    # mirroring the official Codex client. Applies only to OAuth credentials
+    # targeting https://chatgpt.com/backend-api/codex (API-key credentials,
+    # custom base URLs, and SIWC requests are never compressed). A 400/415
+    # rejection is retried once with an uncompressed body. Default: false.
+    upstream-request-compression: false
+    # Request bodies smaller than this many bytes are sent uncompressed.
+    upstream-request-compression-min-bytes: 1024
+    # Enable permessage-deflate compression on Codex WebSocket connections
+    # (upstream and downstream) after negotiation. Default: true.
+    websocket-compression: true
     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
     disable-codex-cloaking: false
     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,
@@ -465,7 +499,8 @@ upstream:
     # timeout is a fallback and
     # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
     # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
-    # the same exact software baseline rather than learning newer client versions.
+    # the same exact software baseline rather than learning newer client versions (unless the
+    # credential resolves to cloak_mode: never, which preserves the confirmed caller's headers).
     # header-defaults:
     #   user-agent: "claude-cli/2.1.280 (external, cli)"
     #   package-version: "0.112.1"
@@ -662,6 +697,18 @@ upstream:
 #         # X-Claude-Code-Session-Id: "$ABC" # copies client's "ABC" header
 #       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
+#       # Optional connection reuse for this credential group. Writing the block is the opt-in;
+#       # `connection-pool: {}` opts in with the defaults below. Pools stay per key, so pooling
+#       # one key never shares connections with another key. Applies to the standard transport
+#       # and the Claude Code TLS transport (Anthropic upstreams); the ChatGPT browser-profile
+#       # transport keeps its one-connection-per-request lifecycle.
+#       # Defaults: idle-conn-timeout 300s, max-idle-conns-per-host 2. Zero or negative values
+#       # disable keep-alives (every request dials). Authenticated proxy URLs are isolated per
+#       # proxy credential digest so rotating user:pass or sticky-session usernames never mix.
+#       # connection-pool:
+#       #   enabled: true
+#       #   idle-conn-timeout: "300s" # defaults to 300s; measured upstreams reuse idle conns >600s
+#       #   max-idle-conns-per-host: 2 # defaults to 2
 #       models:
 #         - name: "gpt-5-codex"   # upstream model name
 #           alias: "codex-latest" # client alias mapped to the upstream model
@@ -683,6 +730,8 @@ upstream:
 #       keys:
 #         - api-key: "sk-atSM..."
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#           # connection-pool:                # optional: per-key override of the group pool setting
+#           #   enabled: false                # opt this key out while the group stays pooled
 #           disable-codex-cloaking: false # optional: true disables cloaking; OAuth provider settings do not apply here
 #           alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #           websockets: false # optional: use the Codex upstream WebSocket transport
@@ -891,6 +940,8 @@ upstream:
 #           weight: 5 # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
 #           proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #           # proxy-url: "direct" # optional: explicit direct connect for this credential
+#           # connection-pool: # optional: per-key override of the group pool block
+#           #   enabled: true
 #         - api-key: "sk-or-v1-...b781" # without proxy-url
 #       models: # The models supported by the provider.
 #         - name: "moonshotai/kimi-k2:free" # The actual model name.
@@ -1150,6 +1201,12 @@ multimedia:
   # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
   # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
   # gpt-image-2-base-model: "gpt-5.4-mini"
+
+  # Grok video routes accept grok-imagine-video, grok-imagine-video-1.5,
+  # grok-imagine-video-1.5-preview, and grok-imagine-video-1.5-lite.
+  # Supported on /openai/v1/videos and the native xAI /v1/videos/* endpoints.
+  # The OpenAI-compatible route accepts resolution 480p, 720p, or 1080p (default: 720p).
+  # Built-in xAI video models remain available when a refreshed catalog omits them.
 
   # How long video IDs returned by /openai/v1/videos and xAI video creation stay bound
   # to the credential that created them. Default: 3h.

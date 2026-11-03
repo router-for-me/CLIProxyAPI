@@ -202,6 +202,33 @@ type DevinConfig struct {
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
+// ProxyConnectionPoolConfig configures upstream connection reuse for one api-key
+// credential (group level or per key).
+//
+// Pools are per credential: two API keys never share a connection, and OAuth
+// credentials are not poolable at all (Antigravity keeps its own switch). The
+// transport cache is bounded, so a deployment with very many keys degrades to the
+// historical one-transport-per-request behavior instead of growing without limit.
+type ProxyConnectionPoolConfig struct {
+	// Enabled controls whether connection reuse is active for this credential.
+	// Writing the connection-pool block is the opt-in, so an omitted or true
+	// value enables pooling; an explicit false opts a key out of its group pool.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// IdleConnTimeout is how long an idle pooled connection survives before it
+	// is closed. Defaults to "300s". Measured against ollama.com, an idle
+	// connection was still reused after 600s, so 300s sits inside the upstream
+	// window while covering the multi-minute gaps between interactive requests.
+	// Zero or a negative value disables keep-alives, so every request dials
+	// afresh.
+	IdleConnTimeout string `yaml:"idle-conn-timeout,omitempty" json:"idle-conn-timeout,omitempty"`
+
+	// MaxIdleConnsPerHost caps idle connections kept per upstream host.
+	// Defaults to 2, matching net/http's DefaultMaxIdleConnsPerHost. Zero or a
+	// negative value disables keep-alives as well.
+	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
+}
+
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
@@ -226,8 +253,35 @@ type AntigravityConnectionPoolConfig struct {
 	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
 }
 
+// ResponseCompressionConfig controls downstream HTTP response compression.
+type ResponseCompressionConfig struct {
+	// Enabled defaults to true when unset.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// MinBytes defaults to 1024 when zero or negative.
+	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
+}
+
+// IsEnabled reports whether negotiated response compression is enabled.
+func (c ResponseCompressionConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// EffectiveMinBytes returns the minimum non-streaming response size to compress.
+func (c ResponseCompressionConfig) EffectiveMinBytes() int {
+	if c.MinBytes <= 0 {
+		return 1024
+	}
+	return c.MinBytes
+}
+
 // CodexConfig configures provider-wide Codex request behavior.
 type CodexConfig struct {
+	// WebsocketCompression controls upstream and downstream permessage-deflate; unset means enabled.
+	WebsocketCompression *bool `yaml:"websocket-compression,omitempty" json:"websocket-compression,omitempty"`
+	// UpstreamRequestCompression enables zstd request bodies for the ChatGPT Codex backend.
+	UpstreamRequestCompression bool `yaml:"upstream-request-compression" json:"upstream-request-compression"`
+	// UpstreamRequestCompressionMinBytes defaults to 1024 when zero or negative.
+	UpstreamRequestCompressionMinBytes int `yaml:"upstream-request-compression-min-bytes,omitempty" json:"upstream-request-compression-min-bytes,omitempty"`
 	// DisableCodexCloaking disables forcing the official Codex identity headers on HTTP/SSE and WebSocket requests.
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// StreamBootstrapBuffering holds back the frames that arrive before generation starts, none of
@@ -269,6 +323,19 @@ type CodexConfig struct {
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
 	SignInWithChatGPTIdentifier string `yaml:"signin-with-chatgpt-identifier,omitempty" json:"signin-with-chatgpt-identifier,omitempty"`
+}
+
+// WebsocketCompressionEnabled reports whether WebSocket compression is enabled.
+func (c *CodexConfig) WebsocketCompressionEnabled() bool {
+	return c == nil || c.WebsocketCompression == nil || *c.WebsocketCompression
+}
+
+// RequestCompressionMinBytes returns the minimum request size eligible for compression.
+func (c *CodexConfig) RequestCompressionMinBytes() int {
+	if c == nil || c.UpstreamRequestCompressionMinBytes <= 0 {
+		return 1024
+	}
+	return c.UpstreamRequestCompressionMinBytes
 }
 
 // DefaultSignInWithChatGPTIdentifier is the default identifier (agent_name_hint and User-Agent prefix)
@@ -376,7 +443,8 @@ type DiscoveryConfig struct {
 	// AuthRequired indicates whether authentication is required for client calls (default: true).
 	AuthRequired *bool `yaml:"auth-required" json:"auth-required"`
 
-	// AdvertiseManagement explicitly controls whether management endpoints are exposed (default: false).
+	// AdvertiseManagement is deprecated and ignored. Management endpoints are never
+	// advertised over DNS-SD; the field remains so existing config files still load.
 	AdvertiseManagement bool `yaml:"advertise-management" json:"advertise-management"`
 }
 
@@ -615,6 +683,11 @@ type ClaudeKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
 
@@ -741,6 +814,11 @@ type CodexKey struct {
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []CodexModel `yaml:"models" json:"models"`
 
@@ -852,6 +930,11 @@ type GeminiKey struct {
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Models defines upstream model names and aliases for request routing.
 	Models []GeminiModel `yaml:"models,omitempty" json:"models,omitempty"`
 
@@ -939,6 +1022,10 @@ type OpenAICompatibility struct {
 	// APIKeyEntries defines API keys with optional per-key proxy configuration.
 	APIKeyEntries []OpenAICompatibilityAPIKey `yaml:"api-key-entries,omitempty" json:"api-key-entries,omitempty"`
 
+	// ConnectionPool is the provider-group default for upstream connection reuse.
+	// A per-key connection-pool entry overrides it field by field; omitted disables pooling.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Models defines the model configurations including aliases for routing.
 	Models []OpenAICompatibilityModel `yaml:"models" json:"models"`
 
@@ -971,6 +1058,11 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ConnectionPool configures upstream connection reuse for this key, overriding
+	// the provider-group default field by field. Pools stay per credential, so
+	// opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,

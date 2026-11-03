@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -108,7 +108,7 @@ func TestClaudeExecutor_ReplayedCompactionCapsuleIsExpanded(t *testing.T) {
 		"base_url": server.URL,
 	}}
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","stream":false,"input":[` +
-		`{"type":"compaction","encrypted_content":` + gjson.Get(`{"v":"`+capsule+`"}`, "v").Raw + `},` +
+		`{"type":"compaction","encrypted_content":` + ojson.Get(`{"v":"`+capsule+`"}`, "v").Raw + `},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
 
 	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
@@ -165,7 +165,7 @@ func TestClaudeExecutor_CompactionTriggerKeepsToolsForToolHistory(t *testing.T) 
 	if !bytes.Contains(seen, []byte(`"type":"tool_use"`)) || !bytes.Contains(seen, []byte(`"type":"tool_result"`)) {
 		t.Fatalf("tool history missing from summary request: %s", seen)
 	}
-	if got := gjson.GetBytes(seen, "tool_choice.type").String(); got != "none" {
+	if got := ojson.GetBytes(seen, "tool_choice.type").String(); got != "none" {
 		t.Fatalf("tool_choice.type = %q, want none so the summary cannot call tools: %s", got, seen)
 	}
 }
@@ -242,10 +242,10 @@ func TestClaudeExecutor_CompactionSummaryPayloadRuleIsLast(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(seen, "max_tokens").Int(); got != 1234 {
+	if got := ojson.GetBytes(seen, "max_tokens").Int(); got != 1234 {
 		t.Fatalf("max_tokens = %d, want payload rule 1234; body=%s", got, seen)
 	}
-	if got := gjson.GetBytes(seen, "tool_choice.type").String(); got != "auto" {
+	if got := ojson.GetBytes(seen, "tool_choice.type").String(); got != "auto" {
 		t.Fatalf("tool_choice.type = %q, want payload rule auto to win over built-in none; body=%s", got, seen)
 	}
 }
@@ -265,7 +265,7 @@ func TestClaudeExecutor_CompactionTriggerIncludesPreviousCapsule(t *testing.T) {
 		"base_url": server.URL,
 	}}
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","stream":false,"input":[` +
-		`{"type":"compaction","encrypted_content":` + gjson.Get(`{"v":"`+capsule+`"}`, "v").Raw + `},` +
+		`{"type":"compaction","encrypted_content":` + ojson.Get(`{"v":"`+capsule+`"}`, "v").Raw + `},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]},` +
 		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"continued"}]},` +
 		`{"type":"compaction_trigger"}]}`)
@@ -354,7 +354,7 @@ func TestClaudeExecutor_CompactionUsageMatchesResponsesAccounting(t *testing.T) 
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	usage := gjson.GetBytes(resp.Payload, "usage")
+	usage := ojson.GetBytes(resp.Payload, "usage")
 	if usage.Get("input_tokens").Int() != 114 || usage.Get("output_tokens").Int() != 7 || usage.Get("total_tokens").Int() != 121 || usage.Get("input_tokens_details.cached_tokens").Int() != 100 {
 		t.Fatalf("usage = %s, want input 114 output 7 total 121 cached 100", usage.Raw)
 	}
@@ -401,7 +401,7 @@ func claudeCompactionUpstream(t *testing.T, seen *[]byte) http.Handler {
 			return
 		}
 		*seen = body
-		if gjson.GetBytes(body, "stream").Bool() {
+		if ojson.GetBytes(body, "stream").Bool() {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte(strings.Join([]string{
 				`event: message_start`,
@@ -427,9 +427,9 @@ func claudeCompactionUpstream(t *testing.T, seen *[]byte) http.Handler {
 
 func assertSingleCompactionOutput(t *testing.T, payload []byte) {
 	t.Helper()
-	output := gjson.GetBytes(payload, "output")
+	output := ojson.GetBytes(payload, "output")
 	if !output.Exists() {
-		output = gjson.GetBytes(payload, "response.output")
+		output = ojson.GetBytes(payload, "response.output")
 	}
 	items := output.Array()
 	if len(items) != 1 || items[0].Get("type").String() != "compaction" {
@@ -442,16 +442,16 @@ func assertSingleCompactionOutput(t *testing.T, payload []byte) {
 	if plain != claudeCompactionSummaryText {
 		t.Fatalf("capsule summary = %q, want %q", plain, claudeCompactionSummaryText)
 	}
-	usage := gjson.GetBytes(payload, "usage")
+	usage := ojson.GetBytes(payload, "usage")
 	if !usage.Exists() {
-		usage = gjson.GetBytes(payload, "response.usage")
+		usage = ojson.GetBytes(payload, "response.usage")
 	}
 	if usage.Get("input_tokens").Int() != 11 || usage.Get("output_tokens").Int() != 7 || usage.Get("total_tokens").Int() != 18 {
 		t.Fatalf("usage = %s, want input 11 output 7 total 18", usage.Raw)
 	}
 }
 
-func compactionOutputTypes(items []gjson.Result) string {
+func compactionOutputTypes(items []ojson.Result) string {
 	if len(items) == 0 {
 		return "<empty>"
 	}
@@ -472,7 +472,7 @@ func assertClaudeCompactionSummaryRequest(t *testing.T, body []byte) {
 	}
 }
 
-func claudeCompactionCompletedResponse(t *testing.T, stream string) gjson.Result {
+func claudeCompactionCompletedResponse(t *testing.T, stream string) ojson.Result {
 	t.Helper()
 	for _, frame := range strings.Split(stream, "\n\n") {
 		if !strings.Contains(frame, "event: response.completed") {
@@ -482,9 +482,9 @@ func claudeCompactionCompletedResponse(t *testing.T, stream string) gjson.Result
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
-			return gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			return ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
 	}
 	t.Fatalf("response.completed missing from stream: %s", stream)
-	return gjson.Result{}
+	return ojson.Result{}
 }

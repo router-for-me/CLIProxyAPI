@@ -23,7 +23,9 @@ func TestGeminiAppCookieReplacementRecoversUnauthorizedAuth(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			ctx := context.Background()
 			manager := NewManager(nil, nil, nil)
-			initial, err := manager.Register(ctx, geminiAppCookieAuth())
+			auth := geminiAppCookieAuth()
+			auth.RequiresSignIn = true
+			initial, err := manager.Register(ctx, auth)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -45,7 +47,7 @@ func TestGeminiAppCookieReplacementRecoversUnauthorizedAuth(t *testing.T) {
 			}
 			manager.MarkResult(ctx, failure) // An old in-flight 401 must stay stale.
 			fresh, _ = manager.GetByID(initial.ID)
-			if fresh.Unavailable || fresh.LastError != nil {
+			if fresh.RequiresSignIn || fresh.Unavailable || fresh.LastError != nil {
 				t.Fatal("replacement kept an expired session's auth state")
 			}
 			if state := fresh.ModelStates["gemini-app"]; state != nil && (state.Unavailable || state.LastError != nil || !state.NextRetryAfter.IsZero()) {

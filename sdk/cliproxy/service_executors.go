@@ -363,7 +363,7 @@ func (s *Service) registerOpenAICompatProviderExecutor(providerKey string, auth 
 	nextExecutor := s.wrapOpenAICompatIfPluginAuth(compatExecutor, auth, cfg)
 	if !forceReplace {
 		if existingExecutor, hasExecutor := s.coreManager.Executor(providerKey); hasExecutor {
-			if shouldKeepExistingOpenAICompatExecutor(s, existingExecutor, nextExecutor, respectNonOwned) {
+			if shouldKeepExistingOpenAICompatExecutor(s, existingExecutor, nextExecutor, cfg, respectNonOwned) {
 				return
 			}
 		}
@@ -408,11 +408,14 @@ func pluginAuthProviderLookupKeys(auth *coreauth.Auth, fallback string) []string
 	return keys
 }
 
-func shouldKeepExistingOpenAICompatExecutor(s *Service, existing, next coreauth.ProviderExecutor, respectNonOwned bool) bool {
+func shouldKeepExistingOpenAICompatExecutor(s *Service, existing, next coreauth.ProviderExecutor, cfg *config.Config, respectNonOwned bool) bool {
 	if existing == nil || next == nil {
 		return false
 	}
 	if shouldUpgradeOpenAICompatToPluginRefresh(existing, next) {
+		return false
+	}
+	if cfgHolder, ok := existing.(interface{ UsesConfig(*config.Config) bool }); ok && !cfgHolder.UsesConfig(cfg) {
 		return false
 	}
 	if pluginhost.IsPluginRefreshCompatExecutor(existing) && pluginhost.IsPluginRefreshCompatExecutor(next) {

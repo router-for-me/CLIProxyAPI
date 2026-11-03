@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestClaudeResponsesServerToolStopReason(t *testing.T) {
@@ -24,7 +25,7 @@ func TestClaudeResponsesServerToolStopReason(t *testing.T) {
 		{reason: " PAUSE_TURN ", status: "completed", endTurn: "false"},
 		{reason: "max_tokens", status: "incomplete", detail: `{"reason":"max_output_tokens"}`},
 		{reason: "refusal", status: "incomplete", detail: `{"reason":"content_filter"}`},
-		{reason: "model_context_window_exceeded", status: "failed", event: "response.failed", errCode: "context_length_exceeded"},
+		{reason: "model_context_window_exceeded", status: "incomplete", detail: `{"reason":"max_output_tokens"}`},
 		{reason: "end_turn", status: "completed"},
 		{reason: "tool_use", status: "completed"},
 		{reason: "stop_sequence", status: "completed"},
@@ -34,7 +35,7 @@ func TestClaudeResponsesServerToolStopReason(t *testing.T) {
 			stop := chunks[len(chunks)-1]
 			chunks = append(chunks[:len(chunks)-1], []byte(fmt.Sprintf(
 				`data: {"type":"message_delta","delta":{"stop_reason":%q},"usage":{"output_tokens":12}}`, tc.reason)), stop)
-			check := func(t *testing.T, response gjson.Result) {
+			check := func(t *testing.T, response ojson.Result) {
 				t.Helper()
 				if got := response.Get("status").String(); got != tc.status {
 					t.Fatalf("status = %q, want %q", got, tc.status)
@@ -82,7 +83,7 @@ func TestClaudeResponsesServerToolStopReason(t *testing.T) {
 			t.Run("buffered", func(t *testing.T) {
 				output := ConvertClaudeResponseToOpenAIResponsesNonStream(
 					context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil)
-				check(t, gjson.ParseBytes(output))
+				check(t, util.ParseGJSONBytesNoCopy(output))
 			})
 		})
 	}

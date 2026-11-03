@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/geminiapp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -19,7 +20,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // GeminiAppExecutor exposes the signed-in Gemini App's default text model.
@@ -193,7 +193,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	// Claude-to-Gemini translation does not preserve output_config.format.
 	// Inspect both inbound buffers before translation can drop the contract.
-	if opts.SourceFormat == sdktranslator.FormatClaude && (gjson.GetBytes(original, "output_config.format").Exists() || gjson.GetBytes(req.Payload, "output_config.format").Exists()) {
+	if opts.SourceFormat == sdktranslator.FormatClaude && (ojson.GetBytes(original, "output_config.format").Exists() || ojson.GetBytes(req.Payload, "output_config.format").Exists()) {
 		return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, "gemini-app: structured output is not supported")
 	}
 	translatedOriginal, translated, err := helps.TranslateRequestPairReturningError(ctx, opts.Headers, e.cfg, opts.SourceFormat, sdktranslator.FormatGemini, req.Model, original, req.Payload, opts.Stream, false)
@@ -250,7 +250,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpReq.Header.Set("Referer", geminiapp.BaseURL+"/app")
 	httpReq.Header.Set("User-Agent", "Mozilla/5.0")
 	httpReq.Header.Set("X-Same-Domain", "1")
-	if id := gjson.GetBytes(body, "59").String(); id != "" {
+	if id := ojson.GetBytes(body, "59").String(); id != "" {
 		httpReq.Header.Set("x-goog-ext-525005358-jspb", fmt.Sprintf("[%q,1]", id))
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)

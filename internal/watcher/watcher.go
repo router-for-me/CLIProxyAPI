@@ -55,6 +55,7 @@ type Watcher struct {
 	currentAuths               map[string]*coreauth.Auth
 	pendingProviderReloadAuths map[string]*coreauth.Auth
 	authRevisions              map[string]uint64 // Includes deletion tombstones; guarded by clientsMutex.
+	persistedAuthRevisions     map[string]uint64 // Latest revision stamped by dispatchPersistedAuthUpdateWithRevision; guarded by clientsMutex.
 	fileObservations           map[string]uint64 // Tracks file events even when content is unchanged.
 	activeAuthScans            int               // Guarded by clientsMutex.
 	runtimeAuths               map[string]*coreauth.Auth
@@ -202,6 +203,12 @@ func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
 // and returns the stamped monotonic revision.
 func (w *Watcher) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
 	return w.dispatchPersistedAuthUpdateWithRevision(update)
+}
+
+// RereadDiscardedFileSnapshot invalidates watcher caches for a file snapshot
+// discarded by the manager's digest fence and re-reads the backing file.
+func (w *Watcher) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	w.rereadDiscardedFileSnapshot(auth)
 }
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.

@@ -2678,24 +2678,19 @@ func (a *ZeroconfAdvertiser) Stop() error {
 
 // ZeroconfBrowser provides DNS-SD browsing with fallback support.
 type ZeroconfBrowser struct {
-	options []zeroconf.ClientOption
+	ifaces []net.Interface
 }
 
 // NewZeroconfBrowser creates a new ZeroconfBrowser.
 func NewZeroconfBrowser(ifaces ...net.Interface) *ZeroconfBrowser {
-	var opts []zeroconf.ClientOption
-	if len(ifaces) > 0 {
-		opts = append(opts, zeroconf.SelectIfaces(ifaces))
-	}
-	return &ZeroconfBrowser{options: opts}
+	return &ZeroconfBrowser{ifaces: append([]net.Interface(nil), ifaces...)}
 }
 
 const (
 	maxDiscoveredServices      = 256
-	maxBrowseEntries           = 256
 	maxBrowseTXTRecords        = 64
 	maxBrowseTXTBytes          = 16 * 1024
-	maxDiscoveredAddresses     = 32
+	maxDiscoveredAddresses     = 64
 	maxDiscoveredMetadataItems = 32
 	maxMetadataItemBytes       = 64
 )
@@ -2729,162 +2724,20 @@ func (b *ZeroconfBrowser) Browse(ctx context.Context, serviceType, domain string
 		serviceType = DefaultServiceType
 	}
 
-	entries := make(chan *zeroconf.ServiceEntry, 32)
-	browseCtx, cancelBrowse := context.WithCancel(ctx)
-	defer cancelBrowse()
-
-	var discovered []DiscoveredService
-	var mu sync.Mutex
-	seen := make(map[string]int)
-
-	// Stop the underlying zeroconf client after a bounded number of entries. This
-	// is separate from the caller's context so a LAN flood cannot grow the
-	// dependency's internal sentEntries cache for the full browse lifetime.
-	doneCh := make(chan struct{})
-	go func() {
-		defer close(doneCh)
-		entriesSeen := 0
-		for entry := range entries {
-			if entriesSeen >= maxBrowseEntries {
-				continue
-			}
-			entriesSeen++
-
-			if browseEntryWithinLimits(entry) {
-				svc := entryToDiscovered(entry)
-				if svc.Port != 0 && (len(svc.IPv4) != 0 || len(svc.IPv6) != 0) {
-					key := discoveredServiceKey(svc)
-					mu.Lock()
-					if index, ok := seen[key]; ok {
-						mergeDiscoveredService(&discovered[index], svc)
-					} else if len(discovered) < maxDiscoveredServices {
-						seen[key] = len(discovered)
-						discovered = append(discovered, svc)
-					}
-					mu.Unlock()
-				}
-			}
-
-			if entriesSeen == maxBrowseEntries {
-				cancelBrowse()
-			}
-		}
-	}()
-
-	errBrowse := zeroconf.Browse(browseCtx, serviceType, domain, entries, b.options...)
-	if errBrowse != nil {
-		// zeroconf may already have closed entries after a runtime error.
-		closeBrowseEntries(entries)
-		<-doneCh
-		return nil, fmt.Errorf("discovery: browse query failed: %w", errBrowse)
+	var errQuery error
+	serviceType, domain, errQuery = normalizeBrowseQuery(serviceType, domain)
+	if errQuery != nil {
+		return nil, errQuery
 	}
-
-	<-doneCh
-
-	return discovered, nil
-}
-
-func closeBrowseEntries(entries chan *zeroconf.ServiceEntry) {
-	defer func() {
-		_ = recover()
-	}()
-	close(entries)
-}
-
-func discoveredServiceKey(svc DiscoveredService) string {
-	return strings.Join([]string{svc.InstanceName, svc.ServiceType, svc.Domain}, "\x00")
-}
-
-func mergeDiscoveredService(dst *DiscoveredService, src DiscoveredService) {
-	if dst == nil {
-		return
-	}
-	if src.Host != "" {
-		dst.Host = src.Host
-	}
-	if src.Port != 0 {
-		dst.Port = src.Port
-	}
-	dst.IPv4 = appendUniqueIPs(dst.IPv4, src.IPv4)
-	dst.IPv6 = appendUniqueIPs(dst.IPv6, src.IPv6)
-	if src.Product != "" {
-		dst.Product = src.Product
-	}
-	if src.Version != "" {
-		dst.Version = src.Version
-	}
-	if src.NodeRole != "" {
-		dst.NodeRole = src.NodeRole
-	}
-	if dst.RawTXT == nil {
-		dst.RawTXT = make(map[string]string)
-	}
-	mergeRawTXTRecords(dst.RawTXT, src.RawTXT)
-	if value, ok := dst.RawTXT["auth_required"]; ok {
-		dst.AuthRequired = strings.EqualFold(strings.TrimSpace(value), "true")
-	}
-	dst.AuthMethods = appendUniqueStrings(dst.AuthMethods, src.AuthMethods)
-	dst.Protocols = appendUniqueStrings(dst.Protocols, src.Protocols)
-	dst.Features = appendUniqueStrings(dst.Features, src.Features)
-	if dst.Endpoints == nil {
-		dst.Endpoints = make(map[string]string)
-	}
-	for key, value := range src.Endpoints {
-		dst.Endpoints[key] = value
-	}
-}
-
-func mergeRawTXTRecords(dst, src map[string]string) {
-	totalBytes := rawTXTMapBytes(dst)
-	for key, value := range src {
-		if key == "" {
-			continue
-		}
-		replacedBytes := 0
-		_, exists := dst[key]
-		if exists {
-			replacedBytes = rawTXTRecordBytes(key, dst[key])
-		} else if len(dst) >= maxBrowseTXTRecords {
-			continue
-		}
-		nextBytes := totalBytes - replacedBytes + rawTXTRecordBytes(key, value)
-		if nextBytes > maxBrowseTXTBytes {
-			continue
-		}
-		dst[key] = value
-		totalBytes = nextBytes
-	}
-}
-
-func rawTXTMapBytes(records map[string]string) int {
-	totalBytes := 0
-	for key, value := range records {
-		totalBytes += rawTXTRecordBytes(key, value)
-	}
-	return totalBytes
-}
-
-func rawTXTRecordBytes(key, value string) int {
-	return len(key) + len(value) + 1
-}
-
-func appendUniqueIPs(dst, src []net.IP) []net.IP {
-	for _, ip := range src {
-		if ip == nil || len(dst) >= maxDiscoveredAddresses {
-			continue
-		}
-		duplicate := false
-		for _, existing := range dst {
-			if existing.Equal(ip) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			dst = append(dst, append(net.IP(nil), ip...))
+	ifaces := b.ifaces
+	if len(ifaces) == 0 {
+		var errFilter error
+		ifaces, errFilter = FilterInterfaces(nil, nil)
+		if errFilter != nil {
+			return nil, fmt.Errorf("discovery: filter browse interfaces: %w", errFilter)
 		}
 	}
-	return dst
+	return browseLAN(ctx, ifaces, serviceType, domain)
 }
 
 func appendUniqueStrings(dst, src []string) []string {
@@ -2955,29 +2808,13 @@ func (b *ZeroconfBrowser) BrowseWithFallbackServiceType(ctx context.Context, ser
 	return append(cpaGateways, otherGateways...), nil
 }
 
-// sanitizeEndpointPath validates that an endpoint path is a safe relative API path
-// starting with '/' and containing no scheme, domain, protocol-relative prefixes, or traversal elements.
-func sanitizeEndpointPath(p string) string {
-	p = strings.TrimSpace(p)
-	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.Contains(p, `\`) || strings.Contains(p, "://") || strings.Contains(p, "..") {
-		return ""
-	}
-	for _, r := range p {
-		if r < 32 || r == 127 {
-			return ""
-		}
-	}
-	return p
-}
-
-func entryToDiscovered(e *zeroconf.ServiceEntry) DiscoveredService {
-	parsed := ParseTXTRecords(e.Text)
-
+// entryToDiscovered converts a zeroconf entry and reports whether its TXT
+// record satisfies draft-su-ai-gateway-discovery-00 (or the legacy CPA schema).
+func entryToDiscovered(e *zeroconf.ServiceEntry) (DiscoveredService, bool) {
 	port := e.Port
 	if port < 1 || port > 65535 {
 		port = 0
 	}
-
 	svc := DiscoveredService{
 		InstanceName: e.Instance,
 		ServiceType:  e.Service,
@@ -2986,49 +2823,22 @@ func entryToDiscovered(e *zeroconf.ServiceEntry) DiscoveredService {
 		Port:         port,
 		IPv4:         filterUsableIPs(e.AddrIPv4),
 		IPv6:         filterUsableIPs(e.AddrIPv6),
-		Product:      parsed["product"],
-		Version:      parsed["version"],
-		NodeRole:     parsed["node_role"],
-		RawTXT:       parsed,
-		Endpoints:    make(map[string]string),
 	}
-
-	if parsed["auth_required"] == "true" {
-		svc.AuthRequired = true
+	if e.HostName == "." || !browseEntryWithinLimits(e) {
+		return svc, false
 	}
-	if methods := parsed["auth_methods"]; methods != "" {
-		svc.AuthMethods = parseTXTList(methods)
+	parsed := ParseTXTRecords(e.Text)
+	if _, draft := parsed[txtKeyVersion]; draft && !validateDraftTXTRecords(e.Text) {
+		return svc, false
 	}
-	if protos := parsed["protocols"]; protos != "" {
-		svc.Protocols = parseTXTList(protos)
-	}
-	if feats := parsed["features"]; feats != "" {
-		svc.Features = parseTXTList(feats)
-	}
-
-	if v, ok := parsed["api_openai"]; ok {
-		if clean := sanitizeEndpointPath(v); clean != "" {
-			svc.Endpoints["openai"] = clean
-		}
-	}
-	if v, ok := parsed["api_anthropic"]; ok {
-		if clean := sanitizeEndpointPath(v); clean != "" {
-			svc.Endpoints["anthropic"] = clean
-		}
-	}
-	if v, ok := parsed["api_gemini"]; ok {
-		if clean := sanitizeEndpointPath(v); clean != "" {
-			svc.Endpoints["gemini"] = clean
-		}
-	}
-
-	return svc
+	usable := applyTXTMetadata(&svc, parsed)
+	return svc, usable
 }
 
 func filterUsableIPs(ips []net.IP) []net.IP {
 	usable := make([]net.IP, 0, min(len(ips), maxDiscoveredAddresses))
 	for _, ip := range ips {
-		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
+		if ip == nil || ip.To16() == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
 			continue
 		}
 		usable = append(usable, append(net.IP(nil), ip...))

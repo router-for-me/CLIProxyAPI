@@ -13,13 +13,13 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type geminiAppTransport func(*http.Request) (*http.Response, error)
@@ -111,7 +111,7 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 						}
 						output += string(chunk.Payload)
 						if test.format == sdktranslator.FormatOpenAI {
-							metadata := gjson.ParseBytes(chunk.Payload)
+							metadata := ojson.ParseBytes(chunk.Payload)
 							if metadata.Get("id").String() == "" || metadata.Get("model").String() != "gemini-app" || metadata.Get("created").Int() <= 0 {
 								t.Fatalf("missing response metadata: %s", chunk.Payload)
 							}
@@ -130,11 +130,11 @@ func TestGeminiAppExecutorProtocolResponses(t *testing.T) {
 						t.Fatal(err)
 					}
 					output = string(result.Payload)
-					if !gjson.Valid(output) || !strings.Contains(output, "Hello 🌏") {
+					if !ojson.Valid(output) || !strings.Contains(output, "Hello 🌏") {
 						t.Fatalf("invalid text response: %s", output)
 					}
 					if test.format == sdktranslator.FormatOpenAI || test.format == sdktranslator.FormatClaude {
-						metadata := gjson.Parse(output)
+						metadata := ojson.Parse(output)
 						if metadata.Get("id").String() == "" || metadata.Get("model").String() != "gemini-app" {
 							t.Fatalf("missing response metadata: %s", output)
 						}
@@ -165,8 +165,8 @@ func TestGeminiAppPayloadRulesAreFinal(t *testing.T) {
 			var sent bool
 			ctx := geminiAppTestContext(t, geminiAppTestFrame("answer", true), func(req *http.Request) {
 				sent = true
-				outer := gjson.Parse(req.Form.Get("f.req"))
-				body := gjson.Parse(outer.Get("1").String())
+				outer := ojson.Parse(req.Form.Get("f.req"))
+				body := ojson.Parse(outer.Get("1").String())
 				if body.Get("0.0").String() != "configured prompt" || body.Get("45").Int() != 0 || body.Get("7").Int() != 0 || len(body.Array()) != 80 {
 					t.Fatalf("payload rules overwritten by framing: %s", body.Raw)
 				}
@@ -203,7 +203,7 @@ func TestGeminiAppDefaultPayloadRulesOverrideBuiltins(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
 			ctx := geminiAppTestContext(t, geminiAppTestFrame("answer", true), func(req *http.Request) {
-				body := gjson.Parse(gjson.Get(req.Form.Get("f.req"), "1").String())
+				body := ojson.Parse(ojson.Get(req.Form.Get("f.req"), "1").String())
 				if body.Get("0.0").String() != "default prompt" || body.Get("45").Int() != 0 || body.Get("7").Int() != 0 {
 					t.Fatalf("built-in values blocked caller defaults: %s", body.Raw)
 				}

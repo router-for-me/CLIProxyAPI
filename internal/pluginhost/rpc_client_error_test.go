@@ -3,15 +3,133 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type staticEnvelopePluginClient struct {
 	raw []byte
+}
+
+func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
+	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:              "rate_limited",
+			Message:           "try later",
+			HTTPStatus:        http.StatusTooManyRequests,
+			RetryAfterSeconds: 7,
+		},
+	})
+	if errDecode == nil {
+		t.Fatal("decodeEnvelopeResult returned nil error")
+	}
+	retryAfter, ok := errDecode.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryAfter.RetryAfter() == nil || *retryAfter.RetryAfter() != 7*time.Second {
+		t.Fatalf("RetryAfter() = %#v, want 7s", retryAfter)
+	}
+	if got := coreauth.SafeResponseHeaders(errDecode).Get("Retry-After"); got != "7" {
+		t.Fatalf("SafeResponseHeaders Retry-After = %q, want 7", got)
+	}
+
+	const (
+		provider = "plugin-provider-retry-after"
+		model    = "test-model-retry-after"
+		authID   = "auth-retry-after-1"
+	)
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-retry-after"})
+	host := newHostWithRecords(executorRecord)
+	exec := &fakeExecutor{
+		identifier: provider,
+		execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{}, errDecode
+		},
+	}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+	adapter.provider = provider
+
+	authMgr := coreauth.NewManager(nil, nil, nil)
+	authMgr.RegisterExecutor(adapter)
+	auth := &coreauth.Auth{
+		ID:         authID,
+		Provider:   provider,
+		Status:     coreauth.StatusActive,
+		FileName:   "auth-retry-after-1.json",
+		Attributes: map[string]string{"type": "api_key"},
+	}
+	if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register auth: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	before := time.Now()
+	_, errExec := authMgr.Execute(context.Background(), []string{provider}, coreexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"test-model-retry-after"}`),
+	}, coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	})
+	if errExec == nil {
+		t.Fatal("authMgr.Execute returned nil error")
+	}
+	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "7" {
+		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 7", got)
+	}
+	updated, okAuth := authMgr.GetByID(authID)
+	if !okAuth || updated == nil {
+		t.Fatalf("GetByID(%q) missing", authID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil || !state.NextRetryAfter.After(before.Add(5*time.Second)) {
+		t.Fatalf("model NextRetryAfter = %v, want at least %v (7s cooldown)", state, before.Add(7*time.Second))
+	}
+}
+
+func TestPluginErrorRetryAfterDoesNotOverflow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:              "rate_limited",
+			Message:           "try later",
+			HTTPStatus:        http.StatusTooManyRequests,
+			RetryAfterSeconds: maxInt,
+		},
+	})
+	if errDecode == nil {
+		t.Fatal("decodeEnvelopeResult returned nil error")
+	}
+	retryAfter, ok := errDecode.(interface{ RetryAfter() *time.Duration })
+	maxDurationSeconds := int64(1<<63-1) / int64(time.Second)
+	wantSeconds := int64(maxInt)
+	if wantSeconds > maxDurationSeconds {
+		wantSeconds = maxDurationSeconds
+	}
+	wantRetryAfter := time.Duration(wantSeconds) * time.Second
+	if !ok || retryAfter.RetryAfter() == nil || *retryAfter.RetryAfter() != wantRetryAfter {
+		t.Fatalf("RetryAfter() = %#v, want %s", retryAfter, wantRetryAfter)
+	}
+	wantHeader := strconv.FormatInt(wantSeconds, 10)
+	if got := coreauth.SafeResponseHeaders(errDecode).Get("Retry-After"); got != wantHeader {
+		t.Fatalf("SafeResponseHeaders Retry-After = %q, want %q", got, wantHeader)
+	}
 }
 
 func (c staticEnvelopePluginClient) Call(context.Context, string, []byte) ([]byte, error) {
@@ -221,5 +339,62 @@ func TestCallPluginSchedulerPickCompatibility(t *testing.T) {
 				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
 			}
 		})
+	}
+}
+
+func TestStreamCallbacksCarryStructuredPluginErrors(t *testing.T) {
+	type statusError interface{ StatusCode() int }
+	type retryAfterError interface{ RetryAfter() *time.Duration }
+
+	detail := `{"code":"rate_limited","message":"slow down","http_status":429,"retry_after_seconds":7}`
+	for _, tc := range []struct {
+		name string
+		send func(host *Host, streamID string) error
+	}{
+		{"emit", func(host *Host, streamID string) error {
+			_, err := host.callHostStreamEmit(context.Background(), []byte(`{"stream_id":"`+streamID+`","error_detail":`+detail+`}`))
+			return err
+		}},
+		{"close", func(host *Host, streamID string) error {
+			_, err := host.callHostStreamClose([]byte(`{"stream_id":"` + streamID + `","error_detail":` + detail + `}`))
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New()
+			streamID, chunks, cleanup := host.streams.open(context.Background())
+			t.Cleanup(cleanup)
+			if err := tc.send(host, streamID); err != nil {
+				t.Fatalf("stream %s callback error = %v", tc.name, err)
+			}
+			chunk := <-chunks
+			if chunk.Err == nil {
+				t.Fatal("stream error was dropped")
+			}
+			var withStatus statusError
+			if !errors.As(chunk.Err, &withStatus) || withStatus.StatusCode() != 429 {
+				t.Fatalf("stream error status = %v, want 429 (%v)", withStatus, chunk.Err)
+			}
+			var withRetry retryAfterError
+			if !errors.As(chunk.Err, &withRetry) || withRetry.RetryAfter() == nil || *withRetry.RetryAfter() != 7*time.Second {
+				t.Fatalf("stream error retry-after = %v, want 7s", withRetry)
+			}
+			if got := coreauth.SafeResponseHeaders(chunk.Err).Get("Retry-After"); got != "7" {
+				t.Fatalf("Retry-After header = %q, want 7", got)
+			}
+		})
+	}
+}
+
+func TestStreamCallbacksKeepPlainErrorStrings(t *testing.T) {
+	host := New()
+	streamID, chunks, cleanup := host.streams.open(context.Background())
+	t.Cleanup(cleanup)
+	if _, err := host.callHostStreamClose([]byte(`{"stream_id":"` + streamID + `","error":"boom"}`)); err != nil {
+		t.Fatalf("stream close callback error = %v", err)
+	}
+	chunk := <-chunks
+	if chunk.Err == nil || chunk.Err.Error() != "boom" {
+		t.Fatalf("plain stream error = %v, want boom", chunk.Err)
 	}
 }

@@ -59,6 +59,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 				w.currentAuths = make(map[string]*coreauth.Auth)
 			}
 			w.currentAuths[clone.ID] = clone.Clone()
+			delete(w.persistedAuthRevisions, clone.ID)
 		}
 	case AuthUpdateActionDelete:
 		id := update.ID
@@ -67,6 +68,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 		}
 		if id != "" {
 			delete(w.runtimeAuths, id)
+			delete(w.persistedAuthRevisions, id)
 			if w.currentAuths != nil {
 				delete(w.currentAuths, id)
 			}
@@ -131,6 +133,10 @@ func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (b
 	updates := []AuthUpdate{updateCopy}
 	w.stampAuthUpdatesLocked(updates)
 	rev := updates[0].revision
+	if w.persistedAuthRevisions == nil {
+		w.persistedAuthRevisions = make(map[string]uint64)
+	}
+	w.persistedAuthRevisions[clone.ID] = rev
 	update.revision = rev
 	w.clientsMutex.Unlock()
 	if w.getAuthQueue() == nil {
@@ -181,6 +187,46 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 		}
 	}
+	incompletePathOrDir := func(rawPath string, checkDir bool) bool {
+		if len(incompletePaths) == 0 {
+			return false
+		}
+		target := rawPath
+		if checkDir {
+			if strings.TrimSpace(rawPath) == "" {
+				return false
+			}
+			target = filepath.Dir(rawPath)
+		}
+		normalized := w.normalizeAuthPath(target)
+		if normalized == "" {
+			return false
+		}
+		if _, ok := incompletePaths[normalized]; ok {
+			return true
+		}
+		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+			if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	if len(incompletePaths) > 0 {
+		for knownPath := range w.lastAuthHashes {
+			if !incompletePathOrDir(knownPath, true) {
+				continue
+			}
+			var knownAbs string
+			if abs, errAbs := filepath.Abs(knownPath); errAbs == nil {
+				knownAbs = w.normalizeAuthPath(abs)
+			}
+			if previousFiles[knownPath] == w.fileObservations[knownPath] &&
+				(knownAbs == "" || previousFiles[knownAbs] == w.fileObservations[knownAbs]) {
+				w.lastAuthHashes[knownPath] = ""
+			}
+		}
+	}
 	authPath := func(auth *coreauth.Auth) string {
 		path := auth.Attributes[coreauth.AttributePath]
 		if path == "" {
@@ -195,23 +241,21 @@ func (w *Watcher) refreshAuthState(force bool) {
 		return previous[auth.ID] != w.authRevisions[auth.ID] ||
 			previousFiles[normalized] != w.fileObservations[normalized]
 	}
-	incompleteDuringScan := func(auth *coreauth.Auth) bool {
-		if len(incompletePaths) == 0 {
+	persistedDuringScan := func(auth *coreauth.Auth) bool {
+		if previous[auth.ID] == w.authRevisions[auth.ID] {
 			return false
 		}
-		normalized := authPath(auth)
-		if normalized == "" {
-			return false
-		}
-		if _, ok := incompletePaths[normalized]; ok {
+		if !auth.HasFileSnapshot() {
 			return true
 		}
-		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
-			if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
-				return true
-			}
+		return w.persistedAuthRevisions[auth.ID] == w.authRevisions[auth.ID]
+	}
+	incompleteDuringScan := func(auth *coreauth.Auth) bool {
+		if incompletePathOrDir(authPath(auth), false) {
+			return true
 		}
-		return false
+		// An unreadable auth directory is recorded as incomplete for every file in it.
+		return incompletePathOrDir(auth.Attributes[coreauth.AttributePath], true)
 	}
 	isFileBackedAuth := func(auth *coreauth.Auth) bool {
 		if auth == nil || len(auth.Attributes) == 0 {
@@ -259,6 +303,8 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 		}
 	}
+	var rereadPaths []string
+	rereadSeen := make(map[string]struct{})
 	for _, auth := range w.currentAuths {
 		if auth == nil {
 			continue
@@ -268,6 +314,20 @@ func (w *Watcher) refreshAuthState(force bool) {
 		}
 		if isFileBackedAuth(auth) {
 			w.indexFileBackedAuthLocked(auth)
+			if persistedDuringScan(auth) && !incompleteDuringScan(auth) {
+				delete(w.persistedAuthRevisions, auth.ID)
+				rawPath := auth.Attributes[coreauth.AttributePath]
+				if rawPath == "" {
+					rawPath = auth.Attributes[coreauth.AttributeSource]
+				}
+				normalized := w.invalidateAuthFileHashLocked(rawPath)
+				if normalized != "" {
+					if _, exists := rereadSeen[normalized]; !exists {
+						rereadSeen[normalized] = struct{}{}
+						rereadPaths = append(rereadPaths, rawPath)
+					}
+				}
+			}
 		}
 		auths = append(auths, auth.Clone())
 	}
@@ -281,6 +341,9 @@ func (w *Watcher) refreshAuthState(force bool) {
 	updates := w.prepareAuthUpdatesLocked(auths, force)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
+	for _, path := range rereadPaths {
+		w.addOrUpdateClient(path)
+	}
 }
 
 func (w *Watcher) indexFileBackedAuthLocked(auth *coreauth.Auth) {

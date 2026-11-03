@@ -648,10 +648,11 @@ func ApplyClaudeDefaultDeviceProfileHeaders(r *http.Request, cfg *config.Config)
 	ApplyClaudeDeviceProfileHeaders(r, defaultClaudeDeviceProfile(cfg))
 }
 
-func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config, confirmedClaudeCode bool) {
+func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config, confirmedClaudeCode bool, keepNewerVersions ...bool) {
 	if r == nil {
 		return
 	}
+	allowNewer := len(keepNewerVersions) > 0 && keepNewerVersions[0]
 	profile := defaultClaudeDeviceProfile(cfg)
 	miscEnsure := func(name, fallback string, valid func(string) bool) {
 		if current := strings.TrimSpace(r.Header.Get(name)); current != "" && (valid == nil || valid(current)) {
@@ -666,13 +667,13 @@ func ApplyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg
 
 	if confirmedClaudeCode {
 		validRuntime := func(value string) bool {
-			if cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion) != "" {
+			if !allowNewer && cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion) != "" {
 				return value == profile.RuntimeVersion
 			}
 			return plausibleClaudeRuntimeVersion(value, profile.RuntimeVersion)
 		}
 		validPackage := func(value string) bool {
-			if cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion) != "" {
+			if !allowNewer && cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion) != "" {
 				return value == profile.PackageVersion
 			}
 			return plausibleClaudePackageVersion(value, profile.PackageVersion)

@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -153,8 +153,8 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 		AgentSDKVersion: agentSDKVersion,
 	}
 
-	metadataUserID := gjson.GetBytes(payload, "metadata.user_id")
-	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == gjson.String && isValidUserID(metadataUserID.String())
+	metadataUserID := ojson.GetBytesNoCopy(payload, "metadata.user_id")
+	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == ojson.String && isValidUserID(metadataUserID.String())
 	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent && (countTokens || detection.MetadataUserID)
 	detection.HelperProfile = detection.NativeClient && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
@@ -215,7 +215,7 @@ func matchesMeasuredClaudeCodeHaiku55HelperProfile(
 	detection ClaudeCodeRequestDetection,
 	cfg *config.Config,
 ) bool {
-	if !detection.NativeClient || gjson.GetBytes(payload, "model").String() != "claude-haiku-5-5" {
+	if !detection.NativeClient || ojson.GetBytesNoCopy(payload, "model").String() != "claude-haiku-5-5" {
 		return false
 	}
 	if !measuredClaudeCodeHaiku55HelperHeadersMatch(headers, cfg) {
@@ -278,12 +278,12 @@ func measuredClaudeCodeHaiku55HelperHeadersMatch(headers http.Header, cfg *confi
 }
 
 func measuredClaudeCodeHaiku55HelperSessionMatches(headers http.Header, payload []byte) bool {
-	metadata := gjson.GetBytes(payload, "metadata")
+	metadata := ojson.GetBytesNoCopy(payload, "metadata")
 	if !metadata.IsObject() || !claudeJSONObjectHasKeys([]byte(metadata.Raw), []string{"user_id"}) {
 		return false
 	}
 	userID := metadata.Get("user_id")
-	if userID.Type != gjson.String || !isValidUserID(userID.String()) {
+	if userID.Type != ojson.String || !isValidUserID(userID.String()) {
 		return false
 	}
 	var identityMap map[string]json.RawMessage
@@ -300,33 +300,33 @@ func measuredClaudeCodeHaiku55HelperSessionMatches(headers http.Header, payload 
 	if len(identityMap) < 3 {
 		return false
 	}
-	return headerValue(headers, ClaudeCodeSessionHeader) == gjson.GetBytes([]byte(userID.String()), "session_id").String()
+	return headerValue(headers, ClaudeCodeSessionHeader) == ojson.GetBytesNoCopy([]byte(userID.String()), "session_id").String()
 }
 
 func measuredClaudeCodeHaiku55HelperBodyMatches(payload []byte, entrypoint string) bool {
-	if gjson.GetBytes(payload, "max_tokens").Type != gjson.Number {
+	if ojson.GetBytesNoCopy(payload, "max_tokens").Type != ojson.Number {
 		return false
 	}
-	messages := gjson.GetBytes(payload, "messages")
+	messages := ojson.GetBytesNoCopy(payload, "messages")
 	if !messages.IsArray() || len(messages.Array()) != 1 || messages.Get("0.role").String() != "user" {
 		return false
 	}
 	if !measuredClaudeCodeBillingAndIdentityMatch(payload, entrypoint) {
 		return false
 	}
-	tools := gjson.GetBytes(payload, "tools")
+	tools := ojson.GetBytesNoCopy(payload, "tools")
 	if !tools.IsArray() {
 		return false
 	}
 	toolItems := tools.Array()
 	if len(toolItems) == 0 {
-		format := gjson.GetBytes(payload, "output_config.format")
+		format := ojson.GetBytesNoCopy(payload, "output_config.format")
 		required := format.Get("schema.required")
 		return format.Get("type").String() == "json_schema" &&
 			format.Get("schema.type").String() == "object" &&
 			format.Get("schema.properties.title.type").String() == "string" &&
 			required.IsArray() && len(required.Array()) == 1 && required.Get("0").String() == "title" &&
-			format.Get("schema.additionalProperties").Type == gjson.False
+			format.Get("schema.additionalProperties").Type == ojson.False
 	}
 	if len(toolItems) == 1 {
 		return toolItems[0].Get("name").String() == "web_search" &&
@@ -336,7 +336,7 @@ func measuredClaudeCodeHaiku55HelperBodyMatches(payload []byte, entrypoint strin
 }
 
 func measuredClaudeCodeBillingAndIdentityMatch(payload []byte, entrypoint string) bool {
-	system := gjson.GetBytes(payload, "system")
+	system := ojson.GetBytesNoCopy(payload, "system")
 	if !system.IsArray() || len(system.Array()) < 2 {
 		return false
 	}
@@ -459,12 +459,12 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 }
 
 func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte) bool {
-	metadata := gjson.GetBytes(payload, "metadata")
+	metadata := ojson.GetBytesNoCopy(payload, "metadata")
 	if !metadata.IsObject() || !claudeJSONObjectHasKeys([]byte(metadata.Raw), []string{"user_id"}) {
 		return false
 	}
 	userID := metadata.Get("user_id")
-	if userID.Type != gjson.String || !isValidUserID(userID.String()) {
+	if userID.Type != ojson.String || !isValidUserID(userID.String()) {
 		return false
 	}
 	// The native metadata builder is
@@ -477,7 +477,7 @@ func measuredClaudeCodeHelperSessionMatches(headers http.Header, payload []byte)
 		!claudeJSONObjectHasKeys(identityRaw, []string{"device_id", "account_uuid", "session_id", "parent_session_id"}) {
 		return false
 	}
-	return headerValue(headers, ClaudeCodeSessionHeader) == gjson.GetBytes(identityRaw, "session_id").String()
+	return headerValue(headers, ClaudeCodeSessionHeader) == ojson.GetBytesNoCopy(identityRaw, "session_id").String()
 }
 
 func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
@@ -498,12 +498,12 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 		return claudeCodeHelperShapeNone
 	}
 
-	maxTokens := gjson.GetBytes(payload, "max_tokens")
-	if gjson.GetBytes(payload, "model").String() != claudeCodeHelperModel ||
-		maxTokens.Type != gjson.Number {
+	maxTokens := ojson.GetBytesNoCopy(payload, "max_tokens")
+	if ojson.GetBytesNoCopy(payload, "model").String() != claudeCodeHelperModel ||
+		maxTokens.Type != ojson.Number {
 		return claudeCodeHelperShapeNone
 	}
-	messages := gjson.GetBytes(payload, "messages")
+	messages := ojson.GetBytesNoCopy(payload, "messages")
 	if !messages.IsArray() || len(messages.Array()) != 1 {
 		return claudeCodeHelperShapeNone
 	}
@@ -514,18 +514,18 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 	}
 
 	if shape == claudeCodeHelperShapeMinimal {
-		if maxTokens.Raw != "1" || message.Get("content").Type != gjson.String {
+		if maxTokens.Raw != "1" || message.Get("content").Type != ojson.String {
 			return claudeCodeHelperShapeNone
 		}
 		return shape
 	}
 
 	if isTitle280 {
-		outputConfig := gjson.GetBytes(payload, "output_config")
+		outputConfig := ojson.GetBytesNoCopy(payload, "output_config")
 		format := outputConfig.Get("format")
 		schema := format.Get("schema")
 		if maxTokens.Raw != "80" ||
-			message.Get("content").Type != gjson.String ||
+			message.Get("content").Type != ojson.String ||
 			!claudeJSONObjectHasKeys([]byte(outputConfig.Raw), []string{"format"}) ||
 			!claudeJSONObjectHasKeys([]byte(format.Raw), []string{"type", "schema"}) ||
 			format.Get("type").String() != "json_schema" ||
@@ -545,14 +545,14 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 		contentBlock.Get("type").String() != "text" {
 		return claudeCodeHelperShapeNone
 	}
-	if !measuredClaudeCodeHelperSystemMatches(gjson.GetBytes(payload, "system")) {
+	if !measuredClaudeCodeHelperSystemMatches(ojson.GetBytesNoCopy(payload, "system")) {
 		return claudeCodeHelperShapeNone
 	}
-	if tools := gjson.GetBytes(payload, "tools"); !tools.IsArray() || len(tools.Array()) != 0 {
+	if tools := ojson.GetBytesNoCopy(payload, "tools"); !tools.IsArray() || len(tools.Array()) != 0 {
 		return claudeCodeHelperShapeNone
 	}
-	thinking := gjson.GetBytes(payload, "thinking")
-	outputConfig := gjson.GetBytes(payload, "output_config")
+	thinking := ojson.GetBytesNoCopy(payload, "thinking")
+	outputConfig := ojson.GetBytesNoCopy(payload, "output_config")
 	if !claudeJSONObjectHasKeys([]byte(thinking.Raw), []string{"type"}) ||
 		thinking.Get("type").String() != "disabled" {
 		return claudeCodeHelperShapeNone
@@ -572,19 +572,19 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 		!claudeJSONObjectHasKeys([]byte(titleProperty.Raw), []string{"type"}) ||
 		titleProperty.Get("type").String() != "string" ||
 		!required.IsArray() || len(required.Array()) != 1 || required.Get("0").String() != "title" ||
-		additionalProperties.Type != gjson.False {
+		additionalProperties.Type != ojson.False {
 		return claudeCodeHelperShapeNone
 	}
-	temperature := gjson.GetBytes(payload, "temperature")
+	temperature := ojson.GetBytesNoCopy(payload, "temperature")
 	if maxTokens.Raw != "32000" ||
 		temperature.Raw != "1" ||
-		gjson.GetBytes(payload, "stream").Type != gjson.True {
+		ojson.GetBytesNoCopy(payload, "stream").Type != ojson.True {
 		return claudeCodeHelperShapeNone
 	}
 	return shape
 }
 
-func measuredClaudeCodeHelperSystemMatches(system gjson.Result) bool {
+func measuredClaudeCodeHelperSystemMatches(system ojson.Result) bool {
 	if !system.IsArray() || len(system.Array()) != 3 {
 		return false
 	}

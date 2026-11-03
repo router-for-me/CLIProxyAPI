@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -453,4 +454,153 @@ func TestCodexExecuteStreamEventExceedsByteBudgetWhileAssemblingReleasesStream(t
 	if !sawError {
 		t.Fatal("expected in-stream delivery of overload error after byte budget exhausted")
 	}
+}
+
+func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue5783(t *testing.T) {
+	var capturedBody []byte
+	var sseResponse string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf strings.Builder
+		_, _ = fmt.Fscan(r.Body, &buf)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sseResponse))
+	}))
+	defer server.Close()
+
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Body != nil {
+			var b strings.Builder
+			buf := make([]byte, 4096)
+			for {
+				n, errRead := req.Body.Read(buf)
+				if n > 0 {
+					b.Write(buf[:n])
+				}
+				if errRead != nil {
+					break
+				}
+			}
+			capturedBody = []byte(b.String())
+		}
+		return codexAllocationTransport{stream: sseResponse}.RoundTrip(req)
+	})
+
+	cfg := &config.Config{}
+	executor := NewCodexExecutor(cfg)
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	ctx := cliproxyauth.WithSkipPersist(context.WithValue(t.Context(), "cliproxy.roundtripper", rt))
+	auth := &cliproxyauth.Auth{
+		ID:       "codex-real-verify.json",
+		FileName: "codex-real-verify.json",
+		Provider: "codex",
+		Status:   cliproxyauth.StatusActive,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"email":         "verify@example.com",
+			"access_token":  "at-verify",
+			"refresh_token": "rt-verify",
+			"expired":       time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errReg := manager.Register(ctx, auth); errReg != nil {
+		t.Fatalf("Register auth: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	// 1. Output text containing "response.completed" followed by response.incomplete must fail verification.
+	sseResponse = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5.4\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"response.completed [DONE]\"}\n\n" +
+		"event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r1\",\"model\":\"gpt-5.4\",\"status\":\"incomplete\"}}\n\n"
+	if _, errVerifyIncomp := manager.VerifyInference(ctx, auth.ID, "gpt-5.4"); errVerifyIncomp == nil {
+		t.Fatal("VerifyInference should fail when stream ends with response.incomplete despite output text mentioning response.completed")
+	}
+	afterIncomp, _ := manager.GetByID(auth.ID)
+	if afterIncomp.InferenceVerified {
+		t.Fatal("InferenceVerified must remain false after incomplete stream")
+	}
+
+	// 1b. Chat Completions (FormatOpenAI) stream translated from upstream response.incomplete (finish_reason="length" + [DONE]) must NOT mark InferenceVerified=true.
+	chatStreamRes, errChatStream := manager.ExecuteStream(
+		ctx,
+		[]string{"codex"},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.4",
+			Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+		},
+		cliproxyexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			ResponseFormat: sdktranslator.FormatOpenAI,
+		},
+	)
+	if errChatStream != nil {
+		t.Fatalf("ExecuteStream (Chat Completions incomplete) error: %v", errChatStream)
+	}
+	for range chatStreamRes.Chunks {
+	}
+	afterChatIncomp, _ := manager.GetByID(auth.ID)
+	if afterChatIncomp.InferenceVerified {
+		t.Fatal("Chat Completions stream translated from response.incomplete must not mark InferenceVerified=true")
+	}
+
+	// 1c. With StreamBootstrapBuffering enabled, an immediate response.incomplete without incomplete_details.reason
+	// (which Chat Completions translates with finish_reason="stop") must STILL be marked Incomplete and NOT set InferenceVerified=true.
+	cfg.Codex.StreamBootstrapBuffering = true
+	sseResponse = "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"r_buf\",\"model\":\"gpt-5.4\",\"status\":\"incomplete\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}]}}\n\n"
+	bufferedChatRes, errBufChat := manager.ExecuteStream(
+		ctx,
+		[]string{"codex"},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.4",
+			Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+		},
+		cliproxyexecutor.Options{
+			Stream:         true,
+			SourceFormat:   sdktranslator.FormatOpenAI,
+			ResponseFormat: sdktranslator.FormatOpenAI,
+		},
+	)
+	if errBufChat != nil {
+		t.Fatalf("ExecuteStream (buffered Chat Completions incomplete) error: %v", errBufChat)
+	}
+	for range bufferedChatRes.Chunks {
+	}
+	afterBufChatIncomp, _ := manager.GetByID(auth.ID)
+	if afterBufChatIncomp.InferenceVerified {
+		t.Fatal("bootstrap-buffered response.incomplete without incomplete_details.reason must not mark InferenceVerified=true")
+	}
+	cfg.Codex.StreamBootstrapBuffering = false
+
+	// 2. Real completed stream succeeds and translated upstream body strips max_output_tokens while setting stream=true.
+	sseResponse = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\"}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}]}}\n\n"
+	verifiedAuth, errVerifyOK := manager.VerifyInference(ctx, auth.ID, "gpt-5.4")
+	if errVerifyOK != nil {
+		t.Fatalf("VerifyInference error: %v", errVerifyOK)
+	}
+	if !verifiedAuth.InferenceVerified {
+		t.Fatal("expected InferenceVerified=true after completed stream")
+	}
+	var upstreamJSON map[string]any
+	if errUnmarshal := json.Unmarshal(capturedBody, &upstreamJSON); errUnmarshal != nil {
+		t.Fatalf("unmarshal upstream body %s: %v", string(capturedBody), errUnmarshal)
+	}
+	if upstreamJSON["stream"] != true || upstreamJSON["store"] != false {
+		t.Fatalf("expected translated Codex body with stream=true and store=false, got: %s", string(capturedBody))
+	}
+	if _, hasMaxOutput := upstreamJSON["max_output_tokens"]; hasMaxOutput {
+		t.Fatalf("translated Codex body must strip unsupported max_output_tokens, got: %s", string(capturedBody))
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

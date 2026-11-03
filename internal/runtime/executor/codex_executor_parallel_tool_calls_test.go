@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestNormalizeCodexParallelToolCallsForTools_DropsWhenToolsMissing(t *testing.T) {
@@ -12,7 +12,7 @@ func TestNormalizeCodexParallelToolCallsForTools_DropsWhenToolsMissing(t *testin
 
 	out := normalizeCodexParallelToolCallsForTools(body)
 
-	if gjson.GetBytes(out, "parallel_tool_calls").Exists() {
+	if ojson.GetBytes(out, "parallel_tool_calls").Exists() {
 		t.Fatalf("parallel_tool_calls should be removed when tools are missing: %s", string(out))
 	}
 }
@@ -22,10 +22,10 @@ func TestNormalizeCodexParallelToolCallsForTools_DropsWhenToolsEmpty(t *testing.
 
 	out := normalizeCodexParallelToolCallsForTools(body)
 
-	if gjson.GetBytes(out, "parallel_tool_calls").Exists() {
+	if ojson.GetBytes(out, "parallel_tool_calls").Exists() {
 		t.Fatalf("parallel_tool_calls should be removed when tools are empty: %s", string(out))
 	}
-	if !gjson.GetBytes(out, "tools").Exists() {
+	if !ojson.GetBytes(out, "tools").Exists() {
 		t.Fatalf("tools should be preserved: %s", string(out))
 	}
 }
@@ -35,7 +35,7 @@ func TestNormalizeCodexParallelToolCallsForTools_PreservesWhenToolsPresent(t *te
 
 	out := normalizeCodexParallelToolCallsForTools(body)
 
-	if !gjson.GetBytes(out, "parallel_tool_calls").Bool() {
+	if !ojson.GetBytes(out, "parallel_tool_calls").Bool() {
 		t.Fatalf("parallel_tool_calls should be preserved when tools are present: %s", string(out))
 	}
 }
@@ -45,7 +45,7 @@ func TestNormalizeCodexParallelToolCalls_ResponsesLiteMetadataForcesFalse(t *tes
 
 	out := normalizeCodexParallelToolCalls(body, nil)
 
-	parallelToolCalls := gjson.GetBytes(out, "parallel_tool_calls")
+	parallelToolCalls := ojson.GetBytes(out, "parallel_tool_calls")
 	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
 		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", string(out))
 	}
@@ -58,7 +58,7 @@ func TestNormalizeCodexParallelToolCalls_ResponsesLiteHeaderForcesFalse(t *testi
 
 	out := normalizeCodexParallelToolCalls(body, headers)
 
-	parallelToolCalls := gjson.GetBytes(out, "parallel_tool_calls")
+	parallelToolCalls := ojson.GetBytes(out, "parallel_tool_calls")
 	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
 		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", string(out))
 	}

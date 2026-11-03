@@ -167,6 +167,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if traceID == "" {
 		traceID = strings.TrimSpace(logging.GetRequestID(ctx))
 	}
+	selectionID := strings.TrimSpace(record.SelectionID)
+	if selectionID == "" {
+		selectionID = strings.TrimSpace(coreusage.SelectionIDFromContext(ctx))
+	}
 	accessProvider := strings.TrimSpace(record.AccessProvider)
 	if accessProvider == "" {
 		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
@@ -184,32 +188,34 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 		apiKey = strings.TrimSpace(coreusage.APIKeyFromContext(ctx))
 	}
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
-		RequestID:           requestID,
-		TraceID:             traceID,
-		Provider:            record.Provider,
-		BaseURL:             record.BaseURL,
-		ExecutorType:        record.ExecutorType,
-		Model:               record.Model,
-		Alias:               record.Alias,
-		APIKey:              apiKey,
-		IsNativeKey:         isNativeKey,
-		AccessProvider:      accessProvider,
-		SessionID:           sessionID,
-		ParentSessionID:     parentSessionID,
-		AuthID:              record.AuthID,
-		AuthIndex:           record.AuthIndex,
-		AuthType:            record.AuthType,
-		Source:              record.Source,
-		ReasoningEffort:     record.ReasoningEffort,
-		ServiceTier:         record.ServiceTier,
-		ResponseServiceTier: record.ResponseServiceTier,
-		ResponseModel:       record.ResponseModel,
-		Generate:            coreusage.GenerateEnabled(record.Generate),
-		Stream:              record.Stream,
-		RequestedAt:         record.RequestedAt,
-		Latency:             record.Latency,
-		TTFT:                record.TTFT,
-		Failed:              record.Failed,
+		RequestID:            requestID,
+		TraceID:              traceID,
+		SelectionID:          selectionID,
+		Provider:             record.Provider,
+		BaseURL:              record.BaseURL,
+		ExecutorType:         record.ExecutorType,
+		Model:                record.Model,
+		Alias:                record.Alias,
+		APIKey:               apiKey,
+		IsNativeKey:          isNativeKey,
+		AccessProvider:       accessProvider,
+		SessionID:            sessionID,
+		ParentSessionID:      parentSessionID,
+		AuthID:               record.AuthID,
+		AuthIndex:            record.AuthIndex,
+		AuthType:             record.AuthType,
+		Source:               record.Source,
+		ReasoningEffort:      record.ReasoningEffort,
+		ServiceTier:          record.ServiceTier,
+		EffectiveServiceTier: record.EffectiveServiceTier,
+		ResponseServiceTier:  record.ResponseServiceTier,
+		ResponseModel:        record.ResponseModel,
+		Generate:             coreusage.GenerateEnabled(record.Generate),
+		Stream:               record.Stream,
+		RequestedAt:          record.RequestedAt,
+		Latency:              record.Latency,
+		TTFT:                 record.TTFT,
+		Failed:               record.Failed,
 		Failure: pluginapi.UsageFailure{
 			StatusCode: record.Fail.StatusCode,
 			Body:       record.Fail.Body,

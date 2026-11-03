@@ -16,11 +16,11 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://www.kimi.com/code/?aff=cliproxyapi"><img src="./assets/logo/kimi.svg" alt="Kimi" width="28" height="28" /></a></td>
-        <td>Kimiシリーズモデル（Kimi K3、K2.8 Previewなど）。<a href="https://platform.kimi.ai/docs/guide/kimi-k3-quickstart">Kimi K3</a>は、Moonshot AIで最も高性能なモデルであり、世界初のオープンな3兆パラメータ級モデルです。2.8兆のパラメータ、ネイティブな視覚機能、100万トークンのコンテキストウィンドウを備え、長期間にわたるコーディング、知識作業、推論向けに構築されています。CLIProxyAPIはOAuthまたは互換APIインターフェース経由でKimiをサポートします。<strong>Kimi Code プラン</strong>（<a href="https://www.kimi.com/code?aff=cliproxyapi">中文站</a> | <a href="https://www.kimi.ai/code?aff=cliproxyapi">Global</a>）を試すか、Kimi Open Platform（<a href="https://platform.kimi.com?track_id=track-f15622e7182046baa22ca35e006e13a7&aff=cliproxyapi">中文站</a> | <a href="https://platform.kimi.ai?track_id=track-8a28e4b291d84f62af2fccc3e7a21cb3&aff=cliproxyapi">Global</a>）で<strong>APIキー</strong>を取得してください。CLIProxyAPIとオープンソースコミュニティを支援してくださるKimiに感謝します！</td>
+        <td>Kimiシリーズモデル（Kimi K3.1 Pro、K3.1 Pro Highspeed、K3、K2.8 Previewなど）。<a href="https://platform.kimi.ai/docs/guide/kimi-k3-quickstart">Kimi K3</a>は、Moonshot AIの前世代のフラッグシップモデルであり、世界初のオープンな3兆パラメータ級モデルです。2.8兆のパラメータ、ネイティブな視覚機能、100万トークンのコンテキストウィンドウを備え、長期間にわたるコーディング、知識作業、推論向けに構築されています。CLIProxyAPIはOAuthまたは互換APIインターフェース経由でKimiをサポートします。<strong>Kimi Code プラン</strong>（<a href="https://www.kimi.com/code?aff=cliproxyapi">中文站</a> | <a href="https://www.kimi.ai/code?aff=cliproxyapi">Global</a>）を試すか、Kimi Open Platform（<a href="https://platform.kimi.com?track_id=track-f15622e7182046baa22ca35e006e13a7&aff=cliproxyapi">中文站</a> | <a href="https://platform.kimi.ai?track_id=track-8a28e4b291d84f62af2fccc3e7a21cb3&aff=cliproxyapi">Global</a>）で<strong>APIキー</strong>を取得してください。CLIProxyAPIとオープンソースコミュニティを支援してくださるKimiに感謝します！</td>
     </tr>
     <tr>
         <td align="center"><a href="https://developers.openai.com/api/docs/models"><img src="./assets/logo/openai.svg" alt="OpenAI" width="28" height="28" /></a></td>
-        <td>OpenAI GPT-6シリーズモデル（GPT-6 Astra、GPT-6.1 Sol、GPT-6 Luna）。Codex OAuth経由でも利用できます。Astraは複雑な推論とコーディング、Solは性能とコストのバランス、Lunaは大量の明確なタスクに適しています。</td>
+        <td>OpenAI GPT-6シリーズモデル（GPT-6 Astra、GPT-6.1 Sol、GPT-6.1 Terra、GPT-6 Luna）。Codex OAuth経由でも利用できます。Astraは複雑な推論とコーディング、Solは性能とコストのバランス、Terraは視覚的推論とコンピューター操作、Lunaは大量の明確なタスクに適しています。</td>
     </tr>
     <tr>
         <td align="center"><a href="https://www.anthropic.com/claude"><img src="./assets/logo/claude.svg" alt="Anthropic" width="28" height="28" /></a></td>
@@ -80,10 +80,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>Cubenceのスポンサーシップに感謝します！Cubenceは信頼性が高く効率的なAPIリレーサービスプロバイダーで、Claude Code、Codex、Geminiなどのリレーサービスを提供しています。Cubenceは当ソフトウェアのユーザーに特別割引を提供しています：<a href="https://cubence.com/signup?code=CLIPROXYAPI&source=cpa">こちらのリンク</a>から登録し、チャージ時にプロモーションコード「CLIPROXYAPI」を入力すると10%割引になります。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://go.apimart.ai/gh-cliproxyapi"><img src="./assets/apimart-en.png" alt="APIMart" width="150"></a></td>
-<td>APIMartによる本プロジェクトへのご支援に感謝します！APIMartは、AI画像・動画生成に特化した低価格APIプラットフォームです。GPT-Image-2は1枚あたりわずか&#36;0.006で、1ドルで160枚以上の画像を生成できます。画像と動画の両方を1つの非同期APIで扱えます。タスクを送信してIDを取得し、ポーリングまたはコールバックで結果を受け取れます。数万枚規模の画像をタイムアウトなしでバッチ生成でき、コードを変更せずにモデルを切り替えられます。従量課金制で月額料金は不要です。<a href="https://go.apimart.ai/gh-cliproxyapi">こちらの登録リンク</a>からすぐに始められます。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://www.swiftproxy.net/?code=PR67S9A95"><img src="./assets/swiftproxy.png" alt="Swiftproxy" width="150"></a></td>
 <td>Swiftproxyは、世界220以上の国と地域をカバーする9,000万以上のクリーンな住宅IPを提供し、HTTP(S)/SOCKS5、IPローテーション、Sticky Session、詳細な地域指定に対応しています。AI APIツールや自動化ワークフローが異なる地域からオンラインサービスへ安定してアクセスできるよう支援し、APIリクエスト、Webアクセス、データ収集、地域別テストなどに最適です。住宅プロキシは&#36;0.7/GBから利用でき、無料テストにも対応しています。割引コードPROXY90の使用で10%割引になります。<a href="https://www.swiftproxy.net/?code=PR67S9A95">今すぐSwiftproxyを試す</a></td>
 </tr>
@@ -96,10 +92,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>PatewayAI は、経験豊富な AI 開発者向けの API リレーサービスプロバイダーで、Claude および Codex シリーズのモデルを完全にサポートしています。すべてのモデルは高品質な公式チャネルから提供され、希釈や偽装は一切なく、課金明細も透明で確認可能です。エコノミーモードは公式価格のわずか5%から利用できます。<a href="https://pateway.ai/?ch=jjvdb">こちらのリンク</a>から登録するとトライアルクレジットを受け取れるほか、不定期のキャンペーンで無料クレジットを獲得できます。また、エンタープライズ級の同時接続、専用管理ダッシュボード、正式な契約書と請求書に対応し、双方に最大150米ドルが付与される紹介特典も提供しています。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.openlux.ai/register?channel=c_6axb1q5n"><img src="./assets/openlux.png" alt="OpenLux" width="150"></a></td>
-<td>OpenLux による本プロジェクトへのご支援に感謝します！<br><br>OpenLux は、世界の主要プロバイダーが提供する主流の大規模 AI モデルを集約した、企業向けのワンストップ AI プラットフォームです。迅速で安定したサービスと適時の技術サポートを提供しています。Claude、OpenAI、Gemini シリーズのモデルの基本料金は、それぞれ公式料金の8.82%、4%、8%からご利用いただけます。<br><br>CLI Proxy API ユーザー限定特典：専用リンクから登録すると、チャージ時に最大7.5%の割引を受けられます！<br><br>今すぐ OpenLux を試す → <a href="https://www.openlux.ai/register?channel=c_6axb1q5n">https://www.openlux.ai/register?channel=c_6axb1q5n</a></td>
-</tr>
-<tr>
 <td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
 <td>Modelflare による本プロジェクトへのご支援に感謝します！Modelflare：フルスペックで安定、水増しなし。世界の SOTA モデルを低コストで利用できます。米国法人 Havenbyte LLC が運営し、GPT、Claude、Gemini、Grok などの主要モデルと一般的な互換プロトコルに対応しているほか、40 種類以上の画像・動画モデルもサポートしています。キャッシュ補償が大きな特長です：一部の OpenAI 価格優先・安定・プレミアムグループでは、1 日あたり 65%、75%、85% のキャッシュヒット率を保証し、対象リクエストが目標に達しなかった場合は差額を補償します。精算後に使用量ダッシュボードで確認できます。特別キャンペーン：1 回 US&#36;20 のチャージで価格倍率 0.015 倍の GPT 特別グループが、1 回 US&#36;50 のチャージで価格倍率 0.03 倍の Claude 特別グループが解放されます。<a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">専用リンク</a>から登録してご参加ください。</td>
 </tr>
@@ -109,7 +101,14 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 </tr>
 <tr>
 <td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>こちらのAIモデル中转サービスはいつでも返金可能で、どのユーザーも無料でインボイスを発行できます。法人のご利用も個人のご利用もどちらも対応可能で、主要なモデルはすべて揃っています。カスタマーサポートは長時間オンラインで皆様のご指示をお待ちしております。何かございましたらお気軽にご指示ください。お客様のご意見をしっかり取り入れるのがモットーです！！！<br><br>Xcode VIPエントランス→ <a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
+<td>
+    🥚 <b>【タダポチ案件！】登録＆合言葉で $5 相当の無料クレジット + 初回チャージ 15% OFF！</b><br>
+    🚀 <b>単なる API 中継ではなく、オールインワンの Web ワークスペース：</b> フロントエンド構築不要で、Web チャット・AI 画像生成・動画生成・自動ワークフローがブラウザ上ですぐ使えます。<br>
+    ⚡ <b>主要モデル完全網羅：</b> Claude、GPT、Gemini、DeepSeek などの最先端モデルを高速集約。<br>
+    🛡️ <b>安心のサポート体制：</b> いつでも返金可能 ｜ 請求書・領収書対応 ｜ 法人・個人問わず利用可能 ｜ ユーザーの声を大切にする充実のサポート！<br><br>
+    👉 Xcode VIP 専用リンク：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a><br>
+    💬 チケット申請用合言葉：<code>CLIProxyAPI</code>（チケット送信で即時付与）
+  </td>
 </tr>
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
@@ -202,14 +201,6 @@ Claude、Gemini、OpenAI、Antigravityのサブスクリプションを統合し
 ### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
 
 TUI、システムトレイ、マルチプロバイダーOAuthを備えたWindows向けCLIProxyAPIフォーク - AIコーディングツール用、APIキー不要
-
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-Claude Codeモデルを素早く切り替えるVSCode拡張機能。バックエンドとしてCLIProxyAPIを統合し、バックグラウンドでの自動ライフサイクル管理を搭載
-
-### [ZeroLimit](https://github.com/0xtbug/zero-limit)
-
-CLIProxyAPIを使用してAIコーディングアシスタントのクォータを監視するTauri + React製のWindowsデスクトップアプリ。Gemini、Claude、OpenAI Codex、Antigravityアカウントの使用量をリアルタイムダッシュボード、システムトレイ統合、ワンクリックプロキシコントロールで追跡 - APIキー不要
 
 ### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
 
@@ -310,6 +301,14 @@ Cloudflare ベースの LLM ゲートウェイ兼プロキシサーバー。CLIP
 ### [Hermes CLIProxyAPI Provider](https://github.com/duu261/hermes-cliproxyapi-provider)
 
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 向けのモデルプロバイダープラグイン。CLIProxyAPI のプロバイダーごとに Hermes プロバイダーを 1 つ登録し、それぞれの executor が受け付けるプロトコル（Anthropic Messages、Responses、Chat Completions）を使います。コンテキストウィンドウと推論レベルは CLIProxyAPI から取得します。正確なプロバイダーグループ分けのための読み取り専用 Management API 照会はオプションです。[Hermes プラグインカタログ](https://hermes-agent.nousresearch.com/docs/plugins/cliproxyapi-provider)に掲載されています：`hermes plugins install cliproxyapi-provider`。
+
+### [Ebb](https://github.com/lucasnsaraujo/ebb)
+
+CLIProxyAPI のアカウントプール向けのネイティブ macOS メニューバーアプリ。プール全体で Claude、Codex などの 5 時間枠と週間枠がどれだけ残っているか、いつ戻るかを表示し、Management API で各ログインのルーティング重みを設定してアカウントを均等に消費させます。
+
+### [Nia Live Demo](https://github.com/nia-teams/nia-live-demo)
+
+話しながらリアルタイムで描画・操作できるインタラクティブな SVG/HTML キャンバスを備えた、全二重音声コンパニオン。CLIProxyAPI の 2 つの機能を組み合わせています：音声対話と即時割り込みを担う Codex GPT-Live 1.1 メディアリレー（`gpt-live-1-codex`、WebRTC + Sideband）と、会話中にキャンバスをリアルタイムで生成・編集する `ultrafast` Responses（`gpt-6.1-sol` / `gpt-6-astra`）です。
 
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。

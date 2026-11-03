@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,12 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
@@ -477,10 +478,10 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	if errApply != nil {
 		t.Fatalf("ApplyThinking() error = %v", errApply)
 	}
-	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 10240 {
+	if got := ojson.GetBytesNoCopy(out, "thinking_budget").Int(); got != 10240 {
 		t.Fatalf("thinking_budget = %d, want 10240; body=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "plugin").String(); got != "plugin-thinking" {
+	if got := ojson.GetBytesNoCopy(out, "plugin").String(); got != "plugin-thinking" {
 		t.Fatalf("plugin = %q, want plugin-thinking; body=%s", got, string(out))
 	}
 }
@@ -1490,8 +1491,59 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 	if infos[0].OAuthProvider != "alpha" {
 		t.Fatalf("RegisteredPlugins()[0].OAuthProvider = %q, want alpha; infos=%#v", infos[0].OAuthProvider, infos)
 	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"alpha"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [alpha]; infos=%#v", infos[0].OAuthProviders, infos)
+	}
 	if infos[0].Metadata.Logo == "" || len(infos[0].Metadata.ConfigFields) != 1 {
 		t.Fatalf("RegisteredPlugins()[0].Metadata = %#v, want logo and config fields", infos[0].Metadata)
+	}
+}
+
+func TestRegisteredPluginsExposesMultipleOAuthProvidersViaRPC(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("zcode"),
+		reconfigureResult: validTestPlugin("zcode"),
+	}
+	authProv := fakeAuthProvider{
+		identifier:  "zcode-zai",
+		identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+		startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+			return pluginapi.AuthLoginStartResponse{
+				Provider: req.Provider,
+				URL:      "https://login.example/" + req.Provider,
+				State:    "state-" + req.Provider,
+			}, nil
+		},
+	}
+	plugin.registerResult.Capabilities.AuthProvider = authProv
+	plugin.reconfigureResult.Capabilities.AuthProvider = authProv
+	loader.lookups["zcode"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "zcode"),
+			Configs: enabledPluginConfigs("zcode"),
+		},
+	})
+
+	infos := h.RegisteredPlugins()
+	if len(infos) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1; infos=%#v", len(infos), infos)
+	}
+	if !infos[0].SupportsOAuth || infos[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("RegisteredPlugins()[0] = %#v, want SupportsOAuth=true OAuthProvider=zcode-zai", infos[0])
+	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [zcode-zai zcode-bigmodel]", infos[0].OAuthProviders)
+	}
+	for _, portal := range []string{"zcode-zai", "zcode-bigmodel"} {
+		resp, handled, errStart := h.StartLogin(context.Background(), portal, "http://127.0.0.1:8317/callback")
+		if errStart != nil || !handled || resp.Provider != portal {
+			t.Fatalf("StartLogin(%q) = (%#v, %v, %v), want handled", portal, resp, handled, errStart)
+		}
 	}
 }
 
@@ -1695,6 +1747,8 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1714,10 +1768,9 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	}
 
 	close(client.release)
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("blocked initialization client shutdown calls = %d, want 1", got)
 	}
@@ -1734,6 +1787,8 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1754,10 +1809,9 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 	h.mu.Unlock()
 	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
 
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("late client shutdown calls = %d, want 1", got)
 	}

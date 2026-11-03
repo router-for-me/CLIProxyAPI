@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -36,7 +36,7 @@ func requireInlineDataRefusal(t *testing.T, envelope sdktranslator.RequestEnvelo
 	if got, want := envelope.Err.Error(), "unsupported content part: inlineData"; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
-	if !gjson.ValidBytes(envelope.Body) {
+	if !ojson.ValidBytes(envelope.Body) {
 		t.Fatalf("body is not JSON: %q", envelope.Body)
 	}
 }
@@ -81,7 +81,7 @@ func TestGeminiToClaudeRealTextBesideAudioIsSentWithoutAPlaceholder(t *testing.T
 		t.Fatalf("placeholder text was synthesized: %s", envelope.Body)
 	}
 	found := false
-	for _, block := range gjson.GetBytes(envelope.Body, "messages.2.content").Array() {
+	for _, block := range ojson.GetBytesNoCopy(envelope.Body, "messages.2.content").Array() {
 		if block.Get("text").String() == "keep me" {
 			found = true
 		}
@@ -116,14 +116,14 @@ func TestGeminiToClaudeModelAudioKeepsItsPlaceholder(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "messages.1.content.0.text").String(); got != "Media content: inline data (Type: audio/wav)" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "messages.1.content.0.text").String(); got != "Media content: inline data (Type: audio/wav)" {
 		t.Fatalf("assistant placeholder = %q, body = %s", got, envelope.Body)
 	}
 }
 
 func TestGeminiToClaudeExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"contents":[{"role":"user","parts":[` + geminiAudioPart + `]}]}`)
-	if body, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertGeminiRequestToClaude("claude-sonnet-4", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

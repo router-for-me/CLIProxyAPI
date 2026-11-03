@@ -38,7 +38,10 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 
 	entries, err := os.ReadDir(ctx.AuthDir)
 	if err != nil {
-		// Not an error if directory doesn't exist
+		// A missing directory holds no auths; any other read failure keeps the loaded ones.
+		if !errors.Is(err, fs.ErrNotExist) {
+			ctx.RecordIncompleteFile(ctx.AuthDir)
+		}
 		return out, nil
 	}
 

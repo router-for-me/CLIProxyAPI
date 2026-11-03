@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // --- L1 direction A: Claude server tool blocks -> Responses web_search_call ---
@@ -27,7 +28,7 @@ func claudeWebSearchStreamChunks() [][]byte {
 func TestClaudeWebSearchBlocksBecomeWebSearchCallItem(t *testing.T) {
 	outputs := translateClaudeResponsesStreamThroughRegistry(claudeWebSearchStreamChunks())
 
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range outputs {
 		if ev, data := parseClaudeResponsesSSEEvent(t, o); ev == "response.completed" {
 			completed = data
@@ -67,9 +68,9 @@ func TestClaudeWebSearchBlocksBecomeWebSearchCallItemNonStream(t *testing.T) {
 	out := ConvertClaudeResponseToOpenAIResponsesNonStream(
 		context.Background(), "claude-test", nil, nil, []byte(strings.Join(lines, "\n")), nil)
 
-	items := gjson.GetBytes(out, "output").Array()
+	items := ojson.GetBytesNoCopy(out, "output").Array()
 	if len(items) != 1 || items[0].Get("type").String() != "web_search_call" {
-		t.Fatalf("output = %s", gjson.GetBytes(out, "output").Raw)
+		t.Fatalf("output = %s", ojson.GetBytesNoCopy(out, "output").Raw)
 	}
 	if got := items[0].Get("action.query").String(); got != "lindorm vector" {
 		t.Fatalf("action.query = %q", got)
@@ -93,7 +94,7 @@ func TestWebSearchCallItemReplaysAsClaudeServerToolBlocks(t *testing.T) {
 		got[0] != "server_tool_use" || got[1] != "web_search_tool_result" {
 		t.Fatalf("assistant blocks = %v, want [server_tool_use web_search_tool_result]", got)
 	}
-	blocks := gjson.GetBytes(out, "messages.0.content")
+	blocks := ojson.GetBytesNoCopy(out, "messages.0.content")
 	use, result := blocks.Get("0"), blocks.Get("1")
 	if got := use.Get("id").String(); got != "srvtoolu_1" {
 		t.Fatalf("server_tool_use id = %q, want srvtoolu_1 (ws_ prefix stripped)", got)
@@ -128,7 +129,7 @@ func TestWebSearchCallWithoutEncryptedContentReplaysEmptyResults(t *testing.T) {
 	if got := claudeAssistantBlockTypes(t, out); len(got) != 2 {
 		t.Fatalf("assistant blocks = %v, want the server_tool_use/result pair", got)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.content.#").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content.1.content.#").Int(); got != 0 {
 		t.Fatalf("result content entries = %d, want 0", got)
 	}
 }
@@ -141,7 +142,7 @@ func TestOutputTextAnnotationsReplayAsClaudeCitations(t *testing.T) {
 		]}]
 	}`)
 	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	block := gjson.GetBytes(out, "messages.0.content.0")
+	block := ojson.GetBytesNoCopy(out, "messages.0.content.0")
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("block type = %q", got)
 	}
@@ -165,7 +166,7 @@ func TestAnnotationsWithoutEncryptedIndexAreNotReplayedAsCitations(t *testing.T)
 		]}]
 	}`)
 	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	if gjson.GetBytes(out, "messages.0.content.0.citations").Exists() {
+	if ojson.GetBytesNoCopy(out, "messages.0.content.0.citations").Exists() {
 		t.Fatal("citations without encrypted_index must be dropped, not sent")
 	}
 }
@@ -176,9 +177,9 @@ func TestRefusalPartReplaysAsClaudeText(t *testing.T) {
 		"content":[{"type":"refusal","refusal":"I cannot help with that."}]
 	}`)
 	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	block := gjson.GetBytes(out, "messages.0.content")
+	block := ojson.GetBytesNoCopy(out, "messages.0.content")
 	text := block.Get("0.text").String()
-	if block.Type == gjson.String {
+	if block.Type == ojson.String {
 		text = block.String()
 	}
 	if text != "I cannot help with that." {
@@ -214,14 +215,14 @@ func TestRoundTripPreservesReachableClaudeBlocks(t *testing.T) {
 	}
 
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range outputs {
 		if ev, data := parseClaudeResponsesSSEEvent(t, o); ev == "response.completed" {
 			completed = data
 		}
 	}
 	var items []json.RawMessage
-	completed.Get("response.output").ForEach(func(_, v gjson.Result) bool {
+	completed.Get("response.output").ForEach(func(_, v ojson.Result) bool {
 		items = append(items, json.RawMessage(v.Raw))
 		return true
 	})
@@ -258,7 +259,7 @@ func TestWebSearchCallIDNormalisedToClaudeServerToolPattern(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := responsesRequestFromItems(`{"type":"web_search_call","id":"` + tc.responsesID + `","status":"completed","action":{"type":"search","query":"q"}}`)
 			out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-			blocks := gjson.GetBytes(out, "messages.0.content")
+			blocks := ojson.GetBytesNoCopy(out, "messages.0.content")
 			if got := blocks.Get("0.id").String(); got != tc.want {
 				t.Fatalf("server_tool_use id = %q, want %q", got, tc.want)
 			}
@@ -290,7 +291,7 @@ func TestClaudeWebSearchWithoutResultBlockStillEmitsItem(t *testing.T) {
 		[]byte(`data: {"type":"message_stop"}`),
 	}
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
-	done, completed := 0, gjson.Result{}
+	done, completed := 0, ojson.Result{}
 	for _, o := range outputs {
 		event, data := parseClaudeResponsesSSEEvent(t, o)
 		if event == "response.output_item.done" && data.Get("item.type").String() == "web_search_call" {
@@ -319,7 +320,7 @@ func TestUnmappedServerToolProducesNoItem(t *testing.T) {
 		[]byte(`data: {"type":"message_stop"}`),
 	}
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range outputs {
 		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
 			completed = data
@@ -343,7 +344,7 @@ func TestWebSearchResultWithoutMatchingUseKeepsContinuationResult(t *testing.T) 
 		[]byte(`data: {"type":"content_block_stop","index":0}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
-	check := func(t *testing.T, response gjson.Result) {
+	check := func(t *testing.T, response ojson.Result) {
 		t.Helper()
 		if got := response.Get("output.#").Int(); got != 1 {
 			t.Fatalf("output items = %d, want 1: %s", got, response.Get("output").Raw)
@@ -371,7 +372,7 @@ func TestWebSearchResultWithoutMatchingUseKeepsContinuationResult(t *testing.T) 
 	}
 	output := ConvertClaudeResponseToOpenAIResponsesNonStream(
 		context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil)
-	check(t, gjson.ParseBytes(output))
+	check(t, util.ParseGJSONBytesNoCopy(output))
 }
 
 // Native OpenAI clients emit `queries` alongside `query`, and use an `open_page`
@@ -386,7 +387,7 @@ func TestWebSearchCallQueryAcceptsNativeOpenAIActionShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := responsesRequestFromItems(`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":` + tc.action + `}`)
 			out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-			if got := gjson.GetBytes(out, "messages.0.content.0.input.query").String(); got != tc.want {
+			if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.input.query").String(); got != tc.want {
 				t.Fatalf("input.query = %q, want %q", got, tc.want)
 			}
 		})
@@ -405,7 +406,7 @@ func TestClaudeWebSearchWithEmptyResultsKeepsEmptyList(t *testing.T) {
 		[]byte(`data: {"type":"content_block_stop","index":1}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range translateClaudeResponsesStreamThroughRegistry(chunks) {
 		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
 			completed = data
@@ -427,7 +428,7 @@ func TestClaudeWebSearchErrorResultSurvivesRoundTrip(t *testing.T) {
 		[]byte(`data: {"type":"content_block_stop","index":1}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range translateClaudeResponsesStreamThroughRegistry(chunks) {
 		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
 			completed = data
@@ -448,7 +449,7 @@ func TestClaudeWebSearchErrorResultSurvivesRoundTrip(t *testing.T) {
 	// Replay back to Claude
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": []json.RawMessage{json.RawMessage(outputItems[0].Raw)}})
 	replayed, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
-	replayedBlocks := gjson.GetBytes(replayed, "messages.0.content")
+	replayedBlocks := ojson.GetBytesNoCopy(replayed, "messages.0.content")
 	if got := replayedBlocks.Get("1.content.0.type").String(); got != "web_search_tool_result_error" {
 		t.Fatalf("replayed error type = %q, want web_search_tool_result_error", got)
 	}
@@ -474,7 +475,7 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 		[]byte(`data: {"type":"content_block_stop","index":3}`),
 		[]byte(`data: {"type":"message_stop"}`),
 	}
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range translateClaudeResponsesStreamThroughRegistry(chunks) {
 		if event, data := parseClaudeResponsesSSEEvent(t, o); event == "response.completed" {
 			completed = data
@@ -504,9 +505,9 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 	}
 	nonStreamOut := ConvertClaudeResponseToOpenAIResponsesNonStream(
 		context.Background(), "claude-test", nil, nil, []byte(strings.Join(lines, "\n")), nil)
-	nonStreamItems := gjson.GetBytes(nonStreamOut, "output").Array()
+	nonStreamItems := ojson.GetBytesNoCopy(nonStreamOut, "output").Array()
 	if len(nonStreamItems) != 3 {
-		t.Fatalf("non-stream expected 3 output items, got %d: %s", len(nonStreamItems), gjson.GetBytes(nonStreamOut, "output").Raw)
+		t.Fatalf("non-stream expected 3 output items, got %d: %s", len(nonStreamItems), ojson.GetBytesNoCopy(nonStreamOut, "output").Raw)
 	}
 	if nonStreamItems[0].Get("content.0.text").String() != "Before search." {
 		t.Fatalf("non-stream item 0 text = %q, want 'Before search.'", nonStreamItems[0].Get("content.0.text").String())
