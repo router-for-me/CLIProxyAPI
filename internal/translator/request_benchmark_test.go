@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorapi "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
-	"github.com/tidwall/gjson"
 )
 
 const benchmarkHistorySentinel = "benchmark-final-history-turn"
@@ -51,7 +51,7 @@ func benchmarkRequestTranslation(b *testing.B, turns int) {
 		for _, target := range route.targets {
 			b.Run(route.source+"_to_"+target, func(b *testing.B) {
 				output := translatorapi.Request(route.source, target, "gemini-2.5-pro", request, true)
-				if !gjson.ValidBytes(output) {
+				if !ojson.ValidBytes(output) {
 					b.Fatalf("translator generated invalid JSON: %s", output)
 				}
 				if turns > 0 && !bytes.Contains(output, []byte(benchmarkHistorySentinel)) {

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -139,7 +139,7 @@ func NormalizeExplicitID(raw string) string {
 	if raw == "" || len(raw) > 256 {
 		return ""
 	}
-	return raw
+	return strings.Clone(raw)
 }
 
 // ClaudeMetadataIdentities extracts session_id, parent_session_id, and agent_id from Claude user_id metadata.
@@ -159,7 +159,7 @@ func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agent
 		return "", "", ""
 	}
 	if strings.HasPrefix(userID, "{") {
-		parsed := gjson.Parse(userID)
+		parsed := ojson.Parse(userID)
 		sessionID = NormalizeExplicitID(parsed.Get("session_id").String())
 		parentSessionID = NormalizeExplicitID(parsed.Get("parent_session_id").String())
 		if parentSessionID == "" {
@@ -471,7 +471,7 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	if NormalizeExplicitID(conversation.Get("id").String()) != "" {
 		return true
 	}
-	return conversation.Type == gjson.String && NormalizeExplicitID(conversation.String()) != ""
+	return conversation.Type == ojson.String && NormalizeExplicitID(conversation.String()) != ""
 }
 
 func headerValue(headers map[string][]string, name string) string {

@@ -4,6 +4,14 @@ BIN_DIR := $(CURDIR)/bin
 BUILD_DIR := $(BIN_DIR)/build
 
 UNAME_S := $(shell uname -s)
+GOARCH ?= $(strip $(shell go env GOARCH))
+GOAMD64 ?= v1
+GOARM64 ?= v8.0
+ifeq ($(GOARCH),amd64)
+GO_PLUGIN_CGO_CFLAGS ?= -march=x86-64
+else ifeq ($(GOARCH),arm64)
+GO_PLUGIN_CGO_CFLAGS ?= -march=armv8-a
+endif
 
 ifeq ($(OS),Windows_NT)
 PLUGIN_EXT := dll
@@ -36,7 +44,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BIN_DIR)/%-go.$(PLUGIN_EXT): %/go/main.go %/go/go.mod | $(BIN_DIR)
-	cd $*/go && go build -buildmode=c-shared -o $(abspath $@) .
+	cd $*/go && GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) GOARM64=$(GOARM64) CGO_CFLAGS="$(strip $(GO_PLUGIN_CGO_CFLAGS) $(CGO_CFLAGS))" go build -buildmode=c-shared -o $(abspath $@) .
 	rm -f $(BIN_DIR)/$*-go.h
 
 $(BIN_DIR)/%-c.$(PLUGIN_EXT): %/c/CMakeLists.txt %/c/src/plugin.c | $(BIN_DIR) $(BUILD_DIR)

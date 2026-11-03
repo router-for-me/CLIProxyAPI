@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func tcHash(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
@@ -150,7 +150,7 @@ func TestCodexChatToolMetadataEquivalence(t *testing.T) {
 			}
 		}
 		for _, itemJSON := range items {
-			item := gjson.ParseBytes([]byte(itemJSON))
+			item := util.ParseGJSONBytesNoCopy([]byte(itemJSON))
 			if got, want := metadata.isCustomPatch(req, item), isOriginalCustomPatch(req, item); got != want {
 				t.Errorf("req %d isCustomPatch(%s) = %v, want %v", ri, itemJSON, got, want)
 			}

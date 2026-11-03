@@ -3,11 +3,11 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/kimi"
-	"github.com/tidwall/gjson"
 )
 
 // TestKimiK28ClaudeMessagesMaxPreservesMax verifies that K2.8 models preserve effort=max
@@ -24,7 +24,7 @@ func TestKimiK28ClaudeMessagesMaxPreservesMax(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinking returned error: %v", err)
 	}
-	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+	if got := ojson.GetBytes(out, "output_config.effort").String(); got != "max" {
 		t.Fatalf("output_config.effort = %q, want max", got)
 	}
 }
@@ -42,10 +42,10 @@ func TestKimiClaudeMessagesMaxClampsToHigh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinking returned error: %v", err)
 	}
-	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+	if got := ojson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
 		t.Fatalf("thinking.type = %q, want adaptive", got)
 	}
-	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "high" {
+	if got := ojson.GetBytes(out, "output_config.effort").String(); got != "high" {
 		t.Fatalf("output_config.effort = %q, want high", got)
 	}
 }

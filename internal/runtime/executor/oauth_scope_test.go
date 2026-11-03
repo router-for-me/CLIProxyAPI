@@ -8,12 +8,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestV8SharedUpstreamRequestSettingsAffectBothAuthKinds(t *testing.T) {
@@ -79,14 +79,14 @@ upstream:
 					default:
 						t.Fatalf("request did not reach upstream: %v", err)
 					}
-					if got := gjson.GetBytes(body, "input.0.type").String(); got != "message" {
+					if got := ojson.GetBytes(body, "input.0.type").String(); got != "message" {
 						t.Fatalf("shared orphan delegation type = %q; body=%s", got, body)
 					}
 					if provider == "codex" {
-						if got := gjson.GetBytes(body, "tools.0.name").String(); got != "collaboration-optimize" {
+						if got := ojson.GetBytes(body, "tools.0.name").String(); got != "collaboration-optimize" {
 							t.Fatalf("client collaboration namespace = %q, want collaboration-optimize", got)
 						}
-					} else if !gjson.GetBytes(body, `tools.#(type=="x_search")`).Exists() {
+					} else if !ojson.GetBytes(body, `tools.#(type=="x_search")`).Exists() {
 						t.Fatal("shared x_search setting was not applied")
 					}
 					if !cfg.Client.Codex.OptimizeMultiAgentV2 || !cfg.Codex.OrphanDelegationCompatibility || !cfg.XAI.InjectXSearch {

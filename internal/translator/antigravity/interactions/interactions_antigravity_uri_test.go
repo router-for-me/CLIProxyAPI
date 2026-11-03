@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const interactionsAntigravityHistory = `{"type":"user_input","content":[{"type":"text","text":"a"}]},{"type":"model_output","content":[{"type":"text","text":"b"}]}`
@@ -35,7 +35,7 @@ func requireInteractionsToAntigravityRefusal(t *testing.T, envelope sdktranslato
 	if got, want := envelope.Err.Error(), "unsupported content part: "+wantType; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
-	if !gjson.ValidBytes(envelope.Body) {
+	if !ojson.ValidBytes(envelope.Body) {
 		t.Fatalf("body is not JSON: %q", envelope.Body)
 	}
 }
@@ -47,10 +47,10 @@ func TestInteractionsToAntigravityKeepsTheMediaGeminiToInteractionsWrites(t *tes
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "request.contents.#").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.contents.#").Int(); got != 3 {
 		t.Fatalf("contents = %d, want 3: %s", got, envelope.Body)
 	}
-	fileData := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.fileData")
+	fileData := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.fileData")
 	if fileData.Get("fileUri").String() != "gs://b/a.png" || fileData.Get("mimeType").String() != "image/png" {
 		t.Fatalf("last turn lost the file: %s", envelope.Body)
 	}
@@ -63,7 +63,7 @@ func TestInteractionsToAntigravityReadsURIAsFileURI(t *testing.T) {
 			if envelope.Err != nil {
 				t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 			}
-			fileData := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.fileData")
+			fileData := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.fileData")
 			if fileData.Get("fileUri").String() != "gs://b/a.pdf" || fileData.Get("mimeType").String() != "application/pdf" {
 				t.Fatalf("fileData = %s, body = %s", fileData.Raw, envelope.Body)
 			}
@@ -76,7 +76,7 @@ func TestInteractionsToAntigravityInlineDataStillConverts(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	inlineData := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.inlineData")
+	inlineData := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.inlineData")
 	if inlineData.Get("mimeType").String() != "image/png" || inlineData.Get("data").String() != "aGVsbG8=" {
 		t.Fatalf("inlineData = %s, body = %s", inlineData.Raw, envelope.Body)
 	}
@@ -117,10 +117,10 @@ func TestInteractionsToAntigravityUnrepresentableAttachmentBesideTextStillSuccee
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "request.contents.2.parts.#").Int(); got != 1 {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.#").Int(); got != 1 {
 		t.Fatalf("last turn has %d parts, want 1: %s", got, envelope.Body)
 	}
 }
@@ -145,7 +145,7 @@ func TestInteractionsToAntigravityNeighbouringStepKeepsTheTurnAlive(t *testing.T
 
 func TestInteractionsToAntigravityExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"model":"m","input":[` + interactionsAntigravityHistory + `,{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}]}`)
-	if body, _ := ConvertInteractionsRequestToAntigravity("m", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertInteractionsRequestToAntigravity("m", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

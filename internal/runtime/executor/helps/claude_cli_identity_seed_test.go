@@ -4,9 +4,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 func TestEnsureClaudeCLIFingerprintIdentitySynthesizesStableSources(t *testing.T) {
@@ -44,14 +44,14 @@ func TestEnsureClaudeCLIFingerprintIdentitySynthesizesStableSources(t *testing.T
 	if deviceID != deviceIDs[0] {
 		t.Fatalf("selected device = %q, want %q", deviceID, deviceIDs[0])
 	}
-	userID := gjson.GetBytes(updated, "metadata.user_id").String()
+	userID := ojson.GetBytes(updated, "metadata.user_id").String()
 	if !IsValidUserID(userID) {
 		t.Fatalf("user_id = %q, want valid", userID)
 	}
-	if got := gjson.Get(userID, "account_uuid").String(); got != account {
+	if got := ojson.Get(userID, "account_uuid").String(); got != account {
 		t.Fatalf("user_id account = %q, want %q", got, account)
 	}
-	if got := gjson.Get(userID, "session_id").String(); got != sessionID {
+	if got := ojson.Get(userID, "session_id").String(); got != sessionID {
 		t.Fatalf("user_id session = %q, want %q", got, sessionID)
 	}
 }

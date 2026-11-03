@@ -2592,3 +2592,79 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
 	}
 }
+
+func TestManager_Execute_DevinMCPConfigurationIssue403_DoesNotRetryOrCooldown(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	mcpErr := &Error{
+		HTTPStatus: http.StatusForbidden,
+		Message:    "devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.",
+	}
+	executor := &authFallbackExecutor{
+		id: "devin",
+		executeErrors: map[string]error{
+			"auth-devin-1": mcpErr,
+			"auth-devin-2": mcpErr,
+		},
+		streamFirstErrors: map[string]error{
+			"auth-devin-1": mcpErr,
+			"auth-devin-2": mcpErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "devin/claude-opus-5-5"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{"auth-devin-1", "auth-devin-2"} {
+		auth := &Auth{
+			ID:       id,
+			Provider: "devin",
+			Status:   StatusActive,
+		}
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "devin", []*registry.ModelInfo{{ID: model}})
+		cleanupID := id
+		t.Cleanup(func() { reg.UnregisterClient(cleanupID) })
+	}
+
+	_, errExec := m.Execute(context.Background(), []string{"devin"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("expected Execute error")
+	}
+	if statusCodeFromError(errExec) != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", statusCodeFromError(errExec), http.StatusForbidden)
+	}
+	if gotCalls := len(executor.executeCalls); gotCalls != 1 {
+		t.Fatalf("upstream execute attempts = %d (%v), want 1 (must not retry deterministic request fault)", gotCalls, executor.executeCalls)
+	}
+
+	_, errStream := m.ExecuteStream(context.Background(), []string{"devin"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errStream == nil {
+		t.Fatal("expected ExecuteStream error")
+	}
+	if statusCodeFromError(errStream) != http.StatusForbidden {
+		t.Fatalf("stream status = %d, want %d", statusCodeFromError(errStream), http.StatusForbidden)
+	}
+	if gotStreamCalls := len(executor.streamCalls); gotStreamCalls != 1 {
+		t.Fatalf("upstream stream attempts = %d (%v), want 1 (must not retry deterministic request fault)", gotStreamCalls, executor.streamCalls)
+	}
+	for _, id := range []string{"auth-devin-1", "auth-devin-2"} {
+		updated, ok := m.GetByID(id)
+		if !ok || updated == nil {
+			t.Fatalf("expected %s to exist", id)
+		}
+		if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+			t.Fatalf("%s unexpectedly cooled down at auth level: unavailable=%v nextRetryAfter=%v", id, updated.Unavailable, updated.NextRetryAfter)
+		}
+		if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+			t.Fatalf("%s unexpectedly cooled down at model level: %#v", id, state)
+		}
+	}
+}
