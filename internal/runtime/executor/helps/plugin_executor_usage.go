@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
 )
 
 // ParsePluginExecutorResponseUsage extracts token usage from a non-streaming plugin executor response.
@@ -115,10 +116,10 @@ func ObservePluginExecutorStreamTTFT(protocol string, reporter *UsageReporter, p
 }
 
 func parseClaudePayloadUsage(payload []byte) usage.Detail {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return usage.Detail{}
 	}
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	usageNode := root.Get("usage")
 	if !usageNode.Exists() {
 		usageNode = root.Get("message.usage")
@@ -133,12 +134,12 @@ func parseClaudePayloadUsage(payload []byte) usage.Detail {
 
 func parseClaudeStreamLine(line []byte) (usage.Detail, bool) {
 	payload := ExtractStreamJSONPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	usageNode := gjson.GetBytes(payload, "usage")
+	usageNode := ojson.GetBytesNoCopy(payload, "usage")
 	if !usageNode.Exists() {
-		usageNode = gjson.GetBytes(payload, "message.usage")
+		usageNode = ojson.GetBytesNoCopy(payload, "message.usage")
 	}
 	if !usageNode.Exists() {
 		return usage.Detail{}, false

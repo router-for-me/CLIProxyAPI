@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
@@ -478,10 +478,10 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	if errApply != nil {
 		t.Fatalf("ApplyThinking() error = %v", errApply)
 	}
-	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 10240 {
+	if got := ojson.GetBytesNoCopy(out, "thinking_budget").Int(); got != 10240 {
 		t.Fatalf("thinking_budget = %d, want 10240; body=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "plugin").String(); got != "plugin-thinking" {
+	if got := ojson.GetBytesNoCopy(out, "plugin").String(); got != "plugin-thinking" {
 		t.Fatalf("plugin = %q, want plugin-thinking; body=%s", got, string(out))
 	}
 }

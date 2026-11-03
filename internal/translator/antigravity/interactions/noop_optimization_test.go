@@ -3,7 +3,7 @@ package interactions
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestRewriteInteractionsFunctionNamesReusesNormalizedPayload(t *testing.T) {
@@ -21,10 +21,10 @@ func TestRewriteInteractionsFunctionNamesNormalizesNonStringNames(t *testing.T) 
 
 	output := rewriteInteractionsFunctionNames(input, nil)
 
-	if name := gjson.GetBytes(output, "request.contents.0.parts.0.functionCall.name"); name.Type != gjson.String || name.String() != "true" {
+	if name := ojson.GetBytesNoCopy(output, "request.contents.0.parts.0.functionCall.name"); name.Type != ojson.String || name.String() != "true" {
 		t.Fatalf("functionCall.name = %s, want string true", name.Raw)
 	}
-	if name := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0"); name.Type != gjson.String || name.String() != "true" {
+	if name := ojson.GetBytesNoCopy(output, "request.toolConfig.functionCallingConfig.allowedFunctionNames.0"); name.Type != ojson.String || name.String() != "true" {
 		t.Fatalf("allowedFunctionNames.0 = %s, want string true", name.Raw)
 	}
 }

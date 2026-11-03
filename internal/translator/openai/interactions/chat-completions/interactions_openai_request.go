@@ -4,18 +4,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","messages":[]}`)
+	root := util.ParseGJSONBytesNoCopy(inputRawJSON)
+	outDoc := ojson.NewDocString(`{"model":"","messages":[]}`)
 	model := firstNonEmpty(modelName, root.Get("model").String())
-	out, _ = sjson.SetBytes(out, "model", model)
+	_ = outDoc.Set("model", model)
 	if stream || root.Get("stream").Bool() {
-		out, _ = sjson.SetBytes(out, "stream", true)
+		_ = outDoc.Set("stream", true)
 	}
 	messageCapacity := root.Get("input.#").Int()
 	if interactionsText(root.Get("system_instruction")) != "" {
@@ -25,32 +25,32 @@ func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, s
 	appendInteractionsSystemToOpenAI(&messageItems, root)
 	forAntigravity := isAntigravityModel(model)
 	appendInteractionsInputToOpenAIMessages(&messageItems, root.Get("input"), forAntigravity)
-	out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
-	out = copyInteractionsToolsToOpenAI(out, root, forAntigravity)
-	out = copyInteractionsGenerationConfigToOpenAI(out, root)
-	out = copyInteractionsOpenAITopLevel(out, root)
-	return out, nil
+	translatorcommon.SetRawArrayItemsDoc(outDoc, "messages", messageItems)
+	copyInteractionsToolsToOpenAIDoc(outDoc, root, forAntigravity)
+	copyInteractionsGenerationConfigToOpenAIDoc(outDoc, root)
+	copyInteractionsOpenAITopLevelDoc(outDoc, root)
+	return outDoc.Bytes(), nil
 }
 
-func appendInteractionsSystemToOpenAI(items *[][]byte, root gjson.Result) {
+func appendInteractionsSystemToOpenAI(items *[][]byte, root ojson.Result) {
 	text := interactionsText(root.Get("system_instruction"))
 	if text == "" {
 		return
 	}
 	msg := []byte(`{"role":"system","content":""}`)
-	msg, _ = sjson.SetBytes(msg, "content", text)
+	msg, _ = ojson.SetBytes(msg, "content", text)
 	*items = append(*items, msg)
 }
 
-func appendInteractionsInputToOpenAIMessages(items *[][]byte, input gjson.Result, forAntigravity bool) {
-	if input.Type == gjson.String {
+func appendInteractionsInputToOpenAIMessages(items *[][]byte, input ojson.Result, forAntigravity bool) {
+	if input.Type == ojson.String {
 		msg := []byte(`{"role":"user","content":""}`)
-		msg, _ = sjson.SetBytes(msg, "content", input.String())
+		msg, _ = ojson.SetBytes(msg, "content", input.String())
 		*items = append(*items, msg)
 		return
 	}
 	if input.IsArray() {
-		input.ForEach(func(_, step gjson.Result) bool {
+		input.ForEach(func(_, step ojson.Result) bool {
 			appendInteractionsStepToOpenAI(items, step, "user", forAntigravity)
 			return true
 		})
@@ -61,7 +61,7 @@ func appendInteractionsInputToOpenAIMessages(items *[][]byte, input gjson.Result
 	}
 }
 
-func appendInteractionsStepToOpenAI(items *[][]byte, step gjson.Result, defaultRole string, forAntigravity bool) {
+func appendInteractionsStepToOpenAI(items *[][]byte, step ojson.Result, defaultRole string, forAntigravity bool) {
 	switch step.Get("type").String() {
 	case "user_input":
 		appendInteractionsMessageToOpenAI(items, step, "user")
@@ -74,58 +74,58 @@ func appendInteractionsStepToOpenAI(items *[][]byte, step gjson.Result, defaultR
 	case "function_result":
 		appendInteractionsFunctionResultToOpenAI(items, step)
 	default:
-		if step.Type == gjson.String {
-			msg := []byte(`{"role":"","content":""}`)
-			msg, _ = sjson.SetBytes(msg, "role", defaultRole)
-			msg, _ = sjson.SetBytes(msg, "content", step.String())
-			*items = append(*items, msg)
+		if step.Type == ojson.String {
+			msgDoc := ojson.NewDocString(`{"role":"","content":""}`)
+			_ = msgDoc.Set("role", defaultRole)
+			_ = msgDoc.Set("content", step.String())
+			*items = append(*items, msgDoc.Bytes())
 		}
 	}
 }
 
-func appendInteractionsMessageToOpenAI(items *[][]byte, step gjson.Result, role string) {
-	msg := []byte(`{"role":"","content":""}`)
-	msg, _ = sjson.SetBytes(msg, "role", role)
+func appendInteractionsMessageToOpenAI(items *[][]byte, step ojson.Result, role string) {
+	msgDoc := ojson.NewDocString(`{"role":"","content":""}`)
+	_ = msgDoc.Set("role", role)
 	content := step.Get("content")
-	if content.Type == gjson.String {
-		msg, _ = sjson.SetBytes(msg, "content", content.String())
+	if content.Type == ojson.String {
+		_ = msgDoc.Set("content", content.String())
 	} else {
-		msg = appendInteractionsContentToOpenAIMessage(msg, content, role)
+		appendInteractionsContentToOpenAIMessageDoc(msgDoc, content, role)
 	}
-	*items = append(*items, msg)
+	*items = append(*items, msgDoc.Bytes())
 }
 
-func appendInteractionsThoughtToOpenAI(items *[][]byte, step gjson.Result) {
+func appendInteractionsThoughtToOpenAI(items *[][]byte, step ojson.Result) {
 	msg := []byte(`{"role":"assistant","content":"","reasoning_content":""}`)
-	msg, _ = sjson.SetBytes(msg, "reasoning_content", interactionsText(step.Get("content")))
+	msg, _ = ojson.SetBytes(msg, "reasoning_content", interactionsText(step.Get("content")))
 	*items = append(*items, msg)
 }
 
-func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, role string) []byte {
+func appendInteractionsContentToOpenAIMessageDoc(msgDoc *ojson.Doc, content ojson.Result, role string) {
 	if !content.Exists() {
-		return msg
+		return
 	}
-	if content.Type == gjson.String {
-		msg, _ = sjson.SetBytes(msg, "content", content.String())
-		return msg
+	if content.Type == ojson.String {
+		_ = msgDoc.Set("content", content.String())
+		return
 	}
 	contentItems := make([][]byte, 0, 4)
 	textOnly := true
 	var textBuilder strings.Builder
-	appendPart := func(part gjson.Result) {
+	appendPart := func(part ojson.Result) {
 		converted, ok := interactionsContentPartToOpenAI(part, role)
 		if !ok {
 			return
 		}
-		if gjson.GetBytes(converted, "type").String() == "text" {
-			textBuilder.WriteString(gjson.GetBytes(converted, "text").String())
+		if ojson.GetBytesNoCopy(converted, "type").String() == "text" {
+			textBuilder.WriteString(ojson.GetBytesNoCopy(converted, "text").String())
 		} else {
 			textOnly = false
 		}
 		contentItems = append(contentItems, converted)
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
+		content.ForEach(func(_, part ojson.Result) bool {
 			appendPart(part)
 			return true
 		})
@@ -134,48 +134,47 @@ func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, 
 	}
 	if len(contentItems) > 0 {
 		if textOnly {
-			msg, _ = sjson.SetBytes(msg, "content", textBuilder.String())
+			_ = msgDoc.Set("content", textBuilder.String())
 		} else {
-			msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+			_ = msgDoc.SetRawBytes("content", translatorcommon.JoinRawArray(contentItems))
 		}
 	}
-	return msg
 }
 
-func appendInteractionsFunctionCallToOpenAI(items *[][]byte, step gjson.Result, forAntigravity bool) {
+func appendInteractionsFunctionCallToOpenAI(items *[][]byte, step ojson.Result, forAntigravity bool) {
 	msg := []byte(`{"role":"assistant","content":"","tool_calls":[]}`)
-	toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
+	toolCallDoc := ojson.NewDocString(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
 	callID := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), "call_0")
-	toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
+	_ = toolCallDoc.Set("id", callID)
 	name := step.Get("name").String()
 	if forAntigravity {
 		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 	}
-	toolCall, _ = sjson.SetBytes(toolCall, "function.name", name)
-	toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", jsonStringValue(step.Get("arguments"), "{}"))
-	msg = translatorcommon.SetRawArrayItems(msg, "tool_calls", [][]byte{toolCall})
+	_ = toolCallDoc.Set("function.name", name)
+	_ = toolCallDoc.Set("function.arguments", jsonStringValue(step.Get("arguments"), "{}"))
+	msg = translatorcommon.SetRawArrayItems(msg, "tool_calls", [][]byte{toolCallDoc.Bytes()})
 	*items = append(*items, msg)
 }
 
-func appendInteractionsFunctionResultToOpenAI(items *[][]byte, step gjson.Result) {
-	msg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-	msg, _ = sjson.SetBytes(msg, "tool_call_id", firstNonEmpty(step.Get("call_id").String(), step.Get("id").String()))
-	msg, _ = sjson.SetBytes(msg, "content", jsonStringValue(firstExisting(step.Get("result"), step.Get("output")), ""))
-	*items = append(*items, msg)
+func appendInteractionsFunctionResultToOpenAI(items *[][]byte, step ojson.Result) {
+	msgDoc := ojson.NewDocString(`{"role":"tool","tool_call_id":"","content":""}`)
+	_ = msgDoc.Set("tool_call_id", firstNonEmpty(step.Get("call_id").String(), step.Get("id").String()))
+	_ = msgDoc.Set("content", jsonStringValue(firstExisting(step.Get("result"), step.Get("output")), ""))
+	*items = append(*items, msgDoc.Bytes())
 }
 
-func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result, forAntigravity bool) []byte {
+func copyInteractionsToolsToOpenAIDoc(outDoc *ojson.Doc, root ojson.Result, forAntigravity bool) {
 	tools := root.Get("tools")
 	if !tools.Exists() || !tools.IsArray() {
-		return out
+		return
 	}
 	var toolItems [][]byte
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		if converted, ok := openAIToolFromInteractionsTool(tool, forAntigravity); ok {
 			toolItems = append(toolItems, converted)
 		}
 		if decls := firstExisting(tool.Get("function_declarations"), tool.Get("functionDeclarations")); decls.Exists() && decls.IsArray() {
-			decls.ForEach(func(_, decl gjson.Result) bool {
+			decls.ForEach(func(_, decl ojson.Result) bool {
 				if converted, ok := openAIToolFromInteractionsTool(decl, forAntigravity); ok {
 					toolItems = append(toolItems, converted)
 				}
@@ -185,61 +184,58 @@ func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result, forAntigravity
 		return true
 	})
 	if len(toolItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+		_ = outDoc.SetRawBytes("tools", translatorcommon.JoinRawArray(toolItems))
 	}
-	return out
 }
 
-func copyInteractionsGenerationConfigToOpenAI(out []byte, root gjson.Result) []byte {
+func copyInteractionsGenerationConfigToOpenAIDoc(outDoc *ojson.Doc, root ojson.Result) {
 	gen := root.Get("generation_config")
 	if !gen.Exists() {
 		gen = root.Get("generationConfig")
 	}
-	copyNumber(&out, "temperature", firstExisting(gen.Get("temperature"), root.Get("temperature")))
-	copyNumber(&out, "max_tokens", firstExisting(gen.Get("max_output_tokens"), gen.Get("maxOutputTokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")))
-	copyNumber(&out, "top_p", firstExisting(gen.Get("top_p"), gen.Get("topP"), root.Get("top_p")))
-	copyNumber(&out, "top_k", firstExisting(gen.Get("top_k"), gen.Get("topK")))
-	copyNumber(&out, "n", firstExisting(gen.Get("candidate_count"), gen.Get("candidateCount"), root.Get("n")))
+	copyNumberDoc(outDoc, "temperature", firstExisting(gen.Get("temperature"), root.Get("temperature")))
+	copyNumberDoc(outDoc, "max_tokens", firstExisting(gen.Get("max_output_tokens"), gen.Get("maxOutputTokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")))
+	copyNumberDoc(outDoc, "top_p", firstExisting(gen.Get("top_p"), gen.Get("topP"), root.Get("top_p")))
+	copyNumberDoc(outDoc, "top_k", firstExisting(gen.Get("top_k"), gen.Get("topK")))
+	copyNumberDoc(outDoc, "n", firstExisting(gen.Get("candidate_count"), gen.Get("candidateCount"), root.Get("n")))
 	if stop := firstExisting(gen.Get("stop_sequences"), gen.Get("stopSequences"), root.Get("stop")); stop.Exists() {
-		out, _ = sjson.SetRawBytes(out, "stop", []byte(stop.Raw))
+		_ = outDoc.SetRaw("stop", stop.Raw)
 	}
 	if toolChoice := firstExisting(gen.Get("tool_choice"), root.Get("tool_choice")); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		_ = outDoc.SetRaw("tool_choice", toolChoice.Raw)
 	}
 	if effort := interactionsReasoningEffort(root, gen); effort != "" {
-		out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
+		_ = outDoc.Set("reasoning_effort", effort)
 	}
 	if responseModalities := root.Get("response_modalities"); responseModalities.Exists() {
-		out, _ = sjson.SetRawBytes(out, "modalities", []byte(responseModalities.Raw))
+		_ = outDoc.SetRaw("modalities", responseModalities.Raw)
 	}
-	return out
 }
 
-func copyInteractionsOpenAITopLevel(out []byte, root gjson.Result) []byte {
+func copyInteractionsOpenAITopLevelDoc(outDoc *ojson.Doc, root ojson.Result) {
 	if format := root.Get("response_format"); format.Exists() {
-		out, _ = sjson.SetRawBytes(out, "response_format", []byte(format.Raw))
+		_ = outDoc.SetRaw("response_format", format.Raw)
 	}
-	if serviceTier := root.Get("service_tier"); serviceTier.Exists() && serviceTier.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "service_tier", serviceTier.String())
+	if serviceTier := root.Get("service_tier"); serviceTier.Exists() && serviceTier.Type == ojson.String {
+		_ = outDoc.Set("service_tier", serviceTier.String())
 	}
 	if previousInteractionID := firstNonEmpty(root.Get("previous_interaction_id").String(), root.Get("previous_response_id").String()); previousInteractionID != "" {
-		out, _ = sjson.SetBytes(out, "previous_response_id", previousInteractionID)
+		_ = outDoc.Set("previous_response_id", previousInteractionID)
 	}
 	if environmentID := firstNonEmpty(root.Get("environment_id").String(), root.Get("environment.id").String()); environmentID != "" {
-		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+		_ = outDoc.Set("environment_id", environmentID)
 	}
 	if agentConfig := root.Get("agent_config"); agentConfig.Exists() {
-		out, _ = sjson.SetRawBytes(out, "agent_config", []byte(agentConfig.Raw))
+		_ = outDoc.SetRaw("agent_config", agentConfig.Raw)
 	}
 	for _, key := range []string{"parallel_tool_calls", "seed", "user"} {
 		if value := root.Get(key); value.Exists() {
-			out, _ = sjson.SetRawBytes(out, key, []byte(value.Raw))
+			_ = outDoc.SetRaw(key, value.Raw)
 		}
 	}
-	return out
 }
 
-func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bool) {
+func interactionsContentPartToOpenAI(part ojson.Result, role string) ([]byte, bool) {
 	partType := part.Get("type").String()
 	if partType == "" && part.Get("text").Exists() {
 		partType = "text"
@@ -247,37 +243,37 @@ func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bo
 	switch partType {
 	case "text":
 		out := []byte(`{"type":"text","text":""}`)
-		out, _ = sjson.SetBytes(out, "text", part.Get("text").String())
+		out, _ = ojson.SetBytes(out, "text", part.Get("text").String())
 		return out, true
 	case "image":
 		out := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-		out, _ = sjson.SetBytes(out, "image_url.url", interactionsMediaDataURL(part, "application/octet-stream"))
+		out, _ = ojson.SetBytes(out, "image_url.url", interactionsMediaDataURL(part, "application/octet-stream"))
 		return out, true
 	case "audio":
-		out := []byte(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
-		out, _ = sjson.SetBytes(out, "input_audio.data", part.Get("data").String())
-		out, _ = sjson.SetBytes(out, "input_audio.format", openAIInputAudioFormatFromMIME(part.Get("mime_type").String()))
-		return out, true
+		outDoc := ojson.NewDocString(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
+		_ = outDoc.Set("input_audio.data", part.Get("data").String())
+		_ = outDoc.Set("input_audio.format", openAIInputAudioFormatFromMIME(part.Get("mime_type").String()))
+		return outDoc.Bytes(), true
 	case "video":
 		out := []byte(`{"type":"video_url","video_url":{"url":""}}`)
-		out, _ = sjson.SetBytes(out, "video_url.url", interactionsMediaDataURL(part, "video/mp4"))
+		out, _ = ojson.SetBytes(out, "video_url.url", interactionsMediaDataURL(part, "video/mp4"))
 		return out, true
 	case "document", "file":
-		out := []byte(`{"type":"file","file":{"filename":"","file_data":""}}`)
-		out, _ = sjson.SetBytes(out, "file.filename", firstNonEmpty(part.Get("filename").String(), openAIFileNameFromMIME(part.Get("mime_type").String())))
-		out, _ = sjson.SetBytes(out, "file.file_data", part.Get("data").String())
+		outDoc := ojson.NewDocString(`{"type":"file","file":{"filename":"","file_data":""}}`)
+		_ = outDoc.Set("file.filename", firstNonEmpty(part.Get("filename").String(), openAIFileNameFromMIME(part.Get("mime_type").String())))
+		_ = outDoc.Set("file.file_data", part.Get("data").String())
 		if url := firstNonEmpty(part.Get("file_url").String(), part.Get("url").String()); url != "" {
-			out, _ = sjson.DeleteBytes(out, "file.file_data")
-			out, _ = sjson.SetBytes(out, "file.file_url", url)
+			_ = outDoc.Delete("file.file_data")
+			_ = outDoc.Set("file.file_url", url)
 		}
-		return out, true
+		return outDoc.Bytes(), true
 	default:
 		_ = role
 	}
 	return nil, false
 }
 
-func openAIToolFromInteractionsTool(tool gjson.Result, forAntigravity bool) ([]byte, bool) {
+func openAIToolFromInteractionsTool(tool ojson.Result, forAntigravity bool) ([]byte, bool) {
 	name := firstNonEmpty(tool.Get("name").String(), tool.Get("function.name").String())
 	if name == "" {
 		return nil, false
@@ -285,22 +281,22 @@ func openAIToolFromInteractionsTool(tool gjson.Result, forAntigravity bool) ([]b
 	if forAntigravity {
 		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 	}
-	out := []byte(`{"type":"function","function":{"name":""}}`)
-	out, _ = sjson.SetBytes(out, "function.name", name)
+	outDoc := ojson.NewDocString(`{"type":"function","function":{"name":""}}`)
+	_ = outDoc.Set("function.name", name)
 	if desc := firstExisting(tool.Get("description"), tool.Get("function.description")); desc.Exists() {
-		out, _ = sjson.SetBytes(out, "function.description", desc.String())
+		_ = outDoc.Set("function.description", desc.String())
 	}
 	if params := firstExisting(tool.Get("parameters"), tool.Get("function.parameters"), tool.Get("parametersJsonSchema")); params.Exists() {
-		out, _ = sjson.SetRawBytes(out, "function.parameters", []byte(params.Raw))
+		_ = outDoc.SetRaw("function.parameters", params.Raw)
 	}
-	return out, true
+	return outDoc.Bytes(), true
 }
 
-func interactionsText(value gjson.Result) string {
+func interactionsText(value ojson.Result) string {
 	if !value.Exists() {
 		return ""
 	}
-	if value.Type == gjson.String {
+	if value.Type == ojson.String {
 		return value.String()
 	}
 	if text := value.Get("text"); text.Exists() {
@@ -312,7 +308,7 @@ func interactionsText(value gjson.Result) string {
 			continue
 		}
 		var builder strings.Builder
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			builder.WriteString(firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()))
 			return true
 		})
@@ -321,8 +317,8 @@ func interactionsText(value gjson.Result) string {
 	return ""
 }
 
-func interactionsReasoningEffort(root, gen gjson.Result) string {
-	for _, value := range []gjson.Result{
+func interactionsReasoningEffort(root, gen ojson.Result) string {
+	for _, value := range []ojson.Result{
 		gen.Get("reasoning_effort"),
 		gen.Get("thinking_level"),
 		gen.Get("thinkingLevel"),
@@ -330,14 +326,14 @@ func interactionsReasoningEffort(root, gen gjson.Result) string {
 		gen.Get("thinkingConfig.thinkingLevel"),
 		root.Get("reasoning_effort"),
 	} {
-		if value.Exists() && value.Type == gjson.String {
+		if value.Exists() && value.Type == ojson.String {
 			return strings.ToLower(strings.TrimSpace(value.String()))
 		}
 	}
 	return ""
 }
 
-func interactionsMediaDataURL(part gjson.Result, fallbackMimeType string) string {
+func interactionsMediaDataURL(part ojson.Result, fallbackMimeType string) string {
 	if url := firstNonEmpty(part.Get("image_url").String(), part.Get("file_data").String(), part.Get("url").String()); url != "" {
 		return url
 	}
@@ -382,29 +378,29 @@ func openAIFileNameFromMIME(mimeType string) string {
 	}
 }
 
-func copyNumber(out *[]byte, path string, value gjson.Result) {
+func copyNumberDoc(outDoc *ojson.Doc, path string, value ojson.Result) {
 	if value.Exists() {
-		*out, _ = sjson.SetRawBytes(*out, path, []byte(value.Raw))
+		_ = outDoc.SetRaw(path, value.Raw)
 	}
 }
 
-func jsonStringValue(value gjson.Result, fallback string) string {
+func jsonStringValue(value ojson.Result, fallback string) string {
 	if !value.Exists() {
 		return fallback
 	}
-	if value.Type == gjson.String {
+	if value.Type == ojson.String {
 		return value.String()
 	}
 	return value.Raw
 }
 
-func firstExisting(values ...gjson.Result) gjson.Result {
+func firstExisting(values ...ojson.Result) ojson.Result {
 	for _, value := range values {
 		if value.Exists() {
 			return value
 		}
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 func firstNonEmpty(values ...string) string {

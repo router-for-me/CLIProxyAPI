@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -23,8 +24,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -42,12 +41,12 @@ func applyPatchTestPayloads(chunk []byte) [][]byte {
 		line = bytes.TrimSpace(line)
 		if bytes.HasPrefix(line, []byte("data:")) {
 			payload := bytes.TrimSpace(line[len("data:"):])
-			if gjson.ValidBytes(payload) {
+			if ojson.ValidBytes(payload) {
 				payloads = append(payloads, bytes.Clone(payload))
 			}
 		}
 	}
-	if len(payloads) == 0 && gjson.ValidBytes(chunk) {
+	if len(payloads) == 0 && ojson.ValidBytes(chunk) {
 		payloads = append(payloads, bytes.Clone(chunk))
 	}
 	return payloads
@@ -88,28 +87,28 @@ func applyPatchTestFrames(protocol, name string) (string, string) {
 
 func applyPatchTestDeclaration(t *testing.T, protocol string, body []byte) {
 	t.Helper()
-	var tool gjson.Result
+	var tool ojson.Result
 	parameters := "parameters"
 	switch protocol {
 	case "chat":
-		if gjson.GetBytes(body, "tools.0.type").String() != "function" {
+		if ojson.GetBytes(body, "tools.0.type").String() != "function" {
 			t.Fatalf("not a standard function: %s", body)
 		}
-		tool = gjson.GetBytes(body, "tools.0.function")
+		tool = ojson.GetBytes(body, "tools.0.function")
 	case "gemini":
-		tool = gjson.GetBytes(body, "tools.0.functionDeclarations.0")
+		tool = ojson.GetBytes(body, "tools.0.functionDeclarations.0")
 		parameters = "parametersJsonSchema"
 	case "antigravity":
-		tool = gjson.GetBytes(body, "request.tools.0.functionDeclarations.0")
+		tool = ojson.GetBytes(body, "request.tools.0.functionDeclarations.0")
 		parameters = "parameters"
 	case "devin":
 		if len(body) < 5 {
 			t.Fatal("missing Connect envelope")
 		}
 		wire := applyPatchTestWireField(body[5:], 10)
-		tool = gjson.Parse(fmt.Sprintf(`{"name":%q,"description":%q,"parameters":%s}`, applyPatchTestWireField(wire, 1), applyPatchTestWireField(wire, 2), applyPatchTestWireField(wire, 3)))
+		tool = ojson.Parse(fmt.Sprintf(`{"name":%q,"description":%q,"parameters":%s}`, applyPatchTestWireField(wire, 1), applyPatchTestWireField(wire, 2), applyPatchTestWireField(wire, 3)))
 	default:
-		tool = gjson.GetBytes(body, "tools.0")
+		tool = ojson.GetBytes(body, "tools.0")
 		if protocol == "claude" {
 			parameters = "input_schema"
 		}
@@ -211,7 +210,7 @@ func TestApplyPatchBridgeLiveHTTPPreviewMatrix(t *testing.T) {
 				requestBody <- body
 				name := "apply_patch"
 				if tc.protocol == "claude" {
-					name = gjson.GetBytes(body, "tools.0.name").String()
+					name = ojson.GetBytes(body, "tools.0.name").String()
 				}
 				first, last := applyPatchTestFrames(tc.protocol, name)
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -249,7 +248,7 @@ func TestApplyPatchBridgeLiveHTTPPreviewMatrix(t *testing.T) {
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			payload, errSetBytes := sjson.SetBytes(applyPatchTestRequest(), "stream", true)
+			payload, errSetBytes := ojson.SetBytes(applyPatchTestRequest(), "stream", true)
 			if errSetBytes != nil {
 				t.Fatal(errSetBytes)
 			}
@@ -275,7 +274,7 @@ func TestApplyPatchBridgeLiveHTTPPreviewMatrix(t *testing.T) {
 			acknowledged := false
 			for scanner.Scan() {
 				for _, raw := range applyPatchTestPayloads(scanner.Bytes()) {
-					event := gjson.ParseBytes(raw)
+					event := ojson.ParseBytes(raw)
 					lifecycle.consume(t, event)
 					if !acknowledged {
 						if tc.snapshot {
@@ -326,7 +325,7 @@ func applyPatchTestCatalog(t *testing.T, server *httptest.Server, version string
 	if errReadAll != nil {
 		t.Fatal(errReadAll)
 	}
-	entry := gjson.GetBytes(body, `models.#(slug=="test")`)
+	entry := ojson.GetBytes(body, `models.#(slug=="test")`)
 	if response.StatusCode != http.StatusOK || entry.Get("apply_patch_tool_type").String() != "freeform" {
 		t.Fatalf("catalog not backed by the registered route: %d %s", response.StatusCode, body)
 	}
@@ -342,7 +341,7 @@ type applyPatchTestLifecycle struct {
 	itemID, callID                    string
 }
 
-func (s *applyPatchTestLifecycle) consume(t *testing.T, event gjson.Result) {
+func (s *applyPatchTestLifecycle) consume(t *testing.T, event ojson.Result) {
 	t.Helper()
 	switch event.Get("type").String() {
 	case "response.failed", "error", "response.function_call_arguments.delta":
@@ -433,11 +432,11 @@ func TestApplyPatchBridgeHistoryRoundTrip(t *testing.T) {
 		t.Fatal(errExecute)
 	}
 	applyPatchTestDeclaration(t, "chat", <-bodies)
-	call := gjson.GetBytes(response.Payload, `output.#(type=="custom_tool_call")`)
+	call := ojson.GetBytes(response.Payload, `output.#(type=="custom_tool_call")`)
 	if call.Get("call_id").String() != "c1" || call.Get("input").String() != applyPatchTestInput {
 		t.Fatalf("wrong client call: %s", response.Payload)
 	}
-	next, errSetRawBytes := sjson.SetRawBytes(payload, "input", []byte("["+call.Raw+`,{"type":"custom_tool_call_output","call_id":"c1","output":"Success"}]`))
+	next, errSetRawBytes := ojson.SetRawBytes(payload, "input", []byte("["+call.Raw+`,{"type":"custom_tool_call_output","call_id":"c1","output":"Success"}]`))
 	if errSetRawBytes != nil {
 		t.Fatal(errSetRawBytes)
 	}
@@ -446,11 +445,11 @@ func TestApplyPatchBridgeHistoryRoundTrip(t *testing.T) {
 		t.Fatal(errExecute)
 	}
 	body := <-bodies
-	arguments := gjson.GetBytes(body, `messages.#(role=="assistant").tool_calls.0.function.arguments`).String()
-	if !gjson.Valid(arguments) || gjson.Get(arguments, "input").String() != call.Get("input").String() || gjson.GetBytes(body, `messages.#(role=="assistant").tool_calls.0.id`).String() != "c1" {
+	arguments := ojson.GetBytes(body, `messages.#(role=="assistant").tool_calls.0.function.arguments`).String()
+	if !ojson.Valid(arguments) || ojson.Get(arguments, "input").String() != call.Get("input").String() || ojson.GetBytes(body, `messages.#(role=="assistant").tool_calls.0.id`).String() != "c1" {
 		t.Fatalf("wrong replay arguments/identity: %s", body)
 	}
-	if gjson.GetBytes(body, `messages.#(role=="tool").tool_call_id`).String() != "c1" || gjson.GetBytes(body, `messages.#(role=="tool").content`).String() != "Success" {
+	if ojson.GetBytes(body, `messages.#(role=="tool").tool_call_id`).String() != "c1" || ojson.GetBytes(body, `messages.#(role=="tool").content`).String() != "Success" {
 		t.Fatalf("wrong replay result identity: %s", body)
 	}
 }
@@ -480,15 +479,15 @@ func TestApplyPatchBridgeOrdinaryFunctionControl(t *testing.T) {
 				t.Fatal(errExecute)
 			}
 			body := <-bodies
-			if !gjson.GetBytes(body, "tools.0.function.parameters.properties.extra").Exists() || strings.Contains(gjson.GetBytes(body, "tools.0.function.description").String(), "*** Begin Patch") {
+			if !ojson.GetBytes(body, "tools.0.function.parameters.properties.extra").Exists() || strings.Contains(ojson.GetBytes(body, "tools.0.function.description").String(), "*** Begin Patch") {
 				t.Fatalf("ordinary function schema changed: %s", body)
 			}
 			path := "choices.0.message.tool_calls.0.function.arguments"
 			if source == sdktranslator.FormatOpenAIResponse {
 				path = `output.#(type=="function_call").arguments`
 			}
-			arguments := gjson.GetBytes(response.Payload, path).String()
-			if arguments != args || !gjson.Valid(arguments) || bytes.Contains(response.Payload, []byte(`"custom_tool_call"`)) {
+			arguments := ojson.GetBytes(response.Payload, path).String()
+			if arguments != args || !ojson.Valid(arguments) || bytes.Contains(response.Payload, []byte(`"custom_tool_call"`)) {
 				t.Fatalf("ordinary JSON function promoted to freeform: %s", response.Payload)
 			}
 		})
@@ -515,19 +514,19 @@ func TestApplyPatchBridgeKimiReusedClientControls(t *testing.T) {
 				t.Fatal(errExecute)
 			}
 			body := <-bodies
-			tool := gjson.GetBytes(body, "tools.0.function")
+			tool := ojson.GetBytes(body, "tools.0.function")
 			parameters := "parameters"
 			if source == sdktranslator.FormatClaude {
-				tool, parameters = gjson.GetBytes(body, "tools.0"), "input_schema"
+				tool, parameters = ojson.GetBytes(body, "tools.0"), "input_schema"
 			}
 			if !tool.Get(parameters+".properties.extra").Exists() || strings.Contains(tool.Get("description").String(), "*** Begin Patch") || bytes.Contains(response.Payload, []byte("custom_tool_call")) || !bytes.Contains(response.Payload, []byte("RAW_SECRET")) {
 				t.Fatalf("ordinary reused client was promoted or restricted: request=%s response=%s", body, response.Payload)
 			}
-			arguments := gjson.GetBytes(response.Payload, "choices.0.message.tool_calls.0.function.arguments").String()
+			arguments := ojson.GetBytes(response.Payload, "choices.0.message.tool_calls.0.function.arguments").String()
 			if source == sdktranslator.FormatClaude {
-				arguments = gjson.GetBytes(response.Payload, "content.0.input").Raw
+				arguments = ojson.GetBytes(response.Payload, "content.0.input").Raw
 			}
-			if !gjson.Valid(arguments) || gjson.Get(arguments, "extra").Int() != 7 {
+			if !ojson.Valid(arguments) || ojson.Get(arguments, "extra").Int() != 7 {
 				t.Fatalf("ordinary function lost valid JSON: %s", response.Payload)
 			}
 		})
@@ -545,7 +544,7 @@ func applyPatchTestPreviewChunks(t *testing.T, chunks <-chan cliproxyexecutor.St
 		}
 		output = append(output, chunk.Payload...)
 		for _, raw := range applyPatchTestPayloads(chunk.Payload) {
-			lifecycle.consume(t, gjson.ParseBytes(raw))
+			lifecycle.consume(t, ojson.ParseBytes(raw))
 			if !preview && strings.Contains(lifecycle.deltas.String(), "+hello\n") {
 				if lifecycle.completed != 0 || lifecycle.inputDone != "" || lifecycle.itemDone != "" {
 					t.Fatal("preview arrived only at completion")
@@ -636,7 +635,7 @@ func TestApplyPatchBridgeLiveWebsocketPreview(t *testing.T) {
 			output := applyPatchTestPreviewChunks(t, result.Chunks, unblock)
 			body := <-bodies
 			if native {
-				if gjson.GetBytes(body, "tools.0").Raw != gjson.GetBytes(payload, "tools.0").Raw {
+				if ojson.GetBytes(body, "tools.0").Raw != ojson.GetBytes(payload, "tools.0").Raw {
 					t.Fatalf("native grammar declaration altered: %s", body)
 				}
 				for _, raw := range applyPatchTestPayloads([]byte(first + last)) {
@@ -674,7 +673,7 @@ func TestApplyPatchBridgeOrdinaryFunctionStreamControl(t *testing.T) {
 					t.Fatalf("ordinary stream was promoted or restricted: %s", chunk.Payload)
 				}
 				for _, raw := range applyPatchTestPayloads(chunk.Payload) {
-					event := gjson.ParseBytes(raw)
+					event := ojson.ParseBytes(raw)
 					if source == sdktranslator.FormatOpenAI {
 						arguments.WriteString(event.Get("choices.0.delta.tool_calls.0.function.arguments").String())
 					} else if event.Get("type").String() == "response.function_call_arguments.delta" {
@@ -682,7 +681,7 @@ func TestApplyPatchBridgeOrdinaryFunctionStreamControl(t *testing.T) {
 					}
 				}
 			}
-			if !gjson.Valid(arguments.String()) || arguments.String() != args || !gjson.GetBytes(<-bodies, "tools.0.function.parameters.properties.extra").Exists() {
+			if !ojson.Valid(arguments.String()) || arguments.String() != args || !ojson.GetBytes(<-bodies, "tools.0.function.parameters.properties.extra").Exists() {
 				t.Fatalf("ordinary stream did not preserve JSON arguments/schema: %q", arguments.String())
 			}
 		})

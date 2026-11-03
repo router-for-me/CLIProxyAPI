@@ -8,18 +8,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // issue6530EffectiveContents models the assumed upstream view of
 // request.contents: the reporter still gets the 400 although an empty user turn
 // is appended, so empty-text-only user turns are treated as absent here.
-func issue6530EffectiveContents(body []byte) []gjson.Result {
-	var effective []gjson.Result
-	for _, content := range gjson.GetBytes(body, "request.contents").Array() {
+func issue6530EffectiveContents(body []byte) []ojson.Result {
+	var effective []ojson.Result
+	for _, content := range ojson.GetBytes(body, "request.contents").Array() {
 		if content.Get("role").String() == "user" {
 			empty := true
 			for _, part := range content.Get("parts").Array() {
@@ -39,7 +39,7 @@ func issue6530EffectiveContents(body []byte) []gjson.Result {
 
 // issue6530AcceptedTail reports whether upstream accepts the turn as the final
 // one: a user turn, or the model-role function response Antigravity expects.
-func issue6530AcceptedTail(content gjson.Result) bool {
+func issue6530AcceptedTail(content ojson.Result) bool {
 	return content.Get("role").String() == "user" || content.Get("parts.0.functionResponse").Exists()
 }
 
@@ -136,14 +136,14 @@ func TestAntigravityDropsTrailingStructuredReasoningTurn(t *testing.T) {
 			}
 
 			body := <-captured
-			contents := gjson.GetBytes(body, "request.contents").Array()
+			contents := ojson.GetBytes(body, "request.contents").Array()
 			if len(contents) == 0 {
 				t.Fatalf("request.contents empty; body=%s", body)
 			}
 			if last := contents[len(contents)-1]; !issue6530AcceptedTail(last) {
 				t.Fatalf("trailing turn = %s, want user or function response; body=%s", last.Raw, body)
 			}
-			if strings.Contains(gjson.GetBytes(body, "request.contents").Raw, `"thought":true`) {
+			if strings.Contains(ojson.GetBytes(body, "request.contents").Raw, `"thought":true`) {
 				t.Fatalf("trailing reasoning-only turn should be dropped; body=%s", body)
 			}
 		})

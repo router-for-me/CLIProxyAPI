@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 var claudeToolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
@@ -22,11 +22,11 @@ type claudeToolNames struct {
 	fromClaude map[string]string
 }
 
-func buildClaudeToolNames(root gjson.Result, toolSearch bool) claudeToolNames {
+func buildClaudeToolNames(root ojson.Result, toolSearch bool) claudeToolNames {
 	return buildClaudeToolNamesWithWinners(root, responsesToolWinners(root, toolSearch), toolSearch)
 }
 
-func buildClaudeToolNamesWithWinners(root gjson.Result, winners map[string]responsesToolDescriptor, toolSearch bool) claudeToolNames {
+func buildClaudeToolNamesWithWinners(root ojson.Result, winners map[string]responsesToolDescriptor, toolSearch bool) claudeToolNames {
 	m := claudeToolNames{toClaude: map[string]string{}, fromClaude: map[string]string{}}
 	taken := map[string]bool{}
 	var declared []string
@@ -117,11 +117,11 @@ func (m claudeToolNames) allocate(identities []string, taken map[string]bool) {
 
 // responsesHistoryToolIdentities lists qualified names of function_call and
 // custom_tool_call items in input, in order.
-func responsesHistoryToolIdentities(root gjson.Result) []string {
+func responsesHistoryToolIdentities(root ojson.Result) []string {
 	var ids []string
 	input := root.Get("input")
 	if input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
+		input.ForEach(func(_, item ojson.Result) bool {
 			switch item.Get("type").String() {
 			case "function_call", "custom_tool_call":
 				name := item.Get("name").String()

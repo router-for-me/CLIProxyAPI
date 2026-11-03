@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 var issue6478Calls = []struct {
@@ -113,7 +113,7 @@ func TestIssue6478_DevinClaudeOutputAndToolResultRoundTrip(t *testing.T) {
 						t.Fatalf("stream chunk: %v", chunk.Err)
 					}
 					for _, line := range strings.Split(string(chunk.Payload), "\n") {
-						event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+						event := ojson.Parse(strings.TrimPrefix(line, "data: "))
 						if event.Get("type").String() == "content_block_start" && event.Get("content_block.type").String() == "tool_use" {
 							ids = append(ids, event.Get("content_block.id").String())
 						}
@@ -124,7 +124,7 @@ func TestIssue6478_DevinClaudeOutputAndToolResultRoundTrip(t *testing.T) {
 				if errExecute != nil {
 					t.Fatalf("Execute: %v", errExecute)
 				}
-				for _, block := range gjson.GetBytes(result.Payload, "content").Array() {
+				for _, block := range ojson.GetBytes(result.Payload, "content").Array() {
 					if block.Get("type").String() == "tool_use" {
 						ids = append(ids, block.Get("id").String())
 					}
@@ -151,11 +151,11 @@ func TestIssue6478_DevinClaudeOutputAndToolResultRoundTrip(t *testing.T) {
 			if errDecode != nil {
 				t.Fatalf("decode sent Devin payload: %v", errDecode)
 			}
-			if gjson.GetBytes(native, "system_prompt").String() != "observed original Devin IDs" {
+			if ojson.GetBytes(native, "system_prompt").String() != "observed original Devin IDs" {
 				t.Errorf("Devin payload condition did not observe original call/result IDs before final barrier")
 			}
 			var sentCalls, sentResults []string
-			for _, prompt := range gjson.GetBytes(native, "prompts").Array() {
+			for _, prompt := range ojson.GetBytes(native, "prompts").Array() {
 				for _, call := range prompt.Get("tool_calls").Array() {
 					sentCalls = append(sentCalls, call.Get("id").String())
 				}
@@ -189,7 +189,7 @@ func TestIssue6478_ClaudeReplaysLegacyToolIDs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := executeClaudeContextManagementRequest(t, &config.Config{}, issue6478History(legacyIDs), stream)
 			var useIDs, resultIDs []string
-			for _, message := range gjson.GetBytes(body, "messages").Array() {
+			for _, message := range ojson.GetBytes(body, "messages").Array() {
 				for _, block := range message.Get("content").Array() {
 					switch block.Get("type").String() {
 					case "tool_use":
@@ -245,16 +245,16 @@ func TestIssue6478_ClaudeToolIDRepairPrecedesPayloadRules(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			body := executeClaudeContextManagementRequest(t, cfg, issue6478History(legacyIDs), stream)
-			if gjson.GetBytes(body, "temperature").Float() != 0.25 {
+			if ojson.GetBytes(body, "temperature").Float() != 0.25 {
 				t.Errorf("payload condition did not observe repaired tool ID before final barrier")
 			}
 			for _, path := range []string{"messages.1.content.0.id", "messages.2.content.0.tool_use_id"} {
-				if got := gjson.GetBytes(body, path).String(); got != "configured:id#override" {
+				if got := ojson.GetBytes(body, path).String(); got != "configured:id#override" {
 					t.Errorf("final user override at %s was changed: got %q", path, got)
 				}
 			}
 			for _, path := range []string{"messages.1.content.1.id", "messages.2.content.1.tool_use_id"} {
-				if gjson.GetBytes(body, path).Exists() {
+				if ojson.GetBytes(body, path).Exists() {
 					t.Errorf("final user filter at %s was undone", path)
 				}
 			}

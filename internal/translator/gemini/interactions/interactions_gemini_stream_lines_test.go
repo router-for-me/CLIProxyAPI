@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiInteractionsStreamSSEPayloadLines(t *testing.T) {
@@ -26,10 +26,10 @@ func TestGeminiInteractionsStreamSSEPayloadLines(t *testing.T) {
 			if got := string(eventTypes(out)); got != wantEvents {
 				t.Fatalf("events = %s, want %s", got, wantEvents)
 			}
-			if got := gjson.GetBytes(findNthEventPayload(out, "step.delta", 0), "delta.text").String(); got != "OK" {
+			if got := ojson.GetBytesNoCopy(findNthEventPayload(out, "step.delta", 0), "delta.text").String(); got != "OK" {
 				t.Fatalf("text = %q, want OK", got)
 			}
-			if got := gjson.GetBytes(findCompletedPayload(out), "interaction.usage.total_tokens").Int(); got != 15 {
+			if got := ojson.GetBytesNoCopy(findCompletedPayload(out), "interaction.usage.total_tokens").Int(); got != 15 {
 				t.Fatalf("total tokens = %d, want 15", got)
 			}
 		})
