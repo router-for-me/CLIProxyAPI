@@ -154,3 +154,20 @@ func TestSharedBoundariesEmittedOnce(t *testing.T) {
 		t.Fatalf("shared boundaries emitted %d times", got)
 	}
 }
+
+// Upstream selects caveman rules per message role (getRulesForContext), and this
+// scanner only rewrites user text. Assistant-only rules assume a model wrote the
+// answer, so running them here would delete the opening of a user request.
+func TestCavemanSkipsAssistantOnlyRulesOnUserText(t *testing.T) {
+	engine := cavemanEngine{level: "full"}
+	text := "This is config that fails: the port is already in use, which blocks startup."
+	for _, rule := range engine.ruleSet(text) {
+		if rule.context == "assistant" {
+			t.Fatalf("assistant-only rule %q selected for user text", rule.name)
+		}
+	}
+	out, _ := engine.compressKind(kindUser, text)
+	if !strings.HasPrefix(out, "This is") {
+		t.Fatalf("opening of the user message was rewritten: %q", out)
+	}
+}

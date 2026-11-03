@@ -182,12 +182,12 @@ func TestEngineOptionOverrides(t *testing.T) {
 		t.Fatal("min-rows override was ignored")
 	}
 
-	block := strings.Repeat("repeat me ", 40)
+	block := strings.Repeat("repeat me\n", 40)
 	texts := []string{block, block}
-	if got := (&dedupEngine{}).rewrite(texts); got == nil {
+	if got := (&dedupEngine{}).rewrite(texts, nil, nil); got == nil {
 		t.Fatal("dedup should elide an 400-byte duplicate")
 	}
-	if got := (&dedupEngine{opts: StepOptions{MinBlockChars: 1 << 20}}).rewrite(texts); got != nil {
+	if got := (&dedupEngine{opts: StepOptions{MinBlockChars: 1 << 20}}).rewrite(texts, nil, nil); got != nil {
 		t.Fatal("min-block-chars override was ignored")
 	}
 }
@@ -236,7 +236,8 @@ func TestRTKMaxLinesCap(t *testing.T) {
 	for i := 0; i < 500; i++ {
 		lines = append(lines, "distinct output line number "+itoaDecimal(i))
 	}
-	out, ok := rtkEngine{opts: StepOptions{MaxLines: 40}}.compress(strings.Join(lines, "\n"))
+	truncated, ok := rtkTruncate(lines, rtkLimits{maxLines: 40, preserveHead: 24, preserveTail: 24}, rtkDefaultPriority)
+	out := strings.Join(truncated, "\n")
 	if !ok {
 		t.Fatal("expected the line cap to fire")
 	}
@@ -262,7 +263,8 @@ func TestRTKKeepsMiddleDiagnostics(t *testing.T) {
 		}
 		lines = append(lines, "chatter "+itoaDecimal(i))
 	}
-	out, ok := rtkEngine{opts: StepOptions{MaxLines: 40}}.compress(strings.Join(lines, "\n"))
+	truncated, ok := rtkTruncate(lines, rtkLimits{maxLines: 40, preserveHead: 24, preserveTail: 24}, rtkDefaultPriority)
+	out := strings.Join(truncated, "\n")
 	if !ok {
 		t.Fatal("expected the line cap to fire")
 	}
@@ -358,7 +360,9 @@ func TestRTKCharPassKeepsWholeLines(t *testing.T) {
 	}
 	in := b.String()
 	const limit = 1200
-	out, ok := rtkEngine{opts: StepOptions{MaxChars: limit}}.compress(in)
+	lines := strings.Split(strings.TrimSuffix(in, "\n"), "\n")
+	truncated, ok := rtkTruncate(lines, rtkLimits{maxChars: limit, preserveHead: 24, preserveTail: 24}, rtkDefaultPriority)
+	out := strings.Join(truncated, "\n")
 	if !ok {
 		t.Fatal("expected a rewrite")
 	}

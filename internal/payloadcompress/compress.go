@@ -74,19 +74,22 @@ type kindAware interface {
 	compressKind(kind segmentKind, text string) (string, bool)
 }
 
-// commandAware is implemented by engines that pick their transform from the
-// shell command behind a tool result. The command is empty for prose and for
-// tool results whose originating call is not in the payload, and an engine
-// implementing this must treat that as "decide from the text alone".
+// commandAware is implemented by engines that rewrite captured tool output
+// using the shell command behind it and must skip human prose. The command is
+// empty for tool results whose originating call is not in the payload, and an
+// engine implementing this must treat that as "decide from the text alone".
 type commandAware interface {
-	compressCommand(command, text string) (string, bool)
+	// toolName is empty when the payload carries no call record for the result.
+	compressCommand(kind segmentKind, toolName, command, text string) (string, bool)
 }
 
 // bodyEngine rewrites the whole payload at once, for transforms that depend on
 // repeated content across segments. It returns replacement text by segment index.
+// skips marks the segments it must leave alone: the current turn, and everything
+// when the payload carries no assistant item.
 type bodyEngine interface {
 	engine
-	rewrite(texts []string) map[int]string
+	rewrite(texts []string, kinds []segmentKind, skips []bool) map[int]string
 }
 
 // Apply compresses a prepared request payload. It is a pure function: the same
@@ -135,10 +138,14 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 	texts := make([]string, len(s.segs))
 	kinds := make([]segmentKind, len(s.segs))
 	commands := make([]string, len(s.segs))
+	tools := make([]string, len(s.segs))
+	skips := make([]bool, len(s.segs))
 	for i := range s.segs {
 		texts[i] = s.segs[i].value.String()
 		kinds[i] = s.segs[i].kind
 		commands[i] = s.segs[i].command
+		tools[i] = s.segs[i].toolName
+		skips[i] = s.segs[i].current || s.noAssistant
 	}
 	originals := append(make([]string, 0, len(texts)), texts...)
 
@@ -157,7 +164,7 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 
 	saved := make(map[string]int, len(engines))
 	for _, eng := range engines {
-		delta := runEngine(eng, texts, kinds, commands, start)
+		delta := runEngine(eng, texts, kinds, commands, tools, skips, start)
 		if delta != 0 {
 			saved[eng.name()] = delta
 		}
@@ -201,11 +208,11 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 // runEngine applies one engine from start onwards and returns the bytes it saved.
 // Engines that need body-wide context still see every segment, so a reused
 // prefix informs session dedup without being rewritten.
-func runEngine(eng engine, texts []string, kinds []segmentKind, commands []string, start int) int {
+func runEngine(eng engine, texts []string, kinds []segmentKind, commands, tools []string, skips []bool, start int) int {
 	delta := 0
 	switch typed := eng.(type) {
 	case bodyEngine:
-		for i, repl := range typed.rewrite(texts) {
+		for i, repl := range typed.rewrite(texts, kinds, skips) {
 			if i < start || i >= len(texts) || repl == texts[i] {
 				continue
 			}
@@ -214,7 +221,7 @@ func runEngine(eng engine, texts []string, kinds []segmentKind, commands []strin
 		}
 	case commandAware:
 		for i := start; i < len(texts); i++ {
-			out, hit := typed.compressCommand(commands[i], texts[i])
+			out, hit := typed.compressCommand(kinds[i], tools[i], commands[i], texts[i])
 			if !hit || out == texts[i] {
 				continue
 			}
