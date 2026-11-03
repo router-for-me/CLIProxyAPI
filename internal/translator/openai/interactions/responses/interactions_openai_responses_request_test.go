@@ -877,3 +877,28 @@ func TestConvertOpenAIResponsesRequestToInteractions_AntigravityDoesNotFilterDev
 		t.Fatalf("expected mcp__codex_app__automation_update to be kept in antigravity output: %s", string(out))
 	}
 }
+
+func TestConvertOpenAIResponsesRequestKeepsDevinSealedReasoning(t *testing.T) {
+	raw := []byte(`{
+		"model":"swe-2",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"picked 12345"}],"encrypted_content":"sealed.v1.abc"},
+			{"type":"reasoning","summary":[],"encrypted_content":"gAAAAother-provider"},
+			{"type":"function_call","name":"ping","call_id":"c1","arguments":"{}"}
+		]
+	}`)
+	out, _ := ConvertOpenAIResponsesRequestToInteractions("swe-2", raw, false)
+	if got := ojson.GetBytesNoCopy(out, "input.1.type").String(); got != "thought" {
+		t.Fatalf("input.1.type = %q, want thought. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.signature").String(); got != "sealed.v1.abc" {
+		t.Fatalf("signature = %q. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.content.0.text").String(); got != "picked 12345" {
+		t.Fatalf("thought text = %q", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.2.type").String(); got != "function_call" {
+		t.Fatalf("foreign reasoning item must stay dropped, input.2.type = %q. Output: %s", got, string(out))
+	}
+}
