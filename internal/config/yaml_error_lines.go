@@ -124,9 +124,14 @@ func documentRoot(node *yaml.Node) *yaml.Node {
 // its own line instead of at the section.
 func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 	var typeErr *yaml.TypeError
-	var rendered yaml.Node
-	if !errors.As(err, &typeErr) || len(encoded) > maxYAMLErrorDetailBytes || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
+	if !errors.As(err, &typeErr) {
 		return err
+	}
+	// An entry that is not placed keeps no line, which would point into encoded.
+	lines := yamlLines{}
+	var rendered yaml.Node
+	if len(encoded) <= maxYAMLErrorDetailBytes && yaml.Unmarshal(encoded, &rendered) == nil && len(rendered.Content) > 0 {
+		lines = indexYAMLLines(rendered.Content[0], flat)
 	}
 	at := func(node *yaml.Node) string {
 		if node == nil || node.Line == 0 {
@@ -134,7 +139,6 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 		}
 		return "line " + strconv.Itoa(node.Line) + ": "
 	}
-	lines := indexYAMLLines(rendered.Content[0], flat)
 	entries := make([]string, 0, len(typeErr.Errors))
 	for _, entry := range typeErr.Errors {
 		match := yamlTypeErrorEntry.FindStringSubmatch(entry)
@@ -148,7 +152,7 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 		field := yamlUnknownField.FindStringSubmatch(problem)
 		switch {
 		case found == nil:
-			entries = append(entries, entry)
+			entries = append(entries, problem)
 		case field == nil:
 			entries = append(entries, at(found.at)+problem)
 		case !isV8Section(found.path):
@@ -156,7 +160,7 @@ func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 		default:
 			unknown := unknownV8Keys(yamlPath(flat, found.path), found.path)
 			if len(unknown) == 0 {
-				entries = append(entries, entry)
+				entries = append(entries, problem)
 			}
 			for _, key := range unknown {
 				entries = append(entries, at(key.at)+"field "+key.name+" not found")
@@ -214,7 +218,7 @@ func isV8Section(path string) bool {
 // into encoded, yaml.Marshal(doc), as field paths in doc. A field from
 // submitted, the request body doc was built from, reads "line L (path)" with
 // the body's line and spelling. Alias and merge-key copies get the path only,
-// since their line is the anchor's.
+// since their line is the anchor's, but the anchored original keeps its line.
 func DescribeYAMLErrorLines(err error, doc *yaml.Node, encoded, submitted []byte) string {
 	var typeErr *yaml.TypeError
 	var rendered yaml.Node
@@ -241,7 +245,7 @@ func DescribeYAMLErrorLines(err error, doc *yaml.Node, encoded, submitted []byte
 			continue
 		}
 		position := yamlPositionOf(found.at)
-		if source, ok := sources[position]; ok && found.at.Line != 0 && !aliased[position] {
+		if source, ok := sources[position]; ok && found.at.Line != 0 && (!aliased[position] || found.path == source) {
 			name := ""
 			if source != "" {
 				name = " (" + source + ")"

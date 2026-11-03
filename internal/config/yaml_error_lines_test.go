@@ -74,7 +74,8 @@ func TestYAMLErrorDetailsLeaveLargeDocumentsToYAMLv3(t *testing.T) {
 	if got := DescribeYAMLErrorLines(err, &doc, encoded, nil); got != err.Error() {
 		t.Errorf("DescribeYAMLErrorLines: got %q, want yaml.v3's %q", got, err.Error())
 	}
-	if got := describeV8DecodeError(err, encoded, documentRoot(&doc)); got != err {
-		t.Errorf("describeV8DecodeError: got %q, want yaml.v3's %q", got, err.Error())
+	// Lines into the flattened copy must not reach DescribeYAMLErrorLines.
+	if got := describeV8DecodeError(err, encoded, documentRoot(&doc)).Error(); got != "yaml: unmarshal errors:\n  cannot unmarshal !!str `x` into int" {
+		t.Errorf("describeV8DecodeError: got %q, want it without a line", got)
 	}
 }

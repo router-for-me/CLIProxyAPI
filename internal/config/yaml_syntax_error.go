@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"regexp"
 	"strconv"
 
@@ -23,12 +24,20 @@ func DescribeYAMLSyntaxError(body []byte, err error) string {
 		return err.Error()
 	}
 	problem := err.Error()[len(match[0]):]
-	// ends[i] is the offset just past line i+1.
+	// ends[i] is the offset just past line i+1, ended by any break yaml.v3
+	// counts: LF, CR, CRLF, NEL, LS, or PS.
 	var ends []int
 	for i := 0; i < len(body); i++ {
-		if body[i] == '\n' || body[i] == '\r' && (i+1 == len(body) || body[i+1] != '\n') {
-			ends = append(ends, i+1)
+		switch {
+		case body[i] == '\n' || body[i] == '\r' && (i+1 == len(body) || body[i+1] != '\n'):
+		case bytes.HasPrefix(body[i:], []byte("\u0085")):
+			i++
+		case bytes.HasPrefix(body[i:], []byte("\u2028")) || bytes.HasPrefix(body[i:], []byte("\u2029")):
+			i += 2
+		default:
+			continue
 		}
+		ends = append(ends, i+1)
 	}
 	if len(ends) == 0 || ends[len(ends)-1] != len(body) {
 		ends = append(ends, len(body))

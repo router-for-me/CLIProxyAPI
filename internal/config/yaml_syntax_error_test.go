@@ -34,6 +34,10 @@ func TestDescribeYAMLSyntaxErrorReportsTheProblemLine(t *testing.T) {
 			"yaml: line 5: found unexpected end of stream"},
 		{"CR line endings", "a: 1\rb:\r  c: 1\r d: 2\r",
 			"yaml: line 4: did not find expected key"},
+		{"NEL line endings", "a: 1\u0085b:\u0085  c: 1\u0085 d: 2\u0085",
+			"yaml: line 4: did not find expected key"},
+		{"Unicode line and paragraph separators", "a: 1\u2028b:\u2029  c: 1\u2028 d: 2\u2029",
+			"yaml: line 4: did not find expected key"},
 		{"CRLF line endings", "a: 1\r\nb:\r\n  c: 1\r\n d: 2\r\n",
 			"yaml: line 4: did not find expected key"},
 	}
