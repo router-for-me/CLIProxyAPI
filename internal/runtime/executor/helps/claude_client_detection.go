@@ -61,13 +61,44 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 }
 
 // Only product surfaces with verified 2.1.220+ wire behavior are eligible for
-// pass-through. Other first-party-looking entrypoints are cloaked until their
-// CPA-reachable request shape has been captured and reviewed.
+// pass-through by default. Other first-party-looking entrypoints are cloaked
+// until their CPA-reachable request shape has been captured and reviewed, or
+// until they are allowlisted in header-defaults.native-entrypoints.
 var nativeClaudeEntrypoints = map[string]bool{
 	"cli":           true,
 	"sdk-cli":       true,
 	"sdk-ts":        true,
 	"claude-vscode": true,
+}
+
+func isNativeClaudeEntrypoint(entrypoint string, cfg *config.Config) bool {
+	entrypoint = strings.ToLower(strings.TrimSpace(entrypoint))
+	if entrypoint == "" {
+		return false
+	}
+	if nativeClaudeEntrypoints[entrypoint] {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	for _, candidate := range cfg.ClaudeHeaderDefaults.NativeEntrypoints {
+		if strings.EqualFold(strings.TrimSpace(candidate), entrypoint) {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeSubclientForEntrypoint(entrypoint string, cfg *config.Config) string {
+	entrypoint = strings.ToLower(strings.TrimSpace(entrypoint))
+	if subclient := claudeCodeSubclientByEntrypoint[entrypoint]; subclient != "" {
+		return subclient
+	}
+	if isNativeClaudeEntrypoint(entrypoint, cfg) {
+		return "claude-code-" + entrypoint
+	}
+	return ""
 }
 
 type claudeCodeHelperShape uint8
@@ -136,7 +167,8 @@ type ClaudeCodeRequestDetection struct {
 // four strong signals; count_tokens omits metadata.user_id. A separate narrow
 // profile recognizes measured native Haiku helper requests that intentionally
 // omit claude-code-20250219. Unverified entrypoints (such as generic sdk-py)
-// remain unconfirmed by default and receive CLI cloaking unless cloak_mode is never.
+// remain unconfirmed by default and receive CLI cloaking unless cloak_mode is
+// never or the entrypoint is allowlisted in header-defaults.native-entrypoints.
 func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bool, configs ...*config.Config) ClaudeCodeRequestDetection {
 	var cfg *config.Config
 	if len(configs) > 0 {
@@ -144,25 +176,26 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 	}
 	userAgent := headerValue(headers, "User-Agent")
 	entrypoint, agentSDKVersion := parseClaudeCodeUserAgentDetails(userAgent)
+	subclient := claudeSubclientForEntrypoint(entrypoint, cfg)
 	detection := ClaudeCodeRequestDetection{
 		XAppCLI:         headerValue(headers, "X-App") == "cli",
 		UserAgent:       plausibleClaudeCodeUserAgent(userAgent, cfg),
 		BetasPresent:    headerContainsClaudeCodeBeta(headers),
 		Entrypoint:      entrypoint,
-		Subclient:       claudeCodeSubclientByEntrypoint[entrypoint],
+		Subclient:       subclient,
 		AgentSDKVersion: agentSDKVersion,
 	}
 
 	metadataUserID := ojson.GetBytesNoCopy(payload, "metadata.user_id")
 	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == ojson.String && isValidUserID(metadataUserID.String())
-	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
+	detection.NativeClient = isNativeClaudeEntrypoint(entrypoint, cfg)
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent && (countTokens || detection.MetadataUserID)
 	detection.HelperProfile = detection.NativeClient && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
 	detection.StrongSignals = standardSignals || detection.HelperProfile
 	detection.Confirmed = detection.StrongSignals && detection.NativeClient
 	detection.ConfirmedShape = detection.StrongSignals ||
 		(!countTokens && detection.XAppCLI && detection.UserAgent && detection.MetadataUserID &&
-			claudeCodeSubclientByEntrypoint[entrypoint] != "" &&
+			subclient != "" &&
 			measuredClaudeCodeHaiku55HelperSessionMatches(headers, payload) &&
 			measuredClaudeCodeBillingAndIdentityMatch(payload, entrypoint))
 	return detection
