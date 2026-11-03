@@ -2907,6 +2907,152 @@ func TestHomeGeminiModelsIncludeTokenLimits(t *testing.T) {
 	}
 }
 
+func TestHomeOpenAIModelsIncludeTokenLimits(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	engine := gin.New()
+	openaiHandler := openai.NewOpenAIAPIHandler(server.handlers)
+	engine.GET("/v1/models", server.unifiedModelsHandler(openaiHandler, nil))
+
+	client := newHomeCatalogClient(t, `{
+		"openai": [
+			{
+				"id": "gemini-3.8-flash",
+				"context_length": 1048576,
+				"max_context_length": 1048576,
+				"max_completion_tokens": 65536
+			},
+			{
+				"id": "without-limits"
+			}
+		]
+	}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1/models status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	dataArray := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "data").Array()
+	if len(dataArray) != 2 {
+		t.Fatalf("data len = %d, want 2; body=%s", len(dataArray), recorder.Body.String())
+	}
+	foundFlash := false
+	foundWithoutLimits := false
+	for _, m := range dataArray {
+		id := m.Get("id").String()
+		if id == "gemini-3.8-flash" {
+			foundFlash = true
+			if got := m.Get("context_length").Int(); got != 1048576 {
+				t.Fatalf("context_length = %d, want 1048576; model=%v", got, m.Raw)
+			}
+			if got := m.Get("max_context_length").Int(); got != 1048576 {
+				t.Fatalf("max_context_length = %d, want 1048576; model=%v", got, m.Raw)
+			}
+			if got := m.Get("max_completion_tokens").Int(); got != 65536 {
+				t.Fatalf("max_completion_tokens = %d, want 65536; model=%v", got, m.Raw)
+			}
+		} else if id == "without-limits" {
+			foundWithoutLimits = true
+			if m.Get("context_length").Exists() {
+				t.Fatalf("model without limits exposed context_length: %#v", m.Raw)
+			}
+		}
+	}
+	if !foundFlash || !foundWithoutLimits {
+		t.Fatalf("expected models missing from response: %s", recorder.Body.String())
+	}
+}
+
+func TestDecodeHomeModelsAggregatesConservativeMinimumTokenMetadata(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [{"id": "shared-model", "display_name": "Shared Model", "context_length": 272000, "max_context_length": 524288, "max_completion_tokens": 64000}],
+		"claude": [{"id": "shared-model", "context_length": 200000, "max_completion_tokens": 8192}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+	if entries[0].contextLength != 200000 {
+		t.Fatalf("contextLength = %d, want conservative 200000", entries[0].contextLength)
+	}
+	if entries[0].maxContextLength != 200000 {
+		t.Fatalf("maxContextLength = %d, want safe cap 200000", entries[0].maxContextLength)
+	}
+	if entries[0].maxCompletionTokens != 8192 {
+		t.Fatalf("maxCompletionTokens = %d, want conservative 8192", entries[0].maxCompletionTokens)
+	}
+	if entries[0].displayName != "Shared Model" {
+		t.Fatalf("displayName = %q, want Shared Model", entries[0].displayName)
+	}
+}
+
+func TestDecodeHomeModelsPreservesConservativeCapWhenDuplicateRouteOmitsOverride(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [{"id": "gpt-5.5", "context_length": 200000, "max_context_length": 200000}],
+		"claude": [{"id": "gpt-5.5", "context_length": 300000}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+	if entries[0].contextLength != 200000 {
+		t.Fatalf("contextLength = %d, want conservative 200000", entries[0].contextLength)
+	}
+	if entries[0].maxContextLength != 200000 {
+		t.Fatalf("maxContextLength = %d, want preserved cap 200000", entries[0].maxContextLength)
+	}
+}
+
+func TestDecodeHomeModelsAggregatesConservativeRouteCapsIndependentlyOfBaseContext(t *testing.T) {
+	// Earlier route "claude" has context 300k and no max override (effective cap: 300k).
+	// Later route "codex" has context 200k and max override 500k (effective cap: 500k).
+	// Merged base context must be min(300k, 200k) = 200k.
+	// Merged maxContextLength must be min(300k, 500k) = 300k, not suppressed to 200k.
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"claude": [{"id": "gpt-5.5", "context_length": 300000}],
+		"codex": [{"id": "gpt-5.5", "context_length": 200000, "max_context_length": 500000}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+	if entries[0].contextLength != 200000 {
+		t.Fatalf("contextLength = %d, want conservative base 200000", entries[0].contextLength)
+	}
+	if entries[0].maxContextLength != 300000 {
+		t.Fatalf("maxContextLength = %d, want route-wide cap 300000", entries[0].maxContextLength)
+	}
+}
+
+func TestDecodeHomeModelsPreservesAgreedMaxContextOverride(t *testing.T) {
+	entries, errDecode := decodeHomeModels([]byte(`{
+		"codex": [{"id": "gpt-6-sol", "context_length": 272000, "max_context_length": 524288}],
+		"claude": [{"id": "gpt-6-sol", "context_length": 272000, "max_context_length": 524288}]
+	}`))
+	if errDecode != nil {
+		t.Fatalf("decodeHomeModels returned error: %v", errDecode)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v, want one merged model", entries)
+	}
+	if entries[0].contextLength != 272000 {
+		t.Fatalf("contextLength = %d, want 272000", entries[0].contextLength)
+	}
+	if entries[0].maxContextLength != 524288 {
+		t.Fatalf("maxContextLength = %d, want agreed override 524288", entries[0].maxContextLength)
+	}
+}
+
 func TestHomeCodexModels_MaxContextLength(t *testing.T) {
 	entries, errDecode := decodeHomeModels([]byte(`{
 		"codex": [

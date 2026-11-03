@@ -1,8 +1,12 @@
 package openai
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -155,6 +159,54 @@ func TestOpenAIModels_DoesNotExposeMetadataModelID(t *testing.T) {
 		if _, exists := m["MetadataModelID"]; exists {
 			t.Fatalf("model map exposed internal MetadataModelID: %#v", m)
 		}
+	}
+}
+
+func TestOpenAIModelsSurfacesTokenMetadata(t *testing.T) {
+	clientID := "openai-models-token-metadata-test"
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{{
+		ID:                  "input-output-fallback-model",
+		InputTokenLimit:     1048576,
+		OutputTokenLimit:    65536,
+		MaxContextLength:    1000000,
+		MaxCompletionTokens: 0,
+	}})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler := NewOpenAIAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	handler.OpenAIModels(context)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	bodyBytes := recorder.Body.Bytes()
+	dataArray := ojson.GetBytesNoCopy(bodyBytes, "data").Array()
+	found := false
+	for _, model := range dataArray {
+		if model.Get("id").String() != "input-output-fallback-model" {
+			continue
+		}
+		found = true
+		if got := model.Get("context_length").Int(); got != 1048576 {
+			t.Fatalf("context_length = %v, want 1048576", got)
+		}
+		if got := model.Get("max_context_length").Int(); got != 1000000 {
+			t.Fatalf("max_context_length = %v, want 1000000", got)
+		}
+		if got := model.Get("max_completion_tokens").Int(); got != 65536 {
+			t.Fatalf("max_completion_tokens = %v, want 65536", got)
+		}
+		break
+	}
+	if !found {
+		t.Fatalf("model missing from response: %s", recorder.Body.String())
 	}
 }
 
