@@ -4981,7 +4981,7 @@ func TestRelocateClaudeSystemPromptForCountTokens_TerminalUserRunKeepsSystemTopL
 		`{"type":"text","text":"second guidance"}],` +
 		`"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
 
-	out := relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, true)
+	out := relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, true, false)
 	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2 caller blocks: %s", got, out)
 	}

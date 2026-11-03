@@ -68,7 +68,7 @@ func TestClaudeSystemPlacement_EffortDirectivePolicies(t *testing.T) {
 				out  []byte
 			}{
 				{name: "messages", out: checkSystemInstructionsWithMode(payload, false, keepTopLevel)},
-				{name: "count tokens", out: relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, keepTopLevel)},
+				{name: "count tokens", out: relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, keepTopLevel, false)},
 			} {
 				t.Run(test.name, func(t *testing.T) {
 					if got := ojson.GetBytes(test.out, "messages.1").Raw; got != ojson.GetBytes(payload, "messages.1").Raw {

@@ -751,12 +751,12 @@ func checkSystemInstructionsWithModeDoc(doc *ojson.Doc, strictMode bool, keepCal
 // top-level prefix.
 func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) []byte {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+	return checkSystemInstructionsWithSigningModeAt(payload, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, false, "")
 }
 
 func checkSystemInstructionsWithSigningModeDoc(doc *ojson.Doc, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, false, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -843,10 +843,11 @@ func checkSystemInstructionsWithSigningModeAt(
 	isSubagent bool,
 	prevReq, promptID string,
 	keepCallerSystemTopLevel bool,
+	avoidMidSystemTurns bool,
 	turnOrigin ...string,
 ) []byte {
 	doc := ojson.NewDoc(payload)
-	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, turnOrigin...) {
+	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, avoidMidSystemTurns, turnOrigin...) {
 		return payload
 	}
 	return doc.Bytes()
@@ -861,6 +862,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	isSubagent bool,
 	prevReq, promptID string,
 	keepCallerSystemTopLevel bool,
+	avoidMidSystemTurns bool,
 	turnOrigin ...string,
 ) bool {
 	if doc == nil {
@@ -903,7 +905,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 		injectClaudeCodeCurrentDateInternalDoc(doc, currentDate, isExplicit)
 		return true
 	}
-	if claudeUsesLegacySystemReminderDoc(doc) {
+	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
 		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
 	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEndDoc(doc) {
 		for _, block := range forwardedSystemBlocks {
@@ -926,18 +928,18 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 // third-party system prompt from reaching Anthropic in the system slot.
 func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool, explicitCacheMode ...bool) []byte {
 	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheMode(payload)
-	return relocateClaudeSystemPromptForCountTokensWithPolicy(payload, strictMode, isExplicit, false)
+	return relocateClaudeSystemPromptForCountTokensWithPolicy(payload, strictMode, isExplicit, false, false)
 }
 
-func relocateClaudeSystemPromptForCountTokensWithPolicy(payload []byte, strictMode, explicitCacheMode, keepCallerSystemTopLevel bool) []byte {
+func relocateClaudeSystemPromptForCountTokensWithPolicy(payload []byte, strictMode, explicitCacheMode, keepCallerSystemTopLevel, avoidMidSystemTurns bool) []byte {
 	doc := ojson.NewDoc(payload)
-	if !relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, strictMode, explicitCacheMode, keepCallerSystemTopLevel) {
+	if !relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, strictMode, explicitCacheMode, keepCallerSystemTopLevel, avoidMidSystemTurns) {
 		return payload
 	}
 	return doc.Bytes()
 }
 
-func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, strictMode, explicitCacheMode, keepCallerSystemTopLevel bool) bool {
+func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, strictMode, explicitCacheMode, keepCallerSystemTopLevel, avoidMidSystemTurns bool) bool {
 	if doc == nil {
 		return false
 	}
@@ -969,7 +971,7 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 	if errDelete := doc.Delete("system"); errDelete != nil {
 		return false
 	}
-	if claudeUsesLegacySystemReminderDoc(doc) {
+	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
 		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
 		return true
 	}
@@ -2654,6 +2656,9 @@ func applyCloakingInternalDoc(
 		prevReq,
 		promptID,
 		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+		// drop-mid-system-message keys reject role=system turns, so caller prompts
+		// take the <system-reminder> path instead of being inserted as one.
+		dropMidSystemMessageEnabled(cfg, auth),
 		turnOriginArgs...,
 	)
 

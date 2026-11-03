@@ -1747,6 +1747,31 @@ func claudeMessagesHaveMidSystemMessage(messages ojson.Result) bool {
 	return found
 }
 
+// dropMidSystemMessages removes {"role":"system"} turns from messages and
+// leaves the top-level system field as it was.
+func dropMidSystemMessages(payload []byte) []byte {
+	doc := ojson.NewDoc(payload)
+	if !dropMidSystemMessagesDoc(doc) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+func dropMidSystemMessagesDoc(doc *ojson.Doc) bool {
+	if !claudeDocHasMidSystemMessage(doc) {
+		return false
+	}
+	messages := doc.Get("messages")
+	keptMessages := make([]string, 0, int(messages.Get("#").Int()))
+	messages.ForEach(func(_, message ojson.Result) bool {
+		if !strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "system") {
+			keptMessages = append(keptMessages, message.Raw)
+		}
+		return true
+	})
+	return doc.SetRawBytes("messages", rawJSONArray(keptMessages)) == nil
+}
+
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
 	doc := ojson.NewDoc(payload)
 	if !rebuildMidSystemMessagesToTopLevelDoc(doc) {

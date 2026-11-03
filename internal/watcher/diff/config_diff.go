@@ -332,6 +332,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
+			if o.DropMidSystemMessage != n.DropMidSystemMessage {
+				changes = append(changes, fmt.Sprintf("claude[%d].drop-mid-system-message: %t -> %t", i, o.DropMidSystemMessage, n.DropMidSystemMessage))
+			}
 			if o.NativeToolSearch != n.NativeToolSearch {
 				changes = append(changes, fmt.Sprintf("claude[%d].native-tool-search: %t -> %t", i, o.NativeToolSearch, n.NativeToolSearch))
 			}

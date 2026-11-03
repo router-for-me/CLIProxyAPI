@@ -768,6 +768,11 @@ type ClaudeKey struct {
 	// RebuildMidSystemMessage moves Claude messages with role "system" into the top-level system field.
 	RebuildMidSystemMessage bool `yaml:"rebuild-mid-system-message,omitempty" json:"rebuild-mid-system-message,omitempty"`
 
+	// DropMidSystemMessage removes Claude messages with role "system" from messages
+	// instead of moving them, for upstreams that reject them in either place.
+	// It takes precedence over RebuildMidSystemMessage.
+	DropMidSystemMessage bool `yaml:"drop-mid-system-message,omitempty" json:"drop-mid-system-message,omitempty"`
+
 	// NativeToolSearch trusts a custom base URL with Anthropic native tool search
 	// (defer_loading tools and tool_reference results) for Codex tool_search.
 	// Official api.anthropic.com credentials use native tool search without it.
