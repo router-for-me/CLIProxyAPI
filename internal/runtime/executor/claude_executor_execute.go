@@ -80,6 +80,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		ctx = helps.WithClaudeSessionID(ctx, claudeSessionID)
 	}
 
+	webSearchSessionKey, webSearchTTL, webSearchLimit := e.claudeWebSearchResultCacheScope(ctx, auth, from, req, opts, originalPayload)
+	ctx = helps.WithClaudeWebSearchResultRestore(ctx, webSearchSessionKey, webSearchTTL)
+
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated, body, err := helps.TranslateRequestPairReturningError(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, upstreamStream, isCompat)
 	if err != nil {
@@ -92,7 +95,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); err != nil {
 		return resp, err
 	}
-	webSearchSessionKey, webSearchTTL, webSearchLimit := e.claudeWebSearchResultCacheScope(ctx, auth, from, req, opts, originalPayload)
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		rebuildMidSystemMessagesToTopLevelDoc(doc)
