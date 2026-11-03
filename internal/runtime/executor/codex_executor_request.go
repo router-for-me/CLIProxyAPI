@@ -471,7 +471,6 @@ func stripCodexSIWCUnsupportedFieldsDoc(doc *ojson.Doc, hasExplicitInstructions 
 	thinking.CollapseConfigurationUpdatesDoc(doc, len(opts) > 0 && opts[0].KeepTopLevelEffort)
 	_ = doc.Delete("prompt_cache_retention")
 	_ = doc.Delete("prompt_cache_options")
-	_ = doc.Delete("max_output_tokens")
 	_ = doc.Delete("max_completion_tokens")
 	_ = doc.Delete("temperature")
 	if !hasExplicitInstructions {

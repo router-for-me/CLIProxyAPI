@@ -85,15 +85,15 @@ func TestConvertClaudeRequestToGemini_PreservesToolResultErrors(t *testing.T) {
 						t.Fatalf("functionResponse.response = %s, want %s", got, tt.wantResponse)
 					}
 					parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
-					wantParts := 1
-					if tt.wantImage {
-						wantParts++
-						if got := ojson.GetBytesNoCopy(output, "contents.1.parts.1.inline_data").Raw; got != `{"mime_type":"image/png","data":"aGVsbG8="}` {
-							t.Fatalf("tool image changed: %s", got)
-						}
+					if len(parts) != 1 {
+						t.Fatalf("tool result parts = %d, want 1: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
 					}
-					if len(parts) != wantParts {
-						t.Fatalf("tool result parts = %d, want %d", len(parts), wantParts)
+					if tt.wantImage {
+						if got := response.Get("parts.0.inlineData").Raw; got != `{"mimeType":"image/png","data":"aGVsbG8="}` {
+							t.Fatalf("functionResponse.parts[0].inlineData = %s", got)
+						}
+					} else if response.Get("parts").Exists() {
+						t.Fatalf("unexpected functionResponse.parts: %s", response.Get("parts").Raw)
 					}
 				})
 			}
