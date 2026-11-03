@@ -16,7 +16,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type testBranchSpec struct {
@@ -1798,13 +1798,21 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
+	repoClosed := false
 	defer func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close corrupted repository: %v", errClose)
+		if !repoClosed {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close repository before corruption: %v", errClose)
+			}
 		}
 	}()
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
+	}
+	errClose := repo.Close()
+	repoClosed = true
+	if errClose != nil {
+		t.Fatalf("close repacked repository: %v", errClose)
 	}
 	objectsDir := filepath.Join(repoDir, ".git", "objects")
 	objectEntries, errReadDir := os.ReadDir(objectsDir)
@@ -1830,7 +1838,16 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+	corruptedRepo, errOpenCorrupted := git.PlainOpen(repoDir)
+	if errOpenCorrupted != nil {
+		t.Fatalf("open corrupted repository: %v", errOpenCorrupted)
+	}
+	defer func() {
+		if errCloseCorrupted := corruptedRepo.Close(); errCloseCorrupted != nil {
+			t.Errorf("close corrupted repository: %v", errCloseCorrupted)
+		}
+	}()
+	if errVerify := verifyRepositoryHead(corruptedRepo); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 }

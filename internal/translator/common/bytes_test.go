@@ -1,9 +1,10 @@
 package common
 
 import (
+	"bytes"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestJoinRawArray(t *testing.T) {
@@ -55,8 +56,14 @@ func TestSetRawArrayItems(t *testing.T) {
 			if string(got) != test.want {
 				t.Fatalf("SetRawArrayItems() = %s, want %s", got, test.want)
 			}
+			doc := ojson.NewDocString(test.data)
+			SetRawArrayItemsDoc(doc, test.path, test.items)
+			if gotDoc := doc.String(); gotDoc != test.want {
+				t.Fatalf("SetRawArrayItemsDoc() = %s, want %s", gotDoc, test.want)
+			}
 		})
 	}
+	SetRawArrayItemsDoc(nil, "items", [][]byte{[]byte(`{"id":1}`)})
 }
 
 func TestSetStringWithoutHTMLEscape(t *testing.T) {
@@ -129,13 +136,51 @@ func TestSetStringWithoutHTMLEscape(t *testing.T) {
 			}
 
 			// Verify that the JSON parses back and decodes to the exact same value (round-trip)
-			res := gjson.GetBytes(got, tc.path)
+			res := ojson.GetBytesNoCopy(got, tc.path)
 			if !res.Exists() {
 				t.Fatalf("path %q does not exist in result: %s", tc.path, string(got))
 			}
 			if res.String() != tc.value {
 				t.Fatalf("round-trip value mismatch: got %q, want %q", res.String(), tc.value)
 			}
+
+			doc := ojson.NewDocString(tc.data)
+			if errDoc := SetStringWithoutHTMLEscapeDoc(doc, tc.path, tc.value); errDoc != nil {
+				t.Fatalf("SetStringWithoutHTMLEscapeDoc() error: %v", errDoc)
+			}
+			if gotDoc := doc.String(); gotDoc != tc.want {
+				t.Fatalf("SetStringWithoutHTMLEscapeDoc() = %s, want %s", gotDoc, tc.want)
+			}
 		})
+	}
+	if errNil := SetStringWithoutHTMLEscapeDoc(nil, "arguments", "val"); errNil != nil {
+		t.Fatalf("SetStringWithoutHTMLEscapeDoc(nil) error: %v", errNil)
+	}
+}
+
+func TestSSEEventData_SelfTerminatingFrame(t *testing.T) {
+	event := "response.completed"
+	payload := []byte(`{"id":"resp_1"}`)
+	got := SSEEventData(event, payload)
+	want := "event: response.completed\ndata: {\"id\":\"resp_1\"}\n\n"
+	if string(got) != want {
+		t.Fatalf("SSEEventData() = %q, want %q", string(got), want)
+	}
+}
+
+func TestSSEEventData_ConcatenatedFramesSeparable(t *testing.T) {
+	frame1 := SSEEventData("event1", []byte(`{"a":1}`))
+	frame2 := SSEEventData("event2", []byte(`{"b":2}`))
+	concatenated := append(frame1, frame2...)
+
+	frames := bytes.Split(concatenated, []byte("\n\n"))
+	if len(frames) != 3 || len(frames[2]) != 0 {
+		t.Fatalf("expected 2 non-empty frames followed by trailing empty slice, got %d parts", len(frames))
+	}
+	if string(frames[0]) != "event: event1\ndata: {\"a\":1}" {
+		t.Fatalf("unexpected frame1: %s", string(frames[0]))
+	}
+	if string(frames[1]) != "event: event2\ndata: {\"b\":2}" {
+		t.Fatalf("unexpected frame2: %s", string(frames[1]))
 	}
 }

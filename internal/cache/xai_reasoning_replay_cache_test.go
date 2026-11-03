@@ -3,14 +3,14 @@ package cache
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/MoeForge/moego/base64"
 	"testing"
 	"time"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
 
 type fakeXAIReasoningReplayKVClient struct {
@@ -121,10 +121,10 @@ func TestXAIReasoningReplayCacheStoresGrokEncryptedContent(t *testing.T) {
 	if !ok {
 		t.Fatal("xAI replay cache item missing after store")
 	}
-	if got := gjson.GetBytes(item, "encrypted_content").String(); got != encryptedContent {
+	if got := ojson.GetBytes(item, "encrypted_content").String(); got != encryptedContent {
 		t.Fatalf("encrypted_content = %q, want %q; item=%s", got, encryptedContent, string(item))
 	}
-	if got := gjson.GetBytes(item, "summary").Array(); len(got) != 0 {
+	if got := ojson.GetBytes(item, "summary").Array(); len(got) != 0 {
 		t.Fatalf("summary length = %d, want normalized empty summary; item=%s", len(got), string(item))
 	}
 }
@@ -146,13 +146,13 @@ func TestXAIReasoningReplayCacheStoresAssistantMessageWithReasoning(t *testing.T
 	if !ok || len(got) != 2 {
 		t.Fatalf("cached items = %q, %v, want two items", got, ok)
 	}
-	if gjson.GetBytes(got[0], "encrypted_content").String() != encryptedContent {
+	if ojson.GetBytes(got[0], "encrypted_content").String() != encryptedContent {
 		t.Fatalf("reasoning encrypted_content not preserved: %s", got[0])
 	}
-	if gotText := gjson.GetBytes(got[1], "content.0.text").String(); gotText != "answer" {
+	if gotText := ojson.GetBytes(got[1], "content.0.text").String(); gotText != "answer" {
 		t.Fatalf("assistant message text = %q, want answer; item=%s", gotText, got[1])
 	}
-	if gjson.GetBytes(got[1], "id").Exists() || gjson.GetBytes(got[1], "status").Exists() {
+	if ojson.GetBytes(got[1], "id").Exists() || ojson.GetBytes(got[1], "status").Exists() {
 		t.Fatalf("assistant message transport fields were not stripped: %s", got[1])
 	}
 }
@@ -208,14 +208,14 @@ func TestXAIReasoningReplayCacheStoresToolCallWithoutReasoning(t *testing.T) {
 			if !ok || len(items) != 1 {
 				t.Fatalf("cached items = %q, %v, want one item", items, ok)
 			}
-			if got := gjson.GetBytes(items[0], "type").String(); got != tt.wantType {
+			if got := ojson.GetBytes(items[0], "type").String(); got != tt.wantType {
 				t.Fatalf("cached type = %q, want %q; item=%s", got, tt.wantType, items[0])
 			}
 			payloadPath := "arguments"
 			if tt.wantType == "custom_tool_call" {
 				payloadPath = "input"
 			}
-			if got := gjson.GetBytes(items[0], payloadPath).String(); got != tt.wantPayload {
+			if got := ojson.GetBytes(items[0], payloadPath).String(); got != tt.wantPayload {
 				t.Fatalf("cached %s = %q, want %q; item=%s", payloadPath, got, tt.wantPayload, items[0])
 			}
 		})
@@ -269,13 +269,13 @@ func TestXAIReasoningReplayCacheStoresRefusalMessagePart(t *testing.T) {
 	if !ok || len(got) != 2 {
 		t.Fatalf("cached items = %q, %v, want reasoning + refusal message", got, ok)
 	}
-	if gjson.GetBytes(got[1], "content.0.type").String() != "refusal" {
-		t.Fatalf("message part type = %s, want refusal; item=%s", gjson.GetBytes(got[1], "content.0.type").String(), got[1])
+	if ojson.GetBytes(got[1], "content.0.type").String() != "refusal" {
+		t.Fatalf("message part type = %s, want refusal; item=%s", ojson.GetBytes(got[1], "content.0.type").String(), got[1])
 	}
-	if gjson.GetBytes(got[1], "content.0.refusal").String() != "I cannot help with that" {
+	if ojson.GetBytes(got[1], "content.0.refusal").String() != "I cannot help with that" {
 		t.Fatalf("refusal text missing; item=%s", got[1])
 	}
-	if gjson.GetBytes(got[1], "content.0.text").Exists() {
+	if ojson.GetBytes(got[1], "content.0.text").Exists() {
 		t.Fatalf("refusal part should not use text field; item=%s", got[1])
 	}
 }

@@ -3,10 +3,11 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 type GeminiModelsSummary struct {
@@ -123,7 +124,11 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 		if alias != "" {
 			name = alias
 		}
-		names = append(names, name+"|"+strings.TrimSpace(model.DisplayName)+thinkingHashSuffix(model.Thinking))
+		key := name + "|" + strings.TrimSpace(model.DisplayName)
+		if model.OpenAPI != nil {
+			key += fmt.Sprintf("|openapi=%t", *model.OpenAPI)
+		}
+		names = append(names, key+thinkingHashSuffix(model.Thinking))
 	}
 	if len(names) == 0 {
 		return VertexModelsSummary{}

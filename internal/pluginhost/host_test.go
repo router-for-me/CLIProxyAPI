@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
@@ -87,8 +88,95 @@ plugins:
 	if h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
 	}
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after global disable")
+	}
+	if lookup := loader.lookups["alpha"]; lookup == nil || lookup.shutdownCalls != 1 {
+		shutdownCalls := 0
+		if lookup != nil {
+			shutdownCalls = lookup.shutdownCalls
+		}
+		t.Fatalf("alpha shutdown calls = %d, want 1 after global disable", shutdownCalls)
+	}
 	if snap := h.Snapshot(); snap.enabled || len(snap.records) != 0 {
 		t.Fatalf("Snapshot() = %+v, want empty disabled snapshot", snap)
+	}
+}
+
+func TestHostApplyConfigStopsDisabledPluginAndKeepsSibling(t *testing.T) {
+	loader := newTestSymbolLoader()
+	alphaPlugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	bravoPlugin := &testPlugin{
+		registerResult:    validTestPlugin("bravo"),
+		reconfigureResult: validTestPlugin("bravo"),
+	}
+	alphaLookup := newTestSymbolLookup(alphaPlugin)
+	bravoLookup := newTestSymbolLookup(bravoPlugin)
+	loader.lookups["alpha"] = alphaLookup
+	loader.lookups["bravo"] = bravoLookup
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	pluginsDir := makePluginDir(t, "alpha", "bravo")
+	enabledCfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: enabledPluginConfigs("alpha", "bravo"),
+		},
+	}
+	h.ApplyConfig(context.Background(), enabledCfg)
+	if !h.PluginRegistered("alpha") || !h.PluginLoaded("alpha") {
+		t.Fatal("alpha was not loaded before disable")
+	}
+	if !h.PluginRegistered("bravo") || !h.PluginLoaded("bravo") {
+		t.Fatal("bravo was not loaded before disable")
+	}
+
+	disabled := false
+	stillEnabled := true
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": {Enabled: &disabled},
+				"bravo": {Enabled: &stillEnabled},
+			},
+		},
+	})
+
+	if h.PluginRegistered("alpha") {
+		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
+	}
+	if h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = true, want false after disable")
+	}
+	if alphaLookup.shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
+	}
+	if !h.PluginRegistered("bravo") || !h.PluginLoaded("bravo") {
+		t.Fatal("bravo was detached while disabling alpha")
+	}
+	if bravoLookup.shutdownCalls != 0 {
+		t.Fatalf("bravo shutdown calls = %d, want 0", bravoLookup.shutdownCalls)
+	}
+
+	h.ApplyConfig(context.Background(), enabledCfg)
+	if !h.PluginRegistered("alpha") || !h.PluginLoaded("alpha") {
+		t.Fatal("alpha was not loaded again after re-enable")
+	}
+	if alphaLookup.shutdownCalls != 1 {
+		t.Fatalf("alpha shutdown calls = %d, want 1 after re-enable", alphaLookup.shutdownCalls)
+	}
+	if alphaPlugin.registerCalls != 2 {
+		t.Fatalf("alpha register calls = %d, want 2", alphaPlugin.registerCalls)
+	}
+	if bravoLookup.shutdownCalls != 0 || bravoPlugin.registerCalls != 1 {
+		t.Fatalf("bravo changed during alpha re-enable: shutdown=%d register=%d", bravoLookup.shutdownCalls, bravoPlugin.registerCalls)
 	}
 }
 
@@ -177,14 +265,15 @@ func TestHostApplyConfig_DefaultDisabledPluginSkipsLoad(t *testing.T) {
 	}
 }
 
-func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
+func TestHostApplyConfigDisableStopsLoadedPluginHTTPOperations(t *testing.T) {
 	disabled := false
 	loader := newTestSymbolLoader()
 	plugin := &testPlugin{
 		registerResult:    validTestPlugin("alpha"),
 		reconfigureResult: validTestPlugin("alpha"),
 	}
-	loader.lookups["alpha"] = newTestSymbolLookup(plugin)
+	lookup := newTestSymbolLookup(plugin)
+	loader.lookups["alpha"] = lookup
 	h := NewForTest(loader)
 	t.Cleanup(h.ShutdownAll)
 	pluginsDir := makePluginDir(t, "alpha")
@@ -206,6 +295,13 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if len(h.RegisteredPlugins()) != 1 {
 		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(h.RegisteredPlugins()))
 	}
+	h.mu.Lock()
+	instance := h.loaded["alpha"].callbackInstance
+	h.mu.Unlock()
+	operationID, operation, openedOperation := h.httpOperations.open("alpha", instance, "", context.Background())
+	if !openedOperation {
+		t.Fatal("failed to open alpha HTTP operation before disable")
+	}
 
 	h.ApplyConfig(context.Background(), &config.Config{
 		Plugins: config.PluginsConfig{
@@ -223,13 +319,25 @@ func TestPluginLoadedTracksLoadedPluginAfterDisabled(t *testing.T) {
 	if h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = true, want false after disable")
 	}
-	if !h.PluginLoaded("alpha") {
-		t.Fatal("PluginLoaded(alpha) = false, want true while library remains loaded")
-	}
-
-	h.ShutdownAll()
 	if h.PluginLoaded("alpha") {
-		t.Fatal("PluginLoaded(alpha) = true, want false after ShutdownAll")
+		t.Fatal("PluginLoaded(alpha) = true, want false after disable")
+	}
+	if lookup.shutdownCalls != 1 {
+		t.Fatalf("shutdown calls = %d, want 1 after disable", lookup.shutdownCalls)
+	}
+	lateOpenContext := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if lateOperationID, errOpen := h.openHostHTTPOperation(lateOpenContext, ""); errOpen == nil {
+		h.httpOperations.cancel("alpha", instance, lateOperationID)
+		t.Fatal("opened an HTTP operation after disable")
+	}
+	if operation.ctx.Err() != context.Canceled {
+		t.Fatalf("HTTP operation context error = %v, want context.Canceled after disable", operation.ctx.Err())
+	}
+	h.httpOperations.mu.Lock()
+	_, operationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "alpha", operationID: operationID}]
+	h.httpOperations.mu.Unlock()
+	if operationOpen {
+		t.Fatal("HTTP operation remained registered after disable")
 	}
 }
 
@@ -259,14 +367,57 @@ func TestHostUnloadPluginTargetsOnlyRequestedPlugin(t *testing.T) {
 
 	h.ApplyConfig(context.Background(), cfg)
 
+	h.mu.Lock()
+	alphaInstance := h.loaded["alpha"].callbackInstance
+	bravoInstance := h.loaded["bravo"].callbackInstance
+	h.mu.Unlock()
+	alphaOperationID, alphaOperation, openedAlphaOperation := h.httpOperations.open("alpha", alphaInstance, "", context.Background())
+	if !openedAlphaOperation {
+		t.Fatal("failed to open alpha HTTP operation")
+	}
+	alphaCleanupDone := make(chan struct{})
+	if !h.httpOperations.setCleanup("alpha", alphaOperationID, alphaOperation, func() { close(alphaCleanupDone) }) {
+		t.Fatal("failed to attach alpha HTTP operation cleanup")
+	}
+	bravoOperationID, bravoOperation, openedBravoOperation := h.httpOperations.open("bravo", bravoInstance, "", context.Background())
+	if !openedBravoOperation {
+		t.Fatal("failed to open bravo HTTP operation")
+	}
+
 	if !h.UnloadPlugin("alpha") {
 		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	lateOpenContext := withHostCallbackIdentity(context.Background(), "alpha", alphaInstance)
+	if lateOperationID, errOpen := h.openHostHTTPOperation(lateOpenContext, ""); errOpen == nil {
+		h.httpOperations.cancel("alpha", alphaInstance, lateOperationID)
+		t.Fatal("opened an HTTP operation after plugin unload started")
 	}
 	if h.PluginLoaded("alpha") {
 		t.Fatal("PluginLoaded(alpha) = true, want false after targeted unload")
 	}
 	if !h.PluginLoaded("bravo") {
 		t.Fatal("PluginLoaded(bravo) = false, want true after alpha unload")
+	}
+	if alphaOperation.ctx.Err() != context.Canceled {
+		t.Fatalf("alpha HTTP operation context error = %v, want context.Canceled after unload", alphaOperation.ctx.Err())
+	}
+	select {
+	case <-alphaCleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("alpha HTTP operation cleanup did not run after unload")
+	}
+	h.httpOperations.mu.Lock()
+	_, alphaOperationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "alpha", operationID: alphaOperationID}]
+	_, bravoOperationOpen := h.httpOperations.operations[hostHTTPOperationKey{pluginID: "bravo", operationID: bravoOperationID}]
+	h.httpOperations.mu.Unlock()
+	if alphaOperationOpen {
+		t.Fatal("alpha HTTP operation remained registered after plugin unload")
+	}
+	if bravoOperation.ctx.Err() != nil {
+		t.Fatalf("unloading alpha canceled bravo's HTTP operation: %v", bravoOperation.ctx.Err())
+	}
+	if !bravoOperationOpen {
+		t.Fatal("bravo HTTP operation was removed while unloading alpha")
 	}
 	if alphaLookup.shutdownCalls != 1 {
 		t.Fatalf("alpha shutdown calls = %d, want 1", alphaLookup.shutdownCalls)
@@ -327,10 +478,10 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	if errApply != nil {
 		t.Fatalf("ApplyThinking() error = %v", errApply)
 	}
-	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 10240 {
+	if got := ojson.GetBytesNoCopy(out, "thinking_budget").Int(); got != 10240 {
 		t.Fatalf("thinking_budget = %d, want 10240; body=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "plugin").String(); got != "plugin-thinking" {
+	if got := ojson.GetBytesNoCopy(out, "plugin").String(); got != "plugin-thinking" {
 		t.Fatalf("plugin = %q, want plugin-thinking; body=%s", got, string(out))
 	}
 }
@@ -1340,8 +1491,59 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 	if infos[0].OAuthProvider != "alpha" {
 		t.Fatalf("RegisteredPlugins()[0].OAuthProvider = %q, want alpha; infos=%#v", infos[0].OAuthProvider, infos)
 	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"alpha"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [alpha]; infos=%#v", infos[0].OAuthProviders, infos)
+	}
 	if infos[0].Metadata.Logo == "" || len(infos[0].Metadata.ConfigFields) != 1 {
 		t.Fatalf("RegisteredPlugins()[0].Metadata = %#v, want logo and config fields", infos[0].Metadata)
+	}
+}
+
+func TestRegisteredPluginsExposesMultipleOAuthProvidersViaRPC(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("zcode"),
+		reconfigureResult: validTestPlugin("zcode"),
+	}
+	authProv := fakeAuthProvider{
+		identifier:  "zcode-zai",
+		identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+		startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+			return pluginapi.AuthLoginStartResponse{
+				Provider: req.Provider,
+				URL:      "https://login.example/" + req.Provider,
+				State:    "state-" + req.Provider,
+			}, nil
+		},
+	}
+	plugin.registerResult.Capabilities.AuthProvider = authProv
+	plugin.reconfigureResult.Capabilities.AuthProvider = authProv
+	loader.lookups["zcode"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "zcode"),
+			Configs: enabledPluginConfigs("zcode"),
+		},
+	})
+
+	infos := h.RegisteredPlugins()
+	if len(infos) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1; infos=%#v", len(infos), infos)
+	}
+	if !infos[0].SupportsOAuth || infos[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("RegisteredPlugins()[0] = %#v, want SupportsOAuth=true OAuthProvider=zcode-zai", infos[0])
+	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [zcode-zai zcode-bigmodel]", infos[0].OAuthProviders)
+	}
+	for _, portal := range []string{"zcode-zai", "zcode-bigmodel"} {
+		resp, handled, errStart := h.StartLogin(context.Background(), portal, "http://127.0.0.1:8317/callback")
+		if errStart != nil || !handled || resp.Provider != portal {
+			t.Fatalf("StartLogin(%q) = (%#v, %v, %v), want handled", portal, resp, handled, errStart)
+		}
 	}
 }
 
@@ -1545,6 +1747,8 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1564,10 +1768,9 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	}
 
 	close(client.release)
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("blocked initialization client shutdown calls = %d, want 1", got)
 	}
@@ -1584,6 +1787,8 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1604,10 +1809,9 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 	h.mu.Unlock()
 	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
 
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("late client shutdown calls = %d, want 1", got)
 	}
@@ -2200,6 +2404,82 @@ func (l *countingPluginLoader) Open(pluginFile, *Host) (pluginClient, error) {
 		return l.client, nil
 	}
 	return l.replacement, nil
+}
+
+type callbackInstanceCleanupClient struct {
+	shutdown chan struct{}
+	once     sync.Once
+}
+
+func (c *callbackInstanceCleanupClient) Call(context.Context, string, []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (c *callbackInstanceCleanupClient) Shutdown() {
+	c.once.Do(func() { close(c.shutdown) })
+}
+
+func finishPendingPluginLoadForTest(t *testing.T, request *pluginLoadRequest, instance *hostCallbackInstance) {
+	t.Helper()
+	client := &callbackInstanceCleanupClient{shutdown: make(chan struct{})}
+	request.result <- pluginLoadResult{loaded: &loadedPlugin{id: "alpha", client: client, callbackInstance: instance}}
+	waitForHostTestSignal(t, client.shutdown, "pending plugin client shutdown")
+}
+
+func TestHostCanceledLoadRejectsLateCallbackInstance(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	h.cleanupCanceledPluginLoad("alpha", request)
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("canceled load allowed a late callback instance to open an HTTP operation")
+	}
+}
+
+func TestHostShutdownAllRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	h.ShutdownAll()
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("shutdown allowed a late callback instance to open an HTTP operation")
+	}
+}
+
+func TestHostUnloadRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
+	h := New()
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	h.mu.Lock()
+	h.loading["alpha"] = request
+	h.mu.Unlock()
+	var instance *hostCallbackInstance
+	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true for a pending load")
+	}
+	instance = &hostCallbackInstance{}
+	h.registerHostCallbackInstance("alpha", instance)
+	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
+	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
+		t.Fatal("unload allowed a late callback instance to open an HTTP operation")
+	}
 }
 
 func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {

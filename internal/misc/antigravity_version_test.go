@@ -48,10 +48,10 @@ func TestAntigravityLatestVersionUsesCurrentHubFallback(t *testing.T) {
 	}
 }
 
-// Cloud Code resolves newer models only for clients reporting at least 2.9.0;
+// Cloud Code resolves newer models only for clients reporting at least 2.23.0;
 // older versions get 404 Requested entity was not found.
 func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
-	const floorMajor, floorMinor = 2, 9
+	const floorMajor, floorMinor = 2, 23
 
 	var major, minor, patch int
 	if _, err := fmt.Sscanf(antigravityFallbackVersion, "%d.%d.%d", &major, &minor, &patch); err != nil {
@@ -63,18 +63,39 @@ func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
 }
 
 func TestAntigravityUserAgentUsesHubFamily(t *testing.T) {
-	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
-	defer restore()
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"2.23.0", "antigravity/hub/2.23.0 (aidev_client; os_type=darwin; arch=arm64; cl=998057262)"},
+		{"2.24.0", "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"},
+		{"2.25.0", "antigravity/hub/2.25.0 (aidev_client; os_type=darwin; arch=arm64)"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			restore := overrideAntigravityVersionCacheForTest(t, tc.version, time.Now().Add(time.Hour))
+			defer restore()
+			if got := AntigravityUserAgent(); got != tc.want {
+				t.Fatalf("AntigravityUserAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
-	want := "antigravity/hub/2.2.1 darwin/arm64"
-	if got := AntigravityUserAgent(); got != want {
-		t.Fatalf("AntigravityUserAgent() = %q, want %q", got, want)
+func TestAntigravityFallbackVersionHasMatchingChangelist(t *testing.T) {
+	if antigravityHubChangelists[antigravityFallbackVersion] == "" {
+		t.Fatal("fallback version must be updated together with its verified changelist")
 	}
 }
 
 func TestAntigravityVersionFromUserAgentParsesHubFamily(t *testing.T) {
-	if got := AntigravityVersionFromUserAgent("antigravity/hub/2.2.1 darwin/arm64"); got != "2.2.1" {
-		t.Fatalf("AntigravityVersionFromUserAgent() = %q, want %q", got, "2.2.1")
+	for _, userAgent := range []string{
+		"antigravity/hub/2.24.0 darwin/arm64",
+		"antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)",
+		"antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682) google-api-nodejs-client/10.3.0",
+	} {
+		if got := AntigravityVersionFromUserAgent(userAgent); got != "2.24.0" {
+			t.Fatalf("AntigravityVersionFromUserAgent(%q) = %q, want %q", userAgent, got, "2.24.0")
+		}
 	}
 }
 
@@ -88,7 +109,7 @@ func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64"
+	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64)"
 	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
 		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
 	}
@@ -101,7 +122,7 @@ func TestAntigravityOnboardUserUserAgentUsesLongUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 darwin/arm64 google-api-nodejs-client/10.3.0"
+	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0"
 	if got := AntigravityOnboardUserUserAgent(""); got != want {
 		t.Fatalf("AntigravityOnboardUserUserAgent() = %q, want %q", got, want)
 	}

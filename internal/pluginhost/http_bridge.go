@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -16,29 +15,47 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpwire"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
 
 type hostHTTPClient struct {
-	host     *Host
-	auth     *coreauth.Auth
-	provider string
+	host            *Host
+	auth            *coreauth.Auth
+	provider        string
+	requestProxyURL string
 }
 
 func (h *Host) newHTTPClient(auth *coreauth.Auth, providers ...string) pluginapi.HostHTTPClient {
+	return h.newHTTPClientWithProxy(auth, "", providers...)
+}
+
+func (h *Host) newHTTPClientWithProxy(auth *coreauth.Auth, requestProxyURL string, providers ...string) pluginapi.HostHTTPClient {
 	provider := ""
 	if len(providers) > 0 {
 		provider = providers[0]
 	}
-	return &hostHTTPClient{host: h, auth: auth, provider: provider}
+	return &hostHTTPClient{
+		host:            h,
+		auth:            auth,
+		provider:        provider,
+		requestProxyURL: strings.TrimSpace(requestProxyURL),
+	}
+}
+
+func (c *hostHTTPClient) proxyContext(ctx context.Context) context.Context {
+	if c == nil {
+		return cliproxyexecutor.WithoutRequestProxyURL(ctx)
+	}
+	return cliproxyexecutor.WithRequestProxyURL(ctx, c.requestProxyURL)
 }
 
 func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
@@ -200,19 +217,19 @@ func (h *Host) currentRuntimeConfig() *config.Config {
 func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *config.Config, req pluginapi.HTTPRequest, httpReq *http.Request) (*http.Client, func(), error) {
 	profile := req.WireProfile
 	if profile == nil || (!profile.HTTP1Only && !profile.DisableAutoCompression && len(profile.HeaderProfile) == 0) {
-		client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
+		client := helps.NewProxyAwareHTTPClient(c.proxyContext(ctx), cfg, c.auth, 0)
 		if client == nil {
 			client = &http.Client{}
 		}
+		installPluginRedirectPolicy(client)
 		return client, nil, nil
 	}
 
-	// Priority 1: Auth proxy
-	var proxyStr string
-	if c.auth != nil {
+	// Priority: request override, then auth proxy, then config proxy.
+	proxyStr := strings.TrimSpace(c.requestProxyURL)
+	if proxyStr == "" && c.auth != nil {
 		proxyStr = strings.TrimSpace(c.auth.ProxyURL)
 	}
-	// Priority 2: Config proxy
 	if proxyStr == "" && cfg != nil {
 		proxyStr = strings.TrimSpace(cfg.ProxyURL)
 	}
@@ -498,14 +515,99 @@ func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *confi
 		CheckRedirect: func(redirectReq *http.Request, via []*http.Request) error {
 			reqHolder.set(redirectReq)
 			baseTransport.CloseIdleConnections()
-			if len(via) >= 10 {
-				return errors.New("stopped after 10 redirects")
-			}
-			return nil
+			return checkPluginRedirect(redirectReq, via, nil)
 		},
 	}
 
 	return client, cleanup, nil
+}
+
+func installPluginRedirectPolicy(client *http.Client) {
+	if client == nil {
+		return
+	}
+	previous := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return checkPluginRedirect(req, via, previous)
+	}
+}
+
+func checkPluginRedirect(req *http.Request, via []*http.Request, previous func(*http.Request, []*http.Request) error) error {
+	// net/http rebuilds each redirect request from the initial request's headers,
+	// so strip credential headers whenever the target or any intermediate hop
+	// leaves the initial request's origin (scheme + host:port).
+	if crossOriginRedirect(req, via) {
+		for name := range req.Header {
+			if isPluginCredentialHeader(name) {
+				// Delete the exact map key because Header.Del canonicalizes and
+				// would miss non-canonical keys such as "x-api-key".
+				delete(req.Header, name)
+			}
+		}
+	}
+	if previous != nil {
+		return previous(req, via)
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
+}
+
+func crossOriginRedirect(req *http.Request, via []*http.Request) bool {
+	if req == nil || len(via) == 0 || via[0] == nil {
+		return false
+	}
+	origin := via[0].URL
+	if !sameRedirectOrigin(origin, req.URL) {
+		return true
+	}
+	for _, hop := range via[1:] {
+		if hop == nil || !sameRedirectOrigin(origin, hop.URL) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameRedirectOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		redirectOriginPort(a) == redirectOriginPort(b)
+}
+
+func redirectOriginPort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func isPluginCredentialHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case "authorization", "proxy-authorization", "cookie", "cookie2", "www-authenticate":
+		return true
+	}
+	return strings.Contains(lower, "api-key") ||
+		strings.Contains(lower, "apikey") ||
+		strings.Contains(lower, "api_key") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "credential")
 }
 
 type requestHolder struct {

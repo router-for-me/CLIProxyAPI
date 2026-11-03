@@ -37,6 +37,18 @@ func WithSkipPersist(ctx context.Context) context.Context {
 	return context.WithValue(ctx, skipPersistContextKey{}, true)
 }
 
+// WithoutSkipPersist returns a derived context that re-enables persistence even
+// when the parent context was marked with WithSkipPersist.
+func WithoutSkipPersist(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	if !shouldSkipPersist(ctx) {
+		return ctx
+	}
+	return context.WithValue(ctx, skipPersistContextKey{}, false)
+}
+
 func shouldSkipPersist(ctx context.Context) bool {
 	if ctx == nil {
 		return false

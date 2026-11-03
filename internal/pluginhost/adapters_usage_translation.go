@@ -7,12 +7,12 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -162,26 +162,60 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if sessionID == "" || sessionID == parentSessionID {
 		parentSessionID = ""
 	}
+	requestID := strings.TrimSpace(record.RequestID)
+	traceID := strings.TrimSpace(record.TraceID)
+	if traceID == "" {
+		traceID = strings.TrimSpace(logging.GetRequestID(ctx))
+	}
+	selectionID := strings.TrimSpace(record.SelectionID)
+	if selectionID == "" {
+		selectionID = strings.TrimSpace(coreusage.SelectionIDFromContext(ctx))
+	}
+	accessProvider := strings.TrimSpace(record.AccessProvider)
+	if accessProvider == "" {
+		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
+	}
+	isNativeKey := record.IsNativeKey
+	if !isNativeKey {
+		if nativeExplicit, ok := coreusage.IsNativeKeyFromContext(ctx); ok {
+			isNativeKey = nativeExplicit
+		} else if accessProvider != "" {
+			isNativeKey = coreusage.IsNativeAccessProvider(accessProvider)
+		}
+	}
+	apiKey := strings.TrimSpace(record.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(coreusage.APIKeyFromContext(ctx))
+	}
 	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
-		Provider:        record.Provider,
-		BaseURL:         record.BaseURL,
-		ExecutorType:    record.ExecutorType,
-		Model:           record.Model,
-		Alias:           record.Alias,
-		APIKey:          record.APIKey,
-		SessionID:       sessionID,
-		ParentSessionID: parentSessionID,
-		AuthID:          record.AuthID,
-		AuthIndex:       record.AuthIndex,
-		AuthType:        record.AuthType,
-		Source:          record.Source,
-		ReasoningEffort: record.ReasoningEffort,
-		ServiceTier:     record.ServiceTier,
-		Generate:        coreusage.GenerateEnabled(record.Generate),
-		RequestedAt:     record.RequestedAt,
-		Latency:         record.Latency,
-		TTFT:            record.TTFT,
-		Failed:          record.Failed,
+		RequestID:            requestID,
+		TraceID:              traceID,
+		SelectionID:          selectionID,
+		Provider:             record.Provider,
+		BaseURL:              record.BaseURL,
+		ExecutorType:         record.ExecutorType,
+		Model:                record.Model,
+		Alias:                record.Alias,
+		APIKey:               apiKey,
+		IsNativeKey:          isNativeKey,
+		AccessProvider:       accessProvider,
+		SessionID:            sessionID,
+		ParentSessionID:      parentSessionID,
+		AuthID:               record.AuthID,
+		AuthIndex:            record.AuthIndex,
+		AuthType:             record.AuthType,
+		Source:               record.Source,
+		ReasoningEffort:      record.ReasoningEffort,
+		ServiceTier:          record.ServiceTier,
+		EffectiveServiceTier: record.EffectiveServiceTier,
+		ResponseServiceTier:  record.ResponseServiceTier,
+		ResponseModel:        record.ResponseModel,
+		Generate:             coreusage.GenerateEnabled(record.Generate),
+		Stream:               record.Stream,
+		RequestedAt:          record.RequestedAt,
+		Latency:              record.Latency,
+		TTFT:                 record.TTFT,
+		Failed:               record.Failed,
 		Failure: pluginapi.UsageFailure{
 			StatusCode: record.Fail.StatusCode,
 			Body:       record.Fail.Body,

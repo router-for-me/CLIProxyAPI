@@ -13,6 +13,8 @@ const (
 	AuthErrorCodeNoCredentials     AuthErrorCode = "no_credentials"
 	AuthErrorCodeInvalidCredential AuthErrorCode = "invalid_credential"
 	AuthErrorCodeNotHandled        AuthErrorCode = "not_handled"
+	AuthErrorCodeDenied            AuthErrorCode = "denied"
+	AuthErrorCodeRequestTooLarge   AuthErrorCode = "request_too_large"
 	AuthErrorCodeInternal          AuthErrorCode = "internal_error"
 )
 
@@ -48,6 +50,9 @@ func (e *AuthError) Unwrap() error {
 // HTTPStatusCode returns a safe fallback for missing status codes.
 func (e *AuthError) HTTPStatusCode() int {
 	if e == nil || e.StatusCode <= 0 {
+		if e != nil && e.Code == AuthErrorCodeDenied {
+			return http.StatusForbidden
+		}
 		return http.StatusInternalServerError
 	}
 	return e.StatusCode
@@ -72,6 +77,25 @@ func NewInvalidCredentialError() *AuthError {
 
 func NewNotHandledError() *AuthError {
 	return newAuthError(AuthErrorCodeNotHandled, "authentication provider did not handle request", 0, nil)
+}
+
+func NewDeniedError(message string, statusCode int) *AuthError {
+	if statusCode <= 0 {
+		statusCode = http.StatusForbidden
+	}
+	normalizedMessage := strings.TrimSpace(message)
+	if normalizedMessage == "" {
+		normalizedMessage = http.StatusText(statusCode)
+		if normalizedMessage == "" {
+			normalizedMessage = "Access denied"
+		}
+	}
+	return newAuthError(AuthErrorCodeDenied, normalizedMessage, statusCode, nil)
+}
+
+// NewRequestEntityTooLargeError builds a 413 error when the request body exceeds the configured limit.
+func NewRequestEntityTooLargeError(cause error) *AuthError {
+	return newAuthError(AuthErrorCodeRequestTooLarge, "http: request body too large", http.StatusRequestEntityTooLarge, cause)
 }
 
 func NewInternalAuthError(message string, cause error) *AuthError {

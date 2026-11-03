@@ -18,10 +18,10 @@ import (
 const (
 	// antigravityFallbackVersion is the client version reported when the hub
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
-	// newer models for clients below 2.9.0, so this floor must stay at or above
+	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion = "2.9.1"
-	antigravityHubPlatform     = "darwin/arm64"
+	antigravityFallbackVersion = "2.24.0"
+	antigravityHubPlatform     = "os_type=darwin; arch=arm64"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
@@ -31,6 +31,15 @@ const (
 var (
 	antigravityHubLatestManifestURL = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml"
 )
+
+// Changelists belong to specific Hub releases, not to the latest manifest in
+// general. Update the fallback release and its entry together. The 2.24.0 value
+// was verified in the official darwin-arm archive's webm_encoder build metadata.
+// Unknown releases keep their online version without claiming another build's CL.
+var antigravityHubChangelists = map[string]string{
+	"2.23.0": "998057262",
+	"2.24.0": "1000335682",
+}
 
 type antigravityHubUpdaterManifest struct {
 	Version string `yaml:"version"`
@@ -114,7 +123,12 @@ func AntigravityLatestVersion() string {
 
 // AntigravityUserAgent returns the User-Agent string used by the Antigravity Hub family.
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/hub/%s %s", AntigravityLatestVersion(), antigravityHubPlatform)
+	version := AntigravityLatestVersion()
+	metadata := "aidev_client; " + antigravityHubPlatform
+	if changelist := antigravityHubChangelists[version]; changelist != "" {
+		metadata += "; cl=" + changelist
+	}
+	return fmt.Sprintf("antigravity/hub/%s (%s)", version, metadata)
 }
 
 func isAntigravityFamilyUserAgent(lower string) bool {
@@ -138,13 +152,13 @@ func antigravityBaseUserAgent(userAgent string) string {
 	return userAgent
 }
 
-// AntigravityRequestUserAgent returns the short Antigravity runtime UA used by
+// AntigravityRequestUserAgent returns the Antigravity runtime UA used by
 // generate/stream/model-list requests.
 func AntigravityRequestUserAgent(userAgent string) string {
 	return antigravityBaseUserAgent(userAgent)
 }
 
-// AntigravityLoadCodeAssistUserAgent returns the short Antigravity UA used by
+// AntigravityLoadCodeAssistUserAgent returns the Antigravity runtime UA used by
 // loadCodeAssist requests.
 func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
 	return AntigravityRequestUserAgent(userAgent)

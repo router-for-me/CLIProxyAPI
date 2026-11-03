@@ -11,24 +11,25 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
 type loadedPlugin struct {
-	id         string
-	path       string
-	version    string
-	name       string
-	configYAML []byte
-	plugin     pluginapi.Plugin
-	registered bool
-	client     pluginClient
+	id               string
+	path             string
+	version          string
+	name             string
+	configYAML       []byte
+	plugin           pluginapi.Plugin
+	registered       bool
+	client           pluginClient
+	callbackInstance *hostCallbackInstance
 }
 
 type modelExecutor interface {
@@ -37,16 +38,19 @@ type modelExecutor interface {
 }
 
 type pluginUnloadTarget struct {
-	id      string
-	name    string
-	path    string
-	version string
-	client  pluginClient
+	id               string
+	name             string
+	path             string
+	version          string
+	client           pluginClient
+	callbackInstance *hostCallbackInstance
 }
 
 type pluginLoadRequest struct {
-	result         chan pluginLoadResult
-	cleanupStarted bool
+	result            chan pluginLoadResult
+	cleanupStarted    bool
+	closed            bool // Protected by Host.mu; rejects callbacks arriving after cleanup starts.
+	callbackInstances map[*hostCallbackInstance]struct{}
 }
 
 type pluginLoadResult struct {
@@ -57,65 +61,75 @@ type pluginLoadResult struct {
 }
 
 type Host struct {
-	applyMu                chan struct{}
-	mu                     sync.Mutex
-	loader                 pluginLoader
-	loaded                 map[string]*loadedPlugin
-	retired                map[string][]*loadedPlugin
-	loading                map[string]*pluginLoadRequest
-	fused                  map[string]string
-	pluginFileVersions     map[string]string
-	activePluginVersions   map[string]string
-	activePluginPaths      map[string]string
-	cleanupFilesPending    bool
-	runtimeConfig          *config.Config
-	authManager            *coreauth.Manager
-	modelExecutor          modelExecutor
-	modelClientIDs         map[string]struct{}
-	executorModelClientIDs map[string]struct{}
-	modelProviders         map[string]string
-	modelRegistrations     map[string]pluginModelRegistration
-	providerModels         map[string][]*registryModelInfo
-	executorProviders      map[string]struct{}
-	accessProviderKeys     map[string]struct{}
-	commandLineFlags       map[string]commandLineFlagRecord
-	commandLineHits        map[string]struct{}
-	managementRoutes       map[string]managementRouteRecord
-	resourceRoutes         map[string]resourceRouteRecord
-	streams                *streamBridge
-	httpStreams            *hostHTTPStreamBridge
-	modelStreams           *modelStreamBridge
-	callbackContexts       *callbackContextRegistry
-	snapshot               atomic.Value
+	applyMu                  chan struct{}
+	mu                       sync.Mutex
+	loader                   pluginLoader
+	loaded                   map[string]*loadedPlugin
+	retired                  map[string][]*loadedPlugin
+	loading                  map[string]*pluginLoadRequest
+	fused                    map[string]string
+	pluginFileVersions       map[string]string
+	activePluginVersions     map[string]string
+	activePluginPaths        map[string]string
+	cleanupFilesPending      bool
+	runtimeConfig            *config.Config
+	authManager              *coreauth.Manager
+	modelExecutor            modelExecutor
+	modelClientIDs           map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
+	executorModelClientIDs   map[string]struct{}
+	modelProviders           map[string]string
+	modelProviderSets        map[string][]string
+	authCredentialProviders  map[string]map[string]string
+	modelRegistrations       map[string]pluginModelRegistration
+	pluginModelRegistrations map[string][]pluginModelRegistration
+	providerModels           map[string][]*registryModelInfo
+	executorProviders        map[string]struct{}
+	accessProviderKeys       map[string]struct{}
+	commandLineFlags         map[string]commandLineFlagRecord
+	commandLineHits          map[string]struct{}
+	managementRoutes         map[string]managementRouteRecord
+	resourceRoutes           map[string]resourceRouteRecord
+	streams                  *streamBridge
+	httpStreams              *hostHTTPStreamBridge
+	httpOperations           *hostHTTPOperationBridge
+	modelStreams             *modelStreamBridge
+	callbackContexts         *callbackContextRegistry
+	snapshot                 atomic.Value
+	// loadCleanupDoneHook, set by tests, runs after a late load cleanup dropped its load token.
+	loadCleanupDoneHook func()
 }
 
 func New() *Host {
 	h := &Host{
-		applyMu:                make(chan struct{}, 1),
-		loader:                 defaultPluginLoader(),
-		loaded:                 make(map[string]*loadedPlugin),
-		retired:                make(map[string][]*loadedPlugin),
-		loading:                make(map[string]*pluginLoadRequest),
-		fused:                  make(map[string]string),
-		pluginFileVersions:     make(map[string]string),
-		activePluginVersions:   make(map[string]string),
-		activePluginPaths:      make(map[string]string),
-		cleanupFilesPending:    true,
-		modelClientIDs:         make(map[string]struct{}),
-		executorModelClientIDs: make(map[string]struct{}),
-		modelProviders:         make(map[string]string),
-		modelRegistrations:     make(map[string]pluginModelRegistration),
-		providerModels:         make(map[string][]*registryModelInfo),
-		executorProviders:      make(map[string]struct{}),
-		accessProviderKeys:     make(map[string]struct{}),
-		commandLineFlags:       make(map[string]commandLineFlagRecord),
-		commandLineHits:        make(map[string]struct{}),
-		managementRoutes:       make(map[string]managementRouteRecord),
-		resourceRoutes:         make(map[string]resourceRouteRecord),
-		streams:                newStreamBridge(),
-		httpStreams:            newHostHTTPStreamBridge(),
-		modelStreams:           newModelStreamBridge(),
-		callbackContexts:       newCallbackContextRegistry(),
+		applyMu:                  make(chan struct{}, 1),
+		loader:                   defaultPluginLoader(),
+		loaded:                   make(map[string]*loadedPlugin),
+		retired:                  make(map[string][]*loadedPlugin),
+		loading:                  make(map[string]*pluginLoadRequest),
+		fused:                    make(map[string]string),
+		pluginFileVersions:       make(map[string]string),
+		activePluginVersions:     make(map[string]string),
+		activePluginPaths:        make(map[string]string),
+		cleanupFilesPending:      true,
+		modelClientIDs:           make(map[string]struct{}),
+		executorModelClientIDs:   make(map[string]struct{}),
+		modelProviders:           make(map[string]string),
+		modelProviderSets:        make(map[string][]string),
+		authCredentialProviders:  make(map[string]map[string]string),
+		modelRegistrations:       make(map[string]pluginModelRegistration),
+		pluginModelRegistrations: make(map[string][]pluginModelRegistration),
+		providerModels:           make(map[string][]*registryModelInfo),
+		executorProviders:        make(map[string]struct{}),
+		accessProviderKeys:       make(map[string]struct{}),
+		commandLineFlags:         make(map[string]commandLineFlagRecord),
+		commandLineHits:          make(map[string]struct{}),
+		managementRoutes:         make(map[string]managementRouteRecord),
+		resourceRoutes:           make(map[string]resourceRouteRecord),
+		streams:                  newStreamBridge(),
+		httpStreams:              newHostHTTPStreamBridge(),
+		httpOperations:           newHostHTTPOperationBridge(),
+		modelStreams:             newModelStreamBridge(),
+		callbackContexts:         newCallbackContextRegistry(),
 	}
 	h.snapshot.Store(emptySnapshot())
 	return h
@@ -157,7 +171,7 @@ func (h *Host) Snapshot() *Snapshot {
 	return emptySnapshot()
 }
 
-// PluginLoaded reports whether a plugin dynamic library is still loaded by the host.
+// PluginLoaded reports whether a plugin is still active in the host runtime.
 func (h *Host) PluginLoaded(id string) bool {
 	if h == nil {
 		return false
@@ -175,7 +189,7 @@ func (h *Host) PluginLoaded(id string) bool {
 	return len(h.retired[id]) > 0
 }
 
-// PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
+// PluginBusy reports whether a plugin is active in the host runtime or being loaded.
 func (h *Host) PluginBusy(id string) bool {
 	if h == nil {
 		return false
@@ -218,6 +232,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	h.mu.Unlock()
 
 	if !rc.Enabled {
+		h.detachUnselectedPlugins(ctx, nil)
 		h.mu.Lock()
 		h.managementRoutes = make(map[string]managementRouteRecord)
 		h.resourceRoutes = make(map[string]resourceRouteRecord)
@@ -242,6 +257,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		return
 	}
 	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
+	h.detachUnselectedPlugins(ctx, enabledPluginIDs(files, rc.Items))
 
 	records := make([]capabilityRecord, 0, len(files))
 	loadedFiles := make([]pluginFile, 0, len(files))
@@ -408,6 +424,43 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	}
 }
 
+func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
+	if h == nil || instance == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	h.mu.Lock()
+	if request := h.loading[pluginID]; request != nil {
+		if request.callbackInstances == nil {
+			request.callbackInstances = make(map[*hostCallbackInstance]struct{})
+		}
+		request.callbackInstances[instance] = struct{}{}
+		if request.closed {
+			instance.closed.Store(true)
+		}
+	}
+	h.mu.Unlock()
+}
+
+func markPluginLoadClosedLocked(request *pluginLoadRequest) []*hostCallbackInstance {
+	if request == nil {
+		return nil
+	}
+	request.closed = true
+	instances := make([]*hostCallbackInstance, 0, len(request.callbackInstances))
+	for instance := range request.callbackInstances {
+		instance.closed.Store(true)
+		instances = append(instances, instance)
+	}
+	return instances
+}
+
+func (h *Host) closeHostHTTPCallbackInstances(pluginID string, instances []*hostCallbackInstance) {
+	for _, instance := range instances {
+		h.closeHostHTTPCallbackInstance(pluginID, instance)
+	}
+}
+
 func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtimeItemConfig, request *pluginLoadRequest) {
 	if h == nil || request == nil || request.result == nil {
 		return
@@ -425,11 +478,13 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 			request.result <- pluginLoadResult{err: fmt.Errorf("plugin loader returned nil client")}
 			return
 		}
+		guardedClient := newGuardedPluginClient(client)
 		loaded := &loadedPlugin{
-			id:      file.ID,
-			path:    file.Path,
-			version: file.Version,
-			client:  newGuardedPluginClient(client),
+			id:               file.ID,
+			path:             file.Path,
+			version:          file.Version,
+			client:           guardedClient,
+			callbackInstance: pluginCallbackInstance(guardedClient),
 		}
 		plugin, okCall := h.callRegister(ctx, loaded, item)
 		request.result <- pluginLoadResult{loaded: loaded, plugin: plugin, initialized: okCall}
@@ -461,7 +516,9 @@ func (h *Host) cleanupCanceledPluginLoad(id string, request *pluginLoadRequest) 
 		return
 	}
 	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
 	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
 
 	go func() {
 		result := <-request.result
@@ -479,7 +536,9 @@ func (h *Host) cleanupCanceledPluginLoadAndWait(id string, request *pluginLoadRe
 		return
 	}
 	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
 	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
 
 	result := <-request.result
 	h.discardLoadedPlugin(result.loaded)
@@ -498,7 +557,9 @@ func (h *Host) cleanupPluginLoad(id string, request *pluginLoadRequest, loaded *
 		return
 	}
 	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
 	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
 
 	h.finishPluginLoadCleanup(id, request, loaded)
 }
@@ -513,7 +574,9 @@ func (h *Host) cleanupPluginLoadAndWait(id string, request *pluginLoadRequest, l
 		return
 	}
 	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
 	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
 
 	h.discardLoadedPlugin(loaded)
 	h.clearLoadingRequest(id, request)
@@ -523,6 +586,9 @@ func (h *Host) finishPluginLoadCleanup(id string, request *pluginLoadRequest, lo
 	go func() {
 		h.discardLoadedPlugin(loaded)
 		h.clearLoadingRequest(id, request)
+		if h.loadCleanupDoneHook != nil {
+			h.loadCleanupDoneHook()
+		}
 	}()
 }
 
@@ -541,6 +607,7 @@ func (h *Host) discardLoadedPlugin(loaded *loadedPlugin) {
 	if loaded == nil || loaded.client == nil {
 		return
 	}
+	h.closeHostHTTPCallbackInstance(loaded.id, loaded.callbackInstance)
 	shutdownPluginClient(context.Background(), loaded.client)
 }
 
@@ -584,7 +651,8 @@ func (h *Host) withLoadedPluginFallbacks(files []pluginFile, items map[string]ru
 	return files
 }
 
-// UnloadPlugin removes one plugin from the active runtime and closes its dynamic library.
+// UnloadPlugin removes one plugin from the active runtime.
+// The plugin image itself stays mapped for the lifetime of the process.
 func (h *Host) UnloadPlugin(id string) bool {
 	return h.UnloadPluginContext(context.Background(), id)
 }
@@ -600,20 +668,37 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		return false
 	}
 	defer h.unlockApply()
+	return h.detachPlugin(ctx, id)
+}
+
+// detachPlugin shuts down one loaded plugin. Caller must hold the apply lock.
+func (h *Host) detachPlugin(ctx context.Context, id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	targets := make([]pluginUnloadTarget, 0)
 	h.mu.Lock()
 	lp := h.loaded[id]
 	if lp != nil {
-		targets = append(targets, pluginUnloadTarget{id: lp.id, name: lp.name, path: lp.path, version: lp.version, client: lp.client})
+		targets = append(targets, pluginUnloadTarget{id: lp.id, name: lp.name, path: lp.path, version: lp.version, client: lp.client, callbackInstance: lp.callbackInstance})
 	}
 	for _, retired := range h.retired[id] {
 		if retired == nil {
 			continue
 		}
-		targets = append(targets, pluginUnloadTarget{id: retired.id, name: retired.name, path: retired.path, version: retired.version, client: retired.client})
+		targets = append(targets, pluginUnloadTarget{id: retired.id, name: retired.name, path: retired.path, version: retired.version, client: retired.client, callbackInstance: retired.callbackInstance})
 	}
-	if len(targets) == 0 {
+	request := h.loading[id]
+	instances := markPluginLoadClosedLocked(request)
+	if len(targets) == 0 && request == nil {
 		h.mu.Unlock()
 		return false
 	}
@@ -630,6 +715,16 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 	h.snapshot.Store(&Snapshot{enabled: enabled, records: records})
 	h.mu.Unlock()
 
+	h.closeHostHTTPCallbackInstances(id, instances)
+	if len(targets) == 0 {
+		h.closeHostHTTPPluginResources(id, nil)
+	}
+	if request != nil {
+		h.cleanupCanceledPluginLoad(id, request)
+	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
 	h.refreshThinkingProviders(records)
 	h.RegisterFrontendAuthProviders()
 	for _, target := range targets {
@@ -638,10 +733,66 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		}
 		log.WithFields(pluginLogFields(target.id, target.name, target.version, target.path)).Info("pluginhost: plugin unloaded")
 	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
 	return true
 }
 
-// ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
+// detachUnselectedPlugins stops plugins that are no longer enabled. nil keeps none.
+// Caller must hold the apply lock.
+func (h *Host) detachUnselectedPlugins(ctx context.Context, selected map[string]struct{}) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.loaded)+len(h.retired)+len(h.loading))
+	for id := range h.loaded {
+		ids = append(ids, id)
+	}
+	for id := range h.retired {
+		ids = append(ids, id)
+	}
+	for id := range h.loading {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	sort.Strings(ids)
+
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := selected[id]; ok {
+			continue
+		}
+		h.detachPlugin(ctx, id)
+	}
+}
+
+func enabledPluginIDs(files []pluginFile, items map[string]runtimeItemConfig) map[string]struct{} {
+	ids := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		id := strings.TrimSpace(file.ID)
+		if id == "" {
+			continue
+		}
+		item, ok := items[id]
+		if !ok {
+			item = defaultRuntimeItemConfig(id)
+		}
+		if !item.Enabled {
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+	return ids
+}
+
+// ShutdownAll removes active plugin capabilities and detaches all plugins.
+// Plugin images stay mapped for the lifetime of the process.
 func (h *Host) ShutdownAll() {
 	h.ShutdownAllContext(context.Background())
 }
@@ -656,21 +807,24 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 
 	targets := make([]pluginUnloadTarget, 0)
 	var loading map[string]*pluginLoadRequest
+	loadingInstances := make(map[string][]*hostCallbackInstance)
 	h.mu.Lock()
 	loading = make(map[string]*pluginLoadRequest, len(h.loading))
 	for id, request := range h.loading {
 		loading[id] = request
+		loadingInstances[id] = markPluginLoadClosedLocked(request)
 	}
 	for _, lp := range h.loaded {
 		if lp == nil || lp.client == nil {
 			continue
 		}
 		targets = append(targets, pluginUnloadTarget{
-			id:      lp.id,
-			name:    lp.name,
-			path:    lp.path,
-			version: lp.version,
-			client:  lp.client,
+			id:               lp.id,
+			name:             lp.name,
+			path:             lp.path,
+			version:          lp.version,
+			client:           lp.client,
+			callbackInstance: lp.callbackInstance,
 		})
 	}
 	for _, retiredPlugins := range h.retired {
@@ -679,11 +833,12 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 				continue
 			}
 			targets = append(targets, pluginUnloadTarget{
-				id:      lp.id,
-				name:    lp.name,
-				path:    lp.path,
-				version: lp.version,
-				client:  lp.client,
+				id:               lp.id,
+				name:             lp.name,
+				path:             lp.path,
+				version:          lp.version,
+				client:           lp.client,
+				callbackInstance: lp.callbackInstance,
 			})
 		}
 	}
@@ -692,7 +847,10 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.modelClientIDs = make(map[string]struct{})
 	h.executorModelClientIDs = make(map[string]struct{})
 	h.modelProviders = make(map[string]string)
+	h.modelProviderSets = make(map[string][]string)
+	h.authCredentialProviders = make(map[string]map[string]string)
 	h.modelRegistrations = make(map[string]pluginModelRegistration)
+	h.pluginModelRegistrations = make(map[string][]pluginModelRegistration)
 	h.providerModels = make(map[string][]*registryModelInfo)
 	h.executorProviders = make(map[string]struct{})
 	h.commandLineFlags = make(map[string]commandLineFlagRecord)
@@ -705,6 +863,21 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 
+	for id, instances := range loadingInstances {
+		h.closeHostHTTPCallbackInstances(id, instances)
+	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
+	if h.httpOperations != nil {
+		h.httpOperations.cancelAll()
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
+	}
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
 	for id, request := range loading {
@@ -713,6 +886,15 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	for _, target := range targets {
 		shutdownPluginClient(ctx, target.client)
 		log.WithFields(pluginLogFields(target.id, target.name, target.version, target.path)).Info("pluginhost: plugin unloaded")
+	}
+	if h.httpOperations != nil {
+		h.httpOperations.cancelAll()
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
 	}
 }
 
@@ -825,11 +1007,41 @@ func (h *Host) removePluginRuntimeStateLocked(id string) {
 			delete(h.commandLineHits, name)
 		}
 	}
-	if registration, ok := h.modelRegistrations[id]; ok {
-		delete(h.providerModels, registration.provider)
+	affectedProviders := make(map[string]struct{})
+	if registration, ok := h.modelRegistrations[id]; ok && registration.provider != "" {
+		affectedProviders[registration.provider] = struct{}{}
+	}
+	for _, registration := range h.pluginModelRegistrations[id] {
+		if registration.provider != "" {
+			affectedProviders[registration.provider] = struct{}{}
+		}
+	}
+	if provider := normalizeProviderID(h.modelProviders[id]); provider != "" {
+		affectedProviders[provider] = struct{}{}
+	}
+	for _, provider := range h.modelProviderSets[id] {
+		if normalized := normalizeProviderID(provider); normalized != "" {
+			affectedProviders[normalized] = struct{}{}
+		}
 	}
 	delete(h.modelProviders, id)
+	delete(h.modelProviderSets, id)
+	delete(h.authCredentialProviders, id)
 	delete(h.modelRegistrations, id)
+	delete(h.pluginModelRegistrations, id)
+	for provider := range affectedProviders {
+		delete(h.providerModels, provider)
+	}
+	if len(affectedProviders) > 0 {
+		for _, registration := range h.snapshotModelRegistrationsLocked() {
+			if registration.hasExecutor {
+				continue
+			}
+			if _, ok := affectedProviders[registration.provider]; ok {
+				appendModelsForProvider(h.providerModels, registration.provider, registration.models)
+			}
+		}
+	}
 }
 
 func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
@@ -928,17 +1140,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 		return capabilityRecord{}, pluginFile{}, false
 	}
 	return capabilityRecord{
-		id:       lp.id,
-		path:     lp.path,
-		version:  lp.version,
-		priority: item.Priority,
-		meta:     plugin.Metadata,
-		plugin:   plugin,
-	}, pluginFile{
-		ID:      lp.id,
-		Path:    lp.path,
-		Version: lp.version,
-	}, true
+			id:       lp.id,
+			path:     lp.path,
+			version:  lp.version,
+			priority: item.Priority,
+			meta:     plugin.Metadata,
+			plugin:   plugin,
+		}, pluginFile{
+			ID:      lp.id,
+			Path:    lp.path,
+			Version: lp.version,
+		}, true
 }
 
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
@@ -1038,7 +1250,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 	caps := plugin.Capabilities
 	return caps.ModelRegistrar != nil ||
 		caps.ModelProvider != nil ||
-		caps.AuthProvider != nil ||
+		hasAuthProviderCap(caps) ||
 		caps.FrontendAuthProvider != nil ||
 		caps.Scheduler != nil ||
 		caps.ModelRouter != nil ||
@@ -1046,6 +1258,8 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||
 		caps.RequestInterceptor != nil ||
+		caps.RequestBodyPatcherBefore != nil ||
+		caps.RequestBodyPatcherAfter != nil ||
 		caps.RequestLifecyclePlugin != nil ||
 		caps.ResponseTranslator != nil ||
 		caps.ResponseBeforeTranslator != nil ||

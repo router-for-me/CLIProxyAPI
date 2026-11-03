@@ -40,3 +40,25 @@ func TestIsClaudeThinkingModel(t *testing.T) {
 		})
 	}
 }
+
+func TestIsClaudeModel(t *testing.T) {
+	tests := []struct {
+		name     string
+		model    string
+		expected bool
+	}{
+		{"Claude model", "claude-sonnet-4-6", true},
+		{"Claude thinking model", "claude-opus-4-6-thinking", true},
+		{"case insensitive", "Claude-Sonnet-4-5", true},
+		{"Gemini model", "gemini-3-pro-preview", false},
+		{"empty string", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsClaudeModel(tt.model); got != tt.expected {
+				t.Errorf("IsClaudeModel(%q) = %v, expected %v", tt.model, got, tt.expected)
+			}
+		})
+	}
+}

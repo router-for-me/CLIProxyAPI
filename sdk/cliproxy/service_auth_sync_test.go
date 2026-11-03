@@ -11,17 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
-	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestRuntimeAuthSyncHook_SynchronousModelAndSchedulerRestoration(t *testing.T) {
@@ -182,6 +184,333 @@ func TestRuntimeAuthSyncHook_SynchronousModelAndSchedulerRestoration(t *testing.
 	}
 }
 
+func TestAuthIDMatches(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		snapshotID string
+		id         string
+		wantExact  bool
+		wantFolded bool
+	}{
+		{name: "identical", snapshotID: "account.json", id: "account.json", wantExact: true, wantFolded: true},
+		{name: "windows_store_case", snapshotID: "account.json", id: "Account.json", wantFolded: true},
+		{name: "case_sensitive_plugin_ids", snapshotID: "plugin:Account", id: "plugin:account", wantFolded: true},
+		{name: "different_ids", snapshotID: "account.json", id: "other.json"},
+	} {
+		for _, foldCase := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/fold_case=%t", tc.name, foldCase), func(t *testing.T) {
+				want := tc.wantExact
+				if foldCase {
+					want = tc.wantFolded
+				}
+				if got := authIDMatches(tc.snapshotID, tc.id, foldCase); got != want {
+					t.Fatalf("authIDMatches(%q, %q, %t)=%t, want %t", tc.snapshotID, tc.id, foldCase, got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestHandleAuthUpdates_FileDeleteOrdering(t *testing.T) {
+	for _, mode := range []struct {
+		name         string
+		withRevision bool
+		delayHook    bool
+	}{
+		{name: "legacy_callback"},
+		{name: "revision_callback", withRevision: true},
+		{name: "before_persist_hook", withRevision: true, delayHook: true},
+	} {
+		for _, deleteBeforeSave := range []bool{true, false} {
+			name := fmt.Sprintf("%s/delete_before_save=%t", mode.name, deleteBeforeSave)
+			t.Run(name, func(t *testing.T) {
+				ctx := coreauth.WithSkipPersist(context.Background())
+				authID := "codex-file-delete-ordering.json"
+				path := filepath.Join(t.TempDir(), authID)
+				reg := GlobalModelRegistry()
+				reg.UnregisterClient(authID)
+				t.Cleanup(func() { reg.UnregisterClient(authID) })
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.RegisterExecutor(&syncTestExecutor{})
+				auth := &coreauth.Auth{
+					ID:       authID,
+					Provider: "codex",
+					Status:   coreauth.StatusActive,
+					Attributes: map[string]string{
+						"plan_type":            "pro",
+						coreauth.AttributePath: path,
+					},
+				}
+				w, errNewWatcher := watcher.NewWatcher("", filepath.Dir(path), nil)
+				if errNewWatcher != nil {
+					t.Fatal(errNewWatcher)
+				}
+				w.SetConfig(&config.Config{AuthDir: filepath.Dir(path)})
+				queue := make(chan watcher.AuthUpdate, 8)
+				w.SetAuthUpdateQueue(queue)
+				t.Cleanup(func() {
+					if errStop := w.Stop(); errStop != nil {
+						t.Errorf("stop watcher: %v", errStop)
+					}
+				})
+				wrapper := &WatcherWrapper{dispatchPersistedAuth: w.DispatchPersistedAuthUpdate, snapshotAuthFile: w.SnapshotAuthFile}
+				if mode.withRevision {
+					wrapper.dispatchPersistedAuthWithRev = w.DispatchPersistedAuthUpdateWithRevision
+				}
+				service := &Service{cfg: &config.Config{}, coreManager: manager, watcher: wrapper}
+				hook := service.runtimeAuthSyncHook()
+				save := func(syncHook bool) {
+					t.Helper()
+					if errWriteFile := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWriteFile != nil {
+						t.Fatalf("write auth file: %v", errWriteFile)
+					}
+					if _, errRegister := manager.Register(ctx, auth.Clone()); errRegister != nil {
+						t.Fatalf("register auth: %v", errRegister)
+					}
+					if syncHook {
+						if errHook := hook(ctx, auth.Clone()); errHook != nil {
+							t.Fatalf("sync persisted auth: %v", errHook)
+						}
+					}
+				}
+				nextUpdate := func() watcher.AuthUpdate {
+					t.Helper()
+					select {
+					case update := <-queue:
+						return update
+					case <-time.After(5 * time.Second):
+						t.Fatal("watcher did not dispatch auth update")
+						return watcher.AuthUpdate{}
+					}
+				}
+				observeDelete := func() watcher.AuthUpdate {
+					t.Helper()
+					if errRemove := os.Remove(path); errRemove != nil {
+						t.Fatalf("remove auth file: %v", errRemove)
+					}
+					// Use the same watcher stamping/dispatch machinery as file deletes,
+					// without depending on fsnotify scheduling or debounce timers.
+					deletion := watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: authID}
+					deletion.SetFileRemoval(true)
+					if !w.DispatchRuntimeAuthUpdate(deletion) {
+						t.Fatal("delete was not dispatched")
+					}
+					update := nextUpdate()
+					if update.Action != watcher.AuthUpdateActionDelete || update.Auth != nil || update.Revision() == 0 || !update.IsFileRemoval() {
+						t.Fatalf("expected stamped bare watcher delete, got %+v", update)
+					}
+					return update
+				}
+
+				save(true)
+				service.handleAuthUpdate(ctx, nextUpdate())
+				var deletion watcher.AuthUpdate
+				if deleteBeforeSave {
+					deletion = observeDelete()
+				}
+				// Management uploads publish to coreManager before invoking the persist
+				// hook. Exercise that gap as well as the legacy callback's lost revision.
+				save(!mode.delayHook)
+				if !mode.delayHook {
+					// Hold the queued add so restoration depends on the inline persist hook.
+					addition := nextUpdate()
+					if deleteBeforeSave && addition.Revision() <= deletion.Revision() {
+						t.Fatal("re-created auth must have a newer watcher revision")
+					}
+				}
+				if !deleteBeforeSave {
+					deletion = observeDelete()
+				}
+				if len(reg.GetModelsForClient(authID)) == 0 {
+					t.Fatal("expected models registered before delivering delete")
+				}
+				service.handleAuthUpdate(ctx, deletion)
+				_, present := manager.GetByID(authID)
+				modelsPresent := len(reg.GetModelsForClient(authID)) > 0
+				if present != deleteBeforeSave || modelsPresent != deleteBeforeSave {
+					t.Fatalf("after delete: auth present=%t, models present=%t; want both %t", present, modelsPresent, deleteBeforeSave)
+				}
+			})
+		}
+	}
+}
+
+func TestHandleAuthUpdates_FileDeleteRecreatedSubset(t *testing.T) {
+	ctx := coreauth.WithSkipPersist(context.Background())
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	write := func(data string) {
+		t.Helper()
+		if errWriteFile := os.WriteFile(path, []byte(data), 0o600); errWriteFile != nil {
+			t.Fatal(errWriteFile)
+		}
+	}
+	write(`{"type":"plugin","ids":["a","b"]}`)
+	manager := coreauth.NewManager(nil, nil, nil)
+	reg := GlobalModelRegistry()
+	auths := make([]*coreauth.Auth, 0, 2)
+	deletes := make([]watcher.AuthUpdate, 0, 2)
+	for index, id := range []string{"codex-recreated-subset-a", "codex-recreated-subset-b"} {
+		reg.UnregisterClient(id)
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+		auth := &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{coreauth.AttributePath: path}}
+		coreauth.MarkPluginVirtualAuth(auth, path, index)
+		auths = append(auths, auth)
+		deletion := watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: id}
+		deletion.SetFileRemoval(true)
+		deletion.SetRevision(2)
+		deletes = append(deletes, deletion)
+	}
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		watcher: &WatcherWrapper{snapshotAuthFile: func(snapshotPath string) ([]*coreauth.Auth, error) {
+			if snapshotPath != path {
+				t.Fatalf("snapshot path=%q, want %q", snapshotPath, path)
+			}
+			// The re-created source file contains only B, independent of watcher state.
+			return []*coreauth.Auth{auths[1].Clone()}, nil
+		}},
+	}
+	for _, auth := range auths {
+		addition := watcher.AuthUpdate{Action: watcher.AuthUpdateActionAdd, ID: auth.ID, Auth: auth}
+		addition.SetRevision(1)
+		service.handleAuthUpdate(ctx, addition)
+		if len(reg.GetModelsForClient(auth.ID)) == 0 {
+			t.Fatalf("expected initial models for %s", auth.ID)
+		}
+	}
+	if errRemove := os.Remove(path); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	write(`{"type":"plugin","ids":["b"]}`)
+	// Do not deliver the create event: the delayed deletes must reconcile IDs themselves.
+	service.handleAuthUpdates(ctx, deletes)
+	if _, present := manager.GetByID(auths[0].ID); present || len(reg.GetModelsForClient(auths[0].ID)) != 0 {
+		t.Fatal("auth A, absent from the re-created file, must be removed with its models")
+	}
+	if _, present := manager.GetByID(auths[1].ID); !present || len(reg.GetModelsForClient(auths[1].ID)) == 0 {
+		t.Fatal("auth B must remain present with its models")
+	}
+}
+
+func TestHandleAuthUpdates_FileDeleteSnapshotUncertain(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		watcher *WatcherWrapper
+	}{
+		{name: "unavailable"},
+		{name: "empty", watcher: &WatcherWrapper{snapshotAuthFile: func(string) ([]*coreauth.Auth, error) { return nil, nil }}},
+		{name: "invalid_ids", watcher: &WatcherWrapper{snapshotAuthFile: func(string) ([]*coreauth.Auth, error) {
+			return []*coreauth.Auth{nil, {}}, nil
+		}}},
+		{name: "error_with_partial_result", watcher: &WatcherWrapper{snapshotAuthFile: func(string) ([]*coreauth.Auth, error) {
+			return []*coreauth.Auth{{ID: "other-auth"}}, fmt.Errorf("simulated parse failure")
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := coreauth.WithSkipPersist(context.Background())
+			path := filepath.Join(t.TempDir(), "auth.json")
+			if errWriteFile := os.WriteFile(path, []byte(`{"type":`), 0o600); errWriteFile != nil {
+				t.Fatal(errWriteFile)
+			}
+			authID := "codex-uncertain-file-delete-" + tc.name
+			reg := GlobalModelRegistry()
+			reg.UnregisterClient(authID)
+			t.Cleanup(func() { reg.UnregisterClient(authID) })
+			manager := coreauth.NewManager(nil, nil, nil)
+			auth := &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{coreauth.AttributePath: path}}
+			service := &Service{cfg: &config.Config{}, coreManager: manager, watcher: tc.watcher}
+			service.handleAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionAdd, ID: authID, Auth: auth})
+			deletion := watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: authID}
+			deletion.SetFileRemoval(true)
+			service.handleAuthUpdate(ctx, deletion)
+			if _, present := manager.GetByID(authID); !present || len(reg.GetModelsForClient(authID)) == 0 {
+				t.Fatal("uncertain file snapshot must preserve the auth and its models")
+			}
+		})
+	}
+}
+
+func TestHandleAuthUpdates_FileDeleteScope(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		attributes   map[string]string
+		withSnapshot bool
+		unmarked     bool
+		wantPresent  bool
+	}{
+		{name: "file_path", attributes: map[string]string{coreauth.AttributePath: "file"}, wantPresent: true},
+		{name: "file_source", attributes: map[string]string{coreauth.AttributeSource: "file"}, wantPresent: true},
+		{name: "git", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeSourceBackend: coreauth.AuthSourceGit}, wantPresent: true},
+		{name: "postgres", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeSourceBackend: coreauth.AuthSourcePostgres}, wantPresent: true},
+		{name: "objectstore", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeSourceBackend: coreauth.AuthSourceObjectStore}, wantPresent: true},
+		{name: "plugin_virtual_unmarked", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributePluginVirtual: "true"}, unmarked: true},
+		{name: "file_unmarked", attributes: map[string]string{coreauth.AttributePath: "file"}, unmarked: true},
+		{name: "remote_without_local_path", attributes: map[string]string{coreauth.AttributeSource: "file", coreauth.AttributeSourceBackend: coreauth.AuthSourceGit}},
+		{name: "runtime_only", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeRuntimeOnly: "true"}},
+		{name: "runtime_only_remote", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeRuntimeOnly: "true", coreauth.AttributeSourceBackend: coreauth.AuthSourceGit}},
+		{name: "config", attributes: map[string]string{coreauth.AttributePath: "file", coreauth.AttributeSource: "config:codex[0]"}},
+		{name: "api_key", attributes: map[string]string{coreauth.AttributeAPIKey: "test-key"}},
+		{name: "snapshot", attributes: map[string]string{coreauth.AttributePath: "file"}, withSnapshot: true},
+	} {
+		for _, filePresent := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/file_present=%t", tc.name, filePresent), func(t *testing.T) {
+				ctx := coreauth.WithSkipPersist(context.Background())
+				authID := "codex-file-delete-scope-" + tc.name
+				path := filepath.Join(t.TempDir(), "auth.json")
+				if errWriteFile := os.WriteFile(path, []byte(`{"type":"codex"}`), 0o600); errWriteFile != nil {
+					t.Fatalf("write auth file: %v", errWriteFile)
+				}
+				attributes := make(map[string]string, len(tc.attributes))
+				for key, value := range tc.attributes {
+					if value == "file" {
+						value = path
+					}
+					attributes[key] = value
+				}
+				reg := GlobalModelRegistry()
+				reg.UnregisterClient(authID)
+				t.Cleanup(func() { reg.UnregisterClient(authID) })
+				manager := coreauth.NewManager(nil, nil, nil)
+				auth := &coreauth.Auth{ID: authID, Provider: "codex", Status: coreauth.StatusActive, Attributes: attributes}
+				service := &Service{
+					cfg:         &config.Config{},
+					coreManager: manager,
+					watcher: &WatcherWrapper{snapshotAuthFile: func(snapshotPath string) ([]*coreauth.Auth, error) {
+						if snapshotPath != path {
+							t.Fatalf("snapshot path=%q, want %q", snapshotPath, path)
+						}
+						return []*coreauth.Auth{auth.Clone()}, nil
+					}},
+				}
+				service.handleAuthUpdate(ctx, watcher.AuthUpdate{Action: watcher.AuthUpdateActionAdd, ID: authID, Auth: auth})
+				modelsBeforeDelete := len(reg.GetModelsForClient(authID)) > 0
+				if !modelsBeforeDelete && tc.name != "api_key" {
+					t.Fatal("expected models registered before delete")
+				}
+				if !filePresent {
+					if errRemove := os.Remove(path); errRemove != nil {
+						t.Fatalf("remove auth file: %v", errRemove)
+					}
+				}
+				deletion := watcher.AuthUpdate{Action: watcher.AuthUpdateActionDelete, ID: authID}
+				deletion.SetFileRemoval(!tc.unmarked)
+				if tc.withSnapshot {
+					deletion.Auth, _ = manager.GetByID(authID)
+				}
+				service.handleAuthUpdate(ctx, deletion)
+				_, present := manager.GetByID(authID)
+				modelsPresent := len(reg.GetModelsForClient(authID)) > 0
+				wantPresent := tc.wantPresent && filePresent
+				wantModelsPresent := wantPresent && modelsBeforeDelete
+				if present != wantPresent || modelsPresent != wantModelsPresent {
+					t.Fatalf("after delete: auth present=%t, models present=%t; want auth=%t, models=%t", present, modelsPresent, wantPresent, wantModelsPresent)
+				}
+			})
+		}
+	}
+}
+
 type syncTestExecutor struct{}
 
 func (e *syncTestExecutor) Identifier() string { return "codex" }
@@ -224,6 +553,548 @@ func TestRuntimeAuthSyncHook_NilAndEmptyAuth(t *testing.T) {
 
 	if err := hook(context.Background(), &coreauth.Auth{}); err != nil {
 		t.Fatalf("expected nil error for empty auth, got: %v", err)
+	}
+}
+
+func TestRuntimeAuthSyncHook_DoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-probe-wait-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-probe-wait.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+	service.antigravityProbeWg.Add(1)
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		service.antigravityProbeWg.Done()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	hook := service.runtimeAuthSyncHook()
+	if hook == nil {
+		t.Fatal("runtimeAuthSyncHook() returned nil")
+	}
+
+	go func() {
+		defer close(finished)
+		done <- hook(context.Background(), auth)
+	}()
+
+	select {
+	case errHook := <-done:
+		if errHook != nil {
+			t.Fatalf("hook failed: %v", errHook)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtimeAuthSyncHook blocked waiting for unrelated antigravity probes")
+	}
+
+	models := reg.GetModelsForClient(authID)
+	if len(models) == 0 {
+		t.Fatal("expected models registered for enabled auth, got none")
+	}
+}
+
+func TestHandleAuthUpdates_DeleteDoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-probe-wait-delete-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-probe-wait-delete.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+	service.registerModelsForAuth(context.Background(), auth)
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models registered before delete")
+	}
+
+	runAuthUpdateWithoutProbeWait(t, service, func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionDelete,
+			ID:     authID,
+			Auth:   auth,
+		})
+	})
+
+	if _, ok := manager.GetByID(authID); ok {
+		t.Fatal("expected auth to be removed")
+	}
+	if len(reg.GetModelsForClient(authID)) != 0 {
+		t.Fatal("expected models unregistered after delete")
+	}
+}
+
+func TestHandleAuthUpdates_PluginVirtualModifyDoesNotBlockOnUnrelatedAntigravityProbes(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "plugin-virtual-probe-wait-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/plugin-virtual-probe-wait.json",
+		},
+	}
+	coreauth.MarkPluginVirtualAuth(auth, "/path/to/plugin-source.json", 0)
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+		pluginHost:  pluginhost.New(),
+	}
+
+	runAuthUpdateWithoutProbeWait(t, service, func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authID,
+			Auth:   auth,
+		})
+	})
+}
+
+func runAuthUpdateWithoutProbeWait(t *testing.T, service *Service, run func()) {
+	t.Helper()
+	if service == nil {
+		t.Fatal("service is nil")
+	}
+	service.antigravityProbeWg.Add(1)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		service.antigravityProbeWg.Done()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	go func() {
+		defer close(finished)
+		run()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auth update blocked waiting for unrelated antigravity probes")
+	}
+}
+
+func TestHandleAuthUpdates_ModelRegistrationDoesNotHoldAuthUpdateLock(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authAID := "codex-lock-a-auth"
+	authBID := "codex-lock-b-auth"
+	reg.UnregisterClient(authAID)
+	reg.UnregisterClient(authBID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	authA := &coreauth.Auth{
+		ID:       authAID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-lock-a.json",
+		},
+	}
+	authB := &coreauth.Auth{
+		ID:       authBID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-lock-b.json",
+		},
+	}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	var first atomic.Bool
+	modelRegistrationTaskHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(started)
+			<-block
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+
+	finishedA := make(chan struct{})
+	go func() {
+		defer close(finishedA)
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authAID,
+			Auth:   authA,
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first auth update did not reach model registration")
+	}
+
+	doneB := make(chan struct{})
+	go func() {
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authBID,
+			Auth:   authB,
+		})
+		close(doneB)
+	}()
+
+	select {
+	case <-doneB:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second auth update blocked by first auth model registration")
+	}
+
+	close(block)
+	select {
+	case <-finishedA:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first auth update did not finish after registration was unblocked")
+	}
+}
+
+func TestHandleAuthUpdates_OlderGenerationDoesNotOverrideNewerPersist(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-generation-stale-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-generation-stale.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	disabledAuth := auth.Clone()
+	disabledAuth.Disabled = true
+	disabledAuth.Status = coreauth.StatusDisabled
+	disabledSnapshot, errDisable := manager.Update(context.Background(), disabledAuth)
+	if errDisable != nil {
+		t.Fatalf("disable update: %v", errDisable)
+	}
+
+	enabledAuth := disabledSnapshot.Clone()
+	enabledAuth.Disabled = false
+	enabledAuth.Status = coreauth.StatusActive
+	enabledSnapshot, errEnable := manager.Update(context.Background(), enabledAuth)
+	if errEnable != nil {
+		t.Fatalf("enable update: %v", errEnable)
+	}
+
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   enabledSnapshot,
+	})
+	manager.RegisterExecutor(&syncTestExecutor{})
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models after enable")
+	}
+
+	staleDisable := watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   disabledSnapshot,
+	}
+	staleDisable.SetRevision(99)
+	service.handleAuthUpdate(context.Background(), staleDisable)
+	manager.RegisterExecutor(&syncTestExecutor{})
+
+	current, ok := manager.GetByID(authID)
+	if !ok || current == nil || current.Disabled {
+		t.Fatal("expected newer enabled persist to win over older disable snapshot")
+	}
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models to remain registered after stale disable update")
+	}
+}
+
+func TestHandleAuthUpdates_StaleDisableRegistrationDoesNotDropNewerEnable(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authID := "codex-stale-disable-task-auth"
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"plan_type": "pro",
+			"path":      "/path/to/codex-stale-disable-task.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: manager,
+	}
+
+	disabledAuth := auth.Clone()
+	disabledAuth.Disabled = true
+	disabledAuth.Status = coreauth.StatusDisabled
+	disabledSnapshot, errDisable := manager.Update(context.Background(), disabledAuth)
+	if errDisable != nil {
+		t.Fatalf("disable update: %v", errDisable)
+	}
+
+	started := make(chan struct{})
+	block := make(chan struct{})
+	var first atomic.Bool
+	modelRegistrationTaskHook = func() {
+		if first.CompareAndSwap(false, true) {
+			close(started)
+			<-block
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
+
+	finishedDisable := make(chan struct{})
+	go func() {
+		defer close(finishedDisable)
+		service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionModify,
+			ID:     authID,
+			Auth:   disabledSnapshot,
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disable registration did not start")
+	}
+
+	enabledAuth := disabledSnapshot.Clone()
+	enabledAuth.Disabled = false
+	enabledAuth.Status = coreauth.StatusActive
+	enabledSnapshot, errEnable := manager.Update(context.Background(), enabledAuth)
+	if errEnable != nil {
+		t.Fatalf("enable update: %v", errEnable)
+	}
+	service.handleAuthUpdate(context.Background(), watcher.AuthUpdate{
+		Action: watcher.AuthUpdateActionModify,
+		ID:     authID,
+		Auth:   enabledSnapshot,
+	})
+	manager.RegisterExecutor(&syncTestExecutor{})
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models after enable")
+	}
+
+	close(block)
+	select {
+	case <-finishedDisable:
+	case <-time.After(2 * time.Second):
+		t.Fatal("disable registration did not finish")
+	}
+
+	current, ok := manager.GetByID(authID)
+	if !ok || current == nil || current.Disabled {
+		t.Fatal("expected auth to remain enabled after stale disable registration")
+	}
+	if len(reg.GetModelsForClient(authID)) == 0 {
+		t.Fatal("expected models to remain registered after stale disable registration")
+	}
+}
+
+func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *testing.T) {
+	reg := internalregistry.GetGlobalRegistry()
+	authAID := "codex-batch-wait-a-auth"
+	authBID := "codex-batch-wait-b-auth"
+	reg.UnregisterClient(authAID)
+	reg.UnregisterClient(authBID)
+	t.Cleanup(func() {
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&syncTestExecutor{})
+	authA := &coreauth.Auth{
+		ID:         authAID,
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"plan_type": "pro", "path": "/path/to/codex-batch-wait-a.json"},
+	}
+	authB := &coreauth.Auth{
+		ID:         authBID,
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"plan_type": "pro", "path": "/path/to/codex-batch-wait-b.json"},
+	}
+	for _, auth := range []*coreauth.Auth{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	bStarted := make(chan struct{})
+	bBlock := make(chan struct{})
+	var started atomic.Int32
+	modelRegistrationTaskHook = func() {
+		if started.Add(1) == 2 {
+			close(bStarted)
+			<-bBlock
+		}
+	}
+	t.Cleanup(func() {
+		modelRegistrationTaskHook = nil
+		select {
+		case <-bBlock:
+		default:
+			close(bBlock)
+		}
+	})
+
+	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
+	updateA.SetRevision(1)
+	updateB := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authBID, Auth: authB}
+	updateB.SetRevision(1)
+
+	finishedBatch := make(chan struct{})
+	go func() {
+		defer close(finishedBatch)
+		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
+	}()
+
+	select {
+	case <-bStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second auth registration in batch did not start")
+	}
+
+	doneA := make(chan struct{})
+	go func() {
+		service.handleAuthUpdate(context.Background(), updateA)
+		close(doneA)
+	}()
+	select {
+	case <-doneA:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auth A hook wait blocked on unrelated auth B registration")
+	}
+
+	close(bBlock)
+	select {
+	case <-finishedBatch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch auth update did not finish")
 	}
 }
 
@@ -626,6 +1497,10 @@ func TestRuntimeAuthSync_FileSnapshotEnqueuedThenRequestExecutionThenConsume(t *
 	fileSnapshotAuth.Disabled = true
 	fileSnapshotAuth.Status = coreauth.StatusDisabled
 	fileSnapshotAuth.UpdatedAt = time.Now()
+	// File synthesizer snapshots are unversioned; keep this fixture aligned so an
+	// intermediate MarkResult generation bump cannot drop a newer watcher revision.
+	fileSnapshotAuth.RegistrationEpoch = 0
+	fileSnapshotAuth.Generation = 0
 
 	fileUpdate := watcher.AuthUpdate{
 		Action: watcher.AuthUpdateActionModify,
