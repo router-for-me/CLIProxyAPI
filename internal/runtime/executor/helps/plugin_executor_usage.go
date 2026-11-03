@@ -296,6 +296,8 @@ func mergeStreamStructuredFields(merged *usage.Detail, existing, update usage.De
 	merged.VideoInputTokens = mergeInt64Ptr(existing.VideoInputTokens, update.VideoInputTokens)
 	merged.FileInputTokens = mergeInt64Ptr(existing.FileInputTokens, update.FileInputTokens)
 	merged.CachedTextTokens = mergeInt64Ptr(existing.CachedTextTokens, update.CachedTextTokens)
+	merged.CachedImageTokens = mergeInt64Ptr(existing.CachedImageTokens, update.CachedImageTokens)
+	merged.CachedAudioTokens = mergeInt64Ptr(existing.CachedAudioTokens, update.CachedAudioTokens)
 	merged.TextOutputTokens = mergeInt64Ptr(existing.TextOutputTokens, update.TextOutputTokens)
 	merged.ImageOutputTokens = mergeInt64Ptr(existing.ImageOutputTokens, update.ImageOutputTokens)
 	merged.AudioOutputTokens = mergeInt64Ptr(existing.AudioOutputTokens, update.AudioOutputTokens)
