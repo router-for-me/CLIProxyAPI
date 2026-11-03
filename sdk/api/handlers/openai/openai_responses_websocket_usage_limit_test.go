@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -96,7 +97,9 @@ func (usageLimitWebsocketExecutor) HttpRequest(context.Context, *coreauth.Auth, 
 
 // runRefusedResponsesWebsocketTurn cools every Codex credential down with
 // lastErrorBody and returns the frames a client receives for one create.
-func runRefusedResponsesWebsocketTurn(t *testing.T, lastErrorBody string) [][]byte {
+// runRefusedResponsesWebsocketTurn returns the frames the server sent and the
+// error that ended the read: a close, or the deadline when the server hung.
+func runRefusedResponsesWebsocketTurn(t *testing.T, lastErrorBody string) ([][]byte, error) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	// The refusals under test need cooling on, which is the default.
@@ -143,7 +146,7 @@ func runRefusedResponsesWebsocketTurn(t *testing.T, lastErrorBody string) [][]by
 	for {
 		_, payload, errRead := conn.ReadMessage()
 		if errRead != nil {
-			return frames
+			return frames, errRead
 		}
 		frames = append(frames, payload)
 	}
@@ -152,7 +155,7 @@ func runRefusedResponsesWebsocketTurn(t *testing.T, lastErrorBody string) [][]by
 func TestResponsesWebsocketSendsUsageLimitWhenEveryCredentialIsOut(t *testing.T) {
 	resetAt := time.Now().Add(3 * time.Hour)
 	body := fmt.Sprintf(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_at":%d,"limit_window_minutes":300}}`, resetAt.Unix())
-	frames := runRefusedResponsesWebsocketTurn(t, body)
+	frames, _ := runRefusedResponsesWebsocketTurn(t, body)
 	if len(frames) != 1 {
 		t.Fatalf("frames = %d (%q), want one error event", len(frames), frames)
 	}
@@ -169,8 +172,12 @@ func TestResponsesWebsocketSendsUsageLimitWhenEveryCredentialIsOut(t *testing.T)
 }
 
 func TestResponsesWebsocketKeepsRetryableCooldownSilent(t *testing.T) {
-	frames := runRefusedResponsesWebsocketTurn(t, `{"error":{"type":"rate_limit_exceeded","message":"slow down"}}`)
+	frames, errRead := runRefusedResponsesWebsocketTurn(t, `{"error":{"type":"rate_limit_exceeded","message":"slow down"}}`)
 	if len(frames) != 0 {
 		t.Fatalf("frames = %q, want the connection closed without an event", frames)
+	}
+	var netErr net.Error
+	if errors.As(errRead, &netErr) && netErr.Timeout() {
+		t.Fatalf("read ended on the deadline (%v), want the server to close the connection", errRead)
 	}
 }

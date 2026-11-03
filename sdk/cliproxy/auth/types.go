@@ -355,6 +355,13 @@ type QuotaState struct {
 	// Cooldown transitions must use applyCooldownFields so they cannot replace
 	// this snapshot.
 	Signals map[string]string `json:"signals,omitempty"`
+	// UsageLimitResetAt and UsageLimitWindowMinutes record that a Codex
+	// usage_limit_reached refusal set the cooldown ending at UsageLimitResetAt,
+	// and that refusal's window. They count only while the cooldown still ends
+	// then: a later error on the credential does not erase them, and a newer
+	// cooldown does not inherit them. See markCodexUsageLimit.
+	UsageLimitResetAt       time.Time `json:"usage_limit_reset_at,omitempty"`
+	UsageLimitWindowMinutes int64     `json:"usage_limit_window_minutes,omitempty"`
 }
 
 // Clone returns an independent copy of the quota state.

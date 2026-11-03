@@ -1010,7 +1010,23 @@ func TestWriteErrorResponseModelCooldownKeepsRetryAfter(t *testing.T) {
 	if got := recorder.Header().Get("X-Should-Retry"); got != "" {
 		t.Fatalf("X-Should-Retry = %q, want none", got)
 	}
-	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
-		t.Fatalf("Content-Type = %q, want application/json", got)
+}
+
+// WriteSafeErrorHeaders adds the error's retry headers and leaves the headers
+// already set on the response alone.
+func TestWriteSafeErrorHeadersLeavesOtherHeadersAlone(t *testing.T) {
+	headers := http.Header{"Content-Type": {"application/problem+json"}, "X-Request-Id": {"abc"}}
+	WriteSafeErrorHeaders(headers, coreauth.NewUsageLimitModelCooldownError("gpt-6-astra", "codex", time.Now().Add(3*time.Hour), 300))
+	if got := headers.Values("Content-Type"); len(got) != 1 || got[0] != "application/problem+json" {
+		t.Fatalf("Content-Type = %q, want it unchanged", got)
+	}
+	if got := headers.Get("X-Request-Id"); got != "abc" {
+		t.Fatalf("X-Request-Id = %q, want it unchanged", got)
+	}
+	if got := headers.Get("X-Should-Retry"); got != "false" {
+		t.Fatalf("X-Should-Retry = %q, want false", got)
+	}
+	if got := headers.Get("X-Codex-Primary-Used-Percent"); got != "100" {
+		t.Fatalf("X-Codex-Primary-Used-Percent = %q, want 100", got)
 	}
 }

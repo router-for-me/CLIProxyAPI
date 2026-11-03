@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // usageLimitMinResetIn separates cooldowns a client should wait out through
@@ -67,7 +68,7 @@ func usageLimitRefusalFor(auths []*Auth, modelFor func(*Auth) string, now time.T
 		if !blocked || reason != blockReasonCooldown || !next.After(now) {
 			return nil
 		}
-		window, ok := codexUsageLimitEvidence(auth, model, now)
+		window, ok := codexUsageLimitEvidence(auth, model, next, now)
 		if !ok {
 			return nil
 		}
@@ -82,12 +83,16 @@ func usageLimitRefusalFor(auths []*Auth, modelFor func(*Auth) string, now time.T
 }
 
 // codexUsageLimitEvidence reports whether the cooldown blocking auth for model
-// was set by a Codex usage_limit_reached refusal, and that refusal's window.
-// It reads the state isAuthBlockedForModel decides on: a credential-wide quota
+// until next was set by a Codex usage_limit_reached refusal, and that refusal's
+// window. A mark MarkResult left for that cooldown decides first; without one it
+// reads the state isAuthBlockedForModel decides on: a credential-wide quota
 // alone, otherwise every blocked state of the model.
-func codexUsageLimitEvidence(auth *Auth, model string, now time.Time) (int64, bool) {
+func codexUsageLimitEvidence(auth *Auth, model string, next, now time.Time) (int64, bool) {
 	if auth == nil {
 		return 0, false
+	}
+	if window, ok := markedUsageLimit(auth, model, next); ok {
+		return window, true
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return codexUsageLimitWindow(auth.LastError)
@@ -116,6 +121,93 @@ func codexUsageLimitEvidence(auth *Auth, model string, now time.Time) (int64, bo
 		}
 	}
 	return codexUsageLimitWindow(auth.LastError)
+}
+
+// markCodexUsageLimit records on the quota state that err, a Codex
+// usage_limit_reached refusal, set the cooldown that now blocks auth for model.
+// MarkResult replaces LastError with every later failure, for example a stream
+// that ends in a 502 while the quota is still out; the mark keeps the
+// classification for as long as that cooldown lasts, across a restart too. It
+// changes nothing when err is not that refusal or no cooldown blocks the model.
+func markCodexUsageLimit(auth *Auth, model string, err *Error, now time.Time) {
+	if auth == nil {
+		return
+	}
+	window, ok := codexUsageLimitWindow(err)
+	if !ok {
+		return
+	}
+	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
+	if !blocked || reason != blockReasonCooldown || !next.After(now) {
+		return
+	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		auth.Quota.UsageLimitResetAt, auth.Quota.UsageLimitWindowMinutes = next, window
+	}
+	if model == "" {
+		return
+	}
+	modelKey := canonicalModelKey(model)
+	for stateModel, state := range auth.ModelStates {
+		if state != nil && canonicalModelKey(stateModel) == modelKey {
+			state.Quota.UsageLimitResetAt, state.Quota.UsageLimitWindowMinutes = next, window
+		}
+	}
+}
+
+// markedUsageLimit returns the window of a usage-limit mark left for the
+// cooldown that ends at next. A mark from an earlier cooldown ends at another
+// time and does not count.
+func markedUsageLimit(auth *Auth, model string, next time.Time) (int64, bool) {
+	if usageLimitMarkMatches(auth.Quota, next) {
+		return auth.Quota.UsageLimitWindowMinutes, true
+	}
+	if model == "" {
+		return 0, false
+	}
+	modelKey := canonicalModelKey(model)
+	for stateModel, state := range auth.ModelStates {
+		if state != nil && canonicalModelKey(stateModel) == modelKey && usageLimitMarkMatches(state.Quota, next) {
+			return state.Quota.UsageLimitWindowMinutes, true
+		}
+	}
+	return 0, false
+}
+
+func usageLimitMarkMatches(quota QuotaState, next time.Time) bool {
+	if quota.UsageLimitResetAt.IsZero() || next.IsZero() {
+		return false
+	}
+	diff := quota.UsageLimitResetAt.Sub(next)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= time.Second
+}
+
+// restoreUsageLimitMark carries a persisted usage-limit mark onto a restored
+// quota state.
+func restoreUsageLimitMark(dst *QuotaState, src QuotaState) {
+	if dst == nil || src.UsageLimitResetAt.IsZero() {
+		return
+	}
+	dst.UsageLimitResetAt, dst.UsageLimitWindowMinutes = src.UsageLimitResetAt, src.UsageLimitWindowMinutes
+}
+
+// withoutPinnedUsageLimit turns a usage-limit cooldown back into the plain,
+// retryable one when the request was pinned to one credential. The pick then saw
+// only that credential, so its quota says nothing about the rest of the pool: a
+// websocket turn whose pinned credential ran out reconnects onto another one,
+// and a client told to stop would not.
+func withoutPinnedUsageLimit(err error, opts cliproxyexecutor.Options) error {
+	if err == nil || pinnedAuthIDFromMetadata(opts.Metadata) == "" {
+		return err
+	}
+	var cooldown *modelCooldownError
+	if errors.As(err, &cooldown) && cooldown != nil {
+		cooldown.usageLimit = nil
+	}
+	return err
 }
 
 // codexUsageLimitWindow reports whether err records Codex's 429

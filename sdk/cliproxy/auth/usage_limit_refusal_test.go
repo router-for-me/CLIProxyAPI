@@ -225,6 +225,9 @@ type usageLimitTestExecutor struct {
 	provider string
 	reset    time.Duration
 	window   int
+	// body replaces the usage_limit_reached refusal when set, as for another
+	// provider's generic 429.
+	body string
 }
 
 type usageLimitTestStatusError struct {
@@ -240,7 +243,11 @@ func (e usageLimitTestStatusError) RetryAfter() *time.Duration { return &e.retry
 func (e *usageLimitTestExecutor) Identifier() string { return e.provider }
 
 func (e *usageLimitTestExecutor) refusal() error {
-	return usageLimitTestStatusError{body: codexUsageLimitBody(e.window, time.Now().Add(e.reset)), retryAfter: e.reset}
+	body := e.body
+	if body == "" {
+		body = codexUsageLimitBody(e.window, time.Now().Add(e.reset))
+	}
+	return usageLimitTestStatusError{body: body, retryAfter: e.reset}
 }
 
 func (e *usageLimitTestExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
@@ -321,4 +328,218 @@ func TestManagerReportsUsageLimitOnceEveryCredentialIsRefused(t *testing.T) {
 		t.Fatalf("RestoreCooldownStates() error = %v", errRestore)
 	}
 	assertUsageLimit(t, restarted)
+}
+
+// registerUsageLimitPool registers two credentials of each executor's provider
+// for model on a new manager and returns the manager and the credential IDs.
+func registerUsageLimitPool(t *testing.T, selector Selector, model string, executors ...*usageLimitTestExecutor) (*Manager, []string) {
+	t.Helper()
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	var ids []string
+	for _, executor := range executors {
+		manager.RegisterExecutor(executor)
+		for _, suffix := range []string{"-a", "-b"} {
+			id := executor.provider + suffix
+			registry.GetGlobalRegistry().RegisterClient(id, executor.provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: executor.provider, Status: StatusActive}); errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			ids = append(ids, id)
+		}
+	}
+	return manager, ids
+}
+
+// executeTwice sends the same request twice: the first meets the upstream
+// refusals, the second is answered locally from the cooldowns they set.
+func executeTwice(t *testing.T, manager *Manager, providers []string, model string) error {
+	t.Helper()
+	request := cliproxyexecutor.Request{Model: model}
+	if _, errFirst := manager.Execute(context.Background(), providers, request, cliproxyexecutor.Options{}); errFirst == nil {
+		t.Fatal("first Execute() error = nil, want the upstream refusal")
+	}
+	_, errSecond := manager.Execute(context.Background(), providers, request, cliproxyexecutor.Options{})
+	return errSecond
+}
+
+// The production selector, fill-first behind session affinity, decides through
+// the manager's own availability check rather than the selector's.
+func TestUsageLimitThroughSessionAffinitySelector(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	provider := "usage-limit-affinity-" + uuid.NewString()
+	model := "usage-limit-model-" + uuid.NewString()
+	manager, _ := registerUsageLimitPool(t, NewSessionAffinitySelector(&FillFirstSelector{}), model,
+		&usageLimitTestExecutor{provider: provider, reset: 3 * time.Hour, window: 300})
+	if err := executeTwice(t, manager, []string{provider}, model); !IsUsageLimitReachedError(err) {
+		t.Fatalf("Execute() error = %v, want a usage limit", err)
+	}
+}
+
+// Two providers go through the mixed scheduler. The credential that reopens
+// first, here the weekly one, names the window.
+func TestUsageLimitAcrossTwoProviders(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	fiveHour := "usage-limit-5h-" + uuid.NewString()
+	weekly := "usage-limit-weekly-" + uuid.NewString()
+	model := "usage-limit-model-" + uuid.NewString()
+	manager, _ := registerUsageLimitPool(t, &FillFirstSelector{}, model,
+		&usageLimitTestExecutor{provider: fiveHour, reset: 3 * time.Hour, window: 300},
+		&usageLimitTestExecutor{provider: weekly, reset: 2 * time.Hour, window: 10080})
+	err := executeTwice(t, manager, []string{fiveHour, weekly}, model)
+	if !IsUsageLimitReachedError(err) {
+		t.Fatalf("Execute() error = %v, want a usage limit", err)
+	}
+	if got := SafeResponseHeaders(err).Get("X-Codex-Secondary-Window-Minutes"); got != "10080" {
+		t.Fatalf("X-Codex-Secondary-Window-Minutes = %q, want 10080", got)
+	}
+}
+
+// A provider cooling on a generic 429 keeps the answer retryable, even beside
+// credentials that are out of Codex quota.
+func TestUsageLimitNotClaimedBesideAnotherProvidersRateLimit(t *testing.T) {
+	for name, selector := range map[string]Selector{
+		"fill-first":       &FillFirstSelector{},
+		"session affinity": NewSessionAffinitySelector(&FillFirstSelector{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			codex := "usage-limit-codex-" + uuid.NewString()
+			other := "usage-limit-generic-" + uuid.NewString()
+			model := "usage-limit-model-" + uuid.NewString()
+			manager, _ := registerUsageLimitPool(t, selector, model,
+				&usageLimitTestExecutor{provider: codex, reset: 3 * time.Hour, window: 300},
+				&usageLimitTestExecutor{provider: other, reset: 3 * time.Hour, body: `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`})
+			if err := executeTwice(t, manager, []string{codex, other}, model); IsUsageLimitReachedError(err) {
+				t.Fatalf("Execute() error = %v, want the retryable cooldown", err)
+			}
+		})
+	}
+}
+
+// A pinned request (a Responses websocket session pins each turn to the
+// credential that served the last one) sees only that credential. Its quota
+// says nothing about the rest of the pool, so the answer stays retryable.
+func TestPinnedRequestKeepsRetryableCooldown(t *testing.T) {
+	for name, selector := range map[string]Selector{
+		"fill-first":       &FillFirstSelector{},
+		"session affinity": NewSessionAffinitySelector(&FillFirstSelector{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			ctx := context.Background()
+			provider := "usage-limit-pinned-" + uuid.NewString()
+			model := "usage-limit-model-" + uuid.NewString()
+			manager, ids := registerUsageLimitPool(t, selector, model,
+				&usageLimitTestExecutor{provider: provider, reset: 3 * time.Hour, window: 300})
+			retry := 3 * time.Hour
+			manager.MarkResult(ctx, Result{AuthID: ids[0], Provider: provider, Model: model, Error: usageLimitError(300, time.Now().Add(retry)), RetryAfter: &retry, CredentialScope: true})
+
+			request := cliproxyexecutor.Request{Model: model}
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: ids[0]}}
+			_, errStream := manager.ExecuteStream(ctx, []string{provider}, request, opts)
+			_, errExecute := manager.Execute(ctx, []string{provider}, request, opts)
+			_, errSelect := manager.SelectAuth(ctx, provider, model, opts)
+			for call, err := range map[string]error{"ExecuteStream": errStream, "Execute": errExecute, "SelectAuth": errSelect} {
+				var cooldown *modelCooldownError
+				if !errors.As(err, &cooldown) {
+					t.Fatalf("pinned %s() error = %v, want a model cooldown", call, err)
+				}
+				if IsUsageLimitReachedError(err) {
+					t.Fatalf("pinned %s() reports a usage limit for the pool", call)
+				}
+				if SafeResponseHeaders(err).Get("Retry-After") == "" {
+					t.Fatalf("pinned %s() lost Retry-After", call)
+				}
+			}
+		})
+	}
+}
+
+// A stream already running on a refused credential can end afterwards with an
+// ordinary upstream error. That replaces LastError, but the credential is still
+// out of quota, so the pool still reports the usage limit.
+func TestUsageLimitSurvivesALaterFailure(t *testing.T) {
+	for name, later := range map[string]*Error{
+		"502":           {HTTPStatus: http.StatusBadGateway, Message: `{"error":{"message":"upstream connect error"}}`},
+		"transient 429": {HTTPStatus: http.StatusTooManyRequests, Code: transientRateLimitErrorCode, Message: `{"error":{"message":"busy, retry in 2s"}}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			ctx := context.Background()
+			provider := "usage-limit-later-" + uuid.NewString()
+			model := "usage-limit-model-" + uuid.NewString()
+			manager, ids := registerUsageLimitPool(t, NewSessionAffinitySelector(&FillFirstSelector{}), model,
+				&usageLimitTestExecutor{provider: provider, reset: 3 * time.Hour, window: 300})
+			if err := executeTwice(t, manager, []string{provider}, model); !IsUsageLimitReachedError(err) {
+				t.Fatalf("Execute() error = %v, want a usage limit", err)
+			}
+			retry := 2 * time.Second
+			manager.MarkResult(ctx, Result{AuthID: ids[0], Provider: provider, Model: model, Error: later, RetryAfter: &retry})
+			_, err := manager.Execute(ctx, []string{provider}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if !IsUsageLimitReachedError(err) {
+				t.Fatalf("Execute() after a later %s error = %v, want the usage limit still", name, err)
+			}
+		})
+	}
+}
+
+// The mark outlives a later failure across a restart too, when only it still
+// carries the classification. A Codex usage limit covers the whole account, so
+// it also holds for another model of the same credentials.
+func TestUsageLimitMarkSurvivesARestart(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	ctx := context.Background()
+	provider := "usage-limit-restart-" + uuid.NewString()
+	model := "usage-limit-model-" + uuid.NewString()
+	executor := &usageLimitTestExecutor{provider: provider, reset: 3 * time.Hour, window: 300}
+	store := NewFileCooldownStateStore(t.TempDir())
+	otherModel := "usage-limit-other-" + uuid.NewString()
+	manager, ids := registerUsageLimitPool(t, NewSessionAffinitySelector(&FillFirstSelector{}), model, executor)
+	for _, id := range ids {
+		registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}, {ID: otherModel}})
+	}
+	manager.SetCooldownStateStore(store)
+	if err := executeTwice(t, manager, []string{provider}, model); !IsUsageLimitReachedError(err) {
+		t.Fatalf("Execute() error = %v, want a usage limit", err)
+	}
+	for _, id := range ids {
+		manager.MarkResult(ctx, Result{AuthID: id, Provider: provider, Model: model, Error: &Error{HTTPStatus: http.StatusBadGateway, Message: "upstream connect error"}})
+	}
+
+	restarted := NewManager(nil, NewSessionAffinitySelector(&FillFirstSelector{}), nil)
+	restarted.SetRetryConfig(1, 0, 0)
+	restarted.RegisterExecutor(executor)
+	restarted.SetCooldownStateStore(store)
+	for _, id := range ids {
+		if _, errRegister := restarted.Register(ctx, &Auth{ID: id, Provider: provider, Status: StatusActive}); errRegister != nil {
+			t.Fatalf("Register() after restart error = %v", errRegister)
+		}
+	}
+	if errRestore := restarted.RestoreCooldownStates(ctx); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() error = %v", errRestore)
+	}
+	for _, requested := range []string{model, otherModel} {
+		if _, err := restarted.Execute(ctx, []string{provider}, cliproxyexecutor.Request{Model: requested}, cliproxyexecutor.Options{}); !IsUsageLimitReachedError(err) {
+			t.Fatalf("Execute(%s) after restart error = %v, want the usage limit", requested, err)
+		}
+	}
+}
+
+// A mark counts only for the cooldown it was left for. A credential that cools
+// again later, for another reason and until another time, is not a usage limit.
+func TestUsageLimitMarkIgnoredForANewerCooldown(t *testing.T) {
+	now := time.Now()
+	next := now.Add(2 * time.Hour)
+	auth := credentialQuotaAuth("stale-mark", next, &Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"type":"rate_limit_exceeded"}}`})
+	auth.Quota.UsageLimitResetAt = now.Add(5 * time.Hour)
+	auth.Quota.UsageLimitWindowMinutes = 300
+	if _, ok := codexUsageLimitEvidence(auth, "", next, now); ok {
+		t.Fatal("a mark left for another cooldown counted as usage-limit evidence")
+	}
+	auth.Quota.UsageLimitResetAt = next
+	if window, ok := codexUsageLimitEvidence(auth, "", next, now); !ok || window != 300 {
+		t.Fatalf("evidence = (%d, %v), want (300, true) for the cooldown the mark was left for", window, ok)
+	}
 }
