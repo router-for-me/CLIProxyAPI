@@ -19,10 +19,14 @@ func TestDevinExecutorUsesClaudeEffortDirective(t *testing.T) {
 		`"messages":[{"role":"system","content":[],"output_config":{"effort":"medium"}},{"role":"user","content":"first"},` +
 		`{"role":"assistant","content":"ok"},{"role":"system","content":[],"output_config":{"effort":"high"}},{"role":"user","content":"hi"}]}`
 
+	const disabledWithDirective = `{"model":"` + model + `","max_tokens":1024,"thinking":{"type":"disabled"},` +
+		`"messages":[{"role":"system","content":[],"output_config":{"effort":"high"}},{"role":"user","content":"hi"}]}`
+
 	wantLow := helps.ResolveDevinChatModelUID(model, "low", 0)
+	wantNone := helps.ResolveDevinChatModelUID(model, "none", 0)
 	wantHigh := helps.ResolveDevinChatModelUID(model, "high", 0)
-	if wantLow == wantHigh {
-		t.Fatalf("fixture model resolves low and high to the same uid %q", wantLow)
+	if wantLow == wantHigh || wantNone == wantHigh {
+		t.Fatalf("fixture model does not separate low %q, none %q and high %q", wantLow, wantNone, wantHigh)
 	}
 
 	exec := NewDevinExecutor(&config.Config{})
@@ -35,6 +39,7 @@ func TestDevinExecutorUsesClaudeEffortDirective(t *testing.T) {
 	}{
 		{name: "top-level effort only", payload: topLevelOnly, want: wantLow},
 		{name: "last directive wins over the top-level placeholder", payload: withDirectives, want: wantHigh},
+		{name: "disabled thinking keeps a historical directive from selecting a variant", payload: disabledWithDirective, want: wantNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := cliproxyexecutor.Request{Model: model, Payload: []byte(tc.payload)}

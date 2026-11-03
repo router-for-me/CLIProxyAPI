@@ -7,7 +7,8 @@ import (
 )
 
 // ClaudeEffortDirective returns the effort of the last Claude mid-conversation
-// effort directive in body, lowercased, or "" when there is none.
+// effort directive in body, lowercased, or "" when there is none or the
+// request turns thinking off (thinking.type "disabled" or "between_tools").
 //
 // A directive is a role=system message carrying output_config.effort
 // (mid-conversation-output-config beta). It sets the effort for every later
@@ -16,6 +17,10 @@ import (
 // which makes that value a placeholder rather than the requested effort.
 func ClaudeEffortDirective(body []byte) string {
 	if len(body) == 0 || !ojson.ValidBytes(body) {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "thinking.type").String())) {
+	case "disabled", "between_tools":
 		return ""
 	}
 	messages := ojson.GetBytesNoCopy(body, "messages")

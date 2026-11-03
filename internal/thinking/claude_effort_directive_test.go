@@ -20,6 +20,8 @@ func TestClaudeEffortDirective(t *testing.T) {
 			`{"role":"system","content":[],"output_config":{"effort":""}}]}`, want: "max"},
 		{name: "non-system output_config is ignored", body: `{"messages":[{"role":"user","content":"hi","output_config":{"effort":"high"}}]}`, want: ""},
 		{name: "invalid json", body: `{`, want: ""},
+		{name: "disabled thinking ignores directives", body: `{"thinking":{"type":"disabled"},"messages":[{"role":"system","content":[],"output_config":{"effort":"high"}}]}`, want: ""},
+		{name: "between_tools thinking ignores directives", body: `{"thinking":{"type":"between_tools"},"messages":[{"role":"system","content":[],"output_config":{"effort":"high"}}]}`, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := thinking.ClaudeEffortDirective([]byte(tc.body)); got != tc.want {
