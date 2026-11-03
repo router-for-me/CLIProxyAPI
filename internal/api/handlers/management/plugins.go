@@ -391,13 +391,17 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":            "plugin_delete_requires_restart",
-			"message":          "loaded plugin cannot be deleted while the server is running",
-			"restart_required": true,
-		})
-		return
+	unloaded := false
+	if pluginBusy(host, id) {
+		unloaded = host.UnloadPlugin(id)
+		if !unloaded && pluginBusy(host, id) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":            "plugin_delete_requires_restart",
+				"message":          "loaded plugin cannot be deleted while the server is running",
+				"restart_required": true,
+			})
+			return
+		}
 	}
 
 	beforePluginDeleteCommit()
@@ -406,7 +410,14 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	h.mu.Lock()
 	path, configured, ok := h.preparePluginDeleteLocked(c, id)
 	if !ok {
+		if !unloaded {
+			h.mu.Unlock()
+			return
+		}
+		// The unload cannot be undone here, so reapply the config that stays in effect.
+		cfgSnapshot := h.reloadSnapshotConfigLocked()
 		h.mu.Unlock()
+		h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
 		return
 	}
 	fileDeleted := false

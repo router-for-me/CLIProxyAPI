@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -8,9 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing.T) {
@@ -255,5 +259,51 @@ func TestPluginDeleteResolvesArtifactFromConfigSavedDuringDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(newArtifact); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("delete kept the artifact the current config resolves to: %v", err)
+	}
+}
+
+func TestPluginDeleteRejectedAfterUnloadReappliesCurrentConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pluginsDir := writeManagementPluginFile(t, "sample")
+	host := pluginhost.New()
+	host.RegisterPluginForTest("sample", pluginapi.Plugin{Metadata: pluginapi.Metadata{Name: "sample"}})
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{"sample": pluginConfigFromYAML(t, "enabled: true\n")},
+		}},
+		configFilePath: filepath.Join(t.TempDir(), "config.yaml"),
+		pluginHost:     host,
+	}
+	reloaded := make(chan *config.Config, 1)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) { reloaded <- cfg })
+	// A save applied while the plugin unloads makes the deletion invalid.
+	validations := 0
+	h.SetConfigValidator(func(*config.Config) error {
+		validations++
+		if validations > 1 {
+			return errors.New("configuration changed to require the sample plugin")
+		}
+		return nil
+	})
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(ConfigV8ContextKey, true)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v8/management/plugins/sample", nil)
+	h.DeletePlugin(c)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if host.PluginBusy("sample") {
+		t.Fatal("test setup: plugin was not unloaded before the final check")
+	}
+	select {
+	case cfg := <-reloaded:
+		if _, ok := cfg.Plugins.Configs["sample"]; !ok {
+			t.Fatal("reapplied config dropped the sample plugin")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("rejected delete left the plugin unloaded without reapplying the current config")
 	}
 }
