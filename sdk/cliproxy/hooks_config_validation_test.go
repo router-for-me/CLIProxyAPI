@@ -175,3 +175,45 @@ func TestHooksConfigValidationRejectsWatcherReloadBeforeCallback(t *testing.T) {
 		t.Fatal("watcher published a config rejected by the embedding application")
 	}
 }
+
+func TestHooksConfigValidationRejectsOnBeforeStartMutation(t *testing.T) {
+	// Background metadata checks terminate at this local proxy; nothing leaves the host.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer proxy.Close()
+	dir := t.TempDir()
+	// No catalog override: a file catalog would replace the process-wide model registry.
+	cfg := &config.Config{Host: "127.0.0.1", Port: 0, AuthDir: filepath.Join(dir, "auth")}
+	cfg.APIKeys = []string{"client"}
+	cfg.ProxyURL = proxy.URL
+	cfg.RemoteManagement.DisableControlPanel = true
+	rejected := errors.New("proxy API key required")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	started := false
+	service, err := NewBuilder().WithConfig(cfg).WithConfigPath(filepath.Join(dir, "config.yaml")).
+		WithCoreAuthManager(coreauth.NewManager(nil, nil, nil)).
+		WithWatcherFactory(func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{start: func(context.Context) error { return nil }, stop: func() error { return nil }}, nil
+		}).
+		WithHooks(Hooks{
+			ValidateConfig: func(snapshot *config.Config) error {
+				if len(snapshot.APIKeys) == 0 {
+					return rejected
+				}
+				return nil
+			},
+			OnBeforeStart: func(live *config.Config) { live.APIKeys = nil },
+			OnAfterStart:  func(*Service) { started = true; cancel() },
+		}).Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errRun := service.Run(ctx); !errors.Is(errRun, rejected) {
+		t.Fatalf("Run error = %v, want rejection of the OnBeforeStart config", errRun)
+	}
+	if started {
+		t.Fatal("service started with a config rejected by the embedding application")
+	}
+}

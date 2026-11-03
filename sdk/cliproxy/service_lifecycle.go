@@ -172,6 +172,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.currentConfig())
+		// OnBeforeStart may mutate the config Build already validated.
+		if s.hooks.ValidateConfig != nil {
+			if errValidate := s.hooks.ValidateConfig(s.currentConfig().CloneForRuntime()); errValidate != nil {
+				return fmt.Errorf("cliproxy: validate application config after OnBeforeStart: %w", errValidate)
+			}
+		}
 	}
 
 	s.serverErr = make(chan error, 1)
