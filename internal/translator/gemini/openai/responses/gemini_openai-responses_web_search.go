@@ -7,10 +7,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ModelSupportsWebSearch checks whether the given model supports native web search,
@@ -59,7 +58,7 @@ func isResponsesWebSearchToolType(toolType string) bool {
 }
 
 // HasResponsesWebSearchTool checks if the request tools array contains an OpenAI web search tool.
-func HasResponsesWebSearchTool(root gjson.Result) bool {
+func HasResponsesWebSearchTool(root ojson.Result) bool {
 	tools := root.Get("tools")
 	if !tools.IsArray() {
 		return false
@@ -73,7 +72,7 @@ func HasResponsesWebSearchTool(root gjson.Result) bool {
 }
 
 // HasOnlyResponsesWebSearchTools checks if every tool in the tools array is a web search tool.
-func HasOnlyResponsesWebSearchTools(root gjson.Result) bool {
+func HasOnlyResponsesWebSearchTools(root ojson.Result) bool {
 	tools := root.Get("tools")
 	if !tools.IsArray() {
 		return false
@@ -90,12 +89,12 @@ func HasOnlyResponsesWebSearchTools(root gjson.Result) bool {
 }
 
 // AllowsResponsesWebSearchToolChoice checks whether tool_choice permits web search execution.
-func AllowsResponsesWebSearchToolChoice(root gjson.Result) bool {
+func AllowsResponsesWebSearchToolChoice(root ojson.Result) bool {
 	toolChoice := root.Get("tool_choice")
 	if !toolChoice.Exists() {
 		return true
 	}
-	if toolChoice.Type == gjson.String {
+	if toolChoice.Type == ojson.String {
 		switch toolChoice.String() {
 		case "", "auto", "required":
 			return true
@@ -130,9 +129,9 @@ func AllowsResponsesWebSearchToolChoice(root gjson.Result) bool {
 
 // ExtractResponsesWebSearchQuery extracts the search query from OpenAI Responses input.
 // It handles simple string inputs, array of conversation messages, direct content part arrays, and instruction fallbacks.
-func ExtractResponsesWebSearchQuery(root gjson.Result) string {
+func ExtractResponsesWebSearchQuery(root ojson.Result) string {
 	input := root.Get("input")
-	if input.Type == gjson.String {
+	if input.Type == ojson.String {
 		return strings.TrimSpace(input.String())
 	}
 	if input.IsArray() {
@@ -161,7 +160,7 @@ func ExtractResponsesWebSearchQuery(root gjson.Result) string {
 				continue
 			}
 			content := item.Get("content")
-			if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
+			if content.Type == ojson.String && strings.TrimSpace(content.String()) != "" {
 				return strings.TrimSpace(content.String())
 			}
 			if content.IsArray() {
@@ -187,7 +186,7 @@ func ExtractResponsesWebSearchQuery(root gjson.Result) string {
 }
 
 // ExtractResponsesWebSearchAllowedDomains extracts allowed domains from tools[].filters.allowed_domains.
-func ExtractResponsesWebSearchAllowedDomains(root gjson.Result) []string {
+func ExtractResponsesWebSearchAllowedDomains(root ojson.Result) []string {
 	tools := root.Get("tools")
 	if !tools.IsArray() {
 		return nil
@@ -212,23 +211,23 @@ func ExtractResponsesWebSearchAllowedDomains(root gjson.Result) []string {
 }
 
 // ExtractGroundingMetadata locates groundingMetadata in either direct or wrapped Gemini response.
-func ExtractGroundingMetadata(root gjson.Result) gjson.Result {
+func ExtractGroundingMetadata(root ojson.Result) ojson.Result {
 	if gm := root.Get("candidates.0.groundingMetadata"); gm.Exists() {
 		return gm
 	}
 	if gm := root.Get("response.candidates.0.groundingMetadata"); gm.Exists() {
 		return gm
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 // ExtractGroundingQueries retrieves the list of search queries from groundingMetadata.
-func ExtractGroundingQueries(groundingMetadata gjson.Result) []string {
+func ExtractGroundingQueries(groundingMetadata ojson.Result) []string {
 	var queries []string
 	if webSearchQueries := groundingMetadata.Get("webSearchQueries"); webSearchQueries.IsArray() {
 		for _, q := range webSearchQueries.Array() {
 			if str := strings.TrimSpace(q.String()); str != "" {
-				queries = append(queries, str)
+				queries = append(queries, strings.Clone(str))
 			}
 		}
 	}
@@ -236,7 +235,7 @@ func ExtractGroundingQueries(groundingMetadata gjson.Result) []string {
 }
 
 // ExtractGroundingSources converts groundingMetadata groundingChunks into OpenAI Responses source objects.
-func ExtractGroundingSources(groundingMetadata gjson.Result) [][]byte {
+func ExtractGroundingSources(groundingMetadata ojson.Result) [][]byte {
 	chunks := groundingMetadata.Get("groundingChunks").Array()
 	if len(chunks) == 0 {
 		return nil
@@ -250,7 +249,7 @@ func ExtractGroundingSources(groundingMetadata gjson.Result) [][]byte {
 		}
 		seenURLs[uri] = true
 		src := []byte(`{"type":"url","url":""}`)
-		src, _ = sjson.SetBytes(src, "url", uri)
+		src, _ = ojson.SetBytes(src, "url", uri)
 		sources = append(sources, src)
 	}
 	return sources
@@ -258,21 +257,21 @@ func ExtractGroundingSources(groundingMetadata gjson.Result) [][]byte {
 
 // BuildResponsesWebSearchCallItem formats an OpenAI Responses web_search_call output item.
 func BuildResponsesWebSearchCallItem(id string, query string, queries []string, sources [][]byte) []byte {
-	item := []byte(`{"id":"","type":"web_search_call","status":"completed","action":{"type":"search","query":""}}`)
-	item, _ = sjson.SetBytes(item, "id", id)
-	item, _ = sjson.SetBytes(item, "action.query", query)
+	itemDoc := ojson.NewDocString(`{"id":"","type":"web_search_call","status":"completed","action":{"type":"search","query":""}}`)
+	_ = itemDoc.Set("id", id)
+	_ = itemDoc.Set("action.query", query)
 	if len(queries) > 0 {
-		item, _ = sjson.SetBytes(item, "action.queries", queries)
+		_ = itemDoc.Set("action.queries", queries)
 	}
 	if len(sources) > 0 {
-		item, _ = sjson.SetRawBytes(item, "action.sources", translatorcommon.JoinRawArray(sources))
+		_ = itemDoc.SetRawBytes("action.sources", translatorcommon.JoinRawArray(sources))
 	}
-	return item
+	return itemDoc.Bytes()
 }
 
 // HasValidWebGrounding checks whether groundingMetadata contains actual web search queries
 // or web grounding chunks with a valid non-empty URI.
-func HasValidWebGrounding(groundingMetadata gjson.Result) bool {
+func HasValidWebGrounding(groundingMetadata ojson.Result) bool {
 	if !groundingMetadata.Exists() {
 		return false
 	}
@@ -295,19 +294,19 @@ func HasValidWebGrounding(groundingMetadata gjson.Result) bool {
 
 // MergeGroundingMetadata merges incremental groundingMetadata into existing groundingMetadata,
 // combining webSearchQueries, merging groundingChunks with index remapping, and merging groundingSupports.
-func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
+func MergeGroundingMetadata(existingGM, newGM ojson.Result) ojson.Result {
 	if (!existingGM.Exists() || len(strings.TrimSpace(existingGM.Raw)) == 0) &&
 		(!newGM.Exists() || len(strings.TrimSpace(newGM.Raw)) == 0) {
 		return existingGM
 	}
 	if !existingGM.Exists() || len(strings.TrimSpace(existingGM.Raw)) == 0 {
-		existingGM = gjson.Parse("{}")
+		existingGM = ojson.Parse("{}")
 	}
 	if !newGM.Exists() || len(strings.TrimSpace(newGM.Raw)) == 0 {
 		return existingGM
 	}
 
-	merged := existingGM.Raw
+	mergedDoc := ojson.NewDocString(existingGM.Raw)
 
 	// 1. Merge webSearchQueries (preserving order, avoiding duplicates)
 	existingQueries := ExtractGroundingQueries(existingGM)
@@ -327,7 +326,7 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 				mergedQueries = append(mergedQueries, q)
 			}
 		}
-		merged, _ = sjson.Set(merged, "webSearchQueries", mergedQueries)
+		_ = mergedDoc.Set("webSearchQueries", mergedQueries)
 	}
 
 	// 2. Merge groundingChunks with index remapping
@@ -381,9 +380,9 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 					cumulativeRemap[i] = existingIdx
 				}
 				if title != "" {
-					existingChunk := gjson.Parse(mergedChunksRaw[existingIdx])
+					existingChunk := ojson.Parse(mergedChunksRaw[existingIdx])
 					if strings.TrimSpace(existingChunk.Get("web.title").String()) == "" {
-						updated, _ := sjson.Set(mergedChunksRaw[existingIdx], "web.title", title)
+						updated, _ := ojson.Set(mergedChunksRaw[existingIdx], "web.title", title)
 						mergedChunksRaw[existingIdx] = updated
 					}
 				}
@@ -411,7 +410,7 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 
 	if len(mergedChunksRaw) > 0 {
 		chunksJSON := "[" + strings.Join(mergedChunksRaw, ",") + "]"
-		merged, _ = sjson.SetRaw(merged, "groundingChunks", chunksJSON)
+		_ = mergedDoc.SetRaw("groundingChunks", chunksJSON)
 	}
 
 	totalRawCount := prevRawCount + len(newChunks)
@@ -425,8 +424,8 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 		for _, k := range keys {
 			remapPairs = append(remapPairs, fmt.Sprintf("%q:%d", strconv.Itoa(k), cumulativeRemap[k]))
 		}
-		merged, _ = sjson.SetRaw(merged, "_chunkIndexRemap", "{"+strings.Join(remapPairs, ",")+"}")
-		merged, _ = sjson.Set(merged, "_rawChunkCount", totalRawCount)
+		_ = mergedDoc.SetRaw("_chunkIndexRemap", "{"+strings.Join(remapPairs, ",")+"}")
+		_ = mergedDoc.Set("_rawChunkCount", totalRawCount)
 	}
 
 	// 3. Merge groundingSupports with remapped chunk indices
@@ -445,7 +444,7 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 
 	existingChunkCount := len(existingChunks)
 
-	remapSupportIndices := func(origIndices []gjson.Result, isExisting bool) ([]int64, bool) {
+	remapSupportIndices := func(origIndices []ojson.Result, isExisting bool) ([]int64, bool) {
 		var remappedIndices []int64
 		needRewrite := false
 		for _, idxRes := range origIndices {
@@ -512,7 +511,7 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 			for i, v := range remappedIndices {
 				indicesStrs[i] = strconv.FormatInt(v, 10)
 			}
-			rawSupport, _ = sjson.SetRaw(rawSupport, "groundingChunkIndices", "["+strings.Join(indicesStrs, ",")+"]")
+			rawSupport, _ = ojson.SetRaw(rawSupport, "groundingChunkIndices", "["+strings.Join(indicesStrs, ",")+"]")
 		}
 		mergedSupportsRaw = append(mergedSupportsRaw, rawSupport)
 	}
@@ -538,27 +537,27 @@ func MergeGroundingMetadata(existingGM, newGM gjson.Result) gjson.Result {
 			for i, v := range remappedIndices {
 				indicesStrs[i] = strconv.FormatInt(v, 10)
 			}
-			rawSupport, _ = sjson.SetRaw(rawSupport, "groundingChunkIndices", "["+strings.Join(indicesStrs, ",")+"]")
+			rawSupport, _ = ojson.SetRaw(rawSupport, "groundingChunkIndices", "["+strings.Join(indicesStrs, ",")+"]")
 		}
 		mergedSupportsRaw = append(mergedSupportsRaw, rawSupport)
 	}
 
 	if len(mergedSupportsRaw) > 0 {
 		supportsJSON := "[" + strings.Join(mergedSupportsRaw, ",") + "]"
-		merged, _ = sjson.SetRaw(merged, "groundingSupports", supportsJSON)
+		_ = mergedDoc.SetRaw("groundingSupports", supportsJSON)
 	}
 
 	// 4. Preserve/update searchEntryPoint if present
 	if sep := newGM.Get("searchEntryPoint"); sep.Exists() {
-		merged, _ = sjson.SetRaw(merged, "searchEntryPoint", sep.Raw)
+		_ = mergedDoc.SetRaw("searchEntryPoint", sep.Raw)
 	}
 
 	// 5. Preserve/update retrievalQueries if present
 	if rq := newGM.Get("retrievalQueries"); rq.Exists() && !existingGM.Get("retrievalQueries").Exists() {
-		merged, _ = sjson.SetRaw(merged, "retrievalQueries", rq.Raw)
+		_ = mergedDoc.SetRaw("retrievalQueries", rq.Raw)
 	}
 
-	return gjson.Parse(merged)
+	return ojson.Parse(mergedDoc.String())
 }
 
 // MergeCitationAnnotations merges two slices of URL citation annotations,
@@ -573,9 +572,9 @@ func MergeCitationAnnotations(existing, late [][]byte) [][]byte {
 	result := make([][]byte, 0, len(existing)+len(late))
 	keyToIndex := make(map[string]int)
 	for _, a := range existing {
-		url := gjson.GetBytes(a, "url").String()
-		start := gjson.GetBytes(a, "start_index").Int()
-		end := gjson.GetBytes(a, "end_index").Int()
+		url := ojson.GetBytesNoCopy(a, "url").String()
+		start := ojson.GetBytesNoCopy(a, "start_index").Int()
+		end := ojson.GetBytesNoCopy(a, "end_index").Int()
 		key := fmt.Sprintf("%s:%d:%d", url, start, end)
 		if _, exists := keyToIndex[key]; !exists {
 			keyToIndex[key] = len(result)
@@ -583,13 +582,13 @@ func MergeCitationAnnotations(existing, late [][]byte) [][]byte {
 		}
 	}
 	for _, a := range late {
-		url := gjson.GetBytes(a, "url").String()
-		start := gjson.GetBytes(a, "start_index").Int()
-		end := gjson.GetBytes(a, "end_index").Int()
+		url := ojson.GetBytesNoCopy(a, "url").String()
+		start := ojson.GetBytesNoCopy(a, "start_index").Int()
+		end := ojson.GetBytesNoCopy(a, "end_index").Int()
 		key := fmt.Sprintf("%s:%d:%d", url, start, end)
 		if idx, exists := keyToIndex[key]; exists {
-			if gjson.GetBytes(result[idx], "title").String() == "" {
-				if lateTitle := gjson.GetBytes(a, "title").String(); lateTitle != "" {
+			if ojson.GetBytesNoCopy(result[idx], "title").String() == "" {
+				if lateTitle := ojson.GetBytesNoCopy(a, "title").String(); lateTitle != "" {
 					result[idx] = a
 				}
 			}
@@ -718,7 +717,7 @@ func mapByteOffsetsToRuneRange(mappings []GeminiPartMapping, startByte, endByte 
 // BuildResponsesURLCitationsForMessages extracts url_citation annotations from groundingMetadata,
 // correctly translating part-level byte offsets to message-level rune offsets based on GeminiPartMapping.
 // It returns a map from MessageIndex to the slice of citation items for that message.
-func BuildResponsesURLCitationsForMessages(groundingMetadata gjson.Result, mappings []GeminiPartMapping, messageTexts []string) map[int][][]byte {
+func BuildResponsesURLCitationsForMessages(groundingMetadata ojson.Result, mappings []GeminiPartMapping, messageTexts []string) map[int][][]byte {
 	chunks := groundingMetadata.Get("groundingChunks").Array()
 	supports := groundingMetadata.Get("groundingSupports").Array()
 	if len(supports) == 0 || len(chunks) == 0 {
@@ -802,12 +801,12 @@ func BuildResponsesURLCitationsForMessages(groundingMetadata gjson.Result, mappi
 				}
 				seen[key] = true
 
-				cite := []byte(`{"type":"url_citation","url":"","title":"","start_index":0,"end_index":0}`)
-				cite, _ = sjson.SetBytes(cite, "url", uri)
-				cite, _ = sjson.SetBytes(cite, "title", title)
-				cite, _ = sjson.SetBytes(cite, "start_index", r.StartIndex)
-				cite, _ = sjson.SetBytes(cite, "end_index", r.EndIndex)
-				result[r.MessageIndex] = append(result[r.MessageIndex], cite)
+				citeDoc := ojson.NewDocString(`{"type":"url_citation","url":"","title":"","start_index":0,"end_index":0}`)
+				_ = citeDoc.Set("url", uri)
+				_ = citeDoc.Set("title", title)
+				_ = citeDoc.Set("start_index", r.StartIndex)
+				_ = citeDoc.Set("end_index", r.EndIndex)
+				result[r.MessageIndex] = append(result[r.MessageIndex], citeDoc.Bytes())
 			}
 		}
 	}
@@ -816,7 +815,7 @@ func BuildResponsesURLCitationsForMessages(groundingMetadata gjson.Result, mappi
 
 // BuildResponsesURLCitations extracts url_citation annotations from groundingMetadata groundingSupports.
 // Optional text parameter enables converting UTF-8 byte offsets to Unicode character (rune) offsets.
-func BuildResponsesURLCitations(groundingMetadata gjson.Result, text ...string) [][]byte {
+func BuildResponsesURLCitations(groundingMetadata ojson.Result, text ...string) [][]byte {
 	var fullText string
 	if len(text) > 0 {
 		fullText = text[0]

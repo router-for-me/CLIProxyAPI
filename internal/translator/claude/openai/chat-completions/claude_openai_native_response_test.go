@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertClaudeResponseToOpenAINonStream_NativeMessagesJSON(t *testing.T) {
@@ -24,10 +25,10 @@ func TestConvertClaudeResponseToOpenAINonStream_NativeMessagesJSON(t *testing.T)
 			raw := []byte(fmt.Sprintf(`{"id":"msg_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":%s,"stop_reason":%q,"stop_sequence":null,"usage":{"input_tokens":13,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":5}}`, tt.content, tt.stopReason))
 			request := []byte(`{"model":"claude-sonnet-4-6"}`)
 			out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-sonnet-4-6", request, request, raw, nil)
-			if !gjson.ValidBytes(out) {
+			if !ojson.ValidBytes(out) {
 				t.Fatalf("invalid response JSON: %s", out)
 			}
-			root := gjson.ParseBytes(out)
+			root := util.ParseGJSONBytesNoCopy(out)
 			for path, want := range map[string]string{
 				"id":                        "msg_native",
 				"object":                    "chat.completion",
@@ -70,11 +71,11 @@ func TestConvertClaudeResponseToOpenAINonStream_NativeMessagesJSON(t *testing.T)
 					t.Errorf("tool_calls.%s = %q, want %q", path, got, want)
 				}
 			}
-			args := gjson.Parse(calls.Get("0.function.arguments").String())
+			args := ojson.Parse(calls.Get("0.function.arguments").String())
 			if !args.IsObject() || len(args.Map()) != 2 || args.Get("city").String() != "Paris" || args.Get("days").Int() != 2 {
 				t.Errorf("weather arguments not preserved: %s", calls.Get("0.function.arguments").Raw)
 			}
-			emptyArgs := gjson.Parse(calls.Get("1.function.arguments").String())
+			emptyArgs := ojson.Parse(calls.Get("1.function.arguments").String())
 			if !emptyArgs.IsObject() || len(emptyArgs.Map()) != 0 {
 				t.Errorf("empty arguments not preserved: %s", calls.Get("1.function.arguments").Raw)
 			}

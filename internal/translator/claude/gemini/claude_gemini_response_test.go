@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeResponseToGemini_StreamPreservesToolUseID(t *testing.T) {
@@ -30,7 +30,7 @@ func TestConvertClaudeResponseToGemini_StreamPreservesToolUseID(t *testing.T) {
 		t.Fatalf("expected content_block_stop to emit 1 chunk, got %d", len(out))
 	}
 
-	got := gjson.GetBytes(out[0], "candidates.0.content.parts.0.functionCall.id").String()
+	got := ojson.GetBytesNoCopy(out[0], "candidates.0.content.parts.0.functionCall.id").String()
 	if got != "toolu_gateway" {
 		t.Fatalf("expected functionCall.id %q, got %q; chunk=%s", "toolu_gateway", got, string(out[0]))
 	}
@@ -46,7 +46,7 @@ func TestConvertClaudeResponseToGeminiNonStreamPreservesToolUseID(t *testing.T) 
 
 	out := ConvertClaudeResponseToGeminiNonStream(ctx, "gemini-2.5-pro", nil, nil, raw, nil)
 
-	got := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.id").String()
+	got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.id").String()
 	if got != "toolu_gateway" {
 		t.Fatalf("expected functionCall.id %q, got %q; chunk=%s", "toolu_gateway", got, string(out))
 	}
@@ -89,11 +89,11 @@ func TestConvertClaudeResponseToGemini_StreamThinkingSignature(t *testing.T) {
 				[]byte(`data: {"type":"message_stop"}`),
 			}
 
-			var emittedParts []gjson.Result
+			var emittedParts []ojson.Result
 			for _, chunk := range chunks {
 				out := ConvertClaudeResponseToGemini(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
 				for _, c := range out {
-					parts := gjson.GetBytes(c, "candidates.0.content.parts").Array()
+					parts := ojson.GetBytesNoCopy(c, "candidates.0.content.parts").Array()
 					emittedParts = append(emittedParts, parts...)
 				}
 			}
@@ -149,7 +149,7 @@ func TestConvertClaudeResponseToGeminiNonStream_ThinkingSignature(t *testing.T) 
 
 			out := ConvertClaudeResponseToGeminiNonStream(ctx, "gemini-2.5-pro", nil, nil, raw, nil)
 
-			thoughtPart := gjson.GetBytes(out, "candidates.0.content.parts.0")
+			thoughtPart := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0")
 			if !thoughtPart.Get("thought").Bool() || thoughtPart.Get("text").String() != "thinking text" {
 				t.Fatalf("expected thought part with text 'thinking text', got %s", thoughtPart.Raw)
 			}
@@ -157,7 +157,7 @@ func TestConvertClaudeResponseToGeminiNonStream_ThinkingSignature(t *testing.T) 
 				t.Fatalf("expected thoughtSignature %q, got %q", tt.wantSignature, got)
 			}
 
-			textPart := gjson.GetBytes(out, "candidates.0.content.parts.1")
+			textPart := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.1")
 			if textPart.Get("text").String() != "final answer" {
 				t.Fatalf("expected text part 'final answer', got %s", textPart.Raw)
 			}

@@ -7,10 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestIssue7000AntigravityClaudeStructuredOutputUsesPromptAndAutoTools(t *testing.T) {
@@ -62,20 +61,19 @@ func TestIssue7000AntigravityClaudeStructuredOutputUsesPromptAndAutoTools(t *tes
 		} {
 			for _, withTools := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/tools=%t", model, tc.name, withTools), func(t *testing.T) {
-					payload, errSet := sjson.SetBytes([]byte(tc.payload), "model", model)
-					if errSet != nil {
+					payloadDoc := ojson.NewDoc([]byte(tc.payload))
+					if errSet := payloadDoc.Set("model", model); errSet != nil {
 						t.Fatalf("set model: %v", errSet)
 					}
 					if withTools {
-						payload, errSet = sjson.SetRawBytes(payload, "tools", []byte(tc.tools))
-						if errSet != nil {
+						if errSet := payloadDoc.SetRawBytes("tools", []byte(tc.tools)); errSet != nil {
 							t.Fatalf("set tools: %v", errSet)
 						}
-						payload, errSet = sjson.SetBytes(payload, "tool_choice", "auto")
-						if errSet != nil {
+						if errSet := payloadDoc.Set("tool_choice", "auto"); errSet != nil {
 							t.Fatalf("set tool_choice: %v", errSet)
 						}
 					}
+					payload := payloadDoc.Bytes()
 
 					translated := sdktranslator.TranslateRequest(tc.format, sdktranslator.FormatAntigravity, model, payload, false)
 					body := buildRequestBodyFromRawPayload(t, model, translated)
@@ -83,7 +81,7 @@ func TestIssue7000AntigravityClaudeStructuredOutputUsesPromptAndAutoTools(t *tes
 					if errMarshal != nil {
 						t.Fatalf("marshal outbound request: %v", errMarshal)
 					}
-					request := gjson.GetBytes(encoded, "request")
+					request := ojson.GetBytes(encoded, "request")
 
 					if mode := request.Get("toolConfig.functionCallingConfig.mode").String(); mode != "" && mode != "AUTO" {
 						t.Errorf("outbound function calling mode = %q, want AUTO or omitted; Claude 5.5 rejects forced tool use", mode)

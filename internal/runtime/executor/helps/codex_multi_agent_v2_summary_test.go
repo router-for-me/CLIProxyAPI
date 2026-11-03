@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCompatibilityTranslationPreservesExplicitClaudeVisibility(t *testing.T) {
@@ -29,7 +29,7 @@ func TestCompatibilityTranslationPreservesExplicitClaudeVisibility(t *testing.T)
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						out := TranslateRequestWithAPIKeyModelCompatibility(context.Background(), nil, &config.Config{}, tc.from, sdktranslator.FormatClaude, "claude-opus-5-5", []byte(tc.payload), stream, compat)
-						display := gjson.GetBytes(out, "thinking.display")
+						display := ojson.GetBytes(out, "thinking.display")
 						if display.String() != tc.want || (tc.want == "" && display.Exists()) {
 							t.Fatalf("display=%s, want %q; body=%s", display.Raw, tc.want, out)
 						}

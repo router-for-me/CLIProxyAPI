@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInstructionRoles(t *testing.T) {
@@ -34,10 +34,10 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_PreservesInstructi
 				if errConvert != nil {
 					t.Fatal(errConvert)
 				}
-				if gotStream := gjson.GetBytes(output, "stream").Bool(); gotStream != stream {
+				if gotStream := ojson.GetBytesNoCopy(output, "stream").Bool(); gotStream != stream {
 					t.Fatalf("stream = %t, want %t", gotStream, stream)
 				}
-				messages := gjson.GetBytes(output, "messages").Array()
+				messages := ojson.GetBytesNoCopy(output, "messages").Array()
 				if len(messages) != len(wantRoles) {
 					t.Fatalf("message count = %d, want %d; output=%s", len(messages), len(wantRoles), output)
 				}
