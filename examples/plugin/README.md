@@ -172,6 +172,11 @@ make -C examples/plugin build
 
 Artifacts are written to `examples/plugin/bin`.
 
+When building prebuilt `c-shared` plugin release artifacts on CI runners for distribution across diverse machines, pin the baseline CPU instruction set so compiler-emitted instructions (such as AVX/AVX2/AVX-512 on modern `ubuntu-latest` runners) do not trigger `SIGILL` on older CPUs or virtualized hosts:
+
+- `amd64`: `GOAMD64=v1 CGO_CFLAGS="-march=x86-64"`
+- `arm64`: `GOARM64=v8.0 CGO_CFLAGS="-march=armv8-a"`
+
 ## Notes
 
 `protocol-format` uses a minimal executor because format declarations belong to executor capabilities.

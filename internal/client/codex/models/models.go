@@ -573,6 +573,9 @@ func nullCodexClientRequiredOptions(entry map[string]any) {
 	entry["tool_mode"] = "direct"
 	entry["use_responses_lite"] = false
 	entry["supports_reasoning_effort_updates"] = false
+	if _, exists := entry["supports_image_detail_original"]; exists {
+		entry["supports_image_detail_original"] = false
+	}
 	entry["upgrade"] = nil
 	entry["availability_nux"] = nil
 }
@@ -772,7 +775,7 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 	}
 	entry["input_modalities"] = codexModalities
 	if hasImageModality(codexModalities) {
-		entry["supports_image_detail_original"] = true
+		entry["supports_image_detail_original"] = false
 	} else {
 		delete(entry, "supports_image_detail_original")
 	}

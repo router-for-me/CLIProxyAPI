@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 type groundingURLRoundTripper func(*http.Request) (*http.Response, error)
@@ -57,10 +57,10 @@ func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 	if !sawRedirectRequest {
 		t.Fatal("expected resolver to request the vertex redirect")
 	}
-	if got := gjson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri").String(); got != resolvedURL {
+	if got := ojson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri").String(); got != resolvedURL {
 		t.Fatalf("resolved uri = %q, want %q; output=%s", got, resolvedURL, output)
 	}
-	if got := gjson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.1.web.uri").String(); got != "https://already.example/source" {
+	if got := ojson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.1.web.uri").String(); got != "https://already.example/source" {
 		t.Fatalf("non-vertex uri = %q", got)
 	}
 }

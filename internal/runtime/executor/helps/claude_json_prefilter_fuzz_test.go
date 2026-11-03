@@ -4,13 +4,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // referenceIsClaudeTitleHelperRequest is isClaudeTitleHelperRequest without
 // the jsonMayContainASCII pre-filter (the v8.0.11 implementation).
 func referenceIsClaudeTitleHelperRequest(body []byte) bool {
-	props := gjson.GetBytes(body, "output_config.format.schema.properties")
+	props := ojson.GetBytes(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
 			return isClaudeTitleHelperInstruction(body)
@@ -22,7 +22,7 @@ func referenceIsClaudeTitleHelperRequest(body []byte) bool {
 			strings.Contains(t, "Return a short title") ||
 			strings.Contains(t, "Write the title in the predominant language")
 	}
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytes(body, "system")
 	if system.IsArray() {
 		for _, part := range system.Array() {
 			if matchesSystemTitleInstruction(part.Get("text").String()) {
@@ -32,7 +32,7 @@ func referenceIsClaudeTitleHelperRequest(body []byte) bool {
 	} else if matchesSystemTitleInstruction(system.String()) {
 		return true
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytes(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
 			if msg.Get("role").String() == "system" {
@@ -55,11 +55,11 @@ func referenceIsClaudeTitleHelperRequest(body []byte) bool {
 // referenceClaudePayloadHas1hTTL is ClaudePayloadHas1hTTL without the
 // jsonMayContainASCII pre-filter (the v8.0.11 implementation).
 func referenceClaudePayloadHas1hTTL(payload []byte) bool {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return false
 	}
 	has1h := false
-	checkBlock := func(item gjson.Result) bool {
+	checkBlock := func(item ojson.Result) bool {
 		cc := item.Get("cache_control")
 		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
 			has1h = true
@@ -68,8 +68,8 @@ func referenceClaudePayloadHas1hTTL(payload []byte) bool {
 		return true
 	}
 	for _, key := range []string{"tools", "system"} {
-		if arr := gjson.GetBytes(payload, key); arr.IsArray() {
-			arr.ForEach(func(_, item gjson.Result) bool {
+		if arr := ojson.GetBytes(payload, key); arr.IsArray() {
+			arr.ForEach(func(_, item ojson.Result) bool {
 				return checkBlock(item)
 			})
 			if has1h {
@@ -77,11 +77,11 @@ func referenceClaudePayloadHas1hTTL(payload []byte) bool {
 			}
 		}
 	}
-	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+	if messages := ojson.GetBytes(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			content := msg.Get("content")
 			if content.IsArray() {
-				content.ForEach(func(_, item gjson.Result) bool {
+				content.ForEach(func(_, item ojson.Result) bool {
 					return checkBlock(item)
 				})
 			}

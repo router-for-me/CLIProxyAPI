@@ -173,3 +173,61 @@ api-keys:
 		t.Fatalf("null-subkey override max-idle-conns-per-host = %v, want 4", nullSubkey.MaxIdleConnsPerHost)
 	}
 }
+
+func TestCredentialDeduplicationPreservesDistinctConnectionPools(t *testing.T) {
+	raw := []byte(`gemini-api-key:
+  - api-key: "shared-gemini-key"
+    base-url: "https://example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 2
+  - api-key: "shared-gemini-key"
+    base-url: "https://example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 5
+  - api-key: "shared-gemini-key"
+    base-url: "https://example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 5
+vertex-api-key:
+  - api-key: "shared-vertex-key"
+    base-url: "https://vertex.example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 2
+  - api-key: "shared-vertex-key"
+    base-url: "https://vertex.example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 6
+  - api-key: "shared-vertex-key"
+    base-url: "https://vertex.example.invalid"
+    connection-pool:
+      enabled: true
+      max-idle-conns-per-host: 6
+`)
+	cfg, err := config.ParseConfigBytes(raw)
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+	if len(cfg.GeminiKey) != 2 {
+		t.Fatalf("len(GeminiKey) = %d, want 2", len(cfg.GeminiKey))
+	}
+	if cfg.GeminiKey[0].ConnectionPool == nil || cfg.GeminiKey[0].ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.GeminiKey[0].ConnectionPool.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("GeminiKey[0].ConnectionPool = %+v, want max-idle-conns-per-host=2", cfg.GeminiKey[0].ConnectionPool)
+	}
+	if cfg.GeminiKey[1].ConnectionPool == nil || cfg.GeminiKey[1].ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.GeminiKey[1].ConnectionPool.MaxIdleConnsPerHost != 5 {
+		t.Fatalf("GeminiKey[1].ConnectionPool = %+v, want max-idle-conns-per-host=5", cfg.GeminiKey[1].ConnectionPool)
+	}
+	if len(cfg.VertexCompatAPIKey) != 2 {
+		t.Fatalf("len(VertexCompatAPIKey) = %d, want 2", len(cfg.VertexCompatAPIKey))
+	}
+	if cfg.VertexCompatAPIKey[0].ConnectionPool == nil || cfg.VertexCompatAPIKey[0].ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.VertexCompatAPIKey[0].ConnectionPool.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("VertexCompatAPIKey[0].ConnectionPool = %+v, want max-idle-conns-per-host=2", cfg.VertexCompatAPIKey[0].ConnectionPool)
+	}
+	if cfg.VertexCompatAPIKey[1].ConnectionPool == nil || cfg.VertexCompatAPIKey[1].ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.VertexCompatAPIKey[1].ConnectionPool.MaxIdleConnsPerHost != 6 {
+		t.Fatalf("VertexCompatAPIKey[1].ConnectionPool = %+v, want max-idle-conns-per-host=6", cfg.VertexCompatAPIKey[1].ConnectionPool)
+	}
+}

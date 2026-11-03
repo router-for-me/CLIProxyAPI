@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -20,7 +21,6 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 )
 
 func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
@@ -121,10 +121,10 @@ func TestKimiExecutorResponsesPassthrough(t *testing.T) {
 	if authHeader != "Bearer test-kimi-key" {
 		t.Fatalf("Authorization = %q, want Bearer test-kimi-key", authHeader)
 	}
-	if gotModel := gjson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
+	if gotModel := ojson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
 		t.Fatalf("upstreamBody model = %q, want k3", gotModel)
 	}
-	if gotText := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "hello world" {
+	if gotText := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "hello world" {
 		t.Fatalf("response output text = %q, want hello world", gotText)
 	}
 }
@@ -182,7 +182,7 @@ func TestKimiExecutorResponsesStreamPassthrough(t *testing.T) {
 	if streamHeader != "text/event-stream" {
 		t.Fatalf("Accept header = %q, want text/event-stream", streamHeader)
 	}
-	if gotModel := gjson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
+	if gotModel := ojson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
 		t.Fatalf("upstreamBody model = %q, want k3", gotModel)
 	}
 
@@ -277,10 +277,10 @@ func TestKimiExecutorResponsesAppliesSuffixThinking(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if gotModel := gjson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
+	if gotModel := ojson.GetBytes(upstreamBody, "model").String(); gotModel != "k3" {
 		t.Fatalf("upstream model = %q, want k3", gotModel)
 	}
-	if gotEffort := gjson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "high" {
+	if gotEffort := ojson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "high" {
 		t.Fatalf("upstream reasoning.effort = %q, want high; body=%s", gotEffort, upstreamBody)
 	}
 }
@@ -319,7 +319,7 @@ func TestKimiExecutorResponsesSuffixOverridesBodyThinking(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if gotEffort := gjson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "max" {
+	if gotEffort := ojson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "max" {
 		t.Fatalf("upstream reasoning.effort = %q, want max (suffix overrides body); body=%s", gotEffort, upstreamBody)
 	}
 }
@@ -361,7 +361,7 @@ func TestKimiExecutorResponsesStreamAppliesSuffixThinking(t *testing.T) {
 	for range result.Chunks {
 	}
 
-	if gotEffort := gjson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "low" {
+	if gotEffort := ojson.GetBytes(upstreamBody, "reasoning.effort").String(); gotEffort != "low" {
 		t.Fatalf("upstream reasoning.effort = %q, want low; body=%s", gotEffort, upstreamBody)
 	}
 }
@@ -400,13 +400,13 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k2.5" {
+	if got := ojson.GetBytes(upstreamBody, "model").String(); got != "k2.5" {
 		t.Fatalf("upstream model = %q, want k2.5", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
+	if got := ojson.GetBytes(upstreamBody, "output_config.effort").String(); got != "high" {
 		t.Fatalf("upstream output_config.effort = %q, want high", got)
 	}
-	if got := gjson.GetBytes(response.Payload, "model").String(); got != model {
+	if got := ojson.GetBytes(response.Payload, "model").String(); got != model {
 		t.Fatalf("response model = %q, want %q", got, model)
 	}
 }
@@ -454,7 +454,7 @@ func TestKimiExecutorPreservesAssistantContentAndToolCallsFromResponsesHistory(t
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	input := gjson.GetBytes(upstreamBody, "input").Array()
+	input := ojson.GetBytes(upstreamBody, "input").Array()
 	if got := len(input); got != 4 {
 		t.Fatalf("upstream input count = %d, want 4; body=%s", got, upstreamBody)
 	}
@@ -509,7 +509,7 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	if got := upstreamRequest.URL.String(); got != "https://api.kimi.com/coding/v1/messages/count_tokens?beta=true" {
 		t.Fatalf("upstream URL = %q, want Kimi count tokens endpoint", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
+	if got := ojson.GetBytes(upstreamBody, "model").String(); got != "k3" {
 		t.Fatalf("upstream model = %q, want k3", got)
 	}
 }
@@ -658,7 +658,7 @@ func TestNormalizeKimiToolMessageLinks_UsesCallIDFallback(t *testing.T) {
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.1.tool_call_id").String()
+	got := ojson.GetBytes(out, "messages.1.tool_call_id").String()
 	if got != "list_directory:1" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "list_directory:1")
 	}
@@ -677,7 +677,7 @@ func TestNormalizeKimiToolMessageLinks_InferSinglePendingID(t *testing.T) {
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.1.tool_call_id").String()
+	got := ojson.GetBytes(out, "messages.1.tool_call_id").String()
 	if got != "call_123" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_123")
 	}
@@ -699,8 +699,8 @@ func TestNormalizeKimiToolMessageLinks_AmbiguousMissingIDIsNotInferred(t *testin
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	if gjson.GetBytes(out, "messages.1.tool_call_id").Exists() {
-		t.Fatalf("messages.1.tool_call_id should be absent for ambiguous case, got %q", gjson.GetBytes(out, "messages.1.tool_call_id").String())
+	if ojson.GetBytes(out, "messages.1.tool_call_id").Exists() {
+		t.Fatalf("messages.1.tool_call_id should be absent for ambiguous case, got %q", ojson.GetBytes(out, "messages.1.tool_call_id").String())
 	}
 }
 
@@ -717,7 +717,7 @@ func TestNormalizeKimiToolMessageLinks_PreservesExistingToolCallID(t *testing.T)
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.1.tool_call_id").String()
+	got := ojson.GetBytes(out, "messages.1.tool_call_id").String()
 	if got != "call_1" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_1")
 	}
@@ -736,7 +736,7 @@ func TestNormalizeKimiToolMessageLinks_InheritsPreviousReasoningForAssistantTool
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.1.reasoning_content").String()
 	if got != "previous reasoning" {
 		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "previous reasoning")
 	}
@@ -754,7 +754,7 @@ func TestNormalizeKimiToolMessageLinks_InsertsFallbackReasoningWhenMissing(t *te
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	reasoning := gjson.GetBytes(out, "messages.0.reasoning_content")
+	reasoning := ojson.GetBytes(out, "messages.0.reasoning_content")
 	if !reasoning.Exists() {
 		t.Fatalf("messages.0.reasoning_content should exist")
 	}
@@ -776,7 +776,7 @@ func TestNormalizeKimiToolMessageLinks_DoesNotReuseUnavailableReasoning(t *testi
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.1.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.1.reasoning_content").String()
 	if got != "current summary" {
 		t.Fatalf("messages.1.reasoning_content = %q, want %q", got, "current summary")
 	}
@@ -796,7 +796,7 @@ func TestNormalizeKimiToolMessageLinks_UnavailableReasoningDoesNotOverridePrevio
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.2.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.2.reasoning_content").String()
 	if got != "real reasoning" {
 		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "real reasoning")
 	}
@@ -814,7 +814,7 @@ func TestNormalizeKimiToolMessageLinks_ReplacesUnavailableReasoningContent(t *te
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.0.reasoning_content").String()
 	if got != "assistant summary" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
 	}
@@ -832,7 +832,7 @@ func TestNormalizeKimiToolMessageLinks_UsesContentAsReasoningFallback(t *testing
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.0.reasoning_content").String()
 	if got != "first line\nsecond line" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "first line\nsecond line")
 	}
@@ -850,7 +850,7 @@ func TestNormalizeKimiToolMessageLinks_ReplacesEmptyReasoningContent(t *testing.
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.0.reasoning_content").String()
 	if got != "assistant summary" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "assistant summary")
 	}
@@ -868,7 +868,7 @@ func TestNormalizeKimiToolMessageLinks_PreservesExistingAssistantReasoning(t *te
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	got := gjson.GetBytes(out, "messages.0.reasoning_content").String()
+	got := ojson.GetBytes(out, "messages.0.reasoning_content").String()
 	if got != "keep me" {
 		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "keep me")
 	}
@@ -889,13 +889,13 @@ func TestNormalizeKimiToolMessageLinks_RepairsIDsAndReasoningTogether(t *testing
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_1" {
+	if got := ojson.GetBytes(out, "messages.1.tool_call_id").String(); got != "call_1" {
 		t.Fatalf("messages.1.tool_call_id = %q, want %q", got, "call_1")
 	}
-	if got := gjson.GetBytes(out, "messages.3.tool_call_id").String(); got != "call_2" {
+	if got := ojson.GetBytes(out, "messages.3.tool_call_id").String(); got != "call_2" {
 		t.Fatalf("messages.3.tool_call_id = %q, want %q", got, "call_2")
 	}
-	if got := gjson.GetBytes(out, "messages.2.reasoning_content").String(); got != "r1" {
+	if got := ojson.GetBytes(out, "messages.2.reasoning_content").String(); got != "r1" {
 		t.Fatalf("messages.2.reasoning_content = %q, want %q", got, "r1")
 	}
 }
@@ -919,9 +919,9 @@ func TestNormalizeKimiToolMessageLinks_DropsEmptyAssistantWithoutToolLink(t *tes
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	messages := gjson.GetBytes(out, "messages").Array()
+	messages := ojson.GetBytes(out, "messages").Array()
 	if len(messages) != 3 {
-		t.Fatalf("messages length = %d, want 3, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+		t.Fatalf("messages length = %d, want 3, raw = %s", len(messages), ojson.GetBytes(out, "messages").Raw)
 	}
 	if got := messages[0].Get("content").String(); got != "start" {
 		t.Fatalf("messages.0.content = %q, want %q", got, "start")
@@ -949,9 +949,9 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 		t.Fatalf("normalizeKimiToolMessageLinks() error = %v", err)
 	}
 
-	messages := gjson.GetBytes(out, "messages").Array()
+	messages := ojson.GetBytes(out, "messages").Array()
 	if len(messages) != 4 {
-		t.Fatalf("messages length = %d, want 4, raw = %s", len(messages), gjson.GetBytes(out, "messages").Raw)
+		t.Fatalf("messages length = %d, want 4, raw = %s", len(messages), ojson.GetBytes(out, "messages").Raw)
 	}
 	if !messages[0].Get("tool_calls").Exists() {
 		t.Fatalf("messages.0.tool_calls should exist")
@@ -1081,7 +1081,7 @@ func TestKimiExecutorNormalizesToolSchemasForMoonshot(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	tool := gjson.GetBytes(upstreamBody, "tools.0.function")
+	tool := ojson.GetBytes(upstreamBody, "tools.0.function")
 	if !tool.Exists() {
 		t.Fatalf("upstream tool function not found: %s", upstreamBody)
 	}
@@ -1171,7 +1171,7 @@ func TestKimiExecutorStreamNormalizesToolSchemasFromResponses(t *testing.T) {
 		}
 	}
 
-	tool := gjson.GetBytes(upstreamBody, "tools.0")
+	tool := ojson.GetBytes(upstreamBody, "tools.0")
 	if !tool.Exists() {
 		t.Fatalf("upstream tool not found in stream body: %s", upstreamBody)
 	}
@@ -1219,7 +1219,7 @@ func TestNormalizeKimiToolsDirect(t *testing.T) {
 
 	normalized := normalizeKimiTools(input)
 
-	toolParams := gjson.GetBytes(normalized, "tools.0.function.parameters")
+	toolParams := ojson.GetBytes(normalized, "tools.0.function.parameters")
 	if toolParams.Get("definitions").Exists() {
 		t.Errorf("definitions was not stripped: %s", toolParams.Raw)
 	}
@@ -1236,7 +1236,7 @@ func TestNormalizeKimiToolsDirect(t *testing.T) {
 		t.Errorf("tools.0.function.parameters.type = %q, want object", got)
 	}
 
-	fnParams := gjson.GetBytes(normalized, "functions.0.parameters")
+	fnParams := ojson.GetBytes(normalized, "functions.0.parameters")
 	if got := fnParams.Get("type").String(); got != "object" {
 		t.Errorf("functions.0.parameters.type = %q, want object", got)
 	}
@@ -1393,7 +1393,7 @@ func TestKimiExecutorStreamNormalizesNamespacedToolSchemasFromResponses(t *testi
 		}
 	}
 
-	nestedTool := gjson.GetBytes(upstreamBody, "tools.0.tools.0")
+	nestedTool := ojson.GetBytes(upstreamBody, "tools.0.tools.0")
 	if !nestedTool.Exists() {
 		t.Fatalf("upstream namespaced tool not found: %s", upstreamBody)
 	}
@@ -1410,7 +1410,7 @@ func TestKimiExecutorStreamNormalizesNamespacedToolSchemasFromResponses(t *testi
 		t.Fatalf("steps.items.oneOf.0.properties.path.items.type = %q, want integer", got)
 	}
 
-	extraTool := gjson.GetBytes(upstreamBody, "input.1.tools.0.tools.0")
+	extraTool := ojson.GetBytes(upstreamBody, "input.1.tools.0.tools.0")
 	if !extraTool.Exists() {
 		t.Fatalf("upstream additional_tools namespaced tool not found: %s", upstreamBody)
 	}
@@ -1479,7 +1479,7 @@ func TestNormalizeKimiTemperature(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := normalizeKimiTemperature([]byte(tt.body))
-			res := gjson.GetBytes(got, "temperature")
+			res := ojson.GetBytes(got, "temperature")
 			if res.Exists() != tt.wantExist {
 				t.Fatalf("temperature.Exists() = %v, want %v; body=%s", res.Exists(), tt.wantExist, string(got))
 			}
@@ -1493,8 +1493,8 @@ func TestNormalizeKimiTemperature(t *testing.T) {
 func TestKimiExecutor_MappedModelDoesNotWarnWhenUpstreamServesMappedModel(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(req.Body)
-		if gjson.GetBytes(body, "model").String() != "kimi-for-coding" {
-			t.Fatalf("upstream request model = %q, want kimi-for-coding", gjson.GetBytes(body, "model").String())
+		if ojson.GetBytes(body, "model").String() != "kimi-for-coding" {
+			t.Fatalf("upstream request model = %q, want kimi-for-coding", ojson.GetBytes(body, "model").String())
 		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
@@ -1779,7 +1779,7 @@ func TestKimiExecutorExecuteResponses_InterleavedToolOutputsReordered(t *testing
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	input := gjson.GetBytes(upstreamBody, "input").Array()
+	input := ojson.GetBytes(upstreamBody, "input").Array()
 	if got := len(input); got != 5 {
 		t.Fatalf("upstream input count = %d, want 5; body=%s", got, upstreamBody)
 	}
@@ -1846,7 +1846,7 @@ func TestKimiExecutorExecuteResponsesStream_InterleavedToolOutputsReordered(t *t
 		}
 	}
 
-	input := gjson.GetBytes(upstreamBody, "input").Array()
+	input := ojson.GetBytes(upstreamBody, "input").Array()
 	if got := len(input); got != 5 {
 		t.Fatalf("upstream input count = %d, want 5; body=%s", got, upstreamBody)
 	}
@@ -1942,7 +1942,7 @@ func TestKimiExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 			return
 		}
 		seenBodies = append(seenBodies, body)
-		for idx, item := range gjson.GetBytes(body, "input").Array() {
+		for idx, item := range ojson.GetBytes(body, "input").Array() {
 			switch item.Get("type").String() {
 			case "compaction_trigger", "compaction":
 				w.Header().Set("Content-Type", "application/json")
@@ -1958,7 +1958,7 @@ func TestKimiExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 			return
 		}
 
-		if gjson.GetBytes(body, "stream").Bool() {
+		if ojson.GetBytes(body, "stream").Bool() {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cont\",\"status\":\"in_progress\",\"model\":\"k3\"}}\n\n"+
 				"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"CPA_COMPACTION_MARKER_42\"}]}}\n\n"+
@@ -2049,7 +2049,7 @@ func TestKimiExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 	if errExec != nil {
 		t.Fatalf("Execute(compaction_trigger) error = %v", errExec)
 	}
-	nonStreamItems := gjson.GetBytes(nonStreamResp.Payload, "output").Array()
+	nonStreamItems := ojson.GetBytes(nonStreamResp.Payload, "output").Array()
 	if len(nonStreamItems) != 1 || nonStreamItems[0].Get("type").String() != "compaction" {
 		t.Fatalf("expected single compaction item in non-stream response, got: %s", nonStreamResp.Payload)
 	}
@@ -2117,7 +2117,7 @@ func TestKimiExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 	if errOrigOnly != nil {
 		t.Fatalf("Execute(OriginalRequest-only trigger) error = %v", errOrigOnly)
 	}
-	if got := gjson.GetBytes(origOnlyResp.Payload, "output.0.type").String(); got != "compaction" {
+	if got := ojson.GetBytes(origOnlyResp.Payload, "output.0.type").String(); got != "compaction" {
 		t.Fatalf("OriginalRequest-only trigger output[0].type = %q, want compaction", got)
 	}
 
@@ -2162,14 +2162,14 @@ func TestKimiExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 	if errSecond != nil {
 		t.Fatalf("Execute(second compaction_trigger) error = %v", errSecond)
 	}
-	if got := len(gjson.GetBytes(secondResp.Payload, "output").Array()); got != 1 {
+	if got := len(ojson.GetBytes(secondResp.Payload, "output").Array()); got != 1 {
 		t.Fatalf("second compaction output len = %d, want 1", got)
 	}
 	secondSeen := seenBodies[len(seenBodies)-1]
 	if !bytes.Contains(secondSeen, []byte("Summary retaining CPA_COMPACTION_MARKER_42.")) {
 		t.Fatalf("expected first capsule summary in second compaction request, got: %s", secondSeen)
 	}
-	if got := gjson.GetBytes(secondSeen, "max_output_tokens").Int(); got != 2048 {
+	if got := ojson.GetBytes(secondSeen, "max_output_tokens").Int(); got != 2048 {
 		t.Fatalf("max_output_tokens = %d, want payload rule 2048; body=%s", got, secondSeen)
 	}
 

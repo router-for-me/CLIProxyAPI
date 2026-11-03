@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	toolschema "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/tool-schema"
 )
 
 const codexBatchUnionTool = `{"type":"function","name":"choose","parameters":{"type":"object","properties":{"action":{"oneOf":[{"const":"a"},{"const":"b"},{"const":"c"},{"const":"d"},{"const":"e"},{"const":"f"},{"const":"g"},{"const":"h"}]}}}}`
@@ -95,37 +95,44 @@ func BenchmarkNormalizeCodexToolSchemas(b *testing.B) {
 // Frozen pre-batching traversal: compare exact bytes and benchmark the same
 // input before/after without changing the schema normalization policy.
 func codexSequentialToolSchemas(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if !tools.IsArray() {
 		return body
 	}
+	doc := ojson.NewDoc(body)
+	changed := false
 	for index, tool := range tools.Array() {
-		if updated, changed := codexSequentialTool(tool); changed {
-			if out, errSet := sjson.SetRawBytes(body, fmt.Sprintf("tools.%d", index), updated); errSet == nil {
-				body = out
+		if updated, toolChanged := codexSequentialTool(tool); toolChanged {
+			if errSet := doc.SetRawBytes(fmt.Sprintf("tools.%d", index), updated); errSet == nil {
+				changed = true
 			}
 		}
 	}
-	return body
+	if !changed {
+		return body
+	}
+	return doc.Bytes()
 }
 
-func codexSequentialTool(tool gjson.Result) ([]byte, bool) {
+func codexSequentialTool(tool ojson.Result) ([]byte, bool) {
 	if tool.Get("type").String() != "namespace" {
-		return normalizeCodexTool(tool)
+		return toolschema.NormalizeSingleCodexTool(tool)
 	}
 	nested := tool.Get("tools")
 	if !nested.IsArray() || len(nested.Array()) == 0 {
 		return nil, false
 	}
-	raw := []byte(tool.Raw)
+	doc := ojson.NewDocString(tool.Raw)
 	changed := false
 	for index, child := range nested.Array() {
 		if updated, childChanged := codexSequentialTool(child); childChanged {
-			if out, errSet := sjson.SetRawBytes(raw, fmt.Sprintf("tools.%d", index), updated); errSet == nil {
-				raw = out
+			if errSet := doc.SetRawBytes(fmt.Sprintf("tools.%d", index), updated); errSet == nil {
 				changed = true
 			}
 		}
 	}
-	return raw, changed
+	if !changed {
+		return nil, false
+	}
+	return doc.Bytes(), true
 }

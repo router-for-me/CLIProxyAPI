@@ -3,12 +3,12 @@ package executor
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestXAIResponsesPreparationStripsUnsupportedConfigurationUpdates(t *testing.T) {
@@ -26,7 +26,7 @@ func TestXAIResponsesPreparationStripsUnsupportedConfigurationUpdates(t *testing
 			if errPrepare != nil {
 				t.Fatalf("prepareResponsesRequest() error = %v", errPrepare)
 			}
-			if got := gjson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.effort {
+			if got := ojson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.effort {
 				t.Fatalf("target effort = %q, want %q; body=%s", got, tc.effort, prepared.body)
 			}
 			if got := thinking.ExtractReasoningEffort([]byte(source), "openai-response", tc.model); got != "high" {
@@ -35,11 +35,11 @@ func TestXAIResponsesPreparationStripsUnsupportedConfigurationUpdates(t *testing
 			if got := thinking.ExtractTranslatedReasoningEffort(prepared.body, "xai"); got != tc.effort {
 				t.Fatalf("target usage effort = %q, want %q", got, tc.effort)
 			}
-			input := gjson.GetBytes(prepared.body, "input").Array()
+			input := ojson.GetBytes(prepared.body, "input").Array()
 			if len(input) != 2 || input[0].Get("content").String() != "hi" || input[1].Get("content").String() != "again" {
 				t.Fatalf("unsupported updates remain or messages changed: %s", prepared.body)
 			}
-			if got := gjson.GetBytes(prepared.body, "reasoning.summary").String(); got != "auto" {
+			if got := ojson.GetBytes(prepared.body, "reasoning.summary").String(); got != "auto" {
 				t.Fatalf("reasoning.summary = %q, want auto; body=%s", got, prepared.body)
 			}
 		})
@@ -58,10 +58,10 @@ func TestXAIResponsesPreparationHonorsExplicitSupportOnly(t *testing.T) {
 		if errPrepare != nil {
 			t.Fatal(errPrepare)
 		}
-		if got := gjson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.top {
+		if got := ojson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.top {
 			t.Fatalf("top-level effort = %q, want %q; body=%s", got, tc.top, prepared.body)
 		}
-		if got := gjson.GetBytes(prepared.body, "input.0.reasoning.effort").String(); got != "high" {
+		if got := ojson.GetBytes(prepared.body, "input.0.reasoning.effort").String(); got != "high" {
 			t.Fatalf("explicitly supported update was lost: %s", prepared.body)
 		}
 		if got := thinking.ExtractTranslatedReasoningEffort(prepared.body, "xai"); got != "high" {
