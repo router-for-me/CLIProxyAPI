@@ -215,7 +215,7 @@ func isV8Section(path string) bool {
 // request body doc was built from, reads "line L (path)" with the body's line
 // and spelling. Alias and merge-key copies get the path only, since their line
 // is the anchor's.
-func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
+func DescribeYAMLErrorLines(err error, doc *yaml.Node, submitted []byte) string {
 	var typeErr *yaml.TypeError
 	if !errors.As(err, &typeErr) {
 		return err.Error()
@@ -226,7 +226,11 @@ func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
 		return err.Error()
 	}
 	lines := indexYAMLLines(rendered.Content[0], documentRoot(doc))
-	submittedPaths, docPaths := indexYAMLPositions(documentRoot(submitted)), indexYAMLPositions(documentRoot(doc))
+	var body yaml.Node
+	if submitted != nil && yaml.Unmarshal(submitted, &body) != nil {
+		body = yaml.Node{}
+	}
+	sources, aliased := indexYAMLSources(documentRoot(&body))
 	entries := make([]string, 0, len(typeErr.Errors))
 	for _, entry := range typeErr.Errors {
 		match := yamlTypeErrorEntry.FindStringSubmatch(entry)
@@ -240,10 +244,10 @@ func DescribeYAMLErrorLines(err error, doc, submitted *yaml.Node) string {
 			continue
 		}
 		position := yamlPositionOf(found.at)
-		if source := submittedPaths[position]; found.at.Line != 0 && len(source) > 0 && len(docPaths[position]) == 1 {
+		if source, ok := sources[position]; ok && found.at.Line != 0 && !aliased[position] {
 			name := ""
-			if source[0] != "" {
-				name = " (" + source[0] + ")"
+			if source != "" {
+				name = " (" + source + ")"
 			}
 			entries = append(entries, "line "+strconv.Itoa(found.at.Line)+name+": "+match[2])
 			continue
@@ -267,13 +271,28 @@ func yamlPositionOf(node *yaml.Node) yamlPosition {
 	return yamlPosition{node.Line, node.Column, node.Kind, node.Value}
 }
 
-// indexYAMLPositions lists the paths of the nodes of tree at each source
-// position, in document order. Alias and merge-key copies share a position.
-func indexYAMLPositions(tree *yaml.Node) map[yamlPosition][]string {
-	paths := map[yamlPosition][]string{}
+// indexYAMLSources maps each source position in tree to the path of its first
+// node, and marks the positions inside alias targets, which alias and merge-key
+// copies share.
+func indexYAMLSources(tree *yaml.Node) (map[yamlPosition]string, map[yamlPosition]bool) {
+	paths, aliased := map[yamlPosition]string{}, map[yamlPosition]bool{}
+	var mark func(*yaml.Node)
+	mark = func(node *yaml.Node) {
+		if node == nil || aliased[yamlPositionOf(node)] {
+			return
+		}
+		aliased[yamlPositionOf(node)] = true
+		for _, child := range node.Content {
+			mark(child)
+		}
+	}
 	walkYAMLTwins(yamlVisit{rendered: tree, node: tree}, func(visit yamlVisit) {
-		position := yamlPositionOf(visit.node)
-		paths[position] = append(paths[position], visit.path)
+		if _, seen := paths[yamlPositionOf(visit.node)]; !seen {
+			paths[yamlPositionOf(visit.node)] = visit.path
+		}
+		if visit.node.Kind == yaml.AliasNode {
+			mark(visit.node.Alias)
+		}
 	})
-	return paths
+	return paths, aliased
 }

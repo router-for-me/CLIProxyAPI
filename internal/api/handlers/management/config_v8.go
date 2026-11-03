@@ -86,7 +86,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		return
 	}
 	before := cloneConfigV8Node(root)
-	var submitted *yaml.Node
+	var submitted []byte
 	config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 	if c.Request.Method == http.MethodDelete {
 		if len(parts) == 0 {
@@ -118,7 +118,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		}
 		// Keep a whole-document body so validation errors can cite its lines.
 		if c.Request.Method == http.MethodPut && len(parts) == 0 {
-			submitted = cloneConfigV8Node(update.Content[0])
+			submitted = body
 		}
 		stripAPIKeysAuthIndexesFromUpdate(parts, &update)
 		if len(parts) == 0 && update.Content[0].Kind != yaml.MappingNode {
