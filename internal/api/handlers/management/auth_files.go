@@ -308,7 +308,7 @@ func matchesAuthFileLookup(auth *coreauth.Auth, name string, authIndex string) b
 func (h *Handler) lookupAuthFile(name string, authIndex string) (*coreauth.Auth, bool) {
 	name = strings.TrimSpace(name)
 	authIndex = strings.TrimSpace(authIndex)
-	if h == nil || h.authManager == nil || name == "" {
+	if h == nil || h.authManager == nil || (name == "" && authIndex == "") {
 		return nil, false
 	}
 	if authIndex == "" {

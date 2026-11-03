@@ -608,6 +608,18 @@ func AuthGrantFingerprint(a *Auth) string {
 	if accessToken == "" {
 		accessToken = authAccessToken(a)
 	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "api_key")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["api_key"])
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "session_token")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["session_token"])
+	}
 	refreshToken := authRefreshToken(a)
 	email := authMetadataString(a, "email")
 	if email == "" && a.Attributes != nil {

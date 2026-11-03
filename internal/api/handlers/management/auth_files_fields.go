@@ -1009,6 +1009,23 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 	}
 }
 
+type targetedOAuthSaveContextKey struct{}
+
+func withTargetedOAuthSave(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, targetedOAuthSaveContextKey{}, true)
+}
+
+func isTargetedOAuthSave(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	targeted, _ := ctx.Value(targetedOAuthSaveContextKey{}).(bool)
+	return targeted
+}
+
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
 	savedPath, err := h.persistTokenRecord(ctx, record)
 	if err != nil {
@@ -1029,16 +1046,22 @@ func (h *Handler) persistTokenRecord(ctx context.Context, record *coreauth.Auth)
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
-	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, store, record)
-	if errLegacy != nil {
-		return "", errLegacy
-	}
-	if legacyClaudeCredential != nil {
-		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
-	}
-	legacyXAICredential, errLegacyXAI := xaiauth.FindMatchingLegacyCredential(ctx, store, record)
-	if errLegacyXAI != nil {
-		return "", errLegacyXAI
+	var legacyClaudeCredential *coreauth.Auth
+	var legacyXAICredential *coreauth.Auth
+	if !isTargetedOAuthSave(ctx) {
+		var errLegacy error
+		legacyClaudeCredential, errLegacy = claudeauth.FindMatchingLegacyCredential(ctx, store, record)
+		if errLegacy != nil {
+			return "", errLegacy
+		}
+		if legacyClaudeCredential != nil {
+			coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+		}
+		var errLegacyXAI error
+		legacyXAICredential, errLegacyXAI = xaiauth.FindMatchingLegacyCredential(ctx, store, record)
+		if errLegacyXAI != nil {
+			return "", errLegacyXAI
+		}
 	}
 	adoptXAICredential := legacyXAICredential != nil &&
 		strings.EqualFold(strings.TrimSpace(record.Provider), "xai") &&
