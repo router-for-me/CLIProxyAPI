@@ -5,12 +5,14 @@ package authpublication
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const DirectoryName = ".auth-publications"
@@ -79,7 +81,8 @@ func load(path string) (record, bool, error) {
 	if err != nil {
 		return r, true, err
 	}
-	if err := json.Unmarshal(data, &r); err != nil {
+	r, err = decodeRecord(data)
+	if err != nil {
 		return r, true, err
 	}
 	if r.Name != filepath.Base(path) || len(r.Data) == 0 {
@@ -135,12 +138,41 @@ func Repair(path string) error {
 	return Clear(path)
 }
 
-func writeRecord(path string, r record) error {
-	data, err := json.Marshal(r)
-	if err != nil {
-		return err
+func decodeRecord(data []byte) (record, error) {
+	var r record
+	if !ojson.ValidBytes(data) {
+		return r, fmt.Errorf("invalid credential publication JSON")
 	}
-	return writeBytes(path, data)
+	root := ojson.ParseBytes(data)
+	name, encoded, committed := root.Get("name"), root.Get("data"), root.Get("committed")
+	if !root.IsObject() || name.Type != ojson.String || encoded.Type != ojson.String ||
+		(committed.Type != ojson.Null && !committed.IsBool()) {
+		return r, fmt.Errorf("invalid credential publication record")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded.String())
+	if err != nil {
+		return r, fmt.Errorf("invalid credential publication data: %w", err)
+	}
+	r.Name, r.Data, r.Committed = name.String(), decoded, committed.Bool()
+	return r, nil
+}
+
+func writeRecord(path string, r record) error {
+	doc := ojson.NewDocString(`{}`)
+	for _, field := range []struct {
+		name  string
+		value any
+	}{
+		{"name", r.Name},
+		// Keep the existing journal format so pending records survive upgrades.
+		{"data", base64.StdEncoding.EncodeToString(r.Data)},
+		{"committed", r.Committed},
+	} {
+		if err := doc.Set(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	return writeBytes(path, doc.Bytes())
 }
 
 func writeBytes(path string, data []byte) error {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -132,6 +133,9 @@ func resolveCodexAuthDiskPath(cfg *config.Config, auth *cliproxyauth.Auth) (stri
 		}
 	}
 	for _, candidate := range candidates {
+		if authpublication.HasPending(candidate) {
+			return candidate, nil
+		}
 		info, errStat := os.Stat(candidate)
 		if errStat != nil {
 			if os.IsNotExist(errStat) {
@@ -167,6 +171,9 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if diskPath != "" {
 		var outAuth *cliproxyauth.Auth
 		errLock := codexauth.WithFileLock(diskPath, func() error {
+			if errRepair := authpublication.Repair(diskPath); errRepair != nil {
+				return fmt.Errorf("codex executor: repair credential publication %s: %w", diskPath, errRepair)
+			}
 			var errInner error
 			outAuth, errInner = e.refreshLocked(ctx, auth, diskPath, homeEnabled)
 			return errInner

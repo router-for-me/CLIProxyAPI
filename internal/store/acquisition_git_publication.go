@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -54,7 +54,18 @@ func prepareGitPublication(repoDir, relPath, source string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return codex.WriteJSONFileAtomic(path, map[string]any{"path": filepath.ToSlash(relPath), "sha256": publicationHash(data), "staging": source, "base_commit": head.Hash().String()})
+	doc := ojson.NewDocString(`{}`)
+	for _, field := range []struct{ name, value string }{
+		{"path", filepath.ToSlash(relPath)},
+		{"sha256", publicationHash(data)},
+		{"staging", source},
+		{"base_commit", head.Hash().String()},
+	} {
+		if err := doc.Set(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	return writeGitPublicationFile(path, doc.Bytes())
 }
 
 func clearGitPublication(repoDir, relPath string) {
@@ -121,7 +132,7 @@ func recoverGitPublications(ctx context.Context, repo *git.Repository, repoDir, 
 				return err
 			}
 			if publicationHash([]byte(content)) == record.SHA256 {
-				if err := publishGitCredential(destination, []byte(content)); err != nil {
+				if err := writeGitPublicationFile(destination, []byte(content)); err != nil {
 					return err
 				}
 			}
@@ -154,8 +165,27 @@ func readGitPublication(marker, repoDir, authDir string) (gitPublication, error)
 	if err != nil {
 		return record, err
 	}
-	if err := json.Unmarshal(data, &record); err != nil {
-		return record, err
+	if !ojson.ValidBytes(data) {
+		return record, fmt.Errorf("invalid credential publication JSON")
+	}
+	root := ojson.ParseBytes(data)
+	if !root.IsObject() {
+		return record, fmt.Errorf("invalid credential publication record")
+	}
+	for _, field := range []struct {
+		name string
+		dest *string
+	}{
+		{"path", &record.Path},
+		{"sha256", &record.SHA256},
+		{"staging", &record.Staging},
+		{"base_commit", &record.Base},
+	} {
+		value := root.Get(field.name)
+		if value.Type != ojson.Null && value.Type != ojson.String {
+			return record, fmt.Errorf("invalid credential publication %s", field.name)
+		}
+		*field.dest = value.String()
 	}
 	paths, err := normalizeManagedPaths([]string{record.Path})
 	if err != nil || len(paths) != 1 || paths[0] != record.Path {
@@ -178,7 +208,7 @@ func readGitPublication(marker, repoDir, authDir string) (gitPublication, error)
 	return record, nil
 }
 
-func publishGitCredential(path string, data []byte) error {
+func writeGitPublicationFile(path string, data []byte) error {
 	file, err := os.CreateTemp(filepath.Dir(path), ".auth-publication-*")
 	if err != nil {
 		return err

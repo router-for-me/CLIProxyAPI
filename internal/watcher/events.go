@@ -34,11 +34,11 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
+	if errAddAuthDir := w.watchAuthDirectoryTree(w.authDir); errAddAuthDir != nil {
 		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
+	log.Debugf("watching auth directory tree: %s", w.authDir)
 
 	go w.processEvents(ctx)
 
@@ -66,15 +66,24 @@ func (w *Watcher) processEvents(ctx context.Context) {
 }
 
 func (w *Watcher) handleEvent(event fsnotify.Event) {
-	// Filter only relevant events: config file or auth-dir JSON files.
+	// Filter only relevant events: config, auth directories, or auth JSON files.
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
-	if !isConfigEvent && !isAuthJSON {
+	// Keep root-level JSON events eligible for Watcher literals used by incremental
+	// update paths; nested paths must be backed by a successfully installed watch.
+	parentIsAuthRoot := w.normalizeWatchPath(filepath.Dir(normalizedName)) == w.normalizeWatchPath(normalizedAuthDir)
+	parentWatched := parentIsAuthRoot || w.isWatchedAuthDirectory(filepath.Dir(normalizedName))
+	isAuthJSON := parentWatched && strings.HasSuffix(strings.ToLower(normalizedName), ".json") && event.Op&authOps != 0
+	info, errStat := os.Stat(event.Name)
+	isDirectoryCreate := errStat == nil && info.IsDir() && event.Op&(fsnotify.Create|fsnotify.Rename) != 0
+	isWatchedDirectoryRemoval := w.isWatchedAuthDirectory(normalizedName) && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0
+	isAuthDirEvent := (isDirectoryCreate || isWatchedDirectoryRemoval) &&
+		!isPrivateAuthPath(normalizedAuthDir, normalizedName) && (parentWatched || w.isWatchedAuthDirectory(normalizedName))
+	if !isConfigEvent && !isAuthJSON && !isAuthDirEvent {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
 	}
@@ -86,6 +95,24 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	if isConfigEvent {
 		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
 		w.scheduleConfigReload()
+		return
+	}
+	if isAuthDirEvent {
+		w.authRescanMu.Lock()
+		// A removed directory can already have been recreated when its queued event
+		// reaches us. Retire the old inode's watches before registering that path again.
+		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && w.isWatchedAuthDirectory(normalizedName) {
+			w.removeAuthDirectoryTree(normalizedName)
+		}
+		if info, errStat := os.Stat(event.Name); errStat == nil && info.IsDir() {
+			if errWatch := w.watchAuthDirectoryTree(normalizedName); errWatch != nil {
+				log.WithError(errWatch).Warnf("failed to watch auth directory %s", event.Name)
+			}
+		}
+		w.authRescanMu.Unlock()
+		// Directory events may include a tree moved into the auth directory.
+		// Rescanning discovers its files after the new subdirectories are watched.
+		w.reloadClients(true, nil, false)
 		return
 	}
 

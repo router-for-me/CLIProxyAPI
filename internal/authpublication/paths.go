@@ -1,7 +1,6 @@
 package authpublication
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -78,8 +77,8 @@ func pathsInDirectory(dir string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		var r record
-		if err := json.Unmarshal(data, &r); err != nil {
+		r, err := decodeRecord(data)
+		if err != nil {
 			return nil, err
 		}
 		if r.Name == "." || r.Name == ".." || filepath.Base(r.Name) != r.Name || len(r.Data) == 0 {
