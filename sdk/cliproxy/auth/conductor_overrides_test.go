@@ -3015,6 +3015,38 @@ func TestManager_Execute_DisableCooling_NewerExplicitZeroClearsStaleReset(t *tes
 	}
 }
 
+// A reset cleared by a newer Retry-After: 0 must stay cleared across a
+// reconciliation: the state reset there keeps the watermark, so an older 429
+// completing afterwards cannot reinstall its stale hint.
+func TestManager_ReconcileRegistryModelStates_KeepsClearedResetWatermark(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reconcile-cleared-reset", "test-model-reconcile-cleared-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	olderSeq := m.nextExecutionSeq()
+	newerSeq := m.nextExecutionSeq()
+	zero := time.Duration(0)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: newerSeq,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &zero})
+
+	m.ReconcileRegistryModelStates(context.Background(), id)
+
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: olderSeq,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if got := coolingDisabledRetryAt(m.auths[id], model); !got.IsZero() {
+		t.Fatalf("reset after the older 429 = %v, want it to stay cleared", got)
+	}
+}
+
 // Alias migration in reconciliation must carry a state whose only content is a
 // live cooling-disabled reset (left by a stale success after the 429).
 func TestManager_ReconcileRegistryModelStates_MigratesCleanStateWithLiveReset(t *testing.T) {

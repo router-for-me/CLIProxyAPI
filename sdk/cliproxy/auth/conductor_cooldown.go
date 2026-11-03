@@ -1700,8 +1700,9 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
+	// Clear the cooling-disabled reset but keep its watermark: a 429 dispatched
+	// before the reset was cleared or replaced must not reinstall a stale hint.
 	state.coolingDisabledRetryAt = time.Time{}
-	state.coolingDisabledRetrySeq = 0
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now
