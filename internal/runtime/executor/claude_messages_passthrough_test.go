@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func directClaudeMessagesContext() context.Context {
@@ -107,19 +107,19 @@ func TestClaudeExecutor_DirectMessagesOfficialUpstreamPreservesCallerShape(t *te
 	if got := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
 		t.Fatalf("Anthropic-Beta = %q, want %q; headers=%v", got, incoming.Get("Anthropic-Beta"), seenHeaders)
 	}
-	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 1 {
 		t.Fatalf("system block count = %d, want the caller block only", got)
 	}
-	if gjson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
+	if ojson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
 		t.Fatal("direct Messages request gained the CLI identity system block")
 	}
-	if got := gjson.GetBytes(seenBody, "thinking.display").String(); got != "summarized" {
+	if got := ojson.GetBytes(seenBody, "thinking.display").String(); got != "summarized" {
 		t.Fatalf("thinking.display = %q, want summarized", got)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "caller_tool" {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); got != "caller_tool" {
 		t.Fatalf("tool name = %q, want caller_tool", got)
 	}
-	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatal("direct Messages request gained a synthetic cache breakpoint")
 	}
 }
@@ -213,8 +213,8 @@ func TestClaudeExecutor_PreserveCallerFingerprintAlignsSessionIDWithBody(t *test
 	}
 
 	// Verify header session matches session_id embedded in metadata.user_id:
-	rawUserID := gjson.GetBytes(seenBody, "metadata.user_id").String()
-	bodySession := gjson.Get(rawUserID, "session_id").String()
+	rawUserID := ojson.GetBytes(seenBody, "metadata.user_id").String()
+	bodySession := ojson.Get(rawUserID, "session_id").String()
 	if bodySession == "" {
 		t.Fatalf("metadata.user_id has no session_id: %s", rawUserID)
 	}
@@ -246,7 +246,7 @@ func TestApplyClaudeCloakThinkingDisplay(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := applyClaudeCloakThinkingDisplay([]byte(test.body), false)
-			if display := gjson.GetBytes(got, "thinking.display").String(); display != test.want {
+			if display := ojson.GetBytes(got, "thinking.display").String(); display != test.want {
 				t.Fatalf("model=%s thinking.display = %q, want %q; body=%s", test.model, display, test.want, got)
 			}
 		})

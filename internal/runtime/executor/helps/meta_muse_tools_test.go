@@ -4,18 +4,18 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestEnsureMetaMuseToolNamespacePreservesCallerTools(t *testing.T) {
 	input := []byte(`{"input":"hello","tool_choice":"auto","tools":[{"type":"function","name":"muse","parameters":{"type":"object","properties":{"value":{"type":"integer"}}}},{"type":"namespace","name":"client","tools":[{"type":"function","name":"lookup"}]},{"type":"web_search"}]}`)
 	original := bytes.Clone(input)
 	got := EnsureMetaMuseToolNamespace(input)
-	if !gjson.ValidBytes(got) {
+	if !ojson.ValidBytes(got) {
 		t.Fatalf("invalid JSON: %s", got)
 	}
-	tools := gjson.GetBytes(got, "tools").Array()
-	before := gjson.GetBytes(input, "tools").Array()
+	tools := ojson.GetBytes(got, "tools").Array()
+	before := ojson.GetBytes(input, "tools").Array()
 	if len(tools) != len(before)+1 {
 		t.Fatalf("tool count = %d, want %d", len(tools), len(before)+1)
 	}
@@ -28,7 +28,7 @@ func TestEnsureMetaMuseToolNamespacePreservesCallerTools(t *testing.T) {
 			t.Fatalf("caller tool %d changed: %s", i, tools[i].Raw)
 		}
 	}
-	if gjson.GetBytes(got, "input").String() != "hello" || gjson.GetBytes(got, "tool_choice").String() != "auto" || !bytes.Equal(input, original) {
+	if ojson.GetBytes(got, "input").String() != "hello" || ojson.GetBytes(got, "tool_choice").String() != "auto" || !bytes.Equal(input, original) {
 		t.Fatal("unrelated fields or caller buffer changed")
 	}
 	if again := EnsureMetaMuseToolNamespace(got); !bytes.Equal(again, got) {

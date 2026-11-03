@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func patchTypeReviewIdentity(key string) (int, map[string]any) {
@@ -50,7 +50,7 @@ func TestInteractionsApplyPatchPreNameConsistentTypeConflict(t *testing.T) {
 							resolvedIndex, resolved := patchTypeReviewIdentity(resolvedKey)
 							resolved["type"], resolved["name"] = "function_call", "functions__apply_patch"
 							resolved["arguments"] = map[string]any{"input": "p"}
-							var events []gjson.Result
+							var events []ojson.Result
 							if entry == "step.start" || entry == "step.stop" {
 								for _, event := range patchSend(&param, patchReviewSnapshot(entry, index, conflict)) {
 									if event.Get("item.type").String() == "custom_tool_call" || strings.HasPrefix(event.Get("type").String(), "response.custom_tool_call_input.") || event.Get("type").String() == "response.failed" {
@@ -88,7 +88,7 @@ func TestInteractionsApplyPatchPreNameOmittedType(t *testing.T) {
 			for _, resolvedEntry := range patchTypeReviewEntries(entry) {
 				t.Run(entry+"/"+resolvedEntry+"/"+resolvedKey, func(t *testing.T) {
 					var param any
-					var events []gjson.Result
+					var events []ojson.Result
 					events = append(events, patchSend(&param, patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "arguments": map[string]any{"input": "p"}}))...)
 					_, snapshot := patchTypeReviewIdentity("index and IDs")
 					index, resolved := patchTypeReviewIdentity(resolvedKey)
@@ -127,7 +127,7 @@ func TestInteractionsApplyPatchPreNameTypeOrdinaryCompatibility(t *testing.T) {
 			for _, itemType := range []string{"model_output", "thought", "custom_tool_call", "omitted"} {
 				t.Run(request.name+"/"+entry+"/"+itemType, func(t *testing.T) {
 					var param any
-					send := func(raw []byte) []gjson.Result {
+					send := func(raw []byte) []ojson.Result {
 						return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", []byte(request.request), nil, raw, &param))
 					}
 					send(patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "arguments": map[string]any{"x": 1}}))
@@ -136,7 +136,7 @@ func TestInteractionsApplyPatchPreNameTypeOrdinaryCompatibility(t *testing.T) {
 						conflict["type"] = itemType
 					}
 					resolved := map[string]any{"index": 2, "type": "function_call", "id": "item_2", "call_id": "call_2", "name": request.upstream, "arguments": map[string]any{"x": 1}}
-					var events []gjson.Result
+					var events []ojson.Result
 					if entry == "step.start" || entry == "step.stop" {
 						events = append(events, send(patchReviewSnapshot(entry, 2, conflict))...)
 						events = append(events, send(patchReviewSnapshot("step.start", 2, resolved))...)
@@ -186,7 +186,7 @@ func TestInteractionsApplyPatchPreNameNoBridgeLegacy(t *testing.T) {
 		for _, entry := range []string{"step.start", "interaction.completed", "finish"} {
 			t.Run(request.name+"/"+entry, func(t *testing.T) {
 				var param any
-				send := func(raw []byte) []gjson.Result {
+				send := func(raw []byte) []ojson.Result {
 					return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", []byte(request.request), nil, raw, &param))
 				}
 				send(patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "arguments": map[string]any{"x": 1}}))

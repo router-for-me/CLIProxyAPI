@@ -510,6 +510,9 @@ upstream:
     #   timeout: "600"
     #   timezone: "Asia/Singapore"  # fallback IANA timezone for cloaked currentDate; a credential JSON "timezone" takes priority
     #   stabilize-device-profile: false  # optional, default false; set true to enable per-auth fingerprint pinning
+    #   # Additional Claude Code entrypoint labels (beyond built-in cli, sdk-cli, sdk-ts, claude-vscode)
+    #   # treated as native Claude Code for passthrough when strong signals match (e.g. T3 Code's "t3-code").
+    #   native-entrypoints: ["t3-code"]
     #   # Advanced operator overrides for exact-parity or gateway lanes. They apply to every Claude
     #   # request, after the per-request derivation above, and can produce a beta set real Claude Code
     #   # never sends, which api.anthropic.com may reject. Names are matched exactly; strip runs first.

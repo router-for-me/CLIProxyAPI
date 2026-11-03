@@ -3,11 +3,11 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
 	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
-	"github.com/tidwall/gjson"
 )
 
 func TestApplyThinking_ClaudeEnabledWithOutputConfigEffort(t *testing.T) {
@@ -54,7 +54,7 @@ func TestApplyThinking_ClaudeEnabledWithOutputConfigEffort(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinking returned error: %v", err)
 			}
-			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
+			if got := ojson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
 				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
 			}
 		})
@@ -64,7 +64,7 @@ func TestApplyThinking_ClaudeEnabledWithOutputConfigEffort(t *testing.T) {
 func TestClaudeToOpenAITranslationAndThinkingChained(t *testing.T) {
 	rawClaude := []byte(`{"model":"custom-openai","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`)
 	translated, _ := openaiclaude.ConvertClaudeRequestToOpenAI("custom-openai", rawClaude, false)
-	if got := gjson.GetBytes(translated, "reasoning_effort").String(); got != "high" {
+	if got := ojson.GetBytes(translated, "reasoning_effort").String(); got != "high" {
 		t.Fatalf("translated reasoning_effort = %q, want high; body=%s", got, translated)
 	}
 
@@ -72,7 +72,7 @@ func TestClaudeToOpenAITranslationAndThinkingChained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithSourceAndSummary returned error: %v", err)
 	}
-	if got := gjson.GetBytes(final, "reasoning_effort").String(); got != "high" {
+	if got := ojson.GetBytes(final, "reasoning_effort").String(); got != "high" {
 		t.Fatalf("final reasoning_effort = %q, want high; body=%s", got, final)
 	}
 }
