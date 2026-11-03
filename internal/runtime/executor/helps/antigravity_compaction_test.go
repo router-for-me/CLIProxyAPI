@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityCompactionSealAndUnseal(t *testing.T) {
@@ -81,20 +81,20 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	if !json.Valid(prepared) {
 		t.Fatalf("prepared payload is not valid JSON: %s", string(prepared))
 	}
-	if gjson.GetBytes(prepared, "stream").Bool() {
+	if ojson.GetBytes(prepared, "stream").Bool() {
 		t.Fatal("expected stream to be false")
 	}
-	if gjson.GetBytes(prepared, "tools").Exists() {
+	if ojson.GetBytes(prepared, "tools").Exists() {
 		t.Fatal("expected tools to be removed")
 	}
-	if gjson.GetBytes(prepared, "tool_choice").Exists() {
+	if ojson.GetBytes(prepared, "tool_choice").Exists() {
 		t.Fatal("expected tool_choice to be removed")
 	}
-	if gjson.GetBytes(prepared, "previous_response_id").Exists() {
+	if ojson.GetBytes(prepared, "previous_response_id").Exists() {
 		t.Fatal("expected previous_response_id to be removed")
 	}
 
-	input := gjson.GetBytes(prepared, "input").Array()
+	input := ojson.GetBytes(prepared, "input").Array()
 	if len(input) != 3 {
 		t.Fatalf("expected 3 items in input, got %d", len(input))
 	}
@@ -122,7 +122,7 @@ func TestPrepareAntigravityCompactionSummaryPayload_StringInputWithControlChars(
 		t.Fatalf("prepared output with control chars must be valid JSON, got: %s", string(prepared))
 	}
 
-	input := gjson.GetBytes(prepared, "input").Array()
+	input := ojson.GetBytes(prepared, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("expected 2 items in input for string input, got %d", len(input))
 	}
@@ -160,7 +160,7 @@ func TestExpandAntigravityCompactionCapsules(t *testing.T) {
 		t.Fatalf("expanded payload is not valid JSON: %s", string(expanded))
 	}
 
-	input := gjson.GetBytes(expanded, "input").Array()
+	input := ojson.GetBytes(expanded, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(input))
 	}
@@ -275,10 +275,10 @@ func TestExpandResponsesCompactionCapsulesAndBuildFromSummary(t *testing.T) {
 	if errBuild != nil {
 		t.Fatalf("BuildResponsesCompactionResponseFromSummary failed: %v", errBuild)
 	}
-	if got := gjson.GetBytes(compactionResp, "usage.input_tokens_details.cached_tokens").Int(); got != 5 {
+	if got := ojson.GetBytes(compactionResp, "usage.input_tokens_details.cached_tokens").Int(); got != 5 {
 		t.Fatalf("cached_tokens = %d, want 5", got)
 	}
-	if got := gjson.GetBytes(compactionResp, "usage.output_tokens_details.reasoning_tokens").Int(); got != 2 {
+	if got := ojson.GetBytes(compactionResp, "usage.output_tokens_details.reasoning_tokens").Int(); got != 2 {
 		t.Fatalf("reasoning_tokens = %d, want 2", got)
 	}
 
@@ -290,7 +290,7 @@ func TestExpandResponsesCompactionCapsulesAndBuildFromSummary(t *testing.T) {
 		t.Fatalf("len(chunks) = %d, want 5", len(chunks))
 	}
 
-	capsule := gjson.GetBytes(compactionResp, "output.0.encrypted_content").String()
+	capsule := ojson.GetBytes(compactionResp, "output.0.encrypted_content").String()
 	rawReq := []byte(`{"input":[{"type":"compaction","encrypted_content":"foreign"},{"type":"compaction","encrypted_content":"` + capsule + `"},{"type":"compaction_trigger"}]}`)
 	req := cliproxyexecutor.Request{Payload: rawReq}
 	opts := cliproxyexecutor.Options{OriginalRequest: rawReq}
@@ -300,7 +300,7 @@ func TestExpandResponsesCompactionCapsulesAndBuildFromSummary(t *testing.T) {
 	if errExpand := ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
 		t.Fatalf("ExpandResponsesCompactionCapsules failed: %v", errExpand)
 	}
-	items := gjson.GetBytes(req.Payload, "input").Array()
+	items := ojson.GetBytes(req.Payload, "input").Array()
 	if len(items) != 2 || items[0].Get("role").String() != "developer" || !strings.Contains(items[0].Get("content.0.text").String(), "Summary with text part.") {
 		t.Fatalf("unexpected expanded input: %s", req.Payload)
 	}
@@ -336,7 +336,7 @@ func TestExpandRecognizedResponsesCompactionCapsules_PreservesForeign(t *testing
 		t.Fatalf("ExpandRecognizedResponsesCompactionCapsules failed: %v", errExpand)
 	}
 	for _, target := range [][]byte{req.Payload, opts.OriginalRequest} {
-		items := gjson.GetBytes(target, "input").Array()
+		items := ojson.GetBytes(target, "input").Array()
 		if len(items) != 3 {
 			t.Fatalf("input len = %d, want 3; payload=%s", len(items), target)
 		}

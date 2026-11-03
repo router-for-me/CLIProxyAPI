@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // The upstream deliberately cannot finish the initial response until it reads
@@ -54,7 +54,7 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 					}
 				}
 				first := read()
-				if gjson.GetBytes(first, "type").String() != "response.create" {
+				if ojson.GetBytes(first, "type").String() != "response.create" {
 					t.Errorf("initial create: %s", first)
 				}
 				write([]byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`))
@@ -65,17 +65,17 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 				write([]byte(fmt.Sprintf(`{"type":%q,"response":{"id":"r1","output":[],"incomplete_details":{"reason":"steered"}}}`, boundary)))
 				write([]byte(`{"type":"response.created","response":{"id":"r2","output":[]}}`))
 				got := read()
-				if gjson.GetBytes(got, "type").String() != "response.steer" {
+				if ojson.GetBytes(got, "type").String() != "response.steer" {
 					t.Errorf("second control: %s", got)
 				}
 				write([]byte(`{"type":"response.steer.accepted","steer":{"id":"s2","previous_response_id":"r2"}}`))
 				write([]byte(`{"type":"response.completed","response":{"id":"r2","output":[{"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"}]}}`))
 				write(pending)
 				got = read()
-				if gjson.GetBytes(got, "type").String() != "response.create" || gjson.GetBytes(got, "previous_response_id").String() != "r2" || gjson.GetBytes(got, "input.0.call_id").String() != "c1" {
+				if ojson.GetBytes(got, "type").String() != "response.create" || ojson.GetBytes(got, "previous_response_id").String() != "r2" || ojson.GetBytes(got, "input.0.call_id").String() != "c1" {
 					t.Errorf("tool continuation: %s", got)
 				}
-				if gjson.GetBytes(got, "instructions").String() != "New settings" {
+				if ojson.GetBytes(got, "instructions").String() != "New settings" {
 					t.Errorf("explicit settings not applied: %s", got)
 				}
 				write([]byte(`{"type":"response.created","response":{"id":"r3","output":[]}}`))
@@ -83,7 +83,7 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 				write([]byte(`{"type":"response.completed","response":{"id":"r3","output":[]}}`))
 				// Idle steering must also reach the same live upstream connection.
 				got = read()
-				if gjson.GetBytes(got, "previous_response_id").String() != "missing" {
+				if ojson.GetBytes(got, "previous_response_id").String() != "missing" {
 					t.Errorf("idle control missing: %s", got)
 				}
 				write(failed)
@@ -114,12 +114,12 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 					if chunk.Err != nil {
 						t.Fatal(chunk.Err)
 					}
-					event := gjson.GetBytes(chunk.Payload, "type").String()
-					id := gjson.GetBytes(chunk.Payload, "response.id").String()
+					event := ojson.GetBytes(chunk.Payload, "type").String()
+					id := ojson.GetBytes(chunk.Payload, "response.id").String()
 					switch {
 					case event == "response.created" && id == "r1":
 						input <- core.WebsocketInput{Payload: steer}
-					case event == "response.steer.accepted" && gjson.GetBytes(chunk.Payload, "steer.id").String() == "s1":
+					case event == "response.steer.accepted" && ojson.GetBytes(chunk.Payload, "steer.id").String() == "s1":
 						if !bytes.Equal(chunk.Payload, accepted) {
 							t.Fatal("accepted event changed")
 						}
@@ -135,7 +135,7 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 						seen["pending"] = true
 						input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","previous_response_id":"r2","instructions":"New settings","input":[{"type":"function_call_output","call_id":"c1","output":"ok"}]}`)}
 					case event == "response.completed" && id == "r3":
-						if gjson.GetBytes(chunk.Payload, "response.output.0.content.0.text").String() != "STEER_OK" {
+						if ojson.GetBytes(chunk.Payload, "response.output.0.content.0.text").String() != "STEER_OK" {
 							t.Fatal("successor output missing or contaminated by preceding response")
 						}
 						seen["successor"] = true
@@ -193,7 +193,7 @@ func TestCodexDuplexSIWCSteerStripsConfigurationUpdates(t *testing.T) {
 			t.Errorf("read initial create: %v", errRead)
 			return
 		}
-		if gjson.GetBytes(first, "type").String() != "response.create" {
+		if ojson.GetBytes(first, "type").String() != "response.create" {
 			t.Errorf("initial create: %s", first)
 		}
 		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`)); errWrite != nil {
@@ -245,8 +245,8 @@ func TestCodexDuplexSIWCSteerStripsConfigurationUpdates(t *testing.T) {
 			if chunk.Err != nil {
 				t.Fatal(chunk.Err)
 			}
-			event := gjson.GetBytes(chunk.Payload, "type").String()
-			id := gjson.GetBytes(chunk.Payload, "response.id").String()
+			event := ojson.GetBytes(chunk.Payload, "type").String()
+			id := ojson.GetBytes(chunk.Payload, "response.id").String()
 			if event == "response.created" && id == "r1" {
 				input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":[{"type":"input_text","text":"STEER_OK"}]}]}`)}
 			}
@@ -266,17 +266,17 @@ func TestCodexDuplexSIWCSteerStripsConfigurationUpdates(t *testing.T) {
 
 	select {
 	case got := <-captured:
-		if gjson.GetBytes(got, "type").String() != "response.steer" || gjson.GetBytes(got, "previous_response_id").String() != "r1" {
+		if ojson.GetBytes(got, "type").String() != "response.steer" || ojson.GetBytes(got, "previous_response_id").String() != "r1" {
 			t.Fatalf("steer routing changed: %s", got)
 		}
-		items := gjson.GetBytes(got, "input").Array()
+		items := ojson.GetBytes(got, "input").Array()
 		if len(items) != 1 || items[0].Get("role").String() != "user" || items[0].Get("content.0.text").String() != "STEER_OK" {
 			t.Fatalf("steer input must contain only the user message: %s", got)
 		}
-		if gjson.GetBytes(got, "reasoning").Exists() {
+		if ojson.GetBytes(got, "reasoning").Exists() {
 			t.Fatalf("steer must not promote reasoning: %s", got)
 		}
-		if gjson.GetBytes(got, "store").Exists() || gjson.GetBytes(got, "stream").Exists() {
+		if ojson.GetBytes(got, "store").Exists() || ojson.GetBytes(got, "stream").Exists() {
 			t.Fatalf("steer must not inherit response.create defaults: %s", got)
 		}
 	default:
@@ -302,8 +302,8 @@ func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 			t.Errorf("read first create: %v", err)
 			return
 		}
-		if gjson.GetBytes(first, "instructions").String() != "Initial system instructions" {
-			t.Errorf("first instructions = %q", gjson.GetBytes(first, "instructions").String())
+		if ojson.GetBytes(first, "instructions").String() != "Initial system instructions" {
+			t.Errorf("first instructions = %q", ojson.GetBytes(first, "instructions").String())
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-1","output":[]}}`))
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[]}}`))
@@ -314,16 +314,16 @@ func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 			t.Errorf("read second create (from append): %v", err)
 			return
 		}
-		if got := gjson.GetBytes(second, "type").String(); got != "response.create" {
+		if got := ojson.GetBytes(second, "type").String(); got != "response.create" {
 			t.Errorf("second type = %q, want response.create", got)
 		}
-		if got := gjson.GetBytes(second, "previous_response_id").String(); got != "resp-1" {
+		if got := ojson.GetBytes(second, "previous_response_id").String(); got != "resp-1" {
 			t.Errorf("second previous_response_id = %q, want resp-1", got)
 		}
-		if got := gjson.GetBytes(second, "model").String(); got != "gpt-6-astra" {
+		if got := ojson.GetBytes(second, "model").String(); got != "gpt-6-astra" {
 			t.Errorf("second model = %q, want gpt-6-astra", got)
 		}
-		if got := gjson.GetBytes(second, "instructions").String(); got != "Initial system instructions" {
+		if got := ojson.GetBytes(second, "instructions").String(); got != "Initial system instructions" {
 			t.Errorf("second instructions = %q, want 'Initial system instructions'", got)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-2","output":[]}}`))
@@ -356,8 +356,8 @@ func TestCodexDuplexAppendInheritsContextAndInstructions(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
 		}
-		eventType := gjson.GetBytes(chunk.Payload, "type").String()
-		eventID := gjson.GetBytes(chunk.Payload, "response.id").String()
+		eventType := ojson.GetBytes(chunk.Payload, "type").String()
+		eventID := ojson.GetBytes(chunk.Payload, "response.id").String()
 		if eventType == "response.completed" && eventID == "resp-1" {
 			// Client sends response.append omitting previous_response_id, model, instructions
 			appendPayload := []byte(`{"type":"response.append","input":[{"role":"user","content":"turn 2"}]}`)
@@ -403,10 +403,10 @@ func TestCodexDuplexStandaloneCreateDoesNotInheritParentID(t *testing.T) {
 			t.Errorf("read second create: %v", err)
 			return
 		}
-		if got := gjson.GetBytes(second, "type").String(); got != "response.create" {
+		if got := ojson.GetBytes(second, "type").String(); got != "response.create" {
 			t.Errorf("second type = %q, want response.create", got)
 		}
-		if gjson.GetBytes(second, "previous_response_id").Exists() {
+		if ojson.GetBytes(second, "previous_response_id").Exists() {
 			t.Errorf("standalone create must not gain previous_response_id: %s", second)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp-2","output":[]}}`))
@@ -439,8 +439,8 @@ func TestCodexDuplexStandaloneCreateDoesNotInheritParentID(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
 		}
-		eventType := gjson.GetBytes(chunk.Payload, "type").String()
-		eventID := gjson.GetBytes(chunk.Payload, "response.id").String()
+		eventType := ojson.GetBytes(chunk.Payload, "type").String()
+		eventID := ojson.GetBytes(chunk.Payload, "response.id").String()
 		if eventType == "response.completed" && eventID == "resp-1" {
 			// Client sends standalone response.create without previous_response_id
 			standalonePayload := []byte(`{"type":"response.create","model":"gpt-6-astra","input":[{"role":"user","content":"turn 2 standalone"}]}`)
@@ -477,7 +477,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			t.Errorf("read first create: %v", err)
 			return
 		}
-		if gjson.GetBytes(first, "type").String() != "response.create" {
+		if ojson.GetBytes(first, "type").String() != "response.create" {
 			t.Errorf("expected response.create: %s", first)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r1","output":[]}}`))
@@ -488,7 +488,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			t.Errorf("read steer1: %v", err)
 			return
 		}
-		if gjson.GetBytes(steer1, "type").String() != "response.steer" {
+		if ojson.GetBytes(steer1, "type").String() != "response.steer" {
 			t.Errorf("expected response.steer: %s", steer1)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.steer.accepted","steer":{"id":"s1","previous_response_id":"r1"}}`))
@@ -504,7 +504,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			t.Errorf("read steer: %v", err)
 			return
 		}
-		if got := gjson.GetBytes(steerFrame, "type").String(); got != "response.steer" {
+		if got := ojson.GetBytes(steerFrame, "type").String(); got != "response.steer" {
 			t.Errorf("expected response.steer to arrive before blocked create, got: %s", steerFrame)
 			return
 		}
@@ -519,7 +519,7 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 			t.Errorf("read queued create: %v", err)
 			return
 		}
-		if got := gjson.GetBytes(nextCreate, "type").String(); got != "response.create" {
+		if got := ojson.GetBytes(nextCreate, "type").String(); got != "response.create" {
 			t.Errorf("queued create type = %q, want response.create", got)
 		}
 		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"r2","output":[]}}`))
@@ -552,8 +552,8 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
 		}
-		eventType := gjson.GetBytes(chunk.Payload, "type").String()
-		eventID := gjson.GetBytes(chunk.Payload, "response.id").String()
+		eventType := ojson.GetBytes(chunk.Payload, "type").String()
+		eventID := ojson.GetBytes(chunk.Payload, "response.id").String()
 		if eventType == "response.created" && eventID == "r1" {
 			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.steer","previous_response_id":"r1","input":"steer 1"}`)}
 		}

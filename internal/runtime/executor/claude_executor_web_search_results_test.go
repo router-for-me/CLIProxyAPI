@@ -9,12 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const claudeWebSearchExecutorResults = `[{"type":"web_search_result","url":"https://example.com/a","title":"A","encrypted_content":"enc-a","page_age":null},{"type":"web_search_result","url":"https://example.com/b","title":"B","encrypted_content":"enc-b","page_age":null}]`
@@ -42,7 +42,7 @@ func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) htt
 				`{"type":"text","text":"found two pages"}`,
 			}
 		}
-		if !gjson.GetBytes(body, "stream").Bool() {
+		if !ojson.GetBytes(body, "stream").Bool() {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"msg_ws","type":"message","role":"assistant","model":"claude-opus-5-5","content":[` + strings.Join(blocks, ",") + `],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":5}}`))
 			return
@@ -58,7 +58,7 @@ func claudeWebSearchUpstream(t *testing.T, bodies *[][]byte, mu *sync.Mutex) htt
 			}
 			events = append(events, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":"+index+",\"content_block\":"+start+"}")
 			if strings.Contains(block, `"type":"text"`) {
-				events = append(events, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"+index+",\"delta\":{\"type\":\"text_delta\",\"text\":"+gjson.Get(block, "text").Raw+"}}")
+				events = append(events, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":"+index+",\"delta\":{\"type\":\"text_delta\",\"text\":"+ojson.Get(block, "text").Raw+"}}")
 			}
 			events = append(events, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":"+index+"}")
 		}
@@ -143,10 +143,11 @@ func runClaudeWebSearchScenario(t *testing.T, cfg *config.Config, stream bool, r
 
 const (
 	claudeWebSearchExecutorUser = `{"type":"message","role":"user","content":[{"type":"input_text","text":"search for q"}]}`
-	// The history as Codex stores it: the web_search_call has no results.
+	// The history as Codex stores it: the web_search_call has no results, while
+	// the assistant message keeps its web_search_result_location annotations.
 	claudeWebSearchExecutorHistory = claudeWebSearchExecutorUser +
 		`,{"type":"web_search_call","id":"ws_srvtoolu_01abc","status":"completed","action":{"type":"search","query":"q"}},` +
-		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"found two pages"}]},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"found two pages","annotations":[{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"found two pages","encrypted_index":"IDX_A"}]}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"how many results?"}]}`
 )
 
@@ -185,11 +186,20 @@ func TestClaudeExecutor_RestoresWebSearchResultsDroppedByResponsesClient(t *test
 			if got := claudeWebSearchResultContent(t, bodies[1]); got != claudeWebSearchExecutorResults {
 				t.Fatalf("same session: web_search_tool_result content = %s, want original results", got)
 			}
+			if got := ojson.GetBytes(bodies[1], "messages.1.content.2.citations.0.encrypted_index").String(); got != "IDX_A" {
+				t.Fatalf("same session: expected restored search results to keep citations, got %q in %s", got, bodies[1])
+			}
 			if got := claudeWebSearchResultContent(t, bodies[2]); got != "[]" {
 				t.Fatalf("other session: web_search_tool_result content = %s, want []", got)
 			}
+			if citations := ojson.GetBytes(bodies[2], "messages.1.content.2.citations"); citations.Exists() {
+				t.Fatalf("other session: expected unbacked citations to be dropped, got %s", citations.Raw)
+			}
 			if got := claudeWebSearchResultContent(t, bodies[3]); got != "[]" {
 				t.Fatalf("no session identity: web_search_tool_result content = %s, want []", got)
+			}
+			if citations := ojson.GetBytes(bodies[3], "messages.1.content.2.citations"); citations.Exists() {
+				t.Fatalf("no session identity: expected unbacked citations to be dropped, got %s", citations.Raw)
 			}
 		})
 	}
@@ -207,6 +217,12 @@ func TestClaudeExecutor_WebSearchResultCacheDisabledByDefault(t *testing.T) {
 			}
 			if got := claudeWebSearchResultContent(t, bodies[1]); got != "[]" {
 				t.Fatalf("disabled cache: web_search_tool_result content = %s, want []", got)
+			}
+			if citations := ojson.GetBytes(bodies[1], "messages.1.content.2.citations"); citations.Exists() {
+				t.Fatalf("disabled cache: expected unbacked citations to be dropped, got %s", citations.Raw)
+			}
+			if got := ojson.GetBytes(bodies[1], "messages.1.content.2.text").String(); got != "found two pages" {
+				t.Fatalf("disabled cache: expected text to remain intact, got %q", got)
 			}
 		})
 	}
@@ -229,7 +245,7 @@ func TestClaudeExecutor_WebSearchResultRestoreRunsBeforePayloadRules(t *testing.
 			if len(bodies) != 2 {
 				t.Fatalf("upstream requests = %d, want 2", len(bodies))
 			}
-			block := gjson.GetBytes(bodies[1], "messages.1.content.1")
+			block := ojson.GetBytes(bodies[1], "messages.1.content.1")
 			if block.Get("type").String() != "web_search_tool_result" {
 				t.Fatalf("messages.1.content.1 = %s, want the web_search_tool_result block", block.Raw)
 			}
@@ -267,8 +283,14 @@ func TestClaudeExecutor_WebSearchResultCacheHonorsConfiguredLimit(t *testing.T) 
 	if got := claudeWebSearchResultContent(t, bodies[2]); got != "[]" {
 		t.Fatalf("evicted session-1: web_search_tool_result content = %s, want []", got)
 	}
+	if citations := ojson.GetBytes(bodies[2], "messages.1.content.2.citations"); citations.Exists() {
+		t.Fatalf("evicted session-1: expected citations to be dropped, got %s", citations.Raw)
+	}
 	if got := claudeWebSearchResultContent(t, bodies[3]); got != claudeWebSearchExecutorResults {
 		t.Fatalf("retained session-2: web_search_tool_result content = %s, want original results", got)
+	}
+	if got := ojson.GetBytes(bodies[3], "messages.1.content.2.citations.0.encrypted_index").String(); got != "IDX_A" {
+		t.Fatalf("retained session-2: expected citations to be kept, got %q", got)
 	}
 }
 
@@ -313,8 +335,8 @@ func TestClaudeExecutor_CountTokensRestoresWebSearchResultsWhenEnabled(t *testin
 	if errDisabledCount != nil {
 		t.Fatalf("disabled CountTokens() error = %v", errDisabledCount)
 	}
-	enabledTokens := gjson.GetBytes(enabledCountResp.Payload, "input_tokens").Int()
-	disabledTokens := gjson.GetBytes(disabledCountResp.Payload, "input_tokens").Int()
+	enabledTokens := ojson.GetBytes(enabledCountResp.Payload, "input_tokens").Int()
+	disabledTokens := ojson.GetBytes(disabledCountResp.Payload, "input_tokens").Int()
 	if enabledTokens <= disabledTokens {
 		t.Fatalf("enabled input_tokens (%d) <= disabled input_tokens (%d); want restored search results counted", enabledTokens, disabledTokens)
 	}
@@ -323,7 +345,7 @@ func TestClaudeExecutor_CountTokensRestoresWebSearchResultsWhenEnabled(t *testin
 	if errOtherCredCount != nil {
 		t.Fatalf("other credential CountTokens() error = %v", errOtherCredCount)
 	}
-	otherCredTokens := gjson.GetBytes(otherCredCountResp.Payload, "input_tokens").Int()
+	otherCredTokens := ojson.GetBytes(otherCredCountResp.Payload, "input_tokens").Int()
 	if otherCredTokens != disabledTokens {
 		t.Fatalf("other credential input_tokens = %d, want %d (unrestored empty search results)", otherCredTokens, disabledTokens)
 	}
@@ -351,14 +373,26 @@ func TestClaudeExecutor_WebSearchResultCacheScopesByCredential(t *testing.T) {
 			if got := claudeWebSearchResultContent(t, bodies[1]); got != "[]" {
 				t.Fatalf("different credential ID in same session: web_search_tool_result content = %s, want []", got)
 			}
+			if citations := ojson.GetBytes(bodies[1], "messages.1.content.2.citations"); citations.Exists() {
+				t.Fatalf("different credential ID in same session: expected citations to be dropped, got %s", citations.Raw)
+			}
 			if got := claudeWebSearchResultContent(t, bodies[2]); got != claudeWebSearchExecutorResults {
 				t.Fatalf("original credential ID in same session: web_search_tool_result content = %s, want original results", got)
+			}
+			if got := ojson.GetBytes(bodies[2], "messages.1.content.2.citations.0.encrypted_index").String(); got != "IDX_A" {
+				t.Fatalf("original credential ID in same session: expected citations to be kept, got %q", got)
 			}
 			if got := claudeWebSearchResultContent(t, bodies[4]); got != "[]" {
 				t.Fatalf("different API key in same session: web_search_tool_result content = %s, want []", got)
 			}
+			if citations := ojson.GetBytes(bodies[4], "messages.1.content.2.citations"); citations.Exists() {
+				t.Fatalf("different API key in same session: expected citations to be dropped, got %s", citations.Raw)
+			}
 			if got := claudeWebSearchResultContent(t, bodies[5]); got != claudeWebSearchExecutorResults {
 				t.Fatalf("original API key in same session: web_search_tool_result content = %s, want original results", got)
+			}
+			if got := ojson.GetBytes(bodies[5], "messages.1.content.2.citations.0.encrypted_index").String(); got != "IDX_A" {
+				t.Fatalf("original API key in same session: expected citations to be kept, got %q", got)
 			}
 		})
 	}
@@ -367,8 +401,8 @@ func TestClaudeExecutor_WebSearchResultCacheScopesByCredential(t *testing.T) {
 func claudeWebSearchResultContent(t *testing.T, body []byte) string {
 	t.Helper()
 	var found string
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
+	ojson.GetBytes(body, "messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
 			if block.Get("type").String() == "web_search_tool_result" {
 				found = block.Get("content").Raw
 				return false

@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func parseIssue5093Config(t *testing.T, raw string) *config.Config {
@@ -252,7 +252,7 @@ func TestClaudeExecutor_InjectDiagnosticsDisabledOmitsDiagnosticsAndCacheDiagnos
 		if len(upstreamBody) == 0 {
 			t.Fatalf("%s: upstream request was not captured", tc.name)
 		}
-		if got := gjson.GetBytes(upstreamBody, "diagnostics").Exists(); got != tc.inject {
+		if got := ojson.GetBytes(upstreamBody, "diagnostics").Exists(); got != tc.inject {
 			t.Fatalf("%s: diagnostics present = %v, want %v; body = %s", tc.name, got, tc.inject, upstreamBody)
 		}
 		if got := strings.Contains(upstreamBetas, claudeCacheDiagnosisBeta); got != tc.inject {

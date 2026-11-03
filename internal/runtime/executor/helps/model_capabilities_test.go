@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	helps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -16,7 +17,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type configuredThinkingExecutor struct {
@@ -145,11 +145,11 @@ func TestApplyRequestThinkingConfigurationUpdateSelectedCodexModel(t *testing.T)
 			if executor.seenModel != wantModel {
 				t.Fatalf("executor model = %q, want %q", executor.seenModel, wantModel)
 			}
-			if got := gjson.GetBytes(response.Payload, "reasoning.effort").String(); got != tc.wantTop {
+			if got := ojson.GetBytes(response.Payload, "reasoning.effort").String(); got != tc.wantTop {
 				t.Fatalf("reasoning.effort = %q, want %q; body=%s", got, tc.wantTop, response.Payload)
 			}
 			updates := 0
-			for _, item := range gjson.GetBytes(response.Payload, "input").Array() {
+			for _, item := range ojson.GetBytes(response.Payload, "input").Array() {
 				if item.Get("type").String() == "configuration_update" {
 					updates++
 				}
@@ -190,7 +190,7 @@ func TestApplyRequestThinkingConfigurationUpdateCrossProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyRequestThinking() error = %v", err)
 			}
-			if got := gjson.GetBytes(out, tc.path).String(); got != tc.want {
+			if got := ojson.GetBytes(out, tc.path).String(); got != tc.want {
 				t.Fatalf("%s = %q, want %q; body=%s", tc.path, got, tc.want, out)
 			}
 		})
@@ -257,19 +257,19 @@ func TestApplyRequestThinkingUsesExactClaudeModeForSummaryOnlyRequest(t *testing
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(executor.translatedBody, "thinking.type").String(); got != "adaptive" {
+	if got := ojson.GetBytes(executor.translatedBody, "thinking.type").String(); got != "adaptive" {
 		t.Fatalf("pre-executor thinking.type = %q, want global adaptive trigger; body=%s", got, executor.translatedBody)
 	}
-	if got := gjson.GetBytes(response.Payload, "thinking.type").String(); got != "enabled" {
+	if got := ojson.GetBytes(response.Payload, "thinking.type").String(); got != "enabled" {
 		t.Fatalf("thinking.type = %q, want exact manual mode; body=%s", got, response.Payload)
 	}
-	if got := gjson.GetBytes(response.Payload, "thinking.budget_tokens").Int(); got != 1024 {
+	if got := ojson.GetBytes(response.Payload, "thinking.budget_tokens").Int(); got != 1024 {
 		t.Fatalf("thinking.budget_tokens = %d, want exact minimum 1024; body=%s", got, response.Payload)
 	}
-	if got := gjson.GetBytes(response.Payload, "thinking.display").String(); got != "summarized" {
+	if got := ojson.GetBytes(response.Payload, "thinking.display").String(); got != "summarized" {
 		t.Fatalf("thinking.display = %q, want summarized; body=%s", got, response.Payload)
 	}
-	if gjson.GetBytes(response.Payload, "output_config.effort").Exists() {
+	if ojson.GetBytes(response.Payload, "output_config.effort").Exists() {
 		t.Fatalf("manual thinking retained adaptive effort: %s", response.Payload)
 	}
 }
@@ -337,7 +337,7 @@ func TestApplyRequestThinkingUsesSelectedPrefixedAPIKeyModel(t *testing.T) {
 		if !executor.resolved {
 			t.Fatalf("%s request did not receive selected model capabilities", path)
 		}
-		if got := gjson.GetBytes(payload, "output_config.effort").String(); got != "high" {
+		if got := ojson.GetBytes(payload, "output_config.effort").String(); got != "high" {
 			t.Fatalf("%s output effort = %q, want selected credential capability high; body=%s", path, got, payload)
 		}
 	}

@@ -1,12 +1,13 @@
 package helps
 
 import (
-	"encoding/base64"
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const devinToolIDPrefix = "cpa_tid_v1_"
@@ -74,7 +75,7 @@ func NormalizeClaudeToolCallIDs(body []byte) []byte {
 	}
 	var fields []idField
 	used := make(map[string]bool)
-	for _, message := range gjson.GetBytes(body, "messages").Array() {
+	for _, message := range ojson.GetBytesNoCopy(body, "messages").Array() {
 		for _, block := range message.Get("content").Array() {
 			field := ""
 			switch block.Get("type").String() {
@@ -86,7 +87,7 @@ func NormalizeClaudeToolCallIDs(body []byte) []byte {
 				continue
 			}
 			value := block.Get(field)
-			if value.Type != gjson.String || value.String() == "" {
+			if value.Type != ojson.String || value.String() == "" {
 				continue
 			}
 			id := value.String()
@@ -120,4 +121,63 @@ func NormalizeClaudeToolCallIDs(body []byte) []byte {
 		offset = field.end
 	}
 	return append(out, body[offset:]...)
+}
+
+// NormalizeClaudeToolCallIDsDoc repairs client tool ID fields in place on doc.
+func NormalizeClaudeToolCallIDsDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	type idTarget struct {
+		path string
+		id   string
+	}
+	var targets []idTarget
+	used := make(map[string]bool)
+	for msgIdx, message := range doc.Get("messages").Array() {
+		for blockIdx, block := range message.Get("content").Array() {
+			field := ""
+			switch block.Get("type").String() {
+			case "tool_use":
+				field = "id"
+			case "tool_result":
+				field = "tool_use_id"
+			default:
+				continue
+			}
+			value := block.Get(field)
+			if value.Type != ojson.String || value.String() == "" {
+				continue
+			}
+			id := value.String()
+			if isPortableToolCallID(id) {
+				used[id] = true
+			} else {
+				targets = append(targets, idTarget{
+					path: fmt.Sprintf("messages.%d.content.%d.%s", msgIdx, blockIdx, field),
+					id:   id,
+				})
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return false
+	}
+	mapped := make(map[string]string, len(targets))
+	modified := false
+	for _, target := range targets {
+		id := mapped[target.id]
+		if id == "" {
+			id = EncodeDevinToolCallID(target.id)
+			for used[id] {
+				id = "_" + id
+			}
+			mapped[target.id] = id
+			used[id] = true
+		}
+		if errSet := doc.Set(target.path, id); errSet == nil {
+			modified = true
+		}
+	}
+	return modified
 }
