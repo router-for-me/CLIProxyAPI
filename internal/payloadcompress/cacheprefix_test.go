@@ -16,7 +16,10 @@ import (
 
 const cachePrefixTestModel = "claude-sonnet-4"
 
-// cachePrefixTestConfig runs the default combo. MinBytes is 1 so the test is
+// cachePrefixTestConfig runs lite over the default combo. Session-dedup is left
+// out on purpose: upstream defers a current-turn rewrite to the next turn, so it
+// trades append stability for not replacing what the model just read (see
+// TestDedupDefersCurrentTurn). MinBytes is 1 so the test is
 // about the prefix, never about the size gate: a body crossing the gate
 // mid-conversation changes the prefix once, which is a known discontinuity and
 // not what these tests measure.
@@ -30,7 +33,6 @@ func cachePrefixTestConfig(cachePrefix string) Config {
 			Name:   "standard",
 			Models: []string{"*"},
 			Pipeline: []Step{
-				{Engine: EngineSessionDedup},
 				{Engine: EngineLite},
 			},
 		}},
@@ -119,8 +121,8 @@ func TestCachePrefixCompressAppendStable(t *testing.T) {
 	cachedZoneCompressed := false
 
 	for turn := 1; turn <= turns; turn++ {
-		// Turns 3 and 5 emit the identical tool result, so session-dedup has
-		// something to elide and its index bookkeeping is exercised too.
+		// Turns 3 and 5 emit the identical tool result, so lite has something
+		// to rewrite even though nothing else changed.
 		n := turn
 		if turn == 5 {
 			n = 3

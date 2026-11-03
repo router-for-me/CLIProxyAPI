@@ -33,6 +33,7 @@ type packRule struct {
 	Replacement    *string           `json:"replacement"`
 	ReplacementMap map[string]string `json:"replacementMap"`
 	MinIntensity   string            `json:"minIntensity"`
+	Context        string            `json:"context"`
 }
 
 type packFile struct {
@@ -145,7 +146,7 @@ func compilePackRule(raw packRule) (cavemanRule, bool) {
 	}
 
 	pattern := raw.Pattern
-	rule := cavemanRule{name: raw.Name, level: strings.ToLower(raw.MinIntensity)}
+	rule := cavemanRule{name: raw.Name, level: strings.ToLower(raw.MinIntensity), context: raw.Context}
 
 	for strings.HasPrefix(pattern, "(?<!") {
 		end := strings.Index(pattern, ")")

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -210,18 +211,19 @@ func TestSanitizeDropsUnknownEngines(t *testing.T) {
 }
 
 func TestDedupElidesByteIdenticalSegments(t *testing.T) {
-	block := strings.Repeat("the same content ", 60)
+	block := strings.Repeat("the same content line\n", 20)
 	body := []byte(`{"messages":[` +
 		`{"role":"tool","content":` + quote(block) + `},` +
-		`{"role":"tool","content":` + quote(block) + `}]}`)
+		`{"role":"tool","content":` + quote(block) + `},` +
+		`{"role":"assistant","content":"ok"}]}`)
 	out, stats := Apply(testConfig(EngineSessionDedup), "m", body)
 	if !stats.Applied {
 		t.Fatal("expected dedup")
 	}
-	if !strings.Contains(string(out), dedupMarker) {
+	if !strings.Contains(string(out), dedupRefPrefix) {
 		t.Fatalf("missing marker:\n%s", out)
 	}
-	if strings.Count(string(out), "the same content") != 60 {
+	if strings.Count(string(out), "the same content line") != 20 {
 		t.Fatalf("first copy must be preserved:\n%s", out)
 	}
 }
@@ -312,17 +314,36 @@ func TestRTKCollapsesRuns(t *testing.T) {
 	}
 }
 
-func TestRTKTruncatesLongLines(t *testing.T) {
-	body := strings.Repeat("x", 4000) + "\n" + strings.Repeat("keep\n", 10)
+// Upstream has no per-line shortening: a long line is kept whole or dropped by
+// the total cap, so minified JSON stays parseable.
+func TestRTKKeepsLongLinesWhole(t *testing.T) {
+	long := strings.Repeat("x", 4000)
+	body := "Error: boom\n" + long + "\n" + strings.Repeat("keep\n", 200)
 	out, ok := rtkEngine{}.compress(body)
 	if !ok {
-		t.Fatal("expected truncation")
+		t.Fatal("expected the total-size cap to fire")
 	}
-	if len(out) >= len(body) {
-		t.Fatalf("expected shrink: %d >= %d", len(out), len(body))
+	if strings.Contains(out, "chars omitted") {
+		t.Fatal("rtk elided the middle of a line")
 	}
-	if !strings.Contains(out, "chars omitted") {
-		t.Fatalf("missing truncation marker:\n%s", out)
+	for _, line := range strings.Split(out, "\n") {
+		if line != long && strings.HasPrefix(line, long[:64]) {
+			t.Fatalf("line rewritten in place: %.80s", line)
+		}
+	}
+}
+
+// #4559: a file read is not a build log. Neither the generic fallback filter nor
+// the line/char cap may touch it.
+func TestRTKLeavesDocumentReadsWhole(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 400; i++ {
+		b.WriteString("the quick brown fox jumps over the lazy dog " + itoaDecimal(i) + "\n")
+	}
+	body := b.String()
+	out, ok := rtkEngine{}.compress(body)
+	if ok || out != body {
+		t.Fatal("rtk rewrote a document-like read")
 	}
 }
 
@@ -418,7 +439,8 @@ func TestApplyCoversAllThreeProtocols(t *testing.T) {
 			`{"type":"tool_result","tool_use_id":"t1","content":` + quote(noise) + `}]}]}`,
 		"responses": `{"model":"m","input":[` +
 			`{"type":"message","role":"user","content":[{"type":"input_text","text":` + quote(noise) + `}]},` +
-			`{"type":"function_call_output","call_id":"c1","output":` + quote(noise) + `}]}`,
+			`{"type":"function_call_output","call_id":"c1","output":` + quote(noise) + `},` +
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`,
 	}
 
 	for name, body := range cases {
@@ -513,5 +535,113 @@ func TestApplyIsAppendStable(t *testing.T) {
 			}
 		}
 		prev = cur
+	}
+}
+
+// Upstream lite never caps the tool results of the current turn: cutting what
+// the model just asked for only makes it re-read the same file next turn.
+func TestCurrentTurnToolResultsAreNotCapped(t *testing.T) {
+	text := strings.Repeat("tool output line that would be cut\n", 100)
+	toolTurn := func(id string) string {
+		return `{"role":"assistant","content":null,"tool_calls":[{"id":"` + id +
+			`","type":"function","function":{"name":"read","arguments":"{\"path\":\"/proj/big.txt\"}"}}]},` +
+			`{"role":"tool","tool_call_id":"` + id + `","content":` + quote(text) + `}`
+	}
+	body := []byte(`{"model":"m","messages":[` + toolTurn("t1") + `,` + toolTurn("t2") + `]}`)
+
+	out, stats := Apply(testConfig(EngineLite), "m", body)
+	if !stats.Applied {
+		t.Fatal("expected compression to apply")
+	}
+	var parsed struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if got := parsed.Messages[1].Content; !strings.Contains(got, "...[truncated]") {
+		t.Fatalf("history tool result should be capped, got %d chars", len(got))
+	}
+	if got := parsed.Messages[3].Content; got != text {
+		t.Fatalf("current-turn tool result was rewritten (%d of %d chars)", len(got), len(text))
+	}
+}
+
+// Upstream never rewrites the current turn: a marker where the model expects the
+// result it just asked for reads as a lost read, so the duplicate is elided one
+// turn later instead. That deferral is the one place dedup trades append
+// stability (warm provider cache) for not making the model re-fetch content.
+func TestDedupDefersCurrentTurn(t *testing.T) {
+	block := strings.Repeat("same tool output line\n", 10)
+	turn := func(id string) string {
+		return `{"role":"assistant","content":null,"tool_calls":[{"id":"` + id +
+			`","type":"function","function":{"name":"bash","arguments":"{}"}}]},` +
+			`{"role":"tool","tool_call_id":"` + id + `","content":` + quote(block) + `}`
+	}
+	// Each turn ends on its tool result, so the last one is the current turn.
+	pair := []byte(`{"model":"m","messages":[` + turn("c1") + `,` + turn("c2") + `]}`)
+	if out, _ := Apply(testConfig(EngineSessionDedup), "m", pair); strings.Contains(string(out), dedupRefPrefix) {
+		t.Fatal("current turn must not be rewritten")
+	}
+	triple := []byte(`{"model":"m","messages":[` + turn("c1") + `,` + turn("c2") + `,` + turn("c3") + `]}`)
+	out, stats := Apply(testConfig(EngineSessionDedup), "m", triple)
+	if !stats.Applied || !strings.Contains(string(out), dedupRefPrefix) {
+		t.Fatal("a duplicate that left the current turn should be elided")
+	}
+	if strings.Count(string(out), "same tool output line") != 20 {
+		t.Fatalf("the owner and the current-turn copy must both stay intact:\n%s", out)
+	}
+}
+
+// Upstream lite caps only string tool content: a content array on a role:"tool"
+// message is not a tool_result block, so truncateToolResultBlocks never sees it.
+func TestLiteLeavesToolMessageBlocksUncapped(t *testing.T) {
+	long := strings.Repeat("y", 3000)
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"assistant","content":"a"},` +
+		`{"role":"tool","content":[{"type":"text","text":` + quote(long) + `}]},` +
+		`{"role":"assistant","content":"b"}]}`)
+	out, _ := Apply(testConfig(EngineLite), "m", body)
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != long {
+		t.Fatal("lite capped text in a tool content array")
+	}
+}
+
+// Upstream counts apply_patch_call_output as a Responses tool output. Missing it
+// ended the trailing current-turn window before the function_call_output in front
+// of it, so that output was capped as if it were history.
+func TestApplyPatchCallOutputStaysInCurrentTurn(t *testing.T) {
+	long := strings.Repeat("z", 3000)
+	body := []byte(`{"model":"m","input":[` +
+		`{"type":"function_call_output","call_id":"c1","output":` + quote(long) + `},` +
+		`{"type":"apply_patch_call_output","call_id":"c2","output":"ok"}]}`)
+	out, _ := Apply(testConfig(EngineLite), "m", body)
+	if got := gjson.GetBytes(out, "input.0.output").String(); got != long {
+		t.Fatal("a trailing Responses tool output was capped")
+	}
+}
+
+// Upstream leaves the newest user turn as written when earlier turns exist:
+// clients append memory and quoted history to it, which would push it past the
+// minimum length and let the rules delete the user's own words.
+func TestCavemanDefersLatestUserTurn(t *testing.T) {
+	text := "I would like you to please basically just check the thing, thanks in advance. " +
+		"Memory: the user prefers short answers and always writes Go."
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"user","content":"first question"},` +
+		`{"role":"assistant","content":"first answer"},` +
+		`{"role":"user","content":` + quote(text) + `}]}`)
+	out, _ := Apply(testConfig(EngineCaveman), "m", body)
+	if got := gjson.GetBytes(out, "messages.2.content").String(); got != text {
+		t.Fatalf("latest user turn was rewritten: %q", got)
+	}
+	// A one-shot body has no earlier turn, so it still compresses.
+	one := []byte(`{"model":"m","messages":[{"role":"user","content":` + quote(text) + `}]}`)
+	out, _ = Apply(testConfig(EngineCaveman), "m", one)
+	if gjson.GetBytes(out, "messages.0.content").String() == text {
+		t.Fatal("a one-shot body must still compress")
 	}
 }

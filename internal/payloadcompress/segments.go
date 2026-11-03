@@ -13,7 +13,15 @@ type segmentKind uint8
 
 const (
 	kindUser segmentKind = iota
+	// kindUserLatest is the newest user turn when earlier turns exist. Caveman
+	// leaves it alone: clients append memory and quoted history to it.
+	kindUserLatest
+	kindSystem
 	kindToolOutput
+	kindToolCurrent
+	// kindToolBlocks is text in a tool message's content array: tool output for
+	// rtk, but upstream lite caps only string tool content.
+	kindToolBlocks
 )
 
 // segment is one compressible JSON string value, identified by its byte span in
@@ -23,10 +31,15 @@ type segment struct {
 	end   int
 	kind  segmentKind
 	value gjson.Result
+	// current marks a segment from this request's own turn. Dedup never replaces
+	// it: a marker where the model expected its fresh read makes it read again.
+	current bool
 	// command is the shell command that produced this tool output, when the
 	// payload carries the call pairing. Empty for prose and for tool results
 	// whose originating call is not in the body.
 	command string
+	// toolName is the tool that produced this tool output, empty when unknown.
+	toolName string
 }
 
 // scanner locates compressible text in a request payload.
@@ -44,6 +57,18 @@ type scanner struct {
 	// tool call's arguments stay byte-identical, they just tell the rtk filter
 	// which command produced the output it is looking at.
 	toolCommands map[string]string
+	// toolNames maps a tool call id to the tool that ran it, so rtk can tell a
+	// shell command's output from a file read or a grep result.
+	toolNames map[string]string
+	// current is set while scanning items at or after the current turn's first
+	// item, so a tool result the model just asked for is never capped.
+	current bool
+	// latestUser marks the newest user item when earlier turns exist: caveman
+	// must not rewrite the message being answered.
+	latestUser bool
+	// noAssistant records a payload with no assistant item. Upstream dedup treats
+	// that whole conversation as the current turn, so nothing is rewritten.
+	noAssistant bool
 	// cachePrefix decides how far the provider-cached head is protected; see
 	// Config.CachePrefix. The zero value preserves.
 	cachePrefix string
@@ -93,8 +118,15 @@ func (s *scanner) scan() bool {
 
 	s.collectToolCommands(items)
 
+	// Tool results from the current turn on are what the model just asked for,
+	// so lite must not cap them; see currentTurnStart.
+	currentFrom, hasAssistant := currentTurnStart(items)
+	s.noAssistant = !hasAssistant
+	lastUser, earlierTurn := lastUserTurn(items)
 	idx := 0
 	items.ForEach(func(_, item gjson.Result) bool {
+		s.current = idx >= currentFrom
+		s.latestUser = earlierTurn && idx == lastUser
 		if idx > cut {
 			s.addItem(item)
 		}
@@ -113,9 +145,9 @@ func (s *scanner) scan() bool {
 // addSystem records the top-level system prompt, which arrives outside
 // `messages[]` for Claude (a string or parts array) and Gemini (parts).
 func (s *scanner) addSystem(root gjson.Result) {
-	s.addPromptValue(root.Get("system"), kindUser)
-	s.addPromptValue(root.Get("systemInstruction"), kindUser)
-	s.addPromptValue(root.Get("system_instruction"), kindUser)
+	s.addPromptValue(root.Get("system"), kindSystem)
+	s.addPromptValue(root.Get("systemInstruction"), kindSystem)
+	s.addPromptValue(root.Get("system_instruction"), kindSystem)
 }
 
 // collectToolCommands pairs every tool call id in the payload with the shell
@@ -126,17 +158,25 @@ func (s *scanner) collectToolCommands(items gjson.Result) {
 	items.ForEach(func(_, item gjson.Result) bool {
 		switch item.Get("type").String() {
 		case "function_call", "custom_tool_call":
-			s.recordCommand(item.Get("call_id").String(), item.Get("arguments").String())
+			id := item.Get("call_id").String()
+			s.recordTool(id, item.Get("name").String())
+			s.recordCommand(id, commandFromArgs(item.Get("arguments").String()))
 		case "local_shell_call":
-			s.recordCommand(item.Get("call_id").String(), item.Get("action.command").String())
+			id := item.Get("call_id").String()
+			s.recordTool(id, "bash")
+			s.recordCommand(id, item.Get("action.command").String())
 		}
 		item.Get("tool_calls").ForEach(func(_, call gjson.Result) bool {
-			s.recordCommand(call.Get("id").String(), call.Get("function.arguments").String())
+			id := call.Get("id").String()
+			s.recordTool(id, call.Get("function.name").String())
+			s.recordCommand(id, commandFromArgs(call.Get("function.arguments").String()))
 			return true
 		})
 		item.Get("content").ForEach(func(_, block gjson.Result) bool {
 			if block.Get("type").String() == "tool_use" {
-				s.recordCommand(block.Get("id").String(), block.Get("input").Raw)
+				id := block.Get("id").String()
+				s.recordTool(id, block.Get("name").String())
+				s.recordCommand(id, commandFromArgs(block.Get("input").Raw))
 			}
 			return true
 		})
@@ -144,19 +184,93 @@ func (s *scanner) collectToolCommands(items gjson.Result) {
 	})
 }
 
-// recordCommand stores id -> command from a call record. An arguments value may
-// arrive as a JSON string or as an already-decoded object, and only a non-empty
-// command is worth keeping.
-func (s *scanner) recordCommand(id, arguments string) {
-	if id == "" || arguments == "" {
+// recordTool stores the tool that owns a call id: rtk admits only shell tool
+// output, so a read or a grep result must not be treated as command logs.
+func (s *scanner) recordTool(id, name string) {
+	if id == "" || name == "" {
 		return
 	}
-	if cmd := gjson.Get(arguments, "command"); cmd.Type == gjson.String && cmd.String() != "" {
-		if s.toolCommands == nil {
-			s.toolCommands = make(map[string]string, 8)
-		}
-		s.toolCommands[id] = cmd.String()
+	if s.toolNames == nil {
+		s.toolNames = make(map[string]string, 8)
 	}
+	s.toolNames[id] = name
+}
+
+// recordCommand stores id -> command from a call record. Only a non-empty
+// command is worth keeping.
+func (s *scanner) recordCommand(id, command string) {
+	if id == "" || command == "" {
+		return
+	}
+	if s.toolCommands == nil {
+		s.toolCommands = make(map[string]string, 8)
+	}
+	s.toolCommands[id] = command
+}
+
+// commandFromArgs reads the `command` field out of a call's arguments, which
+// arrive as JSON text or as an already-decoded object.
+func commandFromArgs(raw string) string {
+	if cmd := gjson.Get(raw, "command"); cmd.Type == gjson.String {
+		return cmd.String()
+	}
+	return ""
+}
+
+// currentTurnStart is the index of the first item this request is about.
+// Upstream lite exempts the current turn's tool results from its cap: cutting
+// what the model just asked for makes it re-read the same file every turn.
+// A Responses turn carries the call and its output as top-level items with no
+// assistant message, so its trailing outputs count as this turn's too.
+func currentTurnStart(items gjson.Result) (int, bool) {
+	arr := items.Array()
+	from := len(arr)
+	found := false
+	for i, item := range arr {
+		if item.Get("role").String() == "assistant" {
+			from, found = i+1, true
+		}
+	}
+	trailing := len(arr)
+	for trailing > 0 && isToolOutputItem(arr[trailing-1]) {
+		trailing--
+	}
+	if trailing < from {
+		return trailing, found
+	}
+	return from, found
+}
+
+// lastUserTurn is the index of the newest user item and whether an earlier turn
+// precedes it. Caveman leaves that message as written: clients append memory
+// blocks and quoted history to it, which would otherwise let the rules delete
+// words the user typed. A one-shot body keeps compressing.
+func lastUserTurn(items gjson.Result) (int, bool) {
+	arr := items.Array()
+	last := -1
+	for i, item := range arr {
+		if item.Get("role").String() == "user" {
+			last = i
+		}
+	}
+	if last < 0 {
+		return -1, false
+	}
+	for _, item := range arr[:last] {
+		if role := item.Get("role").String(); role == "user" || role == "assistant" {
+			return last, true
+		}
+	}
+	return last, false
+}
+
+// isToolOutputItem reports whether a Responses item is a tool result.
+func isToolOutputItem(item gjson.Result) bool {
+	switch item.Get("type").String() {
+	case "function_call_output", "custom_tool_call_output", "local_shell_call_output", "apply_patch_call_output":
+		return true
+	}
+	return false
 }
 
 // addPromptValue accepts a bare string, an array of parts, or an object carrying
@@ -187,10 +301,10 @@ func (s *scanner) addItem(item gjson.Result) {
 	}
 	// Responses API tool output items carry their call id beside the text.
 	switch item.Get("type").String() {
-	case "function_call_output", "custom_tool_call_output", "local_shell_call_output":
+	case "function_call_output", "custom_tool_call_output", "local_shell_call_output", "apply_patch_call_output":
 		callID := item.Get("call_id").String()
-		s.addTool(item.Get("output"), callID)
-		s.addParts(item.Get("content"), kindToolOutput, callID)
+		s.addTool(item.Get("output"), callID, kindToolOutput)
+		s.addParts(item.Get("content"), kindToolBlocks, callID)
 		return
 	}
 	switch item.Get("role").String() {
@@ -199,17 +313,21 @@ func (s *scanner) addItem(item gjson.Result) {
 			return
 		}
 		content := item.Get("content")
-		s.add(content, kindUser)
-		s.addParts(content, kindUser, "")
+		s.add(content, kindSystem)
+		s.addParts(content, kindSystem, "")
 	case "user":
 		content := item.Get("content")
-		s.add(content, kindUser)
-		s.addParts(content, kindUser, "")
+		kind := kindUser
+		if s.latestUser {
+			kind = kindUserLatest
+		}
+		s.add(content, kind)
+		s.addParts(content, kind, "")
 	case "tool":
 		callID := item.Get("tool_call_id").String()
 		content := item.Get("content")
-		s.addTool(content, callID)
-		s.addParts(content, kindToolOutput, callID)
+		s.addTool(content, callID, kindToolOutput)
+		s.addParts(content, kindToolBlocks, callID)
 	}
 }
 
@@ -222,8 +340,8 @@ func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string
 	content.ForEach(func(_, part gjson.Result) bool {
 		switch part.Get("type").String() {
 		case "text", "input_text", "output_text":
-			if kind == kindToolOutput {
-				s.addTool(part.Get("text"), callID)
+			if kind == kindToolOutput || kind == kindToolBlocks {
+				s.addTool(part.Get("text"), callID, kind)
 			} else {
 				s.add(part.Get("text"), kind)
 			}
@@ -233,13 +351,13 @@ func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string
 			if inner.IsArray() {
 				inner.ForEach(func(_, sub gjson.Result) bool {
 					if sub.Get("type").String() == "text" {
-						s.addTool(sub.Get("text"), resultID)
+						s.addTool(sub.Get("text"), resultID, kindToolOutput)
 					}
 					return true
 				})
 				return true
 			}
-			s.addTool(inner, resultID)
+			s.addTool(inner, resultID, kindToolOutput)
 		}
 		return true
 	})
@@ -248,15 +366,20 @@ func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string
 // addTool records a tool-output string together with the shell command that
 // produced it, so a command-aware engine can pick its filter. The command is
 // look-up only: nothing in the payload is rewritten.
-func (s *scanner) addTool(res gjson.Result, callID string) {
+func (s *scanner) addTool(res gjson.Result, callID string, kind segmentKind) {
 	before := len(s.segs)
-	s.add(res, kindToolOutput)
+	s.add(res, kind)
 	if callID == "" || len(s.segs) == before {
 		return
 	}
-	if cmd := s.toolCommands[callID]; cmd != "" {
-		s.segs[before].command = cmd
+	seg := &s.segs[before]
+	if s.current && kind == kindToolOutput {
+		seg.kind = kindToolCurrent
 	}
+	if cmd := s.toolCommands[callID]; cmd != "" {
+		seg.command = cmd
+	}
+	seg.toolName = s.toolNames[callID]
 }
 
 // add records a string value span. Spans whose offsets do not line up with the
@@ -274,5 +397,5 @@ func (s *scanner) add(res gjson.Result, kind segmentKind) {
 	if s.body[start] != '"' || s.body[end-1] != '"' {
 		return
 	}
-	s.segs = append(s.segs, segment{start: start, end: end, kind: kind, value: res})
+	s.segs = append(s.segs, segment{start: start, end: end, kind: kind, value: res, current: s.current})
 }

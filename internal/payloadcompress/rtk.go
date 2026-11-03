@@ -18,11 +18,8 @@ type rtkEngine struct {
 func (rtkEngine) name() string { return EngineRTK }
 
 const (
-	rtkMinLines     = 8
-	rtkMaxLineBytes = 512
-	rtkHeadChars    = 256
-	rtkTailChars    = 128
-	rtkRepeatMark   = " (×"
+	rtkMinLines   = 8
+	rtkRepeatMark = " (×"
 )
 
 // rtkLimits is the intensity ladder. Intensity picks how eagerly repeated lines
@@ -67,28 +64,48 @@ func (e rtkEngine) limits() rtkLimits {
 }
 
 func (e rtkEngine) compress(text string) (string, bool) {
-	return e.compressOutput("", text)
+	return e.compressOutput("", text, false)
 }
+
+// rtkShellTool is upstream's SHELL_TOOL_NAME_RE: only these tool results are
+// shell command output. Anything else (Read, Grep, apply_patch) is structured
+// content whose repeated lines are meaningful, so rtk leaves it alone.
+var rtkShellTool = regexp.MustCompile(`\b(bash|shell|terminal|run_command|execute_command|exec|command)\b`)
 
 // compressCommand applies the filter for the command that produced the output.
-// A tool result carries its command when the payload records the call, and the
-// command decides the filter far more reliably than the output's own text.
-func (e rtkEngine) compressCommand(command, text string) (string, bool) {
-	return e.compressOutput(command, text)
+// Only tool results are eligible, matching upstream's shouldCompressMessage, and
+// only a shell tool's output is command output: a file read or a grep result
+// must never be filtered or capped as if it were a build log (#13388).
+func (e rtkEngine) compressCommand(kind segmentKind, toolName, command, text string) (string, bool) {
+	if kind != kindToolOutput && kind != kindToolCurrent && kind != kindToolBlocks {
+		return text, false
+	}
+	skipFilters := toolName != "" && !rtkShellTool.MatchString(strings.ToLower(toolName))
+	if skipFilters {
+		command = ""
+	}
+	return e.compressOutput(command, text, skipFilters)
 }
 
-func (e rtkEngine) compressOutput(command, text string) (string, bool) {
+func (e rtkEngine) compressOutput(command, text string, skipFilters bool) (string, bool) {
 	if strings.Count(text, "\n") < rtkMinLines {
 		return text, false
 	}
 	original := text
 	limits := e.limits()
 
-	// Filters run before the caps below: a filter knows what the command that
-	// produced this output looks like, which is what decides which lines are noise.
+	// A document-like read is a file or prose dump: neither the generic fallback
+	// filter nor the line/char cap may touch it, or the middle of a source file
+	// disappears (#4559). Go has no command-from-text detector, so it classifies
+	// fewer results as logs than upstream does: fewer savings, never fewer lines.
+	docLike := command == "" &&
+		detectRTKOutputType(text, command) == "unknown" &&
+		!rtkGenericErrorMarkers.MatchString(text)
 	changed := false
-	if filtered, ok := applyRTKFilters(text, command); ok {
-		text, changed = filtered, true
+	if !skipFilters && !docLike {
+		if filtered, ok := applyRTKFilters(text, command); ok {
+			text, changed = filtered, true
+		}
 	}
 
 	lines := strings.Split(text, "\n")
@@ -101,23 +118,13 @@ func (e rtkEngine) compressOutput(command, text string) (string, bool) {
 	for i := 0; i < len(lines); i++ {
 		raw := lines[i]
 		line := raw
-		if len(line) > rtkMaxLineBytes {
-			// Count and cut by character: the marker promises chars, and a byte cut
-			// can split a multi-byte rune.
-			if runes := []rune(raw); len(runes) > rtkHeadChars+rtkTailChars {
-				line = string(runes[:rtkHeadChars]) + " …(" +
-					strconv.Itoa(len(runes)-rtkHeadChars-rtkTailChars) + " chars omitted)… " +
-					string(runes[len(runes)-rtkTailChars:])
-				changed = true
-			}
-		}
 		run := 1
 		if raw != "" && !strings.Contains(raw, rtkRepeatMark) {
 			for i+run < len(lines) && lines[i+run] == raw {
 				run++
 			}
 		}
-		if run >= limits.minRun {
+		if !skipFilters && run >= limits.minRun {
 			out = append(out, line+rtkRepeatMark+strconv.Itoa(run)+")")
 			changed = true
 		} else {
@@ -128,9 +135,11 @@ func (e rtkEngine) compressOutput(command, text string) (string, bool) {
 		i += run - 1
 	}
 
-	if capped, ok := rtkTruncate(out, limits, rtkDefaultPriority); ok {
-		out = capped
-		changed = true
+	if !docLike {
+		if capped, ok := rtkTruncate(out, limits, rtkDefaultPriority); ok {
+			out = capped
+			changed = true
+		}
 	}
 	if !changed {
 		return original, false

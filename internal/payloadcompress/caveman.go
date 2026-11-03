@@ -77,7 +77,7 @@ func (e cavemanEngine) packEnabled(tag string) bool {
 // ruleSet resolves the language pack for this segment, then applies the level and
 // skip-rules filters.
 func (e cavemanEngine) ruleSet(text string) []cavemanRule {
-	rules := packRulesFor(e.pack(text))
+	rules := filterRulesByContext(packRulesFor(e.pack(text)))
 	if len(e.opts.SkipRules) == 0 {
 		return filterRulesByLevel(rules, e.level)
 	}
@@ -93,6 +93,20 @@ func (e cavemanEngine) ruleSet(text string) []cavemanRule {
 		kept = append(kept, rule)
 	}
 	return filterRulesByLevel(kept, e.level)
+}
+
+// filterRulesByContext keeps the rules written for user prose and for every
+// role. Upstream selects rules per message role (getRulesForContext); this
+// scanner only rewrites user text, so assistant-only rules must never run here.
+// They assume a model wrote the text and delete openings such as "This is a...".
+func filterRulesByContext(rules []cavemanRule) []cavemanRule {
+	out := make([]cavemanRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.context == "all" || rule.context == "user" {
+			out = append(out, rule)
+		}
+	}
+	return out
 }
 
 func filterRulesByLevel(rules []cavemanRule, level string) []cavemanRule {
@@ -123,9 +137,12 @@ func levelRank(level string) int {
 type cavemanRule struct {
 	name  string
 	level string
-	re    *regexp.Regexp
-	repl  string
-	table map[string]string
+	// context is the message role the rule was written for: "user", "assistant"
+	// or "all". See filterRulesByContext.
+	context string
+	re      *regexp.Regexp
+	repl    string
+	table   map[string]string
 	// lowerOnly deletes a match only when the next byte is a lowercase letter.
 	// Go's RE2 has no lookahead, so that condition is checked here.
 	lowerOnly bool

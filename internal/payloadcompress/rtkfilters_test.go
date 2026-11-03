@@ -149,12 +149,41 @@ func TestRTKCommandPickedFromEveryProtocol(t *testing.T) {
 		}
 		found := ""
 		for _, seg := range s.segs {
-			if seg.kind == kindToolOutput && seg.command != "" {
+			if seg.kind != kindUser && seg.command != "" {
 				found = seg.command
 			}
 		}
 		if found != want[name] {
 			t.Fatalf("%s: tool command = %q, want %q", name, found, want[name])
 		}
+	}
+}
+
+// Upstream's shouldCompressMessage only admits tool results (and assistant
+// messages when configured), never human prose. The command-aware rtk engine had
+// no kind check, so a long user message could have lines dropped as log noise.
+func TestRTKLeavesUserProseAlone(t *testing.T) {
+	engine := rtkEngine{}
+	text := strings.Repeat("identical log line repeated in a user message\n", 40)
+	if out, hit := engine.compressCommand(kindToolOutput, "bash", "", text); !hit || out == text {
+		t.Fatal("expected rtk to compress a tool result")
+	}
+	for _, kind := range []segmentKind{kindUser, kindSystem} {
+		if out, hit := engine.compressCommand(kind, "bash", "", text); hit || out != text {
+			t.Fatalf("rtk rewrote kind %d", kind)
+		}
+	}
+}
+
+// #13388: a Read or Grep result is not command output. Its repeated lines are
+// structural, so rtk must leave a non-shell tool result byte-identical.
+func TestRTKSkipsNonShellTools(t *testing.T) {
+	engine := rtkEngine{}
+	text := strings.Repeat("same structural line\n", 40)
+	if out, hit := engine.compressCommand(kindToolOutput, "Read", "", text); hit || out != text {
+		t.Fatal("rtk rewrote a non-shell tool result")
+	}
+	if _, hit := engine.compressCommand(kindToolOutput, "Bash", "", text); !hit {
+		t.Fatal("rtk must still compress shell tool results")
 	}
 }

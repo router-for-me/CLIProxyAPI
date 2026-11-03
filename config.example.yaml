@@ -311,7 +311,7 @@ requests:
   #     - name: standard
   #       models: ["*"]            # Supports wildcards (e.g., "claude-*")
   #       pipeline:                # Runs in order; each engine sees the previous output.
-  #         - engine: session-dedup # Elide segments that repeat an earlier message verbatim.
+  #         - engine: session-dedup # Replace a repeated line-suffix block with a [dedup:ref] marker.
   #         - engine: lite          # Strip ANSI, carriage returns, trailing spaces, blank runs.
   #     - name: shell
   #       models: ["*sonnet*", "*gpt-5*"]
@@ -334,6 +334,8 @@ requests:
   #           options:
   #             max-tool-length: 2000       # Truncate longer tool results, in characters, head and tail kept.
   #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
+  #             # This turn's tool results (everything after the last assistant
+  #             # message) are never truncated: the model would only re-read them.
   #
   #   # Every engine accepts an options block; omitted knobs keep the defaults below,
   #   # which are the upstream OmniRoute defaults.

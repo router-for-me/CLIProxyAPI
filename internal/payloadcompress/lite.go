@@ -24,6 +24,11 @@ const liteDefaultMaxToolLength = 2000
 // compressToolResults, so a tool result is capped after its blank runs are
 // collapsed; truncating first would spend the character budget on empty lines.
 func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
+	if kind == kindToolCurrent {
+		// The model asked for this result this turn; capping it only makes it
+		// re-read the same file (see currentTurnStart).
+		return text, false
+	}
 	cleaned, changed := e.compress(text)
 	limit := e.opts.MaxToolLength
 	if limit <= 0 {
