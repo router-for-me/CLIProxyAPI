@@ -8,11 +8,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -119,11 +119,11 @@ func collectClaudeInputTokenSegments(payload []byte) ([]string, error) {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return nil, nil
 	}
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return nil, fmt.Errorf("invalid Claude request JSON")
 	}
 
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	segments := make([]string, 0, 32)
 	collectClaudeSystemTokenSegments(root.Get("system"), &segments)
 	collectClaudeMessageTokenSegments(root.Get("messages"), &segments)
@@ -132,16 +132,16 @@ func collectClaudeInputTokenSegments(payload []byte) ([]string, error) {
 	return segments, nil
 }
 
-func collectClaudeSystemTokenSegments(system gjson.Result, segments *[]string) {
-	if system.Type == gjson.String {
+func collectClaudeSystemTokenSegments(system ojson.Result, segments *[]string) {
+	if system.Type == ojson.String {
 		appendClaudeTokenString(segments, system.String())
 		return
 	}
 	if !system.IsArray() {
 		return
 	}
-	system.ForEach(func(_, part gjson.Result) bool {
-		if part.Type == gjson.String {
+	system.ForEach(func(_, part ojson.Result) bool {
+		if part.Type == ojson.String {
 			appendClaudeTokenString(segments, part.String())
 		} else if part.Get("type").String() == "text" {
 			appendClaudeTokenString(segments, part.Get("text").String())
@@ -150,27 +150,27 @@ func collectClaudeSystemTokenSegments(system gjson.Result, segments *[]string) {
 	})
 }
 
-func collectClaudeMessageTokenSegments(messages gjson.Result, segments *[]string) {
+func collectClaudeMessageTokenSegments(messages ojson.Result, segments *[]string) {
 	if !messages.IsArray() {
 		return
 	}
-	messages.ForEach(func(_, message gjson.Result) bool {
+	messages.ForEach(func(_, message ojson.Result) bool {
 		appendClaudeTokenString(segments, message.Get("role").String())
 		collectClaudeContentTokenSegments(message.Get("content"), segments)
 		return true
 	})
 }
 
-func collectClaudeContentTokenSegments(content gjson.Result, segments *[]string) {
+func collectClaudeContentTokenSegments(content ojson.Result, segments *[]string) {
 	if !content.Exists() {
 		return
 	}
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		appendClaudeTokenString(segments, content.String())
 		return
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
+		content.ForEach(func(_, part ojson.Result) bool {
 			collectClaudeContentTokenSegments(part, segments)
 			return true
 		})
@@ -196,7 +196,7 @@ func collectClaudeContentTokenSegments(content gjson.Result, segments *[]string)
 		appendClaudeTokenString(segments, content.Get("tool_call_id").String())
 		collectClaudeContentTokenSegments(content.Get("content"), segments)
 	case "web_search_result", "search_result":
-		if source := content.Get("source"); source.Type == gjson.String {
+		if source := content.Get("source"); source.Type == ojson.String {
 			appendClaudeTokenString(segments, source.String())
 		}
 		appendClaudeTokenString(segments, content.Get("title").String())
@@ -224,7 +224,7 @@ func collectClaudeContentTokenSegments(content gjson.Result, segments *[]string)
 	}
 }
 
-func collectClaudeDocumentTokenSegments(document gjson.Result, segments *[]string) {
+func collectClaudeDocumentTokenSegments(document ojson.Result, segments *[]string) {
 	source := document.Get("source")
 	if source.Get("type").String() != "text" {
 		return
@@ -235,11 +235,11 @@ func collectClaudeDocumentTokenSegments(document gjson.Result, segments *[]strin
 	appendClaudeTokenString(segments, source.Get("content").String())
 }
 
-func collectClaudeToolTokenSegments(tools gjson.Result, segments *[]string) {
+func collectClaudeToolTokenSegments(tools ojson.Result, segments *[]string) {
 	if !tools.IsArray() {
 		return
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		appendClaudeTokenString(segments, tool.Get("type").String())
 		appendClaudeTokenString(segments, tool.Get("name").String())
 		appendClaudeTokenString(segments, tool.Get("description").String())
@@ -248,11 +248,11 @@ func collectClaudeToolTokenSegments(tools gjson.Result, segments *[]string) {
 	})
 }
 
-func collectClaudeToolChoiceTokenSegments(toolChoice gjson.Result, segments *[]string) {
+func collectClaudeToolChoiceTokenSegments(toolChoice ojson.Result, segments *[]string) {
 	if !toolChoice.Exists() {
 		return
 	}
-	if toolChoice.Type == gjson.String {
+	if toolChoice.Type == ojson.String {
 		appendClaudeTokenString(segments, toolChoice.String())
 		return
 	}
@@ -269,11 +269,11 @@ func appendClaudeTokenString(segments *[]string, value string) {
 	}
 }
 
-func appendClaudeTokenJSON(segments *[]string, value gjson.Result) {
+func appendClaudeTokenJSON(segments *[]string, value ojson.Result) {
 	if !value.Exists() {
 		return
 	}
-	if value.Type == gjson.String {
+	if value.Type == ojson.String {
 		appendClaudeTokenString(segments, value.String())
 		return
 	}
@@ -330,8 +330,8 @@ func (state *ClaudeInputTokenState) applyChunk(ctx context.Context, chunk []byte
 				payloadEnd--
 			}
 			payload := line[payloadOffset:payloadEnd]
-			if gjson.GetBytes(payload, "type").String() == "message_start" {
-				inputTokens := gjson.GetBytes(payload, "message.usage.input_tokens")
+			if ojson.GetBytesNoCopy(payload, "type").String() == "message_start" {
+				inputTokens := ojson.GetBytesNoCopy(payload, "message.usage.input_tokens")
 				if inputTokens.Exists() && inputTokens.Int() != 0 {
 					return chunk, true
 				}
@@ -343,7 +343,7 @@ func (state *ClaudeInputTokenState) applyChunk(ctx context.Context, chunk []byte
 				if count == 0 {
 					return chunk, true
 				}
-				updatedPayload, errSet := sjson.SetBytes(payload, "message.usage.input_tokens", count)
+				updatedPayload, errSet := ojson.SetBytes(payload, "message.usage.input_tokens", count)
 				if errSet != nil {
 					state.logEstimateError(ctx, fmt.Errorf("set message_start usage: %w", errSet))
 					return chunk, true

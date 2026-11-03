@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -251,6 +252,213 @@ func TestSaveTokenRecord_MigratesMatchingLegacyClaudeCredential(t *testing.T) {
 		if got := saved[key]; got != want {
 			t.Errorf("%s = %#v, want %#v", key, got, want)
 		}
+	}
+}
+
+func TestSaveTokenRecord_MigratesMatchingLegacyXAICredential(t *testing.T) {
+	authDir := t.TempDir()
+	legacyFileName := "xai-a-b@example.com.json"
+	targetFileName := xai.CredentialFileName("a+b@example.com", "sub-first")
+	legacyPath := filepath.Join(authDir, legacyFileName)
+	targetPath := filepath.Join(authDir, targetFileName)
+
+	existing := map[string]any{
+		"type":          "xai",
+		"email":         "a+b@example.com",
+		"sub":           "sub-first",
+		"access_token":  "old-token",
+		"refresh_token": "old-refresh",
+		"prefix":        "team",
+		"proxy_url":     "http://127.0.0.1:8080",
+		"disabled":      true,
+		"weight":        float64(5),
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal legacy credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(legacyPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write legacy credential: %v", errWrite)
+	}
+
+	tokenStorage := &xai.TokenStorage{
+		AccessToken:  "new-token",
+		RefreshToken: "new-refresh",
+		Email:        "a+b@example.com",
+		Subject:      "sub-first",
+		Expire:       "2026-12-31T23:59:59Z",
+	}
+	record := &coreauth.Auth{
+		ID:       targetFileName,
+		Provider: "xai",
+		FileName: targetFileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email": tokenStorage.Email,
+			"sub":   tokenStorage.Subject,
+		},
+	}
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	savedPath, errSave := h.saveTokenRecord(context.Background(), record)
+	if errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if savedPath != targetPath {
+		t.Fatalf("savedPath = %s, want %s", savedPath, targetPath)
+	}
+	if _, errStat := os.Stat(legacyPath); !os.IsNotExist(errStat) {
+		t.Fatalf("legacy credential still exists or stat failed: %v", errStat)
+	}
+
+	savedRaw, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read migrated credential: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal migrated credential: %v", errUnmarshal)
+	}
+	for key, want := range map[string]any{
+		"access_token":  "new-token",
+		"refresh_token": "new-refresh",
+		"prefix":        "team",
+		"proxy_url":     "http://127.0.0.1:8080",
+		"disabled":      true,
+		"weight":        float64(5),
+	} {
+		if got := saved[key]; got != want {
+			t.Errorf("%s = %#v, want %#v", key, got, want)
+		}
+	}
+}
+
+func TestSaveTokenRecord_ReloginKeepsCanonicalXAICredential(t *testing.T) {
+	authDir := t.TempDir()
+	targetFileName := xai.CredentialFileName("a+b@example.com", "sub-first")
+	targetPath := filepath.Join(authDir, targetFileName)
+
+	existing := map[string]any{
+		"type":          "xai",
+		"email":         "a+b@example.com",
+		"sub":           "sub-first",
+		"access_token":  "old-token",
+		"refresh_token": "old-refresh",
+		"prefix":        "team",
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal canonical credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(targetPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write canonical credential: %v", errWrite)
+	}
+
+	tokenStorage := &xai.TokenStorage{
+		AccessToken:  "new-token",
+		RefreshToken: "new-refresh",
+		Email:        "a+b@example.com",
+		Subject:      "sub-first",
+		Expire:       "2026-12-31T23:59:59Z",
+	}
+	record := &coreauth.Auth{
+		ID:       targetFileName,
+		Provider: "xai",
+		FileName: targetFileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"email": tokenStorage.Email,
+			"sub":   tokenStorage.Subject,
+		},
+	}
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	savedPath, errSave := h.saveTokenRecord(context.Background(), record)
+	if errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if savedPath != targetPath {
+		t.Fatalf("savedPath = %s, want %s", savedPath, targetPath)
+	}
+	savedRaw, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("canonical credential was deleted by re-login: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal canonical credential: %v", errUnmarshal)
+	}
+	if saved["access_token"] != "new-token" || saved["prefix"] != "team" {
+		t.Fatalf("saved credential = %#v, want new token with preserved prefix", saved)
+	}
+}
+
+func TestSaveTokenRecord_SubjectOnlyReloginKeepsEmailCredential(t *testing.T) {
+	authDir := t.TempDir()
+	emailFileName := xai.CredentialFileName("a+b@example.com", "sub-first")
+	emailPath := filepath.Join(authDir, emailFileName)
+
+	existing := map[string]any{
+		"type":          "xai",
+		"email":         "a+b@example.com",
+		"sub":           "sub-first",
+		"access_token":  "old-token",
+		"refresh_token": "old-refresh",
+		"prefix":        "team",
+		"weight":        float64(5),
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal canonical credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(emailPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write canonical credential: %v", errWrite)
+	}
+
+	// The upstream stops returning an email, so the record is named after
+	// the subject; its identity keys omit the missing email.
+	tokenStorage := &xai.TokenStorage{
+		AccessToken:  "new-token",
+		RefreshToken: "new-refresh",
+		Subject:      "sub-first",
+		Expire:       "2026-12-31T23:59:59Z",
+	}
+	subjectFileName := xai.CredentialFileName("", tokenStorage.Subject)
+	record := &coreauth.Auth{
+		ID:       subjectFileName,
+		Provider: "xai",
+		FileName: subjectFileName,
+		Storage:  tokenStorage,
+		Metadata: map[string]any{
+			"sub": tokenStorage.Subject,
+		},
+	}
+
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil)
+	savedPath, errSave := h.saveTokenRecord(context.Background(), record)
+	if errSave != nil {
+		t.Fatalf("saveTokenRecord error: %v", errSave)
+	}
+	if savedPath != emailPath {
+		t.Fatalf("savedPath = %s, want canonical email credential %s", savedPath, emailPath)
+	}
+	savedRaw, errRead := os.ReadFile(emailPath)
+	if errRead != nil {
+		t.Fatalf("read canonical credential: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal canonical credential: %v", errUnmarshal)
+	}
+	if saved["access_token"] != "new-token" || saved["prefix"] != "team" || saved["weight"] != float64(5) || saved["email"] != "a+b@example.com" {
+		t.Fatalf("saved credential = %#v, want new token with preserved settings and email", saved)
+	}
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil {
+		t.Fatalf("ReadDir error: %v", errReadDir)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("auth dir holds %d files, want the single canonical credential", len(entries))
 	}
 }
 

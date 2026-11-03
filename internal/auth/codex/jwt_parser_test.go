@@ -1,8 +1,8 @@
 package codex
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"testing"
 )
 

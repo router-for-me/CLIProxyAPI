@@ -7,11 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool(t *testing.T) {
@@ -49,10 +49,10 @@ func TestCodexExecutorExecuteResponsesLiteHeaderDoesNotInjectImageGenerationTool
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if tools := gjson.GetBytes(gotBody, "tools"); tools.Exists() {
+	if tools := ojson.GetBytes(gotBody, "tools"); tools.Exists() {
 		t.Fatalf("unexpected tools in responses-lite upstream payload: %s", tools.Raw)
 	}
-	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
+	parallelToolCalls := ojson.GetBytes(gotBody, "parallel_tool_calls")
 	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
 		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
 	}
@@ -99,7 +99,7 @@ func TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFal
 		}
 	}
 
-	parallelToolCalls := gjson.GetBytes(gotBody, "parallel_tool_calls")
+	parallelToolCalls := ojson.GetBytes(gotBody, "parallel_tool_calls")
 	if !parallelToolCalls.Exists() || parallelToolCalls.Bool() {
 		t.Fatalf("responses-lite parallel_tool_calls should be false: %s", gotBody)
 	}
@@ -112,8 +112,8 @@ func TestEnsureImageGenerationTool_ResponsesLiteMetadataDoesNotInjectTool(t *tes
 	if string(result) != string(body) {
 		t.Fatalf("expected responses-lite body to be unchanged, got %s", string(result))
 	}
-	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no injected tools for responses-lite request, got %s", gjson.GetBytes(result, "tools").Raw)
+	if ojson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no injected tools for responses-lite request, got %s", ojson.GetBytes(result, "tools").Raw)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t 
 	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
 	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
 
-	if got := gjson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
+	if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)
 	}
 }
@@ -150,7 +150,7 @@ func TestEnsureImageGenerationTool_NoTools(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools")
+	tools := ojson.GetBytes(result, "tools")
 	if !tools.IsArray() {
 		t.Fatalf("expected tools array, got %v", tools.Type)
 	}
@@ -170,7 +170,7 @@ func TestEnsureImageGenerationTool_ExistingToolsWithoutImageGen(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"get_weather","parameters":{}}]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools")
+	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
 	if len(arr) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(arr))
@@ -187,7 +187,7 @@ func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"webp"},{"type":"function","name":"f1"}]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools")
+	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
 	if len(arr) != 2 {
 		t.Fatalf("expected 2 tools (no duplicate), got %d", len(arr))
@@ -219,7 +219,7 @@ func TestEnsureImageGenerationTool_SimilarNamespaceStillInjectsTool(t *testing.T
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_tools","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools").Array()
+	tools := ojson.GetBytes(result, "tools").Array()
 	if len(tools) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(tools))
 	}
@@ -232,7 +232,7 @@ func TestEnsureImageGenerationTool_EmptyToolsArray(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools")
+	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
 	if len(arr) != 1 {
 		t.Fatalf("expected 1 tool, got %d", len(arr))
@@ -246,7 +246,7 @@ func TestEnsureImageGenerationTool_WebSearchAndImageGen(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"web_search"}]}`)
 	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
-	tools := gjson.GetBytes(result, "tools")
+	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
 	if len(arr) != 2 {
 		t.Fatalf("expected 2 tools, got %d", len(arr))
@@ -266,8 +266,8 @@ func TestEnsureImageGenerationTool_GPT53CodexSparkDoesNotInjectTool(t *testing.T
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
 	}
-	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no tools for gpt-5.3-codex-spark, got %s", gjson.GetBytes(result, "tools").Raw)
+	if ojson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no tools for gpt-5.3-codex-spark, got %s", ojson.GetBytes(result, "tools").Raw)
 	}
 }
 
@@ -282,7 +282,7 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
 	}
-	if gjson.GetBytes(result, "tools").Exists() {
-		t.Fatalf("expected no tools for free codex auth, got %s", gjson.GetBytes(result, "tools").Raw)
+	if ojson.GetBytes(result, "tools").Exists() {
+		t.Fatalf("expected no tools for free codex auth, got %s", ojson.GetBytes(result, "tools").Raw)
 	}
 }

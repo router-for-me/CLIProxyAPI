@@ -39,6 +39,11 @@ type VertexCompatKey struct {
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	// Commonly used for cookies, user-agent, and other authentication headers.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
@@ -136,8 +141,8 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		}
 		entry.Models = sanitizedModels
 
-		// Use API key + base URL as uniqueness key
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		// Use API key + base URL + connection-pool settings as uniqueness key
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL + "\x00" + FormatConnectionPoolDedupID(entry.ConnectionPool)
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

@@ -2,8 +2,8 @@ package signature
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 	"unicode/utf8"
 )

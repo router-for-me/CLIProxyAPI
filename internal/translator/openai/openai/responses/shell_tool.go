@@ -6,16 +6,16 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 var errInvalidShellAction = errors.New("invalid shell action: expected nonempty commands strings and optional positive integer limits")
 
-func convertResponsesShellToolToOpenAIChat(_ gjson.Result, name string) ([]byte, bool) {
+func convertResponsesShellToolToOpenAIChat(_ ojson.Result, name string) ([]byte, bool) {
 	tool := []byte(`{"type":"function","function":{"name":"","description":"Request commands to execute in the client-provided local shell environment. Each commands entry is a complete shell command, not an argv element.","parameters":{"type":"object","properties":{"commands":{"type":"array","items":{"type":"string"},"minItems":1},"timeout_ms":{"type":"integer","minimum":1},"max_output_length":{"type":"integer","minimum":1}},"required":["commands"],"additionalProperties":false}}}`)
-	tool, _ = sjson.SetBytes(tool, "function.name", name)
+	tool, _ = ojson.SetBytes(tool, "function.name", name)
 	return tool, true
 }
 
@@ -34,7 +34,7 @@ func (idx *responsesToolIndex) shellName() string {
 
 // Normalize shell history before the existing call grouping and output pairing.
 // Keep the entire output envelope as JSON text, including truncation metadata.
-func (idx *responsesToolIndex) shellHistory(items []gjson.Result) []gjson.Result {
+func (idx *responsesToolIndex) shellHistory(items []ojson.Result) []ojson.Result {
 	name := idx.shellName()
 	if name == "" {
 		// Historical calls remain meaningful after the client withdraws the tool.
@@ -60,29 +60,31 @@ func (idx *responsesToolIndex) shellHistory(items []gjson.Result) []gjson.Result
 		}
 	}
 	for i, item := range items {
-		raw := []byte(item.Raw)
+		var rawDoc *ojson.Doc
 		switch item.Get("type").String() {
 		case "shell_call":
 			if environment := item.Get("environment.type"); environment.Exists() && environment.String() != "local" {
 				continue
 			}
-			raw, _ = sjson.SetBytes(raw, "type", "function_call")
-			raw, _ = sjson.SetBytes(raw, "name", name)
-			raw, _ = sjson.SetBytes(raw, "arguments", item.Get("action").Raw)
+			rawDoc = ojson.NewDocString(item.Raw)
+			_ = rawDoc.Set("type", "function_call")
+			_ = rawDoc.Set("name", name)
+			_ = rawDoc.Set("arguments", item.Get("action").Raw)
 		case "shell_call_output":
-			raw, _ = sjson.SetBytes(raw, "type", "function_call_output")
-			raw, _ = sjson.SetBytes(raw, "output", item.Raw)
+			rawDoc = ojson.NewDocString(item.Raw)
+			_ = rawDoc.Set("type", "function_call_output")
+			_ = rawDoc.Set("output", item.Raw)
 		default:
 			continue
 		}
-		items[i] = gjson.ParseBytes(raw)
+		items[i] = util.ParseGJSONBytesNoCopy(rawDoc.Bytes())
 	}
 	return items
 }
 
 func shellCallItem(callID, arguments, status string) ([]byte, error) {
-	action := gjson.Parse(arguments)
-	if !gjson.Valid(arguments) || !action.IsObject() {
+	action := ojson.Parse(arguments)
+	if !ojson.Valid(arguments) || !action.IsObject() {
 		return nil, errInvalidShellAction
 	}
 	commands := action.Get("commands")
@@ -90,16 +92,16 @@ func shellCallItem(callID, arguments, status string) ([]byte, error) {
 		return nil, errInvalidShellAction
 	}
 	for _, command := range commands.Array() {
-		if command.Type != gjson.String || strings.TrimSpace(command.String()) == "" {
+		if command.Type != ojson.String || strings.TrimSpace(command.String()) == "" {
 			return nil, errInvalidShellAction
 		}
 	}
 	valid := true
-	action.ForEach(func(key, value gjson.Result) bool {
+	action.ForEach(func(key, value ojson.Result) bool {
 		switch key.String() {
 		case "commands":
 		case "timeout_ms", "max_output_length":
-			if value.Type != gjson.Null && (value.Type != gjson.Number || value.Float() <= 0 || math.Trunc(value.Float()) != value.Float()) {
+			if value.Type != ojson.Null && (value.Type != ojson.Number || value.Float() <= 0 || math.Trunc(value.Float()) != value.Float()) {
 				valid = false
 			}
 		default:
@@ -110,23 +112,27 @@ func shellCallItem(callID, arguments, status string) ([]byte, error) {
 	if !valid {
 		return nil, errInvalidShellAction
 	}
-	item := shellCallPlaceholder(callID)
-	item, _ = sjson.SetBytes(item, "status", status)
-	item, _ = sjson.SetRawBytes(item, "action", []byte(arguments))
-	return item, nil
+	itemDoc := shellCallPlaceholderDoc(callID)
+	_ = itemDoc.Set("status", status)
+	_ = itemDoc.SetRaw("action", arguments)
+	return itemDoc.Bytes(), nil
+}
+
+func shellCallPlaceholderDoc(callID string) *ojson.Doc {
+	itemDoc := ojson.NewDocString(`{"id":"","type":"shell_call","status":"in_progress","call_id":"","action":{"commands":[]}}`)
+	_ = itemDoc.Set("id", "sh_"+callID)
+	_ = itemDoc.Set("call_id", callID)
+	return itemDoc
 }
 
 func shellCallPlaceholder(callID string) []byte {
-	item := []byte(`{"id":"","type":"shell_call","status":"in_progress","call_id":"","action":{"commands":[]}}`)
-	item, _ = sjson.SetBytes(item, "id", "sh_"+callID)
-	item, _ = sjson.SetBytes(item, "call_id", callID)
-	return item
+	return shellCallPlaceholderDoc(callID).Bytes()
 }
 
 func responsesToolInputFailure(responseID string, sequence int, err error) []byte {
 	failure := translatorcommon.ApplyPatchFailure(responseID, sequence)
 	if errors.Is(err, errInvalidShellAction) {
-		failure, _ = sjson.SetBytes(failure, "response.error.message", errInvalidShellAction.Error())
+		failure, _ = ojson.SetBytes(failure, "response.error.message", errInvalidShellAction.Error())
 	}
 	return failure
 }

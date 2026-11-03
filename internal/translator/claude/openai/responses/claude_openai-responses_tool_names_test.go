@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestBuildClaudeToolNames_RoundTripAndStability(t *testing.T) {
@@ -25,7 +26,7 @@ func TestBuildClaudeToolNames_RoundTripAndStability(t *testing.T) {
 		]
 	}`)
 
-	root := gjson.ParseBytes(reqJSON)
+	root := util.ParseGJSONBytesNoCopy(reqJSON)
 	names := buildClaudeToolNames(root, true)
 
 	// Verify all declared tools are unique and match pattern
@@ -85,8 +86,8 @@ func TestBuildClaudeToolNames_DeclarationOrderInvariance(t *testing.T) {
 		]
 	}`)
 
-	namesA := buildClaudeToolNames(gjson.ParseBytes(reqA), true)
-	namesB := buildClaudeToolNames(gjson.ParseBytes(reqB), true)
+	namesA := buildClaudeToolNames(util.ParseGJSONBytesNoCopy(reqA), true)
+	namesB := buildClaudeToolNames(util.ParseGJSONBytesNoCopy(reqB), true)
 
 	if namesA.claudeName(tool1) != namesB.claudeName(tool1) {
 		t.Fatalf("order affected tool1 mapping: %q vs %q", namesA.claudeName(tool1), namesB.claudeName(tool1))
@@ -104,7 +105,7 @@ func TestBuildClaudeToolNames_SingleLongName(t *testing.T) {
 		]
 	}`)
 
-	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON), true)
+	names := buildClaudeToolNames(util.ParseGJSONBytesNoCopy(reqJSON), true)
 	claudeName := names.claudeName(longTool)
 	if len(claudeName) > 64 {
 		t.Fatalf("claudeName length = %d > 64: %q", len(claudeName), claudeName)
@@ -128,7 +129,7 @@ func TestBuildClaudeToolNames_CustomToolCollision(t *testing.T) {
 		]
 	}`, tool1, tool2))
 
-	root := gjson.ParseBytes(reqJSON)
+	root := util.ParseGJSONBytesNoCopy(reqJSON)
 	names := buildClaudeToolNames(root, true)
 	customMap := responsesCustomToolNames(reqJSON)
 
@@ -162,7 +163,7 @@ func TestBuildClaudeToolNames_CustomToolCollision(t *testing.T) {
 		`data: {"type":"message_stop"}`,
 	}, "\n"))
 	translatedResp := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-sonnet-5-5", reqJSON, nil, claudeResp, nil)
-	outputItem := gjson.GetBytes(translatedResp, "output.0")
+	outputItem := ojson.GetBytesNoCopy(translatedResp, "output.0")
 	if outputItem.Get("type").String() != "custom_tool_call" {
 		t.Fatalf("output.0.type = %q, want custom_tool_call", outputItem.Get("type").String())
 	}
@@ -182,7 +183,7 @@ func TestBuildClaudeToolNames_DeclaredToolsPrecedeHistory(t *testing.T) {
 		]
 	}`)
 
-	names := buildClaudeToolNames(gjson.ParseBytes(reqJSON), true)
+	names := buildClaudeToolNames(util.ParseGJSONBytesNoCopy(reqJSON), true)
 
 	// tool_x must keep its exact name
 	if names.claudeName("tool_x") != "tool_x" {

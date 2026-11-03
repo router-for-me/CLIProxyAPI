@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -78,7 +78,7 @@ func TestConvertAntigravityResponseToGeminiNonStreamRestoresDisambiguatedName(t 
 	raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
 
 	out := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", original, nil, raw, nil)
-	if got := gjson.GetBytes(out, "candidates.0.content.parts.0.functionCall.name").String(); got != second {
+	if got := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.name").String(); got != second {
 		t.Fatalf("functionCall.name = %q, want %q. Output: %s", got, second, out)
 	}
 }
@@ -93,7 +93,7 @@ func TestConvertAntigravityResponseToGeminiStream_SynthesizesFinishReasonOnDoneW
 	if len(results1) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(results1))
 	}
-	if fr := gjson.GetBytes(results1[0], "candidates.0.finishReason").String(); fr != "" {
+	if fr := ojson.GetBytesNoCopy(results1[0], "candidates.0.finishReason").String(); fr != "" {
 		t.Fatalf("chunk1 should not have finishReason yet, got %q", fr)
 	}
 
@@ -103,28 +103,28 @@ func TestConvertAntigravityResponseToGeminiStream_SynthesizesFinishReasonOnDoneW
 		t.Fatalf("expected synthetic terminal chunk on [DONE], got %d results", len(doneResults))
 	}
 	synthetic := doneResults[0]
-	if fr := gjson.GetBytes(synthetic, "candidates.0.finishReason").String(); fr != "STOP" {
+	if fr := ojson.GetBytesNoCopy(synthetic, "candidates.0.finishReason").String(); fr != "STOP" {
 		t.Fatalf("synthetic chunk finishReason = %q, want STOP", fr)
 	}
 	// Upstream terminal chunks always carry a model-role candidate with an empty
 	// text part, so the synthetic chunk mirrors that shape for client compatibility.
-	if role := gjson.GetBytes(synthetic, "candidates.0.content.role").String(); role != "model" {
+	if role := ojson.GetBytesNoCopy(synthetic, "candidates.0.content.role").String(); role != "model" {
 		t.Fatalf("synthetic chunk content role = %q, want model", role)
 	}
-	if parts := gjson.GetBytes(synthetic, "candidates.0.content.parts"); parts.String() != `[{"text":""}]` {
+	if parts := ojson.GetBytesNoCopy(synthetic, "candidates.0.content.parts"); parts.String() != `[{"text":""}]` {
 		t.Fatalf("synthetic chunk parts = %s, want [{\"text\":\"\"}]", parts.Raw)
 	}
 	// The last real chunk carries usage, so the synthetic terminal chunk must keep it.
-	if got := gjson.GetBytes(synthetic, "usageMetadata.promptTokenCount").Int(); got != 100 {
+	if got := ojson.GetBytesNoCopy(synthetic, "usageMetadata.promptTokenCount").Int(); got != 100 {
 		t.Fatalf("synthetic chunk promptTokenCount = %d, want 100", got)
 	}
-	if got := gjson.GetBytes(synthetic, "usageMetadata.totalTokenCount").Int(); got != 150 {
+	if got := ojson.GetBytesNoCopy(synthetic, "usageMetadata.totalTokenCount").Int(); got != 150 {
 		t.Fatalf("synthetic chunk totalTokenCount = %d, want 150", got)
 	}
-	if mv := gjson.GetBytes(synthetic, "modelVersion").String(); mv != "gemini-3.7-flash" {
+	if mv := ojson.GetBytesNoCopy(synthetic, "modelVersion").String(); mv != "gemini-3.7-flash" {
 		t.Fatalf("synthetic chunk modelVersion = %q, want gemini-3.7-flash", mv)
 	}
-	if rid := gjson.GetBytes(synthetic, "responseId").String(); rid != "resp-123" {
+	if rid := ojson.GetBytesNoCopy(synthetic, "responseId").String(); rid != "resp-123" {
 		t.Fatalf("synthetic chunk responseId = %q, want resp-123", rid)
 	}
 
@@ -145,7 +145,7 @@ func TestConvertAntigravityResponseToGeminiStream_DoesNotDuplicateFinishReasonWh
 	if len(results1) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(results1))
 	}
-	if fr := gjson.GetBytes(results1[0], "candidates.0.finishReason").String(); fr != "STOP" {
+	if fr := ojson.GetBytesNoCopy(results1[0], "candidates.0.finishReason").String(); fr != "STOP" {
 		t.Fatalf("chunk1 finishReason = %q, want STOP", fr)
 	}
 
@@ -169,7 +169,7 @@ func TestConvertAntigravityResponseToGeminiStream_CarriesFilteredUsageIntoSynthe
 	if len(results) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(results))
 	}
-	if got := gjson.GetBytes(results[0], "usageMetadata.totalTokenCount").Int(); got != 49 {
+	if got := ojson.GetBytesNoCopy(results[0], "usageMetadata.totalTokenCount").Int(); got != 49 {
 		t.Fatalf("restored chunk totalTokenCount = %d, want 49", got)
 	}
 
@@ -177,13 +177,13 @@ func TestConvertAntigravityResponseToGeminiStream_CarriesFilteredUsageIntoSynthe
 	if len(doneResults) != 1 {
 		t.Fatalf("expected synthetic terminal chunk, got %d results", len(doneResults))
 	}
-	if fr := gjson.GetBytes(doneResults[0], "candidates.0.finishReason").String(); fr != "STOP" {
+	if fr := ojson.GetBytesNoCopy(doneResults[0], "candidates.0.finishReason").String(); fr != "STOP" {
 		t.Fatalf("synthetic finishReason = %q, want STOP", fr)
 	}
-	if got := gjson.GetBytes(doneResults[0], "usageMetadata.totalTokenCount").Int(); got != 49 {
+	if got := ojson.GetBytesNoCopy(doneResults[0], "usageMetadata.totalTokenCount").Int(); got != 49 {
 		t.Fatalf("synthetic totalTokenCount = %d, want 49", got)
 	}
-	if got := gjson.GetBytes(doneResults[0], "usageMetadata.candidatesTokenCount").Int(); got != 7 {
+	if got := ojson.GetBytesNoCopy(doneResults[0], "usageMetadata.candidatesTokenCount").Int(); got != 7 {
 		t.Fatalf("synthetic candidatesTokenCount = %d, want 7", got)
 	}
 }
@@ -225,7 +225,7 @@ func TestConvertAntigravityResponseToGeminiNonStream_DefaultsEveryCandidate(t *t
 	out := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, input, nil)
 	want := []string{"STOP", "MAX_TOKENS", "STOP"}
 	for i, expected := range want {
-		got := gjson.GetBytes(out, fmt.Sprintf("candidates.%d.finishReason", i)).String()
+		got := ojson.GetBytesNoCopy(out, fmt.Sprintf("candidates.%d.finishReason", i)).String()
 		if got != expected {
 			t.Fatalf("candidates.%d.finishReason = %q, want %q", i, got, expected)
 		}
@@ -235,7 +235,20 @@ func TestConvertAntigravityResponseToGeminiNonStream_DefaultsEveryCandidate(t *t
 func TestConvertAntigravityResponseToGeminiNonStream_DefaultsMissingFinishReason(t *testing.T) {
 	input := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hi"}],"role":"model"}}]}}`)
 	out := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, input, nil)
-	if fr := gjson.GetBytes(out, "candidates.0.finishReason").String(); fr != "STOP" {
+	if fr := ojson.GetBytesNoCopy(out, "candidates.0.finishReason").String(); fr != "STOP" {
 		t.Fatalf("ConvertAntigravityResponseToGeminiNonStream finishReason = %q, want STOP", fr)
+	}
+}
+
+func TestAntigravityGeminiResponseAllowsWhitespace(t *testing.T) {
+	body := `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+	for _, separator := range []string{"", " ", "\n\t"} {
+		t.Run(fmt.Sprintf("separator=%q", separator), func(t *testing.T) {
+			raw := []byte(`{"response":` + separator + body + `}`)
+			out := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, raw, nil)
+			if !ojson.ValidBytes(out) || string(out) != body {
+				t.Fatalf("incorrect response slice: %s", out)
+			}
+		})
 	}
 }

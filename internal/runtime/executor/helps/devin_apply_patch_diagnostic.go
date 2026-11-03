@@ -2,6 +2,7 @@ package helps
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -229,6 +230,11 @@ func devinPatchReasonCode(reason string) string {
 		switch {
 		case strings.HasSuffix(reason, "in string literal"):
 			return "invalid control character in apply_patch input"
+		case strings.HasPrefix(reason, "decode apply_patch input value: invalid character ") && strings.HasSuffix(reason, " in string"):
+			quoted := strings.TrimSuffix(strings.TrimPrefix(reason, "decode apply_patch input value: invalid character "), " in string")
+			if character, errUnquote := strconv.Unquote(quoted); errUnquote == nil && len(character) == 1 && character[0] < 0x20 {
+				return "invalid control character in apply_patch input"
+			}
 		case strings.Contains(reason, "in \\u hexadecimal character escape"):
 			return "invalid Unicode escape in apply_patch input"
 		case strings.Contains(reason, "in string escape code"):

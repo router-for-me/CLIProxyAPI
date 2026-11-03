@@ -1,11 +1,11 @@
 package signature
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -43,7 +43,7 @@ func TestAntigravityCAQSNativeSanitizerRejectsPrefixedWrappers(t *testing.T) {
 			}
 			payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning","signature":` + string(encoded) + `},{"type":"text","text":"answer"}]}]}`)
 			output, report := SanitizeClaudeMessagesForClaudeUpstream(payload, "claude-opus-5-5")
-			parts := gjson.GetBytes(output, "messages.0.content").Array()
+			parts := ojson.GetBytes(output, "messages.0.content").Array()
 			if len(parts) != 1 || parts[0].Get("type").String() != "text" || parts[0].Get("text").String() != "answer" || report.DroppedBlocks != 1 || report.Preserved != 0 {
 				t.Errorf("native sanitizer retained Google thinking wrapper: report=%+v", report)
 			}

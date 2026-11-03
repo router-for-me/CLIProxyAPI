@@ -3,7 +3,8 @@ package common
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestSetResponsesToolCallIdentity(t *testing.T) {
@@ -55,10 +56,10 @@ func TestSetResponsesToolCallIdentity(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := SetResponsesToolCallIdentity([]byte(test.input), test.toolName, test.namespace, test.itemPath)
-			if actual := gjson.GetBytes(got, test.namePath).String(); actual != test.wantName {
+			if actual := ojson.GetBytesNoCopy(got, test.namePath).String(); actual != test.wantName {
 				t.Fatalf("name = %q, want %q; output=%s", actual, test.wantName, got)
 			}
-			namespace := gjson.GetBytes(got, test.namespacePath)
+			namespace := ojson.GetBytesNoCopy(got, test.namespacePath)
 			if namespace.Exists() != test.wantNamespaceExists {
 				t.Fatalf("namespace exists = %t, want %t; output=%s", namespace.Exists(), test.wantNamespaceExists, got)
 			}
@@ -129,7 +130,7 @@ func TestExtractResponsesCallID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			node := gjson.Parse(tt.input)
+			node := ojson.Parse(tt.input)
 			if got := ExtractResponsesCallID(node); got != tt.expected {
 				t.Fatalf("ExtractResponsesCallID(%s) = %q, want %q", tt.input, got, tt.expected)
 			}
@@ -145,7 +146,7 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 			{"type":"function_call_output","output":"result_b"},
 			{"type":"function_call_output","tool_call_id":"call_a","output":"result_a"}
 		]`)
-		items := gjson.ParseBytes(input).Array()
+		items := util.ParseGJSONBytesNoCopy(input).Array()
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if len(normalized) != 4 {
 			t.Fatalf("expected 4 items, got %d", len(normalized))
@@ -169,7 +170,7 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"intervening"}]},
 			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
 		]`)
-		items := gjson.ParseBytes(input).Array()
+		items := util.ParseGJSONBytesNoCopy(input).Array()
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if len(normalized) != 5 {
 			t.Fatalf("expected 5 items, got %d", len(normalized))
@@ -191,7 +192,7 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 			{"type":"function_call","call_id":"call_a","name":"tool_a"},
 			{"type":"function_call_output","call_id":"call_other","output":"result_other"}
 		]`)
-		items := gjson.ParseBytes(input).Array()
+		items := util.ParseGJSONBytesNoCopy(input).Array()
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if got := normalized[1].Get("call_id").String(); got != "call_other" {
 			t.Fatalf("normalized[1].call_id = %q, want call_other", got)
@@ -203,7 +204,7 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 			{"type":"function_call","call_id":"call_1788961125480214178_817","name":"Bash"},
 			{"type":"function_call_output","id":"fco_01a08664-2d16-7a91-8ab2-2eccd49e4c3e","output":"result"}
 		]`)
-		items := gjson.ParseBytes(input).Array()
+		items := util.ParseGJSONBytesNoCopy(input).Array()
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if len(normalized) != 2 {
 			t.Fatalf("expected 2 items, got %d", len(normalized))
@@ -220,7 +221,7 @@ func TestNormalizeResponsesToolCallOutputs(t *testing.T) {
 			{"type":"function_call_output","id":"fco_b","output":"result_b"},
 			{"type":"function_call_output","call_id":"call_a","output":"result_a"}
 		]`)
-		items := gjson.ParseBytes(input).Array()
+		items := util.ParseGJSONBytesNoCopy(input).Array()
 		normalized := NormalizeResponsesToolCallOutputs(items)
 		if len(normalized) != 4 {
 			t.Fatalf("expected 4 items, got %d", len(normalized))

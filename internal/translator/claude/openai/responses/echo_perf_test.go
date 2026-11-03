@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func goldenHash(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
@@ -277,7 +277,7 @@ func TestClaudeEchoGoldenEdgeCases(t *testing.T) {
 		names      func(req []byte) []string
 	}{
 		{"long-and-invalid-names", []byte(`{"model":"gpt-5","tools":` + toolsJSON + `,"input":[]}`), false, func(req []byte) []string {
-			names := buildClaudeToolNames(gjson.ParseBytes(req), false)
+			names := buildClaudeToolNames(util.ParseGJSONBytesNoCopy(req), false)
 			return []string{names.claudeName(longName), names.claudeName(dotted), names.claudeName(collideA), names.claudeName(collideB), "editor__read"}
 		}},
 		{"toolsearch-on", []byte(`{"model":"gpt-5","tools":` + searchTools + `,"input":[]}`), true, func(req []byte) []string {

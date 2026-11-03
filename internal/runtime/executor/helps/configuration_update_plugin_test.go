@@ -5,6 +5,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	helps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -13,8 +14,6 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type editUpdatePluginHooks struct {
@@ -26,10 +25,10 @@ type editUpdatePluginHooks struct {
 func (h *editUpdatePluginHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
 	h.calls++
 	if h.effort == "" {
-		out, _ := sjson.DeleteBytes(body, "input.0")
+		out, _ := ojson.DeleteBytes(body, "input.0")
 		return out
 	}
-	out, _ := sjson.SetBytes(body, "input.0.reasoning.effort", h.effort)
+	out, _ := ojson.SetBytes(body, "input.0.reasoning.effort", h.effort)
 	return out
 }
 
@@ -51,10 +50,10 @@ func TestPluginConfigurationUpdateNormalizationIsAuthoritative(t *testing.T) {
 			if errApply != nil {
 				t.Fatal(errApply)
 			}
-			if got := gjson.GetBytes(body, "reasoning.effort").String(); got != tc.want {
+			if got := ojson.GetBytes(body, "reasoning.effort").String(); got != tc.want {
 				t.Fatalf("effort = %q, want %q; body=%s", got, tc.want, body)
 			}
-			if len(gjson.GetBytes(body, "input").Array()) != 1 {
+			if len(ojson.GetBytes(body, "input").Array()) != 1 {
 				t.Fatalf("unexpected input: %s", body)
 			}
 		})
@@ -107,7 +106,7 @@ func TestNativeCrossProtocolTranslationWithoutPluginRetainsSourceUpdate(t *testi
 	if errApply != nil {
 		t.Fatal(errApply)
 	}
-	if got := gjson.GetBytes(body, "reasoning_effort").String(); got != "high" {
+	if got := ojson.GetBytes(body, "reasoning_effort").String(); got != "high" {
 		t.Fatalf("cross-protocol effort = %q, want high; body=%s", got, body)
 	}
 }

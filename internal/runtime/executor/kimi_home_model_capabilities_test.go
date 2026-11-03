@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type kimiHomeModelCapabilityDispatcher struct{}
@@ -117,13 +117,13 @@ func TestKimiHomeModelThinkingCapabilitiesOverrideLocalRegistry(t *testing.T) {
 				}
 			}
 
-			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
+			if got := ojson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
 				t.Fatalf("thinking.type = %q, want enabled; body=%s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "thinking.effort").String(); got != "high" {
+			if got := ojson.GetBytes(upstreamBody, "thinking.effort").String(); got != "high" {
 				t.Fatalf("thinking.effort = %q, want high from Home model capabilities; body=%s", got, upstreamBody)
 			}
-			if effort := gjson.GetBytes(upstreamBody, "reasoning_effort"); effort.Exists() {
+			if effort := ojson.GetBytes(upstreamBody, "reasoning_effort"); effort.Exists() {
 				t.Fatalf("reasoning_effort should be absent, got %s; body=%s", effort.Raw, upstreamBody)
 			}
 		})

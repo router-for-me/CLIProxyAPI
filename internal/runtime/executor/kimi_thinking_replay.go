@@ -9,14 +9,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type kimiThinkingReplayScope struct {
@@ -76,11 +76,32 @@ func prepareKimiThinkingReplayRequest(ctx context.Context, req cliproxyexecutor.
 	return req, scope
 }
 
+func prepareKimiThinkingReplayRequestDoc(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) kimiThinkingReplayScope {
+	scope := kimiThinkingReplayScopeFromRequest(ctx, req, opts)
+	if !scope.valid() || doc == nil {
+		return scope
+	}
+	content, snapshot, found, errGet := internalcache.GetKimiThinkingReplayWithSnapshotRequired(ctx, scope.modelFamily, scope.sessionKey)
+	scope.snapshot = snapshot
+	scope.cacheReady = errGet == nil
+	if errGet != nil {
+		log.Warnf("kimi thinking replay cache read failed: %v", errGet)
+		return scope
+	}
+	if !found {
+		return scope
+	}
+	if restoreKimiThinkingReplayContentDoc(doc, content) {
+		scope.replayApplied = true
+	}
+	return scope
+}
+
 func cacheKimiThinkingReplayResponse(ctx context.Context, scope kimiThinkingReplayScope, response []byte) {
 	if !scope.valid() || !scope.cacheReady {
 		return
 	}
-	content := gjson.GetBytes(response, "content")
+	content := ojson.GetBytesNoCopy(response, "content")
 	if !content.IsArray() {
 		return
 	}
@@ -122,7 +143,7 @@ func clearKimiThinkingReplayContent(ctx context.Context, scope kimiThinkingRepla
 }
 
 func kimiThinkingReplayContentIsReplayable(content []byte) bool {
-	root := gjson.ParseBytes(content)
+	root := util.ParseGJSONBytesNoCopy(content)
 	if !root.IsArray() {
 		return false
 	}
@@ -144,13 +165,24 @@ func kimiThinkingReplayContentIsReplayable(content []byte) bool {
 }
 
 func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool) {
-	cachedParts, cachedOK := kimiNonThinkingContentParts(gjson.ParseBytes(cachedContent))
-	if !cachedOK {
+	doc := ojson.NewDoc(body)
+	if !restoreKimiThinkingReplayContentDoc(doc, cachedContent) {
 		return body, false
 	}
-	messages := gjson.GetBytes(body, "messages")
+	return doc.Bytes(), true
+}
+
+func restoreKimiThinkingReplayContentDoc(doc *ojson.Doc, cachedContent []byte) bool {
+	if doc == nil {
+		return false
+	}
+	cachedParts, cachedOK := kimiNonThinkingContentParts(util.ParseGJSONBytesNoCopy(cachedContent))
+	if !cachedOK {
+		return false
+	}
+	messages := doc.Get("messages")
 	if !messages.IsArray() {
-		return body, false
+		return false
 	}
 	messageItems := messages.Array()
 	for index := len(messageItems) - 1; index >= 0; index-- {
@@ -160,7 +192,7 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		}
 		currentContent := message.Get("content")
 		if kimiJSONEqual([]byte(currentContent.Raw), cachedContent) {
-			return body, false
+			return false
 		}
 		if kimiContentHasThinking(currentContent) {
 			continue
@@ -169,16 +201,12 @@ func restoreKimiThinkingReplayContent(body, cachedContent []byte) ([]byte, bool)
 		if !currentOK || !kimiCanonicalPartsEqual(currentParts, cachedParts) {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes(body, fmt.Sprintf("messages.%d.content", index), cachedContent)
-		if errSet != nil {
-			return body, false
-		}
-		return updated, true
+		return doc.SetRawBytes(fmt.Sprintf("messages.%d.content", index), cachedContent) == nil
 	}
-	return body, false
+	return false
 }
 
-func kimiContentHasThinking(content gjson.Result) bool {
+func kimiContentHasThinking(content ojson.Result) bool {
 	if !content.IsArray() {
 		return false
 	}
@@ -191,7 +219,7 @@ func kimiContentHasThinking(content gjson.Result) bool {
 	return false
 }
 
-func kimiNonThinkingContentParts(content gjson.Result) ([][]byte, bool) {
+func kimiNonThinkingContentParts(content ojson.Result) ([][]byte, bool) {
 	if !content.IsArray() {
 		return nil, false
 	}
@@ -284,11 +312,11 @@ func (a *kimiThinkingReplayStreamAccumulator) observe(chunk []byte) {
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
-		if !gjson.ValidBytes(payload) {
+		if !ojson.ValidBytes(payload) {
 			a.abandon()
 			continue
 		}
-		root := gjson.ParseBytes(payload)
+		root := util.ParseGJSONBytesNoCopy(payload)
 		switch root.Get("type").String() {
 		case "message_start":
 			a.observed = true
@@ -313,7 +341,7 @@ func (a *kimiThinkingReplayStreamAccumulator) observe(chunk []byte) {
 	}
 }
 
-func (a *kimiThinkingReplayStreamAccumulator) observeBlockStart(root gjson.Result) {
+func (a *kimiThinkingReplayStreamAccumulator) observeBlockStart(root ojson.Result) {
 	index := int(root.Get("index").Int())
 	block := root.Get("content_block")
 	if !block.IsObject() || len(a.blocks) >= internalcache.KimiThinkingReplayCacheMaxBlocksPerEntry {
@@ -331,7 +359,7 @@ func (a *kimiThinkingReplayStreamAccumulator) observeBlockStart(root gjson.Resul
 	a.blocks[index] = &kimiThinkingReplayStreamBlock{raw: append([]byte(nil), raw...)}
 }
 
-func (a *kimiThinkingReplayStreamAccumulator) observeBlockDelta(root gjson.Result) {
+func (a *kimiThinkingReplayStreamAccumulator) observeBlockDelta(root ojson.Result) {
 	index := int(root.Get("index").Int())
 	block, ok := a.blocks[index]
 	if !ok {
@@ -359,7 +387,7 @@ func (a *kimiThinkingReplayStreamAccumulator) observeBlockDelta(root gjson.Resul
 
 func (a *kimiThinkingReplayStreamAccumulator) appendBlockText(block *kimiThinkingReplayStreamBlock, builder *strings.Builder, initialized *bool, path, suffix string) {
 	if !*initialized {
-		initial := gjson.GetBytes(block.raw, path).String()
+		initial := ojson.GetBytesNoCopy(block.raw, path).String()
 		if !a.reserveBytes(len(initial)) {
 			return
 		}
@@ -377,7 +405,7 @@ func (a *kimiThinkingReplayStreamAccumulator) finishBlock(index int) {
 		a.abandon()
 		return
 	}
-	if block.hasInputDelta && !gjson.Valid(block.input.String()) {
+	if block.hasInputDelta && !ojson.Valid(block.input.String()) {
 		a.abandon()
 		return
 	}
@@ -415,25 +443,29 @@ func (a *kimiThinkingReplayStreamAccumulator) content() ([]byte, bool) {
 			a.abandon()
 			return nil, false
 		}
-		raw := append([]byte(nil), block.raw...)
+		if !block.textInitialized && !block.thinkingInitialized && !block.signatureInitialized && !block.hasInputDelta {
+			parts = append(parts, append([]byte(nil), block.raw...))
+			continue
+		}
+		blockDoc := ojson.NewDoc(block.raw)
 		var errSet error
 		if block.textInitialized {
-			raw, errSet = sjson.SetBytes(raw, "text", block.text.String())
+			errSet = blockDoc.Set("text", block.text.String())
 		}
 		if errSet == nil && block.thinkingInitialized {
-			raw, errSet = sjson.SetBytes(raw, "thinking", block.thinking.String())
+			errSet = blockDoc.Set("thinking", block.thinking.String())
 		}
 		if errSet == nil && block.signatureInitialized {
-			raw, errSet = sjson.SetBytes(raw, "signature", block.signature.String())
+			errSet = blockDoc.Set("signature", block.signature.String())
 		}
 		if errSet == nil && block.hasInputDelta {
-			raw, errSet = sjson.SetRawBytes(raw, "input", []byte(block.input.String()))
+			errSet = blockDoc.SetRawBytes("input", []byte(block.input.String()))
 		}
 		if errSet != nil {
 			a.abandon()
 			return nil, false
 		}
-		parts = append(parts, raw)
+		parts = append(parts, blockDoc.Bytes())
 	}
 	content := helps.JoinRawJSONArray(parts)
 	if len(content) > internalcache.KimiThinkingReplayCacheMaxBytesPerEntry {

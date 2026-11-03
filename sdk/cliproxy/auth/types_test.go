@@ -1,8 +1,8 @@
 package auth
 
 import (
-	"encoding/base64"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"strings"

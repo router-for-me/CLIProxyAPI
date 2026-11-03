@@ -3,10 +3,13 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -31,6 +34,25 @@ func (h *Host) callRequestInterceptor(ctx context.Context, record capabilityReco
 	if errIntercept != nil {
 		log.Warnf("pluginhost: request interceptor %s failed: %v", record.id, errIntercept)
 		return pluginapi.RequestInterceptResponse{}, false
+	}
+	return resp, true
+}
+
+func (h *Host) callRequestBodyPatcher(ctx context.Context, record capabilityRecord, method string, patcher pluginapi.RequestBodyPatcher, body []byte) (out pluginapi.RequestBodyPatchResponse, ok bool) {
+	if h == nil || patcher == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return pluginapi.RequestBodyPatchResponse{}, false
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, method, recovered)
+			out = pluginapi.RequestBodyPatchResponse{}
+			ok = false
+		}
+	}()
+	resp, errPatch := patcher.PatchRequestBody(ctx, body)
+	if errPatch != nil {
+		log.Warnf("pluginhost: request body patcher %s failed: %v", record.id, errPatch)
+		return pluginapi.RequestBodyPatchResponse{}, false
 	}
 	return resp, true
 }
@@ -114,18 +136,45 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 	skipPluginID = strings.TrimSpace(skipPluginID)
 	currentBase := req.Body
 	bodyModified := false
+	patchMethod := "RequestBodyPatcher.PatchRequestBodyAfterAuth"
+	if beforeAuth {
+		patchMethod = "RequestBodyPatcher.PatchRequestBodyBeforeAuth"
+	}
 
 	for _, record := range h.activeRecords() {
-		interceptor := record.plugin.Capabilities.RequestInterceptor
-		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
+		if h.isPluginFused(record.id) || record.id == skipPluginID {
 			continue
+		}
+		patcher := requestRecordBodyPatcher(record, beforeAuth)
+		interceptor := record.plugin.Capabilities.RequestInterceptor
+		if patcher == nil && interceptor == nil {
+			continue
+		}
+		if patcher != nil {
+			if len(currentBase) > 0 {
+				patchInput := requestPatcherInputBody(patcher, currentBase)
+				if patchResp, ok := h.callRequestBodyPatcher(ctx, record, patchMethod, patcher, patchInput); ok && len(patchResp.Edits) > 0 {
+					patched, modified, errPatch := applyRequestBodyEdits(currentBase, patchResp.Edits)
+					if errPatch != nil {
+						log.Warnf("pluginhost: request body patcher %s returned invalid edits: %v", record.id, errPatch)
+					} else if modified {
+						currentBase = patched
+						bodyModified = true
+					}
+				}
+			}
+			// When a plugin opts into raw body patching for this phase without also requesting
+			// metadata-only request interception (omit_body), skip the legacy full-body RPC call.
+			if interceptor == nil || !requestInterceptorOmitsBody(record, beforeAuth) {
+				continue
+			}
 		}
 		nextReq := req
 		nextReq.Headers = cloneHeader(current.Headers)
 		if requestInterceptorOmitsBody(record, beforeAuth) {
 			nextReq.Body = nil
 		} else if len(currentBase) > 0 {
-			nextReq.Body = bytes.Clone(currentBase)
+			nextReq.Body = requestInterceptorInputBody(interceptor, currentBase)
 		} else {
 			nextReq.Body = nil
 		}
@@ -150,9 +199,20 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			return invoke(interceptor, callCtx, callReq)
 		}, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
+			if len(resp.ClearHeaders) > 0 {
+				current.ClearHeaders = append(current.ClearHeaders, resp.ClearHeaders...)
+			}
 			if len(resp.Body) > 0 {
-				currentBase = bytes.Clone(resp.Body)
+				currentBase = requestInterceptorOutputBody(interceptor, resp.Body)
 				bodyModified = true
+			} else if edits := requestInterceptResponseEdits(resp); len(edits) > 0 && len(currentBase) > 0 {
+				patched, modified, errPatch := applyRequestBodyEdits(currentBase, edits)
+				if errPatch != nil {
+					log.Warnf("pluginhost: request interceptor %s returned invalid edits: %v", record.id, errPatch)
+				} else if modified {
+					currentBase = patched
+					bodyModified = true
+				}
 			}
 			if strings.TrimSpace(resp.Path) != "" {
 				current.Path = strings.TrimSpace(resp.Path)
@@ -164,6 +224,19 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 				current.ResponseBody = bytes.Clone(resp.ResponseBody)
 				break
 			}
+		}
+	}
+	if len(current.ClearHeaders) > 0 && len(current.Headers) > 0 {
+		filtered := current.ClearHeaders[:0]
+		for _, key := range current.ClearHeaders {
+			if current.Headers.Values(key) == nil {
+				filtered = append(filtered, key)
+			}
+		}
+		if len(filtered) == 0 {
+			current.ClearHeaders = nil
+		} else {
+			current.ClearHeaders = filtered
 		}
 	}
 	if bodyModified {
@@ -408,11 +481,170 @@ func (h *Host) HasRequestInterceptors() bool {
 		if h.isPluginFused(record.id) {
 			continue
 		}
-		if record.plugin.Capabilities.RequestInterceptor != nil {
+		if recordHasRequestInterceptor(record) {
 			return true
 		}
 	}
 	return false
+}
+
+func recordHasRequestInterceptor(record capabilityRecord) bool {
+	caps := record.plugin.Capabilities
+	if caps.RequestInterceptor != nil {
+		return true
+	}
+	return requestRecordBodyPatcher(record, true) != nil || requestRecordBodyPatcher(record, false) != nil
+}
+
+type funcBodyPatcher func(context.Context, []byte) (pluginapi.RequestBodyPatchResponse, error)
+
+func (f funcBodyPatcher) PatchRequestBody(ctx context.Context, body []byte) (pluginapi.RequestBodyPatchResponse, error) {
+	return f(ctx, body)
+}
+
+func requestRecordBodyPatcher(record capabilityRecord, beforeAuth bool) pluginapi.RequestBodyPatcher {
+	if record.plugin.SchemaVersion < pluginabi.SchemaVersionRequestInterceptorBodyPatch {
+		return nil
+	}
+	caps := record.plugin.Capabilities
+	if beforeAuth {
+		if caps.RequestBodyPatcherBefore != nil {
+			return caps.RequestBodyPatcherBefore
+		}
+		if caps.RequestInterceptorPatchBodyBefore && caps.RequestInterceptor != nil {
+			if p, ok := caps.RequestInterceptor.(interface {
+				PatchRequestBodyBeforeAuth(context.Context, []byte) (pluginapi.RequestBodyPatchResponse, error)
+			}); ok && p != nil {
+				return funcBodyPatcher(p.PatchRequestBodyBeforeAuth)
+			}
+			if p, ok := caps.RequestInterceptor.(pluginapi.RequestBodyPatcher); ok && p != nil {
+				return p
+			}
+		}
+		return nil
+	}
+	if caps.RequestBodyPatcherAfter != nil {
+		return caps.RequestBodyPatcherAfter
+	}
+	if caps.RequestInterceptorPatchBodyAfter && caps.RequestInterceptor != nil {
+		if p, ok := caps.RequestInterceptor.(interface {
+			PatchRequestBodyAfterAuth(context.Context, []byte) (pluginapi.RequestBodyPatchResponse, error)
+		}); ok && p != nil {
+			return funcBodyPatcher(p.PatchRequestBodyAfterAuth)
+		}
+		if p, ok := caps.RequestInterceptor.(pluginapi.RequestBodyPatcher); ok && p != nil {
+			return p
+		}
+	}
+	return nil
+}
+
+func requestPatcherInputBody(patcher pluginapi.RequestBodyPatcher, body []byte) []byte {
+	if _, isRPC := patcher.(rpcRequestBodyPatcher); isRPC {
+		return body
+	}
+	return bytes.Clone(body)
+}
+
+func requestInterceptorInputBody(interceptor pluginapi.RequestInterceptor, body []byte) []byte {
+	if _, isRPC := interceptor.(*rpcPluginAdapter); isRPC {
+		return body
+	}
+	return bytes.Clone(body)
+}
+
+func requestInterceptorOutputBody(interceptor pluginapi.RequestInterceptor, body []byte) []byte {
+	if _, isRPC := interceptor.(*rpcPluginAdapter); isRPC {
+		return body
+	}
+	return bytes.Clone(body)
+}
+
+func requestInterceptResponseEdits(resp pluginapi.RequestInterceptResponse) []pluginapi.RequestBodyEdit {
+	if len(resp.BodyEdits) > 0 {
+		return resp.BodyEdits
+	}
+	return resp.Edits
+}
+
+func requestBodyEditReplacementLen(edit pluginapi.RequestBodyEdit) int {
+	if len(edit.ReplacementBytes) > 0 {
+		return len(edit.ReplacementBytes)
+	}
+	return len(edit.Replacement)
+}
+
+func appendRequestBodyEditReplacement(dst []byte, edit pluginapi.RequestBodyEdit) []byte {
+	if len(edit.ReplacementBytes) > 0 {
+		return append(dst, edit.ReplacementBytes...)
+	}
+	return append(dst, edit.Replacement...)
+}
+
+func applyRequestBodyEdits(base []byte, edits []pluginapi.RequestBodyEdit) ([]byte, bool, error) {
+	if len(edits) == 0 {
+		return base, false, nil
+	}
+	type indexedEdit struct {
+		edit pluginapi.RequestBodyEdit
+	}
+	sorted := make([]indexedEdit, len(edits))
+	for i, edit := range edits {
+		sorted[i] = indexedEdit{edit: edit}
+	}
+	if len(sorted) > 1 {
+		sort.SliceStable(sorted, func(i, j int) bool {
+			if sorted[i].edit.Start != sorted[j].edit.Start {
+				return sorted[i].edit.Start < sorted[j].edit.Start
+			}
+			return sorted[i].edit.End < sorted[j].edit.End
+		})
+	}
+	baseLen := len(base)
+	outLen := baseLen
+	prevEnd := 0
+	anyChange := false
+	for i, item := range sorted {
+		e := item.edit
+		if e.Start < 0 || e.End < e.Start || e.End > baseLen {
+			return base, false, fmt.Errorf("edit[%d] range [%d:%d] out of bounds for body length %d", i, e.Start, e.End, baseLen)
+		}
+		if i > 0 && e.Start < prevEnd {
+			return base, false, fmt.Errorf("edit[%d] range [%d:%d] overlaps previous end %d", i, e.Start, e.End, prevEnd)
+		}
+		replLen := requestBodyEditReplacementLen(e)
+		if e.Start != e.End || replLen > 0 {
+			if len(e.ReplacementBytes) > 0 {
+				if !bytes.Equal(base[e.Start:e.End], e.ReplacementBytes) {
+					anyChange = true
+				}
+			} else if string(base[e.Start:e.End]) != e.Replacement {
+				anyChange = true
+			}
+		}
+		outLen += replLen - (e.End - e.Start)
+		prevEnd = e.End
+	}
+	if !anyChange {
+		return base, false, nil
+	}
+	out := make([]byte, 0, outLen)
+	cursor := 0
+	for _, item := range sorted {
+		e := item.edit
+		if e.Start > cursor {
+			out = append(out, base[cursor:e.Start]...)
+		}
+		out = appendRequestBodyEditReplacement(out, e)
+		cursor = e.End
+	}
+	if cursor < baseLen {
+		out = append(out, base[cursor:]...)
+	}
+	if !json.Valid(out) {
+		return base, false, fmt.Errorf("patched request body is not valid JSON")
+	}
+	return out, true, nil
 }
 
 func readAndRestoreRequestBody(r *http.Request) ([]byte, error) {

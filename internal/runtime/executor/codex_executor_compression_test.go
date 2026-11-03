@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -20,7 +21,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func codexCompressionConfig() *config.Config {
@@ -222,7 +222,7 @@ func TestCodexExecutor_CompressedUpstreamResponseDecoded(t *testing.T) {
 						t.Fatal(errExecute)
 					}
 					headers = result.Headers
-					if !gjson.ValidBytes(result.Payload) || gjson.GetBytes(result.Payload, "id").String() != "resp_1" {
+					if !ojson.ValidBytes(result.Payload) || ojson.GetBytes(result.Payload, "id").String() != "resp_1" {
 						t.Fatalf("invalid decoded payload: %s", result.Payload)
 					}
 				}
@@ -264,7 +264,7 @@ func TestCodexExecutor_CompressionRejectedFallback(t *testing.T) {
 					if len(encodings) > 1 && !bytes.Equal(wire, firstPlain) {
 						t.Error("retry changed the final business payload")
 					}
-					if got := gjson.GetBytes(wire, "audit").Raw; got != `["once"]` {
+					if got := ojson.GetBytes(wire, "audit").Raw; got != `["once"]` {
 						t.Errorf("payload rules must run exactly once: audit=%s", got)
 					}
 					if r.Header.Get(codexRoutingHintHeader) == "" || r.Header.Get("Authorization") != "Bearer test-oauth" {
@@ -505,7 +505,7 @@ func TestCodexUpstreamCompression_DirectImagePayloadRewrite(t *testing.T) {
 					t.Errorf("rewritten image body retained Content-Encoding=%q", got)
 				}
 				body := readCodexCompressionBody(t, req.Body)
-				if !gjson.ValidBytes(body) || gjson.GetBytes(body, "prompt").String() != "operator-prompt" || gjson.GetBytes(body, "audit").Raw != `["once"]` {
+				if !ojson.ValidBytes(body) || ojson.GetBytes(body, "prompt").String() != "operator-prompt" || ojson.GetBytes(body, "audit").Raw != `["once"]` {
 					t.Errorf("image payload finalization was not preserved: %s", body)
 				}
 				output := `{"created":1713833628,"data":[{"b64_json":"AA=="}]}`

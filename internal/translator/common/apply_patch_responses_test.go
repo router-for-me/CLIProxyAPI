@@ -6,8 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 var patchResponsesRequest = []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
@@ -51,7 +52,7 @@ func TestApplyPatchResponsesBridgeDeltaAndFourCompletions(t *testing.T) {
 			counts := map[string]int{}
 			lastSequence := int64(-1)
 			for _, event := range events {
-				root := gjson.ParseBytes(event)
+				root := util.ParseGJSONBytesNoCopy(event)
 				kind := root.Get("type").String()
 				counts[kind]++
 				seq := root.Get("sequence_number").Int()
@@ -127,7 +128,7 @@ func TestApplyPatchResponsesBridgeIdentityAndSnapshotEvidence(t *testing.T) {
 				patchSend(t, b, e)
 			}
 			out, errTransform := b.Transform(tc.after)
-			if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" || b.ToolInputError() == nil {
+			if errTransform == nil || len(out) != 1 || ojson.GetBytesNoCopy(out[0], "type").String() != "response.failed" || b.ToolInputError() == nil {
 				t.Fatalf("unsafe evidence accepted: %s %v", out, errTransform)
 			}
 			if more, errMore := b.Transform([]byte(`{"type":"response.completed","response":{"output":[]}}`)); len(more) != 0 || errMore != nil {
@@ -152,7 +153,7 @@ func TestApplyPatchResponsesBridgeStagesAndFinish(t *testing.T) {
 			t.Fatalf("missing input.done: %s", out)
 		}
 		out = patchSend(t, b, patchEvent("response.output_item.done", i, patchItem("function_call", fmt.Sprint("a", i), fmt.Sprint("c", i), "apply_patch", args)))
-		if len(out) != 1 || gjson.GetBytes(out[0], "item.input").String() != fmt.Sprint("patch", i) {
+		if len(out) != 1 || ojson.GetBytesNoCopy(out[0], "item.input").String() != fmt.Sprint("patch", i) {
 			t.Fatalf("duplicate arguments: %s", out)
 		}
 		if out = patchSend(t, b, patchEvent("response.output_item.done", i, patchItem("function_call", fmt.Sprint("a", i), fmt.Sprint("c", i), "apply_patch", args))); len(out) != 0 {
@@ -170,17 +171,17 @@ func TestApplyPatchResponsesRequestHistoryAndWinners(t *testing.T) {
 		`{"tools":[{"type":"function","name":"apply_patch"}],"input":[]}`,
 		`{"input":[]}`,
 	} {
-		root := gjson.Parse(req)
+		root := ojson.Parse(req)
 		_ = root
 		raw := strings.Replace(req, `"input":[]`, `"input":[{"type":"custom_tool_call","call_id":"old","name":"apply_patch","input":"{\"input\":\"raw\"}"},{"type":"custom_tool_call_output","call_id":"old","output":"ok"},{"type":"function_call","call_id":"fn","name":"apply_patch","arguments":"{\"input\":\"existing\"}"}]`, 1)
 		out, errNormalize := NormalizeApplyPatchResponsesRequest([]byte(raw))
 		if errNormalize != nil {
 			t.Fatal(errNormalize)
 		}
-		if gjson.GetBytes(out, "input.0.arguments").String() != applypatch.WrapInput(`{"input":"raw"}`) || gjson.GetBytes(out, "input.1.type").String() != "function_call_output" || gjson.GetBytes(out, "input.2.arguments").String() != `{"input":"existing"}` {
+		if ojson.GetBytesNoCopy(out, "input.0.arguments").String() != applypatch.WrapInput(`{"input":"raw"}`) || ojson.GetBytesNoCopy(out, "input.1.type").String() != "function_call_output" || ojson.GetBytesNoCopy(out, "input.2.arguments").String() != `{"input":"existing"}` {
 			t.Fatalf("history: %s", out)
 		}
-		if strings.Contains(req, `"type":"function"`) && gjson.GetBytes(out, "tools.0.parameters").Exists() {
+		if strings.Contains(req, `"type":"function"`) && ojson.GetBytesNoCopy(out, "tools.0.parameters").Exists() {
 			t.Fatalf("ordinary declaration changed: %s", out)
 		}
 	}
@@ -198,7 +199,7 @@ func TestApplyPatchResponsesRequestHistoryAndWinners(t *testing.T) {
 			item = patchItem("function_call", "a", "c", "n__apply_patch", `{"x":1}`)
 		}
 		got := patchSend(t, winners, patchEvent("response.output_item.done", 0, item))
-		if len(got) != 1 || gjson.GetBytes(got[0], "item.type").String() != "function_call" {
+		if len(got) != 1 || ojson.GetBytesNoCopy(got[0], "item.type").String() != "function_call" {
 			t.Fatalf("loser stole ordinary identity: %s normalized=%s", got, out)
 		}
 	}
@@ -212,7 +213,7 @@ func TestApplyPatchResponsesNamespaceMixedNonStream(t *testing.T) {
 	if errTransform != nil {
 		t.Fatal(errTransform)
 	}
-	if gjson.GetBytes(out, "output.0.type").String() != "custom_tool_call" || gjson.GetBytes(out, "output.0.name").String() != "apply_patch" || gjson.GetBytes(out, "output.0.namespace").String() != "n" || gjson.GetBytes(out, "output.1.name").String() != "lookup" || gjson.GetBytes(out, "output.1.namespace").String() != "n" || gjson.GetBytes(out, "output.1.arguments").String() != `{"x":1}` {
+	if ojson.GetBytesNoCopy(out, "output.0.type").String() != "custom_tool_call" || ojson.GetBytesNoCopy(out, "output.0.name").String() != "apply_patch" || ojson.GetBytesNoCopy(out, "output.0.namespace").String() != "n" || ojson.GetBytesNoCopy(out, "output.1.name").String() != "lookup" || ojson.GetBytesNoCopy(out, "output.1.namespace").String() != "n" || ojson.GetBytesNoCopy(out, "output.1.arguments").String() != `{"x":1}` {
 		t.Fatalf("namespace routing: %s", out)
 	}
 }
@@ -228,11 +229,11 @@ func TestApplyPatchResponsesContinuationMissingSnapshots(t *testing.T) {
 			}
 			patchSend(t, b, []byte(fmt.Sprintf(`{"type":%s,"item_id":"a",%s:%s}`, patchJSON(kind), patchJSON(field), patchJSON(applypatch.WrapInput("p")))))
 			out := patchSend(t, b, []byte(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":"apply_patch"}}`))
-			if gjson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
+			if ojson.GetBytesNoCopy(out[len(out)-1], "item.input").String() != "p" {
 				t.Fatalf("missing snapshot: %s", out)
 			}
 			out = patchSend(t, b, []byte(`{"type":"response.completed","response":{"output":[]}}`))
-			if gjson.GetBytes(out[len(out)-1], "response.output.0.input").String() != "p" {
+			if ojson.GetBytesNoCopy(out[len(out)-1], "response.output.0.input").String() != "p" {
 				t.Fatalf("omitted completed item: %s", out)
 			}
 		})
@@ -256,7 +257,7 @@ func TestApplyPatchResponsesContinuationRootLateName(t *testing.T) {
 	b := NewApplyPatchResponsesBridge(patchResponsesRequest)
 	patchSend(t, b, []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"a"}}`))
 	out := patchSend(t, b, []byte(`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"a","call_id":"c","name":"apply_patch","arguments":"{\"input\":\"p\"}"}`))
-	if len(out) == 0 || gjson.GetBytes(out[len(out)-1], "type").String() != "response.custom_tool_call_input.done" {
+	if len(out) == 0 || ojson.GetBytesNoCopy(out[len(out)-1], "type").String() != "response.custom_tool_call_input.done" {
 		t.Fatalf("late root name: %s", out)
 	}
 	if errFinish := b.Finish(); errFinish != nil {
@@ -268,7 +269,7 @@ func TestApplyPatchResponsesContinuationNoInventedPreview(t *testing.T) {
 	b := NewApplyPatchResponsesBridge(patchResponsesRequest)
 	out := patchSend(t, b, patchEvent("response.output_item.done", 0, patchItem("function_call", "a", "c", "apply_patch", applypatch.WrapInput("p"))))
 	for _, e := range out {
-		if gjson.GetBytes(e, "type").String() == "response.custom_tool_call_input.delta" {
+		if ojson.GetBytesNoCopy(e, "type").String() == "response.custom_tool_call_input.delta" {
 			t.Fatalf("invented progress: %s", out)
 		}
 	}
@@ -290,7 +291,7 @@ func TestApplyPatchResponsesContinuationAllMatchedProvenance(t *testing.T) {
 				vals[patchKey] = map[string]string{"output_index": "1", "item_id": `"b"`, "call_id": `"cb"`}[patchKey]
 				e := []byte(fmt.Sprintf(`{"type":"response.function_call_arguments.delta","output_index":%s,"item_id":%s,"call_id":%s,"delta":"{}"}`, vals["output_index"], vals["item_id"], vals["call_id"]))
 				out, errTransform := b.Transform(e)
-				if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" {
+				if errTransform == nil || len(out) != 1 || ojson.GetBytesNoCopy(out[0], "type").String() != "response.failed" {
 					t.Fatalf("lost matched provenance: %s %v", out, errTransform)
 				}
 			})
@@ -338,13 +339,13 @@ func TestApplyPatchResponsesContinuationOmittedMixedCompletedItems(t *testing.T)
 	ordinary := `{"type":"message","id":"m","content":[{"type":"output_text","text":"ok"}]}`
 	patchSend(t, b, patchEvent("response.output_item.done", 1, ordinary))
 	out := patchSend(t, b, []byte(`{"type":"response.completed","response":{"output":[]}}`))
-	if gjson.GetBytes(out[len(out)-1], "response.output.0.input").String() != "p" || gjson.GetBytes(out[len(out)-1], "response.output.1.id").String() != "m" {
+	if ojson.GetBytesNoCopy(out[len(out)-1], "response.output.0.input").String() != "p" || ojson.GetBytesNoCopy(out[len(out)-1], "response.output.1.id").String() != "m" {
 		t.Fatalf("completed output lost: %s", out)
 	}
 	b = NewApplyPatchResponsesBridge(patchResponsesRequest)
 	patchSend(t, b, patchEvent("response.output_item.done", 0, patchItem("function_call", "p", "cp", "apply_patch", applypatch.WrapInput("p"))))
 	out = patchSend(t, b, []byte(`{"type":"response.completed","response":{"output":[`+ordinary+`]}}`))
-	if gjson.GetBytes(out[len(out)-1], "response.output.0.input").String() != "p" || gjson.GetBytes(out[len(out)-1], "response.output.1.id").String() != "m" {
+	if ojson.GetBytesNoCopy(out[len(out)-1], "response.output.0.input").String() != "p" || ojson.GetBytesNoCopy(out[len(out)-1], "response.output.1.id").String() != "m" {
 		t.Fatalf("new final output collided: %s", out)
 	}
 }
@@ -359,7 +360,7 @@ func TestApplyPatchResponsesContinuationUnmatchedIdentityEvidence(t *testing.T) 
 				}
 				patchSend(t, b, []byte(`{"type":"response.output_item.added","output_index":1,"item_id":"a","call_id":"ca","item":{"type":"function_call","id":"b","call_id":"cb","name":""}}`))
 				out, errTransform := b.Transform([]byte(`{"type":"response.function_call_arguments.done",` + key + `,"name":"apply_patch","arguments":"{\"input\":\"p\"}"}`))
-				if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" {
+				if errTransform == nil || len(out) != 1 || ojson.GetBytesNoCopy(out[0], "type").String() != "response.failed" {
 					t.Fatalf("unmatched-key evidence lost: %s %v", out, errTransform)
 				}
 			})
@@ -381,7 +382,7 @@ func TestApplyPatchResponsesContinuationMixedSequence(t *testing.T) {
 	}
 	last := int64(-1)
 	for _, event := range events {
-		seq := gjson.GetBytes(event, "sequence_number").Int()
+		seq := ojson.GetBytesNoCopy(event, "sequence_number").Int()
 		if seq <= last {
 			t.Fatalf("nonmonotonic mixed sequence: %s", events)
 		}

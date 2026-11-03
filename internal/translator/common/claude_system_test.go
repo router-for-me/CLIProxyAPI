@@ -4,21 +4,21 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestBuildClaudeStructuredOutputInstruction(t *testing.T) {
 	t.Run("empty or invalid", func(t *testing.T) {
-		if got := BuildClaudeStructuredOutputInstruction(gjson.Result{}); got != "" {
+		if got := BuildClaudeStructuredOutputInstruction(ojson.Result{}); got != "" {
 			t.Fatalf("expected empty instruction, got: %s", got)
 		}
-		if got := BuildClaudeStructuredOutputInstruction(gjson.Parse(`{"type":"text"}`)); got != "" {
+		if got := BuildClaudeStructuredOutputInstruction(ojson.Parse(`{"type":"text"}`)); got != "" {
 			t.Fatalf("expected empty instruction for text, got: %s", got)
 		}
 	})
 
 	t.Run("json_object", func(t *testing.T) {
-		got := BuildClaudeStructuredOutputInstruction(gjson.Parse(`{"type":"json_object"}`))
+		got := BuildClaudeStructuredOutputInstruction(ojson.Parse(`{"type":"json_object"}`))
 		if !strings.Contains(got, "JSON object") {
 			t.Fatalf("expected JSON object instruction, got: %s", got)
 		}
@@ -36,7 +36,7 @@ func TestBuildClaudeStructuredOutputInstruction(t *testing.T) {
 				}
 			}
 		}`
-		got := BuildClaudeStructuredOutputInstruction(gjson.Parse(input))
+		got := BuildClaudeStructuredOutputInstruction(ojson.Parse(input))
 		if !strings.Contains(got, "extracted_facts") {
 			t.Fatalf("expected schema name in instruction, got: %s", got)
 		}
@@ -56,7 +56,7 @@ func TestBuildClaudeStructuredOutputInstruction(t *testing.T) {
 				"properties": {"key": {"type": "string"}}
 			}
 		}`
-		got := BuildClaudeStructuredOutputInstruction(gjson.Parse(input))
+		got := BuildClaudeStructuredOutputInstruction(ojson.Parse(input))
 		if !strings.Contains(got, "key") {
 			t.Fatalf("expected key in instruction, got: %s", got)
 		}
@@ -64,7 +64,7 @@ func TestBuildClaudeStructuredOutputInstruction(t *testing.T) {
 
 	t.Run("json_schema without schema falls back to json_object instruction", func(t *testing.T) {
 		input := `{"type": "json_schema"}`
-		got := BuildClaudeStructuredOutputInstruction(gjson.Parse(input))
+		got := BuildClaudeStructuredOutputInstruction(ojson.Parse(input))
 		if !strings.Contains(got, "JSON object") {
 			t.Fatalf("expected JSON object fallback, got: %s", got)
 		}

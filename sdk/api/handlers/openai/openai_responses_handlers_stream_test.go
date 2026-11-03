@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
@@ -127,7 +127,7 @@ func TestForwardResponsesStreamPreservesResponseFailedEventAndEnvelopeForAllClie
 			if !ok {
 				t.Fatalf("no data payload in terminal frame: %q", last)
 			}
-			resp := gjson.GetBytes(payload, "response")
+			resp := ojson.GetBytesNoCopy(payload, "response")
 			if resp.Get("id").String() != "msg_1" || resp.Get("status").String() != "failed" {
 				t.Fatalf("response envelope lost id or status: %s", payload)
 			}
@@ -160,7 +160,7 @@ func TestForwardResponsesStreamResponseFailedPreservesLongOutputWhileSanitizingE
 	if !ok {
 		t.Fatalf("missing data payload: %q", body)
 	}
-	resp := gjson.GetBytes(payload, "response")
+	resp := ojson.GetBytesNoCopy(payload, "response")
 	if got := resp.Get("output.0.encrypted_content").String(); got != longEncrypted {
 		t.Fatalf("encrypted_content len = %d, want %d", len(got), len(longEncrypted))
 	}
@@ -222,14 +222,14 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
-	output := gjson.Get(payload, "response.output")
+	output := ojson.Get(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 2 {
 		t.Fatalf("expected repaired completed output with 2 items, got %s", output.Raw)
 	}
-	if got := gjson.Get(payload, "response.output.1.name").String(); got != "shell" {
+	if got := ojson.Get(payload, "response.output.1.name").String(); got != "shell" {
 		t.Fatalf("expected function_call name to be preserved, got %q in %s", got, payload)
 	}
-	if got := gjson.Get(payload, "response.output.1.arguments").String(); got != `{"cmd":"pwd"}` {
+	if got := ojson.Get(payload, "response.output.1.arguments").String(); got != `{"cmd":"pwd"}` {
 		t.Fatalf("expected function_call arguments to be preserved, got %q in %s", got, payload)
 	}
 }
@@ -253,14 +253,14 @@ func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testi
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
-	output := gjson.Get(payload, "response.output")
+	output := ojson.Get(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 2 {
 		t.Fatalf("expected repaired completed output with 2 items, got %s", output.Raw)
 	}
-	if got := gjson.Get(payload, "response.output.0.name").String(); got != "shell" {
+	if got := ojson.Get(payload, "response.output.0.name").String(); got != "shell" {
 		t.Fatalf("expected indexed function_call to be preserved first, got %q in %s", got, payload)
 	}
-	if got := gjson.Get(payload, "response.output.1.id").String(); got != "msg-1" {
+	if got := ojson.Get(payload, "response.output.1.id").String(); got != "msg-1" {
 		t.Fatalf("expected unindexed message to be appended, got %q in %s", got, payload)
 	}
 }
@@ -293,7 +293,7 @@ func TestForwardResponsesStreamRepairsMultilineCompletedOutputAsSSEDataLines(t *
 	if !ok {
 		t.Fatalf("expected completed frame to contain data payload: %q", parts[1])
 	}
-	output := gjson.GetBytes(payload, "response.output")
+	output := ojson.GetBytesNoCopy(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 1 {
 		t.Fatalf("expected repaired completed output with 1 item, got %s from %q", output.Raw, payload)
 	}

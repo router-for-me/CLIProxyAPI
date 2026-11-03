@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestIssue6897_RefSiblingConjunctions(t *testing.T) {
@@ -108,7 +108,7 @@ func TestIssue6897_RefSiblingConjunctions(t *testing.T) {
 				} {
 					t.Run(cleaner, func(t *testing.T) {
 						got := clean(input)
-						node := gjson.Parse(got)
+						node := ojson.Parse(got)
 						if path != "" {
 							node = node.Get(path)
 						}
@@ -136,7 +136,7 @@ func TestIssue6897_RefSiblingAnnotationsAndIdenticalTypes(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := clean(input)
-			compareJSON(t, `{"type":"string","minLength":5,"description":"local","default":"local","examples":[{"$ref":"literal"}]}`, gjson.Get(got, "properties.x").Raw)
+			compareJSON(t, `{"type":"string","minLength":5,"description":"local","default":"local","examples":[{"$ref":"literal"}]}`, ojson.Get(got, "properties.x").Raw)
 		})
 	}
 }
@@ -156,7 +156,7 @@ func TestIssue6897_RootRefKeepsDocumentDeclarations(t *testing.T) {
 func TestIssue6897_RequiredOutsideAllOf(t *testing.T) {
 	input := `{"type":"object","allOf":[{"properties":{"x":{"type":"string"}}}],"required":["x"]}`
 	got := CleanJSONSchemaForGeminiJSONSchema(input)
-	if gjson.Get(got, "required.0").String() != "x" {
+	if ojson.Get(got, "required.0").String() != "x" {
 		t.Fatalf("required property declared in allOf was dropped: %s", got)
 	}
 }
@@ -173,7 +173,7 @@ func TestIssue6897_ArrayConjunctionDoesNotInventItems(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			got := CleanJSONSchemaForGeminiJSONSchema(input)
-			node := gjson.Parse(got)
+			node := ojson.Parse(got)
 			if path != "" {
 				node = node.Get(path)
 			}
@@ -196,7 +196,7 @@ func TestIssue6897_ArrayTargetDoesNotInventItemsBeforeInlining(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			got := CleanJSONSchemaForGeminiJSONSchema(input)
-			node := gjson.Parse(got)
+			node := ojson.Parse(got)
 			if path != "" {
 				node = node.Get(path)
 			}
@@ -210,10 +210,10 @@ func TestIssue6897_ArrayTargetDoesNotInventItemsBeforeInlining(t *testing.T) {
 func TestIssue6897_ArrayItemsInsideAllOf(t *testing.T) {
 	input := `{"type":"array","allOf":[{"items":{"type":"integer"}}]}`
 	got := CleanJSONSchemaForGeminiJSONSchema(input)
-	if gjson.Get(got, "items").Exists() {
+	if ojson.Get(got, "items").Exists() {
 		t.Fatalf("array conjunction gained an unrelated element constraint: %s", got)
 	}
-	if gjson.Get(got, "allOf.0.items.type").String() != "integer" {
+	if ojson.Get(got, "allOf.0.items.type").String() != "integer" {
 		t.Fatalf("integer element constraint was lost: %s", got)
 	}
 }
@@ -222,7 +222,7 @@ func TestIssue6897_UnionCannotReplaceConjunction(t *testing.T) {
 	input := `{"type":"object","allOf":[{"properties":{"x":{"type":"string"}},"required":["x"]}],"anyOf":[{"type":"object"}]}`
 	got := CleanJSONSchemaForGeminiJSONSchema(input)
 	// {} must remain invalid, even though it satisfies the anyOf branch.
-	if gjson.Get(got, "allOf.0.properties.x.type").String() != "string" || gjson.Get(got, "allOf.0.required.0").String() != "x" {
+	if ojson.Get(got, "allOf.0.properties.x.type").String() != "string" || ojson.Get(got, "allOf.0.required.0").String() != "x" {
 		t.Fatalf("union cleanup removed the required-property conjunction: %s", got)
 	}
 	compareJSON(t, got, CleanJSONSchemaForGeminiJSONSchema(got))
@@ -232,7 +232,7 @@ func TestIssue6897_ConjunctionPreservesRequiredOnlyUnion(t *testing.T) {
 	input := `{"type":"object","allOf":[{"properties":{"a":{"type":"string"},"b":{"type":"string"}}},{"anyOf":[{"required":["a"]},{"required":["b"]}]}]}`
 	got := CleanJSONSchemaForGeminiJSONSchema(input)
 	// {} must fail both alternatives; either declared key can satisfy the union.
-	if gjson.Get(got, "allOf.1.anyOf.0.required.0").String() != "a" || gjson.Get(got, "allOf.1.anyOf.1.required.0").String() != "b" {
+	if ojson.Get(got, "allOf.1.anyOf.0.required.0").String() != "a" || ojson.Get(got, "allOf.1.anyOf.1.required.0").String() != "b" {
 		t.Fatalf("required-only union lost constraints declared in another conjunction branch: %s", got)
 	}
 	compareJSON(t, got, CleanJSONSchemaForGeminiJSONSchema(got))
@@ -242,7 +242,7 @@ func TestIssue6897_RefSiblingRequiredOnlyUnion(t *testing.T) {
 	input := `{"$defs":{"A":{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"string"}},"minProperties":1}},"type":"object","properties":{"x":{"$ref":"#/$defs/A","minProperties":0,"anyOf":[{"required":["a"]},{"required":["b"]}]}}}`
 	got := CleanJSONSchemaForGeminiJSONSchema(input)
 	// {"x":{"z":1}} must remain invalid: at least a or b is required.
-	if gjson.Get(got, "properties.x.anyOf.0.required.0").String() != "a" || gjson.Get(got, "properties.x.anyOf.1.required.0").String() != "b" {
+	if ojson.Get(got, "properties.x.anyOf.0.required.0").String() != "a" || ojson.Get(got, "properties.x.anyOf.1.required.0").String() != "b" {
 		t.Fatalf("sibling union required constraints were removed: %s", got)
 	}
 	compareJSON(t, got, CleanJSONSchemaForGeminiJSONSchema(got))
@@ -256,7 +256,7 @@ func TestIssue6897_ConjunctionDoesNotInferContainerType(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			input := `{"$defs":{"A":{"type":"number","minimum":5}},"type":"object","properties":{"x":{"$ref":"#/$defs/A","minimum":1,` + sibling + `}}}`
 			got := CleanJSONSchemaForGeminiJSONSchema(input)
-			node := gjson.Get(got, "properties.x")
+			node := ojson.Get(got, "properties.x")
 			// 5 is valid; items/properties do not constrain non-container instances.
 			if node.Get("type").Exists() || node.Get("allOf.0.type").String() != "number" {
 				t.Fatalf("container inference made a valid numeric conjunction impossible: %s", got)
@@ -292,7 +292,7 @@ func TestIssue6897_OuterUnionPreservesConjunction(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := CleanJSONSchemaForGeminiJSONSchema(tc.input)
-			if gjson.Get(got, tc.path).String() != tc.want {
+			if ojson.Get(got, tc.path).String() != tc.want {
 				t.Fatalf("outer union lost %s = %s: %s", tc.path, tc.want, got)
 			}
 			compareJSON(t, got, CleanJSONSchemaForGeminiJSONSchema(got))
@@ -344,7 +344,7 @@ func TestIssue6897_RefSiblingUnevaluatedScope(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				got := InlineLocalRefs(input)
-				node := gjson.Parse(got)
+				node := ojson.Parse(got)
 				if path != "" {
 					node = node.Get(path)
 				} else {
@@ -355,7 +355,7 @@ func TestIssue6897_RefSiblingUnevaluatedScope(t *testing.T) {
 					if errMarshal != nil {
 						t.Fatal(errMarshal)
 					}
-					node = gjson.ParseBytes(encoded)
+					node = ojson.ParseBytes(encoded)
 				}
 				// Unevaluated keywords must stay adjacent to the applicator so they see its
 				// annotations: {"x":"ok"} and [1] remain valid, unlike extra keys or items.
@@ -371,15 +371,15 @@ func TestIssue6897_RefSiblingMinLength(t *testing.T) {
 	t.Logf("cleaned=%s", got)
 
 	// Both constraints apply: "a" must remain invalid and "abcde" must remain valid.
-	var minLength func(gjson.Result) int64
-	minLength = func(schema gjson.Result) int64 {
+	var minLength func(ojson.Result) int64
+	minLength = func(schema ojson.Result) int64 {
 		minimum := schema.Get("minLength").Int()
 		for _, branch := range schema.Get("allOf").Array() {
 			minimum = max(minimum, minLength(branch))
 		}
 		return minimum
 	}
-	if minimum := minLength(gjson.Get(got, "properties.x")); minimum != 5 {
+	if minimum := minLength(ojson.Get(got, "properties.x")); minimum != 5 {
 		t.Fatalf("effective minLength = %d, want 5; reference target constraint was lost", minimum)
 	}
 }

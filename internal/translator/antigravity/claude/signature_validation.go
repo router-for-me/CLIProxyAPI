@@ -2,14 +2,13 @@
 package claude
 
 import (
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -75,7 +74,7 @@ func decodeGeminiClaudeCarrierSignature(rawSignature string) (signatureValue, di
 	return normalized, direction, targetKind, true, true
 }
 
-func geminiClaudeSemanticTargetKind(block gjson.Result) string {
+func geminiClaudeSemanticTargetKind(block ojson.Result) string {
 	switch block.Get("type").String() {
 	case "text":
 		return geminiClaudeCarrierText
@@ -89,7 +88,7 @@ func geminiClaudeSemanticTargetKind(block gjson.Result) string {
 	return ""
 }
 
-func geminiClaudeCarrierMatchesAdjacent(blocks []gjson.Result, index int, direction, targetKind string) bool {
+func geminiClaudeCarrierMatchesAdjacent(blocks []ojson.Result, index int, direction, targetKind string) bool {
 	step := 1
 	if direction == geminiClaudeCarrierPrevious {
 		step = -1
@@ -142,7 +141,7 @@ type geminiClaudeCarrierContext struct {
 	hasTrailingPreviousCarrier []bool
 }
 
-func geminiClaudePrecomputeCarrierContext(blocks []gjson.Result) geminiClaudeCarrierContext {
+func geminiClaudePrecomputeCarrierContext(blocks []ojson.Result) geminiClaudeCarrierContext {
 	n := len(blocks)
 	ctx := geminiClaudeCarrierContext{
 		nextSemanticKind:           make([]string, n),
@@ -235,7 +234,7 @@ func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
 // whose signatures can be replayed to Gemini. Claude Code uses these carriers
 // to return provider-native signatures from prior translated responses.
 func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
+	messages := ojson.GetBytesNoCopy(payload, "messages")
 	if !messages.IsArray() {
 		return payload
 	}
@@ -326,7 +325,7 @@ func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
 			contentItems = append(contentItems, []byte(block.Raw))
 		}
 		if contentChanged {
-			messageJSON, _ = sjson.SetRawBytes(messageJSON, "content", translatorcommon.JoinRawArray(contentItems))
+			messageJSON, _ = ojson.SetRawBytes(messageJSON, "content", translatorcommon.JoinRawArray(contentItems))
 			changed = true
 		}
 		messageItems = append(messageItems, messageJSON)
@@ -334,7 +333,7 @@ func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
 	if !changed {
 		return payload
 	}
-	updated, errSet := sjson.SetRawBytes(payload, "messages", translatorcommon.JoinRawArray(messageItems))
+	updated, errSet := ojson.SetRawBytes(payload, "messages", translatorcommon.JoinRawArray(messageItems))
 	if errSet != nil {
 		return payload
 	}

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsZeroUsageDefaults(t *testing.T) {
@@ -13,7 +13,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsZeroUsageDefaults(t
 	output := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "", nil, nil, input, nil)
 
 	for _, path := range []string{"usage.input_tokens", "usage.input_tokens_details.cached_tokens", "usage.output_tokens", "usage.total_tokens"} {
-		value := gjson.GetBytes(output, path)
+		value := ojson.GetBytesNoCopy(output, path)
 		if !value.Exists() || value.Int() != 0 {
 			t.Fatalf("%s = %s, want zero", path, value.Raw)
 		}

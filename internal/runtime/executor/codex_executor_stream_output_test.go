@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *testing.T) {
@@ -44,13 +44,13 @@ func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *t
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if got := gjson.GetBytes(resp.Payload, "output.0.id").String(); got != "fc_123" {
+	if got := ojson.GetBytes(resp.Payload, "output.0.id").String(); got != "fc_123" {
 		t.Fatalf("output[0].id = %q, want %q; payload=%s", got, "fc_123", resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "output.0.name").String(); got != "weather-terminal" {
+	if got := ojson.GetBytes(resp.Payload, "output.0.name").String(); got != "weather-terminal" {
 		t.Fatalf("output[0].name = %q, want terminal value; payload=%s", got, resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "output.1.id").String(); got != "fc_existing" {
+	if got := ojson.GetBytes(resp.Payload, "output.1.id").String(); got != "fc_existing" {
 		t.Fatalf("output[1].id = %q, want existing value; payload=%s", got, resp.Payload)
 	}
 }
@@ -80,7 +80,7 @@ func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *t
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	gotContent := gjson.GetBytes(resp.Payload, "choices.0.message.content").String()
+	gotContent := ojson.GetBytes(resp.Payload, "choices.0.message.content").String()
 	if gotContent != "ok" {
 		t.Fatalf("choices.0.message.content = %q, want %q; payload=%s", gotContent, "ok", string(resp.Payload))
 	}
@@ -146,7 +146,7 @@ func TestCodexExecutorExecuteIncompleteResponseIsSuccessful(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "stop_reason").String(); got != "max_tokens" {
+	if got := ojson.GetBytes(resp.Payload, "stop_reason").String(); got != "max_tokens" {
 		t.Fatalf("stop_reason = %q, want %q; payload=%s", got, "max_tokens", resp.Payload)
 	}
 }
@@ -295,12 +295,12 @@ func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDe
 			t.Errorf("read request body: %v", errRead)
 			return
 		}
-		if gjson.GetBytes(body, "stream_options.include_usage").Exists() {
+		if ojson.GetBytes(body, "stream_options.include_usage").Exists() {
 			t.Errorf("unsupported stream option was forwarded: %s", body)
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		if delivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
+		if delivery := ojson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
 			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"Checking"}` + "\n\n"))
 		} else {
 			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Checking"}` + "\n\n"))
@@ -419,7 +419,7 @@ func TestCodexExecutorExecuteIgnoresTransportErrorAfterCompletion(t *testing.T) 
 	if err != nil {
 		t.Fatalf("unexpected error after response.completed: %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "resp_1" {
+	if got := ojson.GetBytes(resp.Payload, "id").String(); got != "resp_1" {
 		t.Fatalf("response id = %q, want resp_1; payload=%s", got, resp.Payload)
 	}
 }
@@ -705,7 +705,7 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 			continue
 		}
 		data := bytes.TrimSpace(payload[5:])
-		if gjson.GetBytes(data, "type").String() == "response.completed" {
+		if ojson.GetBytes(data, "type").String() == "response.completed" {
 			completed = append([]byte(nil), data...)
 		}
 	}
@@ -714,7 +714,7 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 		t.Fatal("missing response.completed chunk")
 	}
 
-	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
+	gotContent := ojson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
 	}

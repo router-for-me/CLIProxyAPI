@@ -9,11 +9,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // pause_turn end to end through the executor with the web search result cache:
@@ -53,7 +53,7 @@ func TestClaudeExecutorPauseTurnContinuationRestoresFinishedSearchAndKeepsPaused
 
 			executor := NewClaudeExecutor(enabledClaudeWebSearchCacheConfig())
 			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-pause", "base_url": server.URL}}
-			run := func(input string) gjson.Result {
+			run := func(input string) ojson.Result {
 				payload := []byte(`{"model":"claude-opus-5-5","stream":` + map[bool]string{false: "false", true: "true"}[stream] + `,"tools":[{"type":"web_search"}],"input":[` + input + `]}`)
 				req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
 				opts := cliproxyexecutor.Options{
@@ -66,20 +66,20 @@ func TestClaudeExecutorPauseTurnContinuationRestoresFinishedSearchAndKeepsPaused
 					if errExecute != nil {
 						t.Fatal(errExecute)
 					}
-					return gjson.ParseBytes(resp.Payload)
+					return ojson.ParseBytes(resp.Payload)
 				}
 				result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
 				if errStream != nil {
 					t.Fatal(errStream)
 				}
-				var terminal gjson.Result
+				var terminal ojson.Result
 				for chunk := range result.Chunks {
 					if chunk.Err != nil {
 						t.Fatal(chunk.Err)
 					}
 					for _, line := range strings.Split(string(chunk.Payload), "\n") {
-						if data, ok := strings.CutPrefix(line, "data: "); ok && gjson.Get(data, "type").String() == "response.completed" {
-							terminal = gjson.Get(data, "response")
+						if data, ok := strings.CutPrefix(line, "data: "); ok && ojson.Get(data, "type").String() == "response.completed" {
+							terminal = ojson.Get(data, "response")
 						}
 					}
 				}
@@ -106,7 +106,7 @@ func TestClaudeExecutorPauseTurnContinuationRestoresFinishedSearchAndKeepsPaused
 			if len(bodies) != 2 {
 				t.Fatalf("upstream requests = %d", len(bodies))
 			}
-			messages := gjson.GetBytes(bodies[1], "messages").Array()
+			messages := ojson.GetBytes(bodies[1], "messages").Array()
 			last := messages[len(messages)-1]
 			blocks := last.Get("content").Array()
 			var types []string
@@ -146,13 +146,13 @@ func TestClaudeExecutorChatContextWindowExceededMapsToLength(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute err = %v, want nil", errExecute)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "length" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "length" {
 		t.Fatalf("finish_reason = %q, want length: %s", got, resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "cut" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "cut" {
 		t.Fatalf("content = %q, want cut: %s", got, resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.completion_tokens").Int(); got != 2 {
+	if got := ojson.GetBytes(resp.Payload, "usage.completion_tokens").Int(); got != 2 {
 		t.Fatalf("completion_tokens = %d, want 2: %s", got, resp.Payload)
 	}
 }
@@ -177,7 +177,7 @@ func TestClaudeExecutorChatRefusalStaysSuccessful(t *testing.T) {
 	if errExecute != nil {
 		t.Fatal(errExecute)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "content_filter" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q: %s", got, resp.Payload)
 	}
 }

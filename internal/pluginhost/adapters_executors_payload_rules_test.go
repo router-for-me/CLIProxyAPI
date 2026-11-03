@@ -9,13 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // payloadUpstream records the JSON bodies a plugin sends through host.http.
@@ -90,16 +89,16 @@ func TestExecutorAdapterAppliesPayloadRulesAfterTranslation(t *testing.T) {
 	if gotModel != "claude-model(high)" {
 		t.Errorf("plugin request model = %q, want unchanged claude-model(high)", gotModel)
 	}
-	if got := gjson.GetBytes(pluginPayload, "temperature").Float(); got != 0.2 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "temperature").Float(); got != 0.2 {
 		t.Errorf("temperature = %v, want default 0.2: %s", got, pluginPayload)
 	}
-	if !gjson.GetBytes(pluginPayload, "defaulted").Bool() {
+	if !ojson.GetBytesNoCopy(pluginPayload, "defaulted").Bool() {
 		t.Errorf("defaulted rule not applied: %s", pluginPayload)
 	}
-	if got := gjson.GetBytes(pluginPayload, "max_tokens").Int(); got != 64 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "max_tokens").Int(); got != 64 {
 		t.Errorf("max_tokens = %d, want overridden 64: %s", got, pluginPayload)
 	}
-	if gjson.GetBytes(pluginPayload, "secret").Exists() {
+	if ojson.GetBytesNoCopy(pluginPayload, "secret").Exists() {
 		t.Errorf("filtered secret remains in plugin payload: %s", pluginPayload)
 	}
 }
@@ -133,10 +132,10 @@ func TestExecutorAdapterAppliesPayloadRulesToStreams(t *testing.T) {
 	}
 	for range result.Chunks {
 	}
-	if got := gjson.GetBytes(pluginPayload, "max_tokens").Int(); got != 64 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "max_tokens").Int(); got != 64 {
 		t.Errorf("stream max_tokens = %d, want override 64: %s", got, pluginPayload)
 	}
-	if gjson.GetBytes(pluginPayload, "secret").Exists() {
+	if ojson.GetBytesNoCopy(pluginPayload, "secret").Exists() {
 		t.Errorf("filtered field remained in stream plugin payload: %s", pluginPayload)
 	}
 }
@@ -170,13 +169,13 @@ func TestExecutorAdapterAppliesPayloadRulesToCountTokens(t *testing.T) {
 	if gotModel != "claude-model(high)" {
 		t.Errorf("plugin count_tokens model = %q, want unchanged claude-model(high)", gotModel)
 	}
-	if got := gjson.GetBytes(pluginPayload, "temperature").Float(); got != 0.2 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "temperature").Float(); got != 0.2 {
 		t.Errorf("count_tokens temperature = %v, want default 0.2: %s", got, pluginPayload)
 	}
-	if got := gjson.GetBytes(pluginPayload, "max_tokens").Int(); got != 64 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "max_tokens").Int(); got != 64 {
 		t.Errorf("count_tokens max_tokens = %d, want overridden 64: %s", got, pluginPayload)
 	}
-	if gjson.GetBytes(pluginPayload, "secret").Exists() {
+	if ojson.GetBytesNoCopy(pluginPayload, "secret").Exists() {
 		t.Errorf("filtered secret remains in count_tokens payload: %s", pluginPayload)
 	}
 }
@@ -207,7 +206,7 @@ func TestExecutorAdapterPayloadRulesCanonicalizeSourceFormatAlias(t *testing.T) 
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(pluginPayload, "max_tokens").Int(); got != 64 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "max_tokens").Int(); got != 64 {
 		t.Errorf("max_tokens = %d, want 64: rule gated on from-protocol claude was skipped for alias source", got)
 	}
 }
@@ -236,10 +235,10 @@ func TestExecutorAdapterPayloadRulesUseAntigravityRequestRoot(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(pluginPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64 {
+	if got := ojson.GetBytesNoCopy(pluginPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64 {
 		t.Errorf("request.generationConfig.maxOutputTokens = %d, want 64: %s", got, pluginPayload)
 	}
-	if gjson.GetBytes(pluginPayload, "generationConfig").Exists() {
+	if ojson.GetBytesNoCopy(pluginPayload, "generationConfig").Exists() {
 		t.Errorf("rule created a top-level generationConfig beside request: %s", pluginPayload)
 	}
 }
@@ -255,9 +254,9 @@ func TestExecutorAdapterAppliesArrayIndexFilterOnlyOnceAcrossHostHTTP(t *testing
 	adapter := newCurrentExecutorAdapterForTest(host, "payload-once-plugin", &fakeExecutor{
 		identifier: "plugin-provider",
 		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-			body, errSet := sjson.SetBytes(req.Payload, "user", "plugin-added")
+			body, errSet := ojson.SetBytes(req.Payload, "user", "plugin-added")
 			if errSet != nil {
-				t.Fatalf("sjson.SetBytes() error = %v", errSet)
+				t.Fatalf("ojson.SetBytes() error = %v", errSet)
 			}
 			callbackID, closeCallback := host.openCallbackContext(ctx)
 			defer closeCallback()
@@ -281,10 +280,10 @@ func TestExecutorAdapterAppliesArrayIndexFilterOnlyOnceAcrossHostHTTP(t *testing
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 	sent := upstream.last(t)
-	if got := len(gjson.GetBytes(sent, "messages").Array()); got != 1 {
+	if got := len(ojson.GetBytesNoCopy(sent, "messages").Array()); got != 1 {
 		t.Fatalf("messages count = %d, want 1: %s", got, sent)
 	}
-	if got := gjson.GetBytes(sent, "messages.0.content").String(); got != "keep" {
+	if got := ojson.GetBytesNoCopy(sent, "messages.0.content").String(); got != "keep" {
 		t.Errorf("messages.0.content = %q, want keep: %s", got, sent)
 	}
 }

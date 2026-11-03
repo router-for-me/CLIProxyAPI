@@ -3,12 +3,12 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
-	"github.com/tidwall/gjson"
 )
 
 func TestApplyThinkingWithModelInfoMapsCrossFamilyHighIntent(t *testing.T) {
@@ -38,7 +38,7 @@ func TestApplyThinkingWithModelInfoMapsCrossFamilyHighIntent(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 			}
-			if got := gjson.GetBytes(out, "output_config.effort").String(); got != tc.want {
+			if got := ojson.GetBytes(out, "output_config.effort").String(); got != tc.want {
 				t.Fatalf("output effort = %q, want %q; body=%s", got, tc.want, out)
 			}
 		})
@@ -57,7 +57,7 @@ func TestApplyThinkingWithModelInfoMapsOpenAICompatibilityHighIntent(t *testing.
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "max" {
+	if got := ojson.GetBytes(out, "reasoning_effort").String(); got != "max" {
 		t.Fatalf("reasoning_effort = %q, want max; body=%s", got, out)
 	}
 }
@@ -74,7 +74,7 @@ func TestApplyThinkingWithModelInfoMapsResponsesToCodexHighIntent(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "xhigh" {
+	if got := ojson.GetBytes(out, "reasoning.effort").String(); got != "xhigh" {
 		t.Fatalf("reasoning.effort = %q, want xhigh; body=%s", got, out)
 	}
 }
@@ -106,10 +106,10 @@ func TestApplyThinkingWithModelInfoAppliesEnabledSummaryOnlyClaudeVisibility(t *
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+	if got := ojson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
 		t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+	if got := ojson.GetBytes(out, "thinking.display").String(); got != "summarized" {
 		t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
 	}
 }
@@ -129,7 +129,7 @@ func TestApplyThinkingWithModelInfoAndSummaryDropsInferredClaudeModeWhenSummaryR
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
 	}
-	if gjson.GetBytes(out, "thinking").Exists() {
+	if ojson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("removed summary retained globally inferred adaptive thinking: %s", out)
 	}
 }
@@ -148,7 +148,7 @@ func TestApplyThinkingWithModelInfoDoesNotActivateClaudeForDisabledSummary(t *te
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 	}
-	if gjson.GetBytes(out, "thinking").Exists() {
+	if ojson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("disabled summary activated Claude thinking: %s", out)
 	}
 }
@@ -167,7 +167,7 @@ func TestApplyThinkingWithModelInfoSummaryOnlyDoesNotInventOpenAIEffort(t *testi
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v; body=%s", err, out)
 	}
-	if gjson.GetBytes(out, "reasoning_effort").Exists() {
+	if ojson.GetBytes(out, "reasoning_effort").Exists() {
 		t.Fatalf("summary-only request invented reasoning_effort: %s", out)
 	}
 }
@@ -181,7 +181,7 @@ func TestApplyThinkingWithSummaryKeepsOpenAIChatSuffixNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithSummary() error = %v; body=%s", err, out)
 	}
-	if got := gjson.GetBytes(out, "reasoning_effort").String(); got != "none" {
+	if got := ojson.GetBytes(out, "reasoning_effort").String(); got != "none" {
 		t.Fatalf("reasoning_effort = %q, want none; body=%s", got, out)
 	}
 }
@@ -200,10 +200,10 @@ func TestApplyThinkingWithModelInfoUsesOpenRouterVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v; body=%s", err, out)
 	}
-	if exclude := gjson.GetBytes(out, "reasoning.exclude"); !exclude.Exists() || exclude.Bool() {
+	if exclude := ojson.GetBytes(out, "reasoning.exclude"); !exclude.Exists() || exclude.Bool() {
 		t.Fatalf("OpenRouter summary visibility not enabled: %s", out)
 	}
-	if gjson.GetBytes(out, "reasoning_effort").Exists() {
+	if ojson.GetBytes(out, "reasoning_effort").Exists() {
 		t.Fatalf("OpenRouter summary visibility invented reasoning_effort: %s", out)
 	}
 }
@@ -247,10 +247,10 @@ func TestApplyConfigurationUpdateCrossProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 			}
-			if got := gjson.GetBytes(out, tc.wantPath).String(); got != tc.want {
+			if got := ojson.GetBytes(out, tc.wantPath).String(); got != tc.want {
 				t.Errorf("%s = %q, want %q; body=%s", tc.wantPath, got, tc.want, out)
 			}
-			if !gjson.GetBytes(out, "other").Bool() {
+			if !ojson.GetBytes(out, "other").Bool() {
 				t.Errorf("non-thinking field lost: %s", out)
 			}
 		})
@@ -305,11 +305,11 @@ func TestApplyConfigurationUpdateSourceEntry(t *testing.T) {
 			if format == "openai" {
 				path = "reasoning_effort"
 			}
-			if got := gjson.GetBytes(out, path).String(); got != tc.want {
+			if got := ojson.GetBytes(out, path).String(); got != tc.want {
 				t.Errorf("%s = %q, want %q; body=%s", path, got, tc.want, out)
 			}
-			if tc.wantInput != "" && gjson.GetBytes(out, "input").Raw != tc.wantInput {
-				t.Errorf("input = %s, want %s; body=%s", gjson.GetBytes(out, "input").Raw, tc.wantInput, out)
+			if tc.wantInput != "" && ojson.GetBytes(out, "input").Raw != tc.wantInput {
+				t.Errorf("input = %s, want %s; body=%s", ojson.GetBytes(out, "input").Raw, tc.wantInput, out)
 			}
 			if tc.wantSame && string(out) != tc.body {
 				t.Errorf("native body changed: got %s, want %s", out, tc.body)
@@ -377,10 +377,10 @@ func TestApplyConfigurationUpdateBoundModelWithoutThinking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "low" {
+	if got := ojson.GetBytes(out, "reasoning.effort").String(); got != "low" {
 		t.Errorf("unresolved binding used static support: effort=%q; body=%s", got, out)
 	}
-	if len(gjson.GetBytes(out, "input").Array()) != 1 {
+	if len(ojson.GetBytes(out, "input").Array()) != 1 {
 		t.Errorf("unresolved binding retained an update: %s", out)
 	}
 
@@ -389,10 +389,10 @@ func TestApplyConfigurationUpdateBoundModelWithoutThinking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfoAndSummary(user-defined) error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "low" {
+	if got := ojson.GetBytes(out, "reasoning.effort").String(); got != "low" {
 		t.Errorf("user-defined model lost source effort: effort=%q; body=%s", got, out)
 	}
-	if len(gjson.GetBytes(out, "input").Array()) != 1 {
+	if len(ojson.GetBytes(out, "input").Array()) != 1 {
 		t.Errorf("user-defined model retained an update: %s", out)
 	}
 
@@ -410,13 +410,13 @@ func TestApplyConfigurationUpdateBoundModelWithoutThinking(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", errApply)
 			}
-			if got := gjson.GetBytes(out, "reasoning.effort").String(); got != tc.want {
+			if got := ojson.GetBytes(out, "reasoning.effort").String(); got != tc.want {
 				t.Errorf("effort = %q, want %q; body=%s", got, tc.want, out)
 			}
-			if got := gjson.GetBytes(out, "input.0.reasoning.effort").String(); got != "low" {
+			if got := ojson.GetBytes(out, "input.0.reasoning.effort").String(); got != "low" {
 				t.Errorf("input update effort changed to %q: %s", got, out)
 			}
-			if got := gjson.GetBytes(out, "reasoning.summary").String(); got != "auto" {
+			if got := ojson.GetBytes(out, "reasoning.summary").String(); got != "auto" {
 				t.Errorf("summary = %q, want auto; body=%s", got, out)
 			}
 		})
@@ -435,7 +435,7 @@ func TestApplyThinkingWithModelInfoUsesOriginalResponsesEffort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
 	}
-	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+	if got := ojson.GetBytes(out, "output_config.effort").String(); got != "max" {
 		t.Fatalf("output effort = %q, want max; body=%s", got, out)
 	}
 }

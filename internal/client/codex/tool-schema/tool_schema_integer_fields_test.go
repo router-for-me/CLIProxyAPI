@@ -8,8 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestNormalizeCodexToolIntegerTypesSourceFields(t *testing.T) {
@@ -55,10 +54,11 @@ func TestNormalizeCodexToolIntegerTypesSourceFields(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, typeJSON := range []string{`"number"`, `["number","integer","null"]`, `"integer"`, `"string"`} {
-				input := []byte(fmt.Sprintf(`{"tools":[{"type":"function","name":%q,"parameters":{"type":"object","properties":{"unrelated":{"type":"number","default":1.5}}},"output_schema":{"properties":{"wall_time_seconds":{"type":"number"}}}}],"input":[{"type":"function_call","arguments":"{\"limit\":1.5}"}]}`, tt.name))
+				inputDoc := ojson.NewDoc([]byte(fmt.Sprintf(`{"tools":[{"type":"function","name":%q,"parameters":{"type":"object","properties":{"unrelated":{"type":"number","default":1.5}}},"output_schema":{"properties":{"wall_time_seconds":{"type":"number"}}}}],"input":[{"type":"function_call","arguments":"{\"limit\":1.5}"}]}`, tt.name)))
 				for _, field := range tt.fields {
-					input = setIntegerTestRaw(t, input, "tools.0.parameters.properties."+field, `{"type":`+typeJSON+`,"description":"Keep metadata","minimum":0,"default":1}`)
+					setIntegerTestRawDoc(t, inputDoc, "tools.0.parameters.properties."+field, `{"type":`+typeJSON+`,"description":"Keep metadata","minimum":0,"default":1}`)
 				}
+				input := inputDoc.Bytes()
 				for _, ua := range []string{"codex-tui/0.154.0", "curl/8.7.1", ""} {
 					var headers http.Header
 					if ua != "" {
@@ -72,9 +72,11 @@ func TestNormalizeCodexToolIntegerTypesSourceFields(t *testing.T) {
 						} else if typeJSON == `["number","integer","null"]` {
 							wantType = `["integer","null"]`
 						}
+						wantDoc := ojson.NewDoc(want)
 						for _, field := range tt.fields {
-							want = setIntegerTestRaw(t, want, "tools.0.parameters.properties."+field+".type", wantType)
+							setIntegerTestRawDoc(t, wantDoc, "tools.0.parameters.properties."+field+".type", wantType)
 						}
+						want = wantDoc.Bytes()
 					}
 					out := NormalizeCodexToolIntegerTypes(input, headers)
 					if !bytes.Equal(out, want) {
@@ -107,8 +109,10 @@ func TestNormalizeCodexToolIntegerTypesNamespaceFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			input := []byte(fmt.Sprintf(tt.body, schema))
-			want := setIntegerTestRaw(t, input, tt.path+".properties.line_offset.type", `"integer"`)
-			want = setIntegerTestRaw(t, want, tt.path+".properties.max_lines.type", `["integer","null"]`)
+			wantDoc := ojson.NewDoc(input)
+			setIntegerTestRawDoc(t, wantDoc, tt.path+".properties.line_offset.type", `"integer"`)
+			setIntegerTestRawDoc(t, wantDoc, tt.path+".properties.max_lines.type", `["integer","null"]`)
+			want := wantDoc.Bytes()
 			out := NormalizeCodexToolIntegerTypes(input, http.Header{"User-Agent": []string{"Codex/1.0"}})
 			if !bytes.Equal(out, want) {
 				t.Fatalf("got %s, want %s", out, want)
@@ -144,7 +148,7 @@ func TestNormalizeCodexToolIntegerTypesPreservesUnprovenFields(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"test_sync_tool","parameters":{"properties":{"barrier.participants":{"type":"number"},"other":{"properties":{"participants":{"type":"number"}}},"barrier":{"properties":{"participants":{"type":"number"},"ratio":{"type":"number"}}}}}}]}`)
 	out := NormalizeCodexToolIntegerTypes(input, http.Header{"User-Agent": []string{"codex"}})
 	want := setIntegerTestRaw(t, input, "tools.0.parameters.properties.barrier.properties.participants.type", `"integer"`)
-	if !bytes.Equal(out, want) || !gjson.ValidBytes(out) {
+	if !bytes.Equal(out, want) || !ojson.ValidBytes(out) {
 		t.Fatalf("nested path changed unrelated fields: %s", out)
 	}
 }
@@ -155,10 +159,10 @@ func TestNormalizeCodexToolIntegerTypesHistoryNotesSchemas(t *testing.T) {
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if !gjson.ValidBytes(fixture) {
+	if !ojson.ValidBytes(fixture) {
 		t.Fatal("invalid source schema fixture")
 	}
-	for _, namespace := range gjson.GetBytes(fixture, "tools").Array() {
+	for _, namespace := range ojson.GetBytesNoCopy(fixture, "tools").Array() {
 		tool := namespace.Get("tools.0")
 		name := namespace.Get("name").String() + "__" + tool.Get("name").String()
 		t.Run(name, func(t *testing.T) {
@@ -201,8 +205,10 @@ func TestNormalizeCodexToolIntegerTypesHistoryNotesSchemas(t *testing.T) {
 
 func TestNormalizeCodexToolIntegerTypesNotesExplicitUnionPaths(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"notes__read_file","parameters":{"type":"object","properties":{"start_line":{"anyOf":[{"type":"number"},{"type":"null"}],"default":-3},"stop_line":{"anyOf":[{"type":"number"},{"type":"number"}],"default":-1},"ratio":{"anyOf":[{"type":"number"},{"type":"null"}]},"other":{"properties":{"start_line":{"anyOf":[{"type":"number"}]}}}},"required":["path"]}}],"input":[{"type":"function_call","arguments":"{\"start_line\":-3,\"stop_line\":-1}"}]}`)
-	want := setIntegerTestRaw(t, input, "tools.0.parameters.properties.start_line.anyOf.0.type", `"integer"`)
-	want = setIntegerTestRaw(t, want, "tools.0.parameters.properties.stop_line.anyOf.0.type", `"integer"`)
+	wantDoc := ojson.NewDoc(input)
+	setIntegerTestRawDoc(t, wantDoc, "tools.0.parameters.properties.start_line.anyOf.0.type", `"integer"`)
+	setIntegerTestRawDoc(t, wantDoc, "tools.0.parameters.properties.stop_line.anyOf.0.type", `"integer"`)
+	want := wantDoc.Bytes()
 	out := NormalizeCodexToolIntegerTypes(input, http.Header{"User-Agent": []string{"codex"}})
 	if !bytes.Equal(out, want) {
 		t.Fatalf("explicit union paths changed unrelated branches or signed values: %s", out)
@@ -211,9 +217,16 @@ func TestNormalizeCodexToolIntegerTypesNotesExplicitUnionPaths(t *testing.T) {
 
 func setIntegerTestRaw(t *testing.T, body []byte, path, value string) []byte {
 	t.Helper()
-	out, errSet := sjson.SetRawBytes(body, path, []byte(value))
+	out, errSet := ojson.SetRawBytes(body, path, []byte(value))
 	if errSet != nil {
 		t.Fatal(errSet)
 	}
 	return out
+}
+
+func setIntegerTestRawDoc(t *testing.T, doc *ojson.Doc, path, value string) {
+	t.Helper()
+	if errSet := doc.SetRaw(path, value); errSet != nil {
+		t.Fatal(errSet)
+	}
 }

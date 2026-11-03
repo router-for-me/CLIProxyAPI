@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/MoeForge/moego/ojson"
 	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -29,11 +30,23 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 }
 
+// RewriteCodexMultiAgentV2InputDoc converts official Codex multi-agent input into
+// standard Responses API messages in place on doc when multi-agent v2 optimization is enabled.
+func RewriteCodexMultiAgentV2InputDoc(doc *ojson.Doc, ctx context.Context, headers http.Header, cfg *config.Config) bool {
+	return multiagentv2.RewriteCodexMultiAgentV2InputDoc(doc, ctx, headers, cfg)
+}
+
 // RewriteCodexOrphanDelegationInput converts orphan Codex delegation outputs into
 // standard user messages when orphan delegation compatibility is enabled and the
 // request carries the X-Openai-Subagent: collab_spawn header.
 func RewriteCodexOrphanDelegationInput(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
 	return multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
+}
+
+// RewriteCodexOrphanDelegationInputDoc converts orphan Codex delegation outputs into
+// standard user messages in place on doc when orphan delegation compatibility is enabled.
+func RewriteCodexOrphanDelegationInputDoc(doc *ojson.Doc, ctx context.Context, headers http.Header, cfg *config.Config) bool {
+	return multiagentv2.RewriteCodexOrphanDelegationInputForConfigDoc(doc, ctx, headers, cfg)
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
@@ -175,24 +188,41 @@ func TranslateRequestReturningError(ctx context.Context, headers http.Header, cf
 }
 
 func translateRequestWithAPIKeyModelCompatibilityForExecutor(ctx context.Context, headers http.Header, cfg *config.Config, targetExecutor string, from, to sdktranslator.Format, model string, payload []byte, stream, isCompat bool) ([]byte, error) {
-	if IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor) {
-		payload = NormalizeCodexToolIntegerTypes(payload, headers)
-	}
+	needsIntNorm := IsCodexUserAgent(headers) && !isCodexTargetExecutor(targetExecutor)
 	if !isCompat {
+		if needsIntNorm {
+			payload = NormalizeCodexToolIntegerTypes(payload, headers)
+		}
 		return translateRequestWithCodexMultiAgentV2Checked(ctx, headers, cfg, from, to, model, payload, stream)
 	}
 	if from == sdktranslator.FormatOpenAIResponse {
-		payload = RewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
-		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, isCompat)
+		if len(payload) > 0 {
+			doc := ojson.NewDoc(payload)
+			changed := false
+			if needsIntNorm && NormalizeCodexToolIntegerTypesDoc(doc, headers) {
+				changed = true
+			}
+			if RewriteCodexOrphanDelegationInputDoc(doc, ctx, headers, cfg) {
+				changed = true
+			}
+			if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+				if multiagentv2.RewriteCodexMultiAgentV2InputDoc(doc, ctx, headers, cfg, isCompat) {
+					changed = true
+				}
+			}
+			if changed {
+				payload = doc.Bytes()
+			}
 		}
+	} else if needsIntNorm {
+		payload = NormalizeCodexToolIntegerTypes(payload, headers)
 	}
 
 	var translated []byte
 	var convertErr error
 	switch {
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex:
-		translated, convertErr = codexclaude.ConvertClaudeRequestToCodexWithCompat(model, payload, stream)
+		translated, convertErr = codexclaude.ConvertClaudeRequestToCodexWithCompatContext(ctx, model, payload, stream)
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatGemini:
 		translated, convertErr = geminiclaude.ConvertClaudeRequestToGeminiWithCompat(model, payload, stream)
 	case from == sdktranslator.FormatClaude && to == sdktranslator.FormatInteractions:
@@ -218,10 +248,22 @@ func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
 	return multiagentv2.HasCodexMultiAgentV2NamespaceConflict(payload)
 }
 
+// HasCodexMultiAgentV2NamespaceConflictDoc reports whether doc defines
+// the reserved optimized namespace, which must remain untouched.
+func HasCodexMultiAgentV2NamespaceConflictDoc(doc *ojson.Doc) bool {
+	return multiagentv2.HasCodexMultiAgentV2NamespaceConflictDoc(doc)
+}
+
 // OptimizeCodexMultiAgentV2Request rewrites an eligible spawn_agent request and
 // reports whether the collaboration namespace was renamed for upstream use.
 func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) ([]byte, bool) {
 	return multiagentv2.OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
+}
+
+// OptimizeCodexMultiAgentV2RequestDoc rewrites an eligible spawn_agent request in place on doc
+// and reports whether the collaboration namespace was renamed for upstream use.
+func OptimizeCodexMultiAgentV2RequestDoc(doc *ojson.Doc, ctx context.Context, headers http.Header, cfg *config.Config) bool {
+	return multiagentv2.OptimizeCodexMultiAgentV2RequestDoc(doc, ctx, headers, cfg)
 }
 
 // OptimizeCodexMultiAgentV2RequestForAuth applies the standard Codex MultiAgentV2
@@ -229,15 +271,30 @@ func OptimizeCodexMultiAgentV2Request(ctx context.Context, headers http.Header, 
 // flag to convert agent_message items into portable message/user input,
 // proactively stripping author, recipient, and internal passthrough metadata.
 func OptimizeCodexMultiAgentV2RequestForAuth(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config, auth *cliproxyauth.Auth, isCompat bool) ([]byte, bool) {
+	if len(payload) == 0 {
+		return payload, false
+	}
+	doc := ojson.NewDoc(payload)
+	optimized := OptimizeCodexMultiAgentV2RequestForAuthDoc(doc, ctx, headers, cfg, auth, isCompat)
+	return doc.Bytes(), optimized
+}
+
+// OptimizeCodexMultiAgentV2RequestForAuthDoc applies the standard Codex MultiAgentV2
+// request optimization in place on doc and reports whether the collaboration namespace
+// was renamed for upstream use.
+func OptimizeCodexMultiAgentV2RequestForAuthDoc(doc *ojson.Doc, ctx context.Context, headers http.Header, cfg *config.Config, auth *cliproxyauth.Auth, isCompat bool) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
 	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
 		cfg = cfg.ForAPIKey()
 	}
-	payload = multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
-	updated, optimized := multiagentv2.OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
+	multiagentv2.RewriteCodexOrphanDelegationInputForConfigDoc(doc, ctx, headers, cfg)
+	optimized := multiagentv2.OptimizeCodexMultiAgentV2RequestDoc(doc, ctx, headers, cfg)
 	if isCompat {
-		updated = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, updated, cfg, true)
+		multiagentv2.RewriteCodexMultiAgentV2InputDoc(doc, ctx, headers, cfg, true)
 	}
-	return updated, optimized
+	return optimized
 }
 
 // RestoreCodexMultiAgentV2Response restores optimized collaboration namespace

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	cpaauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -17,7 +18,6 @@ import (
 	cpaexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestHomeV8PromptCacheKey(t *testing.T) {
@@ -33,7 +33,7 @@ func TestHomeV8PromptCacheKey(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := gjson.GetBytes(out, "prompt_cache_key").String()
+		got := ojson.GetBytes(out, "prompt_cache_key").String()
 		t.Logf("home=%v prompt_cache_key=%q", home, got)
 		if got != "fixture-cache-key" {
 			t.Errorf("home=%v: enabled prompt cache option is not consumed", home)
@@ -71,10 +71,10 @@ func TestHomeV8CompatOptionsReachUpstream(t *testing.T) {
 		if enabled {
 			field = "max_completion_tokens"
 		}
-		if gjson.GetBytes(body, field).Int() != 512 {
+		if ojson.GetBytes(body, field).Int() != 512 {
 			t.Fatalf("enabled=%v missing %s in %s", enabled, field, body)
 		}
-		if enabled && gjson.GetBytes(body, "prompt_cache_key").String() != "fixture-cache" {
+		if enabled && ojson.GetBytes(body, "prompt_cache_key").String() != "fixture-cache" {
 			t.Fatalf("prompt cache missing: %s", body)
 		}
 	}
@@ -106,7 +106,7 @@ func TestHomeV8PromptCacheOverrideAndFallback(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := gjson.GetBytes(result, "prompt_cache_key").Exists(); got != tc.want {
+			if got := ojson.GetBytes(result, "prompt_cache_key").Exists(); got != tc.want {
 				t.Fatalf("cache key present=%v, want=%v", got, tc.want)
 			}
 		})
@@ -199,7 +199,7 @@ func TestHomeCompatOptionsUseSelectedRoute(t *testing.T) {
 					if enabled {
 						field, otherField = otherField, field
 					}
-					if gjson.GetBytes(body, field).Int() != 64 || gjson.GetBytes(body, otherField).Exists() {
+					if ojson.GetBytes(body, field).Int() != 64 || ojson.GetBytes(body, otherField).Exists() {
 						t.Errorf("expected only %s=64 in %s", field, body)
 					}
 					if hasImage := strings.Contains(string(body), "image_url"); hasImage == enabled {

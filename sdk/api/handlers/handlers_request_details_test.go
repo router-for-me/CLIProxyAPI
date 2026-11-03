@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -150,10 +150,10 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 			if !json.Valid([]byte(body)) {
 				t.Fatalf("error body is not valid JSON: %s", body)
 			}
-			if got := gjson.Get(body, "error.code").String(); got != "model_not_found" {
+			if got := ojson.Get(body, "error.code").String(); got != "model_not_found" {
 				t.Fatalf("error code = %q, want model_not_found; the caller controlled the body: %s", got, body)
 			}
-			if got, want := gjson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
+			if got, want := ojson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
 				t.Fatalf("error message = %q, want %q", got, want)
 			}
 		})

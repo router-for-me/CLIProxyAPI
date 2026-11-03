@@ -12,23 +12,22 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Walk recursively traverses a JSON structure to find all occurrences of a specific field.
 // It builds paths to each occurrence and adds them to the provided paths slice.
 //
 // Parameters:
-//   - value: The gjson.Result object to traverse
+//   - value: The ojson.Result object to traverse
 //   - path: The current path in the JSON structure (empty string for root)
 //   - field: The field name to search for
 //   - paths: Pointer to a slice where found paths will be stored
 //
 // The function works recursively, building dot-notation paths to each occurrence
 // of the specified field throughout the JSON structure.
-func Walk(value gjson.Result, path, field string, paths *[]string) {
+func Walk(value ojson.Result, path, field string, paths *[]string) {
 	walk(value, path, field, paths, false)
 }
 
@@ -37,15 +36,15 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 // whose contents are client data rather than subschemas. The literal keyword itself is still
 // recorded when it is the searched field, and under a property-name map a key spelled like one is
 // a property name whose subschema is still walked.
-func WalkSchema(value gjson.Result, path, field string, paths *[]string) {
+func WalkSchema(value ojson.Result, path, field string, paths *[]string) {
 	walk(value, path, field, paths, true)
 }
 
-func walk(value gjson.Result, path, field string, paths *[]string, schemaAware bool) {
+func walk(value ojson.Result, path, field string, paths *[]string, schemaAware bool) {
 	switch value.Type {
-	case gjson.JSON:
+	case ojson.JSON:
 		// For JSON objects and arrays, iterate through each child
-		value.ForEach(func(key, val gjson.Result) bool {
+		value.ForEach(func(key, val ojson.Result) bool {
 			var childPath string
 			// Escape special characters for gjson/sjson path syntax
 			// . -> \.
@@ -68,7 +67,7 @@ func walk(value gjson.Result, path, field string, paths *[]string, schemaAware b
 			walk(val, childPath, field, paths, schemaAware)
 			return true
 		})
-	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
+	case ojson.String, ojson.Number, ojson.True, ojson.False, ojson.Null:
 		// Terminal types - no further traversal needed
 	}
 }
@@ -89,23 +88,22 @@ func walk(value gjson.Result, path, field string, paths *[]string, schemaAware b
 // 1. Sets the value at the new key path
 // 2. Deletes the old key path
 func RenameKey(jsonStr, oldKeyPath, newKeyPath string) (string, error) {
-	value := gjson.Get(jsonStr, oldKeyPath)
+	value := ojson.Get(jsonStr, oldKeyPath)
 
 	if !value.Exists() {
 		return "", fmt.Errorf("old key '%s' does not exist", oldKeyPath)
 	}
 
-	interimJSON, errSet := sjson.SetRawBytes([]byte(jsonStr), newKeyPath, []byte(value.Raw))
-	if errSet != nil {
+	doc := ojson.NewDocString(jsonStr)
+	if errSet := doc.SetRaw(newKeyPath, value.Raw); errSet != nil {
 		return "", fmt.Errorf("failed to set new key '%s': %w", newKeyPath, errSet)
 	}
 
-	finalJSON, errDelete := sjson.DeleteBytes(interimJSON, oldKeyPath)
-	if errDelete != nil {
+	if errDelete := doc.Delete(oldKeyPath); errDelete != nil {
 		return "", fmt.Errorf("failed to delete old key '%s': %w", oldKeyPath, errDelete)
 	}
 
-	return string(finalJSON), nil
+	return doc.String(), nil
 }
 
 // FixJSON converts non-standard JSON that uses single quotes for strings into
@@ -263,29 +261,71 @@ func UnambiguousToolNameMapFromClaudeRequest(rawJSON []byte) map[string]string {
 	return toolNameMapFromClaudeRequest(rawJSON, true)
 }
 
+func claudePayloadMayContainToolAddition(rawJSON []byte) bool {
+	return bytes.Contains(rawJSON, []byte("tool_addition")) ||
+		bytes.Contains(rawJSON, []byte(`\u`)) ||
+		bytes.Contains(rawJSON, []byte(`\U`))
+}
+
+func forEachClaudeInlineToolAdditionDefinition(rawJSON []byte, fn func(def ojson.Result)) {
+	if !claudePayloadMayContainToolAddition(rawJSON) {
+		return
+	}
+	messages := ojson.GetBytes(rawJSON, "messages")
+	if !messages.IsArray() {
+		return
+	}
+	messages.ForEach(func(_, message ojson.Result) bool {
+		if message.Get("role").String() != "system" {
+			return true
+		}
+		content := message.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(_, part ojson.Result) bool {
+			if part.Get("type").String() != "tool_addition" {
+				return true
+			}
+			toolSpec := part.Get("tool")
+			if toolSpec.Get("type").String() == "tool_definition" || toolSpec.Get("definition").IsObject() {
+				if def := toolSpec.Get("definition"); def.IsObject() {
+					fn(def)
+				}
+			}
+			return true
+		})
+		return true
+	})
+}
+
 func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[string]string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
 		return nil
 	}
 
-	tools := gjson.GetBytes(rawJSON, "tools")
-	if !tools.Exists() || !tools.IsArray() {
+	tools := ojson.GetBytes(rawJSON, "tools")
+	hasTools := tools.Exists() && tools.IsArray()
+	hasToolAddition := claudePayloadMayContainToolAddition(rawJSON)
+	if !hasTools && !hasToolAddition {
 		return nil
 	}
 
-	toolResults := tools.Array()
-	out := make(map[string]string, len(toolResults))
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		name := strings.TrimSpace(tool.Get("name").String())
+	var out map[string]string
+	recordTool := func(tool ojson.Result) {
+		name := strings.Clone(strings.TrimSpace(tool.Get("name").String()))
 		if name == "" {
-			name = strings.TrimSpace(tool.Get("function.name").String())
+			name = strings.Clone(strings.TrimSpace(tool.Get("function.name").String()))
 		}
 		if name == "" {
-			return true
+			return
 		}
-		key := CanonicalToolName(name)
+		key := strings.Clone(CanonicalToolName(name))
 		if key == "" {
-			return true
+			return
+		}
+		if out == nil {
+			out = make(map[string]string, 4)
 		}
 		if previous, exists := out[key]; !exists {
 			out[key] = name
@@ -294,8 +334,17 @@ func toolNameMapFromClaudeRequest(rawJSON []byte, rejectAmbiguous bool) map[stri
 			// an ambiguous canonical key, including exact declared names.
 			out[key] = ""
 		}
-		return true
-	})
+	}
+
+	if hasTools {
+		tools.ForEach(func(_, tool ojson.Result) bool {
+			recordTool(tool)
+			return true
+		})
+	}
+	if hasToolAddition {
+		forEachClaudeInlineToolAdditionDefinition(rawJSON, recordTool)
+	}
 
 	if len(out) == 0 {
 		return nil
@@ -323,21 +372,39 @@ func MapClaudeToolName(toolNameMap map[string]string, originalRequestRawJSON []b
 	if name == "" {
 		return name
 	}
-	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
-		tools := gjson.GetBytes(originalRequestRawJSON, "tools")
-		if tools.IsArray() {
+	if len(originalRequestRawJSON) > 0 && ojson.ValidBytes(originalRequestRawJSON) {
+		tools := ojson.GetBytes(originalRequestRawJSON, "tools")
+		hasTools := tools.IsArray()
+		hasToolAddition := claudePayloadMayContainToolAddition(originalRequestRawJSON)
+		if hasTools || hasToolAddition {
 			canonical := CanonicalToolName(name)
 			canonicalNames := map[string]bool{}
-			for _, tool := range tools.Array() {
+			exactMatch := false
+			inspectTool := func(tool ojson.Result) {
 				declared := strings.TrimSpace(tool.Get("name").String())
 				if declared == "" {
 					declared = strings.TrimSpace(tool.Get("function.name").String())
 				}
 				if declared == name {
-					return name
+					exactMatch = true
+					return
 				}
 				if declared != "" && CanonicalToolName(declared) == canonical {
 					canonicalNames[declared] = true
+				}
+			}
+			if hasTools {
+				for _, tool := range tools.Array() {
+					inspectTool(tool)
+					if exactMatch {
+						return name
+					}
+				}
+			}
+			if hasToolAddition {
+				forEachClaudeInlineToolAdditionDefinition(originalRequestRawJSON, inspectTool)
+				if exactMatch {
+					return name
 				}
 			}
 			if len(canonicalNames) > 1 {
@@ -426,21 +493,21 @@ func DisambiguatedToolNameMap(rawJSON []byte) map[string]string {
 // top-level Claude-style tools. Collision-aware translators should use
 // DisambiguatedToolNameMap instead.
 func SanitizedToolNameMap(rawJSON []byte) map[string]string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
 		return nil
 	}
-	tools := gjson.GetBytes(rawJSON, "tools")
+	tools := ojson.GetBytes(rawJSON, "tools")
 	if !tools.IsArray() {
 		return nil
 	}
 
 	out := make(map[string]string)
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		name := strings.TrimSpace(tool.Get("name").String())
+	tools.ForEach(func(_, tool ojson.Result) bool {
+		name := strings.Clone(strings.TrimSpace(tool.Get("name").String()))
 		if name == "" {
 			return true
 		}
-		sanitized := SanitizeFunctionName(name)
+		sanitized := strings.Clone(SanitizeFunctionName(name))
 		if sanitized == name {
 			return true
 		}
@@ -458,30 +525,30 @@ func SanitizedToolNameMap(rawJSON []byte) map[string]string {
 }
 
 func functionNamesFromRequest(rawJSON []byte) []string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
 		return nil
 	}
-	tools := gjson.GetBytes(rawJSON, "tools")
+	tools := ojson.GetBytes(rawJSON, "tools")
 	if !tools.IsArray() {
 		return nil
 	}
 
 	names := make([]string, 0, len(tools.Array()))
-	var collectTool func(gjson.Result)
-	collectDeclarations := func(declarations gjson.Result) {
+	var collectTool func(ojson.Result)
+	collectDeclarations := func(declarations ojson.Result) {
 		if !declarations.IsArray() {
 			return
 		}
-		declarations.ForEach(func(_, declaration gjson.Result) bool {
+		declarations.ForEach(func(_, declaration ojson.Result) bool {
 			if name := declaration.Get("name").String(); name != "" {
-				names = append(names, name)
+				names = append(names, strings.Clone(name))
 			}
 			return true
 		})
 	}
-	collectTool = func(tool gjson.Result) {
+	collectTool = func(tool ojson.Result) {
 		if nestedTools := tool.Get("tools"); nestedTools.IsArray() {
-			nestedTools.ForEach(func(_, nestedTool gjson.Result) bool {
+			nestedTools.ForEach(func(_, nestedTool ojson.Result) bool {
 				collectTool(nestedTool)
 				return true
 			})
@@ -500,14 +567,14 @@ func functionNamesFromRequest(rawJSON []byte) []string {
 			return
 		}
 		if name := tool.Get("function.name").String(); name != "" {
-			names = append(names, name)
+			names = append(names, strings.Clone(name))
 			return
 		}
 		if name := tool.Get("name").String(); name != "" {
-			names = append(names, name)
+			names = append(names, strings.Clone(name))
 		}
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		collectTool(tool)
 		return true
 	})
@@ -531,7 +598,7 @@ func disambiguateSanitizedFunctionName(base, original string, used map[string]st
 
 // DeduplicateFunctionDeclarations removes duplicate named declarations while preserving order.
 func DeduplicateFunctionDeclarations(raw []byte) []byte {
-	result := gjson.ParseBytes(raw)
+	result := ParseGJSONBytesNoCopy(raw)
 	if !result.IsArray() {
 		return raw
 	}
@@ -565,7 +632,7 @@ func RestoreSanitizedToolName(toolNameMap map[string]string, sanitizedName strin
 }
 
 type claudeObjectSchemaInfo struct {
-	properties           map[string][]gjson.Result
+	properties           map[string][]ojson.Result
 	required             map[string]bool
 	hasProperties        bool
 	allowsDynamic        bool
@@ -577,7 +644,7 @@ type claudeObjectSchemaInfo struct {
 	branchInfos          []claudeObjectSchemaInfo
 }
 
-func claudeSchemaAllowsDynamic(schema gjson.Result) bool {
+func claudeSchemaAllowsDynamic(schema ojson.Result) bool {
 	// patternProperties permit matching keys even when additionalProperties is false
 	// (the latter only restricts keys matching no pattern), so pattern permission is
 	// never cancelled by an additionalProperties: false sibling.
@@ -585,24 +652,24 @@ func claudeSchemaAllowsDynamic(schema gjson.Result) bool {
 		return true
 	}
 	additionalProperties := schema.Get("additionalProperties")
-	if additionalProperties.Exists() && additionalProperties.Type != gjson.False {
+	if additionalProperties.Exists() && additionalProperties.Type != ojson.False {
 		return true
 	}
 	return false
 }
 
-func claudeSchemaHasPatternProperties(schema gjson.Result) bool {
+func claudeSchemaHasPatternProperties(schema ojson.Result) bool {
 	return schema.Get("patternProperties").IsObject() && len(schema.Get("patternProperties").Map()) > 0
 }
 
-func claudeSchemaForbidsDynamic(schema gjson.Result) bool {
+func claudeSchemaForbidsDynamic(schema ojson.Result) bool {
 	additionalProperties := schema.Get("additionalProperties")
-	return additionalProperties.Exists() && additionalProperties.Type == gjson.False
+	return additionalProperties.Exists() && additionalProperties.Type == ojson.False
 }
 
-func claudeResolveLocalRef(root gjson.Result, ref string) (gjson.Result, bool) {
+func claudeResolveLocalRef(root ojson.Result, ref string) (ojson.Result, bool) {
 	if !strings.HasPrefix(ref, "#/") {
-		return gjson.Result{}, false
+		return ojson.Result{}, false
 	}
 	current := root
 	for _, segment := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
@@ -612,11 +679,11 @@ func claudeResolveLocalRef(root gjson.Result, ref string) (gjson.Result, bool) {
 			if current.IsArray() {
 				index, errAtoi := strconv.Atoi(segment)
 				if errAtoi != nil || index < 0 || index >= len(current.Array()) {
-					return gjson.Result{}, false
+					return ojson.Result{}, false
 				}
 				next = current.Array()[index]
 			} else {
-				return gjson.Result{}, false
+				return ojson.Result{}, false
 			}
 		}
 		current = next
@@ -624,11 +691,11 @@ func claudeResolveLocalRef(root gjson.Result, ref string) (gjson.Result, bool) {
 	return current, true
 }
 
-func analyzeClaudeObjectSchema(schema gjson.Result, root gjson.Result) claudeObjectSchemaInfo {
+func analyzeClaudeObjectSchema(schema ojson.Result, root ojson.Result) claudeObjectSchemaInfo {
 	return analyzeClaudeObjectSchemaDepth(schema, root, 0, map[string]bool{})
 }
 
-func claudeSchemaDeclaresObject(schema gjson.Result) bool {
+func claudeSchemaDeclaresObject(schema ojson.Result) bool {
 	typeValue := schema.Get("type")
 	if typeValue.String() == "object" {
 		return true
@@ -643,8 +710,8 @@ func claudeSchemaDeclaresObject(schema gjson.Result) bool {
 	return false
 }
 
-func claudeUnionBranches(schema gjson.Result) ([]gjson.Result, bool) {
-	var branches []gjson.Result
+func claudeUnionBranches(schema ojson.Result) ([]ojson.Result, bool) {
+	var branches []ojson.Result
 	seen := map[string]bool{}
 	for _, keyword := range []string{"anyOf", "oneOf"} {
 		union := schema.Get(keyword)
@@ -686,7 +753,7 @@ var claudeAnalyzedSchemaKeywords = map[string]bool{
 	"example": true, "contentEncoding": true, "contentMediaType": true,
 }
 
-func claudeSchemaHasUnanalyzedKeyword(schema gjson.Result) bool {
+func claudeSchemaHasUnanalyzedKeyword(schema ojson.Result) bool {
 	for key := range schema.Map() {
 		if strings.HasPrefix(key, "x-") {
 			continue
@@ -698,8 +765,8 @@ func claudeSchemaHasUnanalyzedKeyword(schema gjson.Result) bool {
 	return false
 }
 
-func analyzeClaudeObjectSchemaDepth(schema gjson.Result, root gjson.Result, depth int, visitedRefs map[string]bool) claudeObjectSchemaInfo {
-	info := claudeObjectSchemaInfo{properties: map[string][]gjson.Result{}, required: map[string]bool{}}
+func analyzeClaudeObjectSchemaDepth(schema ojson.Result, root ojson.Result, depth int, visitedRefs map[string]bool) claudeObjectSchemaInfo {
+	info := claudeObjectSchemaInfo{properties: map[string][]ojson.Result{}, required: map[string]bool{}}
 	if depth > 16 || !schema.Exists() || !schema.IsObject() {
 		info.complex = true
 		return info
@@ -833,7 +900,7 @@ func analyzeClaudeObjectSchemaDepth(schema gjson.Result, root gjson.Result, dept
 	return info
 }
 
-func appendUniqueSchema(schemas []gjson.Result, value gjson.Result) []gjson.Result {
+func appendUniqueSchema(schemas []ojson.Result, value ojson.Result) []ojson.Result {
 	for _, existing := range schemas {
 		if existing.Raw == value.Raw {
 			return schemas
@@ -844,7 +911,7 @@ func appendUniqueSchema(schemas []gjson.Result, value gjson.Result) []gjson.Resu
 
 func mergeClaudeObjectSchemaInfo(dst *claudeObjectSchemaInfo, src claudeObjectSchemaInfo) {
 	if dst.properties == nil {
-		dst.properties = map[string][]gjson.Result{}
+		dst.properties = map[string][]ojson.Result{}
 	}
 	if dst.required == nil {
 		dst.required = map[string]bool{}
@@ -869,18 +936,18 @@ func mergeClaudeObjectSchemaInfo(dst *claudeObjectSchemaInfo, src claudeObjectSc
 	dst.declaresObject = dst.declaresObject || src.declaresObject
 }
 
-func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (gjson.Result, gjson.Result, bool) {
-	if toolName == "" || len(originalRequestRawJSON) == 0 || !gjson.ValidBytes(originalRequestRawJSON) {
-		return gjson.Result{}, gjson.Result{}, false
+func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (ojson.Result, ojson.Result, bool) {
+	if toolName == "" || len(originalRequestRawJSON) == 0 || !ojson.ValidBytes(originalRequestRawJSON) {
+		return ojson.Result{}, ojson.Result{}, false
 	}
-	root := gjson.ParseBytes(originalRequestRawJSON)
+	root := ojson.ParseBytes(originalRequestRawJSON)
 	tools := root.Get("tools")
 	if !tools.IsArray() {
-		return gjson.Result{}, root, false
+		return ojson.Result{}, root, false
 	}
 	type candidate struct {
 		name   string
-		schema gjson.Result
+		schema ojson.Result
 		found  bool
 	}
 	var exact []candidate
@@ -924,7 +991,7 @@ func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (gjson
 		if identical {
 			return exact[0].schema, root, true
 		}
-		return gjson.Result{}, root, false
+		return ojson.Result{}, root, false
 	}
 	if len(canonicalMatches) == 1 {
 		for _, matches := range canonicalMatches {
@@ -944,7 +1011,7 @@ func findClaudeToolSchema(originalRequestRawJSON []byte, toolName string) (gjson
 			}
 		}
 	}
-	return gjson.Result{}, root, false
+	return ojson.Result{}, root, false
 }
 
 // ClaudeToolIsParameterless reports whether the tool was declared in the original
@@ -967,13 +1034,13 @@ func ClaudeToolIsParameterless(toolName string, originalRequestRawJSON []byte) b
 	return len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0)
 }
 
-func resolveClaudeArrayItemsSchema(schema gjson.Result, root gjson.Result, depth int, visitedRefs map[string]bool) ([]gjson.Result, bool) {
+func resolveClaudeArrayItemsSchema(schema ojson.Result, root ojson.Result, depth int, visitedRefs map[string]bool) ([]ojson.Result, bool) {
 	if depth > 16 || !schema.Exists() || !schema.IsObject() {
 		return nil, false
 	}
-	var items []gjson.Result
+	var items []ojson.Result
 	deterministic := true
-	collect := func(candidate gjson.Result) {
+	collect := func(candidate ojson.Result) {
 		items = appendUniqueSchema(items, candidate)
 	}
 	if ref := schema.Get("$ref"); ref.Exists() {
@@ -1037,11 +1104,11 @@ func claudeDeclaredPropertyPlaceholders(info claudeObjectSchemaInfo) (bool, bool
 	return reasonDeclared, underscoreDeclared
 }
 
-func claudeArraySchemaUnsafe(schema gjson.Result, root gjson.Result) bool {
+func claudeArraySchemaUnsafe(schema ojson.Result, root ojson.Result) bool {
 	return analyzeClaudeObjectSchema(schema, root).unsafeComplex
 }
 
-func cleanClaudeToolArray(argsJSON string, schemas []gjson.Result, root gjson.Result, path string) string {
+func cleanClaudeToolArray(argsJSON string, schemas []ojson.Result, root ojson.Result, path string) string {
 	for _, schema := range schemas {
 		if claudeArraySchemaUnsafe(schema, root) {
 			// Value-constraining keywords on the array itself (e.g. enum of whole
@@ -1049,7 +1116,7 @@ func cleanClaudeToolArray(argsJSON string, schemas []gjson.Result, root gjson.Re
 			return argsJSON
 		}
 	}
-	var itemSchemas []gjson.Result
+	var itemSchemas []ojson.Result
 	deterministic := true
 	for _, schema := range schemas {
 		resolvedItems, okItems := resolveClaudeArrayItemsSchema(schema, root, 0, map[string]bool{})
@@ -1072,10 +1139,10 @@ func cleanClaudeToolArray(argsJSON string, schemas []gjson.Result, root gjson.Re
 		return argsJSON
 	}
 	cleaned := argsJSON
-	elementCount := len(gjson.Get(cleaned, path).Array())
+	elementCount := len(ojson.Get(cleaned, path).Array())
 	for index := 0; index < elementCount; index++ {
 		elementPath := joinPath(path, strconv.Itoa(index))
-		element := gjson.Get(cleaned, elementPath)
+		element := ojson.Get(cleaned, elementPath)
 		if element.IsObject() {
 			cleaned = cleanClaudeToolObject(cleaned, itemSchemas, root, elementPath, false)
 		} else if element.IsArray() {
@@ -1085,15 +1152,15 @@ func cleanClaudeToolArray(argsJSON string, schemas []gjson.Result, root gjson.Re
 	return cleaned
 }
 
-func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.Result, path string, topLevel bool) string {
-	argsResult := gjson.Get(argsJSON, path)
+func cleanClaudeToolObject(argsJSON string, schemas []ojson.Result, root ojson.Result, path string, topLevel bool) string {
+	argsResult := ojson.Get(argsJSON, path)
 	if path == "" {
-		argsResult = gjson.Parse(argsJSON)
+		argsResult = ojson.Parse(argsJSON)
 	}
 	if !argsResult.IsObject() || len(schemas) == 0 {
 		return argsJSON
 	}
-	merged := claudeObjectSchemaInfo{properties: map[string][]gjson.Result{}}
+	merged := claudeObjectSchemaInfo{properties: map[string][]ojson.Result{}}
 	for _, schema := range schemas {
 		mergeClaudeObjectSchemaInfo(&merged, analyzeClaudeObjectSchema(schema, root))
 	}
@@ -1115,7 +1182,7 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 		if topLevel {
 			return "{}"
 		}
-		updated, _ := sjson.SetRaw(argsJSON, path, "{}")
+		updated, _ := ojson.SetRaw(argsJSON, path, "{}")
 		return updated
 	}
 	keys := make([]string, 0, len(merged.properties))
@@ -1127,13 +1194,13 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 	for _, key := range keys {
 		propertySchemas := merged.properties[key]
 		childPath := joinPath(path, escapeGJSONPathKey(key))
-		child := gjson.Get(cleaned, childPath)
+		child := ojson.Get(cleaned, childPath)
 		if !child.Exists() {
 			continue
 		}
-		currentForBranch := gjson.Parse(cleaned)
+		currentForBranch := ojson.Parse(cleaned)
 		if path != "" {
-			currentForBranch = gjson.Get(cleaned, path)
+			currentForBranch = ojson.Get(cleaned, path)
 		}
 		if claudeParentBranchAcceptsChild(merged, key, currentForBranch) || claudeOriginalsMayPermitChild(schemas, root, key, currentForBranch) {
 			continue
@@ -1147,14 +1214,16 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 	if claudeInfoAnyBranchAllowsDynamic(merged) {
 		return cleaned
 	}
-	current := gjson.Parse(cleaned)
+	current := ojson.Parse(cleaned)
 	if path != "" {
-		current = gjson.Get(cleaned, path)
+		current = ojson.Get(cleaned, path)
 	}
 	if !current.IsObject() {
 		return cleaned
 	}
 	reasonDeclared, underscoreDeclared := claudeDeclaredPropertyPlaceholders(merged)
+	doc := ojson.NewDocString(cleaned)
+	docModified := false
 	for _, placeholder := range []string{"reason", "_"} {
 		if placeholder == "reason" && reasonDeclared {
 			continue
@@ -1176,12 +1245,17 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 		}
 		if _, ok := current.Map()[placeholder]; ok {
 			placeholderPath := joinPath(path, placeholder)
-			cleaned, _ = sjson.Delete(cleaned, placeholderPath)
+			if doc.Delete(placeholderPath) == nil {
+				docModified = true
+			}
 		}
 	}
-	parsedCleaned := gjson.Parse(cleaned)
+	if docModified {
+		cleaned = doc.String()
+	}
+	parsedCleaned := ojson.Parse(cleaned)
 	if path != "" {
-		parsedCleaned = gjson.Get(cleaned, path)
+		parsedCleaned = ojson.Get(cleaned, path)
 	}
 	if parsedCleaned.IsObject() && len(parsedCleaned.Map()) == 0 && path == "" {
 		return "{}"
@@ -1189,17 +1263,17 @@ func cleanClaudeToolObject(argsJSON string, schemas []gjson.Result, root gjson.R
 	return cleaned
 }
 
-func findTranslatedClaudeToolSchemas(translatedRequestRawJSON []byte, toolName string, originalRequestRawJSON []byte) []gjson.Result {
-	if toolName == "" || len(translatedRequestRawJSON) == 0 || !gjson.ValidBytes(translatedRequestRawJSON) {
+func findTranslatedClaudeToolSchemas(translatedRequestRawJSON []byte, toolName string, originalRequestRawJSON []byte) []ojson.Result {
+	if toolName == "" || len(translatedRequestRawJSON) == 0 || !ojson.ValidBytes(translatedRequestRawJSON) {
 		return nil
 	}
-	root := gjson.ParseBytes(translatedRequestRawJSON)
+	root := ojson.ParseBytes(translatedRequestRawJSON)
 	type namedSchema struct {
 		name   string
-		schema gjson.Result
+		schema ojson.Result
 	}
 	var named []namedSchema
-	collectNamed := func(tools gjson.Result) {
+	collectNamed := func(tools ojson.Result) {
 		if !tools.IsArray() {
 			return
 		}
@@ -1237,8 +1311,8 @@ func findTranslatedClaudeToolSchemas(translatedRequestRawJSON []byte, toolName s
 	if forward := SanitizedFunctionNameMap(originalRequestRawJSON); forward != nil {
 		sentName = forward[toolName]
 	}
-	var exact []gjson.Result
-	canonicalByName := map[string][]gjson.Result{}
+	var exact []ojson.Result
+	canonicalByName := map[string][]ojson.Result{}
 	for _, entry := range named {
 		if entry.name == toolName || (sentName != "" && entry.name == sentName) {
 			exact = append(exact, entry.schema)
@@ -1258,7 +1332,7 @@ func findTranslatedClaudeToolSchemas(translatedRequestRawJSON []byte, toolName s
 	return nil
 }
 
-func claudeOriginalDeclaresPropertyDeep(schema gjson.Result, root gjson.Result, property string, depth int, visitedRefs map[string]bool) bool {
+func claudeOriginalDeclaresPropertyDeep(schema ojson.Result, root ojson.Result, property string, depth int, visitedRefs map[string]bool) bool {
 	if depth > 16 || !schema.Exists() || !schema.IsObject() {
 		return false
 	}
@@ -1308,7 +1382,7 @@ func claudeInfoAnyBranchAllowsDynamic(info claudeObjectSchemaInfo) bool {
 	return info.allowsDynamic && !info.forbidsDynamic
 }
 
-func claudeBranchMayAccept(info claudeObjectSchemaInfo, key string, current gjson.Result) bool {
+func claudeBranchMayAccept(info claudeObjectSchemaInfo, key string, current ojson.Result) bool {
 	// patternProperties permit matching keys regardless of additionalProperties.
 	if info.hasPatternProperties {
 		return true
@@ -1347,7 +1421,7 @@ func claudeBranchMayAccept(info claudeObjectSchemaInfo, key string, current gjso
 	return false
 }
 
-func claudeParentBranchAcceptsChild(originalInfo claudeObjectSchemaInfo, key string, current gjson.Result) bool {
+func claudeParentBranchAcceptsChild(originalInfo claudeObjectSchemaInfo, key string, current ojson.Result) bool {
 	if len(originalInfo.branchInfos) == 0 {
 		return false
 	}
@@ -1363,7 +1437,7 @@ func claudeParentBranchAcceptsChild(originalInfo claudeObjectSchemaInfo, key str
 	return false
 }
 
-func claudeCandidateMayPermitChild(info claudeObjectSchemaInfo, key string, current gjson.Result) bool {
+func claudeCandidateMayPermitChild(info claudeObjectSchemaInfo, key string, current ojson.Result) bool {
 	if _, declaresKey := info.properties[key]; declaresKey {
 		return false
 	}
@@ -1381,7 +1455,7 @@ func claudeCandidateMayPermitChild(info claudeObjectSchemaInfo, key string, curr
 	return true
 }
 
-func claudeOriginalsMayPermitChild(originals []gjson.Result, root gjson.Result, key string, current gjson.Result) bool {
+func claudeOriginalsMayPermitChild(originals []ojson.Result, root ojson.Result, key string, current ojson.Result) bool {
 	if len(originals) <= 1 {
 		return false
 	}
@@ -1397,7 +1471,7 @@ func claudeOriginalsMayPermitChild(originals []gjson.Result, root gjson.Result, 
 	return false
 }
 
-func claudeOriginalsAnyCandidateAcceptsImplicitly(originals []gjson.Result, root gjson.Result, current gjson.Result) bool {
+func claudeOriginalsAnyCandidateAcceptsImplicitly(originals []ojson.Result, root ojson.Result, current ojson.Result) bool {
 	if len(originals) <= 1 {
 		return false
 	}
@@ -1420,7 +1494,7 @@ func claudeOriginalsAnyCandidateAcceptsImplicitly(originals []gjson.Result, root
 	return false
 }
 
-func claudeOriginalsAnyBranchAllowsDynamic(originals []gjson.Result, root gjson.Result) bool {
+func claudeOriginalsAnyBranchAllowsDynamic(originals []ojson.Result, root ojson.Result) bool {
 	for _, original := range originals {
 		if info := analyzeClaudeObjectSchema(original, root); claudeInfoAnyBranchAllowsDynamic(info) {
 			return true
@@ -1429,18 +1503,18 @@ func claudeOriginalsAnyBranchAllowsDynamic(originals []gjson.Result, root gjson.
 	return false
 }
 
-func mergedClaudeOriginalInfo(originals []gjson.Result, root gjson.Result) claudeObjectSchemaInfo {
-	merged := claudeObjectSchemaInfo{properties: map[string][]gjson.Result{}}
+func mergedClaudeOriginalInfo(originals []ojson.Result, root ojson.Result) claudeObjectSchemaInfo {
+	merged := claudeObjectSchemaInfo{properties: map[string][]ojson.Result{}}
 	for _, original := range originals {
 		mergeClaudeObjectSchemaInfo(&merged, analyzeClaudeObjectSchema(original, root))
 	}
 	return merged
 }
 
-func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchemas []gjson.Result, originals []gjson.Result, root gjson.Result, path string, topLevel bool) string {
-	current := gjson.Parse(argsJSON)
+func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchemas []ojson.Result, originals []ojson.Result, root ojson.Result, path string, topLevel bool) string {
+	current := ojson.Parse(argsJSON)
 	if path != "" {
-		current = gjson.Get(argsJSON, path)
+		current = ojson.Get(argsJSON, path)
 	}
 	if !current.IsObject() || len(translatedSchemas) == 0 || len(originals) == 0 {
 		return argsJSON
@@ -1477,11 +1551,11 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 		sort.Strings(keys)
 		for _, key := range keys {
 			childPath := joinPath(path, escapeGJSONPathKey(key))
-			child := gjson.Get(cleaned, childPath)
+			child := ojson.Get(cleaned, childPath)
 			if !child.Exists() {
 				continue
 			}
-			var translatedChildren []gjson.Result
+			var translatedChildren []ojson.Result
 			for _, translated := range translatedSchemas {
 				translatedInfo := analyzeClaudeObjectSchema(translated, translated)
 				for _, childSchema := range translatedInfo.properties[key] {
@@ -1492,9 +1566,9 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 				continue
 			}
 			originalChildren := originalInfo.properties[key]
-			currentForBranch := gjson.Parse(cleaned)
+			currentForBranch := ojson.Parse(cleaned)
 			if path != "" {
-				currentForBranch = gjson.Get(cleaned, path)
+				currentForBranch = ojson.Get(cleaned, path)
 			}
 			if claudeParentBranchAcceptsChild(originalInfo, key, currentForBranch) || claudeOriginalsMayPermitChild(originals, root, key, currentForBranch) {
 				// Another alternative branch/candidate may accept this key without an
@@ -1510,13 +1584,14 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 			}
 		}
 	}
-	currentAfterChildren := gjson.Parse(cleaned)
+	currentAfterChildren := ojson.Parse(cleaned)
 	if path != "" {
-		currentAfterChildren = gjson.Get(cleaned, path)
+		currentAfterChildren = ojson.Get(cleaned, path)
 	}
 	if !currentAfterChildren.IsObject() {
 		return cleaned
 	}
+	var placeholdersToDelete []string
 	for _, placeholder := range []string{"reason", "_"} {
 		if _, declared := originalInfo.properties[placeholder]; declared {
 			continue
@@ -1638,11 +1713,11 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 				// Mirror the executor's cleanNestedSchema wrapping: the schema is nested
 				// under a wrapper key before cleaning, so its top-level object counts as
 				// nested and can receive the "_" placeholder.
-				wrapped, errWrap := sjson.SetRaw("{}", "schema", translated.Raw)
+				wrapped, errWrap := ojson.SetRaw("{}", "schema", translated.Raw)
 				if errWrap != nil {
 					continue
 				}
-				recleaned := gjson.Get(CleanJSONSchemaForAntigravity(wrapped), "schema")
+				recleaned := ojson.Get(CleanJSONSchemaForAntigravity(wrapped), "schema")
 				if !recleaned.Exists() {
 					continue
 				}
@@ -1658,7 +1733,14 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 			}
 		}
 		if injected {
-			cleaned, _ = sjson.Delete(cleaned, joinPath(path, placeholder))
+			placeholdersToDelete = append(placeholdersToDelete, joinPath(path, placeholder))
+		}
+	}
+	doc := ojson.NewDocString(cleaned)
+	docModified := false
+	for _, placeholderPath := range placeholdersToDelete {
+		if doc.Delete(placeholderPath) == nil {
+			docModified = true
 		}
 	}
 	// Closed parameterless objects: if the original declared no properties and
@@ -1673,20 +1755,29 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 			break
 		}
 	}
-	currentForNormalize := gjson.Parse(cleaned)
-	if path != "" {
-		currentForNormalize = gjson.Get(cleaned, path)
+	currentForNormalize := doc.Get(path)
+	if path == "" {
+		if docModified {
+			cleaned = doc.String()
+			docModified = false
+		}
+		currentForNormalize = ojson.Parse(cleaned)
 	}
 	if !originalInfo.complex && allCandidatesDeclareObject && originalInfo.forbidsDynamic && !claudeInfoAnyBranchAllowsDynamic(originalInfo) && !claudeOriginalsAnyBranchAllowsDynamic(originals, root) && !claudeOriginalsAnyCandidateAcceptsImplicitly(originals, root, currentForNormalize) && originalInfo.declaresObject && len(originalInfo.required) == 0 && (!originalInfo.hasProperties || len(originalInfo.properties) == 0) {
 		if topLevel {
 			return "{}"
 		}
-		updated, _ := sjson.SetRaw(cleaned, path, "{}")
-		return updated
+		if doc.SetRaw(path, "{}") == nil {
+			return doc.String()
+		}
+		return cleaned
 	}
-	parsedCleaned := gjson.Parse(cleaned)
+	if docModified {
+		cleaned = doc.String()
+	}
+	parsedCleaned := ojson.Parse(cleaned)
 	if path != "" {
-		parsedCleaned = gjson.Get(cleaned, path)
+		parsedCleaned = ojson.Get(cleaned, path)
 	}
 	if parsedCleaned.IsObject() && len(parsedCleaned.Map()) == 0 && path == "" {
 		return "{}"
@@ -1695,14 +1786,14 @@ func cleanClaudeToolArgumentsByTranslatedSchema(argsJSON string, translatedSchem
 	return cleaned
 }
 
-func cleanClaudeTranslatedArray(argsJSON string, translatedArraySchemas []gjson.Result, originalArraySchemas []gjson.Result, root gjson.Result, path string) string {
+func cleanClaudeTranslatedArray(argsJSON string, translatedArraySchemas []ojson.Result, originalArraySchemas []ojson.Result, root ojson.Result, path string) string {
 	for _, schema := range originalArraySchemas {
 		if claudeArraySchemaUnsafe(schema, root) {
 			return argsJSON
 		}
 	}
-	var translatedItems []gjson.Result
-	var originalItems []gjson.Result
+	var translatedItems []ojson.Result
+	var originalItems []ojson.Result
 	deterministic := true
 	for _, schema := range translatedArraySchemas {
 		items, okItems := resolveClaudeArrayItemsSchema(schema, schema, 0, map[string]bool{})
@@ -1730,10 +1821,10 @@ func cleanClaudeTranslatedArray(argsJSON string, translatedArraySchemas []gjson.
 		return argsJSON
 	}
 	cleaned := argsJSON
-	elementCount := len(gjson.Get(cleaned, path).Array())
+	elementCount := len(ojson.Get(cleaned, path).Array())
 	for index := 0; index < elementCount; index++ {
 		elementPath := joinPath(path, strconv.Itoa(index))
-		element := gjson.Get(cleaned, elementPath)
+		element := ojson.Get(cleaned, elementPath)
 		if element.IsObject() {
 			cleaned = cleanClaudeToolArgumentsByTranslatedSchema(cleaned, translatedItems, originalItems, root, elementPath, false)
 		} else if element.IsArray() {
@@ -1756,7 +1847,7 @@ func CleanClaudeToolArgumentsWithTranslated(rawArgs string, toolName string, ori
 		if rawArgs == "" || rawArgs == "{}" {
 			return "{}"
 		}
-		if !gjson.Valid(rawArgs) || !gjson.Parse(rawArgs).IsObject() {
+		if !ojson.Valid(rawArgs) || !ojson.Parse(rawArgs).IsObject() {
 			return rawArgs
 		}
 		schema, _, found := findClaudeToolSchema(originalRequestRawJSON, toolName)
@@ -1766,7 +1857,7 @@ func CleanClaudeToolArgumentsWithTranslated(rawArgs string, toolName string, ori
 		if !schema.Exists() {
 			return "{}"
 		}
-		return cleanClaudeToolArgumentsByTranslatedSchema(rawArgs, translatedSchemas, []gjson.Result{schema}, schema, "", true)
+		return cleanClaudeToolArgumentsByTranslatedSchema(rawArgs, translatedSchemas, []ojson.Result{schema}, schema, "", true)
 	}
 	return CleanClaudeToolArguments(rawArgs, toolName, originalRequestRawJSON)
 }
@@ -1785,7 +1876,7 @@ func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRa
 	if rawArgs == "" || rawArgs == "{}" {
 		return "{}"
 	}
-	if !gjson.Valid(rawArgs) {
+	if !ojson.Valid(rawArgs) {
 		return rawArgs
 	}
 	schema, root, found := findClaudeToolSchema(originalRequestRawJSON, toolName)
@@ -1795,7 +1886,7 @@ func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRa
 	if !schema.Exists() {
 		return "{}"
 	}
-	argsResult := gjson.Parse(rawArgs)
+	argsResult := ojson.Parse(rawArgs)
 	if !argsResult.IsObject() {
 		return rawArgs
 	}
@@ -1807,5 +1898,5 @@ func CleanClaudeToolArguments(rawArgs string, toolName string, originalRequestRa
 	if len(info.required) == 0 && (!info.hasProperties || len(info.properties) == 0) && info.forbidsDynamic && !claudeInfoAnyBranchAllowsDynamic(info) {
 		return "{}"
 	}
-	return cleanClaudeToolObject(rawArgs, []gjson.Result{schema}, schema, "", true)
+	return cleanClaudeToolObject(rawArgs, []ojson.Result{schema}, schema, "", true)
 }

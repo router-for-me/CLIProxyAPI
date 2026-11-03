@@ -1,10 +1,8 @@
 package helps
 
 import (
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 var emptyGeminiUserTurnJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
@@ -12,17 +10,33 @@ var emptyGeminiUserTurnJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
 // EnsureGeminiLeadingUserContent ensures that the contents array at the given path
 // starts with a user turn when sending to Gemini/Antigravity upstreams.
 func EnsureGeminiLeadingUserContent(payload []byte, path string) []byte {
-	firstRole := gjson.GetBytes(payload, path+".0.role")
-	if firstRole.String() != "model" {
+	if len(payload) == 0 {
 		return payload
 	}
-	contents := util.GetGJSONBytesNoCopy(payload, path)
-	if !contents.IsArray() {
+	doc := ojson.NewDoc(payload)
+	if !EnsureGeminiLeadingUserContentDoc(doc, path) {
 		return payload
+	}
+	return doc.Bytes()
+}
+
+// EnsureGeminiLeadingUserContentDoc ensures that the contents array at the given path
+// starts with a user turn in place on doc.
+func EnsureGeminiLeadingUserContentDoc(doc *ojson.Doc, path string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	firstRole := doc.Get(path + ".0.role")
+	if firstRole.String() != "model" {
+		return false
+	}
+	contents := doc.Get(path)
+	if !contents.IsArray() {
+		return false
 	}
 	contentArray := contents.Array()
 	if len(contentArray) == 0 {
-		return payload
+		return false
 	}
 
 	contentItems := make([][]byte, 0, len(contentArray)+1)
@@ -31,14 +45,10 @@ func EnsureGeminiLeadingUserContent(payload []byte, path string) []byte {
 		contentItems = append(contentItems, []byte(content.Raw))
 	}
 
-	out, errSet := sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(contentItems))
-	if errSet != nil {
-		return payload
-	}
-	return out
+	return doc.SetRawBytes(path, translatorcommon.JoinRawArray(contentItems)) == nil
 }
 
-func contentHasFunctionResponse(content gjson.Result) bool {
+func contentHasFunctionResponse(content ojson.Result) bool {
 	parts := content.Get("parts")
 	if !parts.IsArray() {
 		return false
@@ -53,7 +63,7 @@ func contentHasFunctionResponse(content gjson.Result) bool {
 
 // contentHasFunctionResponseMedia reports whether any functionResponse in the
 // content carries nested media parts (inlineData/fileData).
-func contentHasFunctionResponseMedia(content gjson.Result) bool {
+func contentHasFunctionResponseMedia(content ojson.Result) bool {
 	parts := content.Get("parts")
 	if !parts.IsArray() {
 		return false
@@ -76,21 +86,37 @@ func contentHasFunctionResponseMedia(content gjson.Result) bool {
 // A model-role functionResponse turn carrying nested media is the exception:
 // Antigravity rejects it as the final turn with 400 INVALID_ARGUMENT (#6524).
 func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
-	contents := util.GetGJSONBytesNoCopy(payload, path)
-	if !contents.IsArray() {
+	if len(payload) == 0 {
 		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !EnsureGeminiTrailingUserContentDoc(doc, path) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// EnsureGeminiTrailingUserContentDoc ensures that the contents array at the given path
+// ends with a user turn in place on doc.
+func EnsureGeminiTrailingUserContentDoc(doc *ojson.Doc, path string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	contents := doc.Get(path)
+	if !contents.IsArray() {
+		return false
 	}
 	contentArray := contents.Array()
 	if len(contentArray) == 0 {
-		return payload
+		return false
 	}
 	lastContent := contentArray[len(contentArray)-1]
 	lastRole := lastContent.Get("role").String()
 	if lastRole != "model" && lastRole != "assistant" {
-		return payload
+		return false
 	}
 	if contentHasFunctionResponse(lastContent) && !contentHasFunctionResponseMedia(lastContent) {
-		return payload
+		return false
 	}
 
 	contentItems := make([][]byte, 0, len(contentArray)+1)
@@ -99,11 +125,7 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 	}
 	contentItems = append(contentItems, emptyGeminiUserTurnJSON)
 
-	out, errSet := sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(contentItems))
-	if errSet != nil {
-		return payload
-	}
-	return out
+	return doc.SetRawBytes(path, translatorcommon.JoinRawArray(contentItems)) == nil
 }
 
 // DropGeminiTrailingThoughtOnlyContent removes trailing model turns made only of
@@ -112,9 +134,25 @@ func EnsureGeminiTrailingUserContent(payload []byte, path string) []byte {
 // empty user turn, which did not prevent Antigravity (#6530) or Vertex (#6630)
 // from rejecting the request as ending with a model turn.
 func DropGeminiTrailingThoughtOnlyContent(payload []byte, path string) []byte {
-	contents := util.GetGJSONBytesNoCopy(payload, path)
-	if !contents.IsArray() {
+	if len(payload) == 0 {
 		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !DropGeminiTrailingThoughtOnlyContentDoc(doc, path) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// DropGeminiTrailingThoughtOnlyContentDoc removes trailing model turns made only of
+// thought parts in place on doc, keeping at least one turn.
+func DropGeminiTrailingThoughtOnlyContentDoc(doc *ojson.Doc, path string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	contents := doc.Get(path)
+	if !contents.IsArray() {
+		return false
 	}
 	contentArray := contents.Array()
 	keep := len(contentArray)
@@ -122,21 +160,17 @@ func DropGeminiTrailingThoughtOnlyContent(payload []byte, path string) []byte {
 		keep--
 	}
 	if keep == len(contentArray) {
-		return payload
+		return false
 	}
 
 	contentItems := make([][]byte, 0, keep)
 	for _, content := range contentArray[:keep] {
 		contentItems = append(contentItems, []byte(content.Raw))
 	}
-	out, errSet := sjson.SetRawBytes(payload, path, translatorcommon.JoinRawArray(contentItems))
-	if errSet != nil {
-		return payload
-	}
-	return out
+	return doc.SetRawBytes(path, translatorcommon.JoinRawArray(contentItems)) == nil
 }
 
-func contentIsThoughtOnlyModelTurn(content gjson.Result) bool {
+func contentIsThoughtOnlyModelTurn(content ojson.Result) bool {
 	role := content.Get("role").String()
 	if role != "model" && role != "assistant" {
 		return false
@@ -156,6 +190,20 @@ func contentIsThoughtOnlyModelTurn(content gjson.Result) bool {
 // EnsureGeminiBoundaryUserContent ensures that the contents array at the given path
 // both starts and ends with a user turn when sending to Gemini/Antigravity upstreams.
 func EnsureGeminiBoundaryUserContent(payload []byte, path string) []byte {
-	payload = EnsureGeminiLeadingUserContent(payload, path)
-	return EnsureGeminiTrailingUserContent(payload, path)
+	if len(payload) == 0 {
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !EnsureGeminiBoundaryUserContentDoc(doc, path) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// EnsureGeminiBoundaryUserContentDoc ensures that the contents array at the given path
+// both starts and ends with a user turn in place on doc.
+func EnsureGeminiBoundaryUserContentDoc(doc *ojson.Doc, path string) bool {
+	leading := EnsureGeminiLeadingUserContentDoc(doc, path)
+	trailing := EnsureGeminiTrailingUserContentDoc(doc, path)
+	return leading || trailing
 }

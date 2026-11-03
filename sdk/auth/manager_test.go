@@ -9,6 +9,7 @@ import (
 	"time"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -193,6 +194,185 @@ func TestManagerLogin_MigratesMatchingLegacyClaudeCredential(t *testing.T) {
 	}
 }
 
+func TestManagerLogin_ReloginKeepsCanonicalXAICredential(t *testing.T) {
+	authDir := t.TempDir()
+	targetFileName := xaiauth.CredentialFileName("a+b@example.com", "sub-first")
+	targetPath := filepath.Join(authDir, targetFileName)
+
+	existing := map[string]any{
+		"type":         "xai",
+		"email":        "a+b@example.com",
+		"sub":          "sub-first",
+		"access_token": "old-token",
+		"prefix":       "team",
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal canonical credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(targetPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write canonical credential: %v", errWrite)
+	}
+
+	newRecord := &coreauth.Auth{
+		ID:       targetFileName,
+		FileName: targetFileName,
+		Provider: "xai",
+		Storage: &xaiauth.TokenStorage{
+			Type:        "xai",
+			Email:       "a+b@example.com",
+			Subject:     "sub-first",
+			AccessToken: "new-token",
+		},
+		Metadata: map[string]any{
+			"type":         "xai",
+			"email":        "a+b@example.com",
+			"sub":          "sub-first",
+			"access_token": "new-token",
+		},
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	mgr := NewManager(store, &dummyAuthenticator{provider: "xai", record: newRecord})
+
+	_, savedPath, errLogin := mgr.Login(context.Background(), "xai", &config.Config{AuthDir: authDir}, nil)
+	if errLogin != nil {
+		t.Fatalf("Login error: %v", errLogin)
+	}
+	if savedPath != targetPath {
+		t.Fatalf("savedPath = %s, want %s", savedPath, targetPath)
+	}
+	savedRaw, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("canonical credential was deleted by re-login: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal canonical credential: %v", errUnmarshal)
+	}
+	if saved["access_token"] != "new-token" || saved["prefix"] != "team" {
+		t.Fatalf("saved credential = %#v, want new token with preserved prefix", saved)
+	}
+}
+
+func TestManagerLogin_SubjectOnlyReloginKeepsEmailCredential(t *testing.T) {
+	authDir := t.TempDir()
+	emailFileName := xaiauth.CredentialFileName("a+b@example.com", "sub-first")
+	emailPath := filepath.Join(authDir, emailFileName)
+
+	existing := map[string]any{
+		"type":         "xai",
+		"email":        "a+b@example.com",
+		"sub":          "sub-first",
+		"access_token": "old-token",
+		"prefix":       "team",
+		"weight":       float64(5),
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal canonical credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(emailPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write canonical credential: %v", errWrite)
+	}
+
+	// The upstream stops returning an email, so the authenticator names the
+	// record after the subject; its identity keys omit the missing email.
+	subjectFileName := xaiauth.CredentialFileName("", "sub-first")
+	newRecord := &coreauth.Auth{
+		ID:       subjectFileName,
+		FileName: subjectFileName,
+		Provider: "xai",
+		Storage: &xaiauth.TokenStorage{
+			Type:        "xai",
+			Subject:     "sub-first",
+			AccessToken: "new-token",
+		},
+		Metadata: map[string]any{
+			"type":         "xai",
+			"sub":          "sub-first",
+			"access_token": "new-token",
+		},
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	mgr := NewManager(store, &dummyAuthenticator{provider: "xai", record: newRecord})
+
+	_, savedPath, errLogin := mgr.Login(context.Background(), "xai", &config.Config{AuthDir: authDir}, nil)
+	if errLogin != nil {
+		t.Fatalf("Login error: %v", errLogin)
+	}
+	if savedPath != emailPath {
+		t.Fatalf("savedPath = %s, want canonical email credential %s", savedPath, emailPath)
+	}
+	savedRaw, errRead := os.ReadFile(emailPath)
+	if errRead != nil {
+		t.Fatalf("read canonical credential: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal canonical credential: %v", errUnmarshal)
+	}
+	if saved["access_token"] != "new-token" || saved["prefix"] != "team" || saved["weight"] != float64(5) || saved["email"] != "a+b@example.com" {
+		t.Fatalf("saved credential = %#v, want new token with preserved settings and email", saved)
+	}
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil {
+		t.Fatalf("ReadDir error: %v", errReadDir)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("auth dir holds %d files, want the single canonical credential", len(entries))
+	}
+
+	// Return leg: the upstream returns the email again, and that login must
+	// land on the same canonical file with settings intact, completing the
+	// email+subject -> subject-only -> email+subject round trip.
+	returnRecord := &coreauth.Auth{
+		ID:       emailFileName,
+		FileName: emailFileName,
+		Provider: "xai",
+		Storage: &xaiauth.TokenStorage{
+			Type:        "xai",
+			Email:       "a+b@example.com",
+			Subject:     "sub-first",
+			AccessToken: "round-trip-token",
+		},
+		Metadata: map[string]any{
+			"type":         "xai",
+			"email":        "a+b@example.com",
+			"sub":          "sub-first",
+			"access_token": "round-trip-token",
+		},
+	}
+	returnMgr := NewManager(store, &dummyAuthenticator{provider: "xai", record: returnRecord})
+	_, savedPath, errLogin = returnMgr.Login(context.Background(), "xai", &config.Config{AuthDir: authDir}, nil)
+	if errLogin != nil {
+		t.Fatalf("return Login error: %v", errLogin)
+	}
+	if savedPath != emailPath {
+		t.Fatalf("return savedPath = %s, want canonical email credential %s", savedPath, emailPath)
+	}
+	savedRaw, errRead = os.ReadFile(emailPath)
+	if errRead != nil {
+		t.Fatalf("read round-trip credential: %v", errRead)
+	}
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal round-trip credential: %v", errUnmarshal)
+	}
+	if saved["access_token"] != "round-trip-token" || saved["prefix"] != "team" || saved["weight"] != float64(5) || saved["email"] != "a+b@example.com" {
+		t.Fatalf("round-trip credential = %#v, want newest token with preserved settings and email", saved)
+	}
+	entries, errReadDir = os.ReadDir(authDir)
+	if errReadDir != nil {
+		t.Fatalf("ReadDir error: %v", errReadDir)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("auth dir holds %d files after round trip, want the single canonical credential", len(entries))
+	}
+}
+
 func TestManagerLogin_DoesNotMigrateLegacyClaudeCredentialFromDifferentOrganization(t *testing.T) {
 	authDir := t.TempDir()
 	legacyFileName := "claude-user@example.com.json"
@@ -313,5 +493,84 @@ func TestManagerLogin_MultipleOrganizationsSharingEmailCoexist(t *testing.T) {
 	}
 	if len(records) != 2 {
 		t.Fatalf("store.List returned %d records, want 2 distinct organization records", len(records))
+	}
+}
+
+func TestManagerLogin_MigratesMatchingLegacyXAICredential(t *testing.T) {
+	authDir := t.TempDir()
+	legacyFileName := "xai-a-b@example.com.json"
+	targetFileName := xaiauth.CredentialFileName("a+b@example.com", "sub-first")
+	legacyPath := filepath.Join(authDir, legacyFileName)
+	targetPath := filepath.Join(authDir, targetFileName)
+
+	existing := map[string]any{
+		"type":         "xai",
+		"email":        "a+b@example.com",
+		"sub":          "sub-first",
+		"access_token": "old-token",
+		"prefix":       "team",
+		"proxy_url":    "http://127.0.0.1:8080",
+		"disabled":     true,
+		"weight":       float64(5),
+	}
+	raw, errMarshal := json.Marshal(existing)
+	if errMarshal != nil {
+		t.Fatalf("marshal legacy credential: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(legacyPath, raw, 0o600); errWrite != nil {
+		t.Fatalf("write legacy credential: %v", errWrite)
+	}
+
+	newRecord := &coreauth.Auth{
+		ID:       targetFileName,
+		FileName: targetFileName,
+		Provider: "xai",
+		Storage: &xaiauth.TokenStorage{
+			Type:        "xai",
+			Email:       "a+b@example.com",
+			Subject:     "sub-first",
+			AccessToken: "new-token",
+		},
+		Metadata: map[string]any{
+			"type":         "xai",
+			"email":        "a+b@example.com",
+			"sub":          "sub-first",
+			"access_token": "new-token",
+		},
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	mgr := NewManager(store, &dummyAuthenticator{provider: "xai", record: newRecord})
+
+	_, savedPath, errLogin := mgr.Login(context.Background(), "xai", &config.Config{AuthDir: authDir}, nil)
+	if errLogin != nil {
+		t.Fatalf("Login error: %v", errLogin)
+	}
+	if savedPath != targetPath {
+		t.Fatalf("savedPath = %s, want %s", savedPath, targetPath)
+	}
+	if _, errStat := os.Stat(legacyPath); !os.IsNotExist(errStat) {
+		t.Fatalf("legacy credential still exists or stat failed: %v", errStat)
+	}
+
+	savedRaw, errRead := os.ReadFile(targetPath)
+	if errRead != nil {
+		t.Fatalf("read migrated credential: %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("unmarshal migrated credential: %v", errUnmarshal)
+	}
+	for key, want := range map[string]any{
+		"access_token": "new-token",
+		"prefix":       "team",
+		"proxy_url":    "http://127.0.0.1:8080",
+		"disabled":     true,
+		"weight":       float64(5),
+	} {
+		if got := saved[key]; got != want {
+			t.Errorf("%s = %#v, want %#v", key, got, want)
+		}
 	}
 }

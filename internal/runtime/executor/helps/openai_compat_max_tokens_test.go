@@ -3,8 +3,8 @@ package helps
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestShouldUseMaxCompletionTokensForModel(t *testing.T) {
@@ -115,10 +115,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"o1","max_tokens":1024,"messages":[]}`)
 		got := NormalizeOpenAIMaxTokens(input, true)
 
-		if v := gjson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 1024 {
+		if v := ojson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 1024 {
 			t.Fatalf("max_completion_tokens = %v, want 1024; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_tokens").Exists() {
+		if ojson.GetBytes(got, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -127,10 +127,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"o1","max_tokens":512,"max_completion_tokens":2048}`)
 		got := NormalizeOpenAIMaxTokens(input, true)
 
-		if v := gjson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 2048 {
+		if v := ojson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 2048 {
 			t.Fatalf("max_completion_tokens = %v, want 2048; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_tokens").Exists() {
+		if ojson.GetBytes(got, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -139,10 +139,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"o1","max_completion_tokens":4096}`)
 		got := NormalizeOpenAIMaxTokens(input, true)
 
-		if v := gjson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 4096 {
+		if v := ojson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Int() != 4096 {
 			t.Fatalf("max_completion_tokens = %v, want 4096; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_tokens").Exists() {
+		if ojson.GetBytes(got, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; out=%s", string(got))
 		}
 	})
@@ -151,10 +151,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"deepseek","max_completion_tokens":1024,"messages":[]}`)
 		got := NormalizeOpenAIMaxTokens(input, false)
 
-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 1024 {
+		if v := ojson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 1024 {
 			t.Fatalf("max_tokens = %v, want 1024; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(got, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -163,10 +163,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"deepseek","max_tokens":512,"max_completion_tokens":2048}`)
 		got := NormalizeOpenAIMaxTokens(input, false)
 
-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 512 {
+		if v := ojson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 512 {
 			t.Fatalf("max_tokens = %v, want 512; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(got, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -175,10 +175,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"deepseek","max_tokens":4096}`)
 		got := NormalizeOpenAIMaxTokens(input, false)
 
-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 4096 {
+		if v := ojson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 4096 {
 			t.Fatalf("max_tokens = %v, want 4096; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(got, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; out=%s", string(got))
 		}
 	})
@@ -187,10 +187,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"o1","max_tokens":null}`)
 		got := NormalizeOpenAIMaxTokens(input, true)
 
-		if v := gjson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Type != gjson.Null {
+		if v := ojson.GetBytes(got, "max_completion_tokens"); !v.Exists() || v.Type != ojson.Null {
 			t.Fatalf("max_completion_tokens = %v, want null; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_tokens").Exists() {
+		if ojson.GetBytes(got, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -199,10 +199,10 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"deepseek","max_completion_tokens":null}`)
 		got := NormalizeOpenAIMaxTokens(input, false)
 
-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Type != gjson.Null {
+		if v := ojson.GetBytes(got, "max_tokens"); !v.Exists() || v.Type != ojson.Null {
 			t.Fatalf("max_tokens = %v, want null; out=%s", v, string(got))
 		}
-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(got, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
 		}
 	})
@@ -211,12 +211,12 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
 		input := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
 
 		gotTrue := NormalizeOpenAIMaxTokens(input, true)
-		if gjson.GetBytes(gotTrue, "max_tokens").Exists() || gjson.GetBytes(gotTrue, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotTrue, "max_tokens").Exists() || ojson.GetBytes(gotTrue, "max_completion_tokens").Exists() {
 			t.Fatalf("unexpected token fields emitted for true; out=%s", string(gotTrue))
 		}
 
 		gotFalse := NormalizeOpenAIMaxTokens(input, false)
-		if gjson.GetBytes(gotFalse, "max_tokens").Exists() || gjson.GetBytes(gotFalse, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotFalse, "max_tokens").Exists() || ojson.GetBytes(gotFalse, "max_completion_tokens").Exists() {
 			t.Fatalf("unexpected token fields emitted for false; out=%s", string(gotFalse))
 		}
 	})

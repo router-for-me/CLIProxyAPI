@@ -6,8 +6,9 @@ package claude
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 // GeneratePKCECodes generates a PKCE code verifier and challenge pair
@@ -45,12 +46,12 @@ func generateCodeVerifier() (string, error) {
 	}
 
 	// Encode to URL-safe base64 without padding
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(bytes), nil
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 // generateCodeChallenge creates a SHA256 hash of the code verifier
 // and encodes it using URL-safe base64 encoding without padding
 func generateCodeChallenge(codeVerifier string) string {
 	hash := sha256.Sum256([]byte(codeVerifier))
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(hash[:])
+	return base64.RawURLEncoding.EncodeToString(hash[:])
 }

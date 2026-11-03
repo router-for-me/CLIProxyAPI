@@ -104,8 +104,9 @@ retain the corresponding business operation's fields.
 | `/credentials/status` | PATCH | Change credential status. |
 | `/credentials/fields` | PATCH | Change credential fields. |
 | `/credentials/refresh` | POST | Refresh credentials. |
+| `/credentials/verify` | POST | Run an operator-triggered, account-pinned inference verification using an isolated session and minimal 1-token prompt. |
 | `/oauth/import?provider=vertex` | POST | Import a Vertex service account using a multipart `file` upload. |
-| `/oauth/auth-url?provider=<provider>` | GET | Start built-in or plugin OAuth. |
+| `/oauth/auth-url?provider=<provider>` | GET, POST | Start built-in or plugin OAuth (supports `name`/`auth_index` for targeted credential recovery and optional `verify` opt-in). |
 | `/oauth/siwc/bind` | POST | Start SIWC binding to an existing file-backed Codex OAuth credential. |
 | `/oauth/siwc/status` | GET | Read local SIWC credential status (`off`, `valid`, or `invalid`). |
 | `/oauth/status?state=<state>` | GET | Get login status. |
@@ -128,9 +129,16 @@ GET /v8/management/oauth/auth-url?provider=codex
 Authorization: Bearer <management-key>
 ```
 
-Keep any provider-specific login parameters in the query string. The login
-response includes the authorization URL and a session `state`. Use that state
-for status queries and cancellation.
+Keep any provider-specific login parameters in the query string. To target recovery
+at a specific existing credential, pass `name` (or `auth_index`) via query parameter
+or POST JSON body; authenticating a different account will be rejected rather than
+overwriting or clearing the target credential's recovery state. By default, post-login
+inference verification is not executed automatically to avoid unexpected token
+consumption; operators may explicitly opt in by passing `verify: true` (and optional
+`verify_model`) when starting the targeted login, or trigger verification explicitly
+after adoption via `POST /v8/management/credentials/verify` (`{"name":"<file>","model":"<optional-model>"}`).
+The login response includes the authorization URL and a session `state` (plus `target_auth_id`
+when targeted). Use that state for status queries and cancellation.
 
 Callbacks accept `provider`, `state`, `code`, and `error` as GET query parameters
 or POST JSON fields. POST also accepts `redirect_url` containing the complete
@@ -220,6 +228,18 @@ For Codex entries, `GET /credentials` includes these non-secret summary fields:
 | `siwc_status` | string | Local SIWC status: `off`, `valid`, or `invalid`. |
 | `siwc_bound` | boolean | SIWC access token, refresh token, and issued client ID are present; not a live validity check. |
 | `siwc_expires_at` | optional RFC3339 string | Stored SIWC expiration, when available. |
+| `access_token_expires_at` | optional RFC3339 string | Active access token expiration deadline, when available. |
+| `next_refresh_after` | optional RFC3339 string | Next scheduled automatic refresh check, when in the future. |
+| `requires_sign_in` | boolean | Automatic renewal failed with a terminal grant rejection and independent sign-in is required. |
+| `renewal_state` | string | Renewal lifecycle state: `sign_in_required`, `expired_sign_in_required`, `retry_scheduled`, `awaiting_first_renewal`, or `renewal_verified`. |
+| `recovery_stage` | string | Post-login runtime adoption and verification stage: `sign_in_required`, `quota_blocked`, `loaded`, `inference_verified`, or `renewal_verified`. |
+| `adopted` | boolean | Whether the current credential version is loaded in the running auth manager. |
+| `inference_verified` | boolean | Whether the current credential version has completed an inference response. |
+| `renewal_verified` | boolean | Whether the current credential version has completed an automatic refresh cycle. |
+| `refresh_error` | optional object | Sanitized last refresh failure (`code`, `message`, `http_status`) with no tokens, codes, or URLs. |
+| `next_action` | optional string | Required operator recovery action (`sign_in` when `requires_sign_in` is true). |
+| `recovery_hint` | optional string | Operator guidance explaining instance-scoped OAuth recovery when `requires_sign_in` is true. |
+| `renewal_event` | optional object | Deduplicated structured event (`renewal_sign_in_required`) for terminal renewal failures. |
 
 The v0 callback and credential-list contracts are unchanged. SIWC activation,
 unbinding, and standalone SIWC credential creation are not separate management

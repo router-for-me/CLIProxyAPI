@@ -3,8 +3,7 @@ package thinking
 import (
 	"strings"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func isResponsesFormat(format string) bool {
@@ -13,19 +12,29 @@ func isResponsesFormat(format string) bool {
 
 // extractConfigurationUpdateConfig returns the last nonempty Responses effort update.
 func extractConfigurationUpdateConfig(body []byte) ThinkingConfig {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return ThinkingConfig{}
 	}
-	input := gjson.GetBytes(body, "input")
+	return extractConfigurationUpdateConfigFromInput(ojson.GetBytesNoCopy(body, "input"))
+}
+
+func extractConfigurationUpdateConfigDoc(doc *ojson.Doc, docValid bool) ThinkingConfig {
+	if doc == nil || !docValid {
+		return ThinkingConfig{}
+	}
+	return extractConfigurationUpdateConfigFromInput(doc.Get("input"))
+}
+
+func extractConfigurationUpdateConfigFromInput(input ojson.Result) ThinkingConfig {
 	if !input.IsArray() {
 		return ThinkingConfig{}
 	}
 
 	var effort string
-	input.ForEach(func(_, item gjson.Result) bool {
+	input.ForEach(func(_, item ojson.Result) bool {
 		if item.Get("type").String() == "configuration_update" {
 			value := item.Get("reasoning.effort")
-			if value.Type == gjson.String {
+			if value.Type == ojson.String {
 				if normalized := strings.ToLower(strings.TrimSpace(value.String())); normalized != "" {
 					effort = normalized
 				}
@@ -56,19 +65,37 @@ func extractConfigurationUpdateConfig(body []byte) ThinkingConfig {
 // item is returned unchanged, and the top-level effort is only touched when
 // an update carries a usable effort.
 func CollapseConfigurationUpdates(body []byte, keepTopLevelEffort ...bool) []byte {
-	updated := stripConfigurationUpdates(body)
-	if len(keepTopLevelEffort) > 0 && keepTopLevelEffort[0] {
-		return updated
+	if len(body) == 0 || !ojson.ValidBytes(body) {
+		return body
 	}
-	effort := reasoningEffortFromConfig(extractConfigurationUpdateConfig(body))
-	if effort == "" {
-		return updated
+	doc := ojson.NewDoc(body)
+	if !collapseConfigurationUpdatesDoc(doc, true, keepTopLevelEffort...) {
+		return body
 	}
-	collapsed, errSet := sjson.SetBytes(updated, "reasoning.effort", effort)
-	if errSet != nil {
-		return updated
+	return doc.Bytes()
+}
+
+// CollapseConfigurationUpdatesDoc removes every configuration_update input item
+// on doc and optionally promotes the last nonempty update effort to reasoning.effort.
+func CollapseConfigurationUpdatesDoc(doc *ojson.Doc, keepTopLevelEffort ...bool) {
+	_ = collapseConfigurationUpdatesDoc(doc, true, keepTopLevelEffort...)
+}
+
+func collapseConfigurationUpdatesDoc(doc *ojson.Doc, docValid bool, keepTopLevelEffort ...bool) bool {
+	if doc == nil || !docValid {
+		return false
 	}
-	return collapsed
+	effort := ""
+	if !(len(keepTopLevelEffort) > 0 && keepTopLevelEffort[0]) {
+		effort = reasoningEffortFromConfig(extractConfigurationUpdateConfigDoc(doc, docValid))
+	}
+	modified := stripConfigurationUpdatesDoc(doc, docValid)
+	if effort != "" {
+		if doc.Set("reasoning.effort", effort) == nil {
+			modified = true
+		}
+	}
+	return modified
 }
 
 // StripConfigurationUpdates removes configuration_update input items without changing reasoning.
@@ -76,20 +103,36 @@ func StripConfigurationUpdates(body []byte) []byte {
 	return stripConfigurationUpdates(body)
 }
 
+// StripConfigurationUpdatesDoc removes configuration_update input items on doc.
+func StripConfigurationUpdatesDoc(doc *ojson.Doc) {
+	_ = stripConfigurationUpdatesDoc(doc, true)
+}
+
 // stripConfigurationUpdates removes unsupported Responses input items without
 // modifying other input items or introducing an input field.
 func stripConfigurationUpdates(body []byte) []byte {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return body
 	}
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !stripConfigurationUpdatesDoc(doc, true) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+func stripConfigurationUpdatesDoc(doc *ojson.Doc, docValid bool) bool {
+	if doc == nil || !docValid {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() {
+		return false
 	}
 
 	var kept []string
 	removed := false
-	input.ForEach(func(_, item gjson.Result) bool {
+	input.ForEach(func(_, item ojson.Result) bool {
 		if item.Get("type").String() == "configuration_update" {
 			removed = true
 		} else {
@@ -98,26 +141,32 @@ func stripConfigurationUpdates(body []byte) []byte {
 		return true
 	})
 	if !removed {
-		return body
+		return false
 	}
-	updated, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(kept, ",")+"]"))
-	if errSet != nil {
-		return body
-	}
-	return updated
+	return doc.SetRaw("input", "["+strings.Join(kept, ",")+"]") == nil
 }
 
 // stripResponsesEffort leaves summary and unrelated reasoning fields intact.
 func stripResponsesEffort(body []byte) []byte {
-	if len(body) == 0 || !gjson.ValidBytes(body) || !gjson.GetBytes(body, "reasoning.effort").Exists() {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return body
 	}
-	result, errDelete := sjson.DeleteBytes(body, "reasoning.effort")
-	if errDelete != nil {
+	doc := ojson.NewDoc(body)
+	if !stripResponsesEffortDoc(doc, true) {
 		return body
 	}
-	if reasoning := gjson.GetBytes(result, "reasoning"); reasoning.IsObject() && len(reasoning.Map()) == 0 {
-		result, _ = sjson.DeleteBytes(result, "reasoning")
+	return doc.Bytes()
+}
+
+func stripResponsesEffortDoc(doc *ojson.Doc, docValid bool) bool {
+	if doc == nil || !docValid || !doc.Get("reasoning.effort").Exists() {
+		return false
 	}
-	return result
+	if errDelete := doc.Delete("reasoning.effort"); errDelete != nil {
+		return false
+	}
+	if reasoning := doc.Get("reasoning"); reasoning.IsObject() && len(reasoning.Map()) == 0 {
+		_ = doc.Delete("reasoning")
+	}
+	return true
 }

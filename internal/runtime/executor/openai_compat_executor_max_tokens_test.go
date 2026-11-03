@@ -7,11 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
@@ -67,10 +67,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 1024 {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 1024 {
 			t.Fatalf("max_completion_tokens = %d, want 1024; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -89,10 +89,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 512 {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 512 {
 			t.Fatalf("max_completion_tokens = %d, want 512; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -111,10 +111,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 1024 {
+		if got := ojson.GetBytes(gotBody, "max_tokens").Int(); got != 1024 {
 			t.Fatalf("max_tokens = %d, want 1024; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -133,10 +133,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 512 {
+		if got := ojson.GetBytes(gotBody, "max_tokens").Int(); got != 512 {
 			t.Fatalf("max_tokens = %d, want 512; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -155,10 +155,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -177,10 +177,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -199,10 +199,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -221,10 +221,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalization(t *testing.T) {
 			t.Fatalf("Execute error: %v", err)
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -285,10 +285,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 256 {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens").Int(); got != 256 {
 			t.Fatalf("max_completion_tokens = %d, want 256; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -309,10 +309,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens").Int(); got != 256 {
+		if got := ojson.GetBytes(gotBody, "max_tokens").Int(); got != 256 {
 			t.Fatalf("max_tokens = %d, want 256; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -333,10 +333,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -357,10 +357,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -381,10 +381,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_completion_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_completion_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_tokens").Exists() {
 			t.Fatalf("max_tokens should be absent; body=%s", string(gotBody))
 		}
 	})
@@ -405,10 +405,10 @@ func TestOpenAICompatExecutor_MaxTokensNormalizationStream(t *testing.T) {
 		for range res.Chunks {
 		}
 
-		if got := gjson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != gjson.Null {
+		if got := ojson.GetBytes(gotBody, "max_tokens"); !got.Exists() || got.Type != ojson.Null {
 			t.Fatalf("max_tokens = %v, want null; body=%s", got, string(gotBody))
 		}
-		if gjson.GetBytes(gotBody, "max_completion_tokens").Exists() {
+		if ojson.GetBytes(gotBody, "max_completion_tokens").Exists() {
 			t.Fatalf("max_completion_tokens should be absent; body=%s", string(gotBody))
 		}
 	})

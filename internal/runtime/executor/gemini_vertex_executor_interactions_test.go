@@ -12,11 +12,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestGeminiVertexInteractions_ServiceAccount_Execute(t *testing.T) {
@@ -113,10 +113,10 @@ func TestGeminiVertexInteractions_ServiceAccount_Execute(t *testing.T) {
 	if gotRevision != "2026-05-20" {
 		t.Fatalf("got Api-Revision = %q, want 2026-05-20", gotRevision)
 	}
-	if !gjson.GetBytes(upstreamBody, "input").Exists() {
+	if !ojson.GetBytes(upstreamBody, "input").Exists() {
 		t.Fatalf("expected input in upstream body, got: %s", string(upstreamBody))
 	}
-	if gotID := gjson.GetBytes(resp.Payload, "id").String(); gotID != "interaction_vertex_1" {
+	if gotID := ojson.GetBytes(resp.Payload, "id").String(); gotID != "interaction_vertex_1" {
 		t.Fatalf("got response id = %q, want interaction_vertex_1", gotID)
 	}
 }
@@ -424,7 +424,7 @@ func TestGeminiVertexInteractions_APIKey_Execute(t *testing.T) {
 	if gotRevision != "2026-05-20" {
 		t.Fatalf("got Api-Revision = %q, want 2026-05-20", gotRevision)
 	}
-	if gotID := gjson.GetBytes(resp.Payload, "id").String(); gotID != "interaction_vertex_key" {
+	if gotID := ojson.GetBytes(resp.Payload, "id").String(); gotID != "interaction_vertex_key" {
 		t.Fatalf("got response id = %q, want interaction_vertex_key", gotID)
 	}
 }
@@ -537,7 +537,7 @@ func TestGeminiVertexInteractions_PayloadRulesOrdering(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if got := gjson.GetBytes(upstreamBody, "custom_rule_param").String(); got != "enforced_after_all_transforms" {
+	if got := ojson.GetBytes(upstreamBody, "custom_rule_param").String(); got != "enforced_after_all_transforms" {
 		t.Fatalf("custom_rule_param = %q, want enforced_after_all_transforms. Body: %s", got, string(upstreamBody))
 	}
 }

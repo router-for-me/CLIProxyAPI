@@ -292,16 +292,38 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			needSIWC = hasSIWC
 		}
 	}
+	suppressedRejectedOuter := false
+	if !diskRotatedOuter && auth.RejectedRefreshToken != "" && outerRefreshToken == strings.TrimSpace(auth.RejectedRefreshToken) {
+		if needOuter {
+			suppressedRejectedOuter = true
+		}
+		needOuter = false
+	}
+	suppressedRejectedSIWC := false
+	if !diskRotatedSIWC && auth.RejectedSIWCRefreshToken != "" && siwcRefreshToken == strings.TrimSpace(auth.RejectedSIWCRefreshToken) {
+		if needSIWC {
+			suppressedRejectedSIWC = true
+		}
+		needSIWC = false
+	}
 
 	if !needOuter && !needSIWC {
 		if diskRotatedOuter || diskRotatedSIWC {
 			patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, diskRotatedOuter, diskRotatedSIWC)
+			patch.SetUpstreamRefreshed(false)
 			auth.CodexRefreshPatch = patch
 			if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 				clonedStorage := *storage
 				clonedStorage.RefreshPatch = patch
 				auth.Storage = &clonedStorage
 			}
+			return auth, nil
+		}
+		if suppressedRejectedOuter || suppressedRejectedSIWC {
+			if auth.RefreshError != nil {
+				return nil, auth.RefreshError
+			}
+			return nil, statusErr{code: http.StatusUnauthorized, msg: "codex executor: refresh token is invalid; sign-in required"}
 		}
 		return auth, nil
 	}
@@ -439,11 +461,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if !outerRefreshed && !siwcRefreshed && !diskRotatedOuter && !diskRotatedSIWC {
-		if outerErr != nil {
-			return nil, outerErr
-		}
-		if siwcErr != nil {
-			return nil, siwcErr
+		if errCombined := codexauth.NewPartitionRefreshError(outerErr, siwcErr); errCombined != nil {
+			return nil, errCombined
 		}
 		return nil, fmt.Errorf("codex executor: refresh failed")
 	}
@@ -455,6 +474,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, outerRefreshed || diskRotatedOuter, siwcRefreshed || diskRotatedSIWC)
+	patch.SetUpstreamRefreshed(outerRefreshed || siwcRefreshed)
+	patch.SetPartitionErrors(outerErr, siwcErr)
 	auth.CodexRefreshPatch = patch
 	if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 		clonedStorage := *storage
