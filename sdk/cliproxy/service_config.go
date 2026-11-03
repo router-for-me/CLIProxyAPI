@@ -247,6 +247,20 @@ func (s *Service) configCommitCurrent(commit configCommit) bool {
 	return current
 }
 
+// discardConfigCommit stops a commit's selector preparation when its runtime
+// apply is skipped, so it does not stay pending until the next commit.
+func (s *Service) discardConfigCommit(commit configCommit) {
+	if commit.preparedSelector == nil {
+		return
+	}
+	s.configRuntimeMu.Lock()
+	defer s.configRuntimeMu.Unlock()
+	commit.preparedSelector.stop()
+	if s.pendingRoutingSelector == commit.preparedSelector {
+		s.pendingRoutingSelector = nil
+	}
+}
+
 func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, synthesizeConfigAuths bool) bool {
 	cfg := commit.cfg
 	if s == nil || cfg == nil {

@@ -746,7 +746,11 @@ func (s *Service) runHomeConfigWorkerWithSupervisor(lifetimeCtx, homeCtx context
 		if s.homeConfigRuntimeHook != nil {
 			s.homeConfigRuntimeHook()
 		}
-		if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) || !s.applyConfigRuntime(lifetimeCtx, work.configCommit, true) {
+		if !s.homeLifetimeActive(homeCtx, lifetimeCtx, generation) {
+			s.discardConfigCommit(work.configCommit)
+			return
+		}
+		if !s.applyConfigRuntime(lifetimeCtx, work.configCommit, true) {
 			return
 		}
 		if errFinalize := s.finalizeHomePluginWorkUntilDone(lifetimeCtx, homeCtx, generation, client, work, publish); errFinalize != nil {

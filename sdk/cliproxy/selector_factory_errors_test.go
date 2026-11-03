@@ -5,8 +5,10 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -196,5 +198,51 @@ func TestSelectorFactoryRebuildsOnTTLEditOnlyWhenAffinityEnabled(t *testing.T) {
 		if calls != want || int(previous.stops.Load()) != want {
 			t.Fatalf("affinity=%v: factory calls=%d, previous stops=%d", affinity, calls, previous.stops.Load())
 		}
+	}
+}
+
+func TestHomeConfigCancellationAfterCommitStopsPreparedSelector(t *testing.T) {
+	var prepared *factoryOwnedSelector
+	service, previous := factoryErrorService(func(*config.Config) (coreauth.Selector, error) {
+		prepared = &factoryOwnedSelector{}
+		return prepared, nil
+	})
+	service.cfg.Home.Enabled = true
+	service.homeGeneration = 1
+	homeCtx, cancelHome := context.WithCancel(context.Background())
+	t.Cleanup(cancelHome)
+	lifetimeCtx, cancelLifetime := context.WithCancel(homeCtx)
+	t.Cleanup(cancelLifetime)
+	// Cancel the Home lifetime between the commit and the runtime apply.
+	service.homeConfigRuntimeHook = cancelLifetime
+	client, _ := newHomePluginTaskTestClient(t, nil, 0)
+	queue := newHomeConfigWorkQueue()
+	queue.enqueue([]byte("routing:\n  strategy: fill-first\n"))
+	ready := make(chan struct{})
+	close(ready)
+	published := atomic.Bool{}
+	cancelBound := atomic.Int64{}
+	cancelBound.Store(int64(time.Second))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.runHomeConfigWorker(lifetimeCtx, homeCtx, 1, client, executionregistry.New(), queue, ready, &published, &cancelBound)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled Home config worker did not exit")
+	}
+	if prepared == nil {
+		t.Fatal("test setup: routing change did not prepare a selector")
+	}
+	service.configRuntimeMu.Lock()
+	pending := service.pendingRoutingSelector
+	service.configRuntimeMu.Unlock()
+	if prepared.stops.Load() != 1 || pending != nil {
+		t.Fatalf("canceled Home commit left its prepared selector: stops=%d pending=%v", prepared.stops.Load(), pending != nil)
+	}
+	if service.coreManager.Selector() != previous || previous.stops.Load() != 0 {
+		t.Fatal("canceled Home commit replaced or stopped the active selector")
 	}
 }
