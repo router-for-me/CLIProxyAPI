@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // usageLimitMinResetIn separates cooldowns a client should wait out through
@@ -127,17 +127,17 @@ func codexUsageLimitWindow(err *Error) (int64, bool) {
 		return 0, false
 	}
 	body := strings.TrimSpace(err.Message)
-	if !gjson.Valid(body) {
+	if !ojson.Valid(body) {
 		// An executor may prefix the upstream body, as in "status 429: {...}".
 		if idx := strings.Index(body, ": {"); idx != -1 && idx < 50 {
 			body = strings.TrimSpace(body[idx+2:])
 		}
 	}
-	if !gjson.Valid(body) {
+	if !ojson.Valid(body) {
 		return 0, false
 	}
-	root := gjson.Parse(body)
-	for _, node := range []gjson.Result{root.Get("error"), root, root.Get("body.error"), root.Get("response.error")} {
+	root := ojson.Parse(body)
+	for _, node := range []ojson.Result{root.Get("error"), root, root.Get("body.error"), root.Get("response.error")} {
 		if !node.IsObject() || !strings.EqualFold(strings.TrimSpace(node.Get("type").String()), "usage_limit_reached") {
 			continue
 		}

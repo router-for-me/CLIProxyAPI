@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func chatStopReasonChunks(reason string) [][]byte {
@@ -32,7 +33,7 @@ func TestChatContextWindowExceededStreamMapsToLengthAndKeepsTextAndUsage(t *test
 	var text string
 	var finish string
 	for _, output := range outputs {
-		chunk := gjson.ParseBytes(output)
+		chunk := util.ParseGJSONBytesNoCopy(output)
 		if chunk.Get("error").Exists() {
 			t.Fatalf("unexpected error chunk: %s", chunk.Raw)
 		}
@@ -47,7 +48,7 @@ func TestChatContextWindowExceededStreamMapsToLengthAndKeepsTextAndUsage(t *test
 	if finish != "length" {
 		t.Fatalf("stream finish_reason = %q, want length", finish)
 	}
-	last := gjson.ParseBytes(outputs[len(outputs)-1])
+	last := util.ParseGJSONBytesNoCopy(outputs[len(outputs)-1])
 	if last.Get("usage.completion_tokens").Int() != 3 {
 		t.Fatalf("trailing usage chunk = %s", last.Raw)
 	}
@@ -55,16 +56,16 @@ func TestChatContextWindowExceededStreamMapsToLengthAndKeepsTextAndUsage(t *test
 
 func TestChatContextWindowExceededNonStreamMapsToLengthAndKeepsTextAndUsage(t *testing.T) {
 	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-test", nil, nil, bytes.Join(chatStopReasonChunks("model_context_window_exceeded"), []byte("\n")), nil)
-	if gjson.GetBytes(out, "error").Exists() {
+	if ojson.GetBytesNoCopy(out, "error").Exists() {
 		t.Fatalf("unexpected error body = %s", out)
 	}
-	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "length" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String(); got != "length" {
 		t.Fatalf("finish_reason = %q, want length: %s", got, out)
 	}
-	if got := gjson.GetBytes(out, "choices.0.message.content").String(); got != "partial" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.content").String(); got != "partial" {
 		t.Fatalf("content = %q, want %q: %s", got, "partial", out)
 	}
-	if got := gjson.GetBytes(out, "usage.completion_tokens").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(out, "usage.completion_tokens").Int(); got != 3 {
 		t.Fatalf("completion_tokens = %d, want 3: %s", got, out)
 	}
 }
@@ -87,7 +88,7 @@ func TestChatTruncatedToolCallKeepsLengthFinishReason(t *testing.T) {
 			var streamCompletionTokens int64
 			for _, chunk := range chunks {
 				for _, output := range ConvertClaudeResponseToOpenAI(context.Background(), "claude-test", nil, nil, chunk, &param) {
-					parsed := gjson.ParseBytes(output)
+					parsed := util.ParseGJSONBytesNoCopy(output)
 					if args := parsed.Get("choices.0.delta.tool_calls.0.function.arguments"); args.Exists() {
 						streamArgs = args.String()
 					}
@@ -110,13 +111,13 @@ func TestChatTruncatedToolCallKeepsLengthFinishReason(t *testing.T) {
 			}
 
 			nonStream := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil)
-			if got := gjson.GetBytes(nonStream, "choices.0.finish_reason").String(); got != "length" {
+			if got := ojson.GetBytesNoCopy(nonStream, "choices.0.finish_reason").String(); got != "length" {
 				t.Fatalf("non-stream finish_reason = %q, want length: %s", got, nonStream)
 			}
-			if got := gjson.GetBytes(nonStream, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"command":"ls -l` {
+			if got := ojson.GetBytesNoCopy(nonStream, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"command":"ls -l` {
 				t.Fatalf("non-stream tool call arguments = %q: %s", got, nonStream)
 			}
-			if got := gjson.GetBytes(nonStream, "usage.completion_tokens").Int(); got != 4 {
+			if got := ojson.GetBytesNoCopy(nonStream, "usage.completion_tokens").Int(); got != 4 {
 				t.Fatalf("non-stream completion_tokens = %d, want 4: %s", got, nonStream)
 			}
 		})
@@ -128,7 +129,7 @@ func TestChatRefusalKeepsContentFilterAndUsage(t *testing.T) {
 	var finish string
 	for _, chunk := range chatStopReasonChunks("refusal") {
 		for _, output := range ConvertClaudeResponseToOpenAI(context.Background(), "claude-test", nil, nil, chunk, &param) {
-			if reason := gjson.GetBytes(output, "choices.0.finish_reason").String(); reason != "" {
+			if reason := ojson.GetBytesNoCopy(output, "choices.0.finish_reason").String(); reason != "" {
 				finish = reason
 			}
 		}
@@ -137,14 +138,14 @@ func TestChatRefusalKeepsContentFilterAndUsage(t *testing.T) {
 		t.Fatalf("stream finish_reason = %q", finish)
 	}
 	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-test", nil, nil, bytes.Join(chatStopReasonChunks("refusal"), []byte("\n")), nil)
-	if gjson.GetBytes(out, "choices.0.finish_reason").String() != "content_filter" || gjson.GetBytes(out, "usage.completion_tokens").Int() != 3 {
+	if ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String() != "content_filter" || ojson.GetBytesNoCopy(out, "usage.completion_tokens").Int() != 3 {
 		t.Fatalf("non-stream = %s", out)
 	}
 }
 
 func TestChatMaxTokensUnchanged(t *testing.T) {
 	out := ConvertClaudeResponseToOpenAINonStream(context.Background(), "claude-test", nil, nil, bytes.Join(chatStopReasonChunks("max_tokens"), []byte("\n")), nil)
-	if gjson.GetBytes(out, "choices.0.finish_reason").String() != "length" {
+	if ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String() != "length" {
 		t.Fatalf("non-stream = %s", out)
 	}
 }

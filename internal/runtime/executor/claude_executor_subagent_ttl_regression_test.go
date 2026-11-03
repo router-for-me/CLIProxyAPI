@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested verifies
@@ -76,7 +76,7 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 	if !has1h {
 		t.Fatalf("subagent body must preserve ttl: 1h when requested by client, got: %s", rawBody)
 	}
-	for _, msg := range gjson.GetBytes(seenBody, "messages").Array() {
+	for _, msg := range ojson.GetBytes(seenBody, "messages").Array() {
 		for _, content := range msg.Get("content").Array() {
 			if cc := content.Get("cache_control"); cc.Exists() {
 				if gotTTL := cc.Get("ttl").String(); gotTTL != "1h" {

@@ -5,12 +5,11 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type interactionsTranslateHooks struct {
@@ -19,7 +18,7 @@ type interactionsTranslateHooks struct {
 
 func (h *interactionsTranslateHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
 	h.calls++
-	updated, errSet := sjson.SetBytes(body, "plugin_call", h.calls)
+	updated, errSet := ojson.SetBytes(body, "plugin_call", h.calls)
 	if errSet != nil {
 		return body
 	}
@@ -170,7 +169,7 @@ func TestTranslateGeminiInteractionsRequestPairInvokesPluginOncePerInput(t *test
 			if hooks.calls != 1 {
 				t.Fatalf("stream=%v compat=%v: plugin calls = %d, want 1", stream, compat, hooks.calls)
 			}
-			if got := gjson.GetBytes(work, "plugin_call").Int(); got != 1 {
+			if got := ojson.GetBytes(work, "plugin_call").Int(); got != 1 {
 				t.Fatalf("working plugin_call = %d, want 1", got)
 			}
 			if !bytes.Equal(base, work) {
@@ -187,10 +186,10 @@ func TestTranslateGeminiInteractionsRequestPairInvokesPluginOncePerInput(t *test
 	if hooks.calls != before+2 {
 		t.Fatalf("distinct plugin hook calls = %d, want %d", hooks.calls-before, 2)
 	}
-	if got := gjson.GetBytes(work, "plugin_call").Int(); got != before+1 {
+	if got := ojson.GetBytes(work, "plugin_call").Int(); got != before+1 {
 		t.Fatalf("distinct working plugin_call = %d, want %d", got, before+1)
 	}
-	if got := gjson.GetBytes(base, "plugin_call").Int(); got != before+2 {
+	if got := ojson.GetBytes(base, "plugin_call").Int(); got != before+2 {
 		t.Fatalf("distinct baseline plugin_call = %d, want %d", got, before+2)
 	}
 }

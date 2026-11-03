@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // Run the R1 source trace through the actual Interactions HTTP executor and usage boundary.
@@ -61,7 +61,7 @@ func TestApplyPatchInteractionsSourceStopActualFailures(t *testing.T) {
 								t.Fatalf("failure leaked/completed: %s", chunk.Payload)
 							}
 							for _, payload := range applyPatchTestPayloads(chunk.Payload) {
-								if gjson.GetBytes(payload, "type").String() != "response.failed" || gjson.GetBytes(payload, "response.error.code").String() != "invalid_tool_arguments" {
+								if ojson.GetBytes(payload, "type").String() != "response.failed" || ojson.GetBytes(payload, "response.error.code").String() != "invalid_tool_arguments" {
 									t.Fatalf("source-stopped unresolved patch published success/raw fallback: %s", payload)
 								}
 								failed++

@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -46,7 +46,7 @@ func TestConvertOpenAIRequestToGemini_RefusesAnyEmptiedUserTurn(t *testing.T) {
 			if got, want := err.Error(), "unsupported content part: "+tc.wantType; got != want {
 				t.Fatalf("error text = %q, want %q", got, want)
 			}
-			if !gjson.ValidBytes(body) {
+			if !ojson.ValidBytes(body) {
 				t.Fatalf("body is not JSON: %q", body)
 			}
 		})
@@ -59,7 +59,7 @@ func TestConvertOpenAIRequestToGemini_KeepsTurnWithTextBesideAttachment(t *testi
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "contents.2.parts.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(body, "contents.2.parts.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", body)
 	}
 }
@@ -70,7 +70,7 @@ func TestConvertOpenAIRequestToGemini_InlineFileAfterHistoryStaysInlineData(t *t
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "contents.2.parts.0.inlineData.mime_type").String(); got != "application/pdf" {
+	if got := ojson.GetBytesNoCopy(body, "contents.2.parts.0.inlineData.mime_type").String(); got != "application/pdf" {
 		t.Fatalf("inline file was not kept: %s", body)
 	}
 }

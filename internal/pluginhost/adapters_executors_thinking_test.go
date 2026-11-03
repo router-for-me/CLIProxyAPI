@@ -6,13 +6,13 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type recordingThinkingApplier struct {
@@ -112,13 +112,13 @@ func TestExecutorAdapterAppliesCanonicalThinkingWithPluginApplier(t *testing.T) 
 	if gotExecuteReq.Model != "my-model" {
 		t.Fatalf("Execute req.Model = %q, want %q", gotExecuteReq.Model, "my-model")
 	}
-	if got := gjson.GetBytes(gotExecuteReq.Payload, "model").String(); got != "my-model" {
+	if got := ojson.GetBytesNoCopy(gotExecuteReq.Payload, "model").String(); got != "my-model" {
 		t.Fatalf("Execute payload model = %q, want %q; payload=%s", got, "my-model", gotExecuteReq.Payload)
 	}
-	if got := gjson.GetBytes(gotExecuteReq.Payload, "applied_by_plugin").String(); got != provider {
+	if got := ojson.GetBytesNoCopy(gotExecuteReq.Payload, "applied_by_plugin").String(); got != provider {
 		t.Fatalf("Execute payload applied_by_plugin = %q, want %q; payload=%s", got, provider, gotExecuteReq.Payload)
 	}
-	if got := gjson.GetBytes(gotExecuteReq.Payload, "thinking_level").String(); got != "high" {
+	if got := ojson.GetBytesNoCopy(gotExecuteReq.Payload, "thinking_level").String(); got != "high" {
 		t.Fatalf("Execute payload thinking_level = %q, want high (suffix overrides body); payload=%s", got, gotExecuteReq.Payload)
 	}
 
@@ -139,7 +139,7 @@ func TestExecutorAdapterAppliesCanonicalThinkingWithPluginApplier(t *testing.T) 
 	if gotStreamReq.Model != "my-model" {
 		t.Fatalf("ExecuteStream req.Model = %q, want %q", gotStreamReq.Model, "my-model")
 	}
-	if got := gjson.GetBytes(gotStreamReq.Payload, "thinking_budget").Int(); got != 8192 {
+	if got := ojson.GetBytesNoCopy(gotStreamReq.Payload, "thinking_budget").Int(); got != 8192 {
 		t.Fatalf("ExecuteStream payload thinking_budget = %d, want 8192; payload=%s", got, gotStreamReq.Payload)
 	}
 
@@ -157,7 +157,7 @@ func TestExecutorAdapterAppliesCanonicalThinkingWithPluginApplier(t *testing.T) 
 	if gotCountReq.Model != "my-model" {
 		t.Fatalf("CountTokens req.Model = %q, want %q", gotCountReq.Model, "my-model")
 	}
-	if got := gjson.GetBytes(gotCountReq.Payload, "thinking_level").String(); got != "medium" {
+	if got := ojson.GetBytesNoCopy(gotCountReq.Payload, "thinking_level").String(); got != "medium" {
 		t.Fatalf("CountTokens payload thinking_level = %q, want medium; payload=%s", got, gotCountReq.Payload)
 	}
 	if len(applier.calls) != 3 {
@@ -219,7 +219,7 @@ func TestExecutorAdapterCallsPluginThinkingApplierWithoutModelThinkingMetadata(t
 	if gotReq.Model != "my-model" {
 		t.Fatalf("req.Model = %q, want %q", gotReq.Model, "my-model")
 	}
-	if got := gjson.GetBytes(gotReq.Payload, "thinking_level").String(); got != "high" {
+	if got := ojson.GetBytesNoCopy(gotReq.Payload, "thinking_level").String(); got != "high" {
 		t.Fatalf("payload thinking_level = %q, want high; payload=%s", got, gotReq.Payload)
 	}
 }
@@ -270,10 +270,10 @@ func TestExecutorAdapterAppliesModelThinkingMetadataWithoutPluginApplier(t *test
 	if gotReq.Model != "my-model" {
 		t.Fatalf("req.Model = %q, want %q", gotReq.Model, "my-model")
 	}
-	if got := gjson.GetBytes(gotReq.Payload, "model").String(); got != "my-model" {
+	if got := ojson.GetBytesNoCopy(gotReq.Payload, "model").String(); got != "my-model" {
 		t.Fatalf("payload model = %q, want %q; payload=%s", got, "my-model", gotReq.Payload)
 	}
-	if got := gjson.GetBytes(gotReq.Payload, "reasoning_effort").String(); got != "high" {
+	if got := ojson.GetBytesNoCopy(gotReq.Payload, "reasoning_effort").String(); got != "high" {
 		t.Fatalf("payload reasoning_effort = %q, want high; payload=%s", got, gotReq.Payload)
 	}
 
@@ -288,7 +288,7 @@ func TestExecutorAdapterAppliesModelThinkingMetadataWithoutPluginApplier(t *test
 	if errNoThinking != nil {
 		t.Fatalf("Execute(no-thinking-model) error = %v", errNoThinking)
 	}
-	if gjson.GetBytes(gotReq.Payload, "reasoning_effort").Exists() {
+	if ojson.GetBytesNoCopy(gotReq.Payload, "reasoning_effort").Exists() {
 		t.Fatalf("expected reasoning_effort to be stripped for non-thinking model; payload=%s", gotReq.Payload)
 	}
 }
@@ -387,7 +387,7 @@ func TestExecutorAdapterValidatesThinkingAndClampsOrRejectsOutOfRange(t *testing
 	if errSuffixClamp != nil {
 		t.Fatalf("Execute(my-model(9000)) error = %v", errSuffixClamp)
 	}
-	if got := gjson.GetBytes(gotReq.Payload, "thinking.budget_tokens").Int(); got != 8192 {
+	if got := ojson.GetBytesNoCopy(gotReq.Payload, "thinking.budget_tokens").Int(); got != 8192 {
 		t.Fatalf("clamped budget_tokens = %d, want 8192; payload=%s", got, gotReq.Payload)
 	}
 }
@@ -491,13 +491,13 @@ func TestExecutorAdapterAppliesThinkingBeforePayloadRules(t *testing.T) {
 		if got.Model != "my-model" {
 			t.Fatalf("%s req.Model = %q, want my-model", name, got.Model)
 		}
-		if level := gjson.GetBytes(got.Payload, "thinking_level").String(); level != "low" {
+		if level := ojson.GetBytesNoCopy(got.Payload, "thinking_level").String(); level != "low" {
 			t.Fatalf("%s thinking_level = %q, want payload override low after thinking applier; payload=%s", name, level, got.Payload)
 		}
-		if gjson.GetBytes(got.Payload, "applied_by_plugin").Exists() {
+		if ojson.GetBytesNoCopy(got.Payload, "applied_by_plugin").Exists() {
 			t.Fatalf("%s applied_by_plugin was not removed by payload filter; payload=%s", name, got.Payload)
 		}
-		if temp := gjson.GetBytes(got.Payload, "temperature").Float(); temp != 0.25 {
+		if temp := ojson.GetBytesNoCopy(got.Payload, "temperature").Float(); temp != 0.25 {
 			t.Fatalf("%s temperature = %v, want payload default 0.25; payload=%s", name, temp, got.Payload)
 		}
 	}

@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 var keepaliveSSEComment = []byte(": keepalive\n\n")
@@ -53,7 +53,7 @@ func IsGrokClientContext(ctx context.Context, headers http.Header) bool {
 
 // IsKeepalivePayload reports whether a JSON payload has type "keepalive".
 func IsKeepalivePayload(payload []byte) bool {
-	return gjson.GetBytes(payload, "type").String() == "keepalive"
+	return ojson.GetBytesNoCopy(payload, "type").String() == "keepalive"
 }
 
 // IsKeepaliveSSELine reports whether an SSE line represents a keepalive event or data frame.

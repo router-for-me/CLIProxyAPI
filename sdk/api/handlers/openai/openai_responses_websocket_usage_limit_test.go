@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -20,7 +21,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestShouldExposeResponsesUsageLimit(t *testing.T) {
@@ -47,10 +47,10 @@ func TestResponsesWebsocketUsageLimitPayloadCarriesCodexHeaders(t *testing.T) {
 			if errBuild != nil {
 				t.Fatalf("buildResponsesWebsocketErrorPayload() error = %v", errBuild)
 			}
-			if got := gjson.GetBytes(payload, "status").Int(); got != http.StatusTooManyRequests {
+			if got := ojson.GetBytes(payload, "status").Int(); got != http.StatusTooManyRequests {
 				t.Fatalf("status = %d, want 429: %s", got, payload)
 			}
-			headers := gjson.GetBytes(payload, "headers")
+			headers := ojson.GetBytes(payload, "headers")
 			if got := headers.Get("X-Codex-Primary-Used-Percent").String(); got != "100" {
 				t.Fatalf("headers.X-Codex-Primary-Used-Percent = %q, want 100: %s", got, payload)
 			}
@@ -60,10 +60,10 @@ func TestResponsesWebsocketUsageLimitPayloadCarriesCodexHeaders(t *testing.T) {
 			if headers.Get("Retry-After").Exists() {
 				t.Fatalf("headers.Retry-After is set: %s", payload)
 			}
-			if got := gjson.GetBytes(payload, "error.type").String(); got != "usage_limit_reached" {
+			if got := ojson.GetBytes(payload, "error.type").String(); got != "usage_limit_reached" {
 				t.Fatalf("error.type = %q, want usage_limit_reached: %s", got, payload)
 			}
-			if got := gjson.GetBytes(payload, "error.resets_at").Int(); got != resetAt.Unix() {
+			if got := ojson.GetBytes(payload, "error.resets_at").Int(); got != resetAt.Unix() {
 				t.Fatalf("error.resets_at = %d, want %d: %s", got, resetAt.Unix(), payload)
 			}
 		})
@@ -157,13 +157,13 @@ func TestResponsesWebsocketSendsUsageLimitWhenEveryCredentialIsOut(t *testing.T)
 		t.Fatalf("frames = %d (%q), want one error event", len(frames), frames)
 	}
 	payload := frames[0]
-	if got := gjson.GetBytes(payload, "type").String(); got != "error" {
+	if got := ojson.GetBytes(payload, "type").String(); got != "error" {
 		t.Fatalf("type = %q, want error: %s", got, payload)
 	}
-	if got := gjson.GetBytes(payload, "error.type").String(); got != "usage_limit_reached" {
+	if got := ojson.GetBytes(payload, "error.type").String(); got != "usage_limit_reached" {
 		t.Fatalf("error.type = %q, want usage_limit_reached: %s", got, payload)
 	}
-	if got := gjson.GetBytes(payload, "headers.X-Codex-Primary-Used-Percent").String(); got != "100" {
+	if got := ojson.GetBytes(payload, "headers.X-Codex-Primary-Used-Percent").String(); got != "100" {
 		t.Fatalf("headers.X-Codex-Primary-Used-Percent = %q, want 100: %s", got, payload)
 	}
 }

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/url"
@@ -519,6 +519,24 @@ type ProxyConnectionPoolOverride struct {
 }
 
 // Clone deep copies the override so auth snapshots never share mutable state.
+func (o *ProxyConnectionPoolOverride) seedKey() string {
+	if o == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("pool:")
+	if o.Enabled != nil {
+		b.WriteString(strconv.FormatBool(*o.Enabled))
+	}
+	b.WriteByte(0)
+	b.WriteString(strings.TrimSpace(o.IdleConnTimeout))
+	b.WriteByte(0)
+	if o.MaxIdleConnsPerHost != nil {
+		b.WriteString(strconv.Itoa(*o.MaxIdleConnsPerHost))
+	}
+	return b.String()
+}
+
 func (o *ProxyConnectionPoolOverride) Clone() *ProxyConnectionPoolOverride {
 	if o == nil {
 		return nil
@@ -589,6 +607,18 @@ func AuthGrantFingerprint(a *Auth) string {
 	accessToken := authOuterAccessToken(a)
 	if accessToken == "" {
 		accessToken = authAccessToken(a)
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "api_key")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["api_key"])
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "session_token")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["session_token"])
 	}
 	refreshToken := authRefreshToken(a)
 	email := authMetadataString(a, "email")
@@ -677,7 +707,11 @@ func (a *Auth) indexSeed() string {
 		}
 	}
 	if apiPrefix != "" {
-		return apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
+		seed := apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
+		if poolSeed := a.ProxyConnectionPool.seedKey(); poolSeed != "" {
+			seed += "\x00" + poolSeed
+		}
+		return seed
 	}
 
 	if id := strings.TrimSpace(a.ID); id != "" {
