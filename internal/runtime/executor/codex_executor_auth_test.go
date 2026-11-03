@@ -746,7 +746,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if got := gotHeaders.Get("User-Agent"); got != codexSIWCUserAgent(&customCfg) {
 		t.Fatalf("custom User-Agent = %q, want %q", got, codexSIWCUserAgent(&customCfg))
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -781,7 +784,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotBody["service_tier"] != "priority" {
 		t.Fatalf("expected user payload rule to set service_tier=priority after SIWC body cleanup, got %v", gotBody["service_tier"])
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -905,7 +911,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
@@ -928,7 +937,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket stream frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
