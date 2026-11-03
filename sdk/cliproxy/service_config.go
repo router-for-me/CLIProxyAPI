@@ -104,7 +104,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "fill-first"
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
-	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
+	// Affinity-only options stay at defaults while affinity is off, so editing them
+	// does not rebuild (and stop) the active selector.
+	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); state.sessionAffinity && ttl != "" {
 		if parsed, errParse := time.ParseDuration(ttl); errParse == nil && parsed > 0 {
 			if parsed < time.Second {
 				parsed = time.Second

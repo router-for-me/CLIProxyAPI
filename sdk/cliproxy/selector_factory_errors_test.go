@@ -171,3 +171,30 @@ func TestSelectorFactoryBuildDoesNotStopSelectorInstalledByNewManager(t *testing
 		t.Fatalf("installed selector = %T, want factory selector", service.coreManager.Selector())
 	}
 }
+
+func TestSelectorFactoryRebuildsOnTTLEditOnlyWhenAffinityEnabled(t *testing.T) {
+	for _, affinity := range []bool{false, true} {
+		service, previous := factoryErrorService(nil)
+		service.cfg.Routing.SessionAffinity = affinity
+		service.cfg.Routing.SessionAffinityTTL = "1h"
+		state := normalizedRoutingRuntimeState(service.cfg)
+		service.appliedRoutingState = &state
+		calls := 0
+		service.selectorFactory = func(*config.Config) (coreauth.Selector, error) {
+			calls++
+			return &factoryOwnedSelector{}, nil
+		}
+		updated := service.currentConfig().CloneForRuntime()
+		updated.Routing.SessionAffinityTTL = "2h"
+		if !service.applyConfigUpdateWithAuthSynthesis(context.Background(), updated, false) {
+			t.Fatalf("affinity=%v: TTL reload rejected", affinity)
+		}
+		want := 0
+		if affinity {
+			want = 1
+		}
+		if calls != want || int(previous.stops.Load()) != want {
+			t.Fatalf("affinity=%v: factory calls=%d, previous stops=%d", affinity, calls, previous.stops.Load())
+		}
+	}
+}
