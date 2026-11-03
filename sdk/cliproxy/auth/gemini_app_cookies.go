@@ -35,6 +35,19 @@ func geminiAppCookiesChanged(existing, incoming *Auth) bool {
 		!reflect.DeepEqual(before[geminiapp.CookiePSIDTS], after[geminiapp.CookiePSIDTS])
 }
 
+// AdoptGeminiAppRotationVersion updates a request-owned auth snapshot's result
+// identity after a persisted rotation. It leaves the request's cookie merge base
+// intact and never adopts an explicit re-import or another registration.
+func (a *Auth) AdoptGeminiAppRotationVersion(saved *Auth) {
+	if a == nil || saved == nil || a.ID != saved.ID ||
+		a.RegistrationEpoch != saved.RegistrationEpoch || a.geminiAppCookieEpoch != saved.geminiAppCookieEpoch ||
+		!strings.EqualFold(strings.TrimSpace(a.Provider), geminiapp.Provider) ||
+		!strings.EqualFold(strings.TrimSpace(saved.Provider), geminiapp.Provider) {
+		return
+	}
+	a.CredentialVersion = max(a.CredentialVersion, saved.CredentialVersion)
+}
+
 func mergeGeminiAppPreparedCookies(base, current, updated, merged *Auth) {
 	if base == nil || current == nil || updated == nil || merged == nil ||
 		!strings.EqualFold(strings.TrimSpace(current.Provider), geminiapp.Provider) ||

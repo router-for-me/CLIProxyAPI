@@ -231,7 +231,8 @@ func TestGeminiAppServiceConcurrentCookieRotations(t *testing.T) {
 				}
 				svc := &Service{cfg: &config.Config{AuthDir: dir}, coreManager: manager}
 				svc.ensureExecutorsForAuth(auth)
-				bound, _ := manager.Executor("gemini-app")
+				svc.registerModelsForAuth(t.Context(), auth)
+				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
 				candidate := make([]any, 9)
 				candidate[1], candidate[8] = []any{"answer"}, []any{2}
 				inner, _ := json.Marshal([]any{nil, nil, nil, nil, []any{candidate}})
@@ -260,7 +261,7 @@ func TestGeminiAppServiceConcurrentCookieRotations(t *testing.T) {
 						var err error
 						if stream {
 							var result *coreexecutor.StreamResult
-							result, err = bound.ExecuteStream(ctx, auth.Clone(), req, opts)
+							result, err = manager.ExecuteStream(ctx, []string{"gemini-app"}, req, opts)
 							if err == nil {
 								for chunk := range result.Chunks {
 									if chunk.Err != nil {
@@ -269,7 +270,7 @@ func TestGeminiAppServiceConcurrentCookieRotations(t *testing.T) {
 								}
 							}
 						} else {
-							_, err = bound.Execute(ctx, auth.Clone(), req, opts)
+							_, err = manager.Execute(ctx, []string{"gemini-app"}, req, opts)
 						}
 						done <- err
 					}()
@@ -317,6 +318,79 @@ func TestGeminiAppServiceConcurrentCookieRotations(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// Rotation results must cool the current credential, while an explicit re-import
+// fences failures from the old execution even when its response rotates cookies.
+func TestGeminiAppServiceRotationResultsKeepCredentialIdentity(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, stage := range []string{"session", "generation", "both"} {
+			for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+				for _, replacement := range []bool{false, true} {
+					t.Run(fmt.Sprintf("stream=%t/stage=%s/status=%d/replacement=%t", stream, stage, status, replacement), func(t *testing.T) {
+						manager := coreauth.NewManager(nil, nil, nil)
+						auth, err := manager.Register(t.Context(), &coreauth.Auth{ID: t.Name(), Provider: "gemini-app", Status: coreauth.StatusActive, Metadata: map[string]any{"cookies": map[string]any{"__Secure-1PSID": "initial"}}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						svc := &Service{cfg: &config.Config{}, coreManager: manager}
+						svc.ensureExecutorsForAuth(auth)
+						svc.registerModelsForAuth(t.Context(), auth)
+						t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+						attempts := 0
+						ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(geminiAppCookieTransport(func(req *http.Request) (*http.Response, error) {
+							header := make(http.Header)
+							if req.URL.Path == "/app" {
+								if stage != "generation" {
+									header.Add("Set-Cookie", "__Secure-1PSID=session; Path=/; Secure")
+								}
+								return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(`{"SNlM0e":"csrf"}`))}, nil
+							}
+							attempts++
+							if replacement {
+								fresh, _ := manager.GetByID(auth.ID)
+								fresh.Metadata["cookies"] = map[string]any{"__Secure-1PSID": "reimported"}
+								if _, err := manager.Update(t.Context(), fresh); err != nil {
+									t.Fatal(err)
+								}
+							}
+							if stage != "session" {
+								header.Add("Set-Cookie", "__Secure-1PSID=generation; Path=/; Secure")
+							}
+							return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader("failed"))}, nil
+						})))
+						req := coreexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
+						opts := coreexecutor.Options{SourceFormat: translator.FormatGemini}
+						if stream {
+							var result *coreexecutor.StreamResult
+							result, err = manager.ExecuteStream(ctx, []string{"gemini-app"}, req, opts)
+							if err == nil {
+								for chunk := range result.Chunks {
+									if chunk.Err != nil {
+										err = chunk.Err
+									}
+								}
+							}
+						} else {
+							_, err = manager.Execute(ctx, []string{"gemini-app"}, req, opts)
+						}
+						if attempts == 0 {
+							t.Fatal("request did not reach generation")
+						}
+						if err == nil {
+							t.Fatal("expected upstream failure")
+						}
+						current, _ := manager.GetByID(auth.ID)
+						state := current.ModelStates["gemini-app"]
+						unavailable := current.Unavailable || (state != nil && state.Unavailable)
+						if unavailable == replacement {
+							t.Fatalf("upstream failure cooldown mismatch: unavailable=%t replacement=%t", unavailable, replacement)
+						}
+					})
+				}
+			}
 		}
 	}
 }

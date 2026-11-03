@@ -22,10 +22,7 @@ func GeminiAppPrompt(body []byte) (string, error) {
 		return "", fmt.Errorf("gemini-app: invalid request JSON")
 	}
 	root := ojson.ParseBytes(body)
-	if len(root.Get("tools").Array()) > 0 {
-		return "", fmt.Errorf("gemini-app: tool calling is not supported")
-	}
-	if err := ValidateGeminiAppOutput(body); err != nil {
+	if err := ValidateGeminiAppRequest(body); err != nil {
 		return "", err
 	}
 	var prompt strings.Builder
@@ -74,10 +71,13 @@ func GeminiAppPrompt(body []byte) (string, error) {
 	return strings.TrimSpace(prompt.String()), nil
 }
 
-// ValidateGeminiAppOutput checks both native and OpenAI contracts, including
+// ValidateGeminiAppRequest checks both native and OpenAI contracts, including
 // fields that translation may discard rather than preserve in generationConfig.
-func ValidateGeminiAppOutput(body []byte) error {
+func ValidateGeminiAppRequest(body []byte) error {
 	root := ojson.ParseBytes(body)
+	if len(root.Get("tools").Array()) > 0 || len(root.Get("functions").Array()) > 0 {
+		return fmt.Errorf("gemini-app: tool calling is not supported")
+	}
 	if mime := root.Get("generationConfig.responseMimeType").String(); mime != "" && mime != "text/plain" {
 		return fmt.Errorf("gemini-app: structured output is not supported")
 	}

@@ -79,7 +79,7 @@ func (e *GeminiAppExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.
 	httpReq.Header.Del("Cookie") // The isolated jar supplies these exactly once.
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
-	defer e.persistCookies(ctx, auth, cookies, client)
+	defer func() { auth.AdoptGeminiAppRotationVersion(e.persistCookies(ctx, auth, cookies, client)) }()
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, geminiapp.NewTransportError("HTTP request", err)
@@ -187,7 +187,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 		original = opts.OriginalRequest
 	}
 	for _, input := range [][]byte{original, req.Payload} {
-		if err := helps.ValidateGeminiAppOutput(input); err != nil {
+		if err := helps.ValidateGeminiAppRequest(input); err != nil {
 			return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, err.Error())
 		}
 	}
@@ -219,7 +219,8 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	client := geminiapp.NewClient(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0), cookies)
 	// Persist generation-header rotations on success or failure, including
 	// streaming execution, without retaining transient page tokens.
-	defer func() { e.persistCookies(ctx, auth, cookies, client) }()
+	executionAuth := auth
+	defer func() { executionAuth.AdoptGeminiAppRotationVersion(e.persistCookies(ctx, auth, cookies, client)) }()
 	// Session acquisition is an upstream attempt, but its response is not a
 	// generation token and must not start or satisfy generation TTFT.
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
@@ -288,8 +289,11 @@ func (e *GeminiAppExecutor) persistCookies(ctx context.Context, auth *cliproxyau
 	updated.Metadata["cookies"] = stored
 	// Preserve concurrent metadata edits and replacement credentials. Do not
 	// let downstream cancellation discard cookies already rotated by Google.
-	if _, errUpdate := e.authManager.UpdatePreparedAuth(context.WithoutCancel(ctx), auth, updated); errUpdate != nil {
+	saved, errUpdate := e.authManager.UpdatePreparedAuth(context.WithoutCancel(ctx), auth, updated)
+	if errUpdate != nil {
 		log.Errorf("gemini-app: persist session cookies failed (%T)", errUpdate)
+	} else {
+		updated.AdoptGeminiAppRotationVersion(saved)
 	}
 	// Keep this client's own cookie snapshot as the next merge base. Adopting
 	// a concurrent replacement here would let a later rotation overwrite it.

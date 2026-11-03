@@ -317,6 +317,9 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 		{"Gemini candidates", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"candidateCount":2}}`},
 		{"OpenAI image", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["image"]}`},
 		{"OpenAI audio", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["text","audio"]}`},
+		{"Responses required search", sdktranslator.FormatOpenAIResponse, `{"input":"Hello","tools":[{"type":"web_search"}],"tool_choice":"required"}`},
+		{"Responses required search in original", sdktranslator.FormatOpenAIResponse, `{"input":"Hello","tools":[{"type":"web_search"}],"tool_choice":"required"}`},
+		{"OpenAI legacy functions", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"functions":[{"name":"lookup"}],"function_call":"auto"}`},
 		{"OpenAI choices", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"n":2}`},
 	}
 	for _, test := range tests {
@@ -330,6 +333,10 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 				e := NewGeminiAppExecutor(&config.Config{}, nil)
 				req := cliproxyexecutor.Request{Model: "gemini-app", Payload: []byte(test.body)}
 				opts := cliproxyexecutor.Options{SourceFormat: test.format}
+				if test.name == "Responses required search in original" {
+					opts.OriginalRequest = []byte(test.body)
+					req.Payload = []byte(`{"input":"Hello"}`)
+				}
 				var err error
 				if stream {
 					_, err = e.ExecuteStream(ctx, geminiAppTestAuth(), req, opts)
