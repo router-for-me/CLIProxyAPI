@@ -330,6 +330,20 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 	h.persistLocked(c)
 }
 
+// beforePluginDeleteCommit lets tests run a concurrent save while DeletePlugin is unlocked.
+var beforePluginDeleteCommit = func() {}
+
+// validatePluginDeleteLocked reports whether id is configured and whether the
+// config without it passes application validation. Caller must hold h.mu.
+func (h *Handler) validatePluginDeleteLocked(c *gin.Context, id string) (configured, accepted bool) {
+	if _, configured = h.cfg.Plugins.Configs[id]; !configured {
+		return false, true
+	}
+	candidate := h.cfg.CloneForRuntime()
+	delete(candidate.Plugins.Configs, id)
+	return true, h.validateConfigLocked(c, candidate)
+}
+
 // DeletePlugin removes the selected local plugin file and its saved config.
 func (h *Handler) DeletePlugin(c *gin.Context) {
 	id, okID := pluginIDFromRequest(c)
@@ -372,16 +386,12 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	if configured {
-		// Reject early, before unloading; the final check below runs under h.mu.
-		h.mu.Lock()
-		candidate := h.cfg.CloneForRuntime()
-		delete(candidate.Plugins.Configs, id)
-		accepted := h.validateConfigLocked(c, candidate)
-		h.mu.Unlock()
-		if !accepted {
-			return
-		}
+	// Reject early, before unloading; the final check below runs under h.mu.
+	h.mu.Lock()
+	_, accepted := h.validatePluginDeleteLocked(c, id)
+	h.mu.Unlock()
+	if !accepted {
+		return
 	}
 
 	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
@@ -393,16 +403,14 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	beforePluginDeleteCommit()
 	// Hold h.mu from the final check through removal and save, so a concurrent
 	// save cannot change the config this deletion was validated against.
 	h.mu.Lock()
-	if configured {
-		candidate := h.cfg.CloneForRuntime()
-		delete(candidate.Plugins.Configs, id)
-		if !h.validateConfigLocked(c, candidate) {
-			h.mu.Unlock()
-			return
-		}
+	configured, accepted = h.validatePluginDeleteLocked(c, id)
+	if !accepted {
+		h.mu.Unlock()
+		return
 	}
 	fileDeleted := false
 	if path != "" {

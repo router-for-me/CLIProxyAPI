@@ -181,3 +181,41 @@ func TestApplicationValidationRechecksPluginDeleteAgainstFinalConfig(t *testing.
 		t.Fatal("rejected delete changed handler configuration")
 	}
 }
+
+func TestApplicationValidationChecksPluginConfiguredDuringDelete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pluginsDir := writeManagementPluginFile(t, "sample")
+	h := &Handler{
+		cfg:            &config.Config{Plugins: config.PluginsConfig{Dir: pluginsDir, Configs: map[string]config.PluginInstanceConfig{}}},
+		configFilePath: filepath.Join(t.TempDir(), "config.yaml"),
+	}
+	h.SetConfigValidator(func(*config.Config) error { return errors.New("sample plugin is required") })
+	item := pluginConfigFromYAML(t, "enabled: true\n")
+	// A concurrent save configures the discovered plugin while the delete is unlocked.
+	original := beforePluginDeleteCommit
+	beforePluginDeleteCommit = func() {
+		h.mu.Lock()
+		h.cfg.Plugins.Configs["sample"] = item
+		h.mu.Unlock()
+	}
+	t.Cleanup(func() { beforePluginDeleteCommit = original })
+	artifact, err := pluginFilePath(pluginsDir, "sample")
+	if err != nil || artifact == "" {
+		t.Fatalf("plugin path %q: %v", artifact, err)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(ConfigV8ContextKey, true)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v8/management/plugins/sample", nil)
+	h.DeletePlugin(c)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		t.Fatalf("delete removed the artifact without validating the new configuration: %v", err)
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample"]; !ok {
+		t.Fatal("delete dropped a configuration it never validated")
+	}
+}
