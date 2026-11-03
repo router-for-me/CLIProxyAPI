@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
@@ -22,8 +23,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // AIStudioExecutor routes AI Studio requests through a websocket-backed transport.
@@ -544,7 +543,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	if resp.Status < 200 || resp.Status >= 300 {
 		return cliproxyexecutor.Response{}, statusErr{code: resp.Status, msg: string(resp.Body)}
 	}
-	totalTokens := gjson.GetBytes(resp.Body, "totalTokens").Int()
+	totalTokens := ojson.GetBytesNoCopy(resp.Body, "totalTokens").Int()
 	if totalTokens <= 0 {
 		return cliproxyexecutor.Response{}, fmt.Errorf("wsrelay: totalTokens missing in response")
 	}
@@ -582,16 +581,16 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	if err != nil {
 		return nil, translatedPayload{}, err
 	}
-	payload, err = helps.ApplyThinkingWithSourcePayload(payload, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier())
-	if err != nil {
+	doc := ojson.NewDoc(payload)
+	if err = helps.ApplyThinkingWithSourcePayloadDoc(doc, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier()); err != nil {
 		return nil, translatedPayload{}, err
 	}
-	payload = fixGeminiImageAspectRatio(baseModel, payload)
+	fixGeminiImageAspectRatioDoc(baseModel, doc)
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
-	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
+	_ = doc.Delete("generationConfig.maxOutputTokens")
+	_ = doc.Delete("generationConfig.responseMimeType")
+	_ = doc.Delete("generationConfig.responseJsonSchema")
 	metadataAction := "generateContent"
 	if req.Metadata != nil {
 		if action, _ := req.Metadata["action"].(string); action == "countTokens" {
@@ -602,19 +601,20 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 	if stream && action != "countTokens" {
 		action = "streamGenerateContent"
 	}
-	payload, _ = sjson.DeleteBytes(payload, "session_id")
-	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
+	_ = doc.Delete("session_id")
+	helps.EnsureGeminiLeadingUserContentDoc(doc, "contents")
 	if action != "countTokens" {
-		payload = helps.EnsureGeminiTrailingUserContent(payload, "contents")
+		helps.EnsureGeminiTrailingUserContentDoc(doc, "contents")
 	}
-	payload = normalizeAIStudioThinkingLevel(payload)
-	payload = internalsignature.SanitizeNonVertexGeminiRequestThoughtSignatures(payload, "contents")
+	normalizeAIStudioThinkingLevelDoc(doc)
+	internalsignature.SanitizeNonVertexGeminiRequestThoughtSignaturesDoc(doc, "contents")
 	if action == "countTokens" {
-		payload, _ = sjson.DeleteBytes(payload, "generationConfig")
-		payload, _ = sjson.DeleteBytes(payload, "tools")
-		payload, _ = sjson.DeleteBytes(payload, "safetySettings")
+		_ = doc.Delete("generationConfig")
+		_ = doc.Delete("tools")
+		_ = doc.Delete("safetySettings")
 	}
-	payload = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", payload, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	payload = doc.Bytes()
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
 }
 
@@ -622,27 +622,34 @@ func (e *AIStudioExecutor) translateRequest(ctx context.Context, req cliproxyexe
 // The AI Studio upstream validates generationConfig.thinkingConfig.thinkingLevel case-sensitively
 // and rejects lowercase values with a 400 invalid argument error.
 func normalizeAIStudioThinkingLevel(payload []byte) []byte {
-	const path = "generationConfig.thinkingConfig.thinkingLevel"
-	level := gjson.GetBytes(payload, path)
-	if level.Type != gjson.String {
+	doc := ojson.NewDoc(payload)
+	if !normalizeAIStudioThinkingLevelDoc(doc) {
 		return payload
+	}
+	return doc.Bytes()
+}
+
+func normalizeAIStudioThinkingLevelDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	const path = "generationConfig.thinkingConfig.thinkingLevel"
+	level := doc.Get(path)
+	if level.Type != ojson.String {
+		return false
 	}
 
 	normalized := strings.ToUpper(level.String())
 	switch normalized {
 	case "MINIMAL", "LOW", "MEDIUM", "HIGH":
 	default:
-		return payload
+		return false
 	}
 	if normalized == level.String() {
-		return payload
+		return false
 	}
 
-	result, err := sjson.SetBytes(payload, path, normalized)
-	if err != nil {
-		return payload
-	}
-	return result
+	return doc.Set(path, normalized) == nil
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {

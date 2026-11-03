@@ -7,12 +7,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorUsesCompatibleClaudeTranslation(t *testing.T) {
@@ -48,7 +48,7 @@ func TestOpenAICompatExecutorUsesCompatibleClaudeTranslation(t *testing.T) {
 		t.Fatalf("Execute error: %v", errExecute)
 	}
 
-	assistant := gjson.GetBytes(upstreamBody, "messages.0")
+	assistant := ojson.GetBytes(upstreamBody, "messages.0")
 	if got := assistant.Get("reasoning_content").String(); got != "prior reasoning" {
 		t.Fatalf("reasoning_content = %q, want %q; body=%s", got, "prior reasoning", upstreamBody)
 	}

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -79,7 +79,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_RefusesAnyEmptiedU
 			if got, want := err.Error(), "unsupported content part: "+tc.wantType; got != want {
 				t.Fatalf("error text = %q, want %q", got, want)
 			}
-			if !gjson.ValidBytes(body) {
+			if !ojson.ValidBytes(body) {
 				t.Fatalf("body is not JSON: %q", body)
 			}
 
@@ -117,7 +117,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MapsFilesAndAudio(
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
-			part := gjson.GetBytes(body, "messages.2.content.0")
+			part := ojson.GetBytesNoCopy(body, "messages.2.content.0")
 			for path, want := range tc.want {
 				if got := part.Get(path).String(); got != want {
 					t.Fatalf("%s = %q, want %q; part = %s, body = %s", path, got, want, part.Raw, body)
@@ -135,7 +135,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsTurnWithTextB
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
-			if got := gjson.GetBytes(body, "messages.2.content.0.text").String(); got != "keep me" {
+			if got := ojson.GetBytesNoCopy(body, "messages.2.content.0.text").String(); got != "keep me" {
 				t.Fatalf("text was lost: %s", body)
 			}
 		})
@@ -148,7 +148,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MappedAttachmentBe
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	content := gjson.GetBytes(body, "messages.0.content")
+	content := ojson.GetBytesNoCopy(body, "messages.0.content")
 	if got := content.Get("#").Int(); got != 3 {
 		t.Fatalf("content = %s, want text, file and audio", content.Raw)
 	}
@@ -156,7 +156,7 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MappedAttachmentBe
 
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := chatPayload("", chatUserTurn(chatTurnFileURL))
-	if body, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

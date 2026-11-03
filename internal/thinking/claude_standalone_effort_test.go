@@ -3,11 +3,11 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
-	"github.com/tidwall/gjson"
 )
 
 func TestApplyThinking_ClaudeStandaloneEffort(t *testing.T) {
@@ -37,7 +37,7 @@ func TestApplyThinking_ClaudeStandaloneEffort(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("ApplyThinking returned error: %v", errApply)
 			}
-			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
+			if got := ojson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
 				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
 			}
 		})
@@ -80,7 +80,7 @@ func TestClaudeStandaloneEffortPreservesNativeThinkingDefault(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("ApplyThinkingWithModelInfo with suffix returned error: %v", errApply)
 			}
-			if !gjson.GetBytes(out, "thinking.type").Exists() {
+			if !ojson.GetBytes(out, "thinking.type").Exists() {
 				t.Fatalf("explicit suffix must still configure thinking; body=%s", out)
 			}
 		})
@@ -128,7 +128,7 @@ func TestClaudeToCodexStandaloneEffort(t *testing.T) {
 				if errApply != nil {
 					t.Fatalf("bound=%v: ApplyThinking returned error: %v", bound, errApply)
 				}
-				if got := gjson.GetBytes(out, "reasoning.effort").String(); got != tt.wantEffort {
+				if got := ojson.GetBytes(out, "reasoning.effort").String(); got != tt.wantEffort {
 					t.Fatalf("bound=%v: reasoning.effort = %q, want %q; body=%s", bound, got, tt.wantEffort, out)
 				}
 			}
