@@ -7,20 +7,20 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type capturedCodexRequest struct {
 	path        string
-	model       gjson.Result
+	model       ojson.Result
 	routingHint string
 	hasHint     bool
-	serviceTier gjson.Result
+	serviceTier ojson.Result
 }
 
 func newCodexRoutingHintServer(t *testing.T, captured *capturedCodexRequest) *httptest.Server {
@@ -28,10 +28,10 @@ func newCodexRoutingHintServer(t *testing.T, captured *capturedCodexRequest) *ht
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		captured.path = r.URL.Path
-		captured.model = gjson.GetBytes(body, "model")
+		captured.model = ojson.GetBytes(body, "model")
 		_, captured.hasHint = r.Header[http.CanonicalHeaderKey(codexRoutingHintHeader)]
 		captured.routingHint = r.Header.Get(codexRoutingHintHeader)
-		captured.serviceTier = gjson.GetBytes(body, "service_tier")
+		captured.serviceTier = ojson.GetBytes(body, "service_tier")
 		if r.URL.Path == "/responses/compact" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"cmp_1","object":"response.compaction","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
@@ -113,7 +113,7 @@ func TestCodexExecutorRoutingHintCarriesRequestedTier(t *testing.T) {
 				t.Fatalf("Execute error: %v", err)
 			}
 
-			if captured.model.Type != gjson.String || captured.model.String() != "gpt-5.5" {
+			if captured.model.Type != ojson.String || captured.model.String() != "gpt-5.5" {
 				t.Fatalf("body model = %s, want gpt-5.5", captured.model.Raw)
 			}
 			if tc.wantHint == "" {
@@ -153,7 +153,7 @@ func TestCodexExecutorCompactRoutingHintCarriesRequestedTier(t *testing.T) {
 	if captured.path != "/responses/compact" {
 		t.Fatalf("upstream path = %q, want /responses/compact", captured.path)
 	}
-	if captured.model.Type != gjson.String || captured.model.String() != "gpt-5.5" {
+	if captured.model.Type != ojson.String || captured.model.String() != "gpt-5.5" {
 		t.Fatalf("body model = %s, want gpt-5.5", captured.model.Raw)
 	}
 	if captured.serviceTier.String() != "priority" {

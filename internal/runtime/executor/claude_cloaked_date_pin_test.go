@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 var claudeDateReminderPattern = regexp.MustCompile(`Today's date is (\d{4}-\d{2}-\d{2})`)
@@ -25,7 +25,7 @@ var claudeDateReminderPattern = regexp.MustCompile(`Today's date is (\d{4}-\d{2}
 // reminder injected into the first user message of a cloaked payload.
 func extractClaudeCloakDate(t *testing.T, payload []byte) string {
 	t.Helper()
-	content := gjson.GetBytes(payload, "messages.0.content")
+	content := ojson.GetBytes(payload, "messages.0.content")
 	if content.IsArray() {
 		for _, block := range content.Array() {
 			if match := claudeDateReminderPattern.FindStringSubmatch(block.Get("text").String()); match != nil {
@@ -198,9 +198,9 @@ func TestClaudeCloakedDateReminderSessionByteStability(t *testing.T) {
 		t.Fatalf("expected 3 captured bodies, got %d", len(capturedBodies))
 	}
 
-	msg0First := gjson.GetBytes(capturedBodies[0], "messages.0").Raw
-	msg0Second := gjson.GetBytes(capturedBodies[1], "messages.0").Raw
-	msg0SecondStream := gjson.GetBytes(capturedBodies[2], "messages.0").Raw
+	msg0First := ojson.GetBytes(capturedBodies[0], "messages.0").Raw
+	msg0Second := ojson.GetBytes(capturedBodies[1], "messages.0").Raw
+	msg0SecondStream := ojson.GetBytes(capturedBodies[2], "messages.0").Raw
 	if msg0First != msg0Second {
 		t.Fatalf("messages[0] changed between requests of one session:\nfirst:  %s\nsecond: %s", msg0First, msg0Second)
 	}

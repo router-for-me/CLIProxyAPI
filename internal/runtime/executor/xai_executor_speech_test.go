@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -18,7 +19,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestXAISpeechRequestURLStaysOnOfficialAPI(t *testing.T) {
@@ -163,13 +163,13 @@ func TestXAIExecutorExecuteSpeechPayloadRulesMatchOpenAIProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.Get(gotBody, "voice_id").String(); got != "ara" {
+	if got := ojson.Get(gotBody, "voice_id").String(); got != "ara" {
 		t.Fatalf("voice_id = %q, want payload rule override ara; body=%s", got, gotBody)
 	}
-	if got := gjson.Get(gotBody, "language").String(); got != "en" {
+	if got := ojson.Get(gotBody, "language").String(); got != "en" {
 		t.Fatalf("language = %q, want payload rule override en; body=%s", got, gotBody)
 	}
-	if got := gjson.Get(gotBody, "text").String(); got != "hello" {
+	if got := ojson.Get(gotBody, "text").String(); got != "hello" {
 		t.Fatalf("text = %q, want hello; body=%s", got, gotBody)
 	}
 }

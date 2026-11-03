@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -17,8 +18,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
@@ -52,35 +51,33 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 		return nil, err
 	}
 
-	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if errThinking != nil {
+	doc := ojson.NewDoc(body)
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
 		return nil, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = helps.SetBoolIfDifferent(body, "stream", stream)
-	body, _ = sjson.DeleteBytes(body, "generate")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body, _ = sjson.DeleteBytes(body, "client_metadata")
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
+	_ = doc.Delete("generate")
+	_ = doc.Delete("prompt_cache_retention")
+	_ = doc.Delete("safety_identifier")
+	_ = doc.Delete("stream_options")
+	_ = doc.Delete("client_metadata")
 	applyPatch := helps.NewApplyPatchResponsesState(from, originalPayload, originalTranslated)
-	var errNormalizePatch error
-	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body, originalPayload)
-	if errNormalizePatch != nil {
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc, originalPayload); errNormalizePatch != nil {
 		return nil, errNormalizePatch
 	}
-	body = normalizeCodexInstructions(body)
+	normalizeCodexInstructionsDoc(doc)
 	baseURL, _ := metaCreds(auth)
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx, "meta executor", body, baseURL)
-	body = helps.SanitizeMetaWebSearchTools(body)
-	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
-	body = helps.EnsureMetaMuseToolNamespace(body)
+	sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURLDoc(ctx, "meta executor", doc, baseURL)
+	helps.SanitizeMetaWebSearchToolsDoc(doc)
+	helps.NormalizeCodexToolIntegerTypesDoc(doc, opts.Headers)
+	helps.EnsureMetaMuseToolNamespaceDoc(doc)
 
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, e.Identifier(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = doc.Bytes()
 	return &metaPreparedRequest{
 		applyPatch:      applyPatch,
 		baseModel:       baseModel,
@@ -202,14 +199,14 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			continue
 		}
 		eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
-		eventType := gjson.GetBytes(eventData, "type").String()
+		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 		if isMetaSubscriptionUsageEvent(eventType, eventData) {
 			filteringSubscriptionUsage = false
 			continue
 		}
 		if filteringSubscriptionUsage {
 			if eventType == "" {
-				if gjson.ValidBytes(eventData) {
+				if ojson.ValidBytes(eventData) {
 					filteringSubscriptionUsage = false
 				}
 				continue
@@ -226,7 +223,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			return metaCompletedTranslation{}, errBridge
 		}
 		for _, eventData := range events {
-			eventType := gjson.GetBytes(eventData, "type").String()
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -421,7 +418,7 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 	if eventType == metaSubscriptionUsageEventType {
 		return true
 	}
-	if eventType == "" && len(eventData) > 0 && gjson.GetBytes(eventData, "subscription").IsObject() {
+	if eventType == "" && len(eventData) > 0 && ojson.GetBytesNoCopy(eventData, "subscription").IsObject() {
 		return true
 	}
 	return false
@@ -449,12 +446,12 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 }
 
 func metaStreamEventError(eventData []byte) error {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	if eventType != "error" && eventType != "response.failed" {
 		return nil
 	}
 	statusCode := http.StatusBadGateway
-	if code := int(gjson.GetBytes(eventData, "error.code").Int()); code >= 400 && code <= 599 {
+	if code := int(ojson.GetBytesNoCopy(eventData, "error.code").Int()); code >= 400 && code <= 599 {
 		statusCode = code
 	}
 	return wrapMetaUpstreamError(statusCode, eventData)
@@ -462,16 +459,16 @@ func metaStreamEventError(eventData []byte) error {
 
 func metaAsCompletedEvent(data []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(data)
-	if !gjson.ValidBytes(trimmed) {
+	if !ojson.ValidBytes(trimmed) {
 		return nil, false
 	}
-	root := gjson.ParseBytes(trimmed)
+	root := util.ParseGJSONBytesNoCopy(trimmed)
 	switch root.Get("type").String() {
 	case "response.completed", "response.incomplete":
 		return trimmed, true
 	}
 	if root.Get("object").String() == "response" || root.Get("output").Exists() {
-		wrapped, errSet := sjson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
+		wrapped, errSet := ojson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
 		if errSet != nil {
 			return nil, false
 		}

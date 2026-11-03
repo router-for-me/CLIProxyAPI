@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestGeminiVertexGenerateContentInteractionsSSE(t *testing.T) {
@@ -42,7 +42,7 @@ func TestGeminiVertexGenerateContentInteractionsSSE(t *testing.T) {
 						events = append(events, after)
 					}
 					if after, ok := strings.CutPrefix(line, "data: "); ok {
-						payload := gjson.Parse(after)
+						payload := ojson.Parse(after)
 						if value := payload.Get("delta.text"); value.Exists() {
 							text += value.String()
 						}
