@@ -59,3 +59,22 @@ func TestValidateV8ConfigReportsEveryUnknownFieldInASection(t *testing.T) {
 		}
 	}
 }
+
+func TestYAMLErrorDetailsLeaveLargeDocumentsToYAMLv3(t *testing.T) {
+	encoded := []byte("server:\n  port: x\npad: '" + strings.Repeat("a", maxYAMLErrorDetailBytes) + "'\n")
+	var doc yaml.Node
+	if err := yaml.Unmarshal(encoded, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct{ Server struct{ Port int } }
+	err := doc.Decode(&cfg)
+	if err == nil {
+		t.Fatal("decoded")
+	}
+	if got := DescribeYAMLErrorLines(err, &doc, encoded, nil); got != err.Error() {
+		t.Errorf("DescribeYAMLErrorLines: got %q, want yaml.v3's %q", got, err.Error())
+	}
+	if got := describeV8DecodeError(err, encoded, documentRoot(&doc)); got != err {
+		t.Errorf("describeV8DecodeError: got %q, want yaml.v3's %q", got, err.Error())
+	}
+}

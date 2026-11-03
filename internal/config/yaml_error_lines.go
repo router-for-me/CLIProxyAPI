@@ -125,7 +125,7 @@ func documentRoot(node *yaml.Node) *yaml.Node {
 func describeV8DecodeError(err error, encoded []byte, flat *yaml.Node) error {
 	var typeErr *yaml.TypeError
 	var rendered yaml.Node
-	if !errors.As(err, &typeErr) || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
+	if !errors.As(err, &typeErr) || len(encoded) > maxYAMLErrorDetailBytes || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
 		return err
 	}
 	at := func(node *yaml.Node) string {
@@ -211,18 +211,15 @@ func isV8Section(path string) bool {
 }
 
 // DescribeYAMLErrorLines rewrites the yaml.TypeError lines in err, which point
-// into yaml.Marshal(doc), as field paths in doc. A field from submitted, the
-// request body doc was built from, reads "line L (path)" with the body's line
-// and spelling. Alias and merge-key copies get the path only, since their line
-// is the anchor's.
-func DescribeYAMLErrorLines(err error, doc *yaml.Node, submitted []byte) string {
+// into encoded, yaml.Marshal(doc), as field paths in doc. A field from
+// submitted, the request body doc was built from, reads "line L (path)" with
+// the body's line and spelling. Alias and merge-key copies get the path only,
+// since their line is the anchor's.
+func DescribeYAMLErrorLines(err error, doc *yaml.Node, encoded, submitted []byte) string {
 	var typeErr *yaml.TypeError
-	if !errors.As(err, &typeErr) {
-		return err.Error()
-	}
-	encoded, errMarshal := yaml.Marshal(doc)
 	var rendered yaml.Node
-	if errMarshal != nil || yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
+	if !errors.As(err, &typeErr) || len(encoded) > maxYAMLErrorDetailBytes || len(submitted) > maxYAMLErrorDetailBytes ||
+		yaml.Unmarshal(encoded, &rendered) != nil || len(rendered.Content) == 0 {
 		return err.Error()
 	}
 	lines := indexYAMLLines(rendered.Content[0], documentRoot(doc))

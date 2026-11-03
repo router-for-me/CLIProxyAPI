@@ -50,7 +50,7 @@ func TestDescribeYAMLSyntaxErrorReportsTheProblemLine(t *testing.T) {
 }
 
 func TestDescribeYAMLSyntaxErrorLeavesLargeBodiesToYAMLv3(t *testing.T) {
-	body := []byte("root:\n" + strings.Repeat("  key: value\n", maxYAMLSyntaxSearchBytes/13) + " bad: 1\n")
+	body := []byte("root:\n" + strings.Repeat("  key: value\n", maxYAMLErrorDetailBytes/13) + " bad: 1\n")
 	var node yaml.Node
 	err := yaml.Unmarshal(body, &node)
 	if err == nil {

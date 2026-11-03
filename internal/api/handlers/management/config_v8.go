@@ -187,7 +187,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		return
 	}
 	// Validation errors point into the re-encoded data; restate them for the user.
-	describe := func(err error) string { return config.DescribeYAMLErrorLines(err, &doc, submitted) }
+	describe := func(err error) string { return config.DescribeYAMLErrorLines(err, &doc, data, submitted) }
 	next, err := config.ParseConfigBytes(data)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": describe(err)})
