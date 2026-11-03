@@ -39,12 +39,24 @@ type SoonestResetSelector struct {
 	mu sync.Mutex
 	// probes records, per credential ID, that its probe for an unknown weekly reset was
 	// spent, with the weekly-window rollover last probed for, per window.
-	probes map[string]map[quotaWindowID]time.Time
+	probes map[string]soonestResetProbe
+	// probeSeq numbers new probe records in the order they were reserved.
+	probeSeq uint64
+}
+
+// soonestResetProbe is the probe record of one credential.
+type soonestResetProbe struct {
+	// markers holds, per window, the weekly-window rollover last probed for.
+	markers map[quotaWindowID]time.Time
+	// seq orders records by when the credential's first probe was reserved; adding a
+	// marker for a later rollover keeps it.
+	seq uint64
 }
 
 // maxSoonestResetProbeEntries bounds the probe record. Records of removed credentials are
-// dropped through InvalidateAuth; the bound only guards against unbounded growth, and
-// clearing the record at worst sends one more probe per credential.
+// dropped through InvalidateAuth; the bound only guards against unbounded growth. At the
+// bound, recording a new credential evicts the record reserved longest ago, which at worst
+// sends that one credential one more probe.
 const maxSoonestResetProbeEntries = 4096
 
 // Pick selects the available credential whose weekly quota window resets soonest.
@@ -89,7 +101,7 @@ func (s *SoonestResetSelector) pick(auths []*Auth, now time.Time) *Auth {
 			continue
 		}
 		record, hasRecord := s.probes[candidate.ID]
-		rank := windows[i].rank(soonestResetProbed(record, hasRecord, windows[i].rolledOver))
+		rank := windows[i].rank(soonestResetProbed(record.markers, hasRecord, windows[i].rolledOver))
 		if picked < 0 || rank.less(pickedRank) {
 			picked = i
 			pickedRank = rank
@@ -107,16 +119,35 @@ func (s *SoonestResetSelector) pick(auths []*Auth, now time.Time) *Auth {
 // reserveProbeLocked spends a credential's probe. The next pick ranks it by what the
 // answer reports, if anything. Must be called with s.mu held.
 func (s *SoonestResetSelector) reserveProbeLocked(authID string, rolledOver *quotaRollover) {
-	markers, ok := s.probes[authID]
+	record, ok := s.probes[authID]
 	if !ok {
-		if s.probes == nil || len(s.probes) >= maxSoonestResetProbeEntries {
-			s.probes = make(map[string]map[quotaWindowID]time.Time)
+		if s.probes == nil {
+			s.probes = make(map[string]soonestResetProbe)
+		} else if len(s.probes) >= maxSoonestResetProbeEntries {
+			s.evictOldestProbeLocked()
 		}
-		markers = make(map[quotaWindowID]time.Time)
-		s.probes[authID] = markers
+		s.probeSeq++
+		record = soonestResetProbe{markers: make(map[quotaWindowID]time.Time), seq: s.probeSeq}
+		s.probes[authID] = record
 	}
 	if rolledOver != nil {
-		markers[rolledOver.window] = rolledOver.at
+		record.markers[rolledOver.window] = rolledOver.at
+	}
+}
+
+// evictOldestProbeLocked drops the probe record reserved longest ago. It scans every
+// record, which only happens when the record is full. Must be called with s.mu held.
+func (s *SoonestResetSelector) evictOldestProbeLocked() {
+	oldestID := ""
+	var oldestSeq uint64
+	found := false
+	for authID, record := range s.probes {
+		if !found || record.seq < oldestSeq {
+			oldestID, oldestSeq, found = authID, record.seq, true
+		}
+	}
+	if found {
+		delete(s.probes, oldestID)
 	}
 }
 

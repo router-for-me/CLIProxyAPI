@@ -383,3 +383,41 @@ func TestSoonestResetSelector_ProbeRecordIsBounded(t *testing.T) {
 		t.Fatalf("probe records = %d, want at most %d", len(selector.probes), maxSoonestResetProbeEntries)
 	}
 }
+
+// At the bound, a new credential's probe evicts only the record reserved longest ago;
+// every other credential stays probed.
+func TestSoonestResetSelector_ProbeRecordEvictsOldestAtBound(t *testing.T) {
+	t.Parallel()
+
+	wall := soonestResetTestNow
+	selector := &SoonestResetSelector{}
+	id := func(i int) string { return "auth-" + strconv.Itoa(i) }
+	for i := 0; i <= maxSoonestResetProbeEntries; i++ {
+		selector.pick([]*Auth{{ID: id(i), Provider: "claude"}}, wall)
+	}
+
+	selector.mu.Lock()
+	// Marking a later rollover on a recorded credential is not a new record.
+	selector.reserveProbeLocked(id(1), &quotaRollover{window: quotaWindowClaude7d, at: wall, gap: 84 * time.Hour})
+	size := len(selector.probes)
+	_, keptOldest := selector.probes[id(0)]
+	var missing []string
+	for i := 1; i <= maxSoonestResetProbeEntries; i++ {
+		if _, ok := selector.probes[id(i)]; !ok {
+			missing = append(missing, id(i))
+		}
+	}
+	selector.mu.Unlock()
+	if size != maxSoonestResetProbeEntries {
+		t.Fatalf("probe records = %d, want %d", size, maxSoonestResetProbeEntries)
+	}
+	if keptOldest || len(missing) > 0 {
+		t.Fatalf("oldest record kept = %v, other records missing = %v; want only %s evicted", keptOldest, missing, id(0))
+	}
+
+	b := soonestResetClaude("b", wall, soonestResetDay, "allowed")
+	newest := &Auth{ID: id(maxSoonestResetProbeEntries), Provider: "claude"}
+	assertSoonestResetPicks(t, "newest record still probed", soonestResetPicks(selector, wall, 1, newest, b), "b")
+	assertSoonestResetPicks(t, "older surviving record still probed", soonestResetPicks(selector, wall, 1, &Auth{ID: id(1), Provider: "claude"}, b), "b")
+	assertSoonestResetPicks(t, "evicted record probed again", soonestResetPicks(selector, wall, 1, &Auth{ID: id(0), Provider: "claude"}, b), id(0))
+}

@@ -71,9 +71,11 @@ func soonestResetOrder(selector *SoonestResetSelector, auths []*Auth, now time.T
 // probedSoonestResetSelector returns a selector whose probe for every listed credential was
 // already spent, before any rollover.
 func probedSoonestResetSelector(auths []*Auth) *SoonestResetSelector {
-	selector := &SoonestResetSelector{probes: make(map[string]map[quotaWindowID]time.Time)}
+	selector := &SoonestResetSelector{}
+	selector.mu.Lock()
+	defer selector.mu.Unlock()
 	for _, auth := range auths {
-		selector.probes[auth.ID] = map[quotaWindowID]time.Time{}
+		selector.reserveProbeLocked(auth.ID, nil)
 	}
 	return selector
 }
