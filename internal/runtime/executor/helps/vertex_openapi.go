@@ -7,11 +7,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // IsVertexOpenAPIModel reports whether the given model identifier targets a
@@ -116,11 +117,11 @@ func ShouldExecuteVertexOpenAPIForRequest(cfg *config.Config, auth *cliproxyauth
 	}
 	requestedModel := PayloadRequestedModel(opts, "")
 	if requestedModel == "" {
-		requestedModel = strings.TrimSpace(gjson.GetBytes(opts.OriginalRequest, "model").String())
+		requestedModel = strings.TrimSpace(ojson.GetBytesNoCopy(opts.OriginalRequest, "model").String())
 	}
 	if requestedModel == "" && len(opts.Metadata) > 0 {
 		if data, errMarshal := json.Marshal(opts.Metadata); errMarshal == nil {
-			requestedModel = strings.TrimSpace(gjson.GetBytes(data, "model").String())
+			requestedModel = strings.TrimSpace(ojson.GetBytesNoCopy(data, "model").String())
 		}
 	}
 	requestedModel = stripVertexAuthPrefix(requestedModel, auth)
@@ -204,7 +205,7 @@ func isVertexOAuthCredential(auth *cliproxyauth.Auth) bool {
 
 func vertexModelOpenAPIRules(data []byte) []config.OAuthModelAlias {
 	var rules []config.OAuthModelAlias
-	for _, item := range gjson.ParseBytes(data).Array() {
+	for _, item := range util.ParseGJSONBytesNoCopy(data).Array() {
 		var rule config.OAuthModelAlias
 		if errUnmarshal := json.Unmarshal([]byte(item.Raw), &rule); errUnmarshal == nil && (strings.TrimSpace(rule.Name) != "" || strings.TrimSpace(rule.Alias) != "") {
 			rules = append(rules, rule)
@@ -449,7 +450,7 @@ func VertexOpenAPILocation(auth *cliproxyauth.Auth, defaultLocation string) stri
 			}
 		}
 	}
-	return "us-central1"
+	return "global"
 }
 
 // VertexAuthBaseURL extracts an optional custom base_url from a Vertex credential.
@@ -488,9 +489,7 @@ func VertexAuthProjectID(auth *cliproxyauth.Auth) string {
 // VertexOpenAPIHostBaseURL returns the Vertex regional, multi-region REP, or global host URL.
 func VertexOpenAPIHostBaseURL(location string) string {
 	loc := strings.TrimSpace(location)
-	if loc == "" {
-		loc = "us-central1"
-	} else if strings.EqualFold(loc, "global") {
+	if loc == "" || strings.EqualFold(loc, "global") {
 		return "https://aiplatform.googleapis.com"
 	} else if strings.EqualFold(loc, "us") || strings.EqualFold(loc, "eu") {
 		return fmt.Sprintf("https://aiplatform.%s.rep.googleapis.com", strings.ToLower(loc))
@@ -504,7 +503,7 @@ func VertexServiceAccountOpenAPIBaseURL(baseURL, version, projectID, location st
 	explicitLoc := strings.TrimSpace(location)
 	loc := explicitLoc
 	if loc == "" {
-		loc = "us-central1"
+		loc = "global"
 	}
 	ver := strings.TrimSpace(version)
 	if ver == "" {

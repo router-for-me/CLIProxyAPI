@@ -11,23 +11,34 @@ var codexSIWCCredentialKeys = []string{
 // Its original token identities (both in-memory and on-disk baselines) act as versions,
 // independent of timestamp precision.
 type CredentialRefreshPatch struct {
-	outerBefore     map[string]any
-	outerDiskBefore map[string]any
-	outerAfter      map[string]any
-	siwcBefore      map[string]any
-	siwcDiskBefore  map[string]any
-	siwcAfter       map[string]any
+	outerBefore          map[string]any
+	outerDiskBefore      map[string]any
+	outerAfter           map[string]any
+	siwcBefore           map[string]any
+	siwcDiskBefore       map[string]any
+	siwcAfter            map[string]any
+	baselineOuterRefresh string
+	baselineSIWCRefresh  string
+	upstreamRefreshed    bool
+	outerErr             error
+	siwcErr              error
 }
 
 // NewCredentialRefreshPatch records only credential partitions actually refreshed.
 func NewCredentialRefreshPatch(before, after map[string]any, outer, siwc bool) *CredentialRefreshPatch {
-	return NewCredentialRefreshPatchWithDiskBaseline(before, nil, after, outer, siwc)
+	patch := NewCredentialRefreshPatchWithDiskBaseline(before, nil, after, outer, siwc)
+	patch.upstreamRefreshed = outer || siwc
+	return patch
 }
 
 // NewCredentialRefreshPatchWithDiskBaseline records both the in-memory baseline (before)
 // and the on-disk baseline (diskBefore) observed under the file lock before refreshing to after.
 func NewCredentialRefreshPatchWithDiskBaseline(before, diskBefore, after map[string]any, outer, siwc bool) *CredentialRefreshPatch {
-	patch := &CredentialRefreshPatch{}
+	patch := &CredentialRefreshPatch{
+		upstreamRefreshed:    outer || siwc,
+		baselineOuterRefresh: lookupRefreshTokenField(diskBefore, before, false),
+		baselineSIWCRefresh:  lookupRefreshTokenField(diskBefore, before, true),
+	}
 	if outer {
 		patch.outerBefore = credentialFields(before, codexOuterCredentialKeys)
 		if len(diskBefore) > 0 {
@@ -46,6 +57,26 @@ func NewCredentialRefreshPatchWithDiskBaseline(before, diskBefore, after map[str
 		patch.siwcAfter = credentialFields(afterSIWC, codexSIWCCredentialKeys)
 	}
 	return patch
+}
+
+func lookupRefreshTokenField(diskBefore, memBefore map[string]any, siwc bool) string {
+	for _, src := range []map[string]any{diskBefore, memBefore} {
+		if len(src) == 0 {
+			continue
+		}
+		target := src
+		if siwc {
+			nested, ok := src["siwc"].(map[string]any)
+			if !ok || len(nested) == 0 {
+				continue
+			}
+			target = nested
+		}
+		if rt, ok := target["refresh_token"].(string); ok && rt != "" {
+			return rt
+		}
+	}
+	return ""
 }
 
 func credentialFields(metadata map[string]any, keys []string) map[string]any {
@@ -117,6 +148,128 @@ func (p *CredentialRefreshPatch) RefreshedOuter() bool {
 // RefreshedSIWC reports whether p carries a refreshed SIWC credential partition.
 func (p *CredentialRefreshPatch) RefreshedSIWC() bool {
 	return p != nil && p.siwcAfter != nil
+}
+
+// SetUpstreamRefreshed records whether an upstream OAuth token refresh actually succeeded
+// (as opposed to only adopting rotated credentials already present on disk).
+func (p *CredentialRefreshPatch) SetUpstreamRefreshed(refreshed bool) {
+	if p == nil {
+		return
+	}
+	p.upstreamRefreshed = refreshed
+}
+
+// UpstreamRefreshed reports whether p includes an upstream OAuth token refresh.
+func (p *CredentialRefreshPatch) UpstreamRefreshed() bool {
+	if p == nil {
+		return false
+	}
+	return p.upstreamRefreshed
+}
+
+// SetPartitionErrors records any per-partition refresh failures that occurred alongside a partial refresh.
+func (p *CredentialRefreshPatch) SetPartitionErrors(outerErr, siwcErr error) {
+	if p == nil {
+		return
+	}
+	p.outerErr = outerErr
+	p.siwcErr = siwcErr
+}
+
+// OuterError returns any error encountered while refreshing the outer OAuth partition.
+func (p *CredentialRefreshPatch) OuterError() error {
+	if p == nil {
+		return nil
+	}
+	return p.outerErr
+}
+
+// SIWCError returns any error encountered while refreshing the SIWC partition.
+func (p *CredentialRefreshPatch) SIWCError() error {
+	if p == nil {
+		return nil
+	}
+	return p.siwcErr
+}
+
+// FailedOuterRefreshToken returns the baseline outer refresh token that was submitted when OuterError occurred.
+func (p *CredentialRefreshPatch) FailedOuterRefreshToken() string {
+	if p == nil || p.outerErr == nil {
+		return ""
+	}
+	return p.baselineOuterRefresh
+}
+
+// FailedSIWCRefreshToken returns the baseline SIWC refresh token that was submitted when SIWCError occurred.
+func (p *CredentialRefreshPatch) FailedSIWCRefreshToken() string {
+	if p == nil || p.siwcErr == nil {
+		return ""
+	}
+	return p.baselineSIWCRefresh
+}
+
+// PartitionRefreshError carries per-partition refresh errors when a credential refresh fails.
+type PartitionRefreshError struct {
+	outerErr error
+	siwcErr  error
+}
+
+// NewPartitionRefreshError returns a combined error carrying both outer and SIWC refresh errors when present.
+func NewPartitionRefreshError(outerErr, siwcErr error) error {
+	if outerErr == nil && siwcErr == nil {
+		return nil
+	}
+	if outerErr != nil && siwcErr == nil {
+		return outerErr
+	}
+	if siwcErr != nil && outerErr == nil {
+		return siwcErr
+	}
+	return &PartitionRefreshError{outerErr: outerErr, siwcErr: siwcErr}
+}
+
+func (e *PartitionRefreshError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.outerErr != nil && e.siwcErr != nil {
+		return e.outerErr.Error() + "; " + e.siwcErr.Error()
+	}
+	if e.outerErr != nil {
+		return e.outerErr.Error()
+	}
+	if e.siwcErr != nil {
+		return e.siwcErr.Error()
+	}
+	return ""
+}
+
+func (e *PartitionRefreshError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	var errs []error
+	if e.outerErr != nil {
+		errs = append(errs, e.outerErr)
+	}
+	if e.siwcErr != nil {
+		errs = append(errs, e.siwcErr)
+	}
+	return errs
+}
+
+func (e *PartitionRefreshError) OuterRefreshError() error {
+	if e == nil {
+		return nil
+	}
+	return e.outerErr
+}
+
+func (e *PartitionRefreshError) SIWCRefreshError() error {
+	if e == nil {
+		return nil
+	}
+	return e.siwcErr
 }
 
 // CanApplyTo reports whether at least one refreshed partition in p still matches disk's version.

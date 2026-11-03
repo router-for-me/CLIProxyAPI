@@ -372,8 +372,9 @@ func TestHandlerPluginExecutorPublishesUsageStreamInteractions(t *testing.T) {
 
 	originalModel := "gemini-2.5-flash"
 
-	chunks := make(chan coreexecutor.StreamChunk, 2)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_input_tokens\":30,\"total_output_tokens\":70,\"total_tokens\":100}}}\n\n")}
+	chunks := make(chan coreexecutor.StreamChunk, 3)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"start\",\"usage\":{\"input_tokens\":100,\"cache_read_tokens\":20,\"output_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":100}}\n\n")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"finish\",\"usage\":{\"input_tokens\":100,\"cache_read_tokens\":20,\"output_tokens\":30,\"reasoning_tokens\":10,\"total_tokens\":140}}\n\n")}
 	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
 	close(chunks)
 
@@ -401,8 +402,15 @@ func TestHandlerPluginExecutorPublishesUsageStreamInteractions(t *testing.T) {
 	if record.Provider != targetPluginID {
 		t.Errorf("record.Provider = %q, want %q", record.Provider, targetPluginID)
 	}
-	if record.Detail.InputTokens != 30 || record.Detail.OutputTokens != 70 || record.Detail.TotalTokens != 100 {
-		t.Errorf("record.Detail = %+v, want input=30 output=70 total=100", record.Detail)
+	if record.Detail.InputTokens != 100 || record.Detail.CacheReadTokens != 20 || record.Detail.OutputTokens != 30 || record.Detail.ReasoningTokens != 10 || record.Detail.TotalTokens != 140 {
+		t.Errorf("record.Detail = %+v, want input=100 cache_read=20 output=30 reasoning=10 total=140", record.Detail)
+	}
+	tb := record.Detail.TokenBreakdown
+	if !tb.Valid() || tb.Quality != usage.TokenAccountingQualityComplete ||
+		tb.TotalTokens != 140 ||
+		tb.Input.TotalTokens != 100 || tb.Input.UncachedTokens != 80 || tb.Input.CacheReadTokens != 20 ||
+		tb.Output.TotalTokens != 40 || tb.Output.NonReasoningTokens != 30 || tb.Output.ReasoningTokens != 10 {
+		t.Errorf("record.Detail.TokenBreakdown = %+v, want valid separate-reasoning breakdown with total=140 input=(100/80/20/0) output=(40/30/10)", tb)
 	}
 }
 

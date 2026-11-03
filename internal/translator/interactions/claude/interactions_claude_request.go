@@ -3,9 +3,10 @@ package claude
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func ConvertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
@@ -20,20 +21,23 @@ func ConvertClaudeRequestToInteractionsWithCompat(modelName string, inputRawJSON
 }
 
 func convertClaudeRequestToInteractions(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) ([]byte, error) {
-	root := gjson.ParseBytes(inputRawJSON)
-	out := []byte(`{"model":"","input":[]}`)
-	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
+	// The internal commentary marker must be restored as assistant text before
+	// any thinking handling, so it is never dropped or mapped to thought.
+	restoredRawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
+	root := util.ParseGJSONBytesNoCopy(restoredRawJSON)
+	outDoc := ojson.NewDocString(`{"model":"","input":[]}`)
+	_ = outDoc.Set("model", firstNonEmpty(modelName, root.Get("model").String()))
 	if streamValue, ok := claudeRequestStreamValue(root, stream); ok {
-		out, _ = sjson.SetBytes(out, "stream", streamValue)
+		_ = outDoc.Set("stream", streamValue)
 	}
-	out = copyClaudeSystemToInteractions(out, root)
-	out = copyClaudeGenerationConfigToInteractions(out, root)
-	out, errDrops := appendClaudeMessagesToInteractions(out, root.Get("messages"), preserveEmptyThinkingBlocks)
-	out = copyClaudeToolsToInteractions(out, root)
-	return out, errDrops
+	copyClaudeSystemToInteractionsDoc(outDoc, root)
+	copyClaudeGenerationConfigToInteractionsDoc(outDoc, root)
+	errDrops := appendClaudeMessagesToInteractionsDoc(outDoc, root.Get("messages"), preserveEmptyThinkingBlocks)
+	copyClaudeToolsToInteractionsDoc(outDoc, root)
+	return outDoc.Bytes(), errDrops
 }
 
-func claudeRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
+func claudeRequestStreamValue(root ojson.Result, stream bool) (bool, bool) {
 	if value := root.Get("stream"); value.Exists() {
 		return value.Bool(), true
 	}
@@ -43,89 +47,85 @@ func claudeRequestStreamValue(root gjson.Result, stream bool) (bool, bool) {
 	return false, false
 }
 
-func copyClaudeSystemToInteractions(out []byte, root gjson.Result) []byte {
+func copyClaudeSystemToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 	text := claudeText(root.Get("system"))
 	if text == "" {
-		return out
+		return
 	}
-	out, _ = sjson.SetBytes(out, "system_instruction", text)
-	return out
+	_ = outDoc.Set("system_instruction", text)
 }
 
-func copyClaudeGenerationConfigToInteractions(out []byte, root gjson.Result) []byte {
-	out = copyClaudeJSONField(out, root, "max_tokens", "generation_config.max_output_tokens")
-	out = copyClaudeJSONField(out, root, "temperature", "generation_config.temperature")
-	out = copyClaudeJSONField(out, root, "top_p", "generation_config.top_p")
-	out = copyClaudeJSONField(out, root, "stop_sequences", "generation_config.stop_sequences")
-	out = copyClaudeThinkingToInteractions(out, root)
-	return copyClaudeToolChoiceToInteractions(out, root.Get("tool_choice"))
+func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
+	copyClaudeJSONFieldDoc(outDoc, root, "max_tokens", "generation_config.max_output_tokens")
+	copyClaudeJSONFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
+	copyClaudeJSONFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
+	copyClaudeJSONFieldDoc(outDoc, root, "stop_sequences", "generation_config.stop_sequences")
+	copyClaudeThinkingToInteractionsDoc(outDoc, root)
+	copyClaudeToolChoiceToInteractionsDoc(outDoc, root.Get("tool_choice"))
 }
 
-func copyClaudeJSONField(out []byte, root gjson.Result, from, to string) []byte {
+func copyClaudeJSONFieldDoc(outDoc *ojson.Doc, root ojson.Result, from, to string) {
 	value := root.Get(from)
 	if !value.Exists() {
-		return out
+		return
 	}
-	out, _ = sjson.SetRawBytes(out, to, []byte(value.Raw))
-	return out
+	_ = outDoc.SetRaw(to, value.Raw)
 }
 
-func copyClaudeThinkingToInteractions(out []byte, root gjson.Result) []byte {
+func copyClaudeThinkingToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 	thinking := root.Get("thinking")
 	if thinking.Exists() {
 		switch strings.ToLower(strings.TrimSpace(thinking.Get("type").String())) {
 		case "disabled":
-			out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "none")
+			_ = outDoc.Set("generation_config.thinking_level", "none")
 		case "enabled":
 			if budget := thinking.Get("budget_tokens"); budget.Exists() {
-				out, _ = sjson.SetRawBytes(out, "generation_config.thinking_config.thinking_budget", []byte(budget.Raw))
+				_ = outDoc.SetRaw("generation_config.thinking_config.thinking_budget", budget.Raw)
 			} else {
-				out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "high")
+				_ = outDoc.Set("generation_config.thinking_level", "high")
 			}
 		case "adaptive":
-			out, _ = sjson.SetBytes(out, "generation_config.thinking_level", "auto")
+			_ = outDoc.Set("generation_config.thinking_level", "auto")
 		}
 	}
-	if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
+	if effort := root.Get("output_config.effort"); effort.Exists() && effort.Type == ojson.String {
+		_ = outDoc.Set("generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
 	}
-	return out
 }
 
-func copyClaudeToolChoiceToInteractions(out []byte, toolChoice gjson.Result) []byte {
+func copyClaudeToolChoiceToInteractionsDoc(outDoc *ojson.Doc, toolChoice ojson.Result) {
 	if !toolChoice.Exists() {
-		return out
+		return
 	}
 	switch toolChoice.Type {
-	case gjson.String:
+	case ojson.String:
 		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
 		case "auto":
-			out, _ = sjson.SetBytes(out, "generation_config.tool_choice", "auto")
+			_ = outDoc.Set("generation_config.tool_choice", "auto")
 		case "any", "required":
-			out, _ = sjson.SetBytes(out, "generation_config.tool_choice", "required")
+			_ = outDoc.Set("generation_config.tool_choice", "required")
 		}
-	case gjson.JSON:
+	case ojson.JSON:
 		toolType := strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String()))
 		switch toolType {
 		case "auto":
-			out, _ = sjson.SetBytes(out, "generation_config.tool_choice", "auto")
+			_ = outDoc.Set("generation_config.tool_choice", "auto")
 		case "any", "required":
-			out, _ = sjson.SetBytes(out, "generation_config.tool_choice", "required")
+			_ = outDoc.Set("generation_config.tool_choice", "required")
 		case "tool":
 			name := strings.TrimSpace(toolChoice.Get("name").String())
 			if name != "" {
 				choice := []byte(`{"type":"function","name":""}`)
-				choice, _ = sjson.SetBytes(choice, "name", name)
-				out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", choice)
+				choice, _ = ojson.SetBytes(choice, "name", name)
+				_ = outDoc.SetRawBytes("generation_config.tool_choice", choice)
 			}
 		}
 	}
-	return out
 }
 
-func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, preserveEmptyThinkingBlocks bool) ([]byte, error) {
+func appendClaudeMessagesToInteractionsDoc(outDoc *ojson.Doc, messages ojson.Result, preserveEmptyThinkingBlocks bool) error {
 	if !messages.Exists() || !messages.IsArray() {
-		return out, nil
+		return nil
 	}
 	var drops translatorcommon.UserTurnDrops
 	inputItems := translatorcommon.NewRawArrayItems(messages.Get("#").Int())
@@ -133,13 +133,13 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 	var pendingSystemReminders [][]byte
 	toolNamesByID := make(map[string]string)
 
-	messages.ForEach(func(_, message gjson.Result) bool {
+	messages.ForEach(func(_, message ojson.Result) bool {
 		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
 		content := message.Get("content")
 		if role == "system" {
 			if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(content); ok {
 				step := []byte(`{"type":"user_input","content":[{"type":"text","text":""}]}`)
-				step, _ = sjson.SetBytes(step, "content.0.text", reminderText)
+				step, _ = ojson.SetBytes(step, "content.0.text", reminderText)
 				if len(pendingToolUseIDs) > 0 {
 					pendingSystemReminders = append(pendingSystemReminders, step)
 				} else {
@@ -167,24 +167,24 @@ func appendClaudeMessagesToInteractions(out []byte, messages gjson.Result, prese
 	if len(pendingSystemReminders) > 0 {
 		inputItems = append(inputItems, pendingSystemReminders...)
 	}
-	out = translatorcommon.SetRawArrayItems(out, "input", inputItems)
-	return out, drops.Err()
+	translatorcommon.SetRawArrayItemsDoc(outDoc, "input", inputItems)
+	return drops.Err()
 }
 
-func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, toolNamesByID map[string]string, role string, content gjson.Result, preserveEmptyThinkingBlocks bool, drops *translatorcommon.UserTurnDrops) int {
+func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]string, pendingSystemReminders *[][]byte, toolNamesByID map[string]string, role string, content ojson.Result, preserveEmptyThinkingBlocks bool, drops *translatorcommon.UserTurnDrops) int {
 	defaultStepType := "user_input"
 	if role == "assistant" {
 		defaultStepType = "model_output"
 	}
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
 			*items = append(*items, *pendingSystemReminders...)
 			*pendingSystemReminders = nil
 		}
-		step := []byte(`{"type":"","content":[{"type":"text","text":""}]}`)
-		step, _ = sjson.SetBytes(step, "type", defaultStepType)
-		step, _ = sjson.SetBytes(step, "content.0.text", content.String())
-		*items = append(*items, step)
+		stepDoc := ojson.NewDocString(`{"type":"","content":[{"type":"text","text":""}]}`)
+		_ = stepDoc.Set("type", defaultStepType)
+		_ = stepDoc.Set("content.0.text", content.String())
+		*items = append(*items, stepDoc.Bytes())
 		return 1
 	}
 	if !content.IsArray() {
@@ -198,13 +198,13 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 		if len(stepContent) == 0 {
 			return
 		}
-		step := []byte(`{"type":"","content":[]}`)
-		step, _ = sjson.SetBytes(step, "type", defaultStepType)
-		step, _ = sjson.SetRawBytes(step, "content", translatorcommon.JoinRawArray(stepContent))
-		*items = append(*items, step)
+		stepDoc := ojson.NewDocString(`{"type":"","content":[]}`)
+		_ = stepDoc.Set("type", defaultStepType)
+		_ = stepDoc.SetRawBytes("content", translatorcommon.JoinRawArray(stepContent))
+		*items = append(*items, stepDoc.Bytes())
 		stepContent = stepContent[:0]
 	}
-	content.ForEach(func(_, part gjson.Result) bool {
+	content.ForEach(func(_, part ojson.Result) bool {
 		partType := strings.ToLower(strings.TrimSpace(part.Get("type").String()))
 		switch partType {
 		case "text":
@@ -215,7 +215,7 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 					*pendingSystemReminders = nil
 				}
 				contentPart := []byte(`{"type":"text","text":""}`)
-				contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+				contentPart, _ = ojson.SetBytes(contentPart, "text", text)
 				stepContent = append(stepContent, contentPart)
 				if strings.TrimSpace(text) != "" {
 					sendable++
@@ -226,7 +226,7 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 			text := part.Get("thinking").String()
 			if text != "" || preserveEmptyThinkingBlocks {
 				step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
-				step, _ = sjson.SetBytes(step, "content.0.text", text)
+				step, _ = ojson.SetBytes(step, "content.0.text", text)
 				*items = append(*items, step)
 				sendable++
 			}
@@ -267,7 +267,7 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 	return sendable
 }
 
-func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, bool) {
+func claudeMediaPartToInteractions(part ojson.Result, partType string) ([]byte, bool) {
 	source := part.Get("source")
 	mimeType := source.Get("media_type").String()
 	data := source.Get("data").String()
@@ -280,56 +280,56 @@ func claudeMediaPartToInteractions(part gjson.Result, partType string) ([]byte, 
 	if mimeType == "" || data == "" {
 		return nil, false
 	}
-	out := []byte(`{"type":"","mime_type":"","data":""}`)
-	out, _ = sjson.SetBytes(out, "type", partType)
-	out, _ = sjson.SetBytes(out, "mime_type", mimeType)
-	out, _ = sjson.SetBytes(out, "data", data)
-	return out, true
+	outDoc := ojson.NewDocString(`{"type":"","mime_type":"","data":""}`)
+	_ = outDoc.Set("type", partType)
+	_ = outDoc.Set("mime_type", mimeType)
+	_ = outDoc.Set("data", data)
+	return outDoc.Bytes(), true
 }
 
-func claudeToolUseToInteractions(part gjson.Result) []byte {
-	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	step, _ = sjson.SetBytes(step, "name", part.Get("name").String())
+func claudeToolUseToInteractions(part ojson.Result) []byte {
+	stepDoc := ojson.NewDocString(`{"type":"function_call","name":"","arguments":{}}`)
+	_ = stepDoc.Set("name", part.Get("name").String())
 	if id := part.Get("id").String(); id != "" {
-		step, _ = sjson.SetBytes(step, "id", id)
+		_ = stepDoc.Set("id", id)
 	}
 	input := part.Get("input")
 	if input.Exists() && input.IsObject() {
-		step, _ = sjson.SetRawBytes(step, "arguments", []byte(input.Raw))
+		_ = stepDoc.SetRaw("arguments", input.Raw)
 	}
-	return step
+	return stepDoc.Bytes()
 }
 
-func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]string) []byte {
-	step := []byte(`{"type":"function_result","call_id":"","result":""}`)
+func claudeToolResultToInteractions(part ojson.Result, toolNamesByID map[string]string) []byte {
+	stepDoc := ojson.NewDocString(`{"type":"function_result","call_id":"","result":""}`)
 	id := part.Get("tool_use_id").String()
 	if id != "" {
-		step, _ = sjson.SetBytes(step, "call_id", id)
+		_ = stepDoc.Set("call_id", id)
 	}
 	name := part.Get("name").String()
 	if name == "" && id != "" && toolNamesByID != nil {
 		name = toolNamesByID[id]
 	}
 	if name != "" {
-		step, _ = sjson.SetBytes(step, "name", name)
+		_ = stepDoc.Set("name", name)
 	}
 	if isError := part.Get("is_error"); isError.Exists() && isError.Bool() {
-		step, _ = sjson.SetBytes(step, "is_error", true)
+		_ = stepDoc.Set("is_error", true)
 	}
 	result := part.Get("content")
 	if result.Exists() {
 		switch {
-		case result.Type == gjson.String:
-			step, _ = sjson.SetBytes(step, "result", result.String())
+		case result.Type == ojson.String:
+			_ = stepDoc.Set("result", result.String())
 		case result.IsArray():
 			contentItems := make([][]byte, 0, 4)
-			result.ForEach(func(_, item gjson.Result) bool {
+			result.ForEach(func(_, item ojson.Result) bool {
 				itemType := item.Get("type").String()
 				switch itemType {
 				case "text":
 					isPureText := true
 					if item.IsObject() {
-						item.ForEach(func(k, _ gjson.Result) bool {
+						item.ForEach(func(k, _ ojson.Result) bool {
 							key := k.String()
 							if key != "type" && key != "text" && key != "cache_control" {
 								isPureText = false
@@ -340,7 +340,7 @@ func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]
 					}
 					if isPureText {
 						contentPart := []byte(`{"type":"text","text":""}`)
-						contentPart, _ = sjson.SetBytes(contentPart, "text", item.Get("text").String())
+						contentPart, _ = ojson.SetBytes(contentPart, "text", item.Get("text").String())
 						contentItems = append(contentItems, contentPart)
 					} else if raw := strings.TrimSpace(item.Raw); raw != "" {
 						contentItems = append(contentItems, []byte(raw))
@@ -358,47 +358,46 @@ func claudeToolResultToInteractions(part gjson.Result, toolNamesByID map[string]
 				}
 				return true
 			})
-			step, _ = sjson.SetRawBytes(step, "result", translatorcommon.JoinRawArray(contentItems))
+			_ = stepDoc.SetRawBytes("result", translatorcommon.JoinRawArray(contentItems))
 		default:
-			step, _ = sjson.SetRawBytes(step, "result", []byte(result.Raw))
+			_ = stepDoc.SetRaw("result", result.Raw)
 		}
 	}
-	return step
+	return stepDoc.Bytes()
 }
 
-func copyClaudeToolsToInteractions(out []byte, root gjson.Result) []byte {
+func copyClaudeToolsToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 	tools := root.Get("tools")
 	if !tools.Exists() || !tools.IsArray() {
-		return out
+		return
 	}
 	var toolItems [][]byte
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		name := strings.TrimSpace(tool.Get("name").String())
 		if name == "" {
 			return true
 		}
-		item := []byte(`{"type":"function","name":"","parameters":{}}`)
-		item, _ = sjson.SetBytes(item, "name", name)
+		itemDoc := ojson.NewDocString(`{"type":"function","name":"","parameters":{}}`)
+		_ = itemDoc.Set("name", name)
 		if desc := tool.Get("description"); desc.Exists() {
-			item, _ = sjson.SetBytes(item, "description", desc.String())
+			_ = itemDoc.Set("description", desc.String())
 		}
 		if schema := tool.Get("input_schema"); schema.Exists() && schema.IsObject() {
-			item, _ = sjson.SetRawBytes(item, "parameters", []byte(schema.Raw))
+			_ = itemDoc.SetRaw("parameters", schema.Raw)
 		}
-		toolItems = append(toolItems, item)
+		toolItems = append(toolItems, itemDoc.Bytes())
 		return true
 	})
 	if len(toolItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolItems))
+		_ = outDoc.SetRawBytes("tools", translatorcommon.JoinRawArray(toolItems))
 	}
-	return out
 }
 
-func claudeText(value gjson.Result) string {
+func claudeText(value ojson.Result) string {
 	if !value.Exists() {
 		return ""
 	}
-	if value.Type == gjson.String {
+	if value.Type == ojson.String {
 		return value.String()
 	}
 	if text := value.Get("text"); text.Exists() {
@@ -406,7 +405,7 @@ func claudeText(value gjson.Result) string {
 	}
 	if value.IsArray() {
 		var builder strings.Builder
-		value.ForEach(func(_, item gjson.Result) bool {
+		value.ForEach(func(_, item ojson.Result) bool {
 			text := claudeText(item)
 			if text == "" {
 				return true

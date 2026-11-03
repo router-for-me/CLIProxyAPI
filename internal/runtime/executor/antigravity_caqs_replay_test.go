@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature/signaturetest"
@@ -18,12 +19,10 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
-	sig := signaturetest.AntigravityCAQS()
+	sig := signaturetest.AntigravityCAQSWithChannel(19)
 	previousCache, previousStrict := cache.SignatureCacheEnabled(), cache.SignatureBypassStrictMode()
 	t.Cleanup(func() {
 		cache.SetSignatureCacheEnabled(previousCache)
@@ -94,7 +93,7 @@ func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
 							if !bytes.HasPrefix(line, []byte("data:")) {
 								continue
 							}
-							event := gjson.ParseBytes(bytes.TrimSpace(line[5:]))
+							event := ojson.ParseBytes(bytes.TrimSpace(line[5:]))
 							switch event.Get("delta.type").String() {
 							case "signature_delta":
 								signatureOut += event.Get("delta.signature").String()
@@ -107,24 +106,25 @@ func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
 						if signatureOut != sig {
 							t.Fatal("stream changed the original signature")
 						}
-						content = []byte(`[{"type":"thinking"},{"type":"text"}]`)
-						content, _ = sjson.SetBytes(content, "0.thinking", thinkingOut)
-						content, _ = sjson.SetBytes(content, "0.signature", signatureOut)
-						content, _ = sjson.SetBytes(content, "1.text", textOut)
+						contentDoc := ojson.NewDoc([]byte(`[{"type":"thinking"},{"type":"text"}]`))
+						_ = contentDoc.Set("0.thinking", thinkingOut)
+						_ = contentDoc.Set("0.signature", signatureOut)
+						_ = contentDoc.Set("1.text", textOut)
+						content = contentDoc.Bytes()
 					} else {
-						content = []byte(gjson.GetBytes(downstream, "content").Raw)
-						if gjson.GetBytes(content, "0.signature").String() != sig {
+						content = []byte(ojson.GetBytes(downstream, "content").Raw)
+						if ojson.GetBytes(content, "0.signature").String() != sig {
 							t.Fatal("nonstream changed original signature")
 						}
 					}
 					second := []byte(`{"model":"claude-opus-5-5-high","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"calculate"},{"role":"assistant","content":[]},{"role":"user","content":"plus 17"}]}`)
-					second, _ = sjson.SetRawBytes(second, "messages.1.content", content)
+					second, _ = ojson.SetRawBytes(second, "messages.1.content", content)
 					call(second)
 					upstream := <-requests
-					if gjson.GetBytes(upstream, "model").String() != model {
+					if ojson.GetBytes(upstream, "model").String() != model {
 						t.Fatal("upstream model changed")
 					}
-					parts := gjson.GetBytes(upstream, "request.contents.1.parts").Array()
+					parts := ojson.GetBytes(upstream, "request.contents.1.parts").Array()
 					if len(parts) < 2 || !parts[0].Get("thought").Bool() || parts[0].Get("text").String() != "checked calculation" || parts[0].Get("thoughtSignature").String() != sig {
 						t.Fatal("second turn lost thinking or changed the original signature")
 					}
@@ -134,7 +134,7 @@ func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
 						t.Cleanup(func() { _ = cache.DeleteCachedSignatureRequired(context.Background(), model, text) })
 						recovery := []byte(`{"model":"claude-opus-5-5-high","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"caqs-cache-recovery-test"}]},{"role":"user","content":"continue"}]}`)
 						recovered, _ := antigravityclaude.ConvertClaudeRequestToAntigravity(model, recovery, false)
-						if gjson.GetBytes(recovered, "request.contents.0.parts.0.thoughtSignature").String() != sig {
+						if ojson.GetBytes(recovered, "request.contents.0.parts.0.thoughtSignature").String() != sig {
 							t.Fatal("cache recovery changed original signature")
 						}
 					}

@@ -1764,20 +1764,34 @@ func pluginSyncDialer(options *redis.Options) func(context.Context, string, stri
 
 type pluginSyncCancelableConn struct {
 	net.Conn
-	done chan struct{}
-	once sync.Once
+	ctx                 context.Context
+	stopCancel          func() bool
+	once                sync.Once
+	closeUnderlyingOnce sync.Once
 }
 
 func newPluginSyncCancelableConn(ctx context.Context, conn net.Conn) net.Conn {
-	wrapped := &pluginSyncCancelableConn{Conn: conn, done: make(chan struct{})}
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = closeUnderlyingTransport(conn)
-		case <-wrapped.done:
-		}
-	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wrapped := &pluginSyncCancelableConn{
+		Conn: conn,
+		ctx:  ctx,
+	}
+	wrapped.stopCancel = context.AfterFunc(ctx, wrapped.closeUnderlying)
+	if ctx.Err() != nil {
+		wrapped.closeUnderlying()
+	}
 	return wrapped
+}
+
+func (c *pluginSyncCancelableConn) closeUnderlying() {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	c.closeUnderlyingOnce.Do(func() {
+		_ = closeUnderlyingTransport(c.Conn)
+	})
 }
 
 func closeUnderlyingTransport(conn net.Conn) error {
@@ -1817,7 +1831,14 @@ func (c *pluginSyncCancelableConn) Close() error {
 	if c == nil || c.Conn == nil {
 		return net.ErrClosed
 	}
-	c.once.Do(func() { close(c.done) })
+	defer c.once.Do(func() {
+		if c.stopCancel != nil {
+			c.stopCancel()
+		}
+	})
+	if c.ctx != nil && c.ctx.Err() != nil {
+		c.closeUnderlying()
+	}
 	return c.Conn.Close()
 }
 

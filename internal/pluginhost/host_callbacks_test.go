@@ -1004,6 +1004,94 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 }
 
+func TestHostModelExecuteCallbacksForwardCallerScope(t *testing.T) {
+	host := New()
+	var gotExec, gotStream handlers.ModelExecutionRequest
+	host.SetModelExecutor(&fakeHostModelExecutor{
+		executeModel: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			gotExec = req
+			return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
+		},
+		executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			gotStream = req
+			chunks := make(chan handlers.ModelExecutionChunk)
+			close(chunks)
+			return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+		},
+	})
+
+	rawExec, errMarshalExec := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         "claude-sonnet-4-5",
+			Body:          []byte(`{"messages":[]}`),
+			CallerScope:   " caller-scope-handle-abc ",
+		},
+	})
+	if errMarshalExec != nil {
+		t.Fatalf("marshal execute request: %v", errMarshalExec)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecute, rawExec); errCall != nil {
+		t.Fatalf("callFromPlugin(execute) error = %v", errCall)
+	}
+	if gotExec.CallerScope != "caller-scope-handle-abc" {
+		t.Fatalf("gotExec.CallerScope = %q, want caller-scope-handle-abc", gotExec.CallerScope)
+	}
+
+	rawStream, errMarshalStream := json.Marshal(rpcHostModelExecutionRequest{
+		HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+			EntryProtocol: "claude",
+			ExitProtocol:  "claude",
+			Model:         "claude-sonnet-4-5",
+			Stream:        true,
+			Body:          []byte(`{"messages":[]}`),
+			CallerScope:   " caller-scope-handle-abc ",
+		},
+	})
+	if errMarshalStream != nil {
+		t.Fatalf("marshal execute_stream request: %v", errMarshalStream)
+	}
+	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelExecuteStream, rawStream); errCall != nil {
+		t.Fatalf("callFromPlugin(execute_stream) error = %v", errCall)
+	}
+	if gotStream.CallerScope != "caller-scope-handle-abc" {
+		t.Fatalf("gotStream.CallerScope = %q, want caller-scope-handle-abc", gotStream.CallerScope)
+	}
+
+	var seenBefore, seenAfter pluginapi.RequestInterceptRequest
+	interceptHost := newHostWithRecords(capabilityRecord{
+		id: "intercept-caller-scope",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					if req.ToFormat == "" {
+						seenBefore = req
+					} else {
+						seenAfter = req
+					}
+					return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}, nil
+				}),
+			},
+		},
+	})
+
+	_ = interceptHost.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Metadata: map[string]any{pluginapi.CallerScopeMetadataKey: "scope-from-metadata"},
+	})
+	if seenBefore.CallerScope != "scope-from-metadata" {
+		t.Fatalf("seenBefore.CallerScope = %q, want scope-from-metadata", seenBefore.CallerScope)
+	}
+
+	_ = interceptHost.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		ToFormat:    "claude",
+		CallerScope: "scope-from-field",
+	})
+	if seenAfter.Metadata[pluginapi.CallerScopeMetadataKey] != "scope-from-field" {
+		t.Fatalf("seenAfter.Metadata[caller_scope] = %v, want scope-from-field", seenAfter.Metadata[pluginapi.CallerScopeMetadataKey])
+	}
+}
+
 func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	host := New()
 	var got handlers.ModelExecutionRequest
@@ -1419,6 +1507,188 @@ func hostModelStreamCountForTest(t *testing.T, host *Host) int {
 	host.modelStreams.mu.Lock()
 	defer host.modelStreams.mu.Unlock()
 	return len(host.modelStreams.streams)
+}
+
+func TestHostModelStreamsArePluginAndInstanceScoped(t *testing.T) {
+	host := New()
+	chunks := make(chan handlers.ModelExecutionChunk, 1)
+	chunks <- handlers.ModelExecutionChunk{Payload: []byte("owner payload")}
+	ownerInstance := &hostCallbackInstance{}
+	otherInstance := &hostCallbackInstance{}
+	streamID := host.modelStreams.open("plugin-a", ownerInstance, "", chunks, nil)
+
+	readReq, errMarshal := json.Marshal(pluginapi.HostModelStreamReadRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal read request: %v", errMarshal)
+	}
+	closeReq, errMarshal := json.Marshal(pluginapi.HostModelStreamCloseRequest{StreamID: streamID})
+	if errMarshal != nil {
+		t.Fatalf("marshal close request: %v", errMarshal)
+	}
+
+	pluginBCtx := withHostCallbackIdentity(context.Background(), "plugin-b", ownerInstance)
+	if _, errRead := host.callFromPlugin(pluginBCtx, pluginabi.MethodHostModelStreamRead, readReq); errRead == nil {
+		t.Fatal("plugin-b read plugin-a's model stream")
+	}
+	if _, errClose := host.callFromPlugin(pluginBCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("foreign plugin close callback error = %v", errClose)
+	}
+
+	otherInstanceCtx := withHostCallbackIdentity(context.Background(), "plugin-a", otherInstance)
+	if _, errRead := host.callFromPlugin(otherInstanceCtx, pluginabi.MethodHostModelStreamRead, readReq); errRead == nil {
+		t.Fatal("other callback instance read owner's model stream")
+	}
+	if _, errClose := host.callFromPlugin(otherInstanceCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("foreign instance close callback error = %v", errClose)
+	}
+
+	ownerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", ownerInstance)
+	rawRead, errRead := host.callFromPlugin(ownerCtx, pluginabi.MethodHostModelStreamRead, readReq)
+	if errRead != nil {
+		t.Fatalf("owner stream read error = %v", errRead)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostModelStreamReadResponse](rawRead)
+	if errDecode != nil {
+		t.Fatalf("decode stream read response: %v", errDecode)
+	}
+	if string(resp.Payload) != "owner payload" || resp.Done {
+		t.Fatalf("owner stream read = %#v, want owner payload without done", resp)
+	}
+	if _, errClose := host.callFromPlugin(ownerCtx, pluginabi.MethodHostModelStreamClose, closeReq); errClose != nil {
+		t.Fatalf("owner stream close error = %v", errClose)
+	}
+	if got := hostModelStreamCountForTest(t, host); got != 0 {
+		t.Fatalf("remaining model streams = %d, want 0", got)
+	}
+}
+
+func TestHostModelStreamStartupRejectsClosedInstanceAndConcurrentTeardown(t *testing.T) {
+	t.Run("direct open on closed instance cancels and rejects", func(t *testing.T) {
+		host := New()
+		instance := &hostCallbackInstance{}
+		instance.closed.Store(true)
+		ctx, cancel := context.WithCancel(context.Background())
+		chunks := make(chan handlers.ModelExecutionChunk, 1)
+		if streamID := host.modelStreams.open("plugin-a", instance, "", chunks, cancel); streamID != "" {
+			t.Fatalf("open on closed instance returned streamID = %q, want empty", streamID)
+		}
+		if ctx.Err() == nil {
+			t.Fatal("expected stream cancel to run when open is rejected on closed instance")
+		}
+		if got := hostModelStreamCountForTest(t, host); got != 0 {
+			t.Fatalf("remaining model streams = %d, want 0", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		teardown func(host *Host, instance *hostCallbackInstance)
+	}{
+		{
+			name: "instance teardown during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPCallbackInstance("plugin-a", instance)
+			},
+		},
+		{
+			name: "plugin teardown with instance during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPPluginResources("plugin-a", instance)
+			},
+		},
+		{
+			name: "plugin teardown without instance during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.closeHostHTTPPluginResources("plugin-a", nil)
+			},
+		},
+		{
+			name: "host shutdown during ExecuteModelStream",
+			teardown: func(host *Host, instance *hostCallbackInstance) {
+				host.ShutdownAllContext(context.Background())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New()
+			instance := &hostCallbackInstance{}
+			var streamCtx context.Context
+			host.SetModelExecutor(&fakeHostModelExecutor{
+				executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+					streamCtx = ctx
+					tc.teardown(host, instance)
+					chunks := make(chan handlers.ModelExecutionChunk, 1)
+					return handlers.ModelExecutionStream{
+						StatusCode: http.StatusOK,
+						Chunks:     chunks,
+					}, nil
+				},
+			})
+			rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+				HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+					EntryProtocol: "openai",
+					ExitProtocol:  "openai",
+					Model:         "model-1",
+					Stream:        true,
+					Body:          []byte(`{"stream":true}`),
+				},
+			})
+			if errMarshal != nil {
+				t.Fatalf("marshal request: %v", errMarshal)
+			}
+			callerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", instance)
+			if _, errCall := host.callFromPlugin(callerCtx, pluginabi.MethodHostModelExecuteStream, rawReq); errCall == nil {
+				t.Fatal("expected ExecuteModelStream overlapping teardown to fail")
+			}
+			if streamCtx == nil || streamCtx.Err() == nil {
+				t.Fatalf("streamCtx = %v (err=%v), want canceled context", streamCtx, streamCtx.Err())
+			}
+			if got := hostModelStreamCountForTest(t, host); got != 0 {
+				t.Fatalf("remaining model streams = %d, want 0", got)
+			}
+		})
+	}
+
+	t.Run("callback scope teardown during ExecuteModelStream", func(t *testing.T) {
+		host := New()
+		instance := &hostCallbackInstance{}
+		callbackID, closeCallback := host.openCallbackContextForPluginInstance(context.Background(), "plugin-a", instance)
+		var streamCtx context.Context
+		host.SetModelExecutor(&fakeHostModelExecutor{
+			executeModelStream: func(ctx context.Context, req handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+				streamCtx = ctx
+				closeCallback()
+				chunks := make(chan handlers.ModelExecutionChunk, 1)
+				return handlers.ModelExecutionStream{
+					StatusCode: http.StatusOK,
+					Chunks:     chunks,
+				}, nil
+			},
+		})
+		rawReq, errMarshal := json.Marshal(rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+				Stream:        true,
+				Body:          []byte(`{"stream":true}`),
+			},
+			HostCallbackID: callbackID,
+		})
+		if errMarshal != nil {
+			t.Fatalf("marshal request: %v", errMarshal)
+		}
+		callerCtx := withHostCallbackIdentity(context.Background(), "plugin-a", instance)
+		if _, errCall := host.callFromPlugin(callerCtx, pluginabi.MethodHostModelExecuteStream, rawReq); errCall == nil {
+			t.Fatal("expected ExecuteModelStream overlapping callback scope close to fail")
+		}
+		if streamCtx == nil || streamCtx.Err() == nil {
+			t.Fatalf("streamCtx = %v (err=%v), want canceled context", streamCtx, streamCtx.Err())
+		}
+		if got := hostModelStreamCountForTest(t, host); got != 0 {
+			t.Fatalf("remaining model streams = %d, want 0", got)
+		}
+	})
 }
 
 func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {

@@ -2442,3 +2442,44 @@ func findRedisCommand(commands [][]string, commandName string) []string {
 	}
 	return nil
 }
+
+func TestReadRESPBulkBoundsAndOverflowProtection(t *testing.T) {
+	for _, tc := range []struct {
+		wire        string
+		wantErr     string
+		overflows32 bool
+	}{
+		{wire: "$9223372036854775806\r\n", wantErr: "too large", overflows32: true},
+		{wire: "$9223372036854775807\r\n", wantErr: "too large", overflows32: true},
+		{wire: "$2147483647\r\n", wantErr: "too large"},
+		{wire: "$2147483648\r\n", wantErr: "too large", overflows32: true},
+		{wire: "$" + strconv.Itoa(maxHomeCertificateRESPBulkLen+1) + "\r\n", wantErr: "too large"},
+		{wire: "$-1\r\n", wantErr: "returned nil"},
+		{wire: "$-2\r\n", wantErr: "invalid bulk length"},
+		{wire: "$2\r\nokXX", wantErr: "invalid terminator"},
+		{wire: "$" + strings.Repeat("9", maxHomeCertificateRESPLineLen+4096), wantErr: "line is too long"},
+	} {
+		_, errRead := readRESPBulk(bufio.NewReader(strings.NewReader(tc.wire)))
+		if errRead == nil {
+			t.Fatalf("readRESPBulk(%q) succeeded, want error %q", tc.wire[:min(len(tc.wire), 32)], tc.wantErr)
+		}
+		if errors.Is(errRead, io.EOF) || errors.Is(errRead, io.ErrUnexpectedEOF) {
+			t.Fatalf("readRESPBulk(%q) returned EOF %v, want %q", tc.wire[:min(len(tc.wire), 32)], errRead, tc.wantErr)
+		}
+		wantErr := tc.wantErr
+		if strconv.IntSize == 32 && tc.overflows32 {
+			wantErr = "value out of range"
+		}
+		if !strings.Contains(errRead.Error(), wantErr) {
+			t.Fatalf("readRESPBulk(%q) error = %v, want %q", tc.wire[:min(len(tc.wire), 32)], errRead, wantErr)
+		}
+	}
+
+	got, errValid := readRESPBulk(bufio.NewReader(strings.NewReader("$2\r\nok\r\n")))
+	if errValid != nil {
+		t.Fatalf("readRESPBulk(valid) error = %v", errValid)
+	}
+	if string(got) != "ok" {
+		t.Fatalf("readRESPBulk(valid) = %q, want %q", string(got), "ok")
+	}
+}

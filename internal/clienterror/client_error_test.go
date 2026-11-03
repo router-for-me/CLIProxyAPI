@@ -235,6 +235,26 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "anthropic credit balance too low is payment failure",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`),
+			want:   false,
+		},
+		{
+			name: "anthropic credit balance too low in response body is payment failure",
+			err: responseBodyError{
+				status: http.StatusBadRequest,
+				body:   `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`,
+			},
+			want: false,
+		},
+		{
+			name:   "anthropic ordinary invalid_request_error remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}`),
+			want:   true,
+		},
+		{
 			name:   "structured model_not_found is not request fault",
 			status: http.StatusBadRequest,
 			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`),
@@ -244,6 +264,32 @@ func TestIsRequestFault(t *testing.T) {
 			name:   "rate limit status overrides generic request error code",
 			status: http.StatusTooManyRequests,
 			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "devin MCP configuration issue is request fault",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue."),
+			want:   true,
+		},
+		{
+			name: "devin MCP configuration issue from statusError",
+			err: statusError{
+				status: http.StatusForbidden,
+				body:   "devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.",
+			},
+			want: true,
+		},
+		{
+			name:   "devin content policy rejection is request fault",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): Your request was blocked by our content policy. Please remove sensitive or unsafe content from your prompt, memories, and other settings and try again."),
+			want:   true,
+		},
+		{
+			name:   "devin account model access permission_denied remains credential failure",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): model access is not allowed for this account"),
 			want:   false,
 		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},

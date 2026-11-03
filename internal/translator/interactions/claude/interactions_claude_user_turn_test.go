@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const userTurnUpload = `{"type":"container_upload","file_id":"file-1"}`
@@ -49,7 +49,7 @@ func TestConvertClaudeRequestToInteractions_RefusesAnyEmptiedUserTurn(t *testing
 			if got, want := err.Error(), "unsupported content part: "+tc.wantType; got != want {
 				t.Fatalf("error text = %q, want %q", got, want)
 			}
-			if !gjson.ValidBytes(body) {
+			if !ojson.ValidBytes(body) {
 				t.Fatalf("body is not JSON: %q", body)
 			}
 		})
@@ -62,7 +62,7 @@ func TestConvertClaudeRequestToInteractions_KeepsTurnWithTextBesideAttachment(t 
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "input.2.content.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(body, "input.2.content.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", body)
 	}
 }
@@ -73,7 +73,7 @@ func TestConvertClaudeRequestToInteractions_Base64DocumentAfterHistoryStaysMedia
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	part := gjson.GetBytes(body, "input.2.content.0")
+	part := ojson.GetBytesNoCopy(body, "input.2.content.0")
 	if part.Get("type").String() != "document" || part.Get("mime_type").String() != "application/pdf" || part.Get("data").String() != "JVBERi0xLjQK" {
 		t.Fatalf("part = %s, body = %s", part.Raw, body)
 	}
@@ -108,7 +108,7 @@ func TestConvertClaudeRequestToInteractions_RealTextBesideWhitespaceAndAnImageSt
 		t.Fatalf("err = %v, body = %s", err, body)
 	}
 	found := false
-	gjson.GetBytes(body, "input.0.content").ForEach(func(_, part gjson.Result) bool {
+	ojson.GetBytesNoCopy(body, "input.0.content").ForEach(func(_, part ojson.Result) bool {
 		if part.Get("text").String() == "keep me" {
 			found = true
 		}

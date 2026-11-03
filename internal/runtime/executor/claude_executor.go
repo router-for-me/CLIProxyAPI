@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
@@ -20,8 +21,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ClaudeExecutor handles Anthropic Claude over the messages API and keeps bounded
@@ -78,14 +77,155 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
-	sanitized := body
+	doc := ojson.NewDoc(body)
+	if !sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, preserveEmptyThinkingBlocks...) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, doc *ojson.Doc, baseModel string, preserveEmptyThinkingBlocks ...bool) bool {
+	if doc == nil {
+		return false
+	}
+	// The internal commentary marker must never reach any upstream, so its
+	// restore runs unconditionally, independent of the provider signature
+	// sanitization gate below (which non-Claude model names skip entirely).
+	changed := sigcompat.RestoreCodexCommentaryMarkersDoc(doc) > 0
 	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	if shouldSanitizeClaudeMessagesForUpstream(baseModel) || preserveEmpty {
-		var report sigcompat.SignatureSanitizeReport
-		sanitized, report = sigcompat.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel, preserveEmptyThinkingBlocks...)
+		report, sanitized := sanitizeClaudeMessagesForClaudeUpstreamDoc(doc, baseModel, preserveEmpty)
+		if sanitized {
+			changed = true
+		}
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
-	return helps.NormalizeClaudeToolCallIDs(sanitizeClaudeWebSearchDomains(sanitized))
+	if sanitizeClaudeWebSearchDomainsDoc(doc) {
+		changed = true
+	}
+	if helps.NormalizeClaudeToolCallIDsDoc(doc) {
+		changed = true
+	}
+	return changed
+}
+
+func sanitizeClaudeMessagesForClaudeUpstreamDoc(doc *ojson.Doc, targetModel string, preserveEmpty bool) (sigcompat.SignatureSanitizeReport, bool) {
+	report := sigcompat.SignatureSanitizeReport{TargetProvider: sigcompat.SignatureProviderClaude}
+	if doc == nil {
+		return report, false
+	}
+	messages := doc.Get("messages")
+	if !messages.IsArray() {
+		return report, false
+	}
+	messageResults := messages.Array()
+	modified := false
+	var droppedMessages []int
+
+	for i, message := range messageResults {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		contentResults := content.Array()
+		var droppedParts []int
+
+		for j, part := range contentResults {
+			partPath := fmt.Sprintf("messages.%d.content.%d", i, j)
+			partType := part.Get("type").String()
+			if partType == "tool_use" {
+				if stripClaudeToolUseProvenanceFieldsDoc(doc, partPath) {
+					modified = true
+					report.DroppedSignatures++
+				}
+				continue
+			}
+			if partType != "thinking" {
+				continue
+			}
+			rawSignature := part.Get("signature").String()
+			if sigcompat.IsCodexCommentarySignatureMarker(rawSignature) {
+				if text := part.Get("thinking").String(); text != "" {
+					_ = doc.Set(partPath+".type", "text")
+					_ = doc.Delete(partPath + ".thinking")
+					_ = doc.Delete(partPath + ".signature")
+					_ = doc.Set(partPath+".text", text)
+					report.DroppedSignatures++
+					modified = true
+					continue
+				}
+				report.DroppedBlocks++
+				droppedParts = append(droppedParts, j)
+				modified = true
+				continue
+			}
+			if preserveEmpty {
+				report.Preserved++
+				continue
+			}
+			decision := sigcompat.DecideSignatureCompatibilityForModel(sigcompat.SignatureProviderClaude, targetModel, rawSignature, sigcompat.SignatureBlockKindClaudeThinking)
+			decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
+			report.Decisions = append(report.Decisions, decision)
+
+			switch decision.Action {
+			case sigcompat.SignatureActionPreserve:
+				report.Preserved++
+				if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
+					_ = doc.Set(partPath+".signature", decision.NormalizedSignature)
+					modified = true
+				}
+			case sigcompat.SignatureActionReplaceWithGeminiBypass:
+				report.ReplacedSignatures++
+				_ = doc.Set(partPath+".signature", decision.ReplacementSignature)
+				modified = true
+			case sigcompat.SignatureActionDropSignature:
+				report.DroppedSignatures++
+				_ = doc.Delete(partPath + ".signature")
+				modified = true
+			default:
+				report.DroppedBlocks++
+				droppedParts = append(droppedParts, j)
+				modified = true
+			}
+		}
+
+		if len(droppedParts) > 0 {
+			if len(droppedParts) == len(contentResults) {
+				droppedMessages = append(droppedMessages, i)
+				continue
+			}
+			for k := len(droppedParts) - 1; k >= 0; k-- {
+				_ = doc.Delete(fmt.Sprintf("messages.%d.content.%d", i, droppedParts[k]))
+			}
+		}
+	}
+
+	for k := len(droppedMessages) - 1; k >= 0; k-- {
+		_ = doc.Delete(fmt.Sprintf("messages.%d", droppedMessages[k]))
+	}
+	return report, modified
+}
+
+func stripClaudeToolUseProvenanceFieldsDoc(doc *ojson.Doc, partPath string) bool {
+	changed := false
+	for _, relPath := range []string{"signature", "thoughtSignature", "thought_signature", "extra_content.google.thought_signature", "model"} {
+		sigPath := partPath + "." + relPath
+		if !doc.Get(sigPath).Exists() {
+			continue
+		}
+		if doc.Delete(sigPath) == nil {
+			changed = true
+		}
+	}
+	for _, objPath := range []string{partPath + ".extra_content.google", partPath + ".extra_content"} {
+		res := doc.Get(objPath)
+		if res.Exists() && res.IsObject() && len(res.Map()) == 0 {
+			if doc.Delete(objPath) == nil {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // sanitizeClaudeWebSearchDomains removes empty allowed_domains/blocked_domains
@@ -94,11 +234,27 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body 
 // "Empty list of domains is ambiguous. Provide at least one domain or null.".
 // Deleting the key is equivalent to leaving it unset.
 func sanitizeClaudeWebSearchDomains(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return body
 	}
-	tools.ForEach(func(index, tool gjson.Result) bool {
+	doc := ojson.NewDoc(body)
+	if !sanitizeClaudeWebSearchDomainsDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func sanitizeClaudeWebSearchDomainsDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	changed := false
+	tools.ForEach(func(index, tool ojson.Result) bool {
 		if !strings.HasPrefix(tool.Get("type").String(), "web_search_") {
 			return true
 		}
@@ -106,14 +262,14 @@ func sanitizeClaudeWebSearchDomains(body []byte) []byte {
 			value := tool.Get(field)
 			if value.Exists() && value.IsArray() && len(value.Array()) == 0 {
 				path := fmt.Sprintf("tools.%d.%s", index.Int(), field)
-				if updated, errDelete := sjson.DeleteBytes(body, path); errDelete == nil {
-					body = updated
+				if errDelete := doc.Delete(path); errDelete == nil {
+					changed = true
 				}
 			}
 		}
 		return true
 	})
-	return body
+	return changed
 }
 
 func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, report sigcompat.SignatureSanitizeReport) {
@@ -156,7 +312,7 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 	}
 	hasExplicitMaxTokens := func(paths ...string) bool {
 		for _, path := range paths {
-			if v := gjson.GetBytes(originalPayload, path); v.Exists() && v.Type != gjson.Null {
+			if v := ojson.GetBytesNoCopy(originalPayload, path); v.Exists() && v.Type != ojson.Null {
 				return true
 			}
 		}
@@ -178,7 +334,7 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 	default:
 		return originalTranslated
 	}
-	stripped, errDelete := sjson.DeleteBytes(originalTranslated, "max_tokens")
+	stripped, errDelete := ojson.DeleteBytes(originalTranslated, "max_tokens")
 	if errDelete != nil {
 		return originalTranslated
 	}
@@ -342,23 +498,23 @@ func restoreClaudeResponseModel(payload []byte, model string) []byte {
 }
 
 func setClaudeResponseModel(payload []byte, model string) ([]byte, bool) {
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return payload, false
 	}
-	updated := payload
+	doc := ojson.NewDoc(payload)
 	changed := false
 	for _, path := range []string{"model", "message.model"} {
-		if !gjson.GetBytes(updated, path).Exists() {
+		if !doc.Get(path).Exists() {
 			continue
 		}
-		next, errSet := sjson.SetBytes(updated, path, model)
-		if errSet != nil {
-			continue
+		if errSet := doc.Set(path, model); errSet == nil {
+			changed = true
 		}
-		updated = next
-		changed = true
 	}
-	return updated, changed
+	if !changed {
+		return payload, false
+	}
+	return doc.Bytes(), true
 }
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.

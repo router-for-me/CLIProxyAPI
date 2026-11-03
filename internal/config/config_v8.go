@@ -38,6 +38,9 @@ var v8SharedPaths = []configPath{
 	{"oauth.providers.codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
 	{"oauth.providers.codex.model-level-cooling", "upstream.codex.model-level-cooling"},
 	{"oauth.providers.codex.response-steering", "upstream.codex.response-steering"},
+	{"oauth.providers.codex.upstream-request-compression", "upstream.codex.upstream-request-compression"},
+	{"oauth.providers.codex.upstream-request-compression-min-bytes", "upstream.codex.upstream-request-compression-min-bytes"},
+	{"oauth.providers.codex.websocket-compression", "upstream.codex.websocket-compression"},
 	{"oauth.providers.claude.model-level-cooling", "upstream.claude.model-level-cooling"},
 	{"oauth.providers.claude.claude-code.disable-cloaking-model-list", "upstream.claude.disable-cloaking-model-list"},
 	{"oauth.providers.claude.disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
@@ -82,6 +85,7 @@ func buildV8Paths() []configPath {
 		{"transient-error-cooldown-seconds", "routing.cooldown.transient-error-cooldown-seconds"},
 		{"proxy-url", "requests.proxy-url"}, {"tls-handshake-timeout-seconds", "requests.tls-handshake-timeout-seconds"}, {"passthrough-headers", "requests.passthrough-headers"},
 		{"nonstream-keepalive-interval", "requests.nonstream-keepalive-interval"}, {"streaming", "requests.streaming"}, {"payload", "requests.payload"},
+		{"response-compression", "server.response-compression"},
 		{"auth-dir", "oauth.auth-dir"}, {"auth-auto-refresh-workers", "oauth.auth-auto-refresh-workers"},
 		{"oauth-model-alias", "oauth.model-alias"}, {"oauth-excluded-models", "oauth.excluded-models"},
 		{"oauth-request-scoped-errors", "oauth.request-scoped-errors"}, {"oauth-settings", "oauth.settings"}, {"ws-auth", "oauth.providers.aistudio.ws-auth"},
@@ -91,6 +95,9 @@ func buildV8Paths() []configPath {
 		{"codex.orphan-delegation-compatibility", "upstream.codex.orphan-delegation-compatibility"},
 		{"codex.model-level-cooling", "upstream.codex.model-level-cooling"},
 		{"codex.response-steering", "upstream.codex.response-steering"},
+		{"codex.upstream-request-compression", "upstream.codex.upstream-request-compression"},
+		{"codex.upstream-request-compression-min-bytes", "upstream.codex.upstream-request-compression-min-bytes"},
+		{"codex.websocket-compression", "upstream.codex.websocket-compression"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
 		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
@@ -239,6 +246,29 @@ func legacyPath(root *yaml.Node, path string) *yaml.Node {
 	return node
 }
 
+// EffectiveResponseCompression returns the downstream response compression
+// settings from their canonical storage (SDKConfig.ResponseCompression, YAML
+// server.response-compression), falling back to the JSON/programmatic mirror
+// on the outer Config when the canonical value was never populated.
+func (cfg *Config) EffectiveResponseCompression() ResponseCompressionConfig {
+	if cfg == nil {
+		return ResponseCompressionConfig{}
+	}
+	if cfg.ResponseCompression.Enabled != nil || cfg.ResponseCompression.MinBytes != 0 {
+		return cfg.ResponseCompression
+	}
+	return cfg.ServerResponseCompression
+}
+
+// SyncServerResponseCompression copies the canonical response compression
+// settings into the JSON-visible mirror on the outer Config.
+func (cfg *Config) SyncServerResponseCompression() {
+	if cfg == nil {
+		return
+	}
+	cfg.ServerResponseCompression = cfg.ResponseCompression
+}
+
 // UnmarshalYAML accepts both layouts, including partially migrated documents.
 // Presence, rather than Go zero values, determines which setting wins.
 func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
@@ -254,6 +284,7 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 		return errValidate
 	}
 	*cfg = Config(decoded)
+	cfg.SyncServerResponseCompression()
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)
 	for _, path := range v8Paths {
@@ -354,6 +385,9 @@ var sharedKeyFields = map[string]bool{
 	"priority": true, "prefix": true, "proxy-url": true, "headers": true,
 	"models": true, "excluded-models": true, "disable-cooling": true,
 	"request-retry": true, "request-scoped-errors": true,
+	// connection-pool follows proxy-url: a group-level default that each key may
+	// override, so an operator can pool one provider without touching the others.
+	"connection-pool": true,
 }
 
 func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
@@ -407,17 +441,43 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 				}
 			}
 			for i := 0; i < len(key.Content); i += 2 {
-				if key.Content[i].Value == "auth_index" || key.Content[i].Value == "auth-index" {
+				field := key.Content[i].Value
+				if field == "auth_index" || field == "auth-index" {
 					continue
 				}
-				if key.Content[i+1].Tag != "!!null" {
-					setYAMLPath(item, key.Content[i].Value, key.Content[i+1])
+				if key.Content[i+1].Tag == "!!null" {
+					continue
 				}
+				if field == "connection-pool" {
+					// A per-key block merges onto the group block so a key that overrides
+					// one field keeps inheriting the rest, matching the runtime resolution
+					// where an omitted field inherits the outer value. Replacing the whole
+					// block would silently drop the group's enabled: true.
+					setYAMLPath(item, field, mergeConnectionPoolNode(yamlPath(group, field), key.Content[i+1]))
+					continue
+				}
+				setYAMLPath(item, field, key.Content[i+1])
 			}
 			out.Content = append(out.Content, item)
 		}
 	}
 	return out, nil
+}
+
+// mergeConnectionPoolNode merges a per-key connection-pool block onto the group block.
+// Missing sub-keys fall back to the group value; the result is always a fresh node.
+func mergeConnectionPoolNode(base, override *yaml.Node) *yaml.Node {
+	merged := deepCopyNode(base)
+	if merged == nil || merged.Kind != yaml.MappingNode || override == nil || override.Kind != yaml.MappingNode {
+		return deepCopyNode(override)
+	}
+	for i := 0; i < len(override.Content); i += 2 {
+		if override.Content[i+1].Tag == "!!null" {
+			continue
+		}
+		setYAMLPath(merged, override.Content[i].Value, override.Content[i+1])
+	}
+	return merged
 }
 
 // groupLegacyKeys deliberately keeps one group per legacy entry: equal endpoints

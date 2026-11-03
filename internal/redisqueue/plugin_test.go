@@ -865,3 +865,120 @@ func TestUsageQueuePluginPayloadDistinguishesNativeKey(t *testing.T) {
 		})
 	})
 }
+
+func TestUsageQueuePluginEmitsFailCode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "gemini",
+			Model:       "gemini-3.1-pro-preview",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Failed:      true,
+			Fail: coreusage.Failure{
+				StatusCode: http.StatusBadGateway,
+				Body:       "upstream stream closed before finishReason",
+				Code:       coreusage.FailureStreamTruncatedCode,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		raw, ok := payload["fail"]
+		if !ok {
+			t.Fatal("payload missing fail")
+		}
+		var got struct {
+			StatusCode int    `json:"status_code"`
+			Body       string `json:"body"`
+			Code       string `json:"code"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &got); errUnmarshal != nil {
+			t.Fatalf("unmarshal fail: %v", errUnmarshal)
+		}
+		if got.Code != coreusage.FailureStreamTruncatedCode {
+			t.Fatalf("fail.code = %q, want %q", got.Code, coreusage.FailureStreamTruncatedCode)
+		}
+		if got.StatusCode != http.StatusBadGateway {
+			t.Fatalf("fail.status_code = %d, want %d", got.StatusCode, http.StatusBadGateway)
+		}
+	})
+}
+
+func TestUsageQueuePluginPublishesAnthropicStructuredUsageDetails(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "claude-req-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/messages")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:            "claude",
+			ExecutorType:        "ClaudeExecutor",
+			Model:               "claude-opus-5-5",
+			ResponseServiceTier: "standard",
+			Detail: coreusage.Detail{
+				InputTokens:           6,
+				OutputTokens:          483,
+				ReasoningTokens:       45,
+				CachedTokens:          3036,
+				CacheReadTokens:       3036,
+				CacheCreationTokens:   8846,
+				TotalTokens:           12371,
+				CacheCreation5mTokens: coreusage.Int64Ptr(5810),
+				CacheCreation1hTokens: coreusage.Int64Ptr(3036),
+				CacheDetails: &coreusage.CacheDetails{
+					Ephemeral5mInputTokens: coreusage.Int64Ptr(5810),
+					Ephemeral1hInputTokens: coreusage.Int64Ptr(3036),
+					ByTTL:                  map[string]int64{"5m": 5810, "1h": 3036},
+				},
+				WebSearchRequests: coreusage.Int64Ptr(1),
+				ToolUsageDetails: &coreusage.ToolUsageDetails{
+					WebSearchCalls: coreusage.Int64Ptr(1),
+					WebFetchCalls:  coreusage.Int64Ptr(0),
+				},
+				Iterations: coreusage.IterationsPtr([]coreusage.IterationUsage{
+					{
+						Type:                     "message",
+						InputTokens:              coreusage.Int64Ptr(4),
+						OutputTokens:             coreusage.Int64Ptr(53),
+						CacheReadInputTokens:     coreusage.Int64Ptr(0),
+						CacheCreationInputTokens: coreusage.Int64Ptr(3036),
+						CacheCreation5mTokens:    coreusage.Int64Ptr(0),
+						CacheCreation1hTokens:    coreusage.Int64Ptr(3036),
+					},
+					{
+						Type:                     "message",
+						InputTokens:              coreusage.Int64Ptr(2),
+						OutputTokens:             coreusage.Int64Ptr(430),
+						CacheReadInputTokens:     coreusage.Int64Ptr(3036),
+						CacheCreationInputTokens: coreusage.Int64Ptr(5810),
+						CacheCreation5mTokens:    coreusage.Int64Ptr(5810),
+						CacheCreation1hTokens:    coreusage.Int64Ptr(0),
+					},
+				}),
+				Speed:        "standard",
+				InferenceGeo: "global",
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireIntField(t, tokens, "cache_creation_5m_tokens", 5810)
+		requireIntField(t, tokens, "cache_creation_1h_tokens", 3036)
+		requireMissingField(t, tokens, "cache_creation_30m_tokens")
+		requireIntField(t, payload, "web_search_requests", 1)
+		requireStringField(t, payload, "speed", "standard")
+		requireStringField(t, payload, "inference_geo", "global")
+		if _, ok := payload["iterations"]; !ok {
+			t.Fatal("expected iterations in payload")
+		}
+		if _, ok := payload["tool_usage_details"]; !ok {
+			t.Fatal("expected tool_usage_details in payload")
+		}
+	})
+}
