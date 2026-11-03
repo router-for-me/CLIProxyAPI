@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 var (
@@ -82,7 +82,7 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := EnsureGeminiLeadingUserContent([]byte(tt.inputJSON), tt.path)
-			contents := gjson.GetBytes(out, tt.path).Array()
+			contents := ojson.GetBytes(out, tt.path).Array()
 			roles := make([]string, 0, len(contents))
 			for _, content := range contents {
 				roles = append(roles, content.Get("role").String())
@@ -92,7 +92,7 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 				t.Fatalf("roles = %q, want %q; output=%s", got, expectedRoles, out)
 			}
 			if tt.wantLeadingEmpty {
-				text := gjson.GetBytes(out, tt.path+".0.parts.0.text")
+				text := ojson.GetBytes(out, tt.path+".0.parts.0.text")
 				if !text.Exists() || text.String() != "" {
 					t.Fatalf("leading empty user part missing; output=%s", out)
 				}
@@ -197,7 +197,7 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := EnsureGeminiTrailingUserContent([]byte(tt.inputJSON), tt.path)
-			contents := gjson.GetBytes(out, tt.path).Array()
+			contents := ojson.GetBytes(out, tt.path).Array()
 			roles := make([]string, 0, len(contents))
 			for _, content := range contents {
 				roles = append(roles, content.Get("role").String())
@@ -221,7 +221,7 @@ func TestEnsureGeminiBoundaryUserContent(t *testing.T) {
 	// A single model turn should get both leading and trailing user turns
 	inputJSON := `{"contents":[{"role":"model","parts":[{"text":"single answer"}]}]}`
 	out := EnsureGeminiBoundaryUserContent([]byte(inputJSON), "contents")
-	contents := gjson.GetBytes(out, "contents").Array()
+	contents := ojson.GetBytes(out, "contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("contents len = %d, want 3; out=%s", len(contents), out)
 	}
@@ -271,7 +271,7 @@ func TestDropGeminiTrailingThoughtOnlyContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := DropGeminiTrailingThoughtOnlyContent([]byte(tt.input), "contents")
-			if got := gjson.GetBytes(out, "contents").Raw; got != tt.want {
+			if got := ojson.GetBytes(out, "contents").Raw; got != tt.want {
 				t.Fatalf("contents = %s, want %s", got, tt.want)
 			}
 		})

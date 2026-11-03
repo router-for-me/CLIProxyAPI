@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -922,7 +922,7 @@ func TestIsCodexBootstrapBufferableEvent(t *testing.T) {
 		`   `,
 	}
 	for _, payload := range hold {
-		eventType := gjson.GetBytes([]byte(payload), "type").String()
+		eventType := ojson.GetBytes([]byte(payload), "type").String()
 		if !isCodexBootstrapBufferableEvent(eventType, []byte(payload)) {
 			t.Errorf("must stay bufferable: %s", payload)
 		}
@@ -958,7 +958,7 @@ func TestIsCodexBootstrapBufferableEvent(t *testing.T) {
 		`{"type":"response.some_future_event_we_have_never_seen"}`,
 	}
 	for _, payload := range release {
-		eventType := gjson.GetBytes([]byte(payload), "type").String()
+		eventType := ojson.GetBytes([]byte(payload), "type").String()
 		if isCodexBootstrapBufferableEvent(eventType, []byte(payload)) {
 			t.Errorf("must release the stream: %s", payload)
 		}

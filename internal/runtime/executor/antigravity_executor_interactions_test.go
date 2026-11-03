@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityExecutorExecuteStreamInteractionsEmitsDoneAfterSplitTerminal(t *testing.T) {
@@ -103,7 +103,7 @@ consume:
 		t.Fatalf("interaction.completed count = %d, want 1. Stream: %q", got, joined)
 	}
 	for _, line := range bytes.Split(joined, []byte("\n")) {
-		payload := gjson.GetBytes(bytes.TrimSpace(line), "interaction.usage.total_tokens")
+		payload := ojson.GetBytes(bytes.TrimSpace(line), "interaction.usage.total_tokens")
 		if payload.Exists() && payload.Int() != 33 {
 			t.Fatalf("completed total_tokens = %d, want 33. Stream: %q", payload.Int(), joined)
 		}
@@ -262,23 +262,23 @@ func TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest(t *testin
 		"request.generationConfig.thinkingLevel",
 		"request.generationConfig.thinkingSummaries",
 	} {
-		if gjson.GetBytes(upstreamBody, path).Exists() {
+		if ojson.GetBytes(upstreamBody, path).Exists() {
 			t.Fatalf("%s should not be sent upstream: %s", path, string(upstreamBody))
 		}
 	}
-	if gjson.GetBytes(upstreamBody, "input").Exists() {
+	if ojson.GetBytes(upstreamBody, "input").Exists() {
 		t.Fatalf("raw interactions input should not be sent upstream: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
+	if got := ojson.GetBytes(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
 		t.Fatalf("request.contents.0.parts.0.text = %q, want hi. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.toolConfig.functionCallingConfig.mode").String(); got != "AUTO" {
+	if got := ojson.GetBytes(upstreamBody, "request.toolConfig.functionCallingConfig.mode").String(); got != "AUTO" {
 		t.Fatalf("request.toolConfig.functionCallingConfig.mode = %q, want AUTO. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
 		t.Fatalf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want high. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got {
+	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got {
 		t.Fatalf("request.generationConfig.thinkingConfig.includeThoughts = false, want true. Body: %s", string(upstreamBody))
 	}
 }
