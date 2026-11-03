@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -2694,6 +2695,61 @@ func TestUsageAdapterPropagatesBaseURL(t *testing.T) {
 	})
 	if gotBaseURL != "https://custom-proxy.example.com/v1" {
 		t.Fatalf("plugin BaseURL = %q, want https://custom-proxy.example.com/v1", gotBaseURL)
+	}
+}
+
+func TestUsageAdapterPropagatesCacheCreationTTLBreakdown(t *testing.T) {
+	var got pluginapi.UsageDetail
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		got = record.Detail
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-cache-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-cache-ttl",
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-opus-4-6",
+		Detail: coreusage.Detail{
+			CacheCreationTokens:   300,
+			CacheCreation5mTokens: coreusage.Int64Ptr(100),
+			CacheCreation1hTokens: coreusage.Int64Ptr(200),
+		},
+	})
+	if got.CacheCreationTokens != 300 {
+		t.Fatalf("CacheCreationTokens = %d, want 300", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 100 {
+		t.Fatalf("CacheCreation5mTokens = %v, want 100", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 200 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 200", got.CacheCreation1hTokens)
+	}
+	if got.CacheCreation30mTokens != nil || got.CacheCreation12hTokens != nil {
+		t.Fatalf("unreported TTL buckets = %v / %v, want nil", got.CacheCreation30mTokens, got.CacheCreation12hTokens)
+	}
+
+	// Plugins decode the record from JSON: unreported buckets are omitted and old plugins without
+	// the new fields still decode the total.
+	raw, errMarshal := json.Marshal(pluginapi.UsageRecord{Detail: got})
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	if bytes.Contains(raw, []byte("CacheCreation30mTokens")) || bytes.Contains(raw, []byte("CacheCreation12hTokens")) {
+		t.Fatalf("unreported TTL buckets serialized: %s", raw)
+	}
+	var legacy struct {
+		Detail struct{ CacheCreationTokens int64 }
+	}
+	if errLegacy := json.Unmarshal(raw, &legacy); errLegacy != nil || legacy.Detail.CacheCreationTokens != 300 {
+		t.Fatalf("legacy decode = %+v, %v", legacy, errLegacy)
 	}
 }
 
