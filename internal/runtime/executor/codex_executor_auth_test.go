@@ -3,8 +3,8 @@ package executor
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net"
 	"net/http"
@@ -1619,5 +1619,42 @@ func TestCodexExecutorCodexClientIgnoresUseSIWC(t *testing.T) {
 				t.Fatal("expected Codex client request to fail when outer non-SIWC access_token is missing")
 			}
 		})
+	}
+}
+
+func TestCodexExecutorForceRefreshRejectedRefreshTokenWithoutDiskRotation_Issue7135(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	tmpDir := t.TempDir()
+	diskPath := tmpDir + "/codex-dead.json"
+	diskData := map[string]any{
+		"type":          "codex",
+		"access_token":  "revoked-access-token",
+		"refresh_token": "revoked-refresh-token",
+		"expired":       now.Add(2 * time.Hour).Format(time.RFC3339),
+	}
+	if errWrite := codexauth.WriteJSONFileAtomic(diskPath, diskData); errWrite != nil {
+		t.Fatalf("WriteJSONFileAtomic: %v", errWrite)
+	}
+
+	executor := NewCodexExecutor(&config.Config{AuthDir: tmpDir})
+	auth := &cliproxyauth.Auth{
+		ID:                   "codex-dead.json",
+		FileName:             "codex-dead.json",
+		Provider:             "codex",
+		Status:               cliproxyauth.StatusError,
+		Unavailable:          true,
+		RequiresSignIn:       true,
+		RejectedAccessToken:  "revoked-access-token",
+		RejectedRefreshToken: "revoked-refresh-token",
+		StatusMessage:        "unauthorized (refresh token invalid)",
+		RefreshError:         &cliproxyauth.Error{Code: "refresh_token_reused", Message: "refresh token was already used", HTTPStatus: http.StatusUnauthorized},
+		Attributes:           map[string]string{cliproxyauth.AttributePath: diskPath, cliproxyauth.AttributeSource: diskPath},
+		Metadata:             cloneSIWCMap(diskData),
+	}
+
+	// Forced refresh when disk file has NOT rotated and refresh_token matches RejectedRefreshToken must fail.
+	_, errRefresh := executor.Refresh(cliproxyauth.WithForceRefresh(context.Background()), auth.Clone())
+	if errRefresh == nil {
+		t.Fatal("expected forced Refresh on unchanged rejected refresh_token without disk rotation to return an error, got nil")
 	}
 }

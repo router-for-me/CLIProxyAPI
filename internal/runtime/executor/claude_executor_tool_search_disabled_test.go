@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -19,8 +20,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // toolSearchExecutorGoldenPayload is a Codex Responses turn with a client
@@ -91,7 +90,7 @@ func renderToolSearchExecutorGolden(t *testing.T) map[string]string {
 			}
 			// OAuth cloaking derives metadata.user_id from a random device id,
 			// and the billing header's cch hash covers it.
-			body, _ := sjson.DeleteBytes(upstream.body, "metadata.user_id")
+			body, _ := ojson.DeleteBytes(upstream.body, "metadata.user_id")
 			golden[authName+"/"+path] = toolSearchExecutorGoldenCCH.ReplaceAllString(string(body), "cch=0;")
 		}
 	}
@@ -162,7 +161,7 @@ func toolSearchReloadContext(t *testing.T, flipTo bool) (context.Context, *[]byt
 		responsesclaude.SetClientToolSearchEnabled(flipTo)
 		contentType := "application/json"
 		response := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"tool_use","id":"toolu_search","name":"tool_search","input":{"query":"calendar"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`
-		if gjson.GetBytes(body, "stream").Bool() {
+		if ojson.GetBytes(body, "stream").Bool() {
 			contentType = "text/event-stream"
 			response = strings.Join([]string{
 				`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}`,
@@ -201,10 +200,10 @@ func TestClaudeExecutor_ToolSearchSwitchIsPinnedPerRequest(t *testing.T) {
 			if errExecute != nil {
 				t.Fatalf("Execute: %v", errExecute)
 			}
-			if got := gjson.GetBytes(*sent, `tools.#(name=="tool_search")`).Exists(); got != tc.wantTools {
+			if got := ojson.GetBytes(*sent, `tools.#(name=="tool_search")`).Exists(); got != tc.wantTools {
 				t.Fatalf("upstream tool_search declared = %v, want %v: %s", got, tc.wantTools, *sent)
 			}
-			if got := gjson.GetBytes(resp.Payload, "output.0.type").String(); got != tc.wantItem {
+			if got := ojson.GetBytes(resp.Payload, "output.0.type").String(); got != tc.wantItem {
 				t.Fatalf("output item = %s, want %s: %s", got, tc.wantItem, resp.Payload)
 			}
 		})
@@ -221,13 +220,13 @@ func TestClaudeExecutor_ToolSearchSwitchIsPinnedPerRequest(t *testing.T) {
 					t.Fatalf("stream chunk: %v", chunk.Err)
 				}
 				for _, line := range strings.Split(string(chunk.Payload), "\n") {
-					data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+					data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 					if data.Get("type").String() == "response.output_item.done" {
 						items = append(items, data.Get("item.type").String())
 					}
 				}
 			}
-			if got := gjson.GetBytes(*sent, `tools.#(name=="tool_search")`).Exists(); got != tc.wantTools {
+			if got := ojson.GetBytes(*sent, `tools.#(name=="tool_search")`).Exists(); got != tc.wantTools {
 				t.Fatalf("upstream tool_search declared = %v, want %v: %s", got, tc.wantTools, *sent)
 			}
 			if len(items) != 1 || items[0] != tc.wantItem {
@@ -269,8 +268,8 @@ func TestClaudeExecutor_ToolSearchFallbackPinsTranslation(t *testing.T) {
 				t.Fatalf("translate: %v", errTranslate)
 			}
 			for name, want := range tc.wantToolNames {
-				if got := gjson.GetBytes(body, `tools.#(name=="`+name+`")`).Exists(); got != want {
-					t.Errorf("tool %s declared = %v, want %v: %s", name, got, want, gjson.GetBytes(body, "tools").Raw)
+				if got := ojson.GetBytes(body, `tools.#(name=="`+name+`")`).Exists(); got != want {
+					t.Errorf("tool %s declared = %v, want %v: %s", name, got, want, ojson.GetBytes(body, "tools").Raw)
 				}
 			}
 		})

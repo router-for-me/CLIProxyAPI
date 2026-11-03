@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const interactionsCodexHistory = `{"type":"user_input","content":[{"type":"text","text":"a"}]},{"type":"model_output","content":[{"type":"text","text":"b"}]}`
@@ -35,7 +35,7 @@ func requireInteractionsToCodexRefusal(t *testing.T, envelope sdktranslator.Requ
 	if got, want := envelope.Err.Error(), "unsupported content part: "+wantType; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
-	if !gjson.ValidBytes(envelope.Body) {
+	if !ojson.ValidBytes(envelope.Body) {
 		t.Fatalf("body is not JSON: %q", envelope.Body)
 	}
 }
@@ -47,10 +47,10 @@ func TestInteractionsToCodexKeepsTheMediaGeminiToInteractionsWrites(t *testing.T
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "input.#").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "input.#").Int(); got != 3 {
 		t.Fatalf("input has %d items, want 3: %s", got, envelope.Body)
 	}
-	part := gjson.GetBytes(envelope.Body, "input.2.content.0")
+	part := ojson.GetBytesNoCopy(envelope.Body, "input.2.content.0")
 	if part.Get("type").String() != "input_image" || part.Get("image_url").String() != "gs://b/a.png" {
 		t.Fatalf("last turn lost the file: %s", envelope.Body)
 	}
@@ -63,7 +63,7 @@ func TestInteractionsToCodexReadsURIAsAFileReference(t *testing.T) {
 			if envelope.Err != nil {
 				t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 			}
-			part := gjson.GetBytes(envelope.Body, "input.2.content.0")
+			part := ojson.GetBytesNoCopy(envelope.Body, "input.2.content.0")
 			if part.Get("type").String() != "input_image" || part.Get("image_url").String() != "https://example.test/a.png" {
 				t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
 			}
@@ -73,7 +73,7 @@ func TestInteractionsToCodexReadsURIAsAFileReference(t *testing.T) {
 			if envelope.Err != nil {
 				t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 			}
-			part := gjson.GetBytes(envelope.Body, "input.2.content.0")
+			part := ojson.GetBytesNoCopy(envelope.Body, "input.2.content.0")
 			if part.Get("type").String() != "input_file" || part.Get("file_url").String() != "https://example.test/a.pdf" {
 				t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
 			}
@@ -86,15 +86,15 @@ func TestInteractionsToCodexInlineDataStillConverts(t *testing.T) {
 	if image.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", image.Err, image.Body)
 	}
-	if got := gjson.GetBytes(image.Body, "input.2.content.0.image_url").String(); got != "data:image/png;base64,aGVsbG8=" {
+	if got := ojson.GetBytesNoCopy(image.Body, "input.2.content.0.image_url").String(); got != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("image_url = %q, body = %s", got, image.Body)
 	}
 	audio := interactionsFinalTurnToCodex(`{"type":"audio","mime_type":"audio/wav","data":"UklGRg=="}`)
 	if audio.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", audio.Err, audio.Body)
 	}
-	if got := gjson.GetBytes(audio.Body, "input.2.content.0.input_audio.data").String(); got != "UklGRg==" {
-		t.Fatalf("input_audio = %s, body = %s", gjson.GetBytes(audio.Body, "input.2.content.0").Raw, audio.Body)
+	if got := ojson.GetBytesNoCopy(audio.Body, "input.2.content.0.input_audio.data").String(); got != "UklGRg==" {
+		t.Fatalf("input_audio = %s, body = %s", ojson.GetBytesNoCopy(audio.Body, "input.2.content.0").Raw, audio.Body)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestInteractionsToCodexTypeOnlyInstructionStepIsSentAsDeveloper(t *testing.
 			if envelope.Err != nil {
 				t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 			}
-			last := gjson.GetBytes(envelope.Body, "input.2")
+			last := ojson.GetBytesNoCopy(envelope.Body, "input.2")
 			if last.Get("role").String() != "developer" || last.Get("content.0.text").String() != "note" {
 				t.Fatalf("last item = %s, body = %s", last.Raw, envelope.Body)
 			}
@@ -162,10 +162,10 @@ func TestInteractionsToCodexUnrepresentableAttachmentBesideTextStillSucceeds(t *
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "input.2.content.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "input.2.content.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "input.#").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "input.#").Int(); got != 3 {
 		t.Fatalf("input has %d items, want 3: %s", got, envelope.Body)
 	}
 }
@@ -196,7 +196,7 @@ func TestInteractionsToCodexAssistantMediaIsNotAUserTurn(t *testing.T) {
 
 func TestInteractionsToCodexExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"model":"m","input":[` + interactionsCodexHistory + `,{"type":"user_input","content":[{"type":"audio","mime_type":"audio/wav"}]}]}`)
-	if body, _ := ConvertInteractionsRequestToCodex("m", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertInteractionsRequestToCodex("m", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

@@ -4,16 +4,17 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -24,7 +25,29 @@ var (
 
 var metaRefreshGroup singleflight.Group
 
-const metaUserAgent = "muse-build/1.3.0 (interactive; macos-aarch64; build ac7280f2aca67769d1455a8847bb502b617d50f6)"
+// Captured from Muse Code 1.4.14-R7309.1 (build dec7d7497fecdad135ec5835a8161dbc92e55b58)
+// on linux-x86_64. Header parity alone does not satisfy subscription-key
+// attestation for tool-bearing requests; see helps.EnsureMetaMuseToolNamespace.
+const (
+	metaClientVersion = "1.4.14"
+	metaClientBuild   = "dec7d7497fecdad135ec5835a8161dbc92e55b58"
+	metaClientSurface = "tbh:exec"
+)
+
+func metaUserAgent() string {
+	goos := runtime.GOOS
+	if goos == "darwin" {
+		goos = "macos"
+	}
+	arch := runtime.GOARCH
+	switch arch {
+	case "amd64":
+		arch = "x86_64"
+	case "arm64":
+		arch = "aarch64"
+	}
+	return fmt.Sprintf("muse-build/%s (non-interactive; %s-%s; build %s)", metaClientVersion, goos, arch, metaClientBuild)
+}
 
 // MetaExecutor implements the cliproxyauth.ProviderExecutor for Meta Muse models (api.meta.ai).
 type MetaExecutor struct {
@@ -52,8 +75,7 @@ func (e *MetaExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 	} else {
 		req.Header.Del("Authorization")
 	}
-	req.Header.Set("User-Agent", metaUserAgent)
-	req.Header.Set("X-Client-Id", "tbh:tui")
+	applyMetaClientIdentity(req)
 
 	var attrs map[string]string
 	if auth != nil {
@@ -257,7 +279,7 @@ func (e *MetaExecutor) enrichAuth(auth *cliproxyauth.Auth) *cliproxyauth.Auth {
 		cloned.Attributes["api_key"] = token
 	}
 	if _, hasHeader := cloned.Attributes["header:User-Agent"]; !hasHeader {
-		cloned.Attributes["header:User-Agent"] = metaUserAgent
+		cloned.Attributes["header:User-Agent"] = metaUserAgent()
 	}
 	return cloned
 }
@@ -346,7 +368,7 @@ func parseMetaRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.
 	if (statusCode != http.StatusTooManyRequests && statusCode != http.StatusNotFound) || len(errorBody) == 0 {
 		return nil
 	}
-	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
+	if resetsAt := ojson.GetBytesNoCopy(errorBody, "error.resets_at").Int(); resetsAt > 0 {
 		resetAtTime := time.Unix(resetsAt, 0)
 		if resetAtTime.After(now) {
 			retryAfter := resetAtTime.Sub(now)
@@ -373,12 +395,12 @@ func isMetaSubscriptionQuota(statusCode int, body []byte) bool {
 	if statusCode != http.StatusTooManyRequests || len(body) == 0 {
 		return false
 	}
-	msg := strings.ToLower(gjson.GetBytes(body, "error.message").String())
-	code := strings.ToLower(gjson.GetBytes(body, "error.code").String())
+	msg := strings.ToLower(ojson.GetBytesNoCopy(body, "error.message").String())
+	code := strings.ToLower(ojson.GetBytesNoCopy(body, "error.code").String())
 	if strings.Contains(msg, "subscription quota") || strings.Contains(msg, "quota exhausted") {
 		return true
 	}
-	if (code == "rate_limit_exceeded" || strings.Contains(code, "quota")) && gjson.GetBytes(body, "error.resets_at").Exists() {
+	if (code == "rate_limit_exceeded" || strings.Contains(code, "quota")) && ojson.GetBytesNoCopy(body, "error.resets_at").Exists() {
 		return true
 	}
 	return false

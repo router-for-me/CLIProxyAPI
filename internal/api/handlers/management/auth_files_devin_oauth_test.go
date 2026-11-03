@@ -3,9 +3,9 @@ package management
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/MoeForge/moego/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"

@@ -11,13 +11,17 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
@@ -62,13 +66,13 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	if gotPath != "/v1/responses/compact" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses/compact")
 	}
-	if !gjson.GetBytes(gotBody, "input").Exists() {
+	if !ojson.GetBytes(gotBody, "input").Exists() {
 		t.Fatalf("expected input in body")
 	}
-	if gjson.GetBytes(gotBody, "messages").Exists() {
+	if ojson.GetBytes(gotBody, "messages").Exists() {
 		t.Fatalf("unexpected messages in body")
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in responses compact body: %s", string(gotBody))
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
@@ -115,7 +119,7 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
+	if got := ojson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
 		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "low", string(gotBody))
 	}
 }
@@ -235,7 +239,7 @@ func TestOpenAICompatExecutorApplyPromptCacheKey(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			gotKey := gjson.GetBytes(translated, "prompt_cache_key").String()
+			gotKey := ojson.GetBytes(translated, "prompt_cache_key").String()
 			if test.wantKey != "" {
 				if gotKey != test.wantKey {
 					t.Fatalf("prompt_cache_key = %q, want %q", gotKey, test.wantKey)
@@ -293,7 +297,7 @@ func TestOpenAICompatExecutorPromptCacheKeyCallerValueWinsPayloadOverride(t *tes
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			if got := gjson.GetBytes(translated, "prompt_cache_key").String(); got != test.want {
+			if got := ojson.GetBytes(translated, "prompt_cache_key").String(); got != test.want {
 				t.Fatalf("prompt_cache_key = %q, want %q", got, test.want)
 			}
 		})
@@ -329,7 +333,7 @@ func TestOpenAICompatExecutorPromptCacheKeyIsModelAndProtocolScoped(t *testing.T
 		if errApply != nil {
 			t.Fatalf("applyPromptCacheKey error: %v", errApply)
 		}
-		return gjson.GetBytes(translated, "prompt_cache_key").String()
+		return ojson.GetBytes(translated, "prompt_cache_key").String()
 	}
 
 	baseKey := derive(t, "gpt-5.6", "openai")
@@ -382,7 +386,7 @@ func TestOpenAICompatExecutorPromptCacheKeyUsesConfigIndex(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			gotPresent := gjson.GetBytes(translated, "prompt_cache_key").String() != ""
+			gotPresent := ojson.GetBytes(translated, "prompt_cache_key").String() != ""
 			if gotPresent != test.wantPresent {
 				t.Fatalf("prompt_cache_key present = %t, want %t; body=%s", gotPresent, test.wantPresent, string(translated))
 			}
@@ -417,7 +421,7 @@ func TestOpenAICompatExecutorPromptCacheKeyIgnoresConfigIndexForNonConfigAuth(t 
 	if errApply != nil {
 		t.Fatalf("applyPromptCacheKey error: %v", errApply)
 	}
-	if gjson.GetBytes(translated, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(translated, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key for non-config auth: %s", string(translated))
 	}
 }
@@ -456,7 +460,7 @@ func TestOpenAICompatExecutorPromptCacheKeyExecute(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute error: %v", errExecute)
 	}
-	if gotKey := gjson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
 		t.Fatalf("prompt_cache_key is missing from upstream body: %s", string(gotBody))
 	}
 }
@@ -502,7 +506,7 @@ func TestOpenAICompatExecutorPromptCacheKeyExecuteStream(t *testing.T) {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
 	}
-	if gotKey := gjson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
 		t.Fatalf("prompt_cache_key is missing from upstream stream body: %s", string(gotBody))
 	}
 }
@@ -549,7 +553,7 @@ func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in streaming compact body: %s", string(gotBody))
 	}
 }
@@ -605,13 +609,13 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	if gotContentType != "application/json" {
 		t.Fatalf("content type = %q, want application/json", gotContentType)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in image body: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
+	if got := ojson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
 		t.Fatalf("response payload = %s", string(resp.Payload))
 	}
 }
@@ -668,10 +672,10 @@ func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	if gotAccept != "text/event-stream" {
 		t.Fatalf("accept = %q, want text/event-stream", gotAccept)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if !gjson.GetBytes(gotBody, "stream").Bool() {
+	if !ojson.GetBytes(gotBody, "stream").Bool() {
 		t.Fatalf("stream flag missing from upstream body: %s", string(gotBody))
 	}
 	if !strings.Contains(streamed.String(), "event: image_generation.partial") || !strings.Contains(streamed.String(), "data: [DONE]") {
@@ -899,7 +903,7 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		}
 		got.Write(chunk.Payload)
 	}
-	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+	if ojson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
@@ -953,6 +957,144 @@ func TestOpenAICompatExecutorResponsesStreamFailsOnEOFWithoutDone(t *testing.T) 
 	}
 	if !strings.Contains(streamErr.Error(), "closed before [DONE]") {
 		t.Fatalf("stream error does not explain the missing terminal marker: %v", streamErr)
+	}
+	truncatedErr, okTruncated := streamErr.(cliproxyexecutor.StreamTruncatedError)
+	if !okTruncated || !truncatedErr.IsStreamTruncated() {
+		t.Fatalf("stream error = %T (%v), want IsStreamTruncated() = true", streamErr, streamErr)
+	}
+}
+
+func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
+	const provider = "openai-compatible-minimax"
+	const model = "MiniMax-M3"
+	const partialChunk = `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"MiniMax-M3","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"
+
+	cases := []struct {
+		name              string
+		status            int
+		body              string
+		requests          int
+		wantCalls         int32
+		wantCooled        int
+		wantLastErrorText string
+		forbidAuthUnavail bool
+	}{
+		{
+			name:              "partial_stream_without_done_across_requests",
+			status:            http.StatusOK,
+			body:              partialChunk,
+			requests:          4,
+			wantCalls:         4,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "empty_200_stream_without_done",
+			status:            http.StatusOK,
+			body:              "",
+			requests:          1,
+			wantCalls:         1,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "real_http_502_control",
+			status:            http.StatusBadGateway,
+			body:              `{"error":{"message":"mock upstream gateway failure","type":"server_error"}}`,
+			requests:          2,
+			wantCalls:         3,
+			wantCooled:        3,
+			wantLastErrorText: "auth_unavailable: no auth available",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{}
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewOpenAICompatExecutor(provider, cfg))
+
+			for i := 0; i < 3; i++ {
+				id := fmt.Sprintf("minimax-compat-%s-%d", tc.name, i)
+				registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+				_, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
+					ID:       id,
+					Provider: provider,
+					Status:   cliproxyauth.StatusActive,
+					Attributes: map[string]string{
+						"api_key":      fmt.Sprintf("minimax-key-%d", i),
+						"base_url":     server.URL + "/v1",
+						"compat_name":  "minimax",
+						"provider_key": provider,
+					},
+				})
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+
+			requestPayload := []byte(`{"model":"MiniMax-M3","input":"hi","stream":true}`)
+			var lastObservedErr error
+			for reqIdx := 0; reqIdx < tc.requests; reqIdx++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				result, errStream := manager.ExecuteStream(ctx, []string{provider}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: requestPayload,
+				}, cliproxyexecutor.Options{
+					SourceFormat:    sdktranslator.FormatOpenAIResponse,
+					ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+					OriginalRequest: requestPayload,
+					Stream:          true,
+				})
+				observedErr := errStream
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							observedErr = chunk.Err
+						}
+					}
+				}
+				cancel()
+				if observedErr == nil {
+					t.Fatalf("request %d succeeded unexpectedly", reqIdx+1)
+				}
+				lastObservedErr = observedErr
+			}
+
+			cooled := 0
+			for _, auth := range manager.List() {
+				if state := auth.ModelStates[model]; state != nil && state.Unavailable && state.NextRetryAfter.After(time.Now()) {
+					cooled++
+				}
+			}
+
+			if calls.Load() != tc.wantCalls {
+				t.Errorf("upstream calls = %d, want %d", calls.Load(), tc.wantCalls)
+			}
+			if cooled != tc.wantCooled {
+				t.Errorf("cooled credentials = %d, want %d", cooled, tc.wantCooled)
+			}
+			if lastObservedErr == nil || !strings.Contains(lastObservedErr.Error(), tc.wantLastErrorText) {
+				t.Errorf("last error = %v, want substring %q", lastObservedErr, tc.wantLastErrorText)
+			}
+			if tc.forbidAuthUnavail && lastObservedErr != nil && strings.Contains(lastObservedErr.Error(), "auth_unavailable") {
+				t.Errorf("last error unexpectedly degraded to auth_unavailable: %v", lastObservedErr)
+			}
+		})
 	}
 }
 
@@ -1193,14 +1335,14 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 		if strings.Contains(p, `"cost"`) {
 			t.Fatalf("post-DONE cost chunk was forwarded: %s", p)
 		}
-		if !gjson.Get(p, "id").Exists() {
+		if !ojson.Get(p, "id").Exists() {
 			t.Fatalf("chunk missing id: %s", p)
 		}
 	}
-	if gjson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
+	if ojson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
 		t.Fatalf("first chunk = %s", payloads[0])
 	}
-	if gjson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
+	if ojson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
 		t.Fatalf("second chunk = %s", payloads[1])
 	}
 }

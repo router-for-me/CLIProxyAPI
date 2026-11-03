@@ -3,19 +3,18 @@ package responses
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
-const openAIResponsesToolSearchIDPrefix = "ts_"
+const openAIResponsesToolSearchIDPrefix = "tsc_"
 
 // normalizeOpenAIResponsesToolSearchItems rewrites replayed client-executed
 // tool_search history into the function_call / function_call_output shape that
 // the Gemini request conversion already pairs and serializes.
-func normalizeOpenAIResponsesToolSearchItems(items []gjson.Result, forwardMap map[string]string) []gjson.Result {
-	normalized := make([]gjson.Result, 0, len(items))
+func normalizeOpenAIResponsesToolSearchItems(items []ojson.Result, forwardMap map[string]string) []ojson.Result {
+	normalized := make([]ojson.Result, 0, len(items))
 	for _, item := range items {
 		switch item.Get("type").String() {
 		case util.ResponsesToolSearchCallType:
@@ -33,48 +32,48 @@ func normalizeOpenAIResponsesToolSearchItems(items []gjson.Result, forwardMap ma
 	return normalized
 }
 
-func openAIResponsesToolSearchCallAsFunctionCall(item gjson.Result, forwardMap map[string]string) gjson.Result {
-	call := []byte(`{"type":"function_call","name":"","call_id":"","arguments":"{}"}`)
-	call, _ = sjson.SetBytes(call, "name", util.MapResponsesClientToolSearchName(forwardMap))
-	call, _ = sjson.SetBytes(call, "call_id", extractOpenAIResponsesCallID(item))
+func openAIResponsesToolSearchCallAsFunctionCall(item ojson.Result, forwardMap map[string]string) ojson.Result {
+	callDoc := ojson.NewDocString(`{"type":"function_call","name":"","call_id":"","arguments":"{}"}`)
+	_ = callDoc.Set("name", util.MapResponsesClientToolSearchName(forwardMap))
+	_ = callDoc.Set("call_id", extractOpenAIResponsesCallID(item))
 	if id := item.Get("id"); id.Exists() {
-		call, _ = sjson.SetBytes(call, "id", id.String())
+		_ = callDoc.Set("id", id.String())
 	}
 	if status := item.Get("status"); status.Exists() {
-		call, _ = sjson.SetBytes(call, "status", status.String())
+		_ = callDoc.Set("status", status.String())
 	}
 	if arguments := item.Get("arguments"); arguments.Exists() {
-		if arguments.Type == gjson.String {
-			call, _ = translatorcommon.SetStringWithoutHTMLEscape(call, "arguments", arguments.String())
+		if arguments.Type == ojson.String {
+			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(callDoc, "arguments", arguments.String())
 		} else if arguments.IsObject() || arguments.IsArray() {
-			call, _ = translatorcommon.SetStringWithoutHTMLEscape(call, "arguments", arguments.Raw)
+			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(callDoc, "arguments", arguments.Raw)
 		}
 	}
-	return gjson.ParseBytes(call)
+	return util.ParseGJSONBytesNoCopy(callDoc.Bytes())
 }
 
-func openAIResponsesToolSearchOutputAsFunctionCallOutput(item gjson.Result, forwardMap map[string]string) gjson.Result {
-	output := []byte(`{"type":"function_call_output","name":"","call_id":"","output":""}`)
-	output, _ = sjson.SetBytes(output, "name", util.MapResponsesClientToolSearchName(forwardMap))
-	output, _ = sjson.SetBytes(output, "call_id", extractOpenAIResponsesCallID(item))
+func openAIResponsesToolSearchOutputAsFunctionCallOutput(item ojson.Result, forwardMap map[string]string) ojson.Result {
+	outputDoc := ojson.NewDocString(`{"type":"function_call_output","name":"","call_id":"","output":""}`)
+	_ = outputDoc.Set("name", util.MapResponsesClientToolSearchName(forwardMap))
+	_ = outputDoc.Set("call_id", extractOpenAIResponsesCallID(item))
 	if id := item.Get("id"); id.Exists() {
-		output, _ = sjson.SetBytes(output, "id", id.String())
+		_ = outputDoc.Set("id", id.String())
 	}
 
-	summary := []byte(`{"status":"completed","tools":[]}`)
+	summaryDoc := ojson.NewDocString(`{"status":"completed","tools":[]}`)
 	if status := strings.TrimSpace(item.Get("status").String()); status != "" {
-		summary, _ = sjson.SetBytes(summary, "status", status)
+		_ = summaryDoc.Set("status", status)
 	}
-	if errorResult := item.Get("error"); errorResult.Exists() && errorResult.Type != gjson.Null {
-		summary, _ = sjson.SetRawBytes(summary, "error", []byte(errorResult.Raw))
+	if errorResult := item.Get("error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+		_ = summaryDoc.SetRaw("error", errorResult.Raw)
 	}
 	names := openAIResponsesDiscoveredToolNames(item.Get("tools"), forwardMap)
-	summary, _ = sjson.SetBytes(summary, "tools", names)
-	output, _ = translatorcommon.SetStringWithoutHTMLEscape(output, "output", string(summary))
-	return gjson.ParseBytes(output)
+	_ = summaryDoc.Set("tools", names)
+	_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(outputDoc, "output", summaryDoc.String())
+	return util.ParseGJSONBytesNoCopy(outputDoc.Bytes())
 }
 
-func openAIResponsesDiscoveredToolNames(tools gjson.Result, forwardMap map[string]string) []string {
+func openAIResponsesDiscoveredToolNames(tools ojson.Result, forwardMap map[string]string) []string {
 	names := make([]string, 0)
 	if !tools.Exists() || !tools.IsArray() {
 		return names
@@ -92,7 +91,7 @@ func openAIResponsesDiscoveredToolNames(tools gjson.Result, forwardMap map[strin
 		seen[mapped] = struct{}{}
 		names = append(names, mapped)
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "", "function", "custom":
 			name := strings.TrimSpace(tool.Get("name").String())
@@ -106,7 +105,7 @@ func openAIResponsesDiscoveredToolNames(tools gjson.Result, forwardMap map[strin
 			if !children.Exists() || !children.IsArray() {
 				children = tool.Get("children")
 			}
-			children.ForEach(func(_, child gjson.Result) bool {
+			children.ForEach(func(_, child ojson.Result) bool {
 				childName := strings.TrimSpace(child.Get("name").String())
 				if childName == "" {
 					childName = strings.TrimSpace(child.Get("function.name").String())
@@ -125,7 +124,7 @@ func openAIResponsesDiscoveredToolNames(tools gjson.Result, forwardMap map[strin
 func openAIResponsesToolSearchCallStatus(status, argsJSON string) string {
 	if status == "completed" {
 		trimmed := strings.TrimSpace(argsJSON)
-		if !gjson.Valid(trimmed) || !gjson.Parse(trimmed).IsObject() {
+		if !ojson.Valid(trimmed) || !ojson.Parse(trimmed).IsObject() {
 			return "incomplete"
 		}
 	}
@@ -134,16 +133,16 @@ func openAIResponsesToolSearchCallStatus(status, argsJSON string) string {
 
 func buildOpenAIResponsesToolSearchCallItem(id, callID, status, argsJSON string) []byte {
 	status = openAIResponsesToolSearchCallStatus(status, argsJSON)
-	item := []byte(`{"id":"","type":"tool_search_call","status":"","execution":"client","call_id":"","arguments":{}}`)
-	item, _ = sjson.SetBytes(item, "id", id)
-	item, _ = sjson.SetBytes(item, "status", status)
-	item, _ = sjson.SetBytes(item, "call_id", callID)
-	if trimmed := strings.TrimSpace(argsJSON); gjson.Valid(trimmed) {
-		if args := gjson.Parse(trimmed); args.IsObject() {
-			item, _ = sjson.SetRawBytes(item, "arguments", []byte(args.Raw))
+	itemDoc := ojson.NewDocString(`{"id":"","type":"tool_search_call","status":"","execution":"client","call_id":"","arguments":{}}`)
+	_ = itemDoc.Set("id", id)
+	_ = itemDoc.Set("status", status)
+	_ = itemDoc.Set("call_id", callID)
+	if trimmed := strings.TrimSpace(argsJSON); ojson.Valid(trimmed) {
+		if args := ojson.Parse(trimmed); args.IsObject() {
+			_ = itemDoc.SetRaw("arguments", args.Raw)
 		}
 	}
-	return item
+	return itemDoc.Bytes()
 }
 
 func openAIResponsesToolSearchCallItemID(callID string) string {

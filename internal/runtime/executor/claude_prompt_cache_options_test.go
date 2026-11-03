@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func writeClaudeSSEMockResponse(w http.ResponseWriter) {
@@ -65,7 +65,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_SuppressesAutoCacheContr
 	if count := countCacheControls(seenBody); count != 0 {
 		t.Fatalf("expected 0 cache_control blocks with mode: explicit and no client breakpoints, got %d: %s", count, string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+	if ojson.GetBytes(seenBody, "prompt_cache_options").Exists() {
 		t.Fatalf("prompt_cache_options should not be forwarded upstream: %s", string(seenBody))
 	}
 }
@@ -113,13 +113,13 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_PreservesClientBreakpoin
 	if count := countCacheControls(seenBody); count != 1 {
 		t.Fatalf("expected exactly 1 cache_control block (the client-specified one), got %d: %s", count, string(seenBody))
 	}
-	if !gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+	if !ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("client cache_control was not preserved: %s", string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "system.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "system.0.cache_control").Exists() {
 		t.Fatalf("system prompt unexpectedly received automatic cache_control: %s", string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "messages.1.content.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "messages.1.content.0.cache_control").Exists() {
 		t.Fatalf("second message unexpectedly received automatic cache_control: %s", string(seenBody))
 	}
 }
@@ -167,7 +167,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Stream_Explicit_SuppressesAutoCac
 	if count := countCacheControls(seenBody); count != 0 {
 		t.Fatalf("expected 0 cache_control blocks in stream with mode: explicit, got %d: %s", count, string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+	if ojson.GetBytes(seenBody, "prompt_cache_options").Exists() {
 		t.Fatalf("prompt_cache_options should not be forwarded upstream: %s", string(seenBody))
 	}
 }
@@ -228,10 +228,10 @@ func TestClaudeExecutor_PromptCacheOptionsMode_ImplicitOrMissing_PreservesAutoCa
 			}
 
 			// In normal mode without client markers, system and message should receive auto-injected cache_control.
-			if !gjson.GetBytes(seenBody, "system.0.cache_control").Exists() {
+			if !ojson.GetBytes(seenBody, "system.0.cache_control").Exists() {
 				t.Fatalf("expected system cache_control in implicit mode: %s", string(seenBody))
 			}
-			if !gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+			if !ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 				t.Fatalf("expected message cache_control in implicit mode: %s", string(seenBody))
 			}
 		})
@@ -326,13 +326,13 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ClientToolBreakpointPres
 	if count := countCacheControls(seenBody); count != 1 {
 		t.Fatalf("expected 1 cache_control block on client-specified tool, got %d: %s", count, string(seenBody))
 	}
-	if !gjson.GetBytes(seenBody, "tools.0.cache_control").Exists() {
+	if !ojson.GetBytes(seenBody, "tools.0.cache_control").Exists() {
 		t.Fatalf("tools.0 should have client-specified cache_control: %s", string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "tools.1.cache_control").Exists() {
 		t.Fatalf("tools.1 should NOT have cache_control: %s", string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("message should NOT receive automatic cache_control: %s", string(seenBody))
 	}
 }
@@ -383,7 +383,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_SuppressesAllAut
 	if count := countCacheControls(seenBody); count != 0 {
 		t.Fatalf("expected 0 cache_control blocks in cloaked mode with explicit mode and no client breakpoints, got %d: %s", count, string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+	if ojson.GetBytes(seenBody, "prompt_cache_options").Exists() {
 		t.Fatalf("prompt_cache_options should not be forwarded upstream: %s", string(seenBody))
 	}
 }
@@ -438,10 +438,10 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientB
 	if count := countCacheControls(seenBody); count != 1 {
 		t.Fatalf("expected exactly 1 cache_control block (the client-specified one), got %d: %s", count, string(seenBody))
 	}
-	if gjson.GetBytes(seenBody, "system.0.cache_control").Exists() || gjson.GetBytes(seenBody, "system.1.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "system.0.cache_control").Exists() || ojson.GetBytes(seenBody, "system.1.cache_control").Exists() {
 		t.Fatalf("system blocks should not have automatic cache_control: %s", string(seenBody))
 	}
-	if !gjson.GetBytes(seenBody, "messages.3.content.0.cache_control").Exists() {
+	if !ojson.GetBytes(seenBody, "messages.3.content.0.cache_control").Exists() {
 		t.Fatalf("client specified cache_control on user turn should be preserved: %s", string(seenBody))
 	}
 }
@@ -500,22 +500,22 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientS
 		t.Fatalf("expected exactly 1 cache_control block (the client system one), got %d: %s", count, string(seenBody))
 	}
 	// Verify CPA synthetic agent block does NOT have cache_control
-	if gjson.GetBytes(seenBody, "system.1.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "system.1.cache_control").Exists() {
 		t.Fatalf("CPA synthetic agent block must not have cache_control: %s", string(seenBody))
 	}
 	// Verify user message does NOT have cache_control
-	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("first user message must not receive auto cache_control: %s", string(seenBody))
 	}
 	// Verify client system prompt has cache_control preserved
 	foundClientSystemCC := false
-	messages := gjson.GetBytes(seenBody, "messages")
+	messages := ojson.GetBytes(seenBody, "messages")
 	if messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			if msg.Get("role").String() == "system" {
 				content := msg.Get("content")
 				if content.IsArray() {
-					content.ForEach(func(_, part gjson.Result) bool {
+					content.ForEach(func(_, part ojson.Result) bool {
 						if part.Get("text").String() == "Special client system prompt with breakpoint" && part.Get("cache_control.type").String() == "ephemeral" && part.Get("cache_control.scope").String() == "global" {
 							foundClientSystemCC = true
 						}
@@ -526,9 +526,9 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientS
 			return true
 		})
 	}
-	system := gjson.GetBytes(seenBody, "system")
+	system := ojson.GetBytes(seenBody, "system")
 	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
+		system.ForEach(func(_, part ojson.Result) bool {
 			if part.Get("text").String() == "Special client system prompt with breakpoint" && part.Get("cache_control.type").String() == "ephemeral" && part.Get("cache_control.scope").String() == "global" {
 				foundClientSystemCC = true
 			}
@@ -595,7 +595,7 @@ func TestClaudeExecutor_CountTokens_StripsPromptCacheOptions(t *testing.T) {
 	if len(upstreamResp.Payload) == 0 {
 		t.Fatal("expected non-empty countTokensUpstream payload")
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+	if ojson.GetBytes(seenBody, "prompt_cache_options").Exists() {
 		t.Fatalf("prompt_cache_options should not be forwarded in count_tokens upstream: %s", string(seenBody))
 	}
 }
@@ -648,7 +648,7 @@ func TestClaudeExecutor_CountTokensUpstream_StripsPromptCacheOptions_EvenWithPay
 	if len(upstreamResp.Payload) == 0 {
 		t.Fatal("expected non-empty countTokensUpstream payload")
 	}
-	if gjson.GetBytes(seenBody, "prompt_cache_options").Exists() {
+	if ojson.GetBytes(seenBody, "prompt_cache_options").Exists() {
 		t.Fatalf("prompt_cache_options should not be forwarded in count_tokens upstream even if injected by payload rule: %s", string(seenBody))
 	}
 }
@@ -695,7 +695,7 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_ProbePreservesClient1hTT
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	if gotTTL := gjson.GetBytes(seenBody, "messages.0.content.0.cache_control.ttl").String(); gotTTL != "1h" {
+	if gotTTL := ojson.GetBytes(seenBody, "messages.0.content.0.cache_control.ttl").String(); gotTTL != "1h" {
 		t.Fatalf("client specified 1h TTL must be preserved in explicit mode even on probe request, got %q: %s", gotTTL, string(seenBody))
 	}
 }
@@ -758,14 +758,14 @@ func TestClaudeExecutor_CountTokensUpstream_Cloaked_ExplicitPreservesClientSyste
 		t.Fatalf("expected exactly 1 cache_control in count_tokens explicit mode, got %d: %s", count, string(seenBody))
 	}
 	// Verify user message did not get auto-cached
-	if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("user message must not receive auto cache_control: %s", string(seenBody))
 	}
 	// Verify client system breakpoint was preserved with scope: global.
 	foundClientSystemCC := false
-	system := gjson.GetBytes(seenBody, "system")
+	system := ojson.GetBytes(seenBody, "system")
 	if system.IsArray() {
-		system.ForEach(func(_, part gjson.Result) bool {
+		system.ForEach(func(_, part ojson.Result) bool {
 			if part.Get("text").String() == "Count tokens system instructions" &&
 				part.Get("cache_control.type").String() == "ephemeral" &&
 				part.Get("cache_control.scope").String() == "global" {
@@ -834,17 +834,17 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_LegacyModelPrese
 		t.Fatalf("expected exactly 1 cache_control block in legacy model explicit mode, got %d: %s", count, string(seenBody))
 	}
 	// Verify system.1 agent block does not have cache_control
-	if gjson.GetBytes(seenBody, "system.1.cache_control").Exists() {
+	if ojson.GetBytes(seenBody, "system.1.cache_control").Exists() {
 		t.Fatalf("agent block must not have cache_control: %s", string(seenBody))
 	}
 	// Verify the prepended reminder on user message preserves scope: global
 	foundReminderCC := false
-	messages := gjson.GetBytes(seenBody, "messages")
+	messages := ojson.GetBytes(seenBody, "messages")
 	if messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			content := msg.Get("content")
 			if content.IsArray() {
-				content.ForEach(func(_, part gjson.Result) bool {
+				content.ForEach(func(_, part ojson.Result) bool {
 					if strings.Contains(part.Get("text").String(), "Legacy system instructions with scope") &&
 						part.Get("cache_control.type").String() == "ephemeral" &&
 						part.Get("cache_control.scope").String() == "global" {
@@ -919,12 +919,12 @@ func TestClaudeExecutor_CountTokensUpstream_Cloaked_LegacyModel_ExplicitPreserve
 		t.Fatalf("expected exactly 1 cache_control in legacy count_tokens explicit mode, got %d: %s", count, string(seenBody))
 	}
 	foundReminderCC := false
-	messages := gjson.GetBytes(seenBody, "messages")
+	messages := ojson.GetBytes(seenBody, "messages")
 	if messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			content := msg.Get("content")
 			if content.IsArray() {
-				content.ForEach(func(_, part gjson.Result) bool {
+				content.ForEach(func(_, part ojson.Result) bool {
 					if strings.Contains(part.Get("text").String(), "Count tokens legacy system instructions") &&
 						part.Get("cache_control.type").String() == "ephemeral" &&
 						part.Get("cache_control.scope").String() == "global" {
@@ -1001,17 +1001,17 @@ func TestClaudeExecutor_CountTokensUpstream_OAuthRelocatesAffectedSystemPrompts(
 			if len(resp.Payload) == 0 {
 				t.Fatal("expected non-empty countTokensUpstream payload")
 			}
-			if gjson.GetBytes(seenBody, "system").Exists() {
+			if ojson.GetBytes(seenBody, "system").Exists() {
 				t.Fatalf("OAuth caller system prompt must not remain top-level: %s", seenBody)
 			}
-			if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != test.wantMessages {
+			if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != test.wantMessages {
 				t.Fatalf("message count = %d, want %d: %s", got, test.wantMessages, seenBody)
 			}
 			messagePath := fmt.Sprintf("messages.%d", test.wantSystemIdx)
-			if got := gjson.GetBytes(seenBody, messagePath+".role").String(); got != "system" {
+			if got := ojson.GetBytes(seenBody, messagePath+".role").String(); got != "system" {
 				t.Fatalf("%s.role = %q, want system: %s", messagePath, got, seenBody)
 			}
-			if got := gjson.GetBytes(seenBody, messagePath+".content.0.text").String(); got != "caller guidance" {
+			if got := ojson.GetBytes(seenBody, messagePath+".content.0.text").String(); got != "caller guidance" {
 				t.Fatalf("%s.content.0.text = %q, want caller guidance: %s", messagePath, got, seenBody)
 			}
 		})

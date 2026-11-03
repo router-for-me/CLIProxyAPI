@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func legacyToolIDHistory(callCount int) []byte {
@@ -45,8 +45,8 @@ func TestIssue6478_NormalizeLargeHistoryAllocation(t *testing.T) {
 	}
 
 	normalized := NormalizeClaudeToolCallIDs(body)
-	uses := gjson.GetBytes(normalized, "messages.0.content").Array()
-	results := gjson.GetBytes(normalized, "messages.1.content").Array()
+	uses := ojson.GetBytes(normalized, "messages.0.content").Array()
+	results := ojson.GetBytes(normalized, "messages.1.content").Array()
 	if len(uses) != callCount || len(results) != callCount {
 		t.Fatalf("history lost calls/results: %d/%d, want %d", len(uses), len(results), callCount)
 	}

@@ -11,16 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type responsesWebsocketForwardOptions struct {
@@ -238,7 +238,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
-				eventType := gjson.GetBytes(payloads[i], "type").String()
+				eventType := ojson.GetBytesNoCopy(payloads[i], "type").String()
 				if eventType == "response.subscription_usage" ||
 					(eventType == "response.metadata" && !isCodexResponsesClientRequest(c)) {
 					continue
@@ -353,21 +353,18 @@ func completeResponsesWebsocketLocalInterrupt(
 	outputItemsFallback [][]byte,
 	pendingToolCallIDs map[string]struct{},
 ) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
-	responseID := strings.TrimSpace(gjson.GetBytes(payload, "response_id").String())
+	responseID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "response_id").String()))
 	output := responseCompletedOutputFromPayload([]byte(`{"response":{"output":[]}}`), outputItemsByIndex, outputItemsFallback)
-	incomplete := []byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`)
-	var errSet error
-	incomplete, errSet = sjson.SetBytes(incomplete, "response.id", responseID)
-	if errSet != nil {
+	incompleteDoc := ojson.NewDoc([]byte(`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"interrupted"}}}`))
+	if errSet := incompleteDoc.Set("response.id", responseID); errSet != nil {
 		cancel(errSet)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
 	}
-	incomplete, errSet = sjson.SetRawBytes(incomplete, "response.output", output)
-	if errSet != nil {
+	if errSet := incompleteDoc.SetRawBytes("response.output", output); errSet != nil {
 		cancel(errSet)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
 	}
-	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incomplete, time.Now()); errWrite != nil {
+	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incompleteDoc.Bytes(), time.Now()); errWrite != nil {
 		cancel(errWrite)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 	}
@@ -482,14 +479,16 @@ func shouldReleaseResponsesWebsocketPinnedAuth(errMsg *interfaces.ErrorMessage) 
 }
 
 func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
-	if gjson.GetBytes(payload, "type").String() != "response.output_item.done" {
+	var fieldsBuf [3]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "type", "item", "output_index")
+	if fields[0].String() != "response.output_item.done" {
 		return
 	}
-	item := gjson.GetBytes(payload, "item")
+	item := fields[1]
 	if !item.Exists() || !item.IsObject() {
 		return
 	}
-	outputIndex := gjson.GetBytes(payload, "output_index")
+	outputIndex := fields[2]
 	if outputIndex.Exists() {
 		outputItemsByIndex[outputIndex.Int()] = bytes.Clone([]byte(item.Raw))
 		return
@@ -498,13 +497,13 @@ func collectResponsesWebsocketOutputItem(payload []byte, outputItemsByIndex map[
 }
 
 func restoreResponsesWebsocketCompletionOutput(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
-	output := gjson.GetBytes(payload, "response.output")
+	output := ojson.GetBytesNoCopy(payload, "response.output")
 	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
 		reconciledOutput, changed := reconcileResponsesWebsocketCompletionToolCalls(output, outputItemsByIndex, outputItemsFallback)
 		if !changed {
 			return payload
 		}
-		restored, errSet := sjson.SetRawBytes(payload, "response.output", reconciledOutput)
+		restored, errSet := ojson.SetRawBytes(payload, "response.output", reconciledOutput)
 		if errSet != nil {
 			return payload
 		}
@@ -514,17 +513,17 @@ func restoreResponsesWebsocketCompletionOutput(payload []byte, outputItemsByInde
 		return payload
 	}
 
-	restored, errSet := sjson.SetRawBytes(payload, "response.output", responseCompletedOutputFromPayload(payload, outputItemsByIndex, outputItemsFallback))
+	restored, errSet := ojson.SetRawBytes(payload, "response.output", responseCompletedOutputFromPayload(payload, outputItemsByIndex, outputItemsFallback))
 	if errSet != nil {
 		return payload
 	}
 	return restored
 }
 
-func reconcileResponsesWebsocketCompletionToolCalls(output gjson.Result, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) ([]byte, bool) {
+func reconcileResponsesWebsocketCompletionToolCalls(output ojson.Result, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) ([]byte, bool) {
 	collectedToolCalls := make(map[string]json.RawMessage)
 	recordCollectedToolCall := func(raw []byte) {
-		item := gjson.ParseBytes(raw)
+		item := util.ParseGJSONBytesNoCopy(raw)
 		if !isCompleteResponsesWebsocketToolCall(item) {
 			return
 		}
@@ -574,30 +573,30 @@ func reconcileResponsesWebsocketCompletionToolCalls(output gjson.Result, outputI
 	return marshaledOutput, true
 }
 
-func isCompleteResponsesWebsocketToolCall(item gjson.Result) bool {
+func isCompleteResponsesWebsocketToolCall(item ojson.Result) bool {
 	if !item.Exists() || !item.IsObject() {
 		return false
 	}
 	callID := item.Get("call_id")
 	name := item.Get("name")
-	if callID.Type != gjson.String || strings.TrimSpace(callID.String()) == "" || name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
+	if callID.Type != ojson.String || strings.TrimSpace(callID.String()) == "" || name.Type != ojson.String || strings.TrimSpace(name.String()) == "" {
 		return false
 	}
 
 	switch strings.TrimSpace(item.Get("type").String()) {
 	case "function_call":
 		arguments := item.Get("arguments")
-		return arguments.Exists() && arguments.Type == gjson.String
+		return arguments.Exists() && arguments.Type == ojson.String
 	case "custom_tool_call":
 		input := item.Get("input")
-		return input.Exists() && input.Type == gjson.String
+		return input.Exists() && input.Type == ojson.String
 	default:
 		return false
 	}
 }
 
 func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
-	output := gjson.GetBytes(payload, "response.output")
+	output := ojson.GetBytesNoCopy(payload, "response.output")
 	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
 		return bytes.Clone([]byte(output.Raw))
 	}
@@ -615,7 +614,7 @@ func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[i
 
 	items := make([]json.RawMessage, 0, len(outputItemsByIndex)+len(outputItemsFallback))
 	appendCollectedItem := func(raw []byte) {
-		item := gjson.ParseBytes(raw)
+		item := util.ParseGJSONBytesNoCopy(raw)
 		if isResponsesToolCallType(item.Get("type").String()) && !isCompleteResponsesWebsocketToolCall(item) {
 			return
 		}
@@ -636,15 +635,17 @@ func responseCompletedOutputFromPayload(payload []byte, outputItemsByIndex map[i
 }
 
 func responseCompletedIDFromPayload(payload []byte) string {
-	return strings.TrimSpace(gjson.GetBytes(payload, "response.id").String())
+	return strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "response.id").String()))
 }
 
 func recordPendingToolCallIDsFromPayload(pending map[string]struct{}, payload []byte) {
 	if pending == nil || len(payload) == 0 {
 		return
 	}
-	updatePendingToolCallIDsFromItem(pending, gjson.GetBytes(payload, "item"))
-	output := gjson.GetBytes(payload, "response.output")
+	var fieldsBuf [2]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "item", "response.output")
+	updatePendingToolCallIDsFromItem(pending, fields[0])
+	output := fields[1]
 	if output.IsArray() {
 		for _, item := range output.Array() {
 			updatePendingToolCallIDsFromItem(pending, item)
@@ -652,7 +653,7 @@ func recordPendingToolCallIDsFromPayload(pending map[string]struct{}, payload []
 	}
 }
 
-func updatePendingToolCallIDsFromItem(pending map[string]struct{}, item gjson.Result) {
+func updatePendingToolCallIDsFromItem(pending map[string]struct{}, item ojson.Result) {
 	if pending == nil || !item.Exists() {
 		return
 	}
@@ -661,7 +662,7 @@ func updatePendingToolCallIDsFromItem(pending map[string]struct{}, item gjson.Re
 		if !isCompleteResponsesWebsocketToolCall(item) {
 			return
 		}
-		callID := strings.TrimSpace(item.Get("call_id").String())
+		callID := strings.Clone(strings.TrimSpace(item.Get("call_id").String()))
 		pending[callID] = struct{}{}
 	case "function_call_output", "custom_tool_call_output":
 		callID := strings.TrimSpace(item.Get("call_id").String())
@@ -737,70 +738,65 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		errCause = errMsg.Error
 	}
 	body := handlers.BuildErrorResponseBodyWithError(status, errText, errCause)
-	payload := []byte(`{}`)
-	var errSet error
-	payload, errSet = sjson.SetBytes(payload, "type", wsEventTypeError)
-	if errSet != nil {
+	payloadDoc := ojson.NewDoc([]byte(`{}`))
+	if errSet := payloadDoc.Set("type", wsEventTypeError); errSet != nil {
 		return nil, errSet
 	}
-	payload, errSet = sjson.SetBytes(payload, "status", status)
-	if errSet != nil {
+	if errSet := payloadDoc.Set("status", status); errSet != nil {
 		return nil, errSet
 	}
 
 	if errMsg != nil && errMsg.Addon != nil {
-		headers := []byte(`{}`)
+		headersDoc := ojson.NewDoc([]byte(`{}`))
 		hasHeaders := false
 		for key, values := range errMsg.Addon {
 			if len(values) == 0 {
 				continue
 			}
 			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
-			headers, errSet = sjson.SetBytes(headers, headerPath, values[0])
-			if errSet != nil {
+			if errSet := headersDoc.Set(headerPath, values[0]); errSet != nil {
 				return nil, errSet
 			}
 			hasHeaders = true
 		}
 		if hasHeaders {
-			payload, errSet = sjson.SetRawBytes(payload, "headers", headers)
-			if errSet != nil {
+			if errSet := payloadDoc.SetRawBytes("headers", headersDoc.Bytes()); errSet != nil {
 				return nil, errSet
 			}
 		}
 	}
 
+	hasErrorField := false
 	if len(body) > 0 && json.Valid(body) {
-		errorNode := gjson.GetBytes(body, "error")
+		errorNode := ojson.GetBytesNoCopy(body, "error")
+		var errSet error
 		if errorNode.Exists() {
-			payload, errSet = sjson.SetRawBytes(payload, "error", []byte(errorNode.Raw))
+			errSet = payloadDoc.SetRawBytes("error", []byte(errorNode.Raw))
 		} else {
-			payload, errSet = sjson.SetRawBytes(payload, "error", body)
+			errSet = payloadDoc.SetRawBytes("error", body)
 		}
 		if errSet != nil {
 			return nil, errSet
 		}
+		hasErrorField = true
 	}
 
-	if !gjson.GetBytes(payload, "error").Exists() {
-		payload, errSet = sjson.SetBytes(payload, "error.type", "server_error")
-		if errSet != nil {
+	if !hasErrorField {
+		if errSet := payloadDoc.Set("error.type", "server_error"); errSet != nil {
 			return nil, errSet
 		}
-		payload, errSet = sjson.SetBytes(payload, "error.message", errText)
-		if errSet != nil {
+		if errSet := payloadDoc.Set("error.message", errText); errSet != nil {
 			return nil, errSet
 		}
 	}
 
 	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
 	if errMsg != nil && errors.As(errMsg.Error, &turnErr) && turnErr.EventID != "" {
-		payload, errSet = sjson.SetBytes(payload, "error.event_id", turnErr.EventID)
-		if errSet != nil {
+		if errSet := payloadDoc.Set("error.event_id", turnErr.EventID); errSet != nil {
 			return nil, errSet
 		}
 	}
-	return payload, nil
+	return payloadDoc.Bytes(), nil
 }
 
 func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {

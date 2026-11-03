@@ -3,6 +3,7 @@ module github.com/router-for-me/CLIProxyAPI/v7/examples/realtime-openai-go
 go 1.26.0
 
 require (
+	github.com/MoeForge/moego v0.1.0-alpha.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/openai/openai-go/v3 v3.50.0
 )

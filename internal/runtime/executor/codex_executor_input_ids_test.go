@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
@@ -51,10 +51,10 @@ func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
 	for range result.Chunks {
 	}
 
-	if input := gjson.GetBytes(gotBody, "input").Array(); len(input) != 3 {
+	if input := ojson.GetBytes(gotBody, "input").Array(); len(input) != 3 {
 		t.Fatalf("upstream input length = %d, want 3: %s", len(input), gotBody)
 	}
-	if gotType := gjson.GetBytes(gotBody, "input.0.type").String(); gotType != "function_call" {
+	if gotType := ojson.GetBytes(gotBody, "input.0.type").String(); gotType != "function_call" {
 		t.Fatalf("input.0.type = %q, want function_call: %s", gotType, gotBody)
 	}
 
@@ -65,18 +65,18 @@ func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
 		{path: "input.0.id", originalID: longCallItemID},
 		{path: "input.1.id", originalID: longOutputItemID},
 	} {
-		actual := gjson.GetBytes(gotBody, testCase.path).String()
+		actual := ojson.GetBytes(gotBody, testCase.path).String()
 		if len([]rune(actual)) > 64 || actual == testCase.originalID {
 			t.Fatalf("input.%d.id was not shortened to at most 64 characters: %q", index, actual)
 		}
 	}
-	if got := gjson.GetBytes(gotBody, "input.0.call_id").String(); got != "call-1" {
+	if got := ojson.GetBytes(gotBody, "input.0.call_id").String(); got != "call-1" {
 		t.Fatalf("function call_id = %q, want call-1", got)
 	}
-	if got := gjson.GetBytes(gotBody, "input.1.call_id").String(); got != "call-1" {
+	if got := ojson.GetBytes(gotBody, "input.1.call_id").String(); got != "call-1" {
 		t.Fatalf("function call output call_id = %q, want call-1", got)
 	}
-	if got := gjson.GetBytes(gotBody, "input.2.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
+	if got := ojson.GetBytes(gotBody, "input.2.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
 		t.Fatalf("message input item ID was not normalized: %q", got)
 	}
 }

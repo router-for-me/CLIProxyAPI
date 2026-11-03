@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const interactionsAgentAuthSelectionModel = "gemini-2.5-flash"
@@ -25,12 +25,12 @@ type interactionsRequestTarget struct {
 }
 
 func parseInteractionsRequestTarget(rawJSON []byte) (interactionsRequestTarget, error) {
-	if !gjson.ValidBytes(rawJSON) {
+	if !ojson.ValidBytes(rawJSON) {
 		return interactionsRequestTarget{}, fmt.Errorf("invalid JSON body")
 	}
-	root := gjson.ParseBytes(rawJSON)
-	model := strings.TrimSpace(root.Get("model").String())
-	agent := strings.TrimSpace(root.Get("agent").String())
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	model := strings.Clone(strings.TrimSpace(root.Get("model").String()))
+	agent := strings.Clone(strings.TrimSpace(root.Get("agent").String()))
 	if model == "" && agent == "" {
 		return interactionsRequestTarget{}, fmt.Errorf("request requires exactly one of model or agent")
 	}
@@ -56,7 +56,7 @@ func prepareInteractionsExecutionTarget(rawJSON []byte, target interactionsReque
 	if model == target.Model {
 		return model, rawJSON
 	}
-	updatedRawJSON, errSet := sjson.SetBytes(rawJSON, "model", model)
+	updatedRawJSON, errSet := ojson.SetBytes(rawJSON, "model", model)
 	if errSet != nil {
 		return model, rawJSON
 	}

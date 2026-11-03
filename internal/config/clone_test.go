@@ -344,3 +344,25 @@ func keyForPath(key reflect.Value) string {
 	}
 	return key.Type().String()
 }
+
+func TestParseConfigBytes_ProxyConnectionPool(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("api-keys:\n  codex:\n    - name: pool-group\n      base-url: https://ollama.com/v1\n      connection-pool:\n        enabled: true\n        idle-conn-timeout: 15s\n        max-idle-conns-per-host: 4\n      keys:\n        - api-key: pool-key\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CodexKey) != 1 {
+		t.Fatalf("codex entries = %d, want 1", len(cfg.CodexKey))
+	}
+	pool := cfg.CodexKey[0].ConnectionPool
+	if pool == nil || pool.Enabled == nil || !*pool.Enabled || pool.IdleConnTimeout != "15s" || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("unexpected pool config: %+v", pool)
+	}
+	clone := cfg.CloneForRuntime()
+	if clone.CodexKey[0].ConnectionPool == pool {
+		t.Fatal("clone shares the pool block")
+	}
+	*clone.CodexKey[0].ConnectionPool.Enabled = false
+	if !*cfg.CodexKey[0].ConnectionPool.Enabled {
+		t.Fatal("clone shares enabled pointer")
+	}
+}

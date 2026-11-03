@@ -333,16 +333,17 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, true, reqMeta, execOptions.SkipInterceptorPluginID)
 	opts := coreexecutor.Options{
-		Stream:                      true,
-		Alt:                         alt,
-		OriginalRequest:             originalRequest,
-		SourceFormat:                sdktranslator.FromString(entryProtocol),
-		ResponseFormat:              sdktranslator.FromString(responseProtocol),
-		Headers:                     modelExecutionHeaders(ctx, execOptions.Headers),
-		Query:                       modelExecutionQuery(ctx, execOptions.Query),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
-		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
-		ProxyURL:                    execOptions.ProxyURL,
+		Stream:                       true,
+		Alt:                          alt,
+		OriginalRequest:              originalRequest,
+		SourceFormat:                 sdktranslator.FromString(entryProtocol),
+		ResponseFormat:               sdktranslator.FromString(responseProtocol),
+		Headers:                      modelExecutionHeaders(ctx, execOptions.Headers),
+		Query:                        modelExecutionQuery(ctx, execOptions.Query),
+		RequestBeforeAuthInterceptor: h.requestBeforeAuthInterceptor(lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		RequestAfterAuthInterceptor:  h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		WebSocketResponseObserver:    h.webSocketResponseObserver(lifecycle.requestID(), execOptions.SkipInterceptorPluginID),
+		ProxyURL:                     execOptions.ProxyURL,
 	}
 	opts.Metadata = reqMeta
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)

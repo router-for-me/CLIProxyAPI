@@ -3,7 +3,8 @@ package common
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestMergeAdjacentGeminiContents(t *testing.T) {
@@ -32,7 +33,7 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
 		}
 
 		// Turn 0: user with 3 parts
-		turn0 := gjson.ParseBytes(merged[0])
+		turn0 := util.ParseGJSONBytesNoCopy(merged[0])
 		if turn0.Get("role").String() != "user" {
 			t.Fatalf("expected role user, got %s", turn0.Get("role").String())
 		}
@@ -47,13 +48,13 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
 		}
 
 		// Turn 1: model with 1 part
-		turn1 := gjson.ParseBytes(merged[1])
+		turn1 := util.ParseGJSONBytesNoCopy(merged[1])
 		if turn1.Get("role").String() != "model" {
 			t.Fatalf("expected role model, got %s", turn1.Get("role").String())
 		}
 
 		// Turn 2: user with 1 part
-		turn2 := gjson.ParseBytes(merged[2])
+		turn2 := util.ParseGJSONBytesNoCopy(merged[2])
 		if turn2.Get("role").String() != "user" {
 			t.Fatalf("expected role user, got %s", turn2.Get("role").String())
 		}
@@ -93,7 +94,7 @@ func TestMergeAdjacentGeminiContents(t *testing.T) {
 		if len(merged) != 1 {
 			t.Fatalf("expected 1 merged turn, got %d", len(merged))
 		}
-		parts := gjson.GetBytes(merged[0], "parts").Array()
+		parts := ojson.GetBytesNoCopy(merged[0], "parts").Array()
 		if len(parts) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(parts))
 		}
@@ -116,7 +117,7 @@ func TestMergeAdjacentGeminiUserContents(t *testing.T) {
 		if len(merged) != 1 {
 			t.Fatalf("expected 1 merged user turn, got %d", len(merged))
 		}
-		parts := gjson.GetBytes(merged[0], "parts").Array()
+		parts := ojson.GetBytesNoCopy(merged[0], "parts").Array()
 		if len(parts) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(parts))
 		}
@@ -161,7 +162,7 @@ func TestSplitGeminiFunctionResponseTurns(t *testing.T) {
 	t.Run("handles multiple responses and alternate key", func(t *testing.T) {
 		input := [][]byte{[]byte(`{"role":"user","parts":[{"text":"before"},{"functionResponse":{"name":"one"}},{"function_response":{"name":"two"}},{"text":"after"}]}`)}
 		got := SplitGeminiFunctionResponseTurns(input)
-		if len(got) != 2 || len(gjson.GetBytes(got[0], "parts").Array()) != 2 || len(gjson.GetBytes(got[1], "parts").Array()) != 2 {
+		if len(got) != 2 || len(ojson.GetBytesNoCopy(got[0], "parts").Array()) != 2 || len(ojson.GetBytesNoCopy(got[1], "parts").Array()) != 2 {
 			t.Fatalf("unexpected split: %s", JoinRawArray(got))
 		}
 		if !ContentHasGeminiFunctionResponse(got[0]) || ContentHasGeminiFunctionResponse(got[1]) {
@@ -209,7 +210,7 @@ func TestSplitGeminiFunctionResponseTurns(t *testing.T) {
 		if !ContentHasGeminiFunctionResponse(got[1]) {
 			t.Fatalf("expected function response immediately after model turn, got %s", got[1])
 		}
-		if gotText := gjson.GetBytes(got[2], "parts.0.text").String(); gotText != "system reminder" {
+		if gotText := ojson.GetBytesNoCopy(got[2], "parts.0.text").String(); gotText != "system reminder" {
 			t.Fatalf("expected text reminder after function response, got %s", got[2])
 		}
 	})
@@ -224,7 +225,7 @@ func TestSplitGeminiFunctionResponseTurns(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("got %d turns, want 2", len(got))
 		}
-		if len(gjson.GetBytes(got[1], "parts").Array()) != 2 {
+		if len(ojson.GetBytesNoCopy(got[1], "parts").Array()) != 2 {
 			t.Fatalf("expected 2 parts in single function response turn, got %s", got[1])
 		}
 	})
@@ -237,7 +238,7 @@ func TestReorderGeminiUserParts(t *testing.T) {
 			[]byte(`{"inline_data":{"mime_type":"image/png","data":"abc"}}`),
 		}
 		reordered := ReorderGeminiUserParts(parts)
-		if len(reordered) != 2 || gjson.GetBytes(reordered[0], "text").String() != "hello" {
+		if len(reordered) != 2 || ojson.GetBytesNoCopy(reordered[0], "text").String() != "hello" {
 			t.Fatalf("unexpected parts: %v", reordered)
 		}
 	})
@@ -248,7 +249,7 @@ func TestReorderGeminiUserParts(t *testing.T) {
 			[]byte(`{"functionResponse":{"name":"read","response":{"result":"ok"}}}`),
 		}
 		reordered := ReorderGeminiUserParts(parts)
-		if len(reordered) != 2 || gjson.GetBytes(reordered[0], "text").String() != "context" {
+		if len(reordered) != 2 || ojson.GetBytesNoCopy(reordered[0], "text").String() != "context" {
 			t.Fatalf("unexpected parts: %v", reordered)
 		}
 	})
@@ -262,10 +263,10 @@ func TestReorderGeminiUserParts(t *testing.T) {
 		if len(reordered) != 2 {
 			t.Fatalf("expected 2 parts, got %d", len(reordered))
 		}
-		if got := gjson.GetBytes(reordered[0], "text").String(); got != "<system-reminder>reminder</system-reminder>" {
+		if got := ojson.GetBytesNoCopy(reordered[0], "text").String(); got != "<system-reminder>reminder</system-reminder>" {
 			t.Fatalf("expected parts[0] to be text, got %q", got)
 		}
-		if got := gjson.GetBytes(reordered[1], "functionResponse.name").String(); got != "read" {
+		if got := ojson.GetBytesNoCopy(reordered[1], "functionResponse.name").String(); got != "read" {
 			t.Fatalf("expected parts[1] to be functionResponse, got %q", got)
 		}
 	})
@@ -281,16 +282,16 @@ func TestReorderGeminiUserParts(t *testing.T) {
 		if len(reordered) != 4 {
 			t.Fatalf("expected 4 parts, got %d", len(reordered))
 		}
-		if got := gjson.GetBytes(reordered[0], "text").String(); got != "leading" {
+		if got := ojson.GetBytesNoCopy(reordered[0], "text").String(); got != "leading" {
 			t.Fatalf("parts[0] text = %q, want leading", got)
 		}
-		if got := gjson.GetBytes(reordered[1], "text").String(); got != "trailing" {
+		if got := ojson.GetBytesNoCopy(reordered[1], "text").String(); got != "trailing" {
 			t.Fatalf("parts[1] text = %q, want trailing", got)
 		}
-		if got := gjson.GetBytes(reordered[2], "functionResponse.name").String(); got != "tool1" {
+		if got := ojson.GetBytesNoCopy(reordered[2], "functionResponse.name").String(); got != "tool1" {
 			t.Fatalf("parts[2] name = %q, want tool1", got)
 		}
-		if got := gjson.GetBytes(reordered[3], "functionResponse.name").String(); got != "tool2" {
+		if got := ojson.GetBytesNoCopy(reordered[3], "functionResponse.name").String(); got != "tool2" {
 			t.Fatalf("parts[3] name = %q, want tool2", got)
 		}
 	})
@@ -341,7 +342,7 @@ func TestContainsJSONRef(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ContainsJSONRef(gjson.Parse(tt.json))
+			got := ContainsJSONRef(ojson.Parse(tt.json))
 			if got != tt.want {
 				t.Errorf("ContainsJSONRef() = %v, want %v", got, tt.want)
 			}
@@ -352,19 +353,19 @@ func TestContainsJSONRef(t *testing.T) {
 func TestSetGeminiFunctionResponseResult(t *testing.T) {
 	t.Run("preserves $ref as string under result", func(t *testing.T) {
 		part := []byte(`{"functionResponse":{"name":"test"}}`)
-		res := gjson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
+		res := ojson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
 		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response.result", res)
-		val := gjson.GetBytes(updated, "functionResponse.response.result")
-		if val.Type != gjson.String {
+		val := ojson.GetBytesNoCopy(updated, "functionResponse.response.result")
+		if val.Type != ojson.String {
 			t.Fatalf("expected string type, got %s (raw: %s)", val.Type, val.Raw)
 		}
 	})
 
 	t.Run("keeps non-$ref object as raw JSON under result", func(t *testing.T) {
 		part := []byte(`{"functionResponse":{"name":"test"}}`)
-		res := gjson.Parse(`{"ok":true,"code":200}`)
+		res := ojson.Parse(`{"ok":true,"code":200}`)
 		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response.result", res)
-		val := gjson.GetBytes(updated, "functionResponse.response.result")
+		val := ojson.GetBytesNoCopy(updated, "functionResponse.response.result")
 		if !val.IsObject() {
 			t.Fatalf("expected object type, got %s (raw: %s)", val.Type, val.Raw)
 		}
@@ -375,10 +376,10 @@ func TestSetGeminiFunctionResponseResult(t *testing.T) {
 
 	t.Run("places stringified $ref under .result when path ends with response", func(t *testing.T) {
 		part := []byte(`{"functionResponse":{"name":"test"}}`)
-		res := gjson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
+		res := ojson.Parse(`{"schema":{"$ref":"#/components/schemas/ErrorModel"}}`)
 		updated := SetGeminiFunctionResponseResult(part, "functionResponse.response", res)
-		val := gjson.GetBytes(updated, "functionResponse.response.result")
-		if val.Type != gjson.String {
+		val := ojson.GetBytesNoCopy(updated, "functionResponse.response.result")
+		if val.Type != ojson.String {
 			t.Fatalf("expected string type under response.result, got %s (raw: %s)", val.Type, val.Raw)
 		}
 	})

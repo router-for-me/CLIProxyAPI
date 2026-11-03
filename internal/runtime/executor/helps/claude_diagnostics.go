@@ -12,9 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -453,7 +452,7 @@ func IsClaudeNewPromptTurn(body []byte) bool {
 	if IsClaudeProbeOrHelperRequest(body) {
 		return false
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if !messages.IsArray() {
 		return true
 	}
@@ -483,15 +482,15 @@ var (
 )
 
 func isClaudeProbeRequest(body []byte) bool {
-	maxTokens := gjson.GetBytes(body, "max_tokens")
+	maxTokens := ojson.GetBytesNoCopy(body, "max_tokens")
 	if !maxTokens.Exists() || maxTokens.Int() != 1 {
 		return false
 	}
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if tools.Exists() && len(tools.Array()) > 0 {
 		return false
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
 		return true // headless preflight probe without messages
 	}
@@ -504,7 +503,7 @@ func isClaudeProbeRequest(body []byte) bool {
 		return false
 	}
 	content := firstMsg.Get("content")
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		str := strings.TrimSpace(content.String())
 		return str == "quota" || str == "test" || str == "." || str == "probe"
 	}
@@ -533,7 +532,7 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 			strings.Contains(t, "Write the title in the predominant language") ||
 			strings.Contains(t, "<session>")
 	}
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() {
 		for _, part := range system.Array() {
 			if matchesTitlePrompt(part.Get("text").String()) {
@@ -543,7 +542,7 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 	} else if matchesTitlePrompt(system.String()) {
 		return true
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
 			content := msg.Get("content")
@@ -568,7 +567,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 		"Write the title in the predominant language") {
 		return false
 	}
-	props := gjson.GetBytes(body, "output_config.format.schema.properties")
+	props := ojson.GetBytesNoCopy(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
 			return isClaudeTitleHelperInstruction(body)
@@ -584,7 +583,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 			strings.Contains(t, "Return a short title") ||
 			strings.Contains(t, "Write the title in the predominant language")
 	}
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() {
 		for _, part := range system.Array() {
 			if matchesSystemTitleInstruction(part.Get("text").String()) {
@@ -595,7 +594,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 		return true
 	}
 
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
 			if msg.Get("role").String() == "system" {
@@ -631,21 +630,21 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 	if val := HeaderValueCaseInsensitive(headers, "X-Claude-Code-Parent-Agent-Id"); val != "" {
 		return true
 	}
-	if gjson.GetBytes(body, "metadata.user_id.parent_session_id").Exists() {
+	if ojson.GetBytesNoCopy(body, "metadata.user_id.parent_session_id").Exists() {
 		return true
 	}
-	if userID := gjson.GetBytes(body, "metadata.user_id").String(); userID != "" {
+	if userID := ojson.GetBytesNoCopy(body, "metadata.user_id").String(); userID != "" {
 		if strings.Contains(userID, `"parent_session_id"`) {
 			return true
 		}
 	}
 	// Only inspect system[0].text or billing header for cc_is_subagent, never raw user message content
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() && len(system.Array()) > 0 {
 		if strings.Contains(system.Array()[0].Get("text").String(), "cc_is_subagent=true") {
 			return true
 		}
-	} else if system.Type == gjson.String && strings.Contains(system.String(), "cc_is_subagent=true") {
+	} else if system.Type == ojson.String && strings.Contains(system.String(), "cc_is_subagent=true") {
 		return true
 	}
 	return false
@@ -656,11 +655,11 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 func ClaudePayloadHas1hTTL(payload []byte) bool {
 	// A ttl of "1h" is the JSON string "1h"; its quotes are structural and never
 	// escaped, so a payload without that token cannot match.
-	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !ojson.ValidBytes(payload) {
 		return false
 	}
 	has1h := false
-	checkBlock := func(item gjson.Result) bool {
+	checkBlock := func(item ojson.Result) bool {
 		cc := item.Get("cache_control")
 		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
 			has1h = true
@@ -668,27 +667,27 @@ func ClaudePayloadHas1hTTL(payload []byte) bool {
 		}
 		return true
 	}
-	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
-		tools.ForEach(func(_, item gjson.Result) bool {
+	if tools := ojson.GetBytesNoCopy(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(_, item ojson.Result) bool {
 			return checkBlock(item)
 		})
 		if has1h {
 			return true
 		}
 	}
-	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
-		system.ForEach(func(_, item gjson.Result) bool {
+	if system := ojson.GetBytesNoCopy(payload, "system"); system.IsArray() {
+		system.ForEach(func(_, item ojson.Result) bool {
 			return checkBlock(item)
 		})
 		if has1h {
 			return true
 		}
 	}
-	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+	if messages := ojson.GetBytesNoCopy(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			content := msg.Get("content")
 			if content.IsArray() {
-				content.ForEach(func(_, item gjson.Result) bool {
+				content.ForEach(func(_, item ojson.Result) bool {
 					return checkBlock(item)
 				})
 			}
@@ -711,34 +710,61 @@ func ClaudeSubagentRequests1h(headers http.Header, body []byte) bool {
 
 // StripClaudeBillingTags removes cc_prev_req and cc_prompt_id from the billing header in body.
 func StripClaudeBillingTags(body []byte) []byte {
-	system := gjson.GetBytes(body, "system")
-	if !system.IsArray() || len(system.Array()) == 0 {
+	if len(body) == 0 {
 		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !StripClaudeBillingTagsDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+// StripClaudeBillingTagsDoc removes cc_prev_req and cc_prompt_id from the billing header in doc in place.
+func StripClaudeBillingTagsDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	system := doc.Get("system")
+	if !system.IsArray() || len(system.Array()) == 0 {
+		return false
 	}
 	billingText := system.Array()[0].Get("text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
-		return body
+		return false
 	}
 	cleaned := claudePrevReqBillingPattern.ReplaceAllString(billingText, "")
 	cleaned = claudePromptIDBillingPattern.ReplaceAllString(cleaned, "")
 	if cleaned != billingText {
-		updated, err := sjson.SetBytes(body, "system.0.text", cleaned)
-		if err == nil {
-			return updated
-		}
+		return doc.Set("system.0.text", cleaned) == nil
 	}
-	return body
+	return false
 }
 
 // InjectClaudeBillingTags appends cc_prev_req and cc_prompt_id to the billing header in body if present.
 func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
-	system := gjson.GetBytes(body, "system")
-	if !system.IsArray() || len(system.Array()) == 0 {
+	if len(body) == 0 {
 		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !InjectClaudeBillingTagsDoc(doc, prevReq, promptID) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+// InjectClaudeBillingTagsDoc appends cc_prev_req and cc_prompt_id to the billing header in doc in place.
+func InjectClaudeBillingTagsDoc(doc *ojson.Doc, prevReq, promptID string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	system := doc.Get("system")
+	if !system.IsArray() || len(system.Array()) == 0 {
+		return false
 	}
 	billingText := system.Array()[0].Get("text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
-		return body
+		return false
 	}
 	cleaned := claudePrevReqBillingPattern.ReplaceAllString(billingText, "")
 	cleaned = claudePromptIDBillingPattern.ReplaceAllString(cleaned, "")
@@ -752,21 +778,17 @@ func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
 	if promptID != "" {
 		cleaned += " cc_prompt_id=" + promptID + ";"
 	}
-	updated, err := sjson.SetBytes(body, "system.0.text", cleaned)
-	if err == nil {
-		return updated
-	}
-	return body
+	return doc.Set("system.0.text", cleaned) == nil
 }
 
 // ExtractClaudeBillingTags extracts existing cc_prev_req and cc_prompt_id values
 // from a billing header in system text, if present.
 func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	var billingText string
 	if system.IsArray() && len(system.Array()) > 0 {
 		billingText = system.Array()[0].Get("text").String()
-	} else if system.Type == gjson.String {
+	} else if system.Type == ojson.String {
 		billingText = system.String()
 	}
 	if billingText == "" || !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
@@ -778,7 +800,7 @@ func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
 			val = val[:end]
 		}
 		if claudeRequestIDPattern.MatchString(val) {
-			prevReq = val
+			prevReq = strings.Clone(val)
 		}
 	}
 	if idx := strings.Index(billingText, "cc_prompt_id="); idx >= 0 {
@@ -787,7 +809,7 @@ func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
 			val = val[:end]
 		}
 		if IsValidClaudePromptID(val) {
-			promptID = strings.ToLower(val)
+			promptID = strings.Clone(strings.ToLower(val))
 		}
 	}
 	return prevReq, promptID

@@ -3,9 +3,8 @@ package helps
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ShouldUseMaxCompletionTokensForModel reports whether the resolved model under an
@@ -48,37 +47,62 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byt
 	if len(payload) == 0 {
 		return payload
 	}
-
-	hasMaxTokens := gjson.GetBytes(payload, "max_tokens").Exists()
-	hasMaxCompletionTokens := gjson.GetBytes(payload, "max_completion_tokens").Exists()
-	if !hasMaxTokens && !hasMaxCompletionTokens {
+	doc := ojson.NewDoc(payload)
+	if !NormalizeOpenAIMaxTokensDoc(doc, useMaxCompletionTokens) {
 		return payload
 	}
+	return doc.Bytes()
+}
 
+// NormalizeOpenAIMaxTokensDoc normalizes max_tokens and max_completion_tokens in place on doc.
+func NormalizeOpenAIMaxTokensDoc(doc *ojson.Doc, useMaxCompletionTokens bool) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+
+	maxTokens := doc.Get("max_tokens")
+	maxCompletionTokens := doc.Get("max_completion_tokens")
+	hasMaxTokens := maxTokens.Exists()
+	hasMaxCompletionTokens := maxCompletionTokens.Exists()
+	if !hasMaxTokens && !hasMaxCompletionTokens {
+		return false
+	}
+
+	modified := false
 	if useMaxCompletionTokens {
 		if hasMaxTokens && !hasMaxCompletionTokens {
-			val := gjson.GetBytes(payload, "max_tokens")
-			if val.Raw != "" {
-				payload, _ = sjson.SetRawBytes(payload, "max_completion_tokens", []byte(val.Raw))
+			if maxTokens.Raw != "" {
+				if errSet := doc.SetRaw("max_completion_tokens", maxTokens.Raw); errSet == nil {
+					modified = true
+				}
 			} else {
-				payload, _ = sjson.SetBytes(payload, "max_completion_tokens", val.Value())
+				if errSet := doc.Set("max_completion_tokens", maxTokens.Value()); errSet == nil {
+					modified = true
+				}
 			}
 		}
 		if hasMaxTokens {
-			payload, _ = sjson.DeleteBytes(payload, "max_tokens")
+			if errDel := doc.Delete("max_tokens"); errDel == nil {
+				modified = true
+			}
 		}
 	} else {
 		if hasMaxCompletionTokens && !hasMaxTokens {
-			val := gjson.GetBytes(payload, "max_completion_tokens")
-			if val.Raw != "" {
-				payload, _ = sjson.SetRawBytes(payload, "max_tokens", []byte(val.Raw))
+			if maxCompletionTokens.Raw != "" {
+				if errSet := doc.SetRaw("max_tokens", maxCompletionTokens.Raw); errSet == nil {
+					modified = true
+				}
 			} else {
-				payload, _ = sjson.SetBytes(payload, "max_tokens", val.Value())
+				if errSet := doc.Set("max_tokens", maxCompletionTokens.Value()); errSet == nil {
+					modified = true
+				}
 			}
 		}
 		if hasMaxCompletionTokens {
-			payload, _ = sjson.DeleteBytes(payload, "max_completion_tokens")
+			if errDel := doc.Delete("max_completion_tokens"); errDel == nil {
+				modified = true
+			}
 		}
 	}
-	return payload
+	return modified
 }

@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -37,8 +38,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -318,34 +317,32 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 	}
 
 	foundBaseline := false
+	rawDoc := ojson.NewDoc(raw)
+	rawModified := false
 	for i, modelRaw := range payload.Models {
-		slugResult := gjson.GetBytes(modelRaw, "slug")
-		if slugResult.Type != gjson.String || strings.TrimSpace(slugResult.Str) != baselineModelSlug {
+		slugResult := ojson.GetBytesNoCopy(modelRaw, "slug")
+		if slugResult.Type != ojson.String || strings.TrimSpace(slugResult.Str) != baselineModelSlug {
 			continue
 		}
 		foundBaseline = true
-		visResult := gjson.GetBytes(modelRaw, "visibility")
-		if visResult.Type != gjson.String || visResult.Str != baselineModelVisibility {
-			updated, errSet := sjson.SetBytes(raw, fmt.Sprintf("models.%d.visibility", i), baselineModelVisibility)
-			if errSet != nil {
+		visResult := ojson.GetBytesNoCopy(modelRaw, "visibility")
+		if visResult.Type != ojson.String || visResult.Str != baselineModelVisibility {
+			if errSet := rawDoc.Set(fmt.Sprintf("models.%d.visibility", i), baselineModelVisibility); errSet != nil {
 				return nil, 0, fmt.Errorf("failed to update %s visibility: %w", baselineModelSlug, errSet)
 			}
-			raw = updated
+			rawModified = true
 		}
 	}
 
 	count := len(payload.Models)
 	if !foundBaseline {
-		cloned := append([]byte(nil), payload.Models[0]...)
-		var errSet error
-		cloned, errSet = sjson.SetBytes(cloned, "slug", baselineModelSlug)
-		if errSet != nil {
+		cloneDoc := ojson.NewDoc(payload.Models[0])
+		if errSet := cloneDoc.Set("slug", baselineModelSlug); errSet != nil {
 			return nil, 0, fmt.Errorf("failed to set %s slug on cloned model: %w", baselineModelSlug, errSet)
 		}
-		visResult := gjson.GetBytes(cloned, "visibility")
-		if visResult.Type != gjson.String || visResult.Str != baselineModelVisibility {
-			cloned, errSet = sjson.SetBytes(cloned, "visibility", baselineModelVisibility)
-			if errSet != nil {
+		visResult := ojson.GetBytesNoCopy(payload.Models[0], "visibility")
+		if visResult.Type != ojson.String || visResult.Str != baselineModelVisibility {
+			if errSet := cloneDoc.Set("visibility", baselineModelVisibility); errSet != nil {
 				return nil, 0, fmt.Errorf("failed to set %s visibility on cloned model: %w", baselineModelSlug, errSet)
 			}
 		}
@@ -357,16 +354,18 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 			{path: "use_responses_lite", value: false},
 			{path: "supports_reasoning_effort_updates", value: false},
 		} {
-			cloned, errSet = sjson.SetBytes(cloned, reset.path, reset.value)
-			if errSet != nil {
+			if errSet := cloneDoc.Set(reset.path, reset.value); errSet != nil {
 				return nil, 0, fmt.Errorf("failed to set %s %s on cloned model: %w", baselineModelSlug, reset.path, errSet)
 			}
 		}
-		raw, errSet = sjson.SetRawBytes(raw, "models.-1", cloned)
-		if errSet != nil {
+		if errSet := rawDoc.SetRawBytes("models.-1", cloneDoc.Bytes()); errSet != nil {
 			return nil, 0, fmt.Errorf("failed to append %s model: %w", baselineModelSlug, errSet)
 		}
+		rawModified = true
 		count++
+	}
+	if rawModified {
+		raw = rawDoc.Bytes()
 	}
 
 	return raw, count, nil

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestInteractionsApplyPatchOrdinaryFunctionStopSnapshotDeltas(t *testing.T) {
@@ -20,8 +20,8 @@ func TestInteractionsApplyPatchOrdinaryFunctionStopSnapshotDeltas(t *testing.T) 
 		for _, identityAt := range []string{"start", "after delta", "stop", "delta before start"} {
 			t.Run(request.name+"/"+identityAt, func(t *testing.T) {
 				var param any
-				var events []gjson.Result
-				send := func(raw []byte) []gjson.Result {
+				var events []ojson.Result
+				send := func(raw []byte) []ojson.Result {
 					more := patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", []byte(request.request), nil, raw, &param))
 					events = append(events, more...)
 					return more
@@ -84,7 +84,7 @@ func TestInteractionsApplyPatchOrdinaryFunctionStopSnapshotDeltas(t *testing.T) 
 	}
 }
 
-func assertInteractionsPatchReviewFailure(t *testing.T, param *any, events []gjson.Result) {
+func assertInteractionsPatchReviewFailure(t *testing.T, param *any, events []ojson.Result) {
 	t.Helper()
 	if len(events) != 1 || events[0].Get("type").String() != "response.failed" || events[0].Get("response.error.code").String() != "invalid_tool_arguments" {
 		t.Fatalf("expected only sanitized failure: %v", events)
@@ -155,7 +155,7 @@ func TestInteractionsApplyPatchFinalOnlyIdentityAndEnvelope(t *testing.T) {
 					raw := patchJSON(event)
 					if evidence == "malformed named" {
 						raw = raw[:len(raw)-1]
-						if gjson.ValidBytes(raw) || gjson.GetBytes(raw, path+".0.name").String() != "functions__apply_patch" {
+						if ojson.ValidBytes(raw) || ojson.GetBytesNoCopy(raw, path+".0.name").String() != "functions__apply_patch" {
 							t.Fatal("fixture must retain a recoverable patch step in incomplete outer JSON")
 						}
 					}
@@ -197,7 +197,7 @@ func TestInteractionsApplyPatchFinalOnlyOtherToolsKeepLegacyBehavior(t *testing.
 func TestInteractionsApplyPatchFinalSnapshotsPreserveOtherOutputsAndCalls(t *testing.T) {
 	var param any
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"lookup"},{"type":"custom","name":"exec"}]}`)
-	send := func(index int, entry, key string, value any) []gjson.Result {
+	send := func(index int, entry, key string, value any) []ojson.Result {
 		return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, patchJSON(map[string]any{"event_type": entry, "index": index, key: value}), &param))
 	}
 	snapshots := []any{
@@ -229,7 +229,7 @@ func TestInteractionsApplyPatchFinalSnapshotsPreserveOtherOutputsAndCalls(t *tes
 func TestInteractionsApplyPatchFinalOnlyCallDoesNotRebindUnrelatedItem(t *testing.T) {
 	var param any
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"lookup"}]}`)
-	send := func(raw []byte) []gjson.Result {
+	send := func(raw []byte) []ojson.Result {
 		return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, raw, &param))
 	}
 	send([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"ordinary","name":"lookup","arguments":{"x":1}}}`))
@@ -284,7 +284,7 @@ func TestInteractionsApplyPatchFinalOnlyUnnamedUnkeyedFunctionFails(t *testing.T
 func TestInteractionsApplyPatchOrdinaryLateIdentityReplaysOnlyBufferedPrefix(t *testing.T) {
 	var param any
 	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup"}]}`)
-	var events []gjson.Result
+	var events []ojson.Result
 	send := func(raw []byte) {
 		events = append(events, patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, raw, &param))...)
 	}
@@ -435,7 +435,7 @@ func TestInteractionsApplyPatchPreNameIndexConflictRetained(t *testing.T) {
 							delete(resolved, "id")
 							delete(resolved, "call_id")
 						}
-						var events []gjson.Result
+						var events []ojson.Result
 						if entry == "step.start" || entry == "step.stop" {
 							// Unknown names must not make identity contradictions disappear later.
 							patchSend(&param, patchReviewSnapshot(entry, 3, conflict))
@@ -465,7 +465,7 @@ func TestInteractionsApplyPatchConsistentSnapshotIdentityMatrix(t *testing.T) {
 			for _, snapshotType := range []string{"function_call", "omitted"} {
 				t.Run(entry+"/"+key+"/"+snapshotType, func(t *testing.T) {
 					var param any
-					var events []gjson.Result
+					var events []ojson.Result
 					events = append(events, patchSend(&param, patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "functions__apply_patch", "arguments": map[string]any{"input": "p"}}))...)
 					events = append(events, patchSend(&param, patchStep("step.stop", nil))...)
 					step := map[string]any{"arguments": map[string]any{"input": "p"}}
@@ -527,7 +527,7 @@ func TestInteractionsApplyPatchUnmatchedNewIDsRemainIndependent(t *testing.T) {
 func TestInteractionsApplyPatchOrdinaryExplicitIndexKeepsLegacyBehavior(t *testing.T) {
 	var param any
 	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup"}]}`)
-	send := func(raw []byte) []gjson.Result {
+	send := func(raw []byte) []ojson.Result {
 		return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, raw, &param))
 	}
 	for _, index := range []int{2, 3} {
@@ -564,7 +564,7 @@ func TestInteractionsApplyPatchIDsCannotSelectUnrelatedOrdinaryIndex(t *testing.
 			t.Run(entry+"/"+snapshotType, func(t *testing.T) {
 				var param any
 				request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"lookup"}]}`)
-				send := func(raw []byte) []gjson.Result {
+				send := func(raw []byte) []ojson.Result {
 					return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, raw, &param))
 				}
 				send(patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "functions__apply_patch", "arguments": map[string]any{"input": "p"}}))

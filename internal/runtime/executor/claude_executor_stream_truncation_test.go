@@ -935,3 +935,95 @@ func TestTranslatedClaudeStreamTruncationPreservesBufferedUsageOnFailure(t *test
 		}
 	})
 }
+
+func TestClaudeExecutorStreamCancel499RecordsLastPacketUsage(t *testing.T) {
+	for _, mode := range []struct {
+		name   string
+		format sdktranslator.Format
+	}{
+		{name: "passthrough", format: sdktranslator.FormatClaude},
+		{name: "translated", format: sdktranslator.FormatOpenAIResponse},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			deltaFlushed := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				flusher, _ := w.(http.Flusher)
+				_, _ = fmt.Fprint(w, "event: message_start\n")
+				_, _ = fmt.Fprint(w, `data: {"type":"message_start","message":{"id":"msg_cancel_499","type":"message","role":"assistant","content":[],"model":"claude-opus-5-5","stop_reason":null,"usage":{"input_tokens":4,"cache_creation_input_tokens":3036,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036},"output_tokens":1,"service_tier":"standard","inference_geo":"global","speed":"standard"}}}`+"\n\n")
+				_, _ = fmt.Fprint(w, "event: content_block_start\n")
+				_, _ = fmt.Fprint(w, `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`+"\n\n")
+				_, _ = fmt.Fprint(w, "event: content_block_delta\n")
+				_, _ = fmt.Fprint(w, `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`+"\n\n")
+				_, _ = fmt.Fprint(w, "event: message_delta\n")
+				_, _ = fmt.Fprint(w, `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":6,"cache_creation_input_tokens":8846,"cache_read_input_tokens":3036,"output_tokens":120,"output_tokens_details":{"thinking_tokens":30},"server_tool_use":{"web_search_requests":1,"web_fetch_requests":0},"iterations":[{"type":"message","input_tokens":4,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":3036,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036}},{"type":"message","input_tokens":2,"output_tokens":100,"cache_read_input_tokens":3036,"cache_creation_input_tokens":5810,"cache_creation":{"ephemeral_5m_input_tokens":5810,"ephemeral_1h_input_tokens":0}}]}}`+"\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				close(deltaFlushed)
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+
+			pluginName := "test-claude-cancel-499-" + mode.name
+			plugin := &captureClaudeUsagePlugin{records: make(chan usage.Record, 4)}
+			usage.RegisterNamedPlugin(pluginName, plugin)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(pluginName, noopClaudeUsagePlugin{})
+			})
+
+			exec := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-123",
+				"base_url": server.URL,
+			}}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			result, err := exec.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model:   "claude-opus-5-5",
+				Payload: []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat:   mode.format,
+				ResponseFormat: mode.format,
+				Stream:         true,
+			})
+			if err != nil {
+				t.Fatalf("ExecuteStream() error = %v", err)
+			}
+
+			<-deltaFlushed
+			// Drain until the message_delta chunk has been processed, then cancel before message_stop.
+			for chunk := range result.Chunks {
+				if strings.Contains(string(chunk.Payload), "message_delta") || strings.Contains(string(chunk.Payload), "partial") {
+					cancel()
+					break
+				}
+			}
+			for range result.Chunks {
+			}
+
+			select {
+			case record := <-plugin.records:
+				if !record.Failed || record.Fail.StatusCode != 499 {
+					t.Fatalf("expected failed=true status=499 on canceled stream, got failed=%v fail=%+v", record.Failed, record.Fail)
+				}
+				if record.Detail.InputTokens != 6 || record.Detail.OutputTokens != 120 || record.Detail.ReasoningTokens != 30 || record.Detail.CacheReadTokens != 3036 || record.Detail.CacheCreationTokens != 8846 {
+					t.Fatalf("unexpected last-packet token counts on 499 cancel: %+v", record.Detail)
+				}
+				if record.Detail.CacheCreation5mTokens == nil || *record.Detail.CacheCreation5mTokens != 5810 || record.Detail.CacheCreation1hTokens == nil || *record.Detail.CacheCreation1hTokens != 3036 {
+					t.Fatalf("expected 5m=5810 1h=3036 on 499 cancel, got 5m=%v 1h=%v", record.Detail.CacheCreation5mTokens, record.Detail.CacheCreation1hTokens)
+				}
+				if record.Detail.WebSearchRequests == nil || *record.Detail.WebSearchRequests != 1 {
+					t.Fatalf("expected WebSearchRequests=1 on 499 cancel, got %v", record.Detail.WebSearchRequests)
+				}
+				if len(record.Detail.IterationSlice()) != 2 {
+					t.Fatalf("expected 2 iterations on 499 cancel, got %d", len(record.Detail.IterationSlice()))
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for 499 canceled usage record")
+			}
+		})
+	}
+}

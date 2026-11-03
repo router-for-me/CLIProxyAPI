@@ -2,17 +2,18 @@ package helps
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/textproto"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // ApplyMediaPayloadConfig exposes multipart fields as JSON business values. File
@@ -30,14 +31,16 @@ func ApplyMediaPayloadConfig(cfg *config.Config, executor, model, protocol strin
 	if errOriginal != nil {
 		return nil, "", errOriginal
 	}
-	out := NewPayloadFinalizer(cfg, executor, model, protocol, "", originalView, req, opts)(view)
+	doc := ojson.NewDoc(view)
+	NewPayloadFinalizer(cfg, executor, model, protocol, "", originalView, req, opts).FinalizeDoc(doc)
+	out := doc.Bytes()
 	if !multipartBody || bytes.Equal(out, view) {
 		return outOrBody(out, body, multipartBody), contentType, nil
 	}
 	var buffer bytes.Buffer
 	writer := multipart.NewWriter(&buffer)
-	for key, value := range gjson.ParseBytes(out).Map() {
-		values := []gjson.Result{value}
+	for key, value := range util.ParseGJSONBytesNoCopy(out).Map() {
+		values := []ojson.Result{value}
 		if value.IsArray() {
 			values = value.Array()
 		}

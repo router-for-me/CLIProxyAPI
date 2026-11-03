@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestSummaryIntentTranslation(t *testing.T) {
@@ -74,7 +74,7 @@ func TestSummaryIntentTranslation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(test.from, test.to, "", []byte(test.body), true)
-			result := gjson.GetBytes(out, test.path)
+			result := ojson.GetBytesNoCopy(out, test.path)
 			if result.Exists() != test.wantExists {
 				t.Fatalf("%s exists = %v, want %v; body=%s", test.path, result.Exists(), test.wantExists, out)
 			}
@@ -98,7 +98,7 @@ func TestInvalidInteractionsSummaryDoesNotWriteTargetControl(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(sdktranslator.FormatInteractions, test.to, "model", body, false)
-			if result := gjson.GetBytes(out, test.path); result.Exists() {
+			if result := ojson.GetBytesNoCopy(out, test.path); result.Exists() {
 				t.Fatalf("invalid Interactions summary wrote %s=%s; body=%s", test.path, result.Raw, out)
 			}
 		})
@@ -165,14 +165,14 @@ func TestSummaryIntentFinalPipeline(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinking() error = %v; body=%s", err, out)
 			}
-			result := gjson.GetBytes(out, test.path)
+			result := ojson.GetBytesNoCopy(out, test.path)
 			if result.Exists() != test.wantExists {
 				t.Fatalf("%s exists = %v, want %v; body=%s", test.path, result.Exists(), test.wantExists, out)
 			}
 			if test.wantExists && result.String() != test.want {
 				t.Fatalf("%s = %q, want %q; body=%s", test.path, result.String(), test.want, out)
 			}
-			if test.to == sdktranslator.FormatClaude && gjson.GetBytes(out, "thinking.type").String() == "disabled" && gjson.GetBytes(out, "thinking.display").Exists() {
+			if test.to == sdktranslator.FormatClaude && ojson.GetBytesNoCopy(out, "thinking.type").String() == "disabled" && ojson.GetBytesNoCopy(out, "thinking.display").Exists() {
 				t.Fatalf("disabled Claude thinking retained display: %s", out)
 			}
 		})
@@ -198,13 +198,13 @@ func TestGeminiSummaryOnlyProducesValidClaudeThinking(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			body := []byte(`{"model":"` + test.model + `","generationConfig":{"thinkingConfig":{"includeThoughts":true}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 			out := sdktranslator.TranslateRequest(sdktranslator.FormatGemini, sdktranslator.FormatClaude, test.model, body, false)
-			if got := gjson.GetBytes(out, "thinking.type").String(); got != test.wantType {
+			if got := ojson.GetBytesNoCopy(out, "thinking.type").String(); got != test.wantType {
 				t.Fatalf("thinking.type = %q, want %q; body=%s", got, test.wantType, out)
 			}
-			if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+			if got := ojson.GetBytesNoCopy(out, "thinking.display").String(); got != "summarized" {
 				t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
 			}
-			budget := gjson.GetBytes(out, "thinking.budget_tokens")
+			budget := ojson.GetBytesNoCopy(out, "thinking.budget_tokens")
 			if test.wantBudget > 0 {
 				if budget.Int() != test.wantBudget {
 					t.Fatalf("thinking.budget_tokens = %d, want %d; body=%s", budget.Int(), test.wantBudget, out)
@@ -219,11 +219,11 @@ func TestGeminiSummaryOnlyProducesValidClaudeThinking(t *testing.T) {
 func TestNativeClaudeMissingDisplayPreservesSignatureOnlyHistory(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5","thinking":{"type":"adaptive"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"opus-signature"}]},{"role":"user","content":"continue"}]}`)
 	out := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatClaude, "claude-opus-5", body, true)
-	if gjson.GetBytes(out, "thinking.display").Exists() {
+	if ojson.GetBytesNoCopy(out, "thinking.display").Exists() {
 		t.Fatalf("native Claude request without display gained one: %s", out)
 	}
-	if got := gjson.GetBytes(out, "messages").Raw; got != gjson.GetBytes(body, "messages").Raw {
-		t.Fatalf("signature-only history changed: got %s, want %s", got, gjson.GetBytes(body, "messages").Raw)
+	if got := ojson.GetBytesNoCopy(out, "messages").Raw; got != ojson.GetBytesNoCopy(body, "messages").Raw {
+		t.Fatalf("signature-only history changed: got %s, want %s", got, ojson.GetBytesNoCopy(body, "messages").Raw)
 	}
 }
 
@@ -258,7 +258,7 @@ func TestAntigravityIncludeThoughtsPreservesExplicitness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinking() error = %v; body=%s", err, out)
 			}
-			result := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+			result := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.includeThoughts")
 			if result.Exists() != test.wantExists {
 				t.Fatalf("includeThoughts exists = %v, want %v; body=%s", result.Exists(), test.wantExists, out)
 			}
@@ -267,7 +267,7 @@ func TestAntigravityIncludeThoughtsPreservesExplicitness(t *testing.T) {
 					t.Fatalf("includeThoughts = %s, want %s; body=%s", got, test.want, out)
 				}
 			}
-			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts").Exists() {
+			if ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.include_thoughts").Exists() {
 				t.Fatalf("snake_case includeThoughts left in payload: %s", out)
 			}
 		})

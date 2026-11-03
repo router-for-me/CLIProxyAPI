@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // midSystemLegacyPayload is a caller body pairing a legacy model with a
@@ -58,7 +58,7 @@ func (u *midSystemUpstream) context(t *testing.T, headers http.Header) context.C
 		responseBody := `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 		if strings.Contains(req.URL.Path, "count_tokens") {
 			responseBody = `{"input_tokens":18}`
-		} else if gjson.GetBytes(payload, "stream").Bool() {
+		} else if ojson.GetBytes(payload, "stream").Bool() {
 			contentType = "text/event-stream"
 			// A translated caller aggregates the stream back into one message, so
 			// the stub has to complete the block and report a stop reason.
@@ -278,7 +278,7 @@ func TestClaudeExecutor_ConfirmedNativeLegacyMidSystemMessageForwarded(t *testin
 	if !upstream.called {
 		t.Fatal("expected the native request to reach the upstream")
 	}
-	if !gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
+	if !ojson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
 		t.Fatalf("confirmed native caller lost its role=system turn; body=%s", upstream.body)
 	}
 }
@@ -342,7 +342,7 @@ func TestClaudeExecutor_LegacyMidSystemMessageOptInStillRebuilds(t *testing.T) {
 	if !upstream.called {
 		t.Fatal("expected the rebuilt request to reach the upstream")
 	}
-	if gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
+	if ojson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
 		t.Fatalf("opt-in rebuild left a role=system turn; body=%s", upstream.body)
 	}
 }
@@ -385,13 +385,13 @@ func TestTranslatedRequestNeverPairsLegacyModelWithMidSystemMessage(t *testing.T
 			// Without these the subject under test could drift away: a body that
 			// no longer addresses the legacy model, or that lost the caller's
 			// turns, would satisfy the role assertions for the wrong reason.
-			if got := gjson.GetBytes(upstream.body, "model").String(); got != legacyModel {
+			if got := ojson.GetBytes(upstream.body, "model").String(); got != legacyModel {
 				t.Fatalf("upstream model = %q, want the legacy model %q under test", got, legacyModel)
 			}
-			if got := len(gjson.GetBytes(upstream.body, "messages").Array()); got == 0 {
+			if got := len(ojson.GetBytes(upstream.body, "messages").Array()); got == 0 {
 				t.Fatalf("upstream messages are empty, so the role assertions prove nothing; body=%s", upstream.body)
 			}
-			for _, role := range gjson.GetBytes(upstream.body, "messages.#.role").Array() {
+			for _, role := range ojson.GetBytes(upstream.body, "messages.#.role").Array() {
 				if strings.EqualFold(role.String(), "system") {
 					t.Fatalf("translated body carries a system role; body=%s", upstream.body)
 				}
@@ -463,7 +463,7 @@ func TestValidateClaudeMidSystemMessageModel(t *testing.T) {
 			if err == nil {
 				return
 			}
-			if !strings.Contains(err.Error(), gjson.Get(test.payload, "model").String()) {
+			if !strings.Contains(err.Error(), ojson.Get(test.payload, "model").String()) {
 				t.Fatalf("error = %v, want the offending model named", err)
 			}
 		})
@@ -512,13 +512,13 @@ func TestClaudeExecutorPayloadRepairsLegacyMidSystemMessage(t *testing.T) {
 				if !upstream.called {
 					t.Fatal("repaired body did not reach upstream")
 				}
-				if got := gjson.GetBytes(upstream.body, "model").String(); got != repair.wantModel {
+				if got := ojson.GetBytes(upstream.body, "model").String(); got != repair.wantModel {
 					t.Fatalf("final model = %q, want %q", got, repair.wantModel)
 				}
-				if got := gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists(); got != repair.wantSystem {
+				if got := ojson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists(); got != repair.wantSystem {
 					t.Fatalf("final system-turn presence = %v, want %v; body=%s", got, repair.wantSystem, upstream.body)
 				}
-				if !gjson.GetBytes(upstream.body, `messages.#(role=="user")`).Exists() {
+				if !ojson.GetBytes(upstream.body, `messages.#(role=="user")`).Exists() {
 					t.Fatalf("repair removed caller user turn: %s", upstream.body)
 				}
 			})

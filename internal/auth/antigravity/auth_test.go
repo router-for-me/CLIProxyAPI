@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -12,6 +13,20 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestBuildAuthURLIncludesAICodeScope(t *testing.T) {
+	parsedURL, err := url.Parse(NewAntigravityAuth(nil, nil).BuildAuthURL("state", "http://localhost/callback"))
+	if err != nil {
+		t.Fatalf("parse auth URL: %v", err)
+	}
+
+	for _, scope := range strings.Fields(parsedURL.Query().Get("scope")) {
+		if scope == "https://www.googleapis.com/auth/aicode" {
+			return
+		}
+	}
+	t.Fatalf("authorization URL scope does not include %q", "https://www.googleapis.com/auth/aicode")
 }
 
 func TestFetchProjectIDFromLoadCodeAssist(t *testing.T) {

@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // websocketLossInterruptExecutor runs a turn whose upstream websocket is
@@ -115,7 +115,7 @@ func TestResponsesInterruptRacingWebsocketLossIsNotAnsweredLocally(t *testing.T)
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if got := gjson.GetBytes(created, "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(created, "type").String(); got != "response.created" {
 		t.Fatalf("expected response.created, got %s", created)
 	}
 
@@ -136,11 +136,11 @@ func TestResponsesInterruptRacingWebsocketLossIsNotAnsweredLocally(t *testing.T)
 		if errNext != nil {
 			t.Fatalf("waiting for upstream loss notice: %v", errNext)
 		}
-		eventType := gjson.GetBytes(payload, "type").String()
+		eventType := ojson.GetBytesNoCopy(payload, "type").String()
 		if eventType == "response.incomplete" {
 			t.Fatalf("fabricated local incomplete after websocket loss: %s", payload)
 		}
-		if eventType == "error" && gjson.GetBytes(payload, "error.event_id").String() == "evt-loss" {
+		if eventType == "error" && ojson.GetBytesNoCopy(payload, "error.event_id").String() == "evt-loss" {
 			return
 		}
 	}

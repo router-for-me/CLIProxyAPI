@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 func TestCollapseConfigurationUpdatesBoundaries(t *testing.T) {
@@ -26,10 +27,10 @@ func TestCollapseConfigurationUpdatesBoundaries(t *testing.T) {
 	t.Run("only configuration updates", func(t *testing.T) {
 		body := []byte(`{"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"configuration_update","reasoning":{"effort":"high"}}]}`)
 		got := CollapseConfigurationUpdates(body)
-		if input := gjson.GetBytes(got, "input"); !input.IsArray() || len(input.Array()) != 0 {
+		if input := ojson.GetBytes(got, "input"); !input.IsArray() || len(input.Array()) != 0 {
 			t.Fatalf("input = %s, want []; body=%s", input.Raw, got)
 		}
-		if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "high" {
+		if effort := ojson.GetBytes(got, "reasoning.effort").String(); effort != "high" {
 			t.Fatalf("reasoning.effort = %q, want high; body=%s", effort, got)
 		}
 	})
@@ -39,10 +40,10 @@ func TestStripConfigurationUpdatesExported(t *testing.T) {
 	t.Run("items removed without changing top level effort", func(t *testing.T) {
 		body := []byte(`{"reasoning":{"effort":"medium"},"input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"hi"}]}`)
 		got := StripConfigurationUpdates(body)
-		if input := gjson.GetBytes(got, "input").Raw; input != `[{"role":"user","content":"hi"}]` {
+		if input := ojson.GetBytes(got, "input").Raw; input != `[{"role":"user","content":"hi"}]` {
 			t.Fatalf("input = %s, want user message; body=%s", input, got)
 		}
-		if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "medium" {
+		if effort := ojson.GetBytes(got, "reasoning.effort").String(); effort != "medium" {
 			t.Fatalf("reasoning.effort = %q, want medium; body=%s", effort, got)
 		}
 	})
@@ -82,5 +83,30 @@ func TestHasThinkingSuffix(t *testing.T) {
 				t.Fatalf("HasThinkingSuffix(%q) = %t, want %t", tc.model, got, tc.want)
 			}
 		})
+	}
+}
+
+type inPlaceLegacyApplier struct{}
+
+func (inPlaceLegacyApplier) Apply(body []byte, _ ThinkingConfig, _ *registry.ModelInfo) ([]byte, error) {
+	idx := bytes.Index(body, []byte(`"low"`))
+	if idx >= 0 {
+		copy(body[idx:], []byte(`"max"`))
+	}
+	return body, nil
+}
+
+func TestInvokeProviderApplierOnDocPreservesInPlaceMutation(t *testing.T) {
+	doc := ojson.NewDocString(`{"effort":"low"}`)
+	docValid := true
+	modified, err := invokeProviderApplierOnDoc(inPlaceLegacyApplier{}, doc, &docValid, ThinkingConfig{Mode: ModeLevel, Level: LevelMax}, nil)
+	if err != nil {
+		t.Fatalf("invokeProviderApplierOnDoc error: %v", err)
+	}
+	if !modified {
+		t.Fatalf("expected modified=true")
+	}
+	if got := doc.Get("effort").String(); got != "max" {
+		t.Fatalf("doc.Get(effort) = %q, want max", got)
 	}
 }

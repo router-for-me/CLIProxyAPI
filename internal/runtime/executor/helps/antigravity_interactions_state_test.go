@@ -3,10 +3,10 @@ package helps
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 func TestIssue5190ContinuationIsolation(t *testing.T) {
@@ -58,7 +58,7 @@ func TestIssue5190ContinuationIsolation(t *testing.T) {
 				want = "interaction_1"
 			}
 			_, rewritten := PrepareAntigravityInteractions(auth, req, opts, targetModel, body)
-			if got := gjson.GetBytes(rewritten, "previous_interaction_id").String(); got != want {
+			if got := ojson.GetBytes(rewritten, "previous_interaction_id").String(); got != want {
 				t.Fatalf("continuation=%q want=%q body=%s", got, want, rewritten)
 			}
 			if want == "" || name == "explicit" {
@@ -66,7 +66,7 @@ func TestIssue5190ContinuationIsolation(t *testing.T) {
 					t.Fatalf("unexpected rewrite: %s", rewritten)
 				}
 			}
-			if name == "environment" && gjson.GetBytes(rewritten, "environment_id").String() != "explicit-env" {
+			if name == "environment" && ojson.GetBytes(rewritten, "environment_id").String() != "explicit-env" {
 				t.Fatalf("explicit environment overwritten: %s", rewritten)
 			}
 		})

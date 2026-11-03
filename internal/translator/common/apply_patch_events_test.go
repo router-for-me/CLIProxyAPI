@@ -9,7 +9,8 @@ import (
 
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestApplyPatchCallStateInterleavedCalls(t *testing.T) {
@@ -88,7 +89,7 @@ func TestApplyPatchCallStateConcurrentIndependentCalls(t *testing.T) {
 				return
 			}
 			payload := ApplyPatchInputDone(&state, input, index)
-			if !json.Valid(payload) || gjson.GetBytes(payload, "call_id").String() != state.CallID {
+			if !json.Valid(payload) || ojson.GetBytesNoCopy(payload, "call_id").String() != state.CallID {
 				results <- fmt.Errorf("call %d: invalid done identity", index)
 				return
 			}
@@ -120,7 +121,7 @@ func TestApplyPatchEventsPayloads(t *testing.T) {
 			if !json.Valid(test.payload) {
 				t.Fatalf("payload is not plain JSON: %q", test.payload)
 			}
-			root := gjson.ParseBytes(test.payload)
+			root := util.ParseGJSONBytesNoCopy(test.payload)
 			for key, want := range map[string]string{"type": test.kind, "item_id": state.ItemID, "call_id": state.CallID, test.textKey: text} {
 				if got := root.Get(key).String(); got != want {
 					t.Fatalf("%s = %q, want %q", key, got, want)
@@ -133,7 +134,7 @@ func TestApplyPatchEventsPayloads(t *testing.T) {
 	}
 	zero := ApplyPatchInputDelta(&ApplyPatchCallState{}, "", 0)
 	for _, key := range []string{"item_id", "call_id", "output_index", "sequence_number", "delta"} {
-		if !gjson.GetBytes(zero, key).Exists() {
+		if !ojson.GetBytesNoCopy(zero, key).Exists() {
 			t.Fatalf("zero-valued payload omitted %s", key)
 		}
 	}
@@ -155,7 +156,7 @@ func TestApplyPatchFailureSanitizesClientError(t *testing.T) {
 	if !json.Valid(payload) || strings.Contains(string(payload), "secret-token-value") || strings.Contains(string(payload), "Begin Patch") {
 		t.Fatalf("invalid or unsanitized failure payload: %q", payload)
 	}
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	for key, want := range map[string]string{
 		"type":                   "response.failed",
 		"response.id":            "resp_\"1",

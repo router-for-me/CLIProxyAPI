@@ -163,9 +163,14 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 // GetAuthFiles lists auth credential files.
 // API returns {"files": [...]}.
 func (c *Client) GetAuthFiles() ([]map[string]any, error) {
-	wrapper, err := c.getJSON("/v0/management/auth-files")
+	wrapper, err := c.getJSON("/v8/management/credentials")
 	if err != nil {
-		return nil, err
+		if strings.HasPrefix(err.Error(), "HTTP 404:") {
+			wrapper, err = c.getJSON("/v0/management/auth-files")
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	return extractList(wrapper, "files")
 }

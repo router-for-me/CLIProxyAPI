@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 func TestResolveKimiResponsesURL(t *testing.T) {
@@ -161,7 +161,7 @@ func TestNormalizeKimiResponsesInput(t *testing.T) {
 			t.Fatalf("NormalizeKimiResponsesInput error = %v", errNormalize)
 		}
 
-		items := gjson.GetBytes(normalized, "input").Array()
+		items := ojson.GetBytes(normalized, "input").Array()
 		if len(items) != 5 {
 			t.Fatalf("expected 5 items, got %d: %s", len(items), string(normalized))
 		}
@@ -200,7 +200,7 @@ func TestNormalizeKimiResponsesInput(t *testing.T) {
 			t.Fatalf("NormalizeKimiResponsesInput error = %v", errNormalize)
 		}
 
-		items := gjson.GetBytes(normalized, "input").Array()
+		items := ojson.GetBytes(normalized, "input").Array()
 		if len(items) != 5 {
 			t.Fatalf("expected 5 items, got %d: %s", len(items), string(normalized))
 		}
@@ -270,7 +270,7 @@ func TestNormalizeKimiResponsesInput(t *testing.T) {
 			t.Fatalf("NormalizeKimiResponsesInput error = %v", errNormalize)
 		}
 
-		items := gjson.GetBytes(normalized, "input").Array()
+		items := ojson.GetBytes(normalized, "input").Array()
 		if len(items) != 9 {
 			t.Fatalf("expected 9 items, got %d: %s", len(items), string(normalized))
 		}
@@ -348,7 +348,7 @@ func TestNormalizeKimiResponsesInput(t *testing.T) {
 		if errNormalize != nil {
 			t.Fatalf("NormalizeKimiResponsesInput error = %v", errNormalize)
 		}
-		items := gjson.GetBytes(normalized, "input").Array()
+		items := ojson.GetBytes(normalized, "input").Array()
 		if len(items) != 3 {
 			t.Fatalf("expected 3 items, got %d", len(items))
 		}

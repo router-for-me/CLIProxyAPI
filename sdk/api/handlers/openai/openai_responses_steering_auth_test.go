@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -18,8 +20,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestResponsesSteeringDisabledAccountCannotSendAnotherFrame(t *testing.T) {
@@ -115,7 +115,7 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 			if errRead != nil {
 				return
 			}
-			if gjson.GetBytes(raw, "type").String() == "response.steer" {
+			if ojson.GetBytesNoCopy(raw, "type").String() == "response.steer" {
 				upstreamSteers.Add(1)
 				continue
 			}
@@ -187,10 +187,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(steerErrMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(steerErrMsg, "type").String(); got != "error" {
 		t.Fatalf("steer after revoke event = %q, want error (%s)", got, steerErrMsg)
 	}
-	if got := int(gjson.GetBytes(steerErrMsg, "status").Int()); got != http.StatusForbidden {
+	if got := int(ojson.GetBytesNoCopy(steerErrMsg, "status").Int()); got != http.StatusForbidden {
 		t.Fatalf("steer after revoke status = %d, want %d (%s)", got, http.StatusForbidden, steerErrMsg)
 	}
 	if got := upstreamSteers.Load(); got != 0 {
@@ -204,10 +204,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(msg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(msg, "type").String(); got != "error" {
 		t.Fatalf("second create after revoke event = %q, want error (%s)", got, msg)
 	}
-	if got := int(gjson.GetBytes(msg, "status").Int()); got != http.StatusForbidden {
+	if got := int(ojson.GetBytesNoCopy(msg, "status").Int()); got != http.StatusForbidden {
 		t.Fatalf("second create status = %d, want %d (%s)", got, http.StatusForbidden, msg)
 	}
 	if got := upstreamCreates.Load(); got != 1 {
@@ -223,10 +223,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(steerModelDeniedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(steerModelDeniedMsg, "type").String(); got != "error" {
 		t.Fatalf("steer with spoofed model on denied bound model event = %q, want error (%s)", got, steerModelDeniedMsg)
 	}
-	if got := int(gjson.GetBytes(steerModelDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
+	if got := int(ojson.GetBytesNoCopy(steerModelDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
 		t.Fatalf("steer with spoofed model status = %d, want %d (%s)", got, http.StatusTooManyRequests, steerModelDeniedMsg)
 	}
 	if got := upstreamSteers.Load(); got != 0 {
@@ -240,10 +240,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(aliasDeniedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(aliasDeniedMsg, "type").String(); got != "error" {
 		t.Fatalf("omitted-model continuation with denied client alias event = %q, want error (%s)", got, aliasDeniedMsg)
 	}
-	if got := int(gjson.GetBytes(aliasDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
+	if got := int(ojson.GetBytesNoCopy(aliasDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
 		t.Fatalf("omitted-model continuation with denied client alias status = %d, want %d (%s)", got, http.StatusTooManyRequests, aliasDeniedMsg)
 	}
 	if got := upstreamCreates.Load(); got != 1 {
@@ -271,10 +271,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(steerRotatedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(steerRotatedMsg, "type").String(); got != "error" {
 		t.Fatalf("steer after key rotation event = %q, want error (%s)", got, steerRotatedMsg)
 	}
-	if got := int(gjson.GetBytes(steerRotatedMsg, "status").Int()); got != http.StatusUnauthorized {
+	if got := int(ojson.GetBytesNoCopy(steerRotatedMsg, "status").Int()); got != http.StatusUnauthorized {
 		t.Fatalf("steer after key rotation status = %d, want %d (%s)", got, http.StatusUnauthorized, steerRotatedMsg)
 	}
 	if got := upstreamSteers.Load(); got != 0 {
@@ -288,10 +288,10 @@ func TestResponsesSteeringRevokedClientKeyCannotSendSecondCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(createRotatedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(createRotatedMsg, "type").String(); got != "error" {
 		t.Fatalf("create after key rotation event = %q, want error (%s)", got, createRotatedMsg)
 	}
-	if got := int(gjson.GetBytes(createRotatedMsg, "status").Int()); got != http.StatusUnauthorized {
+	if got := int(ojson.GetBytesNoCopy(createRotatedMsg, "status").Int()); got != http.StatusUnauthorized {
 		t.Fatalf("create after key rotation status = %d, want %d (%s)", got, http.StatusUnauthorized, createRotatedMsg)
 	}
 	if got := upstreamCreates.Load(); got != 2 {
@@ -306,7 +306,7 @@ type stripModelInterceptorHost struct {
 func (*stripModelInterceptorHost) HasStreamInterceptors() bool { return false }
 
 func (*stripModelInterceptorHost) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
-	body, _ := sjson.DeleteBytes(req.Body, "model")
+	body, _ := ojson.DeleteBytes(req.Body, "model")
 	return pluginapi.RequestInterceptResponse{Body: body}
 }
 
@@ -329,7 +329,7 @@ func TestResponsesSteeringInterceptorRewrittenBodyBindsClientModel(t *testing.T)
 			if errRead != nil {
 				return
 			}
-			if gjson.GetBytes(raw, "type").String() == "response.steer" {
+			if ojson.GetBytesNoCopy(raw, "type").String() == "response.steer" {
 				upstreamSteers.Add(1)
 				continue
 			}
@@ -404,10 +404,10 @@ func TestResponsesSteeringInterceptorRewrittenBodyBindsClientModel(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(aliasDeniedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(aliasDeniedMsg, "type").String(); got != "error" {
 		t.Fatalf("omitted-model continuation for denied client alias = %s, want 429 error", aliasDeniedMsg)
 	}
-	if got := int(gjson.GetBytes(aliasDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
+	if got := int(ojson.GetBytesNoCopy(aliasDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
 		t.Fatalf("omitted-model continuation status = %d, want %d (%s)", got, http.StatusTooManyRequests, aliasDeniedMsg)
 	}
 	if got := upstreamCreates.Load(); got != 1 {
@@ -421,10 +421,10 @@ func TestResponsesSteeringInterceptorRewrittenBodyBindsClientModel(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(steerDeniedMsg, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(steerDeniedMsg, "type").String(); got != "error" {
 		t.Fatalf("steer for denied client alias = %s, want 429 error", steerDeniedMsg)
 	}
-	if got := int(gjson.GetBytes(steerDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
+	if got := int(ojson.GetBytesNoCopy(steerDeniedMsg, "status").Int()); got != http.StatusTooManyRequests {
 		t.Fatalf("steer status = %d, want %d (%s)", got, http.StatusTooManyRequests, steerDeniedMsg)
 	}
 	if got := upstreamSteers.Load(); got != 0 {
@@ -440,7 +440,7 @@ func TestResponsesSteeringInterceptorRewrittenBodyBindsClientModel(t *testing.T)
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		if got := gjson.GetBytes(msg, "type").String(); got == "error" {
+		if got := ojson.GetBytesNoCopy(msg, "type").String(); got == "error" {
 			t.Fatalf("omitted-model continuation rejected when only upstream model is denied: %s", msg)
 		}
 	}
@@ -456,11 +456,217 @@ func TestResponsesSteeringInterceptorRewrittenBodyBindsClientModel(t *testing.T)
 		if errRead != nil {
 			t.Fatalf("explicit client alias continuation failed: %v", errRead)
 		}
-		if got := gjson.GetBytes(msg, "type").String(); got == "error" {
+		if got := ojson.GetBytesNoCopy(msg, "type").String(); got == "error" {
 			t.Fatalf("explicit client alias continuation returned error: %s", msg)
 		}
 	}
 	if got := upstreamCreates.Load(); got != 3 {
 		t.Fatalf("upstream creates after explicit client alias continuation = %d, want 3", got)
+	}
+}
+
+type environmentContextRewriteInterceptorHost struct {
+	handlers.PluginInterceptorHost
+	afterSawRemovedHeader atomic.Bool
+	afterMissingKept      atomic.Bool
+}
+
+func (*environmentContextRewriteInterceptorHost) HasStreamInterceptors() bool { return false }
+
+func (*environmentContextRewriteInterceptorHost) HasRequestInterceptors() bool { return true }
+
+func (*environmentContextRewriteInterceptorHost) InterceptRequestBeforeAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	var headers http.Header
+	if req.Headers != nil {
+		headers = req.Headers.Clone()
+		headers.Del("X-Strip-In-Before")
+	}
+	if !bytes.Contains(req.Body, []byte("<timezone>UTC</timezone>")) {
+		return pluginapi.RequestInterceptResponse{Headers: headers}
+	}
+	patched := bytes.ReplaceAll(req.Body, []byte("<timezone>UTC</timezone>"), []byte("<timezone>Asia/Shanghai</timezone>"))
+	return pluginapi.RequestInterceptResponse{Headers: headers, Body: patched}
+}
+
+func (h *environmentContextRewriteInterceptorHost) InterceptRequestAfterAuth(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+	if req.Headers.Get("X-Strip-In-Before") != "" {
+		h.afterSawRemovedHeader.Store(true)
+	}
+	if req.Headers.Get("X-Keep-Header") != "kept" {
+		h.afterMissingKept.Store(true)
+	}
+	if !bytes.Contains(req.Body, []byte("<current_date>2026-04-19</current_date>")) {
+		return pluginapi.RequestInterceptResponse{
+			Headers:      http.Header{"X-Codex-Beta-Features": []string{"siwc"}},
+			ClearHeaders: []string{"X-Codex-Beta-Features"},
+		}
+	}
+	patched := bytes.ReplaceAll(req.Body, []byte("<current_date>2026-04-19</current_date>"), []byte("<current_date>2026-04-20</current_date>"))
+	return pluginapi.RequestInterceptResponse{
+		Headers:      http.Header{"X-Codex-Beta-Features": []string{"siwc"}},
+		ClearHeaders: []string{"X-Codex-Beta-Features"},
+		Body:         patched,
+	}
+}
+
+func TestResponsesSteeringSubsequentWebsocketMessagesRunRequestInterceptors(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const (
+		authID    = "codex-steering-env-rewrite-auth"
+		modelName = "steering-env-rewrite-model"
+	)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: modelName}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authID)
+	})
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstreamFrames := make(chan []byte, 8)
+	upstreamWS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		for {
+			_, msg, errRead := conn.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			upstreamFrames <- bytes.Clone(msg)
+			switch ojson.GetBytesNoCopy(msg, "type").String() {
+			case "response.create", "response.append":
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_1"}}`)); err != nil {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"resp_1"}}`)); err != nil {
+					return
+				}
+			case "response.steer":
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"steered"}`)); err != nil {
+					return
+				}
+			}
+		}
+	}))
+	defer upstreamWS.Close()
+
+	cfg := &config.Config{}
+	cfg.Codex.ResponseSteering = true
+	cfg.CodexResponseSteering = true
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-steering-env-rewrite-auth",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"base_url":   upstreamWS.URL,
+			"api_key":    "upstream-token",
+			"websockets": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Register auth failed: %v", err)
+	}
+
+	interceptorHost := &environmentContextRewriteInterceptorHost{}
+	baseHandler := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
+	baseHandler.SetPluginHost(interceptorHost)
+	responsesHandler := NewOpenAIResponsesAPIHandler(baseHandler)
+
+	router := gin.New()
+	router.GET("/v1/responses", responsesHandler.ResponsesWebsocket)
+	proxyServer := httptest.NewServer(router)
+	defer proxyServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(proxyServer.URL, "http") + "/v1/responses"
+	dialHeaders := http.Header{
+		"X-Strip-In-Before": []string{"should-be-removed"},
+		"X-Keep-Header":     []string{"kept"},
+	}
+	c, resp, err := websocket.DefaultDialer.Dial(wsURL, dialHeaders)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	assertRewrittenUpstreamFrame := func(step string) {
+		t.Helper()
+		select {
+		case frame := <-upstreamFrames:
+			if bytes.Contains(frame, []byte("<timezone>UTC</timezone>")) {
+				t.Fatalf("%s upstream frame still contains unpatched timezone: %s", step, frame)
+			}
+			if !bytes.Contains(frame, []byte("<timezone>Asia/Shanghai</timezone>")) {
+				t.Fatalf("%s upstream frame missing before-auth patched timezone: %s", step, frame)
+			}
+			if bytes.Contains(frame, []byte("<current_date>2026-04-19</current_date>")) {
+				t.Fatalf("%s upstream frame still contains unpatched current_date: %s", step, frame)
+			}
+			if !bytes.Contains(frame, []byte("<current_date>2026-04-20</current_date>")) {
+				t.Fatalf("%s upstream frame missing after-auth patched current_date: %s", step, frame)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s timed out waiting for upstream frame", step)
+		}
+	}
+
+	// 1. Initial response.create
+	turn1 := `{"type":"response.create","model":"` + modelName + `","input":[{"role":"developer","content":[{"type":"input_text","text":"<environment_context>\n  <current_date>2026-04-19</current_date>\n  <timezone>UTC</timezone>\n</environment_context>"}]}]}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(turn1)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, errRead := c.ReadMessage(); errRead != nil {
+			t.Fatalf("initial turn read failed: %v", errRead)
+		}
+	}
+	assertRewrittenUpstreamFrame("initial response.create")
+
+	// 2. Subsequent response.create over the same duplex WebSocket
+	turn2 := `{"type":"response.create","model":"` + modelName + `","input":[{"role":"developer","content":[{"type":"input_text","text":"<environment_context>\n  <current_date>2026-04-19</current_date>\n  <timezone>UTC</timezone>\n</environment_context>"}]}]}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(turn2)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, errRead := c.ReadMessage(); errRead != nil {
+			t.Fatalf("subsequent response.create read failed: %v", errRead)
+		}
+	}
+	assertRewrittenUpstreamFrame("subsequent response.create")
+
+	// 3. Subsequent response.append over the same duplex WebSocket
+	turn3 := `{"type":"response.append","input":[{"role":"developer","content":[{"type":"input_text","text":"<environment_context>\n  <current_date>2026-04-19</current_date>\n  <timezone>UTC</timezone>\n</environment_context>"}]}]}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(turn3)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, _, errRead := c.ReadMessage(); errRead != nil {
+			t.Fatalf("subsequent response.append read failed: %v", errRead)
+		}
+	}
+	assertRewrittenUpstreamFrame("subsequent response.append")
+
+	// 4. Subsequent response.steer over the same duplex WebSocket
+	turn4 := `{"type":"response.steer","input":[{"role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <current_date>2026-04-19</current_date>\n  <timezone>UTC</timezone>\n</environment_context>"}]}]}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(turn4)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, errRead := c.ReadMessage(); errRead != nil {
+		t.Fatalf("subsequent response.steer read failed: %v", errRead)
+	}
+	assertRewrittenUpstreamFrame("subsequent response.steer")
+	if interceptorHost.afterSawRemovedHeader.Load() {
+		t.Fatal("after-auth interceptor saw header X-Strip-In-Before that was removed by before-auth interceptor")
+	}
+	if interceptorHost.afterMissingKept.Load() {
+		t.Fatal("after-auth interceptor lost X-Keep-Header across turns")
 	}
 }

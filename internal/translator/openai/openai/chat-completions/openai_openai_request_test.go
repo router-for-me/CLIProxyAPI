@@ -3,7 +3,7 @@ package chat_completions
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIRequestToOpenAIReusesMatchingModelPayload(t *testing.T) {
@@ -21,7 +21,7 @@ func TestConvertOpenAIRequestToOpenAIUpdatesDifferentModel(t *testing.T) {
 
 	output, _ := ConvertOpenAIRequestToOpenAI("new-model", input, false)
 
-	if model := gjson.GetBytes(output, "model").String(); model != "new-model" {
+	if model := ojson.GetBytesNoCopy(output, "model").String(); model != "new-model" {
 		t.Fatalf("model = %q, want new-model", model)
 	}
 }

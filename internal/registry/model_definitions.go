@@ -18,6 +18,7 @@ const (
 	xaiBuiltinVideoModelID             = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
+	xaiBuiltinVideo15LiteModelID       = "grok-imagine-video-1.5-lite"
 	xaiBuiltinSpeechModelID            = "grok-tts"
 	xaiBuiltinSpeechVoiceModelID       = "grok-voice-tts-1.0"
 )
@@ -260,7 +261,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithXAIBuiltins injects hard-coded xAI image, video, and speech model definitions
 // that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinVideo15LiteModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -406,6 +407,21 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video 1.5 Preview",
 		Name:        xaiBuiltinVideo15PreviewID,
 		Description: "Compatibility alias for the xAI Grok video generation model.",
+	}
+}
+
+func xaiBuiltinVideo15LiteModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        xaiBuiltinVideo15LiteModelID,
+		Object:                    "model",
+		Created:                   1787702400, // 2026-08-26
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Video 1.5 Lite",
+		Name:                      xaiBuiltinVideo15LiteModelID,
+		Description:               "xAI Grok Imagine Video 1.5 Lite supports text-to-video and image-to-video generation. Output pricing per second: $0.02 at 480p, $0.03 at 720p, and $0.14 at 1080p.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"video"},
 	}
 }
 

@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexDuplexInitialFailure(t *testing.T) {
@@ -147,10 +147,10 @@ func TestCodexDuplexInitialFailure(t *testing.T) {
 						if chunk.Err != nil {
 							t.Fatal(chunk.Err)
 						}
-						if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
-							completed = gjson.GetBytes(chunk.Payload, "response.id").String() == "healthy-response"
+						if ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+							completed = ojson.GetBytes(chunk.Payload, "response.id").String() == "healthy-response"
 							cancel()
-						} else if gjson.GetBytes(chunk.Payload, "type").String() != "response.created" {
+						} else if ojson.GetBytes(chunk.Payload, "type").String() != "response.created" {
 							t.Fatalf("rejected account payload escaped bootstrap: %s", chunk.Payload)
 						}
 					}

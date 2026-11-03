@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
@@ -60,7 +60,7 @@ func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
 				if !bytes.Equal(base, work) {
 					t.Fatal("same input produced different translations")
 				}
-				parts := gjson.GetBytes(work, "request.contents.0.parts").Array()
+				parts := ojson.GetBytes(work, "request.contents.0.parts").Array()
 				if len(parts) != 10 || parts[0].Get("thoughtSignature").String() != "skip_thought_signature_validator" {
 					t.Fatalf("unexpected parallel tool call layout: %s", work)
 				}

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -217,7 +217,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		// than formatted into the JSON literal: an unescaped quote would otherwise
 		// corrupt the body or let the caller overwrite the error code.
 		body := `{"error":{"message":"","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
-		body, errSet := sjson.Set(body, "error.message", "unknown provider for model "+modelName)
+		body, errSet := ojson.Set(body, "error.message", "unknown provider for model "+modelName)
 		if errSet != nil {
 			body = `{"error":{"message":"unknown provider for model","type":"invalid_request_error","code":"model_not_found","param":"model"}}`
 		}

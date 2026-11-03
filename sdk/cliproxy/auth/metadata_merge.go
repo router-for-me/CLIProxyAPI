@@ -35,6 +35,8 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 			target.Disabled = disabled
 		}
 	}
+	_, targetHadOAuthProvider := target.Metadata["oauth_provider"]
+	_, targetHadPortal := target.Metadata["portal"]
 	for k, v := range existingMap {
 		if IsAuthTokenPayloadKey(k) {
 			continue
@@ -44,6 +46,12 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 			case "api_key", "dca_token", "dca_expired", "dca_expires_at":
 				continue
 			}
+		}
+		if strings.EqualFold(strings.TrimSpace(k), "portal") && targetHadOAuthProvider {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(k), "oauth_provider") && targetHadPortal {
+			continue
 		}
 		if _, exists := target.Metadata[k]; !exists {
 			target.Metadata[k] = v
@@ -134,7 +142,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if (updated.Status == StatusActive || updated.Status == "") && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
+		} else if (updated.Status == StatusActive || updated.Status == "") && (!merged.RequiresSignIn || merged.HasValidAccessToken(time.Now())) && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false

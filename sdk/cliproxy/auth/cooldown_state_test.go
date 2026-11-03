@@ -111,6 +111,25 @@ func TestFileCooldownStateStore_StateRelativePath(t *testing.T) {
 	}
 }
 
+// With a relative auth-dir the file synthesizer records an auth file as "<auth-dir>/<name>", so the state path must strip
+// the auth dir there too; otherwise the store, rooted at the auth dir, writes "<auth-dir>/<auth-dir>/<name>.cds".
+func TestFileCooldownStateStore_StateRelativePathRelativeAuthDir(t *testing.T) {
+	store := NewFileCooldownStateStoreWithAuthDir("auths", "auths")
+	cases := []struct {
+		authFile string
+		want     string
+	}{
+		{filepath.Join("auths", "claude.json"), "claude.cds"},
+		{filepath.Join("auths", "team", "xai.json"), filepath.Join("team", "xai.cds")},
+		{filepath.Join("other", "xai.json"), filepath.Join("other", "xai.cds")},
+	}
+	for _, tc := range cases {
+		if got := store.stateRelativePath(CooldownStateRecord{AuthID: "id", AuthFile: tc.authFile}); got != tc.want {
+			t.Errorf("stateRelativePath(%q) = %q, want %q", tc.authFile, got, tc.want)
+		}
+	}
+}
+
 func TestFileCooldownStateStore_SaveLoadAndCleanStale(t *testing.T) {
 	authDir := t.TempDir()
 	store := NewFileCooldownStateStoreWithAuthDir(authDir, authDir)

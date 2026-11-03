@@ -4,8 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const claudeCodeAttributionSystemPrefix = "x-anthropic-billing-header:"
@@ -22,15 +21,15 @@ func IsClaudeCodeAttributionSystemText(text string) bool {
 // Kimi and Antigravity may treat this block as prompt text, so callers use this
 // helper when the active policy has not explicitly opted into a full CLI profile.
 func StripClaudeCodeAttributionSystem(payload []byte) []byte {
-	system := gjson.GetBytes(payload, "system")
+	system := ojson.GetBytesNoCopy(payload, "system")
 	if !system.Exists() {
 		return payload
 	}
-	if system.Type == gjson.String {
+	if system.Type == ojson.String {
 		if !IsClaudeCodeAttributionSystemText(system.String()) {
 			return payload
 		}
-		updated, errDelete := sjson.DeleteBytes(payload, "system")
+		updated, errDelete := ojson.DeleteBytes(payload, "system")
 		if errDelete != nil {
 			return payload
 		}
@@ -41,7 +40,7 @@ func StripClaudeCodeAttributionSystem(payload []byte) []byte {
 	}
 	kept := make([]string, 0, len(system.Array()))
 	removed := false
-	system.ForEach(func(_, block gjson.Result) bool {
+	system.ForEach(func(_, block ojson.Result) bool {
 		if block.Get("type").String() == "text" && IsClaudeCodeAttributionSystemText(block.Get("text").String()) {
 			removed = true
 			return true
@@ -55,13 +54,13 @@ func StripClaudeCodeAttributionSystem(payload []byte) []byte {
 		return payload
 	}
 	if len(kept) == 0 {
-		updated, errDelete := sjson.DeleteBytes(payload, "system")
+		updated, errDelete := ojson.DeleteBytes(payload, "system")
 		if errDelete != nil {
 			return payload
 		}
 		return updated
 	}
-	updated, errSet := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(kept, ",")+"]"))
+	updated, errSet := ojson.SetRawBytes(payload, "system", []byte("["+strings.Join(kept, ",")+"]"))
 	if errSet != nil {
 		return payload
 	}

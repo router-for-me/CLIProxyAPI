@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 type codexWebsocketSessionStore struct {
@@ -849,7 +849,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
-			eventType := gjson.GetBytes(payload, "type").String()
+			eventType := strings.Clone(ojson.GetBytesNoCopy(payload, "type").String())
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}
@@ -866,7 +866,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			// id-less failure ends the running one. Success terminals only
 			// carry response.id, and one without an id is left unattributed,
 			// as before.
-			responseID := gjson.GetBytes(payload, "response.id").String()
+			responseID := strings.Clone(ojson.GetBytesNoCopy(payload, "response.id").String())
 			if eventType == "response.created" {
 				if responseID != "" {
 					sess.activeMu.Lock()
@@ -879,7 +879,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			} else if isTerminalEvent(eventType) {
 				failure := eventType == "error" || eventType == "response.failed"
 				if failure && responseID == "" {
-					responseID = gjson.GetBytes(payload, "response_id").String()
+					responseID = strings.Clone(ojson.GetBytesNoCopy(payload, "response_id").String())
 				}
 				if responseID != "" || failure {
 					sess.activeMu.Lock()

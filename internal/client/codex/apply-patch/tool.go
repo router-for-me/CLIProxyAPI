@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const parametersJSON = `{"type":"object","properties":{"input":{"type":"string","description":"The complete apply_patch patch text."}},"required":["input"],"additionalProperties":false}`
@@ -27,7 +27,7 @@ Example input:
 *** End Patch`
 
 // IsCustomTool reports whether the declaration is the custom apply_patch tool.
-func IsCustomTool(tool gjson.Result) bool {
+func IsCustomTool(tool ojson.Result) bool {
 	return tool.Get("type").String() == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
 }
 
@@ -37,7 +37,7 @@ func Parameters() []byte {
 }
 
 // Description explains the JSON wrapper and preserves the original patch grammar.
-func Description(tool gjson.Result) string {
+func Description(tool ojson.Result) string {
 	original := strings.ReplaceAll(tool.Get("description").String(), "This is a FREEFORM tool, so do not wrap the patch in JSON.", "")
 	var description strings.Builder
 	if strings.TrimSpace(original) != "" {

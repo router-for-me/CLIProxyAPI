@@ -3,7 +3,7 @@ package util
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestSanitizeClaudeFunctionName(t *testing.T) {
@@ -219,7 +219,7 @@ func TestDeduplicateFunctionDeclarations(t *testing.T) {
 		{"name":"lookup","description":"second"}
 	]`)
 	deduped := DeduplicateFunctionDeclarations(raw)
-	declarations := gjson.ParseBytes(deduped).Array()
+	declarations := ojson.ParseBytes(deduped).Array()
 	if len(declarations) != 2 {
 		t.Fatalf("declaration count = %d, want 2: %s", len(declarations), deduped)
 	}
@@ -763,5 +763,41 @@ func TestCleanClaudeToolArguments_ImplicitOpenObjectPreservesArguments(t *testin
 					tc.want, tc.wantNoArgs, direct, withTranslated, noArgs)
 			}
 		})
+	}
+}
+
+func TestToolNameMapsDoNotAliasInputBytes(t *testing.T) {
+	raw := []byte(`{"tools":[{"name":"mcp__alpha__run/tool"},{"type":"namespace","name":"ns","tools":[{"type":"custom","name":"patch/tool"}]}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"Inline/Tool"}}}]}]}`)
+	claudeMap := ToolNameMapFromClaudeRequest(raw)
+	unambiguousMap := UnambiguousToolNameMapFromClaudeRequest(raw)
+	sanitizedToolMap := SanitizedToolNameMap(raw)
+	sanitizedFuncMap := SanitizedFunctionNameMap(raw)
+	disambiguatedMap := DisambiguatedToolNameMap(raw)
+	reverseIdentityMap := ResponsesToolReverseIdentityMap(raw)
+
+	for i := range raw {
+		raw[i] = 'X'
+	}
+
+	if got := claudeMap[CanonicalToolName("mcp__alpha__run/tool")]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("ToolNameMapFromClaudeRequest aliased input buffer: got %q", got)
+	}
+	if got := claudeMap[CanonicalToolName("Inline/Tool")]; got != "Inline/Tool" {
+		t.Fatalf("ToolNameMapFromClaudeRequest inline tool_addition aliased input buffer: got %q", got)
+	}
+	if got := unambiguousMap[CanonicalToolName("mcp__alpha__run/tool")]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("UnambiguousToolNameMapFromClaudeRequest aliased input buffer: got %q", got)
+	}
+	if got := sanitizedToolMap["mcp__alpha__run_tool"]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("SanitizedToolNameMap aliased input buffer: got %q", got)
+	}
+	if got := sanitizedFuncMap["mcp__alpha__run/tool"]; got != "mcp__alpha__run_tool" {
+		t.Fatalf("SanitizedFunctionNameMap aliased input buffer: got %q", got)
+	}
+	if got := disambiguatedMap["mcp__alpha__run_tool"]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("DisambiguatedToolNameMap aliased input buffer: got %q", got)
+	}
+	if got := reverseIdentityMap["ns__patch_tool"]; got.Name != "patch/tool" || got.Namespace != "ns" {
+		t.Fatalf("ResponsesToolReverseIdentityMap aliased input buffer: got %+v", got)
 	}
 }

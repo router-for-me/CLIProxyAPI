@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
-	"github.com/tidwall/gjson"
 )
 
 type fakeAntigravityReasoningReplayKVClient struct {
@@ -507,7 +507,7 @@ func TestAntigravityReasoningReplayHomeWritesRemainLegacyArrayReadable(t *testin
 	if errUnmarshal := json.Unmarshal(raw, &legacyItems); errUnmarshal != nil {
 		t.Fatalf("new Home value is not readable as legacy [][]byte: %v", errUnmarshal)
 	}
-	if len(legacyItems) != 2 || gjson.GetBytes(legacyItems[0], "type").String() != antigravityReasoningReplayGenerationItemType || !bytes.Contains(legacyItems[1], []byte("legacy-readable-signature")) {
+	if len(legacyItems) != 2 || ojson.GetBytes(legacyItems[0], "type").String() != antigravityReasoningReplayGenerationItemType || !bytes.Contains(legacyItems[1], []byte("legacy-readable-signature")) {
 		t.Fatalf("legacy-readable Home array malformed: %q", legacyItems)
 	}
 }

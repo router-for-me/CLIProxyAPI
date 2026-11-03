@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -22,7 +23,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/gjson"
 )
 
 // lossFixture runs the real handler, manager and Codex executor against a scripted upstream.
@@ -59,7 +59,7 @@ func newLossFixture(t *testing.T, steering bool, script func(index int, c *webso
 			if errRead != nil {
 				return nil
 			}
-			if gjson.GetBytes(p, "type").String() == "response.create" {
+			if ojson.GetBytesNoCopy(p, "type").String() == "response.create" {
 				f.creates.Add(1)
 			}
 			return p
@@ -149,7 +149,7 @@ func (f *lossFixture) next() []byte {
 func (f *lossFixture) nextError() []byte {
 	f.t.Helper()
 	for {
-		if p := f.next(); gjson.GetBytes(p, "type").String() == "error" {
+		if p := f.next(); ojson.GetBytesNoCopy(p, "type").String() == "error" {
 			return p
 		}
 	}
@@ -159,7 +159,7 @@ func (f *lossFixture) awaitCompleted() {
 	f.t.Helper()
 	for {
 		p := f.next()
-		switch gjson.GetBytes(p, "type").String() {
+		switch ojson.GetBytesNoCopy(p, "type").String() {
 		case "response.completed":
 			return
 		case "error":
@@ -177,15 +177,15 @@ func (f *lossFixture) awaitProbeCompleted() {
 		f.create(`,"event_id":"` + id + `"`)
 		for {
 			p := f.next()
-			switch gjson.GetBytes(p, "type").String() {
+			switch ojson.GetBytesNoCopy(p, "type").String() {
 			case "response.completed":
 				return
 			case "error":
-				if gjson.GetBytes(p, "error.event_id").String() != id {
+				if ojson.GetBytesNoCopy(p, "error.event_id").String() != id {
 					f.t.Fatalf("unexpected error frame: %s", p)
 				}
 			}
-			if gjson.GetBytes(p, "type").String() == "error" {
+			if ojson.GetBytesNoCopy(p, "type").String() == "error" {
 				break
 			}
 		}
@@ -210,14 +210,14 @@ func TestResponsesWebsocketUpstreamLossKeepsDownstreamOpen(t *testing.T) {
 	})
 	f.create("")
 	lost := f.nextError()
-	if got := gjson.GetBytes(lost, "error.code").String(); got != "upstream_websocket_lost" {
+	if got := ojson.GetBytesNoCopy(lost, "error.code").String(); got != "upstream_websocket_lost" {
 		t.Fatalf("loss error = %s", lost)
 	}
 	// The turn is not replayed and a continuation cannot resume the lost socket. The full
 	// create follows back to back: the refusal is not a loss and must not fence it.
 	f.create(`,"previous_response_id":"r1"`)
 	f.create("")
-	if got := gjson.GetBytes(f.nextError(), "error.code").String(); got != "previous_response_not_found" {
+	if got := ojson.GetBytesNoCopy(f.nextError(), "error.code").String(); got != "previous_response_not_found" {
 		t.Fatalf("continuation after loss = %s", got)
 	}
 	f.awaitCompleted()
@@ -249,7 +249,7 @@ func TestResponsesWebsocketIdleUpstreamEOFIsSilent(t *testing.T) {
 	// awaitCompleted fails on any error frame, and a loss frame would precede the completion.
 	// The idle socket is gone: a continuation cannot resume it.
 	f.create(`,"previous_response_id":"r2"`)
-	if got := gjson.GetBytes(f.nextError(), "error.code").String(); got != "previous_response_not_found" {
+	if got := ojson.GetBytesNoCopy(f.nextError(), "error.code").String(); got != "previous_response_not_found" {
 		t.Fatalf("continuation after idle EOF = %s", got)
 	}
 	f.create("")
@@ -281,7 +281,7 @@ func TestResponsesWebsocketDuplexLossReportsEveryOperation(t *testing.T) {
 	}
 	for _, w := range want {
 		p := f.nextError()
-		if gjson.GetBytes(p, "error.code").String() != w.code || gjson.GetBytes(p, "error.event_id").String() != w.eventID {
+		if ojson.GetBytesNoCopy(p, "error.code").String() != w.code || ojson.GetBytesNoCopy(p, "error.event_id").String() != w.eventID {
 			t.Fatalf("error = %s, want %s for %s", p, w.code, w.eventID)
 		}
 	}
@@ -324,7 +324,7 @@ func runAcceptedSteer(t *testing.T, successor bool, failure string) {
 		// The accepted steer and the create each get exactly one outcome-unknown error.
 		for _, id := range []string{"c1", "s1"} {
 			p := f.nextError()
-			if gjson.GetBytes(p, "error.code").String() != "upstream_websocket_lost" || gjson.GetBytes(p, "error.event_id").String() != id {
+			if ojson.GetBytesNoCopy(p, "error.code").String() != "upstream_websocket_lost" || ojson.GetBytesNoCopy(p, "error.event_id").String() != id {
 				t.Fatalf("error = %s, want lost for %s", p, id)
 			}
 		}
@@ -364,7 +364,7 @@ func TestResponsesWebsocketLossCarriesEventIDWithoutSteering(t *testing.T) {
 	})
 	f.create(`,"event_id":"c1"`)
 	p := f.nextError()
-	if gjson.GetBytes(p, "error.code").String() != "upstream_websocket_lost" || gjson.GetBytes(p, "error.event_id").String() != "c1" {
+	if ojson.GetBytesNoCopy(p, "error.code").String() != "upstream_websocket_lost" || ojson.GetBytesNoCopy(p, "error.event_id").String() != "c1" {
 		t.Fatalf("error = %s, want lost for c1", p)
 	}
 }
@@ -396,7 +396,7 @@ func TestResponsesWebsocketDuplexLossBetweenTurnsReportsOnce(t *testing.T) {
 			f.awaitCompleted()
 			f.create(tc.secondAttr)
 			p := f.nextError()
-			if gjson.GetBytes(p, "error.code").String() != "upstream_websocket_lost" || gjson.GetBytes(p, "error.event_id").String() != tc.wantID {
+			if ojson.GetBytesNoCopy(p, "error.code").String() != "upstream_websocket_lost" || ojson.GetBytesNoCopy(p, "error.event_id").String() != tc.wantID {
 				t.Fatalf("error = %s, want lost with event_id=%q", p, tc.wantID)
 			}
 			f.awaitProbeCompleted() // fails on any further error frame
@@ -423,7 +423,7 @@ func TestResponsesWebsocketDuplexLossAfterRefusedCreateIsSilent(t *testing.T) {
 	f.awaitCompleted()
 	provider.revoked.Store(true)
 	f.create(`,"event_id":"c2"`)
-	if p := f.nextError(); gjson.GetBytes(p, "status").Int() != http.StatusForbidden {
+	if p := f.nextError(); ojson.GetBytesNoCopy(p, "status").Int() != http.StatusForbidden {
 		t.Fatalf("error = %s, want 403", p)
 	}
 	provider.revoked.Store(false)
@@ -480,7 +480,7 @@ func TestResponsesWebsocketQueuedInputBeforeIdleEOFIsNotSent(t *testing.T) {
 	})
 
 	f.create(`,"event_id":"c1"`)
-	if got := gjson.GetBytes(f.next(), "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(f.next(), "type").String(); got != "response.created" {
 		t.Fatalf("first event = %s, want response.created", got)
 	}
 	f.create(`,"event_id":"c2"`)
@@ -492,13 +492,13 @@ func TestResponsesWebsocketQueuedInputBeforeIdleEOFIsNotSent(t *testing.T) {
 	// interrupt proves readResponsesWebsocketInput has already stamped and queued c3.
 	f.create(`,"event_id":"c3"`)
 	f.send(`{"type":"response.interrupt","response_id":"r1"}`)
-	if interruptErr := f.nextError(); gjson.GetBytes(interruptErr, "status").Int() != http.StatusBadRequest {
+	if interruptErr := f.nextError(); ojson.GetBytesNoCopy(interruptErr, "status").Int() != http.StatusBadRequest {
 		t.Fatalf("post-EOF interrupt error = %s, want 400", interruptErr)
 	}
 	close(releaseTurn2)
 
 	errFrame := f.nextError()
-	if gjson.GetBytes(errFrame, "error.code").String() != "upstream_websocket_not_sent" || gjson.GetBytes(errFrame, "error.event_id").String() != "c2" {
+	if ojson.GetBytesNoCopy(errFrame, "error.code").String() != "upstream_websocket_not_sent" || ojson.GetBytesNoCopy(errFrame, "error.event_id").String() != "c2" {
 		t.Fatalf("queued create after idle EOF = %s, want upstream_websocket_not_sent for c2", errFrame)
 	}
 
@@ -522,7 +522,7 @@ func TestResponsesWebsocketLossBeforeResponseCreatedIgnoresContinueRule(t *testi
 
 	f.create(`,"event_id":"c1"`)
 	lost := f.nextError()
-	if gjson.GetBytes(lost, "error.code").String() != "upstream_websocket_lost" || gjson.GetBytes(lost, "error.event_id").String() != "c1" {
+	if ojson.GetBytesNoCopy(lost, "error.code").String() != "upstream_websocket_lost" || ojson.GetBytesNoCopy(lost, "error.event_id").String() != "c1" {
 		t.Fatalf("loss error = %s, want upstream_websocket_lost for c1", lost)
 	}
 	if f.connections.Load() != 1 || f.creates.Load() != 1 {
@@ -567,7 +567,7 @@ func TestResponsesWebsocketQueuedContinuationBeforeIdleEOFIs409(t *testing.T) {
 	})
 
 	f.create(`,"event_id":"c1"`)
-	if got := gjson.GetBytes(f.next(), "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(f.next(), "type").String(); got != "response.created" {
 		t.Fatalf("first event = %s, want response.created", got)
 	}
 	f.create(`,"event_id":"c2","previous_response_id":"r1"`)
@@ -577,9 +577,9 @@ func TestResponsesWebsocketQueuedContinuationBeforeIdleEOFIs409(t *testing.T) {
 	close(releaseTurn2)
 
 	errFrame := f.nextError()
-	if gjson.GetBytes(errFrame, "status").Int() != http.StatusConflict ||
-		gjson.GetBytes(errFrame, "error.code").String() != "previous_response_not_found" ||
-		gjson.GetBytes(errFrame, "error.event_id").String() != "c2" {
+	if ojson.GetBytesNoCopy(errFrame, "status").Int() != http.StatusConflict ||
+		ojson.GetBytesNoCopy(errFrame, "error.code").String() != "previous_response_not_found" ||
+		ojson.GetBytesNoCopy(errFrame, "error.event_id").String() != "c2" {
 		t.Fatalf("queued continuation after idle EOF = %s, want 409 previous_response_not_found for c2", errFrame)
 	}
 
@@ -636,7 +636,7 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 						if errRead != nil {
 							return
 						}
-						if gjson.GetBytes(payload, "type").String() != "response.create" {
+						if ojson.GetBytesNoCopy(payload, "type").String() != "response.create" {
 							continue
 						}
 						if authHeader == "Bearer key-a" {
@@ -752,15 +752,15 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 					if errRead != nil {
 						t.Fatalf("request 1 downstream websocket closed before completion: %v (authACreates=%d authBCreates=%d)", errRead, authACreates.Load(), authBCreates.Load())
 					}
-					if gotID := gjson.GetBytes(frame, "response.id").String(); gotID == "resp-a-buffered" {
+					if gotID := ojson.GetBytesNoCopy(frame, "response.id").String(); gotID == "resp-a-buffered" {
 						t.Fatalf("buffered handshake from failed credential A leaked to downstream: %s", frame)
 					}
-					if gjson.GetBytes(frame, "type").String() == "response.completed" {
+					if ojson.GetBytesNoCopy(frame, "type").String() == "response.completed" {
 						completed1 = frame
 						break
 					}
 				}
-				if got := gjson.GetBytes(completed1, "response.id").String(); got != "resp-b-1" {
+				if got := ojson.GetBytesNoCopy(completed1, "response.id").String(); got != "resp-b-1" {
 					t.Fatalf("request 1 completed response.id = %q, want resp-b-1; frame=%s", got, completed1)
 				}
 				if authACreates.Load() != 1 || authBCreates.Load() != 1 {
@@ -778,12 +778,12 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 					if errRead != nil {
 						t.Fatalf("followup on conn1 closed before completion: %v", errRead)
 					}
-					if gjson.GetBytes(frame, "type").String() == "response.completed" {
+					if ojson.GetBytesNoCopy(frame, "type").String() == "response.completed" {
 						completed1b = frame
 						break
 					}
 				}
-				if got := gjson.GetBytes(completed1b, "response.id").String(); got != "resp-b-2" {
+				if got := ojson.GetBytesNoCopy(completed1b, "response.id").String(); got != "resp-b-2" {
 					t.Fatalf("followup on conn1 response.id = %q, want resp-b-2; frame=%s", got, completed1b)
 				}
 				if authBConns.Load() != 1 || authBCreates.Load() != 2 {
@@ -820,12 +820,12 @@ func TestResponsesWebsocketEarly429RetriesAnotherCredentialWithoutClosingDownstr
 					if errRead != nil {
 						t.Fatalf("request 2 downstream websocket closed before completion: %v", errRead)
 					}
-					if gjson.GetBytes(frame, "type").String() == "response.completed" {
+					if ojson.GetBytesNoCopy(frame, "type").String() == "response.completed" {
 						completed2 = frame
 						break
 					}
 				}
-				if got := gjson.GetBytes(completed2, "response.id").String(); got != "resp-a-2" {
+				if got := ojson.GetBytesNoCopy(completed2, "response.id").String(); got != "resp-a-2" {
 					t.Fatalf("request 2 completed response.id = %q, want resp-a-2; frame=%s", got, completed2)
 				}
 				if authACreates.Load() != 2 || authBCreates.Load() != 2 {

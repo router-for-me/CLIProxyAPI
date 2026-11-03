@@ -11,12 +11,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestGeminiVertexOpenAPI_ServiceAccount_Execute(t *testing.T) {
@@ -114,13 +114,13 @@ func TestGeminiVertexOpenAPI_ServiceAccount_Execute(t *testing.T) {
 	if gotAuth != "Bearer mock-vertex-sa-token" {
 		t.Fatalf("got auth = %q, want Bearer mock-vertex-sa-token", gotAuth)
 	}
-	if gotModel := gjson.GetBytes(upstreamBody, "model").String(); gotModel != "deepseek-ai/deepseek-v4.1-flash-maas" {
+	if gotModel := ojson.GetBytes(upstreamBody, "model").String(); gotModel != "deepseek-ai/deepseek-v4.1-flash-maas" {
 		t.Fatalf("got upstream model = %q, want deepseek-ai/deepseek-v4.1-flash-maas; body=%s", gotModel, string(upstreamBody))
 	}
-	if gotMsg := gjson.GetBytes(upstreamBody, "messages.0.content").String(); gotMsg != "hello maas" {
+	if gotMsg := ojson.GetBytes(upstreamBody, "messages.0.content").String(); gotMsg != "hello maas" {
 		t.Fatalf("got upstream messages.0.content = %q, want hello maas; body=%s", gotMsg, string(upstreamBody))
 	}
-	if gotText := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); gotText != "hello from vertex maas" {
+	if gotText := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); gotText != "hello from vertex maas" {
 		t.Fatalf("got response content = %q, want hello from vertex maas; payload=%s", gotText, string(resp.Payload))
 	}
 
@@ -152,7 +152,7 @@ func TestGeminiVertexOpenAPI_ModelNormalization_PublisherResourceAndExplicitOptI
 		}
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
-		upstreamModels = append(upstreamModels, gjson.GetBytes(body, "model").String())
+		upstreamModels = append(upstreamModels, ojson.GetBytes(body, "model").String())
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -325,7 +325,7 @@ func TestGeminiVertexOpenAPI_ServiceAccount_ExecuteStream_AndOpenAPILocationOver
 	if gotAuth != "Bearer mock-vertex-sa-token" {
 		t.Fatalf("got auth = %q, want Bearer mock-vertex-sa-token", gotAuth)
 	}
-	if !gjson.GetBytes(upstreamBody, "stream_options.include_usage").Bool() {
+	if !ojson.GetBytes(upstreamBody, "stream_options.include_usage").Bool() {
 		t.Fatalf("expected stream_options.include_usage=true in upstream body: %s", string(upstreamBody))
 	}
 	if !strings.Contains(output.String(), "stream ok") {
@@ -442,17 +442,17 @@ func TestGeminiVertexOpenAPI_PayloadRulesOrdering(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	for name, body := range map[string][]byte{"Execute": nonStreamBody, "ExecuteStream": streamBody} {
-		if got := gjson.GetBytes(body, "custom_openapi_param").String(); got != "final_barrier_applied" {
+		if got := ojson.GetBytes(body, "custom_openapi_param").String(); got != "final_barrier_applied" {
 			t.Fatalf("%s: custom_openapi_param = %q, want final_barrier_applied; body=%s", name, got, string(body))
 		}
-		if got := gjson.GetBytes(body, "temperature").Float(); got != 0.25 {
+		if got := ojson.GetBytes(body, "temperature").Float(); got != 0.25 {
 			t.Fatalf("%s: temperature = %v, want 0.25; body=%s", name, got, string(body))
 		}
-		if gjson.GetBytes(body, "top_p").Exists() {
+		if ojson.GetBytes(body, "top_p").Exists() {
 			t.Fatalf("%s: expected top_p to be filtered out, got body=%s", name, string(body))
 		}
 	}
-	if gjson.GetBytes(streamBody, "stream_options.include_usage").Bool() {
+	if ojson.GetBytes(streamBody, "stream_options.include_usage").Bool() {
 		t.Fatalf("ExecuteStream: expected payload override stream_options.include_usage=false to win over built-in default, got body=%s", string(streamBody))
 	}
 }
@@ -532,7 +532,7 @@ func TestGeminiVertexOpenAPI_APIKey_ValidationAndThirdPartyRelay(t *testing.T) {
 		t.Fatalf("got Authorization = %q, want Bearer test-vertex-key", gotBearer)
 	}
 	mu.Unlock()
-	if gotText := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); gotText != "key openapi ok" {
+	if gotText := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); gotText != "key openapi ok" {
 		t.Fatalf("got response = %q, want key openapi ok", gotText)
 	}
 
@@ -601,7 +601,7 @@ func TestGeminiVertexOpenAPI_CountTokens(t *testing.T) {
 	if hitUpstream {
 		t.Fatal("expected CountTokens for OpenAPI model to use local tokenizer without hitting upstream")
 	}
-	if gjson.GetBytes(resp.Payload, "totalTokens").Int() <= 0 {
+	if ojson.GetBytes(resp.Payload, "totalTokens").Int() <= 0 {
 		t.Fatalf("expected positive totalTokens, got: %s", string(resp.Payload))
 	}
 }
@@ -698,7 +698,7 @@ func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientToolCallThoughtSignatureR
 	if errTurn1 != nil {
 		t.Fatalf("Turn 1 Execute() error = %v", errTurn1)
 	}
-	gotSig := gjson.GetBytes(turn1Resp.Payload, "candidates.0.content.parts.0.thoughtSignature").String()
+	gotSig := ojson.GetBytes(turn1Resp.Payload, "candidates.0.content.parts.0.thoughtSignature").String()
 	if gotSig != "SIG_VERTEX_OPENAPI" {
 		t.Fatalf("Turn 1 response thoughtSignature = %q, want SIG_VERTEX_OPENAPI; payload=%s", gotSig, string(turn1Resp.Payload))
 	}
@@ -723,7 +723,7 @@ func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientToolCallThoughtSignatureR
 	if len(upstreamBodies) != 2 {
 		t.Fatalf("expected 2 upstream requests, got %d", len(upstreamBodies))
 	}
-	if got := gjson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_VERTEX_OPENAPI" {
+	if got := ojson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_VERTEX_OPENAPI" {
 		t.Fatalf("Turn 2 upstream tool_calls.0.extra_content.google.thought_signature = %q, want SIG_VERTEX_OPENAPI; body=%s", got, string(upstreamBodies[1]))
 	}
 }
@@ -815,7 +815,7 @@ func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientStreamToolCallThoughtSign
 	}
 	var gotStreamSig string
 	for _, c := range turn1Chunks {
-		if sig := gjson.GetBytes(c, "candidates.0.content.parts.0.thoughtSignature").String(); sig != "" {
+		if sig := ojson.GetBytes(c, "candidates.0.content.parts.0.thoughtSignature").String(); sig != "" {
 			gotStreamSig = sig
 		}
 	}
@@ -847,7 +847,7 @@ func TestGeminiVertexOpenAPI_ExplicitOptIn_GeminiClientStreamToolCallThoughtSign
 	if len(upstreamBodies) != 2 {
 		t.Fatalf("expected 2 upstream stream requests, got %d", len(upstreamBodies))
 	}
-	if got := gjson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_STREAM_OPENAPI" {
+	if got := ojson.GetBytes(upstreamBodies[1], "messages.1.tool_calls.0.extra_content.google.thought_signature").String(); got != "SIG_STREAM_OPENAPI" {
 		t.Fatalf("Turn 2 stream upstream tool_calls.0.extra_content.google.thought_signature = %q, want SIG_STREAM_OPENAPI; body=%s", got, string(upstreamBodies[1]))
 	}
 }
@@ -866,7 +866,7 @@ func TestGeminiVertexOpenAPI_PerModelOptInAndOverride(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		gotPaths = append(gotPaths, r.URL.Path)
-		gotModels = append(gotModels, gjson.GetBytes(body, "model").String())
+		gotModels = append(gotModels, ojson.GetBytes(body, "model").String())
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")

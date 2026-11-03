@@ -7,13 +7,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type claudeCompactionSummaryContextKey struct{}
@@ -67,7 +66,7 @@ func (e *ClaudeExecutor) executeClaudeCompaction(ctx context.Context, auth *clip
 
 	inputTokens, outputTokens, totalTokens, cachedTokens := claudeCompactionResponsesUsage(summaryResp.Payload)
 	respPayload := helps.BuildAntigravityCompactionResponse(baseModel, capsule, inputTokens, outputTokens, totalTokens)
-	respPayload, _ = sjson.SetBytes(respPayload, "usage.input_tokens_details.cached_tokens", cachedTokens)
+	respPayload, _ = ojson.SetBytes(respPayload, "usage.input_tokens_details.cached_tokens", cachedTokens)
 	return cliproxyexecutor.Response{
 		Payload: respPayload,
 		Headers: summaryResp.Headers,
@@ -81,15 +80,15 @@ func (e *ClaudeExecutor) executeClaudeCompactionStream(ctx context.Context, auth
 		return nil, errSummary
 	}
 	// Reuse the capsule and usage already sealed for the non-stream response.
-	item := gjson.GetBytes(summaryResp.Payload, "output.0")
+	item := ojson.GetBytesNoCopy(summaryResp.Payload, "output.0")
 	capsule := item.Get("encrypted_content").String()
 	if item.Get("type").String() != "compaction" || capsule == "" {
 		return nil, fmt.Errorf("extract summary: compaction item missing")
 	}
-	inputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.input_tokens").Int())
-	outputTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.output_tokens").Int())
-	totalTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.total_tokens").Int())
-	cachedTokens := int(gjson.GetBytes(summaryResp.Payload, "usage.input_tokens_details.cached_tokens").Int())
+	inputTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.input_tokens").Int())
+	outputTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.output_tokens").Int())
+	totalTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.total_tokens").Int())
+	cachedTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.input_tokens_details.cached_tokens").Int())
 	chunks := helps.BuildAntigravityCompactionStreamChunks(baseModel, capsule, inputTokens, outputTokens, totalTokens)
 	for i := range chunks {
 		chunks[i] = patchClaudeCompactionStreamUsage(chunks[i], inputTokens, outputTokens, totalTokens, cachedTokens)
@@ -126,16 +125,17 @@ func claudeCompactionSummaryFromContext(ctx context.Context) bool {
 // prepareClaudeCompactionSummaryPayload keeps tool definitions that Claude needs
 // in order to accept tool_use history, while still asking for a text summary.
 func prepareClaudeCompactionSummaryPayload(payload []byte, modelName string) []byte {
-	tools := gjson.GetBytes(payload, "tools")
-	additionalTools := gjson.GetBytes(payload, "additional_tools")
-	out := helps.PrepareAntigravityCompactionSummaryPayload(payload, modelName)
+	tools := ojson.GetBytesNoCopy(payload, "tools")
+	additionalTools := ojson.GetBytesNoCopy(payload, "additional_tools")
+	doc := ojson.NewDoc(payload)
+	helps.PrepareAntigravityCompactionSummaryPayloadDoc(doc, modelName)
 	if tools.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tools", []byte(tools.Raw))
+		_ = doc.SetRaw("tools", tools.Raw)
 	}
 	if additionalTools.Exists() {
-		out, _ = sjson.SetRawBytes(out, "additional_tools", []byte(additionalTools.Raw))
+		_ = doc.SetRaw("additional_tools", additionalTools.Raw)
 	}
-	return out
+	return doc.Bytes()
 }
 
 // finalizeClaudeCompactionSummaryBody runs after built-in translation and before
@@ -143,22 +143,51 @@ func prepareClaudeCompactionSummaryPayload(payload []byte, modelName string) []b
 // tool_choice none stops the summary turn from calling a tool. History without
 // definitions is flattened so Anthropic does not reject orphan tool blocks.
 func finalizeClaudeCompactionSummaryBody(body []byte) []byte {
-	if claudeBodyHasToolDefinitions(body) {
-		body, _ = sjson.SetRawBytes(body, "tool_choice", []byte(`{"type":"none"}`))
+	doc := ojson.NewDoc(body)
+	if !finalizeClaudeCompactionSummaryBodyDoc(doc) {
 		return body
 	}
-	return flattenClaudeToolBlocksForCompaction(body)
+	return doc.Bytes()
+}
+
+func finalizeClaudeCompactionSummaryBodyDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	if claudeDocHasToolDefinitions(doc) {
+		return doc.SetRawBytes("tool_choice", []byte(`{"type":"none"}`)) == nil
+	}
+	return flattenClaudeToolBlocksForCompactionDoc(doc)
 }
 
 func claudeBodyHasToolDefinitions(body []byte) bool {
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
+	return tools.IsArray() && len(tools.Array()) > 0
+}
+
+func claudeDocHasToolDefinitions(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
 	return tools.IsArray() && len(tools.Array()) > 0
 }
 
 func flattenClaudeToolBlocksForCompaction(body []byte) []byte {
-	messages := gjson.GetBytes(body, "messages")
-	if !messages.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !flattenClaudeToolBlocksForCompactionDoc(doc) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+func flattenClaudeToolBlocksForCompactionDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	messages := doc.Get("messages")
+	if !messages.IsArray() {
+		return false
 	}
 	changed := false
 	rewritten := make([]string, 0, len(messages.Array()))
@@ -174,17 +203,17 @@ func flattenClaudeToolBlocksForCompaction(body []byte) []byte {
 			switch part.Get("type").String() {
 			case "tool_use":
 				text := fmt.Sprintf("Tool call %s (%s): %s", part.Get("name").String(), part.Get("id").String(), part.Get("input").Raw)
-				block, _ := sjson.SetBytes([]byte(`{"type":"text","text":""}`), "text", text)
+				block, _ := ojson.SetBytes([]byte(`{"type":"text","text":""}`), "text", text)
 				parts = append(parts, string(block))
 				msgChanged = true
 			case "tool_result":
 				result := part.Get("content")
 				resultText := result.Raw
-				if result.Type == gjson.String {
+				if result.Type == ojson.String {
 					resultText = result.String()
 				}
 				text := fmt.Sprintf("Tool result %s: %s", part.Get("tool_use_id").String(), resultText)
-				block, _ := sjson.SetBytes([]byte(`{"type":"text","text":""}`), "text", text)
+				block, _ := ojson.SetBytes([]byte(`{"type":"text","text":""}`), "text", text)
 				parts = append(parts, string(block))
 				msgChanged = true
 			default:
@@ -196,20 +225,19 @@ func flattenClaudeToolBlocksForCompaction(body []byte) []byte {
 			continue
 		}
 		changed = true
-		updated, _ := sjson.SetRawBytes([]byte(msg.Raw), "content", []byte("["+strings.Join(parts, ",")+"]"))
+		updated, _ := ojson.SetRawBytes([]byte(msg.Raw), "content", []byte("["+strings.Join(parts, ",")+"]"))
 		rewritten = append(rewritten, string(updated))
 	}
 	if !changed {
-		return body
+		return false
 	}
-	body, _ = sjson.SetRawBytes(body, "messages", []byte("["+strings.Join(rewritten, ",")+"]"))
-	return body
+	return doc.SetRawBytes("messages", []byte("["+strings.Join(rewritten, ",")+"]")) == nil
 }
 
 // claudeCompactionResponsesUsage matches the Responses translator: input includes
 // cache creation and cache read, cached_tokens is cache read, and total is their sum.
 func claudeCompactionResponsesUsage(payload []byte) (inputTokens, outputTokens, totalTokens, cachedTokens int) {
-	usage := gjson.GetBytes(payload, "usage")
+	usage := ojson.GetBytesNoCopy(payload, "usage")
 	if !usage.Exists() {
 		parsed := helps.ParseOpenAIUsage(payload)
 		return int(parsed.InputTokens), int(parsed.OutputTokens), int(parsed.TotalTokens), 0
@@ -230,23 +258,24 @@ func patchClaudeCompactionStreamUsage(chunk []byte, inputTokens, outputTokens, t
 		return chunk
 	}
 	data := bytes.TrimSpace(chunk[idx+len(dataPrefix):])
+	doc := ojson.NewDoc(data)
 	path := ""
 	switch {
-	case gjson.GetBytes(data, "response.usage").Exists():
+	case doc.Get("response.usage").Exists():
 		path = "response.usage"
-	case gjson.GetBytes(data, "usage").Exists():
+	case doc.Get("usage").Exists():
 		path = "usage"
 	default:
 		return chunk
 	}
-	data, _ = sjson.SetBytes(data, path+".input_tokens", inputTokens)
-	data, _ = sjson.SetBytes(data, path+".output_tokens", outputTokens)
-	data, _ = sjson.SetBytes(data, path+".total_tokens", totalTokens)
-	data, _ = sjson.SetBytes(data, path+".input_tokens_details.cached_tokens", cachedTokens)
+	_ = doc.Set(path+".input_tokens", inputTokens)
+	_ = doc.Set(path+".output_tokens", outputTokens)
+	_ = doc.Set(path+".total_tokens", totalTokens)
+	_ = doc.Set(path+".input_tokens_details.cached_tokens", cachedTokens)
 	var buf bytes.Buffer
 	buf.Write(chunk[:idx])
 	buf.WriteString(dataPrefix)
-	buf.Write(data)
+	buf.Write(doc.Bytes())
 	buf.WriteString("\n\n")
 	return buf.Bytes()
 }

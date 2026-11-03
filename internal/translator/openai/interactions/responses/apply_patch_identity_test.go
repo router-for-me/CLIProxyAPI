@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestInteractionsApplyPatchNamedLateIdentity(t *testing.T) {
@@ -40,7 +40,7 @@ func TestInteractionsApplyPatchNamedLateIdentity(t *testing.T) {
 				}
 				step["id"], step["call_id"] = "item_2", "call_2"
 				step["arguments"] = map[string]any{"input": patchText}
-				var events []gjson.Result
+				var events []ojson.Result
 				if boundary == "stop" {
 					events = append(events, patchSend(&param, patchStep("step.stop", step))...)
 				}

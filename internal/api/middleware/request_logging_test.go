@@ -603,6 +603,7 @@ func TestManagementV8RequestsAreNotLogged(t *testing.T) {
 type spyRequestLogger struct {
 	lastLogRequestID       string
 	lastStreamingRequestID string
+	lastStreamWriter       *testStreamingLogWriter
 	underlying             logging.RequestLogger
 }
 
@@ -619,7 +620,9 @@ func (s *spyRequestLogger) LogStreamingRequest(url, method string, headers map[s
 	if s.underlying != nil {
 		return s.underlying.LogStreamingRequest(url, method, headers, body, requestID)
 	}
-	return &testStreamingLogWriter{}, nil
+	w := &testStreamingLogWriter{}
+	s.lastStreamWriter = w
+	return w, nil
 }
 
 func (s *spyRequestLogger) IsEnabled() bool {
@@ -714,6 +717,82 @@ func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing
 	}
 	if parsed.Version() != 7 {
 		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
+	}
+}
+
+func TestRequestLoggingMiddleware_FinalizesStreamingWriterOnHandlerPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	spy := &spyRequestLogger{}
+
+	router := gin.New()
+	router.Use(logging.GinLogrusRecovery())
+	router.Use(RequestLoggingMiddleware(spy))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("data: chunk\n\n"))
+		panic("handler boom")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if spy.lastStreamWriter == nil {
+		t.Fatal("expected streaming log writer to be created before panic")
+	}
+	if !spy.lastStreamWriter.closed {
+		t.Fatal("expected streaming log writer to be closed when handler panics")
+	}
+
+	// Verify that a non-streaming handler panicking before writing a status is
+	// finalized as 500 so error-only request logging persists the error log.
+	logsDir := t.TempDir()
+	errorOnlyLogger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+	errorRouter := gin.New()
+	errorRouter.Use(logging.GinLogrusRecovery())
+	errorRouter.Use(RequestLoggingMiddleware(errorOnlyLogger))
+	errorRouter.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		panic("pre-status boom")
+	})
+	reqPreStatus := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	reqPreStatus.Header.Set("Content-Type", "application/json")
+	respPreStatus := httptest.NewRecorder()
+	errorRouter.ServeHTTP(respPreStatus, reqPreStatus)
+	if respPreStatus.Code != http.StatusInternalServerError {
+		t.Fatalf("panic status = %d, want 500", respPreStatus.Code)
+	}
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir logsDir: %v", errRead)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "error-") {
+		t.Fatalf("expected 1 error log file on pre-status panic, got %+v", entries)
+	}
+
+	// http.ErrAbortHandler must not stamp a synthetic 500 error log in error-only mode.
+	abortLogsDir := t.TempDir()
+	abortLogger := logging.NewFileRequestLogger(false, abortLogsDir, "", 10)
+	abortRouter := gin.New()
+	abortRouter.Use(RequestLoggingMiddleware(abortLogger))
+	abortRouter.POST("/v1/chat/completions", func(c *gin.Context) {
+		panic(http.ErrAbortHandler)
+	})
+	func() {
+		defer func() { _ = recover() }()
+		reqAbort := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+		reqAbort.Header.Set("Content-Type", "application/json")
+		abortRouter.ServeHTTP(httptest.NewRecorder(), reqAbort)
+	}()
+	abortEntries, errReadAbort := os.ReadDir(abortLogsDir)
+	if errReadAbort != nil {
+		t.Fatalf("ReadDir abortLogsDir: %v", errReadAbort)
+	}
+	if len(abortEntries) != 0 {
+		t.Fatalf("expected no error log for http.ErrAbortHandler, got %+v", abortEntries)
 	}
 }
 

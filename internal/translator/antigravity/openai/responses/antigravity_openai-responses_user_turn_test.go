@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -65,7 +65,7 @@ func TestOpenAIResponsesToAntigravityRegistryCarriesTheRefusal(t *testing.T) {
 			if !errors.As(envelope.Err, &unsupported) || unsupported.Type != "input_file" || unsupported.StatusCode() != 400 {
 				t.Fatalf("envelope.Err = %v, want unsupported content part: input_file; body = %s", envelope.Err, envelope.Body)
 			}
-			if !gjson.ValidBytes(envelope.Body) {
+			if !ojson.ValidBytes(envelope.Body) {
 				t.Fatalf("body is not JSON: %q", envelope.Body)
 			}
 
@@ -85,7 +85,7 @@ func TestOpenAIResponsesToAntigravityKeepsTurnWithTextBesideFileID(t *testing.T)
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v", envelope.Err)
 	}
-	if got := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", envelope.Body)
 	}
 }
@@ -97,14 +97,14 @@ func TestOpenAIResponsesToAntigravityInlineFileStaysInlineData(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v", envelope.Err)
 	}
-	if got := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.inline_data.mime_type").String(); got != "application/pdf" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.inline_data.mime_type").String(); got != "application/pdf" {
 		t.Fatalf("inline file was not kept: %s", envelope.Body)
 	}
 }
 
 func TestConvertOpenAIResponsesRequestToAntigravity_ExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := antigravityTurnPayload("", antigravityUserTurn(antigravityTurnFileID))
-	if body, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3-flash", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

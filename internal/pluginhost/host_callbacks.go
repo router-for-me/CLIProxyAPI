@@ -152,7 +152,7 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 	case pluginabi.MethodHostModelStreamRead:
 		return h.callHostModelStreamRead(ctx, request)
 	case pluginabi.MethodHostModelStreamClose:
-		return h.callHostModelStreamClose(request)
+		return h.callHostModelStreamClose(ctx, request)
 	case pluginabi.MethodHostHTTPDo:
 		return h.callHostHTTPDo(ctx, request)
 	case pluginabi.MethodHostHTTPDoStream:
