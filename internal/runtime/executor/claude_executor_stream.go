@@ -101,9 +101,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
-		rebuildMidSystemMessagesToTopLevelDoc(doc)
-	}
+	applyMidSystemMessagePolicyDoc(e.cfg, auth, doc)
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.

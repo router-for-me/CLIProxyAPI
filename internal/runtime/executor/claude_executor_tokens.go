@@ -61,9 +61,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		return cliproxyexecutor.Response{}, errThinking
 	}
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
-		rebuildMidSystemMessagesToTopLevelDoc(doc)
-	}
+	applyMidSystemMessagePolicyDoc(e.cfg, auth, doc)
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
 	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)
@@ -185,9 +183,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		return cliproxyexecutor.Response{}, errThinking
 	}
 	helps.RestoreClaudeWebSearchResultsContextDoc(ctx, doc, webSearchSessionKey, webSearchTTL)
-	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
-		rebuildMidSystemMessagesToTopLevelDoc(doc)
-	}
+	applyMidSystemMessagePolicyDoc(e.cfg, auth, doc)
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
 	// Claude Code's count_tokens carries only model, messages and tools, so the
@@ -204,7 +200,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
-		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
+		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth, dropMidSystemMessageEnabled(e.cfg, auth))
 		if len(settings.sensitiveWords) > 0 {
 			helps.ObfuscateSensitiveWordsDoc(doc, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
 		}
