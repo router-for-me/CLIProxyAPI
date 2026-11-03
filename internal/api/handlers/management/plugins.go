@@ -373,7 +373,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	if configured {
-		// Validate before unloading or removing the artifact; neither can be rolled back.
+		// Reject early, before unloading; the final check below runs under h.mu.
 		h.mu.Lock()
 		candidate := h.cfg.CloneForRuntime()
 		delete(candidate.Plugins.Configs, id)
@@ -393,10 +393,22 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
+	// Hold h.mu from the final check through removal and save, so a concurrent
+	// save cannot change the config this deletion was validated against.
+	h.mu.Lock()
+	if configured {
+		candidate := h.cfg.CloneForRuntime()
+		delete(candidate.Plugins.Configs, id)
+		if !h.validateConfigLocked(c, candidate) {
+			h.mu.Unlock()
+			return
+		}
+	}
 	fileDeleted := false
 	if path != "" {
 		if errRemove := os.Remove(path); errRemove != nil {
 			if !errors.Is(errRemove, os.ErrNotExist) {
+				h.mu.Unlock()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()})
 				return
 			}
@@ -405,7 +417,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 
-	h.mu.Lock()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
