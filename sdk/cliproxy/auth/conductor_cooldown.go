@@ -1069,8 +1069,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// not; an explicit zero (Retry-After: 0) clears it. One dispatched
 					// before it, completing out of order, may only extend a live reset, so
 					// a stale result never shortens a newer hint or revives a cleared one.
+					// An unknown sequence (zero, direct MarkResult callers) is exempt from
+					// the ordering guard and counts as newer.
 					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
-						newer := result.ExecutionSeq > state.coolingDisabledRetrySeq
+						newer := result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq
 						stale := result.ExecutionSeq > 0 && !newer
 						if *result.RetryAfter > 0 {
 							until := now.Add(*result.RetryAfter)

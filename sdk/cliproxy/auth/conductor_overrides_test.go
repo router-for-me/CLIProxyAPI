@@ -3015,6 +3015,39 @@ func TestManager_Execute_DisableCooling_NewerExplicitZeroClearsStaleReset(t *tes
 	}
 }
 
+// A 429 with an unknown execution sequence (a direct MarkResult caller) is
+// exempt from the ordering guard: it is the upstream's latest word, so its
+// explicit zero clears a recorded reset and its shorter hint replaces one.
+func TestManager_MarkResult_DisableCooling_UnknownSeqReplacesReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-unknown-seq-reset", "test-model-unknown-seq-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+	reset := func() time.Time {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	mark := func(seq uint64, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: seq,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+
+	mark(m.nextExecutionSeq(), 2*time.Hour)
+	mark(0, time.Minute)
+	if got := reset(); got.After(time.Now().Add(2 * time.Minute)) {
+		t.Fatalf("reset after an unknown-sequence 1m hint = %v, want about 1m ahead", got)
+	}
+	mark(0, 0)
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after an unknown-sequence Retry-After: 0 = %v, want it cleared", got)
+	}
+}
+
 // A reset cleared by a newer Retry-After: 0 must stay cleared across a
 // reconciliation: the state reset there keeps the watermark, so an older 429
 // completing afterwards cannot reinstall its stale hint.
