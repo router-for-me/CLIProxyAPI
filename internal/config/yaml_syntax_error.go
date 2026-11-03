@@ -9,13 +9,17 @@ import (
 
 var yamlSyntaxPrefix = regexp.MustCompile(`^yaml: (?:line (\d+): )?`)
 
+// Larger bodies keep yaml.v3's message, so the search costs at most a few
+// parses of a normal-sized config.
+const maxYAMLSyntaxSearchBytes = 1 << 20
+
 // DescribeYAMLSyntaxError restates err, from yaml.Unmarshal(body), with the
 // one-based line of the problem. yaml.v3's own line can be zero-based, missing,
 // or the start of the enclosing block, but never past the problem, so it is the
 // lower bound when searching for the shortest line prefix that fails the same way.
 func DescribeYAMLSyntaxError(body []byte, err error) string {
 	match := yamlSyntaxPrefix.FindStringSubmatch(err.Error())
-	if match == nil {
+	if match == nil || len(body) > maxYAMLSyntaxSearchBytes {
 		return err.Error()
 	}
 	problem := err.Error()[len(match[0]):]

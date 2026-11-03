@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -45,5 +46,17 @@ func TestDescribeYAMLSyntaxErrorReportsTheProblemLine(t *testing.T) {
 		if got := DescribeYAMLSyntaxError([]byte(tc.body), err); got != tc.want {
 			t.Errorf("%s: got %q, want %q (yaml.v3 said %q)", tc.name, got, tc.want, err.Error())
 		}
+	}
+}
+
+func TestDescribeYAMLSyntaxErrorLeavesLargeBodiesToYAMLv3(t *testing.T) {
+	body := []byte("root:\n" + strings.Repeat("  key: value\n", maxYAMLSyntaxSearchBytes/13) + " bad: 1\n")
+	var node yaml.Node
+	err := yaml.Unmarshal(body, &node)
+	if err == nil {
+		t.Fatal("body parsed")
+	}
+	if got := DescribeYAMLSyntaxError(body, err); got != err.Error() {
+		t.Errorf("got %q, want yaml.v3's %q", got, err.Error())
 	}
 }
