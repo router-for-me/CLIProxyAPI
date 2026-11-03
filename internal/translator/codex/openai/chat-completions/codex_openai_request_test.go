@@ -5,8 +5,44 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
+
+func TestConvertOpenAIRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"max_completion_tokens", `{"max_completion_tokens":2048}`, "2048"},
+		{"max_output_tokens fallback", `{"max_output_tokens":4096}`, "4096"},
+		{"completion limit takes precedence", `{"max_completion_tokens":1024,"max_tokens":2048,"max_output_tokens":4096}`, "1024"},
+		{"max_tokens takes precedence over output limit", `{"max_tokens":1024,"max_output_tokens":2048}`, "1024"},
+		{"invalid completion limit skipped", `{"max_completion_tokens":"1024","max_tokens":2048}`, "2048"},
+		{"null completion limit skipped", `{"max_completion_tokens":null,"max_tokens":2048}`, "2048"},
+		{"invalid legacy limits skipped", `{"max_completion_tokens":false,"max_tokens":{},"max_output_tokens":4096}`, "4096"},
+		{"zero takes precedence", `{"max_completion_tokens":0,"max_tokens":2048}`, "0"},
+		{"non-numeric limits ignored", `{"max_completion_tokens":"1024","max_tokens":null,"max_output_tokens":true}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+			for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+				if ojson.GetBytesNoCopy(out, path).Exists() {
+					t.Fatalf("%s should not be forwarded; output=%s", path, out)
+				}
+			}
+		})
+	}
+}
 
 // Basic tool-call: system + user + assistant(tool_calls, no content) + tool result.
 // Expects developer msg + user msg + function_call + function_call_output.
@@ -52,9 +88,9 @@ func TestToolCallSimple(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 	if len(items) != 4 {
-		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+		t.Fatalf("expected 4 input items, got %d: %s", len(items), ojson.Get(result, "input").Raw)
 	}
 
 	// system -> developer
@@ -141,10 +177,10 @@ func TestToolCallWithContent(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 	// user + assistant(with content) + function_call + function_call_output
 	if len(items) != 4 {
-		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+		t.Fatalf("expected 4 input items, got %d: %s", len(items), ojson.Get(result, "input").Raw)
 	}
 
 	if items[0].Get("role").String() != "user" {
@@ -218,7 +254,7 @@ func TestToolCallOutputWithMultimodalContent(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	output := gjson.Get(result, "input.2.output")
+	output := ojson.Get(result, "input.2.output")
 	if !output.IsArray() {
 		t.Fatalf("expected tool output to be an array, got: %s", output.Raw)
 	}
@@ -307,7 +343,7 @@ func TestToolCallOutputWithStringifiedImageContent(t *testing.T) {
 			}`)
 
 			out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-			output := gjson.GetBytes(out, "input.2.output")
+			output := ojson.GetBytesNoCopy(out, "input.2.output")
 			if !output.IsArray() {
 				t.Fatalf("expected stringified image output to be an array, got: %s", output.Raw)
 			}
@@ -365,8 +401,8 @@ func TestToolCallOutputKeepsNonImageStrings(t *testing.T) {
 			}`)
 
 			out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-			output := gjson.GetBytes(out, "input.2.output")
-			if output.Type != gjson.String {
+			output := ojson.GetBytesNoCopy(out, "input.2.output")
+			if output.Type != ojson.String {
 				t.Fatalf("expected output to remain a string, got: %s", output.Raw)
 			}
 			if output.String() != tt.expectedOutput {
@@ -406,9 +442,9 @@ func TestToolCallOutputFallsBackForInvalidStructuredParts(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	parts := gjson.Get(result, "input.2.output").Array()
+	parts := ojson.Get(result, "input.2.output").Array()
 	if len(parts) != 3 {
-		t.Fatalf("expected 3 output parts, got %d: %s", len(parts), gjson.Get(result, "input.2.output").Raw)
+		t.Fatalf("expected 3 output parts, got %d: %s", len(parts), ojson.Get(result, "input.2.output").Raw)
 	}
 
 	expectedFallbacks := []string{
@@ -463,9 +499,9 @@ func TestToolCallOutputWithNonStringJSONContent(t *testing.T) {
 			out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 			result := string(out)
 
-			output := gjson.Get(result, "input.2.output")
+			output := ojson.Get(result, "input.2.output")
 			if !output.Exists() {
-				t.Fatalf("expected output field to exist: %s", gjson.Get(result, "input.2").Raw)
+				t.Fatalf("expected output field to exist: %s", ojson.Get(result, "input.2").Raw)
 			}
 			if output.String() != tt.expectedOutput {
 				t.Fatalf("expected output %s, got %s", tt.expectedOutput, output.String())
@@ -489,9 +525,9 @@ func TestConvertOpenAIRequestToCodexPreservesInputAudio(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.5", input, true)
-	parts := gjson.GetBytes(out, "input.0.content").Array()
+	parts := ojson.GetBytesNoCopy(out, "input.0.content").Array()
 	if len(parts) != 2 {
-		t.Fatalf("expected 2 content parts, got %d: %s", len(parts), gjson.GetBytes(out, "input.0.content").Raw)
+		t.Fatalf("expected 2 content parts, got %d: %s", len(parts), ojson.GetBytesNoCopy(out, "input.0.content").Raw)
 	}
 	if parts[0].Get("type").String() != "input_text" || parts[0].Get("text").String() != "Transcribe this audio verbatim." {
 		t.Fatalf("part 0: expected input_text with prompt text, got %s", parts[0].Raw)
@@ -563,10 +599,10 @@ func TestMultipleToolCalls(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 	// user + 3 function_call + 3 function_call_output = 7
 	if len(items) != 7 {
-		t.Fatalf("expected 7 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+		t.Fatalf("expected 7 input items, got %d: %s", len(items), ojson.Get(result, "input").Raw)
 	}
 
 	if items[0].Get("role").String() != "user" {
@@ -634,7 +670,7 @@ func TestNoSpuriousEmptyAssistantMessage(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 
 	for i, item := range items {
 		typ := item.Get("type").String()
@@ -649,7 +685,7 @@ func TestNoSpuriousEmptyAssistantMessage(t *testing.T) {
 
 	// should be exactly: user + function_call + function_call_output
 	if len(items) != 3 {
-		t.Fatalf("expected 3 input items (user + function_call + function_call_output), got %d: %s", len(items), gjson.Get(result, "input").Raw)
+		t.Fatalf("expected 3 input items (user + function_call + function_call_output), got %d: %s", len(items), ojson.Get(result, "input").Raw)
 	}
 	if items[0].Get("type").String() != "message" || items[0].Get("role").String() != "user" {
 		t.Errorf("item 0: expected user message")
@@ -698,10 +734,10 @@ func TestMultiTurnToolCalling(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 	// user, func_call(r1), func_output(r1), assistant text, user, func_call(r2), func_output(r2)
 	if len(items) != 7 {
-		t.Fatalf("expected 7 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+		t.Fatalf("expected 7 input items, got %d: %s", len(items), ojson.Get(result, "input").Raw)
 	}
 
 	for i, item := range items {
@@ -782,10 +818,10 @@ func TestToolNameShortening(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 
 	// find function_call
-	var funcCallItem gjson.Result
+	var funcCallItem ojson.Result
 	for _, item := range items {
 		if item.Get("type").String() == "function_call" {
 			funcCallItem = item
@@ -833,9 +869,9 @@ func TestCustomToolNameShortening(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 3 {
-		t.Fatalf("expected user, custom call, and custom output, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected user, custom call, and custom output, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[1].Get("type").String(); got != "custom_tool_call" {
 		t.Fatalf("expected custom_tool_call, got %s", items[1].Raw)
@@ -844,13 +880,13 @@ func TestCustomToolNameShortening(t *testing.T) {
 	if shortName == longName || len(shortName) > 64 {
 		t.Fatalf("expected shortened custom tool name, got %q", shortName)
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != shortName {
+	if got := ojson.GetBytesNoCopy(out, "tools.0.name").String(); got != shortName {
 		t.Fatalf("expected custom declaration name %q, got %q", shortName, got)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "custom" {
-		t.Fatalf("expected custom tool choice, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "custom" {
+		t.Fatalf("expected custom tool choice, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != shortName {
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != shortName {
 		t.Fatalf("expected shortened custom tool choice name %q, got %q", shortName, got)
 	}
 	if got := items[2].Get("type").String(); got != "custom_tool_call_output" {
@@ -879,9 +915,9 @@ func TestCustomToolShortNameCollisionPreservesFunctionFamily(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 2 {
-		t.Fatalf("expected function call and output, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected function call and output, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[0].Get("type").String(); got != "function_call" {
 		t.Fatalf("expected colliding original function name to remain function_call, got %s", items[0].Raw)
@@ -889,11 +925,11 @@ func TestCustomToolShortNameCollisionPreservesFunctionFamily(t *testing.T) {
 	if got := items[1].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("expected colliding function output to remain function_call_output, got %s", items[1].Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
-		t.Fatalf("expected colliding function choice to remain function, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("expected colliding function choice to remain function, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != gjson.GetBytes(out, "tools.1.name").String() {
-		t.Fatalf("expected function choice name to match translated declaration, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != ojson.GetBytesNoCopy(out, "tools.1.name").String() {
+		t.Fatalf("expected function choice name to match translated declaration, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
 }
 
@@ -913,9 +949,9 @@ func TestSameNameCustomAndFunctionDefaultsToFunctionFamily(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 2 {
-		t.Fatalf("expected function call and output, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected function call and output, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[0].Get("type").String(); got != "function_call" {
 		t.Fatalf("expected ambiguous normalized call to preserve function family, got %s", items[0].Raw)
@@ -923,10 +959,10 @@ func TestSameNameCustomAndFunctionDefaultsToFunctionFamily(t *testing.T) {
 	if got := items[1].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("expected ambiguous output to preserve function family, got %s", items[1].Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "function" {
-		t.Fatalf("expected ambiguous function choice to preserve function family, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("expected ambiguous function choice to preserve function family, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
-	if first, second := gjson.GetBytes(out, "tools.0.name").String(), gjson.GetBytes(out, "tools.1.name").String(); first != second {
+	if first, second := ojson.GetBytesNoCopy(out, "tools.0.name").String(), ojson.GetBytesNoCopy(out, "tools.1.name").String(); first != second {
 		t.Fatalf("expected same-name declarations to use a consistent translated name, got %q and %q", first, second)
 	}
 }
@@ -965,7 +1001,7 @@ func TestEmptyStringContent(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 
 	for i, item := range items {
 		if item.Get("type").String() == "message" && item.Get("role").String() == "assistant" {
@@ -1007,7 +1043,7 @@ func TestCallIDsMatchBetweenCallAndOutput(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
+	items := ojson.Get(result, "input").Array()
 
 	// collect call_ids from function_call items
 	callIDs := make(map[string]bool)
@@ -1082,9 +1118,9 @@ func TestCustomToolCallHistory(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 5 {
-		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 
 	customCall := items[2]
@@ -1114,11 +1150,11 @@ func TestCustomToolCallHistory(t *testing.T) {
 	if got := items[4].Get("content.0.text").String(); got != "The specification is updated." {
 		t.Fatalf("expected final assistant continuation, got %s", items[4].Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.type").String(); got != "custom" {
-		t.Fatalf("expected normalized custom tool choice, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "custom" {
+		t.Fatalf("expected normalized custom tool choice, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "apply_patch" {
-		t.Fatalf("expected custom tool choice name apply_patch, got %s", gjson.GetBytes(out, "tool_choice").Raw)
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != "apply_patch" {
+		t.Fatalf("expected custom tool choice name apply_patch, got %s", ojson.GetBytesNoCopy(out, "tool_choice").Raw)
 	}
 }
 
@@ -1138,7 +1174,7 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 	}`)
 
 	chatResponse := ConvertCodexResponseToOpenAINonStream(nil, "", originalRequest, nil, upstreamResponse, nil)
-	assistantMessage := gjson.GetBytes(chatResponse, "choices.0.message")
+	assistantMessage := ojson.GetBytesNoCopy(chatResponse, "choices.0.message")
 	if got := assistantMessage.Get("tool_calls.0.type").String(); got != "function" {
 		t.Fatalf("expected response to normalize custom call as function, got %s", assistantMessage.Raw)
 	}
@@ -1155,9 +1191,9 @@ func TestCustomToolCallResponseFollowUpRoundTrip(t *testing.T) {
 		"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch."}]
 	}`)
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", followUpRequest, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 3 {
-		t.Fatalf("expected user, custom call, and custom output, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected user, custom call, and custom output, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[1].Get("type").String(); got != "custom_tool_call" {
 		t.Fatalf("expected custom_tool_call after response round trip, got %s", items[1].Raw)
@@ -1188,9 +1224,9 @@ func TestMixedToolCallHistoryPreservesCallFamilies(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 5 {
-		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 
 	expectedTypes := []string{"message", "function_call", "custom_tool_call", "custom_tool_call_output", "function_call_output"}
@@ -1223,9 +1259,9 @@ func TestToolCallHistoryAllowsReusedCallIDAcrossRounds(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 5 {
-		t.Fatalf("expected 5 input items, got %d: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected 5 input items, got %d: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[2].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("expected first reused call output to remain function_call_output, got %s", items[2].Raw)
@@ -1247,9 +1283,9 @@ func TestCustomToolCallHistorySynthesizesMissingCallID(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 2 {
-		t.Fatalf("expected orphan output to be dropped and missing ID pair preserved, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected orphan output to be dropped and missing ID pair preserved, got %d items: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[0].Get("type").String(); got != "custom_tool_call" {
 		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
@@ -1280,9 +1316,9 @@ func TestToolCallHistoryClearsUnmatchedCallAtNewBatch(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 3 {
-		t.Fatalf("expected two calls and one output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected two calls and one output, got %d items: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[2].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("expected new batch output to match function call, got %s", items[2].Raw)
@@ -1302,9 +1338,9 @@ func TestToolCallOutputWithoutIDUsesPendingCall(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 4 {
-		t.Fatalf("expected two calls and two outputs, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected two calls and two outputs, got %d items: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[2].Get("type").String(); got != "function_call_output" {
 		t.Fatalf("expected first empty-ID output to match function call, got %s", items[2].Raw)
@@ -1334,9 +1370,9 @@ func TestAmbiguousDuplicateToolCallIDsAreDropped(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 1 || items[0].Get("role").String() != "user" {
-		t.Fatalf("expected ambiguous calls and outputs to be dropped, got %s", gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected ambiguous calls and outputs to be dropped, got %s", ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 }
 
@@ -1356,9 +1392,9 @@ func TestOrphanAndDuplicateToolCallOutputsAreDropped(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	items := gjson.GetBytes(out, "input").Array()
+	items := ojson.GetBytesNoCopy(out, "input").Array()
 	if len(items) != 2 {
-		t.Fatalf("expected only the matched call and first output, got %d items: %s", len(items), gjson.GetBytes(out, "input").Raw)
+		t.Fatalf("expected only the matched call and first output, got %d items: %s", len(items), ojson.GetBytesNoCopy(out, "input").Raw)
 	}
 	if got := items[0].Get("type").String(); got != "custom_tool_call" {
 		t.Fatalf("expected custom_tool_call, got %s", items[0].Raw)
@@ -1393,7 +1429,7 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	tools := gjson.Get(result, "tools").Array()
+	tools := ojson.Get(result, "tools").Array()
 	if len(tools) == 0 {
 		t.Fatal("no tools found in output")
 	}
@@ -1406,7 +1442,7 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
+		t.Errorf("tool 'search' not found in output tools: %s", ojson.Get(result, "tools").Raw)
 	}
 }
 
@@ -1444,9 +1480,9 @@ func TestFunctionToolStrictDefaultsToFalse(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	tools := gjson.GetBytes(out, "tools").Array()
+	tools := ojson.GetBytesNoCopy(out, "tools").Array()
 	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d: %s", len(tools), gjson.GetBytes(out, "tools").Raw)
+		t.Fatalf("expected 3 tools, got %d: %s", len(tools), ojson.GetBytesNoCopy(out, "tools").Raw)
 	}
 
 	expected := map[string]bool{"omitted": false, "explicit_true": true, "explicit_false": false}
@@ -1502,14 +1538,14 @@ func TestNormalizeInvalidToolNames(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	toolNameInTools := gjson.GetBytes(out, "tools.0.name").String()
+	toolNameInTools := ojson.GetBytesNoCopy(out, "tools.0.name").String()
 	nameRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	if !nameRegex.MatchString(toolNameInTools) {
 		t.Fatalf("expected tool name in tools to match ^[a-zA-Z0-9_-]+$, got %q", toolNameInTools)
 	}
 
 	var funcCallName string
-	for _, item := range gjson.GetBytes(out, "input").Array() {
+	for _, item := range ojson.GetBytesNoCopy(out, "input").Array() {
 		if item.Get("type").String() == "function_call" {
 			funcCallName = item.Get("name").String()
 			break
@@ -1519,7 +1555,7 @@ func TestNormalizeInvalidToolNames(t *testing.T) {
 		t.Fatalf("expected function_call name %q to match tools declaration %q", funcCallName, toolNameInTools)
 	}
 
-	toolChoiceName := gjson.GetBytes(out, "tool_choice.name").String()
+	toolChoiceName := ojson.GetBytesNoCopy(out, "tool_choice.name").String()
 	if toolChoiceName != toolNameInTools {
 		t.Fatalf("expected tool_choice name %q to match tools declaration %q", toolChoiceName, toolNameInTools)
 	}
@@ -1554,7 +1590,7 @@ func TestNormalizeInvalidToolNamesCollisionAndNonASCII(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	tools := gjson.GetBytes(out, "tools").Array()
+	tools := ojson.GetBytesNoCopy(out, "tools").Array()
 	if len(tools) != 3 {
 		t.Fatalf("expected 3 tools, got %d", len(tools))
 	}
@@ -1608,10 +1644,10 @@ func TestHistoricalToolCallCollisionWithDeclaredTool(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToCodex("gpt-5.6-sol", input, true)
-	toolDeclared := gjson.GetBytes(out, "tools.0.name").String()
+	toolDeclared := ojson.GetBytesNoCopy(out, "tools.0.name").String()
 
 	var histCallName string
-	for _, item := range gjson.GetBytes(out, "input").Array() {
+	for _, item := range ojson.GetBytesNoCopy(out, "input").Array() {
 		if item.Get("type").String() == "function_call" {
 			histCallName = item.Get("name").String()
 			break
@@ -1707,14 +1743,14 @@ func TestConvertOpenAIRequestToCodexServiceTier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out, _ := ConvertOpenAIRequestToCodex("gpt-6-sol", []byte(tt.body), true)
-			tierRes := gjson.GetBytes(out, "service_tier")
+			tierRes := ojson.GetBytesNoCopy(out, "service_tier")
 			if tierRes.Exists() != tt.wantExists {
 				t.Fatalf("service_tier exists = %v, want %v; payload=%s", tierRes.Exists(), tt.wantExists, out)
 			}
 			if tt.wantExists && tierRes.String() != tt.wantTier {
 				t.Fatalf("service_tier = %q, want %q; payload=%s", tierRes.String(), tt.wantTier, out)
 			}
-			if gotEffort := gjson.GetBytes(out, "reasoning.effort").String(); gotEffort != tt.wantEffort {
+			if gotEffort := ojson.GetBytesNoCopy(out, "reasoning.effort").String(); gotEffort != tt.wantEffort {
 				t.Fatalf("reasoning.effort = %q, want %q; payload=%s", gotEffort, tt.wantEffort, out)
 			}
 		})
@@ -1732,7 +1768,7 @@ func TestApplyPatchChatHistoryBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := []byte(`{"tools":` + tc.tools + `,"messages":[{"role":"assistant","tool_calls":[` + tc.call + `]}]}`)
 			out, _ := ConvertOpenAIRequestToCodex("m", raw, true)
-			items := gjson.GetBytes(out, "input").Array()
+			items := ojson.GetBytesNoCopy(out, "input").Array()
 			item := items[len(items)-1]
 			field := "arguments"
 			if tc.wantType == "custom_tool_call" {
@@ -1773,7 +1809,7 @@ func TestOverLengthToolCallIDsAreShortenedConsistently(t *testing.T) {
 	out, _ := ConvertOpenAIRequestToCodex("gpt-6.1-sol", input, true)
 
 	var callIDs, outputIDs []string
-	for _, item := range gjson.GetBytes(out, "input").Array() {
+	for _, item := range ojson.GetBytesNoCopy(out, "input").Array() {
 		switch item.Get("type").String() {
 		case "function_call":
 			callIDs = append(callIDs, item.Get("call_id").String())
@@ -1829,7 +1865,7 @@ func TestShortenedToolCallIDCollisionWithLegalIDKeepsResultsMatched(t *testing.T
 
 	callIDByName := map[string]string{}
 	outputIDByResult := map[string]string{}
-	for _, item := range gjson.GetBytes(out, "input").Array() {
+	for _, item := range ojson.GetBytesNoCopy(out, "input").Array() {
 		switch item.Get("type").String() {
 		case "function_call":
 			callIDByName[item.Get("name").String()] = item.Get("call_id").String()
@@ -1855,12 +1891,12 @@ func TestConvertOpenAIRequestToCodexParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name     string
 		field    string
-		wantType gjson.Type
+		wantType ojson.Type
 	}{
-		{name: "false preserved", field: `"parallel_tool_calls":false,`, wantType: gjson.False},
-		{name: "true preserved", field: `"parallel_tool_calls":true,`, wantType: gjson.True},
-		{name: "null defaults to true", field: `"parallel_tool_calls":null,`, wantType: gjson.True},
-		{name: "omitted defaults to true", field: "", wantType: gjson.True},
+		{name: "false preserved", field: `"parallel_tool_calls":false,`, wantType: ojson.False},
+		{name: "true preserved", field: `"parallel_tool_calls":true,`, wantType: ojson.True},
+		{name: "null defaults to true", field: `"parallel_tool_calls":null,`, wantType: ojson.True},
+		{name: "omitted defaults to true", field: "", wantType: ojson.True},
 	}
 
 	for _, tt := range tests {
@@ -1870,7 +1906,7 @@ func TestConvertOpenAIRequestToCodexParallelToolCalls(t *testing.T) {
 			if errConvert != nil {
 				t.Fatalf("ConvertOpenAIRequestToCodex returned error: %v", errConvert)
 			}
-			if got := gjson.GetBytes(output, "parallel_tool_calls"); got.Type != tt.wantType {
+			if got := ojson.GetBytesNoCopy(output, "parallel_tool_calls"); got.Type != tt.wantType {
 				t.Fatalf("parallel_tool_calls = %s (type %v), want type %v; output: %s", got.Raw, got.Type, tt.wantType, string(output))
 			}
 		})

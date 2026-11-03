@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -19,7 +20,6 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 // Exercise both WebSocket endpoints with the real handler, manager and executor.
@@ -78,7 +78,7 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 				}
 				if recoverable {
 					corrected := read()
-					if gjson.GetBytes(corrected, "instructions").String() != "CORRECTED" {
+					if ojson.GetBytesNoCopy(corrected, "instructions").String() != "CORRECTED" {
 						t.Errorf("corrected create missing: %s", corrected)
 					}
 					write([]byte(`{"type":"response.created","response":{"id":"corrected","output":[]}}`))
@@ -133,12 +133,12 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 					}
 					break
 				}
-				switch gjson.GetBytes(p, "type").String() {
+				switch ojson.GetBytesNoCopy(p, "type").String() {
 				case "response.completed":
-					if gjson.GetBytes(p, "response.id").String() == "first" {
+					if ojson.GetBytesNoCopy(p, "response.id").String() == "first" {
 						send("REJECTED")
 					} else {
-						completed = gjson.GetBytes(p, "response.output.0.content.0.text").String() == "RECOVERED"
+						completed = ojson.GetBytesNoCopy(p, "response.output.0.content.0.text").String() == "RECOVERED"
 						_ = c.Close()
 					}
 				case "error":
@@ -275,7 +275,7 @@ func TestResponsesWebsocketClosesOnIdleCodexDisconnect(t *testing.T) {
 				if errRead != nil {
 					t.Fatalf("read response before upstream close: %v", errRead)
 				}
-				if gjson.GetBytes(payload, "type").String() == "response.completed" {
+				if ojson.GetBytesNoCopy(payload, "type").String() == "response.completed" {
 					break
 				}
 			}

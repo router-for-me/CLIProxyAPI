@@ -92,10 +92,6 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>PatewayAI 是一家面向资深 AI 开发者的 API 中继服务商，完整支持 Claude 与 Codex 系列模型。所有模型均来自官方高质量渠道，绝无稀释、绝无伪造，计费明细透明可查。经济模式低至 0.5 折，通过<a href="https://pateway.ai/?ch=jjvdb">此链接</a>注册即可获得试用额度，还可参与不定时营销活动领取免费额度。平台同时支持企业级并发、专属管理后台、正式合同与发票，并提供最高 150 美元的双向推荐奖励。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://www.openlux.ai/register?channel=c_6axb1q5n"><img src="./assets/openlux.png" alt="OpenLux" width="150"></a></td>
-<td>感谢 OpenLux 对本项目的赞助！Openlux是一个面向企业的一站式 AI 聚合平台，汇集全球各大厂商主流大模型，平台提供高效、稳定的服务与及时的技术支持。Claude、OpenAI、Gemini 系列模型基准折扣分别低至官方的 0.882 折、0.4 折和 0.8 折。<br><br>CLI Proxy API 用户还可享受专属福利：通过专属链接注册，充值最高可享 7.5% 优惠！<br><br>立即体验：<a href="https://www.openlux.ai/register?channel=c_6axb1q5n">https://www.openlux.ai/register?channel=c_6axb1q5n</a></td>
-</tr>
-<tr>
 <td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
 <td>感谢 Modelflare 赞助本项目！Modelflare：满血稳定不掺水，低成本享受全球 SOTA 模型。站点由美国 LLC 主体 Havenbyte LLC 运营，支持 GPT、Claude、Gemini、Grok 等主流模型和常用兼容协议，还支持 40 多种图片和视频模型。缓存补偿是一大亮点：部分 OpenAI 价格优先、稳定和高级分组提供每日 65%、75%、85% 的缓存命中率保障，符合条件的请求没达到目标的，平台补偿差额，结算后可在用量看板查看。特惠活动：单笔充值 US&#36;20 即可解锁 0.015 倍价格倍率的 GPT 特惠分组，单笔充值 US&#36;50 即可解锁 0.03 倍价格倍率的 Claude 特惠分组。通过<a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">专属链接</a>注册即可参与。</td>
 </tr>
@@ -105,7 +101,14 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 </tr>
 <tr>
 <td width="180"><a href="https://xcode.best/register?aff=OuDv"><img src="./assets/xcode.gif" alt="Xcode" width="150"></a></td>
-<td>这个 AI 模型中转服务商可以随时退款；任意用户可免费开票；对公对私都能做；主流模型全都有。客服长时间在线等候您的差遣；有事儿您吩咐，主打一个听劝！<br><br>Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best</a></td>
+<td>
+    🥚 <b>【免费领鸡蛋！】注册提工单报暗号，白嫖 $5 额度 + 首充 85 折！</b><br>
+    🚀 <b>不只是 API 中转，更是全能 Web 工作台：</b>无需自建前端，网页直接用对话、AI绘图、视频生成、自动化工作流。<br>
+    ⚡ <b>全主流覆盖：</b>Claude、GPT、Gemini、DeepSeek 等顶尖模型极速聚合。<br>
+    🛡️ <b>服务保障：</b>随时退款 ｜ 免费开票 ｜ 对公对私 ｜ 客服长时在线，主打一个听劝！<br><br>
+    👉 Xcode贵宾入口：<a href="https://xcode.best/register?aff=OuDv">https://xcode.best/register?aff=OuDv</a><br>
+    💬 工单暗号：<code>CLIProxyAPI</code>（提交工单即可直接到账）
+  </td>
 </tr>
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="陈局" width="150"></a></td>

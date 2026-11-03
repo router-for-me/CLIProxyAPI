@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -24,7 +25,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // TestResponsesInterruptInFlight verifies that a Codex response.interrupt sent while
@@ -60,7 +60,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 						t.Errorf("upstream write: %v", errWrite)
 					}
 				}
-				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
+				if payload := read(); ojson.GetBytesNoCopy(payload, "type").String() != "response.create" {
 					t.Errorf("expected response.create, got %s", payload)
 					return
 				}
@@ -71,7 +71,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 					return
 				}
 				write(`{"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"interrupted"},"usage":{"output_tokens":7},"output":[]}}`)
-				if payload := read(); gjson.GetBytes(payload, "type").String() != "response.create" {
+				if payload := read(); ojson.GetBytesNoCopy(payload, "type").String() != "response.create" {
 					t.Errorf("expected follow-up response.create, got %s", payload)
 					return
 				}
@@ -129,7 +129,7 @@ func TestResponsesInterruptInFlight(t *testing.T) {
 				if errRead != nil {
 					t.Fatal(errRead)
 				}
-				if got := gjson.GetBytes(payload, "type").String(); got != event {
+				if got := ojson.GetBytesNoCopy(payload, "type").String(); got != event {
 					t.Fatalf("expected %s, got %s", event, payload)
 				}
 			}
@@ -353,7 +353,7 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if got := gjson.GetBytes(created, "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(created, "type").String(); got != "response.created" {
 		t.Fatalf("expected response.created, got %s", created)
 	}
 	if errSend := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.interrupt","response_id":"r-http","mode":"discard_partial_items"}`)); errSend != nil {
@@ -363,13 +363,13 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if errInterrupted != nil {
 		t.Fatal(errInterrupted)
 	}
-	if got := gjson.GetBytes(interrupted, "type").String(); got != "response.incomplete" {
+	if got := ojson.GetBytesNoCopy(interrupted, "type").String(); got != "response.incomplete" {
 		t.Fatalf("expected response.incomplete, got %s", interrupted)
 	}
-	if got := gjson.GetBytes(interrupted, "response.id").String(); got != "r-http" {
+	if got := ojson.GetBytesNoCopy(interrupted, "response.id").String(); got != "r-http" {
 		t.Fatalf("interrupted response id = %q", got)
 	}
-	if got := gjson.GetBytes(interrupted, "response.incomplete_details.reason").String(); got != "interrupted" {
+	if got := ojson.GetBytesNoCopy(interrupted, "response.incomplete_details.reason").String(); got != "interrupted" {
 		t.Fatalf("interrupt reason = %q, payload %s", got, interrupted)
 	}
 	if !executor.canceled.Load() {
@@ -382,14 +382,14 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	if errFollow != nil {
 		t.Fatal(errFollow)
 	}
-	if got := gjson.GetBytes(followCreated, "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(followCreated, "type").String(); got != "response.created" {
 		t.Fatalf("expected follow-up response.created, got %s", followCreated)
 	}
 	_, followDone, errDone := client.ReadMessage()
 	if errDone != nil {
 		t.Fatal(errDone)
 	}
-	if got := gjson.GetBytes(followDone, "type").String(); got != "response.completed" {
+	if got := ojson.GetBytesNoCopy(followDone, "type").String(); got != "response.completed" {
 		t.Fatalf("expected follow-up response.completed, got %s", followDone)
 	}
 }
@@ -427,7 +427,7 @@ func TestResponsesInterruptUsesHomeSessionAuth(t *testing.T) {
 	if errRead != nil {
 		t.Fatal(errRead)
 	}
-	if got := gjson.GetBytes(payload, "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(payload, "type").String(); got != "response.created" {
 		t.Fatalf("expected response.created, got %s", payload)
 	}
 	if _, ok := manager.GetByID(authID); ok {
@@ -452,7 +452,7 @@ func TestResponsesInterruptUsesHomeSessionAuth(t *testing.T) {
 	if errCompleted != nil {
 		t.Fatal(errCompleted)
 	}
-	if got := gjson.GetBytes(completed, "type").String(); got != "response.completed" {
+	if got := ojson.GetBytesNoCopy(completed, "type").String(); got != "response.completed" {
 		t.Fatalf("expected response.completed after interrupt, got %s", completed)
 	}
 	executor.mu.Lock()
@@ -468,14 +468,14 @@ func TestResponsesInterruptUsesHomeSessionAuth(t *testing.T) {
 	if errFollow != nil {
 		t.Fatal(errFollow)
 	}
-	if got := gjson.GetBytes(followCreated, "type").String(); got != "response.created" {
+	if got := ojson.GetBytesNoCopy(followCreated, "type").String(); got != "response.created" {
 		t.Fatalf("expected follow-up response.created, got %s", followCreated)
 	}
 	_, followDone, errDone := client.ReadMessage()
 	if errDone != nil {
 		t.Fatal(errDone)
 	}
-	if got := gjson.GetBytes(followDone, "type").String(); got != "response.completed" {
+	if got := ojson.GetBytesNoCopy(followDone, "type").String(); got != "response.completed" {
 		t.Fatalf("expected follow-up response.completed, got %s", followDone)
 	}
 }

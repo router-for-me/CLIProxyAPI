@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeResponseToOpenAINonStreamFinishReasons(t *testing.T) {
@@ -25,7 +25,7 @@ func TestConvertClaudeResponseToOpenAINonStreamFinishReasons(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			raw := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"` + testCase.stopReason + `"}}`)
 			output := ConvertClaudeResponseToOpenAINonStream(context.Background(), "", nil, nil, raw, nil)
-			if got := gjson.GetBytes(output, "choices.0.finish_reason").String(); got != testCase.want {
+			if got := ojson.GetBytesNoCopy(output, "choices.0.finish_reason").String(); got != testCase.want {
 				t.Fatalf("finish_reason = %q, want %q", got, testCase.want)
 			}
 		})
