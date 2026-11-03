@@ -147,7 +147,10 @@ func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *te
 	if gotHeaders.Get("Chatgpt-Account-Id") != "" || gotHeaders.Get("Originator") != "" {
 		t.Fatalf("unexpected Codex headers on SIWC compact request: %v", gotHeaders)
 	}
-	for _, omitted := range []string{"instructions", "max_output_tokens", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
+	if maxOutputTokens := ojson.GetBytes(gotBody, "max_output_tokens").Int(); maxOutputTokens != 512 {
+		t.Fatalf("max_output_tokens = %d, want 512; body=%s", maxOutputTokens, gotBody)
+	}
+	for _, omitted := range []string{"instructions", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
 		if ojson.GetBytes(gotBody, omitted).Exists() {
 			t.Fatalf("field %q should be omitted in SIWC compact body: %s", omitted, gotBody)
 		}
