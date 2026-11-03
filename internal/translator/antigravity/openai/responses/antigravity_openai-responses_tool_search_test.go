@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertOpenAIResponsesRequestToAntigravity_ExposesClientToolSearch(t *testing.T) {
@@ -26,10 +27,10 @@ func TestConvertOpenAIResponsesRequestToAntigravity_ExposesClientToolSearch(t *t
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	root := gjson.ParseBytes(out)
+	root := util.ParseGJSONBytesNoCopy(out)
 
 	names := make([]string, 0)
-	root.Get("request.tools.0.functionDeclarations").ForEach(func(_, declaration gjson.Result) bool {
+	root.Get("request.tools.0.functionDeclarations").ForEach(func(_, declaration ojson.Result) bool {
 		names = append(names, declaration.Get("name").String())
 		return true
 	})
@@ -53,12 +54,12 @@ func TestConvertAntigravityResponseToOpenAIResponses_ToolSearchCall(t *testing.T
 	chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool_search","args":{"query":"fixture"}}}]},"finishReason":"STOP"}],"responseId":"resp_ag_tool_search"}}`)
 
 	var param any
-	var added, done, completed gjson.Result
+	var added, done, completed ojson.Result
 	for _, frame := range [][]byte{chunk, []byte("data: [DONE]")} {
 		for _, output := range ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", originalRequest, nil, frame, &param) {
 			payload := string(output)
 			if idx := strings.Index(payload, "data:"); idx >= 0 {
-				data := gjson.Parse(payload[idx+len("data:"):])
+				data := ojson.Parse(payload[idx+len("data:"):])
 				switch data.Get("type").String() {
 				case "response.output_item.added":
 					added = data
@@ -89,7 +90,7 @@ func TestConvertAntigravityResponseToOpenAIResponses_ToolSearchCall(t *testing.T
 	wantItemID := "tsc_" + callID
 	for _, test := range []struct {
 		label string
-		item  gjson.Result
+		item  ojson.Result
 	}{
 		{label: "added", item: added.Get("item")},
 		{label: "done", item: done.Get("item")},
@@ -102,7 +103,7 @@ func TestConvertAntigravityResponseToOpenAIResponses_ToolSearchCall(t *testing.T
 
 	nonStreamRaw := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool_search","args":{"query":"fixture"}}}]},"finishReason":"STOP"}],"responseId":"resp_ag_tool_search_nonstream"}}`)
 	nonStreamOut := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.8-flash-high", originalRequest, nil, nonStreamRaw, nil)
-	nonStreamItem := gjson.GetBytes(nonStreamOut, "output.0")
+	nonStreamItem := ojson.GetBytesNoCopy(nonStreamOut, "output.0")
 	if got := nonStreamItem.Get("type").String(); got != "tool_search_call" {
 		t.Fatalf("non-stream item type = %q, want tool_search_call; raw: %s", got, nonStreamOut)
 	}

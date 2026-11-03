@@ -3,10 +3,10 @@ package codex
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/url"

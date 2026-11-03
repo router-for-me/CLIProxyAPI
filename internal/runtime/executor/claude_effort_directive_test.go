@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestInsertClaudeMidConversationSystemMessages_EffortDirective(t *testing.T) {
@@ -31,9 +31,9 @@ func TestInsertClaudeMidConversationSystemMessages_EffortDirective(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			payload := []byte(`{"messages":[{"role":"user","content":"summary"},` + test.tail + `]}`)
-			before := gjson.GetBytes(payload, "messages").Array()
+			before := ojson.GetBytes(payload, "messages").Array()
 			out := insertClaudeMidConversationSystemMessages(payload, []string{"first guidance", "second guidance"})
-			after := gjson.GetBytes(out, "messages").Array()
+			after := ojson.GetBytes(out, "messages").Array()
 			if len(after) != len(before)+2 {
 				t.Fatalf("message count = %d, want %d: %s", len(after), len(before)+2, out)
 			}
@@ -71,22 +71,22 @@ func TestClaudeSystemPlacement_EffortDirectivePolicies(t *testing.T) {
 				{name: "count tokens", out: relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, keepTopLevel)},
 			} {
 				t.Run(test.name, func(t *testing.T) {
-					if got := gjson.GetBytes(test.out, "messages.1").Raw; got != gjson.GetBytes(payload, "messages.1").Raw {
+					if got := ojson.GetBytes(test.out, "messages.1").Raw; got != ojson.GetBytes(payload, "messages.1").Raw {
 						t.Fatalf("caller effort directive changed or moved: %s", test.out)
 					}
 					wantMessages := int64(4)
 					if keepTopLevel {
 						wantMessages = 3
-						if !bytes.Contains([]byte(gjson.GetBytes(test.out, "system").Raw), []byte("caller guidance")) {
+						if !bytes.Contains([]byte(ojson.GetBytes(test.out, "system").Raw), []byte("caller guidance")) {
 							t.Fatalf("caller guidance missing from top-level system: %s", test.out)
 						}
 					} else {
 						assertClaudeMidConversationSystemMessage(t, test.out, 3, "caller guidance", "")
-						if bytes.Contains([]byte(gjson.GetBytes(test.out, "system").Raw), []byte("caller guidance")) {
+						if bytes.Contains([]byte(ojson.GetBytes(test.out, "system").Raw), []byte("caller guidance")) {
 							t.Fatalf("relocated caller guidance remains in top-level system: %s", test.out)
 						}
 					}
-					if got := gjson.GetBytes(test.out, "messages.#").Int(); got != wantMessages {
+					if got := ojson.GetBytes(test.out, "messages.#").Int(); got != wantMessages {
 						t.Fatalf("message count = %d, want %d: %s", got, wantMessages, test.out)
 					}
 				})
@@ -109,7 +109,7 @@ func TestCaptureClaudeCodeSystemPlacement_EffortDirective(t *testing.T) {
 	if state.insertAt != 3 || len(state.insertedRaw) != 1 || len(state.texts) != 1 {
 		t.Fatalf("placement = %+v, want one inserted guidance turn at index 3", state)
 	}
-	if state.insertedRaw[0] != gjson.GetBytes(after, "messages.3").Raw || state.texts[0] != "guidance" {
+	if state.insertedRaw[0] != ojson.GetBytes(after, "messages.3").Raw || state.texts[0] != "guidance" {
 		t.Fatalf("placement captured the wrong turn: %+v", state)
 	}
 	if callerOwned := captureClaudeCodeSystemPlacement(before, before, true); len(callerOwned.insertedRaw) != 0 {
@@ -165,16 +165,16 @@ func TestClaudeExecutor_EffortDirectiveAfterCompaction(t *testing.T) {
 			if !upstream.called {
 				t.Fatal("upstream request was not sent")
 			}
-			if got := gjson.GetBytes(upstream.body, "messages.1").Raw; got != gjson.GetBytes(payload, "messages.1").Raw {
+			if got := ojson.GetBytes(upstream.body, "messages.1").Raw; got != ojson.GetBytes(payload, "messages.1").Raw {
 				t.Fatalf("caller effort directive changed or moved on the wire: %s", upstream.body)
 			}
-			if got := gjson.GetBytes(upstream.body, "messages.#.role").Raw; got != `["user","system","user","system"]` {
+			if got := ojson.GetBytes(upstream.body, "messages.#.role").Raw; got != `["user","system","user","system"]` {
 				t.Fatalf("wire roles = %s, want [user, directive, user, caller system]: %s", got, upstream.body)
 			}
-			if got := gjson.GetBytes(upstream.body, "messages.3.content.0.text").String(); got != "caller guidance" {
+			if got := ojson.GetBytes(upstream.body, "messages.3.content.0.text").String(); got != "caller guidance" {
 				t.Fatalf("caller guidance missing from trailing system message: %s", upstream.body)
 			}
-			if bytes.Contains([]byte(gjson.GetBytes(upstream.body, "system").Raw), []byte("caller guidance")) {
+			if bytes.Contains([]byte(ojson.GetBytes(upstream.body, "system").Raw), []byte("caller guidance")) {
 				t.Fatalf("OAuth caller guidance must not remain in top-level system: %s", upstream.body)
 			}
 		})

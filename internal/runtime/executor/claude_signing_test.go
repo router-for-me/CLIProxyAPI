@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const claudeCCH21220BaseBody = `{"model":"model-a","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.220.test; cc_entrypoint=sdk-cli; cch=00000;"},{"type":"text","text":"system-x"}],"tools":[],"metadata":{"user_id":"meta-x"},"max_tokens":1,"thinking":{"type":"adaptive","display":"omitted"},"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"output_config":{"effort":"high"},"stream":true}`
@@ -72,7 +72,7 @@ func TestSignAnthropicMessagesBody_PreservesFinalSerializedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signAnthropicMessagesBody() error = %v", err)
 	}
-	if got := gjson.GetBytes(signed, "messages.0.content.0.text").String(); got != literal {
+	if got := ojson.GetBytes(signed, "messages.0.content.0.text").String(); got != literal {
 		t.Fatalf("message text = %q, want %q", got, literal)
 	}
 
@@ -98,7 +98,7 @@ func TestFinalizeAnthropicMessagesBodyCCH_InsertsMissingPlaceholder(t *testing.T
 	if got := claudeCCHFromBody(t, signed); got != "7ee87" {
 		t.Fatalf("cch = %q, want %q", got, "7ee87")
 	}
-	billing := gjson.GetBytes(signed, "system.0.text").String()
+	billing := ojson.GetBytes(signed, "system.0.text").String()
 	if !strings.Contains(billing, "cc_entrypoint=sdk-cli; cch=7ee87;") {
 		t.Fatalf("billing header = %q, want CCH after entrypoint", billing)
 	}
@@ -113,10 +113,10 @@ func TestFinalizeAnthropicMessagesBodyCCH_AddsMissingBillingBlock(t *testing.T) 
 	if err != nil {
 		t.Fatalf("finalizeAnthropicMessagesBodyCCH() error = %v", err)
 	}
-	if got := gjson.GetBytes(signed, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") {
+	if got := ojson.GetBytes(signed, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") {
 		t.Fatalf("system.0.text = %q, want billing block", got)
 	}
-	if got := gjson.GetBytes(signed, "system.1.text").String(); got != "keep this system text" {
+	if got := ojson.GetBytes(signed, "system.1.text").String(); got != "keep this system text" {
 		t.Fatalf("system.1.text = %q, want preserved system text", got)
 	}
 	if _, ok := claudeBillingCCHDigitsOffset(signed); !ok {
