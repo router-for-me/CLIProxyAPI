@@ -8110,3 +8110,388 @@ func TestXAIWebsocketUsagePreservesFilteredSearch(t *testing.T) {
 		t.Fatal("usage not published")
 	}
 }
+
+func TestXAIDoneTerminalType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "completed", raw: `{"type":"response.done","response":{"status":"completed"}}`, want: "response.completed"},
+		{name: "empty status", raw: `{"type":"response.done","response":{"status":""}}`, want: "response.completed"},
+		{name: "missing status", raw: `{"type":"response.done","response":{}}`, want: "response.completed"},
+		{name: "null error", raw: `{"type":"response.done","response":{"status":"completed","error":null}}`, want: "response.completed"},
+		{name: "empty error object", raw: `{"type":"response.done","response":{"status":"completed","error":{}}}`, want: "response.completed"},
+		{name: "empty error string", raw: `{"type":"response.done","error":"  ","response":{"status":"completed"}}`, want: "response.completed"},
+		{name: "incomplete", raw: `{"type":"response.done","response":{"status":"incomplete"}}`, want: "response.incomplete"},
+		{name: "incomplete uppercase", raw: `{"type":"response.done","response":{"status":" Incomplete "}}`, want: "response.incomplete"},
+		{name: "failed", raw: `{"type":"response.done","response":{"status":"failed"}}`, want: "response.done"},
+		{name: "cancelled", raw: `{"type":"response.done","response":{"status":"cancelled"}}`, want: "response.done"},
+		{name: "error beats completed status", raw: `{"type":"response.done","response":{"status":"completed","error":{"message":"boom"}}}`, want: "response.done"},
+		{name: "error beats incomplete status", raw: `{"type":"response.done","response":{"status":"incomplete","error":{"code":"server_error"}}}`, want: "response.done"},
+		{name: "top-level error", raw: `{"type":"response.done","error":"boom","response":{"status":"completed"}}`, want: "response.done"},
+		{name: "passthrough completed", raw: `{"type":"response.completed","response":{"status":"failed"}}`, want: "response.completed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := xaiDoneTerminalType([]byte(tt.raw)); got != tt.want {
+				t.Fatalf("xaiDoneTerminalType() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorExecuteResponseDoneTerminalSucceeds(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	const requestedModel = "grok-4.5-done-ok"
+	nextEncrypted := testValidGrokEncryptedContentForSeed(91)
+	doneDoc := ojson.NewDoc([]byte(`{"type":"response.done","response":{"id":"resp_done_ok","object":"response","status":"completed","output":[{"type":"reasoning","summary":[],"encrypted_content":""},{"id":"msg_done","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done ok"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`))
+	if err := doneDoc.Set("response.output.0.encrypted_content", nextEncrypted); err != nil {
+		t.Fatalf("set encrypted_content: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", doneDoc.Bytes())
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	ctx := testContextWithAPIKey("xai-done-ok-caller")
+	payload := []byte(`{"model":"` + requestedModel + `","prompt_cache_key":"done-ok","input":"hi"}`)
+	req := cliproxyexecutor.Request{Model: requestedModel, Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	if !scope.valid() {
+		t.Fatal("completed response.done replay scope must be valid")
+	}
+	previousEncrypted := seedXAIReplayForTest(t, scope, 90)
+
+	resp, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() on response.done terminal must not 408: %v", err)
+	}
+	if got := ojson.GetBytes(resp.Payload, "status").String(); got != "completed" {
+		t.Fatalf("status = %q, want completed; payload=%s", got, resp.Payload)
+	}
+	if got := ojson.GetBytes(resp.Payload, "output.1.content.0.text").String(); got != "done ok" {
+		t.Fatalf("output text = %q, want %q; payload=%s", got, "done ok", resp.Payload)
+	}
+	assertXAIReplayEncrypted(t, scope, nextEncrypted, previousEncrypted)
+}
+
+func TestXAIExecutorExecuteResponseDonePatchesEmptyOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg_done_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"patched ok\"}]}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_done_patch\",\"object\":\"response\",\"status\":\"\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.5",
+		Payload: []byte(`{"model":"grok-4.5","input":"hi","max_output_tokens":16}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatalf("Execute() on empty-status response.done must not 408: %v", err)
+	}
+	if got := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "patched ok" {
+		t.Fatalf("output text = %q, want patched ok; payload=%s", got, resp.Payload)
+	}
+}
+
+func TestXAIExecutorExecuteResponseDoneFailedAndIncompleteDoNotReplay(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus string
+		wantReason string
+	}{
+		{
+			name:       "failed",
+			body:       `data: {"type":"response.done","response":{"id":"resp_failed","object":"response","status":"failed","output":[],"error":{"code":"server_error","message":"boom"},"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}` + "\n\n",
+			wantStatus: "failed",
+		},
+		{
+			name:       "cancelled",
+			body:       `data: {"type":"response.done","response":{"id":"resp_cancelled","object":"response","status":"cancelled","output":[],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}` + "\n\n",
+			wantStatus: "cancelled",
+		},
+		{
+			name:       "error beats completed status",
+			body:       `data: {"type":"response.done","response":{"id":"resp_err","object":"response","status":"completed","output":[],"error":{"message":"boom"},"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}` + "\n\n",
+			wantStatus: "completed",
+		},
+		{
+			name:       "incomplete",
+			body:       `data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_done","type":"reasoning","summary":[]}}` + "\n\n" + `data: {"type":"response.done","response":{"id":"resp_incomplete","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":4,"output_tokens":1,"total_tokens":5}}}` + "\n\n",
+			wantStatus: "incomplete",
+			wantReason: "max_output_tokens",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			internalcache.ClearXAIReasoningReplayCache()
+			t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+
+			requestedModel := "grok-4.5-done-" + strings.ReplaceAll(tt.name, " ", "-")
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+			ctx := testContextWithAPIKey("xai-done-guard-" + tt.name)
+			payload := []byte(`{"model":"` + requestedModel + `","prompt_cache_key":"done-guard","input":"hi"}`)
+			req := cliproxyexecutor.Request{Model: requestedModel, Payload: payload}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+			scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, req, opts, payload)
+			if !scope.valid() {
+				t.Fatal("replay scope must be valid")
+			}
+			previousEncrypted := seedXAIReplayForTest(t, scope, 92)
+
+			plugin := &captureXAIUsagePlugin{model: requestedModel, records: make(chan usage.Record, 2)}
+			usage.RegisterNamedPlugin(t.Name(), plugin)
+			t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{}) })
+
+			resp, err := exec.Execute(ctx, auth, req, opts)
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if got := ojson.GetBytes(resp.Payload, "status").String(); got != tt.wantStatus {
+				t.Fatalf("status = %q, want %q; payload=%s", got, tt.wantStatus, resp.Payload)
+			}
+			if tt.wantReason != "" {
+				if got := ojson.GetBytes(resp.Payload, "incomplete_details.reason").String(); got != tt.wantReason {
+					t.Fatalf("incomplete reason = %q, want %q; payload=%s", got, tt.wantReason, resp.Payload)
+				}
+				if got := ojson.GetBytes(resp.Payload, "output.#").Int(); got != 1 {
+					t.Fatalf("incomplete output length = %d, want 1; payload=%s", got, resp.Payload)
+				}
+			}
+			if tt.name == "error beats completed status" && !strings.Contains(string(resp.Payload), "boom") {
+				t.Fatalf("failure error was stripped: %s", resp.Payload)
+			}
+			assertXAIReplayPreserved(t, scope, previousEncrypted)
+			if tt.wantStatus != "incomplete" {
+				assertNoAdditionalXAIUsageRecord(t, plugin.records)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorExecuteStreamResponseDoneTerminal(t *testing.T) {
+	const requestedModel = "grok-4.3-stream-done"
+
+	plugin := &captureXAIUsagePlugin{model: requestedModel, records: make(chan usage.Record, 2)}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{}) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_done_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"done ok\"}]}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.done\ndata: {\"type\":\"response.done\",\"sequence_number\":2,\"response\":{\"id\":\"resp_done_stream_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":%q,\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}\n\n", requestedModel)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   requestedModel,
+		Payload: []byte(`{"model":"` + requestedModel + `","stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() on response.done terminal must not fail: %v", err)
+	}
+	output := drainXAIStream(t, result)
+	for _, want := range []string{`"text":"done ok"`, `"type":"message_stop"`, `"output_tokens":2`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream missing %q: %s", want, output)
+		}
+	}
+	if strings.Contains(output, "response.done") {
+		t.Fatalf("response.done leaked untranslated downstream: %s", output)
+	}
+	record := waitForXAIUsageRecord(t, plugin.records)
+	if record.Failed {
+		t.Fatalf("usage record marked failed: %+v", record.Fail)
+	}
+	if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 2 || record.Detail.TotalTokens != 7 {
+		t.Fatalf("usage detail = %+v, want 5/2/7", record.Detail)
+	}
+	assertNoAdditionalXAIUsageRecord(t, plugin.records)
+}
+
+func TestXAIExecutorExecuteStreamResponseDoneFailedStaysUnsuccessful(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	const requestedModel = "grok-4.3-stream-done-failed"
+	plugin := &captureXAIUsagePlugin{model: requestedModel, records: make(chan usage.Record, 2)}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{}) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_failed\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: response.done\ndata: {\"type\":\"response.done\",\"sequence_number\":2,\"response\":{\"id\":\"resp_failed\",\"object\":\"response\",\"status\":\"failed\",\"model\":%q,\"output\":[],\"error\":{\"code\":\"server_error\",\"message\":\"boom\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"total_tokens\":7}}}\n\n", requestedModel)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	ctx := testContextWithAPIKey("xai-done-failed-caller")
+	payload := []byte(`{"model":"` + requestedModel + `","metadata":{"user_id":"{\"session_id\":\"done-failed\"}"},"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	req := cliproxyexecutor.Request{Model: requestedModel, Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Stream: true}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatClaude, req, opts, payload)
+	if !scope.valid() {
+		t.Fatal("failed-terminal replay scope must be valid")
+	}
+	previousEncrypted := seedXAIReplayForTest(t, scope, 93)
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	output := drainXAIStream(t, result)
+	for _, banned := range []string{"message_stop", "message_delta", `"type":"response.completed"`} {
+		if strings.Contains(output, banned) {
+			t.Fatalf("failed response.done produced %q downstream: %s", banned, output)
+		}
+	}
+	assertNoAdditionalXAIUsageRecord(t, plugin.records)
+	assertXAIReplayPreserved(t, scope, previousEncrypted)
+}
+
+func TestXAIExecutorExecuteStreamResponseDoneIncompleteStaysIncomplete(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	const requestedModel = "grok-4.3-stream-done-incomplete"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"msg_incomplete\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"cut short\"}]}}\n\n")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.done\",\"response\":{\"id\":\"resp_incomplete\",\"object\":\"response\",\"status\":\"incomplete\",\"model\":%q,\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":1,\"total_tokens\":5}}}\n\n", requestedModel)
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	ctx := testContextWithAPIKey("xai-done-incomplete-caller")
+	payload := []byte(`{"model":"` + requestedModel + `","prompt_cache_key":"done-incomplete","input":"hi"}`)
+	req := cliproxyexecutor.Request{Model: requestedModel, Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, sdktranslator.FormatOpenAIResponse, req, opts, payload)
+	if !scope.valid() {
+		t.Fatal("incomplete-terminal replay scope must be valid")
+	}
+	previousEncrypted := seedXAIReplayForTest(t, scope, 94)
+
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	output := drainXAIStream(t, result)
+	if strings.Contains(output, `"type":"response.completed"`) {
+		t.Fatalf("incomplete response.done was promoted to completed: %s", output)
+	}
+	if !strings.Contains(output, `"type":"response.incomplete"`) {
+		t.Fatalf("incomplete response.done was not forwarded as response.incomplete: %s", output)
+	}
+	assertXAIReplayPreserved(t, scope, previousEncrypted)
+}
+
+func drainXAIStream(t *testing.T, result *cliproxyexecutor.StreamResult) string {
+	t.Helper()
+	var streamed bytes.Buffer
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamed.Write(chunk.Payload)
+	}
+	return streamed.String()
+}
+
+func seedXAIReplayForTest(t *testing.T, scope xaiReasoningReplayScope, seed byte) string {
+	t.Helper()
+	encrypted := testValidGrokEncryptedContentForSeed(seed)
+	item := []byte(`{"type":"reasoning","summary":[],"content":null,"encrypted_content":""}`)
+	var err error
+	item, err = ojson.SetBytes(item, "encrypted_content", encrypted)
+	if err != nil {
+		t.Fatalf("set replay encrypted_content: %v", err)
+	}
+	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, [][]byte{item}) {
+		t.Fatal("failed to seed xAI replay cache")
+	}
+	return encrypted
+}
+
+func assertXAIReplayPreserved(t *testing.T, scope xaiReasoningReplayScope, encrypted string) {
+	t.Helper()
+	items, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey)
+	if !ok || len(items) != 1 {
+		t.Fatalf("replay items = %d ok=%v, want the previous turn preserved", len(items), ok)
+	}
+	if got := ojson.GetBytes(items[0], "encrypted_content").String(); got != encrypted {
+		t.Fatalf("replay encrypted_content = %q, want previous %q", got, encrypted)
+	}
+}
+
+func assertXAIReplayEncrypted(t *testing.T, scope xaiReasoningReplayScope, want, previous string) {
+	t.Helper()
+	items, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey)
+	if !ok || len(items) == 0 {
+		t.Fatal("completed response.done must refresh the replay cache")
+	}
+	foundWant := false
+	for _, item := range items {
+		got := ojson.GetBytes(item, "encrypted_content").String()
+		if got == previous {
+			t.Fatalf("replay cache still holds the previous turn: %s", item)
+		}
+		if got == want {
+			foundWant = true
+		}
+	}
+	if !foundWant {
+		t.Fatalf("replay cache missing completed encrypted_content %q; items=%d", want, len(items))
+	}
+}
