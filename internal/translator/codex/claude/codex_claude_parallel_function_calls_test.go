@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 type codexClaudeContentBlock struct {
@@ -41,7 +41,7 @@ func assertCodexClaudeContentBlockLifecycle(t *testing.T, outputs [][]byte) []*c
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			event := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if messageState == 2 {
 				t.Fatalf("event emitted after message_stop: %s", event.Raw)
 			}

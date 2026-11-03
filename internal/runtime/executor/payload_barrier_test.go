@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -15,7 +16,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestPayloadBarrierCodexImageFilter(t *testing.T) {
@@ -81,11 +81,11 @@ func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 						t.Fatal(errExecute)
 					}
 					body := <-captured
-					image := gjson.GetBytes(body, `tools.#(type=="image_generation")`).Exists()
+					image := ojson.GetBytes(body, `tools.#(type=="image_generation")`).Exists()
 					if image != (model == "gpt-5.6-luna") {
 						t.Fatalf("image tool presence = %v: %s", image, body)
 					}
-					if model == "gpt-5.6-sol" && (gjson.GetBytes(body, "instructions").Exists() || gjson.GetBytes(body, "prompt_cache_key").Exists()) {
+					if model == "gpt-5.6-sol" && (ojson.GetBytes(body, "instructions").Exists() || ojson.GetBytes(body, "prompt_cache_key").Exists()) {
 						t.Fatalf("late injection undid filter: %s", body)
 					}
 				})
@@ -116,13 +116,13 @@ func TestPayloadBarrierAntigravityRebuiltAttempts(t *testing.T) {
 		if errClose := request.Body.Close(); errClose != nil {
 			t.Fatal(errClose)
 		}
-		if gjson.GetBytes(wire, "request.generationConfig.maxOutputTokens").Int() != 123 {
+		if ojson.GetBytes(wire, "request.generationConfig.maxOutputTokens").Int() != 123 {
 			t.Fatalf("built-in cleanup undid override: %s", wire)
 		}
-		if gjson.GetBytes(wire, "request.sessionId").Exists() {
+		if ojson.GetBytes(wire, "request.sessionId").Exists() {
 			t.Fatalf("session reinjected: %s", wire)
 		}
-		if got := gjson.GetBytes(wire, "request.contents.#").Int(); got != 1 {
+		if got := ojson.GetBytes(wire, "request.contents.#").Int(); got != 1 {
 			t.Fatalf("filter applied more than once: %s", wire)
 		}
 	}
@@ -139,7 +139,7 @@ func TestPayloadBarrierAIStudio(t *testing.T) {
 		if errTranslate != nil {
 			t.Fatal(errTranslate)
 		}
-		if gjson.GetBytes(body, "contents").Exists() || gjson.GetBytes(body, "generationConfig.maxOutputTokens").Int() != 900000 || gjson.GetBytes(body, "generationConfig.thinkingConfig.thinkingLevel").String() != "low" {
+		if ojson.GetBytes(body, "contents").Exists() || ojson.GetBytes(body, "generationConfig.maxOutputTokens").Int() != 900000 || ojson.GetBytes(body, "generationConfig.thinkingConfig.thinkingLevel").String() != "low" {
 			t.Fatalf("late normalization undid rules: %s", body)
 		}
 	}
@@ -158,10 +158,10 @@ func TestPayloadBarrierXAIWebsocketRetry(t *testing.T) {
 	if !bytes.Equal(first, retry) {
 		t.Fatalf("retry changed configured body: %s != %s", first, retry)
 	}
-	if gjson.GetBytes(first, "store").Bool() || gjson.GetBytes(first, "instructions").String() != "configured" || gjson.GetBytes(first, "previous_response_id").Exists() || gjson.GetBytes(first, "input.#").Int() != 1 {
+	if ojson.GetBytes(first, "store").Bool() || ojson.GetBytes(first, "instructions").String() != "configured" || ojson.GetBytes(first, "previous_response_id").Exists() || ojson.GetBytes(first, "input.#").Int() != 1 {
 		t.Fatalf("invalid final payload: %s", first)
 	}
-	if gjson.GetBytes(first, "type").String() != "response.create" {
+	if ojson.GetBytes(first, "type").String() != "response.create" {
 		t.Fatalf("missing frame type: %s", first)
 	}
 }
@@ -174,11 +174,11 @@ func TestPayloadBarrierClaudeDoesNotReplayFiltersOrReinjectIdentity(t *testing.T
 	for _, stream := range []bool{false, true} {
 		body := executeClaudeContextManagementRequest(t, cfg, []byte(`{"model":"claude-opus-5","thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]}`), stream)
 		for _, path := range []string{"system", "metadata", "diagnostics", "context_management"} {
-			if gjson.GetBytes(body, path).Exists() {
+			if ojson.GetBytes(body, path).Exists() {
 				t.Fatalf("%s was reinjected: %s", path, body)
 			}
 		}
-		if gjson.GetBytes(body, "messages.#").Int() != 2 || gjson.GetBytes(body, "max_tokens").Int() != 1 {
+		if ojson.GetBytes(body, "messages.#").Int() != 2 || ojson.GetBytes(body, "max_tokens").Int() != 1 {
 			t.Fatalf("built-in processing changed final rule semantics: %s", body)
 		}
 	}
@@ -268,7 +268,7 @@ func TestPayloadBarrierEffectiveServiceTierUsageAfterOverride(t *testing.T) {
 	t.Run("openai compat chat completions override", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
-			if got := gjson.GetBytes(body, "service_tier").String(); got != "priority" {
+			if got := ojson.GetBytes(body, "service_tier").String(); got != "priority" {
 				t.Errorf("upstream body service_tier = %q, want priority", got)
 			}
 			if r.Header.Get("Accept") == "text/event-stream" {
@@ -438,6 +438,78 @@ func TestPayloadBarrierEffectiveServiceTierUsageAfterOverride(t *testing.T) {
 					t.Fatalf("usage tiers = requested:%q effective:%q, want auto/empty", record.ServiceTier, record.EffectiveServiceTier)
 				}
 			})
+		}
+	})
+}
+
+func TestPayloadBarrierMultiExecutorSingleDocConsistency(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "*", Protocol: "claude"},
+						{Name: "*", Protocol: "codex"},
+						{Name: "*", Protocol: "gemini"},
+						{Name: "*", Protocol: "openai"},
+					},
+					Params: map[string]any{
+						"custom_override": "barrier_won",
+					},
+				},
+			},
+			Filter: []config.PayloadFilterRule{
+				{
+					Models: []config.PayloadModelRule{
+						{Name: "*", Protocol: "claude"},
+						{Name: "*", Protocol: "codex"},
+						{Name: "*", Protocol: "gemini"},
+						{Name: "*", Protocol: "openai"},
+					},
+					Params: []string{"filtered_out"},
+				},
+			},
+		},
+	}
+
+	t.Run("codex cacheHelperDoc applies FinalizePayloadDoc as final barrier", func(t *testing.T) {
+		exec := NewCodexExecutor(cfg)
+		raw := []byte(`{"model":"gpt-5","filtered_out":"drop_me","input":[{"type":"message","role":"user","id":"item_1","content":[{"type":"input_text","text":"hi"}]}]}`)
+		req := cliproxyexecutor.Request{Model: "gpt-5", Payload: raw}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+		reqCtx := helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(cfg, exec.Identifier(), "gpt-5", "codex", "", raw, req, opts))
+
+		doc := ojson.NewDoc(bytes.Clone(raw))
+		_, out, errCache := exec.cacheHelperDoc(reqCtx, opts.SourceFormat, "https://chatgpt.com/backend-api/codex/responses", req, doc, nil, opts.Headers)
+		if errCache != nil {
+			t.Fatalf("cacheHelperDoc error: %v", errCache)
+		}
+		if got := ojson.GetBytesNoCopy(out, "custom_override").String(); got != "barrier_won" {
+			t.Fatalf("custom_override = %q, want barrier_won", got)
+		}
+		if ojson.GetBytesNoCopy(out, "filtered_out").Exists() {
+			t.Fatalf("filtered_out should be removed by finalizer: %s", out)
+		}
+	})
+
+	t.Run("xai prepared request doc applies FinalizeDoc as final barrier", func(t *testing.T) {
+		exec := NewXAIExecutor(cfg)
+		raw := []byte(`{"model":"grok-4","filtered_out":"drop_me","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+		req := cliproxyexecutor.Request{Model: "grok-4", Payload: raw}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+		prepared, errPrep := exec.prepareResponsesRequest(ctx, req, opts, true)
+		if errPrep != nil {
+			t.Fatalf("prepareResponsesRequest error: %v", errPrep)
+		}
+		sanitizeXAIInputEncryptedContentForBaseURLDoc(prepared.doc, "")
+		prepared.finalizePayload.FinalizeDoc(prepared.doc)
+		out := prepared.doc.Bytes()
+		if got := ojson.GetBytesNoCopy(out, "custom_override").String(); got != "barrier_won" {
+			t.Fatalf("custom_override = %q, want barrier_won", got)
+		}
+		if ojson.GetBytesNoCopy(out, "filtered_out").Exists() {
+			t.Fatalf("filtered_out should be removed by finalizer: %s", out)
 		}
 	})
 }

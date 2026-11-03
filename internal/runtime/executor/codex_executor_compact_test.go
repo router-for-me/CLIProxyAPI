@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t *testing.T) {
@@ -67,13 +67,13 @@ func TestCodexExecutorCompactAddsDefaultInstructionsWithoutInjectingImageTool(t 
 			if gotPath != "/responses/compact" {
 				t.Fatalf("path = %q, want %q", gotPath, "/responses/compact")
 			}
-			if instructions := gjson.GetBytes(gotBody, "instructions"); instructions.Type != gjson.String || instructions.String() != "" {
+			if instructions := ojson.GetBytes(gotBody, "instructions"); instructions.Type != ojson.String || instructions.String() != "" {
 				t.Fatalf("instructions = %s, want empty string; body=%s", instructions.Raw, gotBody)
 			}
-			if gjson.GetBytes(gotBody, "tools").Exists() {
+			if ojson.GetBytes(gotBody, "tools").Exists() {
 				t.Fatalf("compact request injected image_generation tool: %s", gotBody)
 			}
-			input := gjson.GetBytes(gotBody, "input").Array()
+			input := ojson.GetBytes(gotBody, "input").Array()
 			if len(input) != 2 || input[1].Get("type").String() != "compaction_trigger" {
 				t.Fatalf("compact input order changed: %s", gotBody)
 			}
@@ -148,19 +148,19 @@ func TestCodexExecutorCompactUseSIWCAppliesSIWCRulesBeforePayloadFinalizer(t *te
 		t.Fatalf("unexpected Codex headers on SIWC compact request: %v", gotHeaders)
 	}
 	for _, omitted := range []string{"instructions", "max_output_tokens", "prompt_cache_retention", "prompt_cache_options", "stream", "store"} {
-		if gjson.GetBytes(gotBody, omitted).Exists() {
+		if ojson.GetBytes(gotBody, omitted).Exists() {
 			t.Fatalf("field %q should be omitted in SIWC compact body: %s", omitted, gotBody)
 		}
 	}
 	// PayloadFinalizer runs last and can override temperature after built-in SIWC stripping.
-	if gotTemp := gjson.GetBytes(gotBody, "temperature").Float(); gotTemp != 0.25 {
+	if gotTemp := ojson.GetBytes(gotBody, "temperature").Float(); gotTemp != 0.25 {
 		t.Fatalf("PayloadFinalizer temperature override = %v, want 0.25; body=%s", gotTemp, gotBody)
 	}
 }
 
 func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770(t *testing.T) {
 	hasWebSearchCallInInput := func(body []byte) bool {
-		for _, item := range gjson.GetBytes(body, "input").Array() {
+		for _, item := range ojson.GetBytes(body, "input").Array() {
 			if item.Get("type").String() == "web_search_call" {
 				return true
 			}
@@ -169,7 +169,7 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 	}
 	countWebSearchTools := func(body []byte) int {
 		count := 0
-		for _, tool := range gjson.GetBytes(body, "tools").Array() {
+		for _, tool := range ojson.GetBytes(body, "tools").Array() {
 			if tool.Get("type").String() == "web_search" {
 				count++
 			}
@@ -258,7 +258,7 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 		if got := countWebSearchTools(gotBody); got != 1 {
 			t.Fatalf("web_search tool count = %d, want 1; body=%s", got, gotBody)
 		}
-		if got := len(gjson.GetBytes(gotBody, "tools").Array()); got != 1 {
+		if got := len(ojson.GetBytes(gotBody, "tools").Array()); got != 1 {
 			t.Fatalf("tools len = %d, want 1; body=%s", got, gotBody)
 		}
 	})
@@ -351,7 +351,7 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 		if got := countWebSearchTools(prepared.clientBody); got != 1 {
 			t.Fatalf("web_search tool count = %d, want 1; body=%s", got, prepared.clientBody)
 		}
-		if !gjson.GetBytes(prepared.clientBody, "tools.0.external_web_access").Bool() {
+		if !ojson.GetBytes(prepared.clientBody, "tools.0.external_web_access").Bool() {
 			t.Fatalf("existing web_search options not preserved: %s", prepared.clientBody)
 		}
 	})
@@ -380,13 +380,13 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 		if err != nil {
 			t.Fatalf("prepareCodexWebsocketStream() error = %v", err)
 		}
-		if gjson.GetBytes(prepared.clientBody, "tools").Exists() {
+		if ojson.GetBytes(prepared.clientBody, "tools").Exists() {
 			t.Fatalf("Responses Lite request must not inject top-level tools: %s", prepared.clientBody)
 		}
 		if hasWebSearchCallInInput(prepared.clientBody) {
 			t.Fatalf("Responses Lite request must strip replayed web_search_call items: %s", prepared.clientBody)
 		}
-		inputItems := gjson.GetBytes(prepared.clientBody, "input").Array()
+		inputItems := ojson.GetBytes(prepared.clientBody, "input").Array()
 		if len(inputItems) != 5 {
 			t.Fatalf("input len = %d, want 5; body=%s", len(inputItems), prepared.clientBody)
 		}
@@ -433,7 +433,7 @@ func TestCodexExecutorReplayedWebSearchCallHistoryEnsuresWebSearchTool_Issue6770
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		if gjson.GetBytes(gotBody, "tools").Exists() {
+		if ojson.GetBytes(gotBody, "tools").Exists() {
 			t.Fatalf("expected user payload filter rule to remove tools after built-in injection, got body=%s", gotBody)
 		}
 	})
@@ -457,7 +457,7 @@ func TestCodexExecutorExpandsRecognizedCPACompactionCapsules_Issue7118(t *testin
 		if bytes.Contains(body, []byte("cpa-ag-compact-v1:")) || bytes.Contains(body, []byte("cmp_ag_compact_1")) {
 			t.Fatalf("CPA compaction capsule leaked to Codex upstream: %s", body)
 		}
-		input := gjson.GetBytes(body, "input").Array()
+		input := ojson.GetBytes(body, "input").Array()
 		if len(input) != 3 {
 			t.Fatalf("input len = %d, want 3; body=%s", len(input), body)
 		}
@@ -604,7 +604,7 @@ func TestCodexExecutorExpandsRecognizedCPACompactionCapsules_Issue7118(t *testin
 		if errExpandedCount != nil {
 			t.Fatalf("CountTokens(expanded) error = %v", errExpandedCount)
 		}
-		if gjson.GetBytes(expandedCountResp.Payload, "response.usage.input_tokens").Int() <= gjson.GetBytes(baseCountResp.Payload, "response.usage.input_tokens").Int() {
+		if ojson.GetBytes(expandedCountResp.Payload, "response.usage.input_tokens").Int() <= ojson.GetBytes(baseCountResp.Payload, "response.usage.input_tokens").Int() {
 			t.Fatalf("expected expanded capsule token count (%s) > base token count (%s)", expandedCountResp.Payload, baseCountResp.Payload)
 		}
 	})
@@ -768,7 +768,7 @@ func TestCodexExecutorExpandsRecognizedCPACompactionCapsules_Issue7118(t *testin
 				sawStreamErr = true
 				break
 			}
-			evType := gjson.GetBytes(chunk.Payload, "type").String()
+			evType := ojson.GetBytes(chunk.Payload, "type").String()
 			switch evType {
 			case "response.created":
 				inputCh <- cliproxyexecutor.WebsocketInput{Payload: []byte(steerPayload)}
@@ -794,7 +794,7 @@ func TestCodexExecutorExpandsRecognizedCPACompactionCapsules_Issue7118(t *testin
 			if bytes.Contains(frame, []byte("cpa-ag-compact-v1:")) || bytes.Contains(frame, []byte("cmp_ag_compact_")) {
 				t.Fatalf("frame[%d] leaked CPA compaction capsule: %s", idx, frame)
 			}
-			input := gjson.GetBytes(frame, "input").Array()
+			input := ojson.GetBytes(frame, "input").Array()
 			if len(input) != 3 {
 				t.Fatalf("frame[%d] input len = %d, want 3; frame=%s", idx, len(input), frame)
 			}

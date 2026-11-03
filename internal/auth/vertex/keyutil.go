@@ -3,11 +3,12 @@ package vertex
 import (
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"strings"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 // NormalizeServiceAccountJSON normalizes the given JSON-encoded service account payload.

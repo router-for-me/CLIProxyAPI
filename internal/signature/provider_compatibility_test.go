@@ -1,11 +1,11 @@
 package signature
 
 import (
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -353,7 +353,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_NormalizesSameProviderClaude(t
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != expectedSig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != expectedSig {
 		t.Fatalf("signature = %q, want normalized %q", got, expectedSig)
 	}
 }
@@ -366,7 +366,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsClaudeThinkingForGemini(t
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
 	}
-	content := gjson.GetBytes(output, "messages.0.content").Array()
+	content := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("content length = %d, want 1: %s", len(content), output)
 	}
@@ -384,7 +384,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_PreservesGeminiThinkingForGemi
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != nativeSig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != nativeSig {
 		t.Fatalf("signature = %q, want normalized %q", got, nativeSig)
 	}
 }
@@ -397,7 +397,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_PreservesGPTForGPT(t *testing.
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
 		t.Fatalf("signature = %q, want preserved %q", got, sig)
 	}
 }
@@ -410,7 +410,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsEmptyAssistantMessage(t *
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1", report.DroppedBlocks)
 	}
-	messages := gjson.GetBytes(output, "messages").Array()
+	messages := ojson.GetBytes(output, "messages").Array()
 	if len(messages) != 1 {
 		t.Fatalf("messages length = %d, want 1: %s", len(messages), output)
 	}
@@ -426,7 +426,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansTo
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
 	}
-	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	parts := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(parts) != 2 {
 		t.Fatalf("content length = %d, want 2: %s", len(parts), output)
 	}
@@ -462,7 +462,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_NormalizesValidThinkingAndDrops
 	if report.Preserved != 1 || report.DroppedBlocks != 1 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	messages := gjson.GetBytes(output, "messages").Array()
+	messages := ojson.GetBytes(output, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("messages length = %d, want 2: %s", len(messages), output)
 	}

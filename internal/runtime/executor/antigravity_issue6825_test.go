@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -19,8 +20,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator/builtin"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const issue6825FirstRequest = `{"model":"gemini-3-flash","tool_choice":"auto","messages":[{"role":"user","content":"What time is it?"}],"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object","properties":{"tz":{"type":"string"}}}}}]}`
@@ -37,7 +36,7 @@ func TestIssue6825StreamToolIndicesAcrossChunks(t *testing.T) {
 	var arguments []string
 	for _, chunk := range chunks {
 		for _, out := range sdktranslator.TranslateStream(context.Background(), sdktranslator.FormatAntigravity, sdktranslator.FormatOpenAI, "gemini-3-flash", original, translated, []byte(chunk), &param) {
-			for _, call := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+			for _, call := range ojson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
 				indices = append(indices, call.Get("index").Int())
 				arguments = append(arguments, call.Get("function.arguments").String())
 			}
@@ -118,7 +117,7 @@ func (c *issue6825Conversation) callWithContext(ctx context.Context, payload []b
 		if errExecute != nil {
 			c.t.Fatalf("Execute: %v", errExecute)
 		}
-		message := gjson.GetBytes(response.Payload, "choices.0.message")
+		message := ojson.GetBytes(response.Payload, "choices.0.message")
 		if !message.Exists() {
 			c.t.Fatalf("missing OpenAI assistant message: %s", response.Payload)
 		}
@@ -137,7 +136,7 @@ func (c *issue6825Conversation) callWithContext(ctx context.Context, payload []b
 		}
 		for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
 			line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-			delta := gjson.GetBytes(line, "choices.0.delta")
+			delta := ojson.GetBytes(line, "choices.0.delta")
 			content += delta.Get("content").String()
 			reasoning += delta.Get("reasoning_content").String()
 			for _, call := range delta.Get("tool_calls").Array() {
@@ -149,15 +148,17 @@ func (c *issue6825Conversation) callWithContext(ctx context.Context, payload []b
 			}
 		}
 	}
+	msgDoc := ojson.NewDoc(message)
 	if len(calls) > 0 {
-		message, _ = sjson.SetBytes(message, "tool_calls", calls)
+		_ = msgDoc.Set("tool_calls", calls)
 	}
 	if content != "" {
-		message, _ = sjson.SetBytes(message, "content", content)
+		_ = msgDoc.Set("content", content)
 	}
 	if reasoning != "" {
-		message, _ = sjson.SetBytes(message, "reasoning_content", reasoning)
+		_ = msgDoc.Set("reasoning_content", reasoning)
 	}
+	message = msgDoc.Bytes()
 	return message, <-c.requests
 }
 
@@ -167,29 +168,28 @@ func (c *issue6825Conversation) call(payload []byte, opts cliproxyexecutor.Optio
 
 func issue6825Followup(t *testing.T, assistant []byte) []byte {
 	t.Helper()
-	calls := gjson.GetBytes(assistant, "tool_calls").Array()
+	calls := ojson.GetBytes(assistant, "tool_calls").Array()
 	if len(calls) == 0 {
 		t.Fatalf("first round returned no tool calls: %s", assistant)
 	}
-	out, errSet := sjson.SetRawBytes([]byte(issue6825FirstRequest), "messages.-1", assistant)
-	if errSet != nil {
+	outDoc := ojson.NewDoc([]byte(issue6825FirstRequest))
+	if errSet := outDoc.SetRawBytes("messages.-1", assistant); errSet != nil {
 		t.Fatal(errSet)
 	}
 	for _, call := range calls {
 		if call.Get("id").String() == "" || call.Get("function.name").String() != "get_time" || call.Get("function.arguments").String() != `{"tz":"UTC"}` {
 			t.Fatalf("invalid client-visible tool call: %s", call.Raw)
 		}
-		out, errSet = sjson.SetBytes(out, "messages.-1", map[string]string{"role": "tool", "tool_call_id": call.Get("id").String(), "content": "12:00 UTC"})
-		if errSet != nil {
+		if errSet := outDoc.Set("messages.-1", map[string]string{"role": "tool", "tool_call_id": call.Get("id").String(), "content": "12:00 UTC"}); errSet != nil {
 			t.Fatal(errSet)
 		}
 	}
-	return out
+	return outDoc.Bytes()
 }
 
 func issue6825FirstToolSignature(t *testing.T, request []byte) string {
 	t.Helper()
-	for _, content := range gjson.GetBytes(request, "request.contents").Array() {
+	for _, content := range ojson.GetBytes(request, "request.contents").Array() {
 		for _, part := range content.Get("parts").Array() {
 			if part.Get("functionCall.name").String() == "get_time" {
 				return part.Get("thoughtSignature").String()
@@ -209,16 +209,16 @@ func TestIssue6825ToolPolicyKeepsHistoricalSignature(t *testing.T) {
 			assistant, _ := conversation.call([]byte(issue6825FirstRequest), opts, false, nil)
 			followup := issue6825Followup(t, assistant)
 			if policy == "omitted_tools" {
-				followup, _ = sjson.DeleteBytes(followup, "tools")
+				followup, _ = ojson.DeleteBytes(followup, "tools")
 			} else {
-				followup, _ = sjson.SetBytes(followup, "tool_choice", policy)
+				followup, _ = ojson.SetBytes(followup, "tool_choice", policy)
 			}
 			_, upstream := conversation.call(followup, opts, false, nil)
 			if policy == "none" {
-				if got := gjson.GetBytes(upstream.body, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+				if got := ojson.GetBytes(upstream.body, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 					t.Errorf("function calling mode = %q, want NONE", got)
 				}
-				if got := gjson.GetBytes(upstream.body, "request.tools.0.functionDeclarations.0.name").String(); got != "get_time" {
+				if got := ojson.GetBytes(upstream.body, "request.tools.0.functionDeclarations.0.name").String(); got != "get_time" {
 					t.Errorf("historical tool declaration = %q, want get_time", got)
 				}
 			}
@@ -267,12 +267,12 @@ func TestIssue6825NonStreamTwoTurnSignatureReplay(t *testing.T) {
 				t.Fatalf("first upstream path = %q, want generateContent", first.path)
 			}
 			if fixture.wantCallID != "" {
-				if gotID := gjson.GetBytes(assistant, "tool_calls.0.id").String(); gotID != fixture.wantCallID {
+				if gotID := ojson.GetBytes(assistant, "tool_calls.0.id").String(); gotID != fixture.wantCallID {
 					t.Errorf("round 1 tool_calls[0].id = %q, want %q", gotID, fixture.wantCallID)
 				}
 			}
 			if fixture.stripReasoning {
-				assistant, _ = sjson.DeleteBytes(assistant, "reasoning_content")
+				assistant, _ = ojson.DeleteBytes(assistant, "reasoning_content")
 			}
 			_, second := conversation.call(issue6825Followup(t, assistant), opts, false, nil)
 			if !strings.HasSuffix(second.path, ":generateContent") {
@@ -295,22 +295,23 @@ func TestIssue6825PolicyReplayRejectsChangedContext(t *testing.T) {
 				Metadata: map[string]any{cliproxyexecutor.CallerScopeMetadataKey: session.CallerScope("trusted-caller-A")},
 			}
 			assistant, _ := conversation.call([]byte(issue6825FirstRequest), opts, false, nil)
-			followup := issue6825Followup(t, assistant)
-			followup, _ = sjson.SetBytes(followup, "tool_choice", "none")
+			followupDoc := ojson.NewDoc(issue6825Followup(t, assistant))
+			_ = followupDoc.Set("tool_choice", "none")
 			switch change {
 			case "system":
-				messages := gjson.GetBytes(followup, "messages").Raw
-				followup, _ = sjson.SetRawBytes(followup, "messages", []byte(`[{"role":"system","content":"Different system instructions"},`+messages[1:]))
+				messages := followupDoc.Get("messages").Raw
+				_ = followupDoc.SetRawBytes("messages", []byte(`[{"role":"system","content":"Different system instructions"},`+messages[1:]))
 			case "history":
-				followup, _ = sjson.SetBytes(followup, "messages.0.content", "Different user history")
+				_ = followupDoc.Set("messages.0.content", "Different user history")
 			case "arguments":
-				followup, _ = sjson.SetBytes(followup, "messages.1.tool_calls.0.function.arguments", `{"tz":"Asia/Tokyo"}`)
+				_ = followupDoc.Set("messages.1.tool_calls.0.function.arguments", `{"tz":"Asia/Tokyo"}`)
 			case "caller":
 				// Untrusted body metadata must not override the trusted execution scope.
-				followup, _ = sjson.SetBytes(followup, "tool_choice", "auto")
-				followup, _ = sjson.SetBytes(followup, "metadata.caller_scope", session.CallerScope("trusted-caller-A"))
+				_ = followupDoc.Set("tool_choice", "auto")
+				_ = followupDoc.Set("metadata.caller_scope", session.CallerScope("trusted-caller-A"))
 				opts.Metadata = map[string]any{cliproxyexecutor.CallerScopeMetadataKey: session.CallerScope("trusted-caller-B")}
 			}
+			followup := followupDoc.Bytes()
 			_, second := conversation.call(followup, opts, false, nil)
 			want := "skip_thought_signature_validator"
 			if change == "unchanged" {
@@ -334,10 +335,10 @@ func TestIssue6825PayloadRulesRemainFinal(t *testing.T) {
 				Filter:   []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gemini-*"}}, Params: []string{"tools", "contents.1.parts.0.thoughtSignature"}}},
 			}
 			_, second := conversation.call(issue6825Followup(t, assistant), opts, false, nil)
-			if gjson.GetBytes(second.body, "request.tools").Exists() || gjson.GetBytes(second.body, "request.contents.1.parts.0.thoughtSignature").Exists() {
+			if ojson.GetBytes(second.body, "request.tools").Exists() || ojson.GetBytes(second.body, "request.contents.1.parts.0.thoughtSignature").Exists() {
 				t.Errorf("payload filters were undone after replay: %s", second.body)
 			}
-			if got := gjson.GetBytes(second.body, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+			if got := ojson.GetBytes(second.body, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 				t.Errorf("configured final mode = %q, want NONE", got)
 			}
 		})
