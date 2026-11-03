@@ -78,7 +78,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	parentIsAuthRoot := w.normalizeWatchPath(filepath.Dir(normalizedName)) == w.normalizeWatchPath(normalizedAuthDir)
 	parentWatched := parentIsAuthRoot || w.isWatchedAuthDirectory(filepath.Dir(normalizedName))
 	isAuthJSON := parentWatched && strings.HasSuffix(strings.ToLower(normalizedName), ".json") && event.Op&authOps != 0
-	info, errStat := os.Stat(event.Name)
+	info, errStat := os.Lstat(event.Name)
 	isDirectoryCreate := errStat == nil && info.IsDir() && event.Op&(fsnotify.Create|fsnotify.Rename) != 0
 	isWatchedDirectoryRemoval := w.isWatchedAuthDirectory(normalizedName) && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0
 	isAuthDirEvent := (isDirectoryCreate || isWatchedDirectoryRemoval) &&
@@ -104,7 +104,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && w.isWatchedAuthDirectory(normalizedName) {
 			w.removeAuthDirectoryTree(normalizedName)
 		}
-		if info, errStat := os.Stat(event.Name); errStat == nil && info.IsDir() {
+		if info, errStat := os.Lstat(event.Name); errStat == nil && info.IsDir() {
 			if errWatch := w.watchAuthDirectoryTree(normalizedName); errWatch != nil {
 				log.WithError(errWatch).Warnf("failed to watch auth directory %s", event.Name)
 			}
