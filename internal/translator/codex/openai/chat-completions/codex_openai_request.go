@@ -49,6 +49,13 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Stream must be set to true
 	_ = outDoc.Set("stream", stream)
 
+	for _, path := range []string{"max_completion_tokens", "max_tokens", "max_output_tokens"} {
+		if v := root.Get(path); v.Type == ojson.Number {
+			_ = outDoc.Set("max_output_tokens", v.Int())
+			break
+		}
+	}
+
 	// Map reasoning effort
 	if v := root.Get("reasoning_effort"); v.Exists() {
 		_ = outDoc.Set("reasoning.effort", v.Value())
