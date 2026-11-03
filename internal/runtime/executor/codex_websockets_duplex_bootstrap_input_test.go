@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
@@ -66,7 +66,7 @@ func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
 					return
 				}
 				healthyFollowups.Add(1)
-				if gjson.GetBytes(payload, "type").String() != kind || gjson.GetBytes(payload, "input.0.content.0.text").String() != "PRESERVE_ME" {
+				if ojson.GetBytes(payload, "type").String() != kind || ojson.GetBytes(payload, "input.0.content.0.text").String() != "PRESERVE_ME" {
 					t.Errorf("follow-up changed: %s", payload)
 				}
 				if err = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"healthy","output":[]}}`)); err != nil {
@@ -112,7 +112,7 @@ func TestCodexDuplexBootstrapPreservesFollowup(t *testing.T) {
 				if chunk.Err != nil {
 					t.Fatal(chunk.Err)
 				}
-				if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+				if ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
 					completed = true
 					cancel()
 				}

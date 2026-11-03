@@ -15,13 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
@@ -66,13 +66,13 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	if gotPath != "/v1/responses/compact" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses/compact")
 	}
-	if !gjson.GetBytes(gotBody, "input").Exists() {
+	if !ojson.GetBytes(gotBody, "input").Exists() {
 		t.Fatalf("expected input in body")
 	}
-	if gjson.GetBytes(gotBody, "messages").Exists() {
+	if ojson.GetBytes(gotBody, "messages").Exists() {
 		t.Fatalf("unexpected messages in body")
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in responses compact body: %s", string(gotBody))
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
@@ -119,7 +119,7 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
+	if got := ojson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
 		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "low", string(gotBody))
 	}
 }
@@ -239,7 +239,7 @@ func TestOpenAICompatExecutorApplyPromptCacheKey(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			gotKey := gjson.GetBytes(translated, "prompt_cache_key").String()
+			gotKey := ojson.GetBytes(translated, "prompt_cache_key").String()
 			if test.wantKey != "" {
 				if gotKey != test.wantKey {
 					t.Fatalf("prompt_cache_key = %q, want %q", gotKey, test.wantKey)
@@ -297,7 +297,7 @@ func TestOpenAICompatExecutorPromptCacheKeyCallerValueWinsPayloadOverride(t *tes
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			if got := gjson.GetBytes(translated, "prompt_cache_key").String(); got != test.want {
+			if got := ojson.GetBytes(translated, "prompt_cache_key").String(); got != test.want {
 				t.Fatalf("prompt_cache_key = %q, want %q", got, test.want)
 			}
 		})
@@ -333,7 +333,7 @@ func TestOpenAICompatExecutorPromptCacheKeyIsModelAndProtocolScoped(t *testing.T
 		if errApply != nil {
 			t.Fatalf("applyPromptCacheKey error: %v", errApply)
 		}
-		return gjson.GetBytes(translated, "prompt_cache_key").String()
+		return ojson.GetBytes(translated, "prompt_cache_key").String()
 	}
 
 	baseKey := derive(t, "gpt-5.6", "openai")
@@ -386,7 +386,7 @@ func TestOpenAICompatExecutorPromptCacheKeyUsesConfigIndex(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("applyPromptCacheKey error: %v", errApply)
 			}
-			gotPresent := gjson.GetBytes(translated, "prompt_cache_key").String() != ""
+			gotPresent := ojson.GetBytes(translated, "prompt_cache_key").String() != ""
 			if gotPresent != test.wantPresent {
 				t.Fatalf("prompt_cache_key present = %t, want %t; body=%s", gotPresent, test.wantPresent, string(translated))
 			}
@@ -421,7 +421,7 @@ func TestOpenAICompatExecutorPromptCacheKeyIgnoresConfigIndexForNonConfigAuth(t 
 	if errApply != nil {
 		t.Fatalf("applyPromptCacheKey error: %v", errApply)
 	}
-	if gjson.GetBytes(translated, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(translated, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key for non-config auth: %s", string(translated))
 	}
 }
@@ -460,7 +460,7 @@ func TestOpenAICompatExecutorPromptCacheKeyExecute(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute error: %v", errExecute)
 	}
-	if gotKey := gjson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
 		t.Fatalf("prompt_cache_key is missing from upstream body: %s", string(gotBody))
 	}
 }
@@ -506,7 +506,7 @@ func TestOpenAICompatExecutorPromptCacheKeyExecuteStream(t *testing.T) {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
 	}
-	if gotKey := gjson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
 		t.Fatalf("prompt_cache_key is missing from upstream stream body: %s", string(gotBody))
 	}
 }
@@ -553,7 +553,7 @@ func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in streaming compact body: %s", string(gotBody))
 	}
 }
@@ -609,13 +609,13 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	if gotContentType != "application/json" {
 		t.Fatalf("content type = %q, want application/json", gotContentType)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
 		t.Fatalf("unexpected prompt_cache_key in image body: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
+	if got := ojson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
 		t.Fatalf("response payload = %s", string(resp.Payload))
 	}
 }
@@ -672,10 +672,10 @@ func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	if gotAccept != "text/event-stream" {
 		t.Fatalf("accept = %q, want text/event-stream", gotAccept)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if !gjson.GetBytes(gotBody, "stream").Bool() {
+	if !ojson.GetBytes(gotBody, "stream").Bool() {
 		t.Fatalf("stream flag missing from upstream body: %s", string(gotBody))
 	}
 	if !strings.Contains(streamed.String(), "event: image_generation.partial") || !strings.Contains(streamed.String(), "data: [DONE]") {
@@ -903,7 +903,7 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		}
 		got.Write(chunk.Payload)
 	}
-	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+	if ojson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
 	}
 }
@@ -1335,14 +1335,14 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 		if strings.Contains(p, `"cost"`) {
 			t.Fatalf("post-DONE cost chunk was forwarded: %s", p)
 		}
-		if !gjson.Get(p, "id").Exists() {
+		if !ojson.Get(p, "id").Exists() {
 			t.Fatalf("chunk missing id: %s", p)
 		}
 	}
-	if gjson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
+	if ojson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
 		t.Fatalf("first chunk = %s", payloads[0])
 	}
-	if gjson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
+	if ojson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
 		t.Fatalf("second chunk = %s", payloads[1])
 	}
 }

@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -103,15 +103,15 @@ func extractClaudeCodeSessionIDFromPayload(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
 	}
-	userID := gjson.GetBytes(payload, "metadata.user_id").String()
+	userID := ojson.GetBytesNoCopy(payload, "metadata.user_id").String()
 	if userID == "" {
 		return ""
 	}
 	if matches := claudeCodeSessionSuffixPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-		return matches[1]
+		return strings.Clone(matches[1])
 	}
 	if len(userID) > 0 && userID[0] == '{' {
-		return strings.TrimSpace(gjson.Get(userID, "session_id").String())
+		return strings.Clone(strings.TrimSpace(ojson.Get(userID, "session_id").String()))
 	}
 	return ""
 }

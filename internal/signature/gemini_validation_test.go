@@ -1,8 +1,8 @@
 package signature
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"runtime"

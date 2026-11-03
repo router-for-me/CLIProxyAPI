@@ -875,6 +875,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
 	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
+	}
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
 	for id, request := range loading {
@@ -889,6 +892,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	}
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
 	}
 }
 

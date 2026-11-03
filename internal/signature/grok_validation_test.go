@@ -3,8 +3,8 @@ package signature
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"runtime"

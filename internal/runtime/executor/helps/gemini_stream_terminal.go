@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // IsGeminiTerminalStreamChunk recognizes terminal output from Gemini stream translators.
@@ -18,7 +18,7 @@ func IsGeminiTerminalStreamChunk(chunk []byte) bool {
 		if len(payload) == 0 {
 			continue
 		}
-		eventType := gjson.GetBytes(payload, "type").String()
+		eventType := ojson.GetBytesNoCopy(payload, "type").String()
 		if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" || eventType == "message_stop" {
 			return true
 		}
@@ -28,7 +28,7 @@ func IsGeminiTerminalStreamChunk(chunk []byte) bool {
 			"candidates.0.finishReason",
 			"response.candidates.0.finishReason",
 		} {
-			if finishReason := gjson.GetBytes(payload, path); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+			if finishReason := ojson.GetBytesNoCopy(payload, path); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
 				return true
 			}
 		}
