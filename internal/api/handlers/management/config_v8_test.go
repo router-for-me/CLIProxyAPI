@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -890,5 +892,86 @@ api-keys:
 	}
 	if loaded.OpenAICompatibility[0].Headers["User-Agent"] != "$User-Agent-3" {
 		t.Fatalf("unexpected loaded headers: %+v", loaded.OpenAICompatibility[0].Headers)
+	}
+}
+
+func TestConfigV8InjectsDistinctAuthIndexesForDistinctConnectionPools(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `config-version: 8
+api-keys:
+  gemini:
+    - name: gemini-group
+      base-url: "https://example.invalid"
+      connection-pool:
+        enabled: true
+        idle-conn-timeout: "120s"
+        max-idle-conns-per-host: 2
+      keys:
+        - api-key: "shared-gemini-key"
+        - api-key: "shared-gemini-key"
+          connection-pool:
+            idle-conn-timeout: ""
+            max-idle-conns-per-host: 5
+  vertex:
+    - name: vertex-group
+      base-url: "https://vertex.example.invalid"
+      connection-pool:
+        enabled: true
+        max-idle-conns-per-host: 2
+      keys:
+        - api-key: "shared-vertex-key"
+        - api-key: "shared-vertex-key"
+          connection-pool:
+            max-idle-conns-per-host: 6
+`
+	if errWrite := os.WriteFile(file, []byte(raw), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(file)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	synth := synthesizer.NewConfigSynthesizer()
+	auths, errSynth := synth.Synthesize(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	})
+	if errSynth != nil {
+		t.Fatal(errSynth)
+	}
+	for _, a := range auths {
+		if _, errReg := manager.Register(context.Background(), a); errReg != nil {
+			t.Fatal(errReg)
+		}
+	}
+	h := &Handler{cfg: cfg, configFilePath: file, authManager: manager}
+	router := gin.New()
+	router.GET("/v8/management/config/*path", h.ConfigV8)
+
+	for _, provider := range []string{"gemini", "vertex"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys/"+provider, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d body=%s", provider, w.Code, w.Body.String())
+		}
+		var groups []struct {
+			Keys []struct {
+				AuthIndex string `yaml:"auth_index" json:"auth_index"`
+			} `yaml:"keys" json:"keys"`
+		}
+		if err := yaml.Unmarshal(w.Body.Bytes(), &groups); err != nil {
+			t.Fatalf("unmarshal %s response: %v", provider, err)
+		}
+		if len(groups) != 1 || len(groups[0].Keys) != 2 {
+			t.Fatalf("%s groups = %+v, want 1 group with 2 keys", provider, groups)
+		}
+		first := groups[0].Keys[0].AuthIndex
+		second := groups[0].Keys[1].AuthIndex
+		if first == "" || second == "" || first == second {
+			t.Fatalf("%s auth_index values = (%q, %q), want two distinct non-empty indexes", provider, first, second)
+		}
 	}
 }

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeRequestToGemini_PreservesToolResultErrors(t *testing.T) {
@@ -74,21 +74,21 @@ func TestConvertClaudeRequestToGemini_PreservesToolResultErrors(t *testing.T) {
 					if errTranslate != nil {
 						t.Fatal(errTranslate)
 					}
-					if !gjson.ValidBytes(output) {
+					if !ojson.ValidBytes(output) {
 						t.Fatalf("invalid translated JSON: %s", output)
 					}
-					response := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+					response := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse")
 					if response.Get("id").String() != "call_1" || response.Get("name").String() != "Read" {
 						t.Fatalf("tool result lost its call identity: %s", response.Raw)
 					}
 					if got := response.Get("response").Raw; got != tt.wantResponse {
 						t.Fatalf("functionResponse.response = %s, want %s", got, tt.wantResponse)
 					}
-					parts := gjson.GetBytes(output, "contents.1.parts").Array()
+					parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
 					wantParts := 1
 					if tt.wantImage {
 						wantParts++
-						if got := gjson.GetBytes(output, "contents.1.parts.1.inline_data").Raw; got != `{"mime_type":"image/png","data":"aGVsbG8="}` {
+						if got := ojson.GetBytesNoCopy(output, "contents.1.parts.1.inline_data").Raw; got != `{"mime_type":"image/png","data":"aGVsbG8="}` {
 							t.Fatalf("tool image changed: %s", got)
 						}
 					}

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -22,7 +23,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/sjson"
 )
 
 const issue6332ReviewModel = "gemini-3.7-flash"
@@ -214,8 +214,10 @@ func testIssue6332LifecycleNextTurn(t *testing.T, split bool) {
 	}
 	manager.SetRoundTripperProvider(rt)
 	body := issue6332ReviewBody(t)
-	second, _ := sjson.SetBytes(body, "input.-1", map[string]any{"type": "function_call", "call_id": "native-call", "name": "lookup", "arguments": `{"key":"value"}`})
-	second, _ = sjson.SetBytes(second, "input.-1", map[string]any{"type": "function_call_output", "call_id": "native-call", "output": "found"})
+	secondDoc := ojson.NewDoc(body)
+	_ = secondDoc.Set("input.-1", map[string]any{"type": "function_call", "call_id": "native-call", "name": "lookup", "arguments": `{"key":"value"}`})
+	_ = secondDoc.Set("input.-1", map[string]any{"type": "function_call_output", "call_id": "native-call", "output": "found"})
+	second := secondDoc.Bytes()
 	host := &issue6332CallbackHost{base: base, body: second, result: make(chan error, 1)}
 	base.SetPluginHost(host)
 	capture := &issue6332Capture{records: make(chan usage.Record, 4), authID: t.Name()}
