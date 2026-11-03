@@ -333,15 +333,37 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 // beforePluginDeleteCommit lets tests run a concurrent save while DeletePlugin is unlocked.
 var beforePluginDeleteCommit = func() {}
 
-// validatePluginDeleteLocked reports whether id is configured and whether the
-// config without it passes application validation. Caller must hold h.mu.
-func (h *Handler) validatePluginDeleteLocked(c *gin.Context, id string) (configured, accepted bool) {
-	if _, configured = h.cfg.Plugins.Configs[id]; !configured {
-		return false, true
+// preparePluginDeleteLocked resolves id's artifact from the current config and
+// validates the config without it, writing the error response on failure.
+// Caller must hold h.mu.
+func (h *Handler) preparePluginDeleteLocked(c *gin.Context, id string) (path string, configured, ok bool) {
+	item, configured := h.cfg.Plugins.Configs[id]
+	pluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(normalizedPluginsDir(h.cfg.Plugins.Dir))
+	if errResolvePluginsDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
+		return "", false, false
 	}
-	candidate := h.cfg.CloneForRuntime()
-	delete(candidate.Plugins.Configs, id)
-	return true, h.validateConfigLocked(c, candidate)
+	var desiredVersions map[string]string
+	if configured {
+		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})
+	}
+	path, errPath := pluginFilePath(pluginsDir, id, desiredVersions)
+	if errPath != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
+		return "", false, false
+	}
+	if path == "" && !configured {
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return "", false, false
+	}
+	if configured {
+		candidate := h.cfg.CloneForRuntime()
+		delete(candidate.Plugins.Configs, id)
+		if !h.validateConfigLocked(c, candidate) {
+			return "", false, false
+		}
+	}
+	return path, configured, true
 }
 
 // DeletePlugin removes the selected local plugin file and its saved config.
@@ -361,36 +383,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
-	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
-	item, configured := h.cfg.Plugins.Configs[id]
 	host := h.pluginHost
-	h.mu.Unlock()
-
-	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
-	if errResolvePluginsDir != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
-		return
-	}
-	pluginsDir = resolvedPluginsDir
-	var desiredVersions map[string]string
-	if configured {
-		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})
-	}
-	path, errPath := pluginFilePath(pluginsDir, id, desiredVersions)
-	if errPath != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
-		return
-	}
-	if path == "" && !configured {
-		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
-		return
-	}
-
 	// Reject early, before unloading; the final check below runs under h.mu.
-	h.mu.Lock()
-	_, accepted := h.validatePluginDeleteLocked(c, id)
+	_, _, ok := h.preparePluginDeleteLocked(c, id)
 	h.mu.Unlock()
-	if !accepted {
+	if !ok {
 		return
 	}
 
@@ -404,11 +401,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	}
 
 	beforePluginDeleteCommit()
-	// Hold h.mu from the final check through removal and save, so a concurrent
-	// save cannot change the config this deletion was validated against.
+	// Resolve and validate again under h.mu, held through removal and save, so a
+	// concurrent save cannot change the config this deletion acts on.
 	h.mu.Lock()
-	configured, accepted = h.validatePluginDeleteLocked(c, id)
-	if !accepted {
+	path, configured, ok := h.preparePluginDeleteLocked(c, id)
+	if !ok {
 		h.mu.Unlock()
 		return
 	}

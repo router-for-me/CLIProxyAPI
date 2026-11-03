@@ -219,3 +219,41 @@ func TestApplicationValidationChecksPluginConfiguredDuringDelete(t *testing.T) {
 		t.Fatal("delete dropped a configuration it never validated")
 	}
 }
+
+func TestPluginDeleteResolvesArtifactFromConfigSavedDuringDelete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	oldDir := writeManagementPluginFile(t, "sample")
+	newDir := writeManagementPluginFile(t, "sample")
+	h := &Handler{
+		cfg:            &config.Config{Plugins: config.PluginsConfig{Dir: oldDir, Configs: map[string]config.PluginInstanceConfig{}}},
+		configFilePath: filepath.Join(t.TempDir(), "config.yaml"),
+	}
+	// A concurrent save moves the plugins directory while the delete is unlocked.
+	original := beforePluginDeleteCommit
+	beforePluginDeleteCommit = func() {
+		h.mu.Lock()
+		h.cfg.Plugins.Dir = newDir
+		h.mu.Unlock()
+	}
+	t.Cleanup(func() { beforePluginDeleteCommit = original })
+	oldArtifact, errOld := pluginFilePath(oldDir, "sample")
+	newArtifact, errNew := pluginFilePath(newDir, "sample")
+	if errOld != nil || errNew != nil || oldArtifact == "" || newArtifact == "" {
+		t.Fatalf("plugin paths %q, %q: %v, %v", oldArtifact, newArtifact, errOld, errNew)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(ConfigV8ContextKey, true)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v8/management/plugins/sample", nil)
+	h.DeletePlugin(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(oldArtifact); err != nil {
+		t.Fatalf("delete removed the artifact from the replaced plugins dir: %v", err)
+	}
+	if _, err := os.Stat(newArtifact); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("delete kept the artifact the current config resolves to: %v", err)
+	}
+}
