@@ -5263,7 +5263,7 @@ func TestResponsesWebsocketPinsProxyMergedCompactionAuth(t *testing.T) {
 	if len(executor.authIDs) != 2 || executor.authIDs[0] != "auth-first" || executor.authIDs[1] != "auth-first" {
 		t.Fatalf("proxy-merged compaction did not preserve producing auth: %v", executor.authIDs)
 	}
-	input := gjson.GetBytes(executor.payloads[1], "input").Array()
+	input := ojson.GetBytesNoCopy(executor.payloads[1], "input").Array()
 	wantIDs := []string{"old-user", "cmp-1", "new-user"}
 	if len(input) != len(wantIDs) {
 		t.Fatalf("proxy-merged input len = %d, want %d: %s", len(input), len(wantIDs), executor.payloads[1])

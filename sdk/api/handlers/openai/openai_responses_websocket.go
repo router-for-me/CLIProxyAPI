@@ -881,7 +881,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		executionAuthID := ""
 		observedReplayExecuted := observedCompactionSupported &&
 			observedCompactionReplayAuthID != "" &&
-			inputContainsFullTranscript(gjson.GetBytes(requestJSON, "input"))
+			inputContainsFullTranscript(ojson.GetBytesNoCopy(requestJSON, "input"))
 		if observedReplayExecuted {
 			// Compaction checkpoints are credential-bound. Use the credential that
 			// produced (or will replay) the checkpoint, even when a stale websocket
