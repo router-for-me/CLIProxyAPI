@@ -369,6 +369,19 @@ func appendPath(path []string, key string) []string {
 // isKnownDefaultValue returns true if the given node at the specified path
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
+//
+// Credential connection-pool blocks (enabled, idle-conn-timeout,
+// max-idle-conns-per-host) are deliberately absent from the pointer-backed
+// zero-value whitelist below. The pruning here only applies to keys that are new
+// to the destination document: a block already present on disk is merged into its
+// existing node and survives. So an empty block (connection-pool: {} is the opt-in
+// for the default pool), an explicit enabled: false, and an explicit
+// max-idle-conns-per-host: 0 all persist when the operator wrote them by hand or
+// through the v8 management API, which writes the YAML tree directly. The
+// remaining gap is a block that only exists in an in-memory Config, for example one
+// an SDK embedder adds through sdk/config.SaveConfigPreserveComments to a file that
+// never carried it: pruning drops those zero-valued sub-keys. No management
+// endpoint mutates ProxyConnectionPool, so that path is reachable only from code.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	if isPluginConfigsSubtreePath(path) {
 		return false
@@ -844,6 +857,12 @@ func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 // This is strictly scoped to credential-nested mappings such as "cloak" and "headers" under
 // known credential sequence paths to prevent stale deleted keys from persisting while leaving
 // all other mappings and root sections unaffected.
+//
+// Credential connection-pool blocks stay out of this list on purpose. Pruning only runs while
+// merging a document from an in-memory Config, and a removed pool sub-key can mean either
+// "delete it" or "inherit the group value" depending on the caller; guessing wrong would silently
+// change pooling for a credential. Hand-edited files and v8 management saves therefore keep a
+// sub-key until the whole block is removed.
 func shouldPruneNestedMappingKeys(path []string) bool {
 	if len(path) < 2 {
 		return false

@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // AlignOpenAIToolCallMessages reorders tool result messages to immediately follow
@@ -34,10 +34,10 @@ func AlignOpenAIToolCallMessages(messages [][]byte, extraAmbiguousIDs ...string)
 	toolMsgIndicesByCallID := make(map[string][]int)
 
 	for i, raw := range messages {
-		role := gjson.GetBytes(raw, "role").String()
+		role := ojson.GetBytesNoCopy(raw, "role").String()
 		switch role {
 		case "assistant":
-			toolCalls := gjson.GetBytes(raw, "tool_calls")
+			toolCalls := ojson.GetBytesNoCopy(raw, "tool_calls")
 			if toolCalls.Exists() && toolCalls.IsArray() {
 				rawCalls := toolCalls.Array()
 				if len(rawCalls) > 0 {
@@ -68,7 +68,7 @@ func AlignOpenAIToolCallMessages(messages [][]byte, extraAmbiguousIDs ...string)
 			}
 
 		case "tool":
-			callID := gjson.GetBytes(raw, "tool_call_id").String()
+			callID := ojson.GetBytesNoCopy(raw, "tool_call_id").String()
 			if callID == "" {
 				ambiguousCallIDs[""] = true
 			} else {

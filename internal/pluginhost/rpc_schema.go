@@ -8,8 +8,9 @@ import (
 )
 
 type rpcLifecycleRequest struct {
-	ConfigYAML    []byte `json:"config_yaml"`
-	SchemaVersion uint32 `json:"schema_version"`
+	ConfigYAML         []byte `json:"config_yaml"`
+	SchemaVersion      uint32 `json:"schema_version"`
+	MultiAuthProviders bool   `json:"multi_auth_providers,omitempty"`
 }
 
 type rpcRegistration struct {
@@ -56,8 +57,17 @@ type rpcCapabilities struct {
 	QuotaProvider                     bool                         `json:"quota_provider"`
 }
 
-type rpcIdentifierResponse struct {
+type rpcAuthProviderEntry struct {
 	Identifier string `json:"identifier"`
+	Name       string `json:"name,omitempty"`
+	Logo       string `json:"logo,omitempty"`
+}
+
+type rpcIdentifierResponse struct {
+	Identifier          string                 `json:"identifier"`
+	Identifiers         []string               `json:"identifiers,omitempty"`
+	CredentialProviders []string               `json:"credential_providers,omitempty"`
+	Entries             []rpcAuthProviderEntry `json:"entries,omitempty"`
 }
 
 type rpcExecutorStreamResponse struct {
@@ -219,7 +229,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	return rpcCapabilities{
 		ModelRegistrar:                    caps.ModelRegistrar != nil,
 		ModelProvider:                     caps.ModelProvider != nil,
-		AuthProvider:                      caps.AuthProvider != nil,
+		AuthProvider:                      hasAuthProviderCap(caps),
 		FrontendAuthProvider:              caps.FrontendAuthProvider != nil,
 		FrontendAuthProviderExclusive:     caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		FrontendAuthProviderOmitBody:      frontendAuthProviderWantsOmitBody(caps),

@@ -8,12 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type pairRequestPluginHooks struct {
@@ -26,7 +25,7 @@ func (h *pairRequestPluginHooks) NormalizeRequest(_ context.Context, _, _ sdktra
 	if h.onNormalize != nil {
 		h.onNormalize(body)
 	}
-	updated, _ := sjson.SetBytes(body, "plugin_call", h.calls)
+	updated, _ := ojson.SetBytes(body, "plugin_call", h.calls)
 	return updated
 }
 
@@ -155,10 +154,10 @@ func TestTranslateRequestPairInvokesPluginOncePerInput(t *testing.T) {
 			if hooks.calls != wantCalls {
 				t.Fatalf("stream=%v distinct=%v: plugin calls = %d, want %d", stream, distinct, hooks.calls, wantCalls)
 			}
-			if got := gjson.GetBytes(base, "plugin_call").Int(); got != 1 {
+			if got := ojson.GetBytes(base, "plugin_call").Int(); got != 1 {
 				t.Fatalf("baseline plugin_call = %d, want 1", got)
 			}
-			if got := gjson.GetBytes(work, "plugin_call").Int(); got != wantCalls {
+			if got := ojson.GetBytes(work, "plugin_call").Int(); got != wantCalls {
 				t.Fatalf("working plugin_call = %d, want %d", got, wantCalls)
 			}
 			if !distinct && !bytes.Equal(base, work) {
@@ -219,10 +218,10 @@ func TestTranslateRequestEnvelopePairWithCodexMultiAgentV2UsesModelInfo(t *testi
 	if errPair != nil {
 		t.Fatalf("translate request pair: %v", errPair)
 	}
-	if gjson.GetBytes(base, "requestType").String() != "web_search" {
+	if ojson.GetBytes(base, "requestType").String() != "web_search" {
 		t.Fatalf("expected baseline requestType web_search, got: %s", base)
 	}
-	if gjson.GetBytes(work, "requestType").String() != "web_search" {
+	if ojson.GetBytes(work, "requestType").String() != "web_search" {
 		t.Fatalf("expected working requestType web_search, got: %s", work)
 	}
 
@@ -235,7 +234,7 @@ func TestTranslateRequestEnvelopePairWithCodexMultiAgentV2UsesModelInfo(t *testi
 	if errPair != nil {
 		t.Fatalf("translate request pair: %v", errPair)
 	}
-	if gjson.GetBytes(workDisabled, "requestType").String() == "web_search" {
+	if ojson.GetBytes(workDisabled, "requestType").String() == "web_search" {
 		t.Fatalf("expected non-web_search when capability disabled, got: %s", workDisabled)
 	}
 }
@@ -244,7 +243,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	var summaryDisplayInHook string
 	hooks := &pairRequestPluginHooks{
 		onNormalize: func(body []byte) {
-			summaryDisplayInHook = gjson.GetBytes(body, "thinking.display").String()
+			summaryDisplayInHook = ojson.GetBytes(body, "thinking.display").String()
 		},
 	}
 	sdktranslator.SetPluginHooks(hooks)
@@ -268,7 +267,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	if hooks.calls != 1 {
 		t.Fatalf("plugin hook calls = %d, want 1", hooks.calls)
 	}
-	if got := gjson.GetBytes(out, "plugin_call").Int(); got != 1 {
+	if got := ojson.GetBytes(out, "plugin_call").Int(); got != 1 {
 		t.Fatalf("plugin_call = %d, want 1; output was %s", got, out)
 	}
 	// Assert summary config was applied to the body before invoking the normalizer hook
@@ -292,7 +291,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	if hooks.calls != 1 {
 		t.Fatalf("non-compat plugin hook calls = %d, want 1", hooks.calls)
 	}
-	if got := gjson.GetBytes(outNonCompat, "plugin_call").Int(); got != 1 {
+	if got := ojson.GetBytes(outNonCompat, "plugin_call").Int(); got != 1 {
 		t.Fatalf("non-compat plugin_call = %d, want 1; output was %s", got, outNonCompat)
 	}
 
@@ -312,7 +311,7 @@ func TestTranslateRequestWithAPIKeyModelCompatibility_InvokesPluginNormalizers(t
 	if hooks.calls != 1 {
 		t.Fatalf("stream compat plugin hook calls = %d, want 1", hooks.calls)
 	}
-	if got := gjson.GetBytes(outStream, "plugin_call").Int(); got != 1 {
+	if got := ojson.GetBytes(outStream, "plugin_call").Int(); got != 1 {
 		t.Fatalf("stream compat plugin_call = %d, want 1; output was %s", got, outStream)
 	}
 }
@@ -363,10 +362,10 @@ func TestTranslateRequestCompatibilityForExecutorToolIntegerTypes(t *testing.T) 
 							wantType = "integer"
 						}
 						for entry, body := range outputs {
-							if got := gjson.GetBytes(body, route.properties+".yield_time_ms.type").String(); got != wantType {
+							if got := ojson.GetBytes(body, route.properties+".yield_time_ms.type").String(); got != wantType {
 								t.Errorf("%s: yield_time_ms.type = %q, want %q; body=%s", entry, got, wantType, body)
 							}
-							if got := gjson.GetBytes(body, route.properties+".unrelated.type").String(); got != "number" {
+							if got := ojson.GetBytes(body, route.properties+".unrelated.type").String(); got != "number" {
 								t.Errorf("%s: unrelated.type = %q, want number", entry, got)
 							}
 						}
@@ -418,10 +417,10 @@ func TestTranslateRequestWithCodexMultiAgentV2_NormalizesCodexToolTypes(t *testi
 	)
 
 	// In Claude format, tool is under tools[0].input_schema.properties
-	if got := gjson.GetBytes(out, "tools.0.input_schema.properties.yield_time_ms.type").String(); got != "integer" {
+	if got := ojson.GetBytes(out, "tools.0.input_schema.properties.yield_time_ms.type").String(); got != "integer" {
 		t.Errorf("translated Claude tool yield_time_ms type = %q, want integer; out=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "tools.0.input_schema.properties.timeout_ms.type").String(); got != "integer" {
+	if got := ojson.GetBytes(out, "tools.0.input_schema.properties.timeout_ms.type").String(); got != "integer" {
 		t.Errorf("translated Claude tool timeout_ms type = %q, want integer; out=%s", got, out)
 	}
 
@@ -437,9 +436,9 @@ func TestTranslateRequestWithCodexMultiAgentV2_NormalizesCodexToolTypes(t *testi
 	)
 
 	// In Gemini format, tool is under functionDeclarations with parameters or parametersJsonSchema
-	geminiParam := gjson.GetBytes(outGemini, "tools.0.functionDeclarations.0.parametersJsonSchema.properties")
+	geminiParam := ojson.GetBytes(outGemini, "tools.0.functionDeclarations.0.parametersJsonSchema.properties")
 	if !geminiParam.Exists() {
-		geminiParam = gjson.GetBytes(outGemini, "tools.0.function_declarations.0.parameters.properties")
+		geminiParam = ojson.GetBytes(outGemini, "tools.0.function_declarations.0.parameters.properties")
 	}
 	if got := geminiParam.Get("yield_time_ms.type").String(); got != "integer" {
 		t.Errorf("translated Gemini tool yield_time_ms type = %q, want integer; out=%s", got, outGemini)

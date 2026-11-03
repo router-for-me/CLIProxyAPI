@@ -79,6 +79,7 @@ type Host struct {
 	executorModelClientIDs   map[string]struct{}
 	modelProviders           map[string]string
 	modelProviderSets        map[string][]string
+	authCredentialProviders  map[string]map[string]string
 	modelRegistrations       map[string]pluginModelRegistration
 	pluginModelRegistrations map[string][]pluginModelRegistration
 	providerModels           map[string][]*registryModelInfo
@@ -114,6 +115,7 @@ func New() *Host {
 		executorModelClientIDs:   make(map[string]struct{}),
 		modelProviders:           make(map[string]string),
 		modelProviderSets:        make(map[string][]string),
+		authCredentialProviders:  make(map[string]map[string]string),
 		modelRegistrations:       make(map[string]pluginModelRegistration),
 		pluginModelRegistrations: make(map[string][]pluginModelRegistration),
 		providerModels:           make(map[string][]*registryModelInfo),
@@ -846,6 +848,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.executorModelClientIDs = make(map[string]struct{})
 	h.modelProviders = make(map[string]string)
 	h.modelProviderSets = make(map[string][]string)
+	h.authCredentialProviders = make(map[string]map[string]string)
 	h.modelRegistrations = make(map[string]pluginModelRegistration)
 	h.pluginModelRegistrations = make(map[string][]pluginModelRegistration)
 	h.providerModels = make(map[string][]*registryModelInfo)
@@ -872,6 +875,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
 	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
+	}
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
 	for id, request := range loading {
@@ -886,6 +892,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	}
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
 	}
 }
 
@@ -1017,6 +1026,7 @@ func (h *Host) removePluginRuntimeStateLocked(id string) {
 	}
 	delete(h.modelProviders, id)
 	delete(h.modelProviderSets, id)
+	delete(h.authCredentialProviders, id)
 	delete(h.modelRegistrations, id)
 	delete(h.pluginModelRegistrations, id)
 	for provider := range affectedProviders {
@@ -1240,7 +1250,7 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 	caps := plugin.Capabilities
 	return caps.ModelRegistrar != nil ||
 		caps.ModelProvider != nil ||
-		caps.AuthProvider != nil ||
+		hasAuthProviderCap(caps) ||
 		caps.FrontendAuthProvider != nil ||
 		caps.Scheduler != nil ||
 		caps.ModelRouter != nil ||

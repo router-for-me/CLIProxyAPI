@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -26,8 +27,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -61,6 +60,11 @@ func NewOpenAICompatExecutor(provider string, cfg *config.Config) *OpenAICompatE
 
 // Identifier implements cliproxyauth.ProviderExecutor.
 func (e *OpenAICompatExecutor) Identifier() string { return e.provider }
+
+// UsesConfig reports whether the executor is bound to the provided config snapshot.
+func (e *OpenAICompatExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.cfg == cfg
+}
 
 // PrepareRequest injects OpenAI-compatible credentials into the outgoing HTTP request.
 func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -139,34 +143,32 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		return resp, err
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
-	translated = helps.SetStringIfDifferent(translated, "model", baseModel)
+	doc := ojson.NewDoc(translated)
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 
-	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
-	if err != nil {
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return resp, err
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(compat, baseModel, requestedModel) {
-		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
+		helps.NormalizeOpenAIToolResultsTextOnlyDoc(doc)
 	}
 	if opts.Alt != "responses/compact" {
 		useMCT := helps.ShouldUseMaxCompletionTokensForModel(compat, baseModel, requestedModel)
-		translated = helps.NormalizeOpenAIMaxTokens(translated, useMCT)
-		translated, err = e.applyPromptCacheKeyWithCompat(ctx, auth, compat, from, baseModel, req, opts, translated)
-		if err != nil {
+		helps.NormalizeOpenAIMaxTokensDoc(doc, useMCT)
+		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return resp, err
 		}
 	}
 	if opts.Alt == "responses/compact" {
-		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
-			translated = updated
-		}
-		translated = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "openai compat executor", translated, true, resolveResponsesSignatureTargetModel(baseModel, req, opts), baseURL)
+		_ = doc.Delete("stream")
+		sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, "openai compat executor", doc, true, resolveResponsesSignatureTargetModel(baseModel, req, opts), baseURL)
 	}
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -374,33 +376,33 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		return nil, err
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
-	translated = helps.SetStringIfDifferent(translated, "model", baseModel)
+	doc := ojson.NewDoc(translated)
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 
-	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
-	if err != nil {
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return nil, err
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(compat, baseModel, requestedModel) {
-		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
+		helps.NormalizeOpenAIToolResultsTextOnlyDoc(doc)
 	}
 	if opts.Alt != "responses/compact" {
 		useMCT := helps.ShouldUseMaxCompletionTokensForModel(compat, baseModel, requestedModel)
-		translated = helps.NormalizeOpenAIMaxTokens(translated, useMCT)
-		translated, err = e.applyPromptCacheKeyWithCompat(ctx, auth, compat, from, baseModel, req, opts, translated)
-		if err != nil {
+		helps.NormalizeOpenAIMaxTokensDoc(doc, useMCT)
+		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return nil, err
 		}
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	helps.SetBoolIfDifferentDoc(doc, "stream_options.include_usage", true)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -812,12 +814,14 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 
 	modelForCounting := baseModel
 
-	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
-	if err != nil {
+	doc := ojson.NewDoc(translated)
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 
-	translated = helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)(translated)
+	ctxWithFinalizer := helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts))
+	helps.FinalizePayloadDoc(ctxWithFinalizer, doc)
+	translated = doc.Bytes()
 	enc, err := helps.TokenizerForModel(modelForCounting)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("openai compat executor: tokenizer init failed: %w", err)
@@ -885,15 +889,16 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	model = strings.TrimSpace(model)
 	contentType = strings.TrimSpace(contentType)
 	if json.Valid(payload) {
+		doc := ojson.NewDoc(payload)
 		if model != "" {
-			payload = helps.SetStringIfDifferent(payload, "model", model)
+			helps.SetStringIfDifferentDoc(doc, "model", model)
 		}
 		if stream {
-			payload = helps.SetBoolIfDifferent(payload, "stream", true)
+			helps.SetBoolIfDifferentDoc(doc, "stream", true)
 		} else {
-			payload, _ = sjson.DeleteBytes(payload, "stream")
+			_ = doc.Delete("stream")
 		}
-		return payload, "application/json", nil
+		return doc.Bytes(), "application/json", nil
 	}
 
 	mediaType, params, errParse := mime.ParseMediaType(contentType)
@@ -993,30 +998,47 @@ func (e *OpenAICompatExecutor) applyPromptCacheKeyWithCompat(ctx context.Context
 	if compat == nil || !compat.SupportPromptCacheKey {
 		return translated, nil
 	}
+	doc := ojson.NewDoc(translated)
+	if errCacheKey := e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); errCacheKey != nil {
+		return translated, errCacheKey
+	}
+	return doc.Bytes(), nil
+}
 
-	for _, payload := range [][]byte{req.Payload, opts.OriginalRequest, translated} {
-		if promptCacheKey := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); promptCacheKey != "" {
-			return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
-		}
+func (e *OpenAICompatExecutor) applyPromptCacheKeyWithCompatDoc(ctx context.Context, auth *cliproxyauth.Auth, compat *config.OpenAICompatibility, from sdktranslator.Format, baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) error {
+	if doc == nil || compat == nil || !compat.SupportPromptCacheKey {
+		return nil
 	}
 
-	modelName := strings.TrimSpace(gjson.GetBytes(translated, "model").String())
+	for _, payload := range [][]byte{req.Payload, opts.OriginalRequest} {
+		if promptCacheKey := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "prompt_cache_key").String()); promptCacheKey != "" {
+			helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", promptCacheKey)
+			return nil
+		}
+	}
+	if promptCacheKey := strings.TrimSpace(doc.Get("prompt_cache_key").String()); promptCacheKey != "" {
+		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", promptCacheKey)
+		return nil
+	}
+
+	modelName := strings.TrimSpace(doc.Get("model").String())
 	if modelName == "" {
 		modelName = baseModel
 	}
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
 		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, opts.Headers)
 		if errCache != nil {
-			return translated, errCache
+			return errCache
 		}
 		if ok {
-			return helps.SetStringIfDifferent(translated, "prompt_cache_key", cached.ID), nil
+			helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cached.ID)
+			return nil
 		}
 	}
 
 	sessionID := helps.ProviderSessionUUID(e.provider, opts.Metadata, req.Metadata)
 	if sessionID == "" {
-		return translated, nil
+		return nil
 	}
 	provider := strings.TrimSpace(e.provider)
 	if provider == "" {
@@ -1030,7 +1052,8 @@ func (e *OpenAICompatExecutor) applyPromptCacheKeyWithCompat(ctx context.Context
 		sessionID,
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
-	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+	helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", promptCacheKey)
+	return nil
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
@@ -1128,8 +1151,8 @@ func openAICompatErrorEvent(eventName string) bool {
 }
 
 func openAICompatChunkHasFinishReason(payload []byte) bool {
-	for _, choice := range gjson.GetBytes(payload, "choices").Array() {
-		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != gjson.Null && strings.TrimSpace(reason.String()) != "" {
+	for _, choice := range ojson.GetBytesNoCopy(payload, "choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != ojson.Null && strings.TrimSpace(reason.String()) != "" {
 			return true
 		}
 	}
@@ -1140,16 +1163,16 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if len(payload) == 0 || !json.Valid(payload) {
 		return statusErr{}, false
 	}
-	payloadType := gjson.GetBytes(payload, "type").String()
+	payloadType := ojson.GetBytesNoCopy(payload, "type").String()
 	hasError := false
 	for _, path := range []string{"error", "response.error"} {
-		errorNode := gjson.GetBytes(payload, path)
+		errorNode := ojson.GetBytesNoCopy(payload, path)
 		if errorNode.Exists() && errorNode.Raw != "null" {
 			hasError = true
 			break
 		}
 	}
-	hasTopLevelErrorFields := gjson.GetBytes(payload, "code").Exists() && gjson.GetBytes(payload, "message").Exists()
+	hasTopLevelErrorFields := ojson.GetBytesNoCopy(payload, "code").Exists() && ojson.GetBytesNoCopy(payload, "message").Exists()
 	if !hasError && !strings.EqualFold(payloadType, "error") && !strings.EqualFold(payloadType, "response.error") && !strings.EqualFold(payloadType, "response.failed") &&
 		!openAICompatErrorEvent(eventName) && !hasTopLevelErrorFields {
 		return statusErr{}, false
@@ -1157,7 +1180,7 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 
 	status := 0
 	for _, path := range []string{"status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code"} {
-		status = int(gjson.GetBytes(payload, path).Int())
+		status = int(ojson.GetBytesNoCopy(payload, path).Int())
 		if status >= http.StatusBadRequest && status <= 599 {
 			break
 		}
@@ -1255,8 +1278,8 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 		return retryAfter
 	}
 
-	code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	code := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	message := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.message").String()))
 	if strings.Contains(code, "tpmratelimitexceeded") ||
 		(strings.Contains(message, "tokens per minute") && strings.Contains(message, "limit") && strings.Contains(message, "exceeded")) {
 		delay := openAICompatTPMFallbackRetryAfter

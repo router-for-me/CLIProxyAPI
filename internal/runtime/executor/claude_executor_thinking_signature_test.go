@@ -8,8 +8,8 @@ import (
 
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/tidwall/gjson"
 )
 
 // thinkingSignatureFixtures are signature shapes that survive a JSON round trip
@@ -32,8 +32,8 @@ func thinkingSignatureFixtures() []string {
 func collectThinkingSignatures(t *testing.T, body []byte) []string {
 	t.Helper()
 	var found []string
-	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
+	ojson.GetBytes(body, "messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
 			if signature := block.Get("signature"); signature.Exists() {
 				found = append(found, signature.String())
 			}
@@ -160,8 +160,8 @@ func TestClaudeThinkingSignaturesSurviveSensitiveWordObfuscation(t *testing.T) {
 	}
 
 	var obfuscatedUserText bool
-	gjson.GetBytes(out, "messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, contentBlock gjson.Result) bool {
+	ojson.GetBytes(out, "messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, contentBlock ojson.Result) bool {
 			if contentBlock.Get("type").String() != "text" {
 				return true
 			}

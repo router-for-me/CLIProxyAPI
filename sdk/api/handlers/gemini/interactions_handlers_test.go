@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -20,7 +21,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestParseInteractionsRequestTarget(t *testing.T) {
@@ -67,7 +67,7 @@ func TestPrepareInteractionsExecutionTargetNormalizesModelResourceName(t *testin
 	if model != "gemini-3.5-flash" {
 		t.Fatalf("model = %q, want gemini-3.5-flash", model)
 	}
-	if got := gjson.GetBytes(body, "model").String(); got != "gemini-3.5-flash" {
+	if got := ojson.GetBytesNoCopy(body, "model").String(); got != "gemini-3.5-flash" {
 		t.Fatalf("body model = %q, want gemini-3.5-flash. Body: %s", got, string(body))
 	}
 }
@@ -81,7 +81,7 @@ func TestPrepareInteractionsExecutionTargetPreservesBareModel(t *testing.T) {
 	if model != "gemini-3.5-flash" {
 		t.Fatalf("model = %q, want gemini-3.5-flash", model)
 	}
-	if got := gjson.GetBytes(body, "model").String(); got != "gemini-3.5-flash" {
+	if got := ojson.GetBytesNoCopy(body, "model").String(); got != "gemini-3.5-flash" {
 		t.Fatalf("body model = %q, want gemini-3.5-flash. Body: %s", got, string(body))
 	}
 }
@@ -101,7 +101,7 @@ func TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel(t *testing
 	if req.Model != "agents/test-agent" {
 		t.Fatalf("Model = %q, want agents/test-agent", req.Model)
 	}
-	if got := gjson.GetBytes(req.Body, "agent").String(); got != "agents/test-agent" {
+	if got := ojson.GetBytesNoCopy(req.Body, "agent").String(); got != "agents/test-agent" {
 		t.Fatalf("body agent = %q, want agents/test-agent", got)
 	}
 }
@@ -224,10 +224,10 @@ func TestInteractionsAgentUsesNativeInteractionsEndpoint(t *testing.T) {
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "agent").String(); got != "agents/test-agent" {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "agent").String(); got != "agents/test-agent" {
 		t.Fatalf("upstream agent = %q, want agents/test-agent. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(rec.Body.Bytes(), "id").String(); got != "interaction_1" {
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "id").String(); got != "interaction_1" {
 		t.Fatalf("response id = %q, want interaction_1. Body: %s", got, rec.Body.String())
 	}
 }
@@ -285,19 +285,19 @@ func TestInteractionsAntigravityModelUsesTranslatorBridge(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if gjson.GetBytes(upstreamBody, "input").Exists() {
+	if ojson.GetBytesNoCopy(upstreamBody, "input").Exists() {
 		t.Fatalf("upstream body still contains raw interactions input: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
 		t.Fatalf("upstream request text = %q, want hi. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.generationConfig.topP").Float(); got != 0.8 {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "request.generationConfig.topP").Float(); got != 0.8 {
 		t.Fatalf("upstream topP = %v, want 0.8. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "translated-ok" {
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "translated-ok" {
 		t.Fatalf("response text = %q, want translated-ok. Body: %s", got, rec.Body.String())
 	}
-	if gjson.GetBytes(rec.Body.Bytes(), "response").Exists() {
+	if ojson.GetBytesNoCopy(rec.Body.Bytes(), "response").Exists() {
 		t.Fatalf("response still contains raw antigravity response wrapper: %s", rec.Body.String())
 	}
 }
@@ -353,10 +353,10 @@ func TestInteractionsVertexModelUsesNativeInteractionsEndpoint(t *testing.T) {
 	if !strings.HasSuffix(gotPath, "interactions") {
 		t.Fatalf("upstream path = %q, want path ending with interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "input").String(); got != "hi vertex" {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "input").String(); got != "hi vertex" {
 		t.Fatalf("upstream input = %q, want hi vertex. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "vertex-ok" {
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "vertex-ok" {
 		t.Fatalf("response text = %q, want vertex-ok. Body: %s", got, rec.Body.String())
 	}
 }

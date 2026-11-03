@@ -47,6 +47,10 @@ type Service struct {
 	selectorFactory        SelectorFactory
 	pendingRoutingSelector *preparedRoutingSelector
 
+	// proxyPoolPublisher scopes connection-pool fencing to this service, so a reload
+	// here never retires config snapshots served by another service.
+	proxyPoolPublisher uint64
+
 	// configPath is the path to the configuration file.
 	configPath string
 
