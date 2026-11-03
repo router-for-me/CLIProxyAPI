@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestCodexModelsURL(t *testing.T) {
@@ -61,28 +61,28 @@ func TestEnsureBaselineModel(t *testing.T) {
 		if count != 3 {
 			t.Fatalf("count = %d, want 3", count)
 		}
-		if got := gjson.GetBytes(out, "models.0.slug").String(); got != "gpt-6.1-sol" {
+		if got := ojson.GetBytesNoCopy(out, "models.0.slug").String(); got != "gpt-6.1-sol" {
 			t.Fatalf("models[0].slug = %q, want gpt-6.1-sol", got)
 		}
-		if got := gjson.GetBytes(out, "models.0.tool_mode").String(); got != "code_mode_only" {
+		if got := ojson.GetBytesNoCopy(out, "models.0.tool_mode").String(); got != "code_mode_only" {
 			t.Fatalf("models[0].tool_mode = %q, want code_mode_only", got)
 		}
-		if got := gjson.GetBytes(out, "models.2.slug").String(); got != "gpt-5.5" {
+		if got := ojson.GetBytesNoCopy(out, "models.2.slug").String(); got != "gpt-5.5" {
 			t.Fatalf("models[2].slug = %q, want gpt-5.5", got)
 		}
-		if got := gjson.GetBytes(out, "models.2.display_name").String(); got != "GPT-6.1-Sol" {
+		if got := ojson.GetBytesNoCopy(out, "models.2.display_name").String(); got != "GPT-6.1-Sol" {
 			t.Fatalf("models[2].display_name = %q, want GPT-6.1-Sol", got)
 		}
-		if got := gjson.GetBytes(out, "models.2.visibility").String(); got != "list" {
+		if got := ojson.GetBytesNoCopy(out, "models.2.visibility").String(); got != "list" {
 			t.Fatalf("models[2].visibility = %q, want list", got)
 		}
-		if got := gjson.GetBytes(out, "models.2.tool_mode"); got.Type != gjson.String || got.Str != "direct" {
+		if got := ojson.GetBytesNoCopy(out, "models.2.tool_mode"); got.Type != ojson.String || got.Str != "direct" {
 			t.Fatalf("models[2].tool_mode = %v (%s), want string \"direct\"", got.Value(), got.Type)
 		}
-		if got := gjson.GetBytes(out, "models.2.use_responses_lite"); got.Type != gjson.False {
+		if got := ojson.GetBytesNoCopy(out, "models.2.use_responses_lite"); got.Type != ojson.False {
 			t.Fatalf("models[2].use_responses_lite = %v (%s), want false", got.Value(), got.Type)
 		}
-		if got := gjson.GetBytes(out, "models.2.supports_reasoning_effort_updates"); got.Type != gjson.False {
+		if got := ojson.GetBytesNoCopy(out, "models.2.supports_reasoning_effort_updates"); got.Type != ojson.False {
 			t.Fatalf("models[2].supports_reasoning_effort_updates = %v (%s), want false", got.Value(), got.Type)
 		}
 	})
@@ -96,13 +96,13 @@ func TestEnsureBaselineModel(t *testing.T) {
 		if count != 2 {
 			t.Fatalf("count = %d, want 2", count)
 		}
-		if got := gjson.GetBytes(out, "models.0.visibility").String(); got != "hide" {
+		if got := ojson.GetBytesNoCopy(out, "models.0.visibility").String(); got != "hide" {
 			t.Fatalf("models[0].visibility = %q, want hide", got)
 		}
-		if got := gjson.GetBytes(out, "models.1.slug").String(); got != "gpt-5.5" {
+		if got := ojson.GetBytesNoCopy(out, "models.1.slug").String(); got != "gpt-5.5" {
 			t.Fatalf("models[1].slug = %q, want gpt-5.5", got)
 		}
-		if got := gjson.GetBytes(out, "models.1.visibility").String(); got != "list" {
+		if got := ojson.GetBytesNoCopy(out, "models.1.visibility").String(); got != "list" {
 			t.Fatalf("models[1].visibility = %q, want list", got)
 		}
 	})
@@ -116,10 +116,10 @@ func TestEnsureBaselineModel(t *testing.T) {
 		if count != 2 {
 			t.Fatalf("count = %d, want 2", count)
 		}
-		if got := gjson.GetBytes(out, "models.1.slug").String(); got != "gpt-5.5" {
+		if got := ojson.GetBytesNoCopy(out, "models.1.slug").String(); got != "gpt-5.5" {
 			t.Fatalf("models[1].slug = %q, want gpt-5.5", got)
 		}
-		if got := gjson.GetBytes(out, "models.1.visibility").String(); got != "list" {
+		if got := ojson.GetBytesNoCopy(out, "models.1.visibility").String(); got != "list" {
 			t.Fatalf("models[1].visibility = %q, want list", got)
 		}
 	})
@@ -136,8 +136,8 @@ func TestEnsureBaselineModel(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("count = %d, want 1", count)
 			}
-			vis := gjson.GetBytes(out, "models.0.visibility")
-			if vis.Type != gjson.String || vis.Str != "list" {
+			vis := ojson.GetBytesNoCopy(out, "models.0.visibility")
+			if vis.Type != ojson.String || vis.Str != "list" {
 				t.Fatalf("models[0].visibility = %v (%s), want string \"list\"", vis.Value(), vis.Type)
 			}
 		}

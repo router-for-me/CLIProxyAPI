@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -21,8 +22,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"golang.org/x/net/proxy"
 )
 
@@ -164,7 +163,7 @@ func codexWebsocketTurnEventID(err error, payload []byte) error {
 		return err
 	}
 	withID := *turnErr
-	withID.EventID = gjson.GetBytes(payload, "event_id").String()
+	withID.EventID = strings.Clone(ojson.GetBytesNoCopy(payload, "event_id").String())
 	return &withID
 }
 
@@ -176,6 +175,13 @@ func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) 
 	return body
 }
 
+func normalizeCodexWebsocketParallelToolCallsDoc(doc *ojson.Doc, headers http.Header) bool {
+	if !isCodexResponsesLiteRequestDoc(doc, headers) {
+		return false
+	}
+	return helps.SetBoolIfDifferentDoc(doc, "parallel_tool_calls", false)
+}
+
 func buildCodexWebsocketRequestBody(body []byte) []byte {
 	return frameCodexWebsocketRequestBody(helps.SanitizeCodexInputItemIDs(body))
 }
@@ -185,7 +191,7 @@ func frameCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
 	}
-	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
+	wsReqBody, errSet := ojson.SetBytes(body, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}

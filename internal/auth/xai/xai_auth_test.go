@@ -2,7 +2,6 @@ package xai
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -333,7 +333,7 @@ func TestXAIAuthDefaultPollInterval(t *testing.T) {
 }
 
 func fakeJWTWithEmail(email, subject string) string {
-	header := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
 	return header + "." + payload + ".sig"
 }

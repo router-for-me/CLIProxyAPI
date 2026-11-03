@@ -1829,3 +1829,104 @@ func containsSubstr(s, sub string) bool {
 	}
 	return false
 }
+
+func TestManager_ForceRefreshAuth_SignInRequiredDoesNotReadmitDeadCredential_Issue7135(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	futureExp := now.Add(6 * time.Hour)
+
+	// Single-account pool where the access_token has future nominal expiry, but upstream rejects it with 401
+	// and refresh fails terminally with refresh_token_reused.
+	auth := &Auth{
+		ID:       "codex-single-7135.json",
+		FileName: "codex-single-7135.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"email":         "dead@example.com",
+			"access_token":  "revoked-access-token",
+			"refresh_token": "revoked-refresh-token",
+			"expired":       futureExp.Format(time.RFC3339),
+		},
+	}
+
+	executor := &unauthorizedRefreshExecutor{
+		id:           "codex",
+		tokenInvalid: map[string]struct{}{"revoked-access-token": {}},
+		refreshErr:   errors.New(`token refresh failed with status 401: {"error":{"code":"refresh_token_reused","message":"Refresh token has already been used"}}`),
+	}
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(executor)
+	model := "gpt-6.1-terra-issue7135"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if _, errReg := m.Register(ctx, auth); errReg != nil {
+		t.Fatalf("register auth: %v", errReg)
+	}
+
+	// Initial inference triggers 401 + terminal refresh failure -> quarantines credential.
+	_, errInit := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errInit == nil {
+		t.Fatal("expected initial Execute to fail with 401")
+	}
+	beforeForce, _ := m.GetByID(auth.ID)
+	if !beforeForce.Unavailable || beforeForce.Status != StatusError || !beforeForce.RequiresSignIn {
+		t.Fatalf("precondition failed: Unavailable=%v Status=%s RequiresSignIn=%v", beforeForce.Unavailable, beforeForce.Status, beforeForce.RequiresSignIn)
+	}
+
+	// Simulate an executor returning (auth, nil) with nil CodexRefreshPatch and unchanged tokens when
+	// refresh_token is already in RejectedRefreshToken and disk did not rotate.
+	executor.mu.Lock()
+	executor.refreshErr = nil
+	executor.refreshPatch = nil
+	executor.refreshTokens = map[string]string{auth.ID: "revoked-access-token"}
+	executor.mu.Unlock()
+
+	if _, errForce := m.ForceRefreshAuth(ctx, auth.ID); errForce == nil {
+		t.Fatal("expected ForceRefreshAuth with unchanged rejected refresh_token and unchanged access_token to fail, got nil")
+	}
+
+	afterForce, _ := m.GetByID(auth.ID)
+	if !afterForce.Unavailable || afterForce.Status != StatusError || !afterForce.RequiresSignIn {
+		t.Fatalf("ForceRefreshAuth flipped terminal sign-in-required credential to active: Unavailable=%v Status=%s RequiresSignIn=%v StatusMessage=%q",
+			afterForce.Unavailable, afterForce.Status, afterForce.RequiresSignIn, afterForce.StatusMessage)
+	}
+	if afterForce.RejectedAccessToken != "revoked-access-token" {
+		t.Fatalf("RejectedAccessToken = %q, want %q preserved", afterForce.RejectedAccessToken, "revoked-access-token")
+	}
+
+	// Next inference must fail with 503 auth_unavailable without attempting upstream Execute on the dead credential.
+	execCallsBefore := len(executor.ExecuteCalls())
+	_, errAfterForce := m.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errAfterForce == nil {
+		t.Fatal("expected Execute after ForceRefreshAuth to fail with auth_unavailable")
+	}
+	var authUnavailableErr *Error
+	if !errors.As(errAfterForce, &authUnavailableErr) || authUnavailableErr == nil || authUnavailableErr.StatusCode() != http.StatusServiceUnavailable || authUnavailableErr.Code != "auth_unavailable" {
+		t.Fatalf("Execute after ForceRefreshAuth error = %#v, want 503 auth_unavailable", errAfterForce)
+	}
+	if gotCalls := len(executor.ExecuteCalls()); gotCalls != execCallsBefore {
+		t.Fatalf("dead credential was selected for inference after ForceRefreshAuth (%d -> %d execute calls)", execCallsBefore, gotCalls)
+	}
+
+	// Even if an inactive SIWC partition rotates while use_siwc=false and the active outer token remains rejected,
+	// the credential must remain Unavailable=true and Status=StatusError.
+	withSIWC := afterForce.Clone()
+	withSIWC.Metadata["use_siwc"] = false
+	withSIWC.Metadata["siwc"] = map[string]any{
+		"access_token":  "siwc-at-1",
+		"refresh_token": "siwc-rt-1",
+		"client_id":     "cid-1",
+	}
+	if _, errUpdSIWC := m.Update(ctx, withSIWC); errUpdSIWC != nil {
+		t.Fatalf("Update(withSIWC) error: %v", errUpdSIWC)
+	}
+	afterUpdSIWC, _ := m.GetByID(auth.ID)
+	if !afterUpdSIWC.Unavailable || afterUpdSIWC.Status != StatusError || !afterUpdSIWC.RequiresSignIn {
+		t.Fatalf("Update of inactive SIWC partition cleared terminal outer failure: Unavailable=%v Status=%s RequiresSignIn=%v",
+			afterUpdSIWC.Unavailable, afterUpdSIWC.Status, afterUpdSIWC.RequiresSignIn)
+	}
+}

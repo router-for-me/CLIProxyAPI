@@ -1303,3 +1303,99 @@ func (e *failingRefreshManagementExecutor) CountTokens(context.Context, *coreaut
 func (e *failingRefreshManagementExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
 	return nil, nil
 }
+
+func TestRefreshAuthFilesV8_SignInRequiredAndRedaction_Issue7135(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	authDir := t.TempDir()
+	cfg := &config.Config{AuthDir: authDir}
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	exec := &failingRefreshManagementExecutor{
+		provider: "codex",
+		err:      fmt.Errorf(`token refresh failed with status 401: {"error":{"code":"refresh_token_reused","message":"Refresh token has already been used"}}`),
+	}
+	manager.RegisterExecutor(exec)
+
+	credPath := filepath.Join(authDir, "codex-dead.json")
+	if errWrite := os.WriteFile(credPath, []byte(`{"type":"codex","email":"dead@example.com","access_token":"secret-dead-access-token","refresh_token":"secret-dead-refresh-token"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	futureExpiry := time.Now().UTC().Add(4 * time.Hour).Truncate(time.Second)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID:                   "codex-dead.json",
+		Index:                "idx-codex-dead",
+		FileName:             "codex-dead.json",
+		Provider:             "codex",
+		Status:               coreauth.StatusError,
+		Unavailable:          true,
+		RequiresSignIn:       true,
+		RejectedAccessToken:  "secret-dead-access-token",
+		RejectedRefreshToken: "secret-dead-refresh-token",
+		StatusMessage:        "unauthorized (refresh token invalid)",
+		LastError:            &coreauth.Error{Code: "unauthorized", Message: "refresh token was already used", HTTPStatus: http.StatusUnauthorized},
+		RefreshError:         &coreauth.Error{Code: "refresh_token_reused", Message: "refresh token was already used", HTTPStatus: http.StatusUnauthorized},
+		Metadata: map[string]any{
+			"type":          "codex",
+			"email":         "dead@example.com",
+			"access_token":  "secret-dead-access-token",
+			"refresh_token": "secret-dead-refresh-token",
+			"expired":       futureExpiry.Format(time.RFC3339),
+		},
+		Attributes: map[string]string{"path": credPath, "source": credPath},
+	})
+
+	// Simulate executor.Refresh returning (auth, nil) without rotating tokens when RejectedRefreshToken is unchanged.
+	exec.err = nil
+	exec.rotateTokens = false
+
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(ConfigV8ContextKey, true)
+		c.Next()
+	})
+	router.POST("/v8/management/credentials/refresh", h.RefreshAuthFiles)
+	router.GET("/v8/management/credentials", h.ListAuthFiles)
+
+	// 1. Refreshing a sign-in-required dead credential with unchanged tokens must fail (HTTP 500) and keep status=error, unavailable=true.
+	wRefreshDead := httptest.NewRecorder()
+	reqRefreshDead := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/refresh", strings.NewReader(`{"name":"codex-dead.json"}`))
+	reqRefreshDead.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wRefreshDead, reqRefreshDead)
+	if wRefreshDead.Code != http.StatusInternalServerError {
+		t.Fatalf("POST /v8/management/credentials/refresh on dead sign-in-required credential status = %d, want 500: %s", wRefreshDead.Code, wRefreshDead.Body.String())
+	}
+
+	wList := httptest.NewRecorder()
+	router.ServeHTTP(wList, httptest.NewRequest(http.MethodGet, "/v8/management/credentials?name=codex-dead.json", nil))
+	var listResp struct {
+		Files []map[string]any `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(wList.Body.Bytes(), &listResp); errUnmarshal != nil {
+		t.Fatalf("unmarshal list: %v", errUnmarshal)
+	}
+	if len(listResp.Files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(listResp.Files))
+	}
+	deadEntry := listResp.Files[0]
+	if deadEntry["status"] != string(coreauth.StatusError) || deadEntry["unavailable"] != true || deadEntry["requires_sign_in"] != true || deadEntry["recovery_stage"] != coreauth.RecoveryStageSignInRequired {
+		t.Fatalf("expected status=error unavailable=true requires_sign_in=true recovery_stage=sign_in_required, got %#v", deadEntry)
+	}
+
+	// 2. When a credential refresh genuinely rotates tokens on v8 /credentials/refresh, the response must use the redacted entry view.
+	exec.rotateTokens = true
+	wRefreshOK := httptest.NewRecorder()
+	reqRefreshOK := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/refresh", strings.NewReader(`{"name":"codex-dead.json"}`))
+	reqRefreshOK.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(wRefreshOK, reqRefreshOK)
+	if wRefreshOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 after token rotation, got %d: %s", wRefreshOK.Code, wRefreshOK.Body.String())
+	}
+	rawOK := wRefreshOK.Body.String()
+	for _, secret := range []string{"rotated-access-token", "rotated-refresh-token", "secret-dead-access-token", "secret-dead-refresh-token"} {
+		if strings.Contains(rawOK, secret) {
+			t.Fatalf("POST /v8/management/credentials/refresh leaked plaintext token %q in response: %s", secret, rawOK)
+		}
+	}
+}

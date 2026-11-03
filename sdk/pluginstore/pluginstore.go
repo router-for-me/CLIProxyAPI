@@ -37,6 +37,7 @@ const (
 type Source = internalpluginstore.Source
 type Registry = internalpluginstore.Registry
 type Plugin = internalpluginstore.Plugin
+type PluginLocale = internalpluginstore.PluginLocale
 type Version = internalpluginstore.Version
 type Release = internalpluginstore.Release
 type ReleaseAsset = internalpluginstore.ReleaseAsset
@@ -115,6 +116,10 @@ func DefaultSource() Source {
 
 func NormalizeSources(registryURLs []string) ([]Source, error) {
 	return internalpluginstore.NormalizeSources(registryURLs)
+}
+
+func NormalizePluginLocales(locales map[string]PluginLocale) map[string]PluginLocale {
+	return internalpluginstore.NormalizePluginLocales(locales)
 }
 
 func SourceID(registryURL string) string {

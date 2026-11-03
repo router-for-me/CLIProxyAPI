@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -341,6 +342,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if mode == updateModeRefresh {
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
+			if merged.Disabled || merged.Status == StatusDisabled {
+				merged.RefreshFailures = auth.RefreshFailures
+			}
 			auth = merged
 			NormalizeCredentialMetadata(auth.Metadata)
 		}
@@ -460,6 +464,23 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					if len(resumed) > 0 {
 						cooldownStateChanged = true
 					}
+				} else if auth.RequiresSignIn && !auth.HasValidAccessToken(now) {
+					auth.Unavailable = true
+					auth.Status = StatusError
+					if auth.StatusMessage == "" {
+						if existing.StatusMessage != "" {
+							auth.StatusMessage = existing.StatusMessage
+						} else {
+							auth.StatusMessage = "unauthorized (refresh token invalid)"
+						}
+					}
+					if auth.LastError == nil {
+						if existing.LastError != nil {
+							auth.LastError = cloneError(existing.LastError)
+						} else if auth.RefreshError != nil {
+							auth.LastError = &Error{Code: "unauthorized", Message: auth.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+						}
+					}
 				}
 			}
 		} else {
@@ -488,15 +509,18 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	} else {
 		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 		applyPreservedRenewalState(existing, auth, mode, now)
-		if !credChanged {
-			auth.LastRefreshedAt = existing.LastRefreshedAt
-			auth.NextRefreshAfter = existing.NextRefreshAfter
-			auth.RefreshFailures = existing.RefreshFailures
-		} else if authHasUnchangedRejectedRefreshToken(auth) {
-			if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
-				auth.NextRefreshAfter = exp
-			} else {
-				auth.NextRefreshAfter = time.Time{}
+		// Refresh updates must retain their outcome rather than the pending job marker.
+		if mode != updateModeRefresh {
+			if !credChanged {
+				auth.LastRefreshedAt = existing.LastRefreshedAt
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				auth.RefreshFailures = existing.RefreshFailures
+			} else if authHasUnchangedRejectedRefreshToken(auth) {
+				if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+					auth.NextRefreshAfter = exp
+				} else {
+					auth.NextRefreshAfter = time.Time{}
+				}
 			}
 		}
 	}
@@ -603,22 +627,39 @@ func equalErrorPtr(a, b *Error) bool {
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	m.RemoveIf(ctx, id, nil)
+}
+
+// RemoveIf deletes an auth from runtime state while holding the per-auth
+// mutation gate when predicate is nil or returns true for the current auth.
+func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth) bool) bool {
 	if m == nil {
-		return
+		return false
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return false
 	}
-	_ = ctx
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
+
+	if predicate != nil {
+		m.mu.RLock()
+		snapshot := m.auths[id]
+		if snapshot != nil {
+			snapshot = snapshot.Clone()
+		}
+		m.mu.RUnlock()
+		if !predicate(snapshot) {
+			return false
+		}
+	}
 
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -666,6 +707,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(context.Background())
+	return true
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {

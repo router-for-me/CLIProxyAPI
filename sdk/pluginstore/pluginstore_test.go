@@ -40,6 +40,11 @@ func TestManifestFromReleaseBuildsPinnedManifest(t *testing.T) {
 			Description: "Adds sample provider support.",
 			Author:      "author-name",
 			Repository:  "https://github.com/author-name/sample-provider",
+			Locales: map[string]PluginLocale{
+				"zh-CN": {
+					Description: "增加示例提供商支持。",
+				},
+			},
 		},
 		Release{TagName: "v0.2.0"},
 	)
@@ -51,6 +56,9 @@ func TestManifestFromReleaseBuildsPinnedManifest(t *testing.T) {
 	}
 	if manifest.Version != "0.2.0" || manifest.ReleaseTag != "v0.2.0" {
 		t.Fatalf("manifest version fields = %q/%q, want 0.2.0/v0.2.0", manifest.Version, manifest.ReleaseTag)
+	}
+	if manifest.Locales["zh-CN"].Description != "增加示例提供商支持。" || manifest.Plugin().Locales["zh-CN"].Description != "增加示例提供商支持。" {
+		t.Fatalf("manifest locales = %#v, want zh-CN description", manifest.Locales)
 	}
 }
 

@@ -219,6 +219,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("gemini[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -254,6 +255,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("interactions[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -291,6 +293,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("claude[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("claude[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("claude[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -348,6 +351,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("codex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("codex[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("codex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -392,6 +396,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("xai[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("xai[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("xai[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -435,6 +440,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("meta[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("meta[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("meta[%d].prefix: %s -> %s", i, o.Prefix, n.Prefix))
 			}
@@ -527,6 +533,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("vertex[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -587,6 +594,39 @@ func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, 
 		return changes
 	}
 	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
+}
+
+func appendConnectionPoolChanges(changes []string, prefix string, oldPool, newPool *config.ProxyConnectionPoolConfig) []string {
+	if oldPool == nil && newPool == nil {
+		return changes
+	}
+	var oldCfg, newCfg config.ProxyConnectionPoolConfig
+	if oldPool != nil {
+		oldCfg = *oldPool
+	}
+	if newPool != nil {
+		newCfg = *newPool
+	}
+	oldEnabled := formatConnectionPoolEnabled(oldPool)
+	newEnabled := formatConnectionPoolEnabled(newPool)
+	if oldEnabled != newEnabled {
+		changes = append(changes, fmt.Sprintf("%s.enabled: %s -> %s", prefix, oldEnabled, newEnabled))
+	}
+	if strings.TrimSpace(oldCfg.IdleConnTimeout) != strings.TrimSpace(newCfg.IdleConnTimeout) {
+		changes = append(changes, fmt.Sprintf("%s.idle-conn-timeout: %q -> %q", prefix, strings.TrimSpace(oldCfg.IdleConnTimeout), strings.TrimSpace(newCfg.IdleConnTimeout)))
+	}
+	changes = appendOptionalIntChange(changes, prefix+".max-idle-conns-per-host", oldCfg.MaxIdleConnsPerHost, newCfg.MaxIdleConnsPerHost)
+	return changes
+}
+
+func formatConnectionPoolEnabled(pool *config.ProxyConnectionPoolConfig) string {
+	if pool == nil {
+		return "<unset>"
+	}
+	if pool.Enabled == nil {
+		return "true"
+	}
+	return fmt.Sprintf("%t", *pool.Enabled)
 }
 
 func appendOptionalIntChange(changes []string, field string, oldVal, newVal *int) []string {
