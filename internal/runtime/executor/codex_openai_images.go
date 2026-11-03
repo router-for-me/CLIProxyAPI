@@ -486,9 +486,9 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			return nil, errRead
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		frames, errFrames := codexDirectImageJSONToSSEFrames(data, codexDirectImageStreamPrefix(endpointPath))
-		if errFrames != nil {
-			err = errFrames
+		root, items, errItems := codexParseDirectImageJSON(data)
+		if errItems != nil {
+			err = errItems
 			return nil, err
 		}
 		reporter.Publish(ctx, helps.ParseOpenAIImageUsage(body, data, contentType))
@@ -496,11 +496,21 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		headers := httpResp.Header.Clone()
 		headers.Set("Content-Type", "text/event-stream")
 		headers.Del("Content-Length")
-		out := make(chan cliproxyexecutor.StreamChunk, len(frames))
-		for _, frame := range frames {
-			out <- cliproxyexecutor.StreamChunk{Payload: frame}
-		}
-		close(out)
+		eventName := codexDirectImageStreamPrefix(endpointPath) + ".completed"
+		// Build each frame only when it is sent, so a multi-image body is not
+		// copied into a full set of frames up front.
+		out := make(chan cliproxyexecutor.StreamChunk)
+		go func() {
+			defer close(out)
+			for i, item := range items {
+				frame := codexBuildDirectImageJSONFrame(root, item, eventName, i == len(items)-1)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
 		return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
 	}
 
@@ -1256,57 +1266,55 @@ func codexDirectImageStreamPrefix(endpointPath string) string {
 	return "image_generation"
 }
 
-// codexDirectImageJSONToSSEFrames converts a non-streamed Images API response into
-// one "<prefix>.completed" SSE frame per image.
-func codexDirectImageJSONToSSEFrames(body []byte, streamPrefix string) ([][]byte, error) {
-	if !json.Valid(body) {
-		return nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned invalid image JSON"}
+// codexParseDirectImageJSON validates a non-streamed Images API response and
+// returns the data[] items that carry image output. The result references body,
+// which must not be mutated afterwards.
+func codexParseDirectImageJSON(body []byte) (ojson.Result, []ojson.Result, error) {
+	if !ojson.ValidBytes(body) {
+		return ojson.Result{}, nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned invalid image JSON"}
 	}
-	root := ojson.ParseBytes(body)
-	eventName := streamPrefix + ".completed"
-	usageRaw := root.Get("usage").Raw
+	root := util.ParseGJSONBytesNoCopy(body)
 	var items []ojson.Result
 	for _, item := range root.Get("data").Array() {
 		if strings.TrimSpace(item.Get("b64_json").String()) != "" || strings.TrimSpace(item.Get("url").String()) != "" {
 			items = append(items, item)
 		}
 	}
-	var frames [][]byte
-	for i, item := range items {
-		b64 := strings.TrimSpace(item.Get("b64_json").String())
-		url := strings.TrimSpace(item.Get("url").String())
-		dataDoc := ojson.NewDoc([]byte(`{"type":""}`))
-		_ = dataDoc.Set("type", eventName)
-		if b64 != "" {
-			_ = dataDoc.Set("b64_json", b64)
-		} else {
-			_ = dataDoc.Set("url", url)
-		}
-		if revised := item.Get("revised_prompt").String(); revised != "" {
-			_ = dataDoc.Set("revised_prompt", revised)
-		}
-		if created := root.Get("created"); created.Exists() {
-			_ = dataDoc.Set("created_at", created.Int())
-		}
-		for _, field := range []string{"size", "quality", "background", "output_format"} {
-			if value := root.Get(field).String(); value != "" {
-				_ = dataDoc.Set(field, value)
-			}
-		}
-		// Usage covers the whole request; attach it once, on the last event.
-		if i == len(items)-1 && usageRaw != "" && json.Valid([]byte(usageRaw)) {
-			_ = dataDoc.SetRaw("usage", usageRaw)
-		}
-		frames = append(frames, codexBuildSSEFrame(eventName, dataDoc.Bytes()))
-	}
-	if len(frames) == 0 {
+	if len(items) == 0 {
 		msg := "upstream did not return image output"
 		if upstreamMsg := strings.TrimSpace(root.Get("error.message").String()); upstreamMsg != "" {
 			msg += ": " + upstreamMsg
 		}
-		return nil, statusErr{code: http.StatusBadGateway, msg: msg}
+		return ojson.Result{}, nil, statusErr{code: http.StatusBadGateway, msg: msg}
 	}
-	return frames, nil
+	return root, items, nil
+}
+
+// codexBuildDirectImageJSONFrame builds one "<prefix>.completed" SSE frame for an
+// image item. Usage covers the whole request, so only the last frame carries it.
+func codexBuildDirectImageJSONFrame(root, item ojson.Result, eventName string, last bool) []byte {
+	dataDoc := ojson.NewDoc([]byte(`{"type":""}`))
+	_ = dataDoc.Set("type", eventName)
+	if b64 := strings.TrimSpace(item.Get("b64_json").String()); b64 != "" {
+		_ = dataDoc.Set("b64_json", b64)
+	} else {
+		_ = dataDoc.Set("url", strings.TrimSpace(item.Get("url").String()))
+	}
+	if revised := item.Get("revised_prompt").String(); revised != "" {
+		_ = dataDoc.Set("revised_prompt", revised)
+	}
+	if created := root.Get("created"); created.Exists() {
+		_ = dataDoc.Set("created_at", created.Int())
+	}
+	for _, field := range []string{"size", "quality", "background", "output_format"} {
+		if value := root.Get(field).String(); value != "" {
+			_ = dataDoc.Set(field, value)
+		}
+	}
+	if usage := root.Get("usage"); last && usage.IsObject() {
+		_ = dataDoc.SetRaw("usage", usage.Raw)
+	}
+	return codexBuildSSEFrame(eventName, dataDoc.Bytes())
 }
 
 func codexMimeTypeFromOutputFormat(outputFormat string) string {
