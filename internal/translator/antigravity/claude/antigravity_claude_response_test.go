@@ -1731,3 +1731,226 @@ func TestConvertAntigravityResponseToClaude_ImplicitOpenToolContinuationOrdering
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToClaudeNonStream_RefusalFinishReasons(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
+	testCases := []struct {
+		finishReason string
+		wantReason   string
+	}{
+		{finishReason: "SAFETY", wantReason: "refusal"},
+		{finishReason: "RECITATION", wantReason: "refusal"},
+		{finishReason: "PROHIBITED_CONTENT", wantReason: "refusal"},
+		{finishReason: "SPII", wantReason: "refusal"},
+		{finishReason: "BLOCKLIST", wantReason: "refusal"},
+		{finishReason: "IMAGE_SAFETY", wantReason: "refusal"},
+		{finishReason: "MALFORMED_RESPONSE", wantReason: "refusal"},
+		{finishReason: "MALFORMED_FUNCTION_CALL", wantReason: "refusal"},
+		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
+		{finishReason: "STOP", wantReason: "end_turn"},
+	}
+
+	ctx := context.Background()
+	for _, tc := range testCases {
+		t.Run(tc.finishReason, func(t *testing.T) {
+			rawJSON := []byte(`{
+				"response": {
+					"candidates": [{
+						"content": {"role": "model", "parts": []},
+						"finishReason": "` + tc.finishReason + `"
+					}],
+					"usageMetadata": {
+						"promptTokenCount": 8149,
+						"totalTokenCount": 8149
+					},
+					"modelVersion": "claude-opus-5-5-high",
+					"responseId": "req_vrtx_test"
+				}
+			}`)
+			output := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-opus-5-5-high", requestJSON, requestJSON, rawJSON, nil)
+			if got := ojson.GetBytesNoCopy(output, "stop_reason").String(); got != tc.wantReason {
+				t.Fatalf("stop_reason = %q, want %q. Output: %s", got, tc.wantReason, string(output))
+			}
+		})
+	}
+
+	t.Run("tool_use_takes_precedence_over_safety", func(t *testing.T) {
+		origReq := []byte(`{"model":"claude-opus-5-5","tools":[{"name":"echo","input_schema":{"type":"object","properties":{"x":{"type":"string"}}}}]}`)
+		rawJSON := []byte(`{
+			"response": {
+				"candidates": [{
+					"content": {"role": "model", "parts": [{"functionCall": {"name": "echo", "args": {"x": "1"}}}]},
+					"finishReason": "SAFETY"
+				}],
+				"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15},
+				"modelVersion": "claude-opus-5-5-high",
+				"responseId": "req_vrtx_tool"
+			}
+		}`)
+		output := ConvertAntigravityResponseToClaudeNonStream(ctx, "claude-opus-5-5-high", origReq, origReq, rawJSON, nil)
+		if got := ojson.GetBytesNoCopy(output, "stop_reason").String(); got != "tool_use" {
+			t.Fatalf("stop_reason = %q, want tool_use. Output: %s", got, string(output))
+		}
+	})
+}
+
+func TestConvertAntigravityResponseToClaudeStream_EmptySafetyRefusal(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5"}`)
+	translatedRequestJSON := []byte(`{"model":"claude-opus-5-5-high"}`)
+
+	firstChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}}],
+			"modelVersion": "claude-opus-5-5-high",
+			"responseId": "req_vrtx_011CgdVmG8o2DSoFQtSfzktZ",
+			"cpaUsageMetadata": {"promptTokenCount": 8149, "totalTokenCount": 8149}
+		}
+	}`)
+	terminalChunk := []byte(`{
+		"response": {
+			"candidates": [{"content": {"role": "model", "parts": [{"text": ""}]}, "finishReason": "SAFETY"}],
+			"usageMetadata": {"promptTokenCount": 8149, "totalTokenCount": 8149},
+			"modelVersion": "claude-opus-5-5-high",
+			"responseId": "req_vrtx_011CgdVmG8o2DSoFQtSfzktZ"
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, translatedRequestJSON, firstChunk, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, translatedRequestJSON, terminalChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	lastIndex := -1
+	for _, eventName := range []string{"message_start", "content_block_start", "content_block_stop", "message_delta", "message_stop"} {
+		index := strings.Index(outputText, "event: "+eventName+"\n")
+		if index < 0 {
+			t.Fatalf("event %q not found in:\n%s", eventName, outputText)
+		}
+		if index <= lastIndex {
+			t.Fatalf("event %q is out of order in:\n%s", eventName, outputText)
+		}
+		lastIndex = index
+	}
+
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := ojson.Get(messageDelta, "delta.stop_reason").String(); got != "refusal" {
+		t.Fatalf("stop_reason = %q, want refusal: %s", got, messageDelta)
+	}
+	if got := ojson.Get(messageDelta, "usage.input_tokens").Int(); got != 8149 {
+		t.Fatalf("input_tokens = %d, want 8149: %s", got, messageDelta)
+	}
+	if got := ojson.Get(messageDelta, "usage.output_tokens").Int(); got != 0 {
+		t.Fatalf("output_tokens = %d, want 0: %s", got, messageDelta)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_RefusalPreservedAcrossTrailingEmptyFinishReason(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5"}`)
+	for _, reason := range []string{
+		"SAFETY",
+		"RECITATION",
+		"PROHIBITED_CONTENT",
+		"SPII",
+		"BLOCKLIST",
+		"IMAGE_SAFETY",
+		"MALFORMED_RESPONSE",
+		"MALFORMED_FUNCTION_CALL",
+	} {
+		t.Run(reason, func(t *testing.T) {
+			for _, textPart := range []string{"partial", ""} {
+				name := "with_text"
+				if textPart == "" {
+					name = "empty_text"
+				}
+				t.Run(name, func(t *testing.T) {
+					finishChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"` + textPart + `"}]},"finishReason":"` + reason + `"}],"modelVersion":"claude-opus-5-5-high","responseId":"req_vrtx_split"}}`)
+					usageChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":""}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1,"totalTokenCount":101},"modelVersion":"claude-opus-5-5-high","responseId":"req_vrtx_split"}}`)
+
+					var param any
+					ctx := context.Background()
+					output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, requestJSON, finishChunk, &param), nil)
+					output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, requestJSON, usageChunk, &param), nil)...)
+					output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "claude-opus-5-5-high", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+					messageDelta := sseDataForEvent(t, string(output), "message_delta")
+					if got := ojson.Get(messageDelta, "delta.stop_reason").String(); got != "refusal" {
+						t.Fatalf("stop_reason = %q, want refusal: %s", got, messageDelta)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_WebSearchBufferedTextDrainedOnEmptyFinishReason(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	chunk := []byte(`{
+		"response": {
+			"modelVersion": "gemini-3.1-flash-lite",
+			"responseId": "resp-web-search-empty-finish",
+			"candidates": [{
+				"content": {"parts": [{"text": "Direct answer without grounding."}]},
+				"finishReason": ""
+			}],
+			"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14}
+		}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, chunk, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"), &param), nil)...)
+	outputText := string(output)
+
+	if !strings.Contains(outputText, "Direct answer without grounding.") {
+		t.Fatalf("buffered web-search text was lost on empty finishReason:\n%s", outputText)
+	}
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := ojson.Get(messageDelta, "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, messageDelta)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRespectsFinishReason(t *testing.T) {
+	requestJSON := []byte(`{
+		"model": "gemini-3.1-flash-lite",
+		"tools": [{"type": "web_search_20250305", "name": "web_search"}]
+	}`)
+	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
+	for _, tc := range []struct {
+		finishReason string
+		wantReason   string
+	}{
+		{finishReason: "SAFETY", wantReason: "refusal"},
+		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
+		{finishReason: "STOP", wantReason: "end_turn"},
+	} {
+		t.Run(tc.finishReason, func(t *testing.T) {
+			rawJSON := []byte(`{
+				"response": {
+					"modelVersion": "gemini-3.1-flash-lite",
+					"responseId": "resp-web-search-grounding-finish",
+					"candidates": [{
+						"content": {"parts": [{"text": "Partial grounded text."}]},
+						"groundingMetadata": {
+							"webSearchQueries": ["query"],
+							"groundingChunks": [{"web": {"uri": "https://example.com", "title": "Example"}}]
+						},
+						"finishReason": "` + tc.finishReason + `"
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4, "totalTokenCount": 14}
+				}
+			}`)
+			output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, rawJSON, nil)
+			if got := ojson.GetBytesNoCopy(output, "stop_reason").String(); got != tc.wantReason {
+				t.Fatalf("stop_reason = %q, want %q: %s", got, tc.wantReason, string(output))
+			}
+		})
+	}
+}

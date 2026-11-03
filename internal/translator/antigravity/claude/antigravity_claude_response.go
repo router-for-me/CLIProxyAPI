@@ -475,8 +475,8 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 
 	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
 		params.HasFinishReason = true
-		params.FinishReason = strings.Clone(finishReasonResult.String())
-		if params.FinishReason != "" {
+		if finishReason := strings.TrimSpace(finishReasonResult.String()); finishReason != "" {
+			params.FinishReason = strings.Clone(finishReason)
 			flushPendingToolInput()
 		}
 	}
@@ -589,18 +589,24 @@ func appendFinalEvents(params *Params, output *[]byte, force bool) {
 }
 
 func resolveStopReason(params *Params) string {
-	if params.HasToolUse {
+	return resolveAntigravityClaudeStopReason(params.FinishReason, params.HasToolUse)
+}
+
+func resolveAntigravityClaudeStopReason(finishReason string, hasToolUse bool) string {
+	if hasToolUse {
 		return "tool_use"
 	}
 
-	switch params.FinishReason {
+	switch strings.ToUpper(strings.TrimSpace(finishReason)) {
 	case "MAX_TOKENS":
 		return "max_tokens"
-	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
+	case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return "refusal"
+	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN", "":
+		return "end_turn"
+	default:
 		return "end_turn"
 	}
-
-	return "end_turn"
 }
 
 // ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Antigravity response to a non-streaming Claude response.
@@ -647,7 +653,8 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if groundingMetadata := antigravityGroundingMetadata(root); groundingMetadata.Exists() {
 			toolUseID := newClaudeWebSearchToolUseID()
 			_ = responseDoc.SetRawBytes("content", buildClaudeWebSearchContent(toolUseID, antigravityTextContent(root), groundingMetadata))
-			_ = responseDoc.Set("stop_reason", "end_turn")
+			stopReason := resolveAntigravityClaudeStopReason(root.Get("response.candidates.0.finishReason").String(), false)
+			_ = responseDoc.Set("stop_reason", stopReason)
 			_ = responseDoc.Set("usage.server_tool_use.web_search_requests", 1)
 			return responseDoc.Bytes()
 		}
@@ -819,21 +826,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		_ = responseDoc.SetRawBytes("content", translatorcommon.JoinRawArray(blocks))
 	}
 
-	stopReason := "end_turn"
-	if hasToolCall {
-		stopReason = "tool_use"
-	} else {
-		if finish := root.Get("response.candidates.0.finishReason"); finish.Exists() {
-			switch finish.String() {
-			case "MAX_TOKENS":
-				stopReason = "max_tokens"
-			case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
-				stopReason = "end_turn"
-			default:
-				stopReason = "end_turn"
-			}
-		}
+	var finishReason string
+	if finish := root.Get("response.candidates.0.finishReason"); finish.Exists() {
+		finishReason = finish.String()
 	}
+	stopReason := resolveAntigravityClaudeStopReason(finishReason, hasToolCall)
 	_ = responseDoc.Set("stop_reason", stopReason)
 
 	if promptTokens == 0 && outputTokens == 0 {
