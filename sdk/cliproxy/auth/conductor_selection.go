@@ -1222,6 +1222,52 @@ func retryRoundAvailabilityForAuth(auth *Auth, model string, now time.Time) (boo
 	return true, next
 }
 
+// hasLiveQuotaCooldown reports whether a quota deadline still gates the
+// requested model: a credential-wide quota whose deadline is in the future
+// (or unknown) always does, and so does the model's own live quota state.
+// A sibling model's quota and an expired quota marker are history, not a
+// live gate: the just-attempted failure's own deadline governs instead.
+func hasLiveQuotaCooldown(auth *Auth, model string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	quotaLive := func(quota QuotaState) bool {
+		return quota.Exceeded && (quota.NextRecoverAt.IsZero() || quota.NextRecoverAt.After(now))
+	}
+	if auth.Quota.Reason == "credential_quota" && quotaLive(auth.Quota) {
+		return true
+	}
+	modelKey := canonicalModelKey(model)
+	if modelKey == "" {
+		return quotaLive(auth.Quota)
+	}
+	for stateModel, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if canonicalModelKey(stateModel) == modelKey && quotaLive(state.Quota) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTransientZeroWaitEligibility reports whether the auth's last failure
+// for the model was a transient capacity rejection, which carries no quota
+// wait floor.
+func hasTransientZeroWaitEligibility(auth *Auth, model string) bool {
+	if auth == nil {
+		return false
+	}
+	modelKey := canonicalModelKey(model)
+	if modelKey != "" && len(auth.ModelStates) > 0 {
+		if state := auth.ModelStates[modelKey]; state != nil {
+			return isTransientRateLimitResultError(state.LastError)
+		}
+	}
+	return isTransientRateLimitResultError(auth.LastError)
+}
+
 func credentialRetryRoundStateEligible(lastErr *Error, quotaExceeded bool) bool {
 	if lastErr == nil {
 		return quotaExceeded
@@ -1291,7 +1337,13 @@ func (m *Manager) closestCooldownWaitWithAttempted(providers []string, model str
 			_, wasAttempted = attempted[auth.ID]
 		}
 		coolingDisabled := m.cooldownDisabledForAuth(auth)
-		if !wasAttempted || coolingDisabled || status != http.StatusTooManyRequests {
+		// A transient capacity rejection cools only until its provider hint,
+		// so an attempted credential whose last failure was transient and
+		// which carries no live quota deadline for this model must schedule
+		// by its actual remaining cooldown (including an explicit zero
+		// hint) instead of gaining the quota wait floor.
+		transientZeroWait := !hasLiveQuotaCooldown(auth, checkModel, now) && hasTransientZeroWaitEligibility(auth, checkModel)
+		if !wasAttempted || coolingDisabled || status != http.StatusTooManyRequests || transientZeroWait {
 			if next.IsZero() {
 				return 0, true
 			}

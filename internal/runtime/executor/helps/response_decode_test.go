@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
@@ -129,5 +130,58 @@ func TestDecodeResponseBodyCompositeClose(t *testing.T) {
 	}}
 	if errClose := body.Close(); !errors.Is(errClose, wantErr) || !reflect.DeepEqual(order, []int{1, 2}) {
 		t.Fatalf("close must attempt all closers and return first error: %v, order=%v", errClose, order)
+	}
+}
+
+func TestDecodeResponseBodyUnlabeledDoesNotWaitForFirstByte(t *testing.T) {
+	reader, writer := io.Pipe()
+	returned := make(chan io.ReadCloser, 1)
+	go func() {
+		body, errDecode := DecodeResponseBody(reader, http.Header{})
+		if errDecode != nil {
+			t.Error(errDecode)
+		}
+		returned <- body
+	}()
+	var body io.ReadCloser
+	select {
+	case body = <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DecodeResponseBody blocked until the upstream sent its first byte")
+	}
+	go func() {
+		_, _ = writer.Write([]byte("data: {}\n\n"))
+		_ = writer.Close()
+	}()
+	got, errRead := io.ReadAll(body)
+	if errRead != nil || string(got) != "data: {}\n\n" {
+		t.Fatalf("read %q, %v", got, errRead)
+	}
+	if errClose := body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+}
+
+func TestDecodeResponseBodySniffsSplitMagicBytes(t *testing.T) {
+	plain := []byte("data: response.completed\n\n")
+	for _, encoding := range []string{"gzip", "zstd"} {
+		wire := encodeResponseDecodeTestBody(t, encoding, plain)
+		reader, writer := io.Pipe()
+		go func() {
+			// The magic bytes arrive one write at a time.
+			for i := range wire {
+				_, _ = writer.Write(wire[i : i+1])
+			}
+			_ = writer.Close()
+		}()
+		body, errDecode := DecodeResponseBody(reader, http.Header{})
+		if errDecode != nil {
+			t.Fatal(errDecode)
+		}
+		got, errRead := io.ReadAll(body)
+		if errRead != nil || !bytes.Equal(got, plain) {
+			t.Fatalf("%s: read %q, %v", encoding, got, errRead)
+		}
+		_ = body.Close()
 	}
 }

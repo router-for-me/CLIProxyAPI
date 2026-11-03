@@ -426,6 +426,7 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	if apiKey == "" || ctx == nil {
 		return
 	}
+	coreusage.SetCapturedAPIKey(ctx, apiKey)
 	ginCtx, ok := ctx.Value("gin").(interface{ Set(string, any) })
 	if !ok || ginCtx == nil {
 		return
@@ -686,6 +687,10 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 		return false
 	}
 	_ = m.endMismatchedHomeSessionSelections(ctx, sessionID, credentialID, routeModel, false)
+	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
+	if !selection.Active() {
+		return false
+	}
 	key := homeSessionSelectionKey{credentialID: credentialID, routeModel: routeModel}
 	m.mu.Lock()
 	if m.homeSessionSelections == nil {
@@ -699,7 +704,6 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 	previous := selections[key]
 	selections[key] = selection
 	m.mu.Unlock()
-	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
 	if previous != nil && previous != selection {
 		previous.End("target_replaced")
 	}
@@ -789,7 +793,9 @@ func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliprox
 	}
 	m.rememberHomeSelectionRuntimeAuth(sessionID, selection)
 	if errBind := selection.Bind(func() error {
-		m.forgetHomeRuntimeAuth(sessionID, authID, selection)
+		if !selection.retained.Load() {
+			m.forgetHomeRuntimeAuth(sessionID, authID, selection)
+		}
 		return nil
 	}); errBind != nil {
 		selection.runtimeAuthBound.Store(false)
@@ -975,7 +981,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if retainedOK {
 		return retained, nil
 	}
+	if errLoss := cliproxyexecutor.WebsocketInputLossError(ctx); errLoss != nil {
+		return nil, errLoss
+	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
+		if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) && pinnedAuthID != "" {
+			if _, ok := m.GetExecutionSessionAuthByID(sessionID, pinnedAuthID); ok {
+				return nil, &cliproxyexecutor.UpstreamWebsocketTurnError{FullContextRequired: true}
+			}
+		}
 		if pinnedAuthID != "" {
 			if errEnd := m.endMismatchedHomeSessionSelections(ctx, sessionID, pinnedAuthID, requestedModel, true); errEnd != nil {
 				return nil, errEnd

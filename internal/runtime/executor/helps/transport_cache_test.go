@@ -260,3 +260,48 @@ func TestTransportCacheEvictionClosesIdleConnections(t *testing.T) {
 		t.Fatal("expected auth-2 and auth-3 to remain in cache")
 	}
 }
+
+func TestTransportCacheBuilderPanicReleasesMutex(t *testing.T) {
+	cache := NewTransportCache[cacheKey](4)
+	key := cacheKey{"auth-panic", ""}
+
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic from builder to propagate")
+			}
+		}()
+		_, _ = cache.Get(key, func() (*http.Transport, error) {
+			panic("builder boom")
+		})
+	}()
+
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("Len() after panicked build = %d, want 0", got)
+	}
+
+	transport, err := cache.Get(key, func() (*http.Transport, error) {
+		return &http.Transport{}, nil
+	})
+	if err != nil || transport == nil {
+		t.Fatalf("Get() after recovered builder panic = (%p, %v), want usable cache", transport, err)
+	}
+}
+
+func TestTransportCachePurgeRetiresEntries(t *testing.T) {
+	cache := NewTransportCache[cacheKey](4)
+	key := cacheKey{"auth-purge", ""}
+
+	_, err := cache.Get(key, func() (*http.Transport, error) {
+		return &http.Transport{}, nil
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	entry := cache.items[key].Value.(*transportCacheEntry[cacheKey])
+	cache.Purge()
+	if !entry.retired.Load() {
+		t.Fatal("expected Purge() to mark removed entry as retired")
+	}
+}

@@ -114,8 +114,25 @@ func (m *Manager) queueRefreshUnschedule(authID string) {
 	loop.remove(authID)
 }
 
+// codexAutoRefreshUnavailable mirrors the executor's local renewal requirements.
+// Runtime evaluators and Home retain control over their own refresh mechanisms.
+func (m *Manager) codexAutoRefreshUnavailable(a *Auth, now time.Time) bool {
+	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "codex") || m.HomeEnabled() {
+		return false
+	}
+	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
+		return false
+	}
+	// Intentionally ignore refreshToken: the local Codex executor only reads refresh_token.
+	if authMetadataString(a, "refresh_token") != "" {
+		return false
+	}
+	_, hasSIWC, _ := CodexSIWCNeedsRefresh(a, now)
+	return !hasSIWC
+}
+
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil {
+	if a == nil || m.codexAutoRefreshUnavailable(a, now) {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
@@ -123,6 +140,12 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
+	}
+	if authHasUnchangedRejectedRefreshToken(a) {
+		if a.HasValidAccessToken(now) {
+			return false
+		}
+		return !a.Disabled && a.Status != StatusDisabled
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
@@ -455,6 +478,21 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
+	if secretGrantChanged(existing, incoming) {
+		return true
+	}
+	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existing.Metadata["use_siwc"])
+	incomingUseSIWC, incomingHasUseSIWC := parseBoolAny(incoming.Metadata["use_siwc"])
+	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
+		return true
+	}
+	return false
+}
+
+func secretGrantChanged(existing, incoming *Auth) bool {
+	if existing == nil || incoming == nil {
+		return false
+	}
 	if authAccessToken(existing) != authAccessToken(incoming) || authOuterAccessToken(existing) != authOuterAccessToken(incoming) {
 		return true
 	}
@@ -495,12 +533,273 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 		authSIWCTokenField(existing, "client_id") != authSIWCTokenField(incoming, "client_id") {
 		return true
 	}
-	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existing.Metadata["use_siwc"])
-	incomingUseSIWC, incomingHasUseSIWC := parseBoolAny(incoming.Metadata["use_siwc"])
-	if existingHasUseSIWC != incomingHasUseSIWC || existingUseSIWC != incomingUseSIWC {
+	return false
+}
+
+func isSIWCRefreshFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var marker interface{ IsSIWCRefreshError() bool }
+	if errors.As(err, &marker) && marker != nil && marker.IsSIWCRefreshError() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "siwc") || strings.Contains(lower, "openai oauth token request failed")
+}
+
+func recordRejectedRefreshTokens(auth *Auth, err error) {
+	if auth == nil {
+		return
+	}
+	outerRT := authRefreshToken(auth)
+	siwcRT := authSIWCTokenField(auth, "refresh_token")
+	var partErr interface {
+		OuterRefreshError() error
+		SIWCRefreshError() error
+	}
+	if errors.As(err, &partErr) && partErr != nil {
+		outerErr := partErr.OuterRefreshError()
+		siwcErr := partErr.SIWCRefreshError()
+		if outerErr != nil && isTerminalRefreshError(auth, outerErr) && outerRT != "" {
+			auth.RejectedRefreshToken = outerRT
+		}
+		if siwcErr != nil && isTerminalRefreshError(auth, siwcErr) && siwcRT != "" {
+			auth.RejectedSIWCRefreshToken = siwcRT
+		}
+		return
+	}
+	if isSIWCRefreshFailure(err) && siwcRT != "" {
+		auth.RejectedSIWCRefreshToken = siwcRT
+		return
+	}
+	if outerRT != "" {
+		auth.RejectedRefreshToken = outerRT
+		return
+	}
+	if siwcRT != "" {
+		auth.RejectedSIWCRefreshToken = siwcRT
+	}
+}
+
+func authHasAnyRejectedRefreshPartition(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.RejectedRefreshToken != "" && authRefreshToken(auth) == auth.RejectedRefreshToken {
+		return true
+	}
+	if auth.RejectedSIWCRefreshToken != "" && authSIWCTokenField(auth, "refresh_token") == auth.RejectedSIWCRefreshToken {
 		return true
 	}
 	return false
+}
+
+func authHasUnchangedRejectedRefreshToken(auth *Auth) bool {
+	if auth == nil || !auth.RequiresSignIn {
+		return false
+	}
+	outerRT := authRefreshToken(auth)
+	siwcRT := authSIWCTokenField(auth, "refresh_token")
+	hasOuter := outerRT != ""
+	hasSIWC := siwcRT != ""
+	if !hasOuter && !hasSIWC {
+		return true
+	}
+	if hasOuter && auth.RejectedRefreshToken != outerRT {
+		return false
+	}
+	if hasSIWC && auth.RejectedSIWCRefreshToken != siwcRT {
+		return false
+	}
+	return true
+}
+
+func applyPreservedRenewalState(existing, updated *Auth, mode updateAuthMode, now time.Time) {
+	if updated == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if mode == updateModeRefresh {
+		var outerErr, siwcErr error
+		var failedOuterRT, failedSIWCRT string
+		if updated.CodexRefreshPatch != nil {
+			outerErr = updated.CodexRefreshPatch.OuterError()
+			siwcErr = updated.CodexRefreshPatch.SIWCError()
+			failedOuterRT = updated.CodexRefreshPatch.FailedOuterRefreshToken()
+			failedSIWCRT = updated.CodexRefreshPatch.FailedSIWCRefreshToken()
+		}
+		currentOuterRT := authRefreshToken(updated)
+		currentSIWCRT := authSIWCTokenField(updated, "refresh_token")
+		outerStillMatchesFailed := failedOuterRT == "" || (currentOuterRT == failedOuterRT && (existing == nil || authRefreshToken(existing) == failedOuterRT))
+		siwcStillMatchesFailed := failedSIWCRT == "" || (currentSIWCRT == failedSIWCRT && (existing == nil || authSIWCTokenField(existing, "refresh_token") == failedSIWCRT))
+		outerTerminal := outerErr != nil && outerStillMatchesFailed && isTerminalRefreshError(updated, outerErr)
+		siwcTerminal := siwcErr != nil && siwcStillMatchesFailed && isTerminalRefreshError(updated, siwcErr)
+		preservedRejectedOuter := existing != nil && existing.RejectedRefreshToken != "" && currentOuterRT == existing.RejectedRefreshToken
+		preservedRejectedSIWC := existing != nil && existing.RejectedSIWCRefreshToken != "" && currentSIWCRT == existing.RejectedSIWCRefreshToken
+		if outerTerminal || siwcTerminal || preservedRejectedOuter || preservedRejectedSIWC {
+			updated.RequiresSignIn = true
+			updated.RenewalVerified = false
+			updated.LastRenewalVerifiedAt = time.Time{}
+			if outerTerminal {
+				updated.RejectedRefreshToken = authRefreshToken(updated)
+				updated.RefreshError = sanitizeRenewalError(updated, outerErr)
+			} else if preservedRejectedOuter {
+				updated.RejectedRefreshToken = existing.RejectedRefreshToken
+			} else {
+				updated.RejectedRefreshToken = ""
+			}
+			if siwcTerminal {
+				updated.RejectedSIWCRefreshToken = authSIWCTokenField(updated, "refresh_token")
+				updated.RefreshError = sanitizeRenewalError(updated, siwcErr)
+			} else if preservedRejectedSIWC {
+				updated.RejectedSIWCRefreshToken = existing.RejectedSIWCRefreshToken
+			} else {
+				updated.RejectedSIWCRefreshToken = ""
+			}
+			if updated.RefreshError == nil && existing != nil {
+				updated.RefreshError = cloneError(existing.RefreshError)
+			}
+			if existing != nil && !existing.RenewalEventAt.IsZero() {
+				updated.RenewalEventAt = existing.RenewalEventAt
+			} else {
+				updated.RenewalEventAt = now
+			}
+			if existing != nil && !existing.AdoptedAt.IsZero() {
+				updated.AdoptedAt = existing.AdoptedAt
+			} else if updated.AdoptedAt.IsZero() {
+				updated.AdoptedAt = now
+			}
+			if existing != nil && existing.AdoptedGrantHash != "" {
+				updated.AdoptedGrantHash = existing.AdoptedGrantHash
+			} else if updated.AdoptedGrantHash == "" {
+				updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+			}
+			if existing != nil {
+				updated.InferenceVerified = existing.InferenceVerified
+				updated.LastInferenceVerifiedAt = existing.LastInferenceVerifiedAt
+			}
+			return
+		}
+		upstreamVerified := updated.CodexRefreshPatch == nil || updated.CodexRefreshPatch.UpstreamRefreshed()
+		if !upstreamVerified {
+			// Disk-only credential adoption during Refresh: treat as a newly loaded grant awaiting its first renewal.
+			updated.RequiresSignIn = false
+			updated.RefreshError = nil
+			updated.RejectedRefreshToken = ""
+			updated.RejectedSIWCRefreshToken = ""
+			updated.RenewalWarnedRefreshToken = ""
+			updated.RenewalEventAt = time.Time{}
+			updated.AdoptedAt = now
+			updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+			updated.InferenceVerified = false
+			updated.LastInferenceVerifiedAt = time.Time{}
+			updated.RenewalVerified = false
+			updated.LastRenewalVerifiedAt = time.Time{}
+			return
+		}
+		updated.RequiresSignIn = false
+		updated.RefreshError = nil
+		updated.RejectedRefreshToken = ""
+		updated.RejectedSIWCRefreshToken = ""
+		updated.RenewalWarnedRefreshToken = ""
+		updated.RenewalEventAt = time.Time{}
+		if existing != nil && !existing.AdoptedAt.IsZero() {
+			updated.AdoptedAt = existing.AdoptedAt
+		} else if updated.AdoptedAt.IsZero() {
+			updated.AdoptedAt = now
+		}
+		if existing != nil && existing.AdoptedGrantHash != "" {
+			updated.AdoptedGrantHash = existing.AdoptedGrantHash
+		} else if existing != nil {
+			updated.AdoptedGrantHash = AuthGrantFingerprint(existing)
+		} else if updated.AdoptedGrantHash == "" {
+			updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+		}
+		if existing != nil {
+			updated.InferenceVerified = existing.InferenceVerified
+			updated.LastInferenceVerifiedAt = existing.LastInferenceVerifiedAt
+		}
+		updated.RenewalVerified = true
+		updated.LastRenewalVerifiedAt = now
+		return
+	}
+	if existing == nil {
+		if updated.AdoptedAt.IsZero() {
+			updated.AdoptedAt = now
+		}
+		if updated.AdoptedGrantHash == "" {
+			updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+		}
+		return
+	}
+	if secretGrantChanged(existing, updated) {
+		rejectedOuterUnchanged := existing.RejectedRefreshToken != "" && authRefreshToken(updated) == existing.RejectedRefreshToken
+		rejectedSIWCUnchanged := existing.RejectedSIWCRefreshToken != "" && authSIWCTokenField(updated, "refresh_token") == existing.RejectedSIWCRefreshToken
+		sameRejectedRefresh := existing.RequiresSignIn && (rejectedOuterUnchanged || rejectedSIWCUnchanged)
+		if !sameRejectedRefresh {
+			updated.RequiresSignIn = false
+			updated.RefreshError = nil
+			updated.RejectedRefreshToken = ""
+			updated.RejectedSIWCRefreshToken = ""
+			updated.RenewalWarnedRefreshToken = ""
+			updated.RenewalEventAt = time.Time{}
+			updated.AdoptedAt = now
+			updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+			updated.InferenceVerified = false
+			updated.LastInferenceVerifiedAt = time.Time{}
+			updated.RenewalVerified = false
+			updated.LastRenewalVerifiedAt = time.Time{}
+			return
+		}
+		if authAccessToken(updated) != authAccessToken(existing) || authOuterAccessToken(updated) != authOuterAccessToken(existing) {
+			updated.RequiresSignIn = existing.RequiresSignIn
+			updated.RefreshError = cloneError(existing.RefreshError)
+			if rejectedOuterUnchanged {
+				updated.RejectedRefreshToken = existing.RejectedRefreshToken
+			} else {
+				updated.RejectedRefreshToken = ""
+			}
+			if rejectedSIWCUnchanged {
+				updated.RejectedSIWCRefreshToken = existing.RejectedSIWCRefreshToken
+			} else {
+				updated.RejectedSIWCRefreshToken = ""
+			}
+			updated.RenewalWarnedRefreshToken = existing.RenewalWarnedRefreshToken
+			updated.RenewalEventAt = existing.RenewalEventAt
+			updated.AdoptedAt = now
+			updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+			updated.InferenceVerified = false
+			updated.LastInferenceVerifiedAt = time.Time{}
+			updated.RenewalVerified = false
+			updated.LastRenewalVerifiedAt = time.Time{}
+			if exp, ok := updated.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+				updated.NextRefreshAfter = exp
+			}
+			return
+		}
+	}
+	updated.RequiresSignIn = existing.RequiresSignIn
+	updated.RefreshError = cloneError(existing.RefreshError)
+	updated.RejectedRefreshToken = existing.RejectedRefreshToken
+	updated.RejectedSIWCRefreshToken = existing.RejectedSIWCRefreshToken
+	updated.RenewalWarnedRefreshToken = existing.RenewalWarnedRefreshToken
+	updated.RenewalEventAt = existing.RenewalEventAt
+	updated.AdoptedAt = existing.AdoptedAt
+	if updated.AdoptedAt.IsZero() {
+		updated.AdoptedAt = now
+	}
+	if existing.AdoptedGrantHash != "" {
+		updated.AdoptedGrantHash = existing.AdoptedGrantHash
+	} else {
+		updated.AdoptedGrantHash = AuthGrantFingerprint(updated)
+	}
+	updated.InferenceVerified = existing.InferenceVerified
+	updated.LastInferenceVerifiedAt = existing.LastInferenceVerifiedAt
+	updated.RenewalVerified = existing.RenewalVerified
+	updated.LastRenewalVerifiedAt = existing.LastRenewalVerifiedAt
 }
 
 func authSIWCTokenField(auth *Auth, key string) string {
@@ -605,6 +904,10 @@ func shouldPreserveRejectedAccessToken(existing, updated *Auth, isRefresh bool) 
 		}
 		if updated.CodexRefreshPatch != nil {
 			return !updated.CodexRefreshPatch.RefreshedOuter()
+		}
+		if (existing.RejectedRefreshToken != "" && authRefreshToken(updated) == existing.RejectedRefreshToken) ||
+			existing.RequiresSignIn || updated.RequiresSignIn {
+			return true
 		}
 		return false
 	}
@@ -982,6 +1285,86 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 	}
 
+	// Do not repeatedly submit an unchanged refresh grant already known to be terminally rejected.
+	if !forceRefresh && authHasUnchangedRejectedRefreshToken(auth) {
+		checkNow := time.Now()
+		accessTokenRejected := failedAccessToken != "" && authMatchesTokenPartition(auth, failedAccessToken)
+		if !accessTokenRejected && auth.HasValidAccessToken(checkNow) {
+			shouldReschedule := false
+			shouldUnschedule := false
+			m.mu.Lock()
+			if current := m.auths[id]; current != nil &&
+				current.RegistrationEpoch == auth.RegistrationEpoch &&
+				current.CredentialVersion == auth.CredentialVersion &&
+				authHasUnchangedRejectedRefreshToken(current) {
+				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(checkNow) {
+					if !current.NextRefreshAfter.Equal(exp) {
+						current.NextRefreshAfter = exp
+						shouldReschedule = true
+					}
+				} else if !current.NextRefreshAfter.IsZero() {
+					current.NextRefreshAfter = time.Time{}
+					shouldUnschedule = true
+				}
+				m.auths[id] = current
+				if m.scheduler != nil {
+					m.scheduler.upsertAuth(current.Clone())
+				}
+			}
+			m.mu.Unlock()
+			if shouldReschedule {
+				m.queueRefreshReschedule(id)
+			} else if shouldUnschedule {
+				m.queueRefreshUnschedule(id)
+			}
+			if auth.RefreshError != nil {
+				return nil, auth.RefreshError
+			}
+			if auth.LastError != nil {
+				return nil, auth.LastError
+			}
+			return nil, errors.New("refresh token requires sign-in")
+		}
+		// Access token has expired (or was rejected by a 401) while refresh grant remains terminally rejected.
+		m.mu.Lock()
+		if current := m.auths[id]; current != nil &&
+			current.RegistrationEpoch == auth.RegistrationEpoch &&
+			current.CredentialVersion == auth.CredentialVersion &&
+			authHasUnchangedRejectedRefreshToken(current) {
+			current.Generation++
+			current.UpdatedAt = checkNow
+			current.Unavailable = true
+			if current.Disabled || current.Status == StatusDisabled {
+				current.Status = StatusDisabled
+				if current.StatusMessage == "" {
+					current.StatusMessage = "disabled"
+				}
+			} else {
+				current.Status = StatusError
+				current.StatusMessage = "unauthorized (refresh token invalid)"
+			}
+			current.NextRefreshAfter = time.Time{}
+			current.NextRetryAfter = time.Time{}
+			current.RefreshFailures = 0
+			current.RequiresSignIn = true
+			msg := "unauthorized (refresh token invalid)"
+			if current.RefreshError != nil && strings.TrimSpace(current.RefreshError.Message) != "" {
+				msg = current.RefreshError.Message
+			}
+			current.LastError = &Error{Code: "unauthorized", Message: msg, HTTPStatus: http.StatusUnauthorized}
+			m.auths[id] = current
+			if m.scheduler != nil {
+				m.scheduler.upsertAuth(current.Clone())
+			}
+		}
+		m.mu.Unlock()
+		m.queueRefreshUnschedule(id)
+		if auth.RefreshError != nil {
+			return nil, auth.RefreshError
+		}
+		return nil, &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
+	}
+
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
@@ -1001,6 +1384,24 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.queueRefreshReschedule(id)
 		return nil, err
 	}
+	if err == nil {
+		probe := updated
+		if probe == nil {
+			probe = base.Clone()
+		} else {
+			probe = probe.Clone()
+		}
+		applyPreservedRenewalState(base, probe, updateModeRefresh, now)
+		if !secretGrantChanged(base, probe) && authHasUnchangedRejectedRefreshToken(probe) {
+			if probe.RefreshError != nil {
+				err = probe.RefreshError
+			} else if base != nil && base.LastError != nil {
+				err = base.LastError
+			} else {
+				err = &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
+			}
+		}
+	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
@@ -1010,7 +1411,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		shouldUnschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
+			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current)) {
 				m.mu.Unlock()
 				return nil, err
 			}
@@ -1018,6 +1419,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				m.mu.Unlock()
 				return nil, err
 			}
+			terminalRefresh := isTerminalRefreshError(current, err)
+			sanitizedRefreshErr := sanitizeRenewalError(current, err)
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			if wasTerminalUnauthorized {
 				current.Generation++
@@ -1026,8 +1429,14 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.Status = StatusError
 				current.NextRefreshAfter = time.Time{}
 				current.NextRetryAfter = time.Time{}
-				if isUnauthorizedError(err) || isInvalidGrantError(err) {
-					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				current.RefreshError = sanitizedRefreshErr
+				if terminalRefresh || isInvalidGrantError(err) {
+					current.RequiresSignIn = true
+					recordRejectedRefreshTokens(current, err)
+					if current.RenewalEventAt.IsZero() {
+						current.RenewalEventAt = now
+					}
+					current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
 					current.StatusMessage = "unauthorized (refresh token invalid)"
 				}
 				m.auths[id] = current
@@ -1041,6 +1450,26 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.Generation++
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
+			if terminalRefresh {
+				current.RefreshError = sanitizedRefreshErr
+				current.RequiresSignIn = true
+				current.RenewalVerified = false
+				current.LastRenewalVerifiedAt = time.Time{}
+				recordRejectedRefreshTokens(current, err)
+				if current.RenewalEventAt.IsZero() {
+					current.RenewalEventAt = now
+				}
+			} else if authHasAnyRejectedRefreshPartition(current) {
+				// Preserve existing terminal sign-in requirement from the other partition
+				// when a healthy partition encounters a transient refresh failure.
+				current.RequiresSignIn = true
+				if current.RefreshError == nil || !isTerminalRefreshError(current, current.RefreshError) {
+					current.RefreshError = sanitizedRefreshErr
+				}
+			} else {
+				current.RefreshError = sanitizedRefreshErr
+				current.RequiresSignIn = false
+			}
 
 			isDisabled = current.Disabled || current.Status == StatusDisabled
 			hasValidAccessToken := current.HasValidAccessToken(now)
@@ -1054,6 +1483,28 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.RefreshFailures = 0
 				current.StatusMessage = "disabled (invalid grant)"
 				shouldUnschedule = true
+			} else if isDisabled && terminalRefresh {
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				current.RefreshFailures = 0
+				if current.StatusMessage == "" {
+					current.StatusMessage = "disabled"
+				}
+				if !authHasUnchangedRejectedRefreshToken(current) {
+					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
+					shouldReschedule = true
+				} else if hasValidAccessToken && !accessTokenRejected {
+					if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+						current.NextRefreshAfter = exp
+						shouldReschedule = true
+					} else {
+						current.NextRefreshAfter = time.Time{}
+						shouldUnschedule = true
+					}
+				} else {
+					current.NextRefreshAfter = time.Time{}
+					shouldUnschedule = true
+				}
 			} else if isDisabled {
 				current.Unavailable = true
 				current.Status = StatusDisabled
@@ -1062,7 +1513,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.StatusMessage = "disabled"
 				}
 				shouldReschedule = true
-			} else if accessTokenRejected && invalidGrant {
+			} else if accessTokenRejected && (invalidGrant || terminalRefresh) {
 				// Neither token can recover without a new login. Stop selecting the
 				// credential until its tokens change instead of retrying it after
 				// every cooldown and returning the same 401 to clients.
@@ -1071,17 +1522,27 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.NextRefreshAfter = time.Time{}
 				current.NextRetryAfter = time.Time{}
 				current.RefreshFailures = 0
-				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
-				current.StatusMessage = "unauthorized (refresh token invalid)"
+				current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
+				if unauthorized && !invalidGrant {
+					current.StatusMessage = "unauthorized"
+				} else {
+					current.StatusMessage = "unauthorized (refresh token invalid)"
+				}
 				shouldUnschedule = true
 			} else if !hasValidAccessToken || accessTokenRejected {
 				current.Unavailable = true
 				current.Status = StatusError
-				if unauthorized {
+				if unauthorized || terminalRefresh {
 					current.NextRefreshAfter = time.Time{}
 					current.NextRetryAfter = time.Time{}
 					current.RefreshFailures = 0
-					current.StatusMessage = "unauthorized"
+					current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
+					if unauthorized {
+						current.StatusMessage = "unauthorized"
+					} else {
+						current.StatusMessage = "unauthorized (refresh token invalid)"
+					}
+					shouldUnschedule = true
 				} else if invalidGrant {
 					current.RefreshFailures++
 					current.NextRefreshAfter = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
@@ -1092,6 +1553,29 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 					current.StatusMessage = "token expired"
 					shouldReschedule = true
+				}
+			} else if terminalRefresh {
+				// Access token remains valid, but refresh grant was terminally rejected.
+				// Preserve working inference and defer refresh check until access_token expiry
+				// when no other healthy refresh partition remains.
+				current.RefreshFailures = 0
+				if !authHasUnchangedRejectedRefreshToken(current) {
+					current.NextRefreshAfter = time.Time{}
+					shouldReschedule = true
+				} else if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+					current.NextRefreshAfter = exp
+					shouldReschedule = true
+				} else {
+					current.NextRefreshAfter = time.Time{}
+					shouldUnschedule = true
+				}
+				warnKey := current.RejectedRefreshToken + "|" + current.RejectedSIWCRefreshToken
+				if warnKey == "|" {
+					warnKey = "terminal"
+				}
+				if !current.Unavailable && current.RenewalWarnedRefreshToken != warnKey {
+					current.RenewalWarnedRefreshToken = warnKey
+					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, sanitizedRefreshErr.Message)
 				}
 			} else {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
@@ -1109,7 +1593,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				shouldReschedule = true
 
 				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
+					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, sanitizedRefreshErr.Message)
 				}
 			}
 			m.auths[id] = current
@@ -1135,8 +1619,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
-	applyPreservedRejectedTokens(auth, updated, true)
-	if updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken {
+	applyPreservedRenewalState(base, updated, updateModeRefresh, now)
+	if authHasUnchangedRejectedRefreshToken(updated) {
+		if exp, okExp := updated.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.After(now) {
+			updated.NextRefreshAfter = exp
+		}
+	}
+	applyPreservedRejectedTokens(base, updated, true)
+	canServeWithAccessToken := !updated.RequiresSignIn || updated.HasValidAccessToken(now)
+	if canServeWithAccessToken && (updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken) {
 		updated.LastError = nil
 		updated.StatusMessage = ""
 		updated.Unavailable = false
@@ -1145,6 +1636,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			updated.Status = StatusActive
 		}
 		_ = clearUnauthorizedModelStates(updated, now)
+	} else if !canServeWithAccessToken && !updated.Disabled && updated.Status != StatusDisabled {
+		updated.Unavailable = true
+		updated.Status = StatusError
+		if updated.StatusMessage == "" {
+			updated.StatusMessage = "unauthorized (refresh token invalid)"
+		}
+		if updated.LastError == nil && updated.RefreshError != nil {
+			updated.LastError = &Error{Code: "unauthorized", Message: updated.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+		}
 	}
 	updated.UpdatedAt = now
 	if m.shouldRefresh(updated, now) {

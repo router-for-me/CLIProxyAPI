@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertCodexResponseToOpenAINonStreamKeepsAssistantRole(t *testing.T) {
@@ -12,7 +12,7 @@ func TestConvertCodexResponseToOpenAINonStreamKeepsAssistantRole(t *testing.T) {
 
 	output := ConvertCodexResponseToOpenAINonStream(context.Background(), "", nil, nil, input, nil)
 
-	if role := gjson.GetBytes(output, "choices.0.message.role").String(); role != "assistant" {
+	if role := ojson.GetBytesNoCopy(output, "choices.0.message.role").String(); role != "assistant" {
 		t.Fatalf("role = %q, want assistant", role)
 	}
 }

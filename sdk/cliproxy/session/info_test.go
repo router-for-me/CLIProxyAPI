@@ -762,3 +762,24 @@ func TestExtractSessionInfoEnhancedHarnesses(t *testing.T) {
 		t.Fatalf("Thread X-Parent-Thread-Id extraction failed: %+v", info)
 	}
 }
+
+func TestSessionExtractionClonesStringsAgainstBufferMutation(t *testing.T) {
+	raw := []byte(`{"session_id":"sess-alpha","parent_session_id":"sess-parent","metadata":{"agent_id":"worker-one"},"messages":[{"role":"user","content":"hello world"}]}`)
+	info, ok := ExtractSessionInfo(nil, raw, nil)
+	if !ok {
+		t.Fatal("expected ExtractSessionInfo to succeed")
+	}
+	turns := ExtractCanonicalTurns("", raw)
+	if len(turns) != 1 || len(turns[0].Parts) != 1 {
+		t.Fatalf("unexpected turns: %+v", turns)
+	}
+	for i := range raw {
+		raw[i] = 'X'
+	}
+	if info.AgentName != "worker-one" {
+		t.Fatalf("AgentName corrupted after buffer mutation: got %q, want worker-one", info.AgentName)
+	}
+	if turns[0].Role != "user" || turns[0].Parts[0].Value != "hello world" {
+		t.Fatalf("CanonicalTurn corrupted after buffer mutation: %+v", turns[0])
+	}
+}

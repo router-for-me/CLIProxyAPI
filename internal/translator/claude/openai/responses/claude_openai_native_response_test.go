@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON(t *testing.T) {
@@ -24,10 +25,10 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON(t *t
 			raw := []byte(fmt.Sprintf(`{"id":"msg_native","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":%s,"stop_reason":%q,"stop_sequence":null,"usage":{"input_tokens":13,"cache_read_input_tokens":7,"cache_creation_input_tokens":3,"output_tokens":5}}`, tt.content, tt.stopReason))
 			request := []byte(`{"model":"claude-sonnet-4-6"}`)
 			out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-sonnet-4-6", request, request, raw, nil)
-			if !gjson.ValidBytes(out) {
+			if !ojson.ValidBytes(out) {
 				t.Fatalf("invalid response JSON: %s", out)
 			}
-			root := gjson.ParseBytes(out)
+			root := util.ParseGJSONBytesNoCopy(out)
 			for path, want := range map[string]string{
 				"id":                      "msg_native",
 				"object":                  "response",
@@ -57,7 +58,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON(t *t
 				if got := root.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
 					t.Errorf("incomplete reason = %q, want max_output_tokens", got)
 				}
-			} else if got := root.Get("incomplete_details"); !got.Exists() || got.Type != gjson.Null {
+			} else if got := root.Get("incomplete_details"); !got.Exists() || got.Type != ojson.Null {
 				t.Errorf("incomplete_details = %s, want null", got.Raw)
 			}
 			if !tt.tools {
@@ -77,11 +78,11 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON(t *t
 					t.Errorf("%s = %q, want %q", path, got, want)
 				}
 			}
-			args := gjson.Parse(root.Get("output.1.arguments").String())
+			args := ojson.Parse(root.Get("output.1.arguments").String())
 			if !args.IsObject() || len(args.Map()) != 2 || args.Get("city").String() != "Paris" || args.Get("days").Int() != 2 {
 				t.Errorf("weather arguments not preserved: %s", root.Get("output.1.arguments").Raw)
 			}
-			emptyArgs := gjson.Parse(root.Get("output.2.arguments").String())
+			emptyArgs := ojson.Parse(root.Get("output.2.arguments").String())
 			if !emptyArgs.IsObject() || len(emptyArgs.Map()) != 0 {
 				t.Errorf("empty arguments not preserved: %s", root.Get("output.2.arguments").Raw)
 			}
@@ -92,7 +93,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_NativeMessagesJSON(t *t
 func TestNativeMessagesJSONCitations(t *testing.T) {
 	raw := []byte(`{"id":"msg_citations","type":"message","model":"claude-native","content":[{"type":"text","text":"Answer.","citations":[{"type":"web_search_result_location","url":"https://example.com","title":"Source","cited_text":"Answer.","encrypted_index":"IDX"}]}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`)
 	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "", nil, nil, raw, nil)
-	annotations := gjson.GetBytes(out, "output.0.content.0.annotations")
+	annotations := ojson.GetBytesNoCopy(out, "output.0.content.0.annotations")
 	if len(annotations.Array()) != 1 || annotations.Get("0.url").String() != "https://example.com" || annotations.Get("0.encrypted_index").String() != "IDX" {
 		t.Fatalf("citations not preserved: %s", out)
 	}

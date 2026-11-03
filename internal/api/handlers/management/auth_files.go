@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -20,7 +21,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
@@ -308,7 +308,7 @@ func matchesAuthFileLookup(auth *coreauth.Auth, name string, authIndex string) b
 func (h *Handler) lookupAuthFile(name string, authIndex string) (*coreauth.Auth, bool) {
 	name = strings.TrimSpace(name)
 	authIndex = strings.TrimSpace(authIndex)
-	if h == nil || h.authManager == nil || name == "" {
+	if h == nil || h.authManager == nil || (name == "" && authIndex == "") {
 		return nil, false
 	}
 	if authIndex == "" {
@@ -423,29 +423,31 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
 		if data, errRead := os.ReadFile(full); errRead == nil {
-			typeValue := gjson.GetBytes(data, "type").String()
-			emailValue := gjson.GetBytes(data, "email").String()
+			var fieldBuf [7]ojson.Result
+			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets")
+			typeValue := strings.Clone(fields[0].String())
+			emailValue := strings.Clone(fields[1].String())
 			fileData["type"] = typeValue
 			fileData["email"] = emailValue
-			if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
-				fileData["project_id"] = projectID
+			if projectID := strings.TrimSpace(fields[2].String()); projectID != "" {
+				fileData["project_id"] = strings.Clone(projectID)
 			}
-			if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
+			if pv := fields[3]; pv.Exists() {
 				switch pv.Type {
-				case gjson.Number:
+				case ojson.Number:
 					fileData["priority"] = int(pv.Int())
-				case gjson.String:
+				case ojson.String:
 					if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
 						fileData["priority"] = parsed
 					}
 				}
 			}
-			if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
+			if wv := fields[4]; wv.Exists() {
 				var rawWeight string
 				switch wv.Type {
-				case gjson.Number:
+				case ojson.Number:
 					rawWeight = wv.Raw
-				case gjson.String:
+				case ojson.String:
 					rawWeight = wv.String()
 				}
 				if rawWeight != "" {
@@ -454,18 +456,18 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 					}
 				}
 			}
-			if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
+			if nv := fields[5]; nv.Exists() && nv.Type == ojson.String {
 				if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
-					fileData["note"] = trimmed
+					fileData["note"] = strings.Clone(trimmed)
 				}
 			}
-			if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
+			if wv := fields[6]; wv.Exists() {
 				switch wv.Type {
-				case gjson.True:
+				case ojson.True:
 					fileData["websockets"] = true
-				case gjson.False:
+				case ojson.False:
 					fileData["websockets"] = false
-				case gjson.String:
+				case ojson.String:
 					if parsed, errParse := strconv.ParseBool(strings.TrimSpace(wv.String())); errParse == nil {
 						fileData["websockets"] = parsed
 					}
@@ -557,6 +559,9 @@ func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavail
 	if isPersistentAuthFailure(auth, now) {
 		if !nextRetry.IsZero() && !nextRetry.After(now) {
 			nextRetry = time.Time{}
+		}
+		if statusMessage == "" && auth.RequiresSignIn {
+			statusMessage = "unauthorized (refresh token invalid)"
 		}
 		return true, coreauth.StatusError, statusMessage, nextRetry
 	}
@@ -785,6 +790,62 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	}
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
+	}
+	if quota.v8 {
+		nowUTC := time.Now().UTC()
+		if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
+			entry["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
+		}
+		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(nowUTC) {
+			entry["next_refresh_after"] = auth.NextRefreshAfter.UTC().Format(time.RFC3339)
+		}
+		entry["requires_sign_in"] = auth.RequiresSignIn
+		if statusMessage != "" {
+			entry["status_message"] = coreauth.SanitizeRenewalMessage(statusMessage)
+		}
+		entry["renewal_state"] = auth.RenewalStateAt(nowUTC)
+		recoveryStage := auth.RecoveryStageAt(nowUTC)
+		entry["recovery_stage"] = recoveryStage
+		entry["quota_blocked"] = recoveryStage == coreauth.RecoveryStageQuotaBlocked
+		entry["adopted"] = !auth.AdoptedAt.IsZero() || auth.CredentialVersion > 0
+		if !auth.AdoptedAt.IsZero() {
+			entry["adopted_at"] = auth.AdoptedAt.UTC().Format(time.RFC3339)
+		}
+		entry["inference_verified"] = auth.InferenceVerified
+		if !auth.LastInferenceVerifiedAt.IsZero() {
+			entry["last_inference_verified_at"] = auth.LastInferenceVerifiedAt.UTC().Format(time.RFC3339)
+		}
+		entry["renewal_verified"] = auth.RenewalVerified
+		if !auth.LastRenewalVerifiedAt.IsZero() {
+			entry["last_renewal_verified_at"] = auth.LastRenewalVerifiedAt.UTC().Format(time.RFC3339)
+		}
+		if auth.RefreshError != nil {
+			entry["refresh_error"] = gin.H{
+				"code":        auth.RefreshError.Code,
+				"message":     auth.RefreshError.Message,
+				"http_status": auth.RefreshError.HTTPStatus,
+			}
+		}
+		if auth.RequiresSignIn {
+			entry["next_action"] = "sign_in"
+			entry["recovery_hint"] = "Re-authenticate this account on this proxy instance via OAuth login; signing in on another machine or a client's separate direct login does not update this instance."
+			event := gin.H{
+				"type":        "renewal_sign_in_required",
+				"auth_id":     auth.ID,
+				"provider":    strings.TrimSpace(auth.Provider),
+				"next_action": "sign_in",
+			}
+			if !auth.RenewalEventAt.IsZero() {
+				event["occurred_at"] = auth.RenewalEventAt.UTC().Format(time.RFC3339)
+			}
+			if email := authEmail(auth); email != "" {
+				event["account"] = email
+			}
+			if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
+				event["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
+			}
+			entry["renewal_event"] = event
+		}
 	}
 	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		entry["siwc_bind_supported"] = siwcBindEligible(auth)
