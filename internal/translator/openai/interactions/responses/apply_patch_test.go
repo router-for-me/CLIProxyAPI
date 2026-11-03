@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const patchRequest = `{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}]}`
@@ -17,29 +18,29 @@ func patchArguments(input string) string { return string(patchJSON(map[string]st
 func patchStep(event string, step any) []byte {
 	return patchJSON(map[string]any{"event_type": event, "index": 2, "step": step})
 }
-func patchEvents(chunks [][]byte) []gjson.Result {
-	var events []gjson.Result
+func patchEvents(chunks [][]byte) []ojson.Result {
+	var events []ojson.Result
 	for _, chunk := range chunks {
 		for _, line := range strings.Split(string(chunk), "\n") {
-			if strings.HasPrefix(line, "data: ") && gjson.Valid(strings.TrimPrefix(line, "data: ")) {
-				events = append(events, gjson.Parse(strings.TrimPrefix(line, "data: ")))
+			if strings.HasPrefix(line, "data: ") && ojson.Valid(strings.TrimPrefix(line, "data: ")) {
+				events = append(events, ojson.Parse(strings.TrimPrefix(line, "data: ")))
 			}
 		}
 	}
 	return events
 }
-func patchSend(param *any, raw []byte) []gjson.Result {
+func patchSend(param *any, raw []byte) []ojson.Result {
 	return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", []byte(patchRequest), nil, raw, param))
 }
 
 func TestInteractionsApplyPatchDeclarationAndHistory(t *testing.T) {
-	request := gjson.Parse(patchRequest).Value().(map[string]any)
+	request := ojson.Parse(patchRequest).Value().(map[string]any)
 	request["input"] = []any{map[string]any{"type": "custom_tool_call", "name": "apply_patch", "namespace": "functions", "call_id": "c1", "input": patchText}, map[string]any{"type": "custom_tool_call_output", "call_id": "c1", "output": "ok"}}
 	body1, errConvert1 := ConvertOpenAIResponsesRequestToInteractions("devin/swe-2", patchJSON(request), false)
 	if errConvert1 != nil {
 		t.Fatal(errConvert1)
 	}
-	out := gjson.ParseBytes(body1)
+	out := util.ParseGJSONBytesNoCopy(body1)
 	if !strings.Contains(out.Get("tools.0.description").String(), "*** Begin Patch") || out.Get("tools.0.parameters.additionalProperties").Bool() || !out.Get("tools.0.parameters.additionalProperties").Exists() {
 		t.Fatalf("missing patch contract: %s", out.Raw)
 	}
@@ -52,7 +53,7 @@ func TestInteractionsApplyPatchEverySplitPreviewAndCompletion(t *testing.T) {
 	args := strings.NewReplacer("中", `\u4e2d`, "😀", `\ud83d\ude00`).Replace(patchArguments(patchText))
 	for split := 0; split <= len(args); split++ {
 		var param any
-		var events []gjson.Result
+		var events []ojson.Result
 		events = append(events, patchSend(&param, patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "functions__apply_patch", "arguments": map[string]any{}}))...)
 		for _, fragment := range []string{args[:split], args[split:]} {
 			events = append(events, patchSend(&param, patchJSON(map[string]any{"event_type": "step.delta", "index": 2, "delta": map[string]any{"type": "arguments_delta", "arguments": fragment}}))...)
@@ -72,7 +73,7 @@ func TestInteractionsApplyPatchEverySplitPreviewAndCompletion(t *testing.T) {
 	}
 }
 
-func assertPatchLifecycle(t *testing.T, events []gjson.Result, want string) {
+func assertPatchLifecycle(t *testing.T, events []ojson.Result, want string) {
 	t.Helper()
 	var delta strings.Builder
 	counts := map[string]int{}
@@ -170,7 +171,7 @@ func TestInteractionsApplyPatchSnapshotMatrix(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			var param any
-			var events []gjson.Result
+			var events []ojson.Result
 			for _, input := range test.inputs {
 				events = append(events, patchSend(&param, input)...)
 			}
@@ -222,13 +223,13 @@ func TestInteractionsApplyPatchWinningDeclarationAndNegativeCompatibility(t *tes
 			if errConvert2 != nil {
 				t.Fatal(errConvert2)
 			}
-			translated := gjson.ParseBytes(body2)
+			translated := util.ParseGJSONBytesNoCopy(body2)
 			declaration := translated.Get("tools.0")
 			if strings.Contains(declaration.Get("description").String(), "*** Begin Patch") != test.patch {
 				t.Fatalf("wrong contract: %s", translated.Raw)
 			}
 			var param any
-			send := func(raw []byte) []gjson.Result {
+			send := func(raw []byte) []ojson.Result {
 				return patchEvents(ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/swe-2", request, nil, raw, &param))
 			}
 			send(patchStep("step.start", map[string]any{"type": "function_call", "id": "c", "name": test.upstream}))
@@ -269,7 +270,7 @@ func TestInteractionsApplyPatchDeltaBeforeStartDoesNotLeakArguments(t *testing.T
 	if events := patchSend(&param, delta); len(events) != 0 {
 		t.Fatalf("raw arguments emitted before tool identity: %v", events)
 	}
-	var events []gjson.Result
+	var events []ojson.Result
 	events = append(events, patchSend(&param, patchStep("step.start", map[string]any{"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "functions__apply_patch"}))...)
 	events = append(events, patchSend(&param, patchJSON(map[string]any{"event_type": "step.delta", "index": 2, "delta": map[string]any{"type": "arguments_delta", "arguments": `b"}`}}))...)
 	events = append(events, patchSend(&param, patchStep("step.stop", nil))...)
@@ -324,7 +325,7 @@ func TestInteractionsApplyPatchDoesNotChangeOtherFunctionNames(t *testing.T) {
 
 func TestInteractionsApplyPatchInterleavedCallsRemainIndependent(t *testing.T) {
 	var param any
-	var events []gjson.Result
+	var events []ojson.Result
 	send := func(index int, event string, value any) {
 		key := "step"
 		if event == "step.delta" {

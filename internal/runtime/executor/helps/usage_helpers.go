@@ -14,19 +14,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type UsageReporter struct {
@@ -367,13 +366,13 @@ func (r *UsageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 }
 
 func extractEffectiveServiceTier(payload []byte) string {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return ""
 	}
 	for _, path := range []string{"service_tier", "request.service_tier", "interaction.service_tier"} {
-		if node := gjson.GetBytes(payload, path); node.Type == gjson.String {
+		if node := ojson.GetBytesNoCopy(payload, path); node.Type == ojson.String {
 			if tier := strings.TrimSpace(node.String()); tier != "" {
-				return tier
+				return strings.Clone(tier)
 			}
 		}
 	}
@@ -970,16 +969,6 @@ var (
 	geminiPredictionsMarker       = []byte(`"predictions"`)
 )
 
-// unsafeBytesToString converts a byte slice to a string without heap allocation.
-// The returned string must only be used for read-only gjson traversal within the
-// call frame, and any string values stored into long-lived structs are cloned.
-func unsafeBytesToString(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
 func cloneTrimmedString(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1110,16 +1099,16 @@ func (b *StreamUsageBuffer) observeGeminiFamilyStream(line []byte, allowResponse
 		return
 	}
 	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
+	root := util.ParseGJSONBytesNoCopy(payload)
 	var (
-		node           gjson.Result
-		candidatesNode gjson.Result
-		predsNode      gjson.Result
+		node           ojson.Result
+		candidatesNode ojson.Result
+		predsNode      ojson.Result
 	)
-	root.ForEach(func(key, val gjson.Result) bool {
+	root.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "usageMetadata", "usage_metadata":
 			if !node.Exists() {
@@ -1131,7 +1120,7 @@ func (b *StreamUsageBuffer) observeGeminiFamilyStream(line []byte, allowResponse
 			predsNode = val
 		case "response":
 			if allowResponseWrapper && val.IsObject() {
-				val.ForEach(func(rk, rv gjson.Result) bool {
+				val.ForEach(func(rk, rv ojson.Result) bool {
 					switch rk.String() {
 					case "usageMetadata", "usage_metadata":
 						if !node.Exists() {
@@ -1216,7 +1205,7 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	if !hasUsageCandidate && !hasCacheCandidate && !hasTierCandidate && !hasToolCallsCandidate && !hasImageCompletedCandidate {
 		return
 	}
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return
 	}
 
@@ -1230,7 +1219,7 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	detail := usage.Detail{}
 	usageOK := false
 	if hasUsageCandidate || hasCacheCandidate {
-		root := gjson.Parse(unsafeBytesToString(payload))
+		root := util.ParseGJSONBytesNoCopy(payload)
 		usageNode := root.Get("usage")
 		detail, usageOK = parseOpenAIStyleUsageWithCache(root, usageNode)
 		if detail.ToolUsageDetails != nil && detail.ToolUsageDetails.ToolCallsRequested != nil {
@@ -1265,9 +1254,9 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 }
 
 func (b *StreamUsageBuffer) observeOpenAIStreamToolCalls(payload []byte) {
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	for choiceIdx, choice := range root.Get("choices").Array() {
-		if idx := choice.Get("index"); idx.Type == gjson.Number {
+		if idx := choice.Get("index"); idx.Type == ojson.Number {
 			choiceIdx = int(idx.Int())
 		}
 		tcNode := choice.Get("delta.tool_calls")
@@ -1279,7 +1268,7 @@ func (b *StreamUsageBuffer) observeOpenAIStreamToolCalls(payload []byte) {
 		}
 		for itemIdx, tc := range tcNode.Array() {
 			key := ""
-			if idxNode := tc.Get("index"); idxNode.Type == gjson.Number {
+			if idxNode := tc.Get("index"); idxNode.Type == ojson.Number {
 				key = fmt.Sprintf("%d:%d", choiceIdx, idxNode.Int())
 			} else if id := strings.TrimSpace(tc.Get("id").String()); id != "" {
 				key = fmt.Sprintf("%d:id:%s", choiceIdx, id)
@@ -1299,18 +1288,18 @@ func (b *StreamUsageBuffer) observeOpenAIStreamToolCalls(payload []byte) {
 }
 
 func (b *StreamUsageBuffer) observeOpenAIImageStreamCompleted(payload []byte) {
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	evType := strings.TrimSpace(root.Get("type").String())
 	if evType != "image_generation.completed" && evType != "image_edit.completed" {
 		return
 	}
 	b.openAIStreamImages++
 	details := &usage.ImageDetails{
-		Size:         strings.TrimSpace(root.Get("size").String()),
-		Quality:      strings.TrimSpace(root.Get("quality").String()),
-		Background:   strings.TrimSpace(root.Get("background").String()),
-		OutputFormat: strings.TrimSpace(root.Get("output_format").String()),
-		MimeType:     strings.TrimSpace(root.Get("mime_type").String()),
+		Size:         cloneTrimmedString(root.Get("size").String()),
+		Quality:      cloneTrimmedString(root.Get("quality").String()),
+		Background:   cloneTrimmedString(root.Get("background").String()),
+		OutputFormat: cloneTrimmedString(root.Get("output_format").String()),
+		MimeType:     cloneTrimmedString(root.Get("mime_type").String()),
 	}
 	if !isEmptyImageDetails(details) {
 		b.openAIStreamImageDetails = details
@@ -1388,17 +1377,17 @@ func (b *StreamUsageBuffer) ObserveClaudeSSEEvent(rawEvent []byte) {
 		return
 	}
 	joined := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
-	if len(joined) == 0 || !gjson.ValidBytes(joined) {
+	if len(joined) == 0 || !ojson.ValidBytes(joined) {
 		return
 	}
 	b.ObserveClaudeStream(joined)
 }
 
 func (b *StreamUsageBuffer) observeClaudeStreamToolBlocks(payload []byte) {
-	if b == nil || !bytes.Contains(payload, claudeStreamBlockStartMarker) || !gjson.ValidBytes(payload) {
+	if b == nil || !bytes.Contains(payload, claudeStreamBlockStartMarker) || !ojson.ValidBytes(payload) {
 		return
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
+	root := util.ParseGJSONBytesNoCopy(payload)
 	if root.Get("type").String() != "content_block_start" {
 		return
 	}
@@ -1522,7 +1511,7 @@ func (b *StreamUsageBuffer) ObserveResponsesStream(line []byte) bool {
 		return false
 	}
 	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return false
 	}
 	if b.responseModel == "" {
@@ -1531,11 +1520,11 @@ func (b *StreamUsageBuffer) ObserveResponsesStream(line []byte) bool {
 		}
 	}
 	if bytes.Contains(payload, responsesOutputItemDoneMarker) {
-		root := gjson.Parse(unsafeBytesToString(payload))
+		root := util.ParseGJSONBytesNoCopy(payload)
 		if strings.TrimSpace(root.Get("type").String()) == "response.output_item.done" {
 			if item := root.Get("item"); item.Exists() && item.IsObject() {
 				rawItem := bytes.Clone([]byte(item.Raw))
-				if idxNode := root.Get("output_index"); idxNode.Type == gjson.Number && idxNode.Int() >= 0 {
+				if idxNode := root.Get("output_index"); idxNode.Type == ojson.Number && idxNode.Int() >= 0 {
 					if b.responsesOutputByIndex == nil {
 						b.responsesOutputByIndex = make(map[int64][]byte)
 					}
@@ -1567,7 +1556,7 @@ func ParseCodexUsageWithOutputItems(data []byte, itemsByIndex map[int64][]byte, 
 	if bytes.Contains(data, openAIStreamServiceTierMarker) {
 		responseServiceTier = extractResponseServiceTier(data)
 	}
-	root := gjson.Parse(unsafeBytesToString(data))
+	root := util.ParseGJSONBytesNoCopy(data)
 	usageNode := root.Get("response.usage")
 	detail, ok := parseOpenAIStyleUsageWithCache(root, usageNode)
 	if !ok {
@@ -1583,7 +1572,7 @@ func ParseCodexUsageWithOutputItems(data []byte, itemsByIndex map[int64][]byte, 
 	if detail.UpstreamServiceTier == "" {
 		detail.UpstreamServiceTier = responseServiceTier
 	}
-	if wsReq := root.Get("response.tool_usage.web_search.num_requests"); wsReq.Type == gjson.Number {
+	if wsReq := root.Get("response.tool_usage.web_search.num_requests"); wsReq.Type == ojson.Number {
 		v := wsReq.Int()
 		if detail.ToolUsageDetails == nil {
 			detail.ToolUsageDetails = &usage.ToolUsageDetails{}
@@ -1611,7 +1600,7 @@ func ParseCodexUsageWithOutputItems(data []byte, itemsByIndex map[int64][]byte, 
 	return detail, true
 }
 
-func applyResponsesCacheRetention(detail *usage.Detail, root, usageNode gjson.Result) {
+func applyResponsesCacheRetention(detail *usage.Detail, root, usageNode ojson.Result) {
 	if detail == nil {
 		return
 	}
@@ -1633,7 +1622,7 @@ func applyResponsesCacheRetention(detail *usage.Detail, root, usageNode gjson.Re
 	buckets := firstExistingUsageNode(usageNode, "input_tokens_details.cache_write_tokens_details", "prompt_tokens_details.cache_write_tokens_details")
 	short := buckets.Get("ttl_30m_tokens")
 	long := buckets.Get("ttl_12h_tokens")
-	if retention == "" && mode == "" && ttl == "" && short.Type != gjson.Number && long.Type != gjson.Number {
+	if retention == "" && mode == "" && ttl == "" && short.Type != ojson.Number && long.Type != ojson.Number {
 		return
 	}
 	if detail.CacheDetails == nil {
@@ -1642,11 +1631,11 @@ func applyResponsesCacheRetention(detail *usage.Detail, root, usageNode gjson.Re
 	detail.CacheDetails.Retention = strings.Clone(retention)
 	detail.CacheDetails.Mode = mode
 	detail.CacheDetails.TTL = ttl
-	if short.Type == gjson.Number {
+	if short.Type == ojson.Number {
 		detail.CacheCreation30mTokens = usage.Int64Ptr(short.Int())
 		detail.CacheDetails.Ephemeral30mInputTokens = usage.Int64Ptr(short.Int())
 	}
-	if long.Type == gjson.Number {
+	if long.Type == ojson.Number {
 		detail.CacheCreation12hTokens = usage.Int64Ptr(long.Int())
 		detail.CacheDetails.Ephemeral12hInputTokens = usage.Int64Ptr(long.Int())
 	}
@@ -1660,7 +1649,7 @@ func ParseCodexImageToolUsageWithOutputItems(requestBody, data []byte, itemsByIn
 	if len(data) == 0 {
 		return usage.Detail{}, false
 	}
-	root := gjson.Parse(unsafeBytesToString(data))
+	root := util.ParseGJSONBytesNoCopy(data)
 	usageNode := root.Get("response.tool_usage.image_gen")
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		return usage.Detail{}, false
@@ -1670,11 +1659,11 @@ func ParseCodexImageToolUsageWithOutputItems(requestBody, data []byte, itemsByIn
 	return detail, true
 }
 
-func applyCodexImageToolOutputMetadata(detail *usage.Detail, requestBody []byte, outputNode gjson.Result, itemsByIndex map[int64][]byte, fallback [][]byte) {
+func applyCodexImageToolOutputMetadata(detail *usage.Detail, requestBody []byte, outputNode ojson.Result, itemsByIndex map[int64][]byte, fallback [][]byte) {
 	if detail == nil {
 		return
 	}
-	var items []gjson.Result
+	var items []ojson.Result
 	if outputNode.Exists() && outputNode.IsArray() && len(outputNode.Array()) > 0 {
 		items = outputNode.Array()
 	} else {
@@ -1721,7 +1710,7 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 	if bytes.Contains(data, openAIStreamServiceTierMarker) {
 		responseServiceTier = extractResponseServiceTier(data)
 	}
-	root := gjson.Parse(unsafeBytesToString(data))
+	root := util.ParseGJSONBytesNoCopy(data)
 	usageNode := root.Get("usage")
 	detail, _ := parseOpenAIStyleUsageWithCache(root, usageNode)
 	detail.ResponseServiceTier = responseServiceTier
@@ -1735,7 +1724,7 @@ func ParseOpenAIUsage(data []byte) usage.Detail {
 	return detail
 }
 
-func applyOpenAIChatToolCallsUsage(detail *usage.Detail, root gjson.Result) {
+func applyOpenAIChatToolCallsUsage(detail *usage.Detail, root ojson.Result) {
 	if detail == nil || !root.Exists() || !root.IsObject() {
 		return
 	}
@@ -1759,7 +1748,7 @@ func applyOpenAIChatToolCallsUsage(detail *usage.Detail, root gjson.Result) {
 
 // parseOpenAIStyleUsageWithCache keeps structured-only usage and cache metadata
 // consistent across Chat, Responses, and streaming entry points.
-func parseOpenAIStyleUsageWithCache(root, usageNode gjson.Result) (usage.Detail, bool) {
+func parseOpenAIStyleUsageWithCache(root, usageNode ojson.Result) (usage.Detail, bool) {
 	var detail usage.Detail
 	hasTokens := hasOpenAIStyleUsageTokenFields(usageNode)
 	if hasTokens {
@@ -1784,14 +1773,14 @@ func hasStructuredUsageDetail(d usage.Detail) bool {
 		d.Speed != "" || d.InferenceGeo != ""
 }
 
-func hasOpenAIStyleUsageTokenFields(usageNode gjson.Result) bool {
+func hasOpenAIStyleUsageTokenFields(usageNode ojson.Result) bool {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return false
 	}
 	return usageNode.Get("total_tokens").Exists() || hasOpenAIStyleUsageBucketFields(usageNode)
 }
 
-func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
+func hasOpenAIStyleUsageBucketFields(usageNode ojson.Result) bool {
 	return usageNode.Get("prompt_tokens").Exists() ||
 		usageNode.Get("input_tokens").Exists() ||
 		usageNode.Get("completion_tokens").Exists() ||
@@ -1807,7 +1796,7 @@ func hasOpenAIStyleUsageBucketFields(usageNode gjson.Result) bool {
 		usageNode.Get("reasoning_tokens").Exists()
 }
 
-func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
+func parseOpenAIStyleUsageNode(usageNode ojson.Result) usage.Detail {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return usage.Detail{}
 	}
@@ -1816,13 +1805,13 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		hasInput        bool
 		hasOutput       bool
 		hasBucketFields bool
-		inputDetails    gjson.Result
-		promptDetails   gjson.Result
-		outputDetails   gjson.Result
-		compDetails     gjson.Result
-		flatReasoning   gjson.Result
+		inputDetails    ojson.Result
+		promptDetails   ojson.Result
+		outputDetails   ojson.Result
+		compDetails     ojson.Result
+		flatReasoning   ojson.Result
 	)
-	usageNode.ForEach(func(key, val gjson.Result) bool {
+	usageNode.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "prompt_tokens":
 			detail.InputTokens = val.Int()
@@ -1862,11 +1851,11 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	})
 
 	var hasCached, hasCacheCreation, hasReasoning bool
-	scanInDetails := func(node gjson.Result) {
+	scanInDetails := func(node ojson.Result) {
 		if !node.Exists() || !node.IsObject() {
 			return
 		}
-		node.ForEach(func(k, v gjson.Result) bool {
+		node.ForEach(func(k, v ojson.Result) bool {
 			switch k.String() {
 			case "cached_tokens":
 				if !hasCached {
@@ -1882,32 +1871,32 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 				}
 				hasBucketFields = true
 			case "text_tokens":
-				if v.Type == gjson.Number && detail.TextInputTokens == nil {
+				if v.Type == ojson.Number && detail.TextInputTokens == nil {
 					detail.TextInputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "image_tokens", "prompt_image_tokens":
-				if v.Type == gjson.Number && detail.ImageInputTokens == nil {
+				if v.Type == ojson.Number && detail.ImageInputTokens == nil {
 					detail.ImageInputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "audio_tokens":
-				if v.Type == gjson.Number && detail.AudioInputTokens == nil {
+				if v.Type == ojson.Number && detail.AudioInputTokens == nil {
 					detail.AudioInputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "video_tokens":
-				if v.Type == gjson.Number && detail.VideoInputTokens == nil {
+				if v.Type == ojson.Number && detail.VideoInputTokens == nil {
 					detail.VideoInputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "file_tokens":
-				if v.Type == gjson.Number && detail.FileInputTokens == nil {
+				if v.Type == ojson.Number && detail.FileInputTokens == nil {
 					detail.FileInputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "cached_prompt_text_tokens":
-				if v.Type == gjson.Number && detail.CachedTextTokens == nil {
+				if v.Type == ojson.Number && detail.CachedTextTokens == nil {
 					detail.CachedTextTokens = usage.Int64Ptr(v.Int())
 				}
 			case "cached_tokens_details":
 				if detail.CachedTextTokens == nil && v.IsObject() {
-					if tv := v.Get("text_tokens"); tv.Type == gjson.Number {
+					if tv := v.Get("text_tokens"); tv.Type == ojson.Number {
 						detail.CachedTextTokens = usage.Int64Ptr(tv.Int())
 					}
 				}
@@ -1927,11 +1916,11 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	scanInDetails(inputDetails)
 	scanInDetails(promptDetails)
 
-	scanOutDetails := func(node gjson.Result) {
+	scanOutDetails := func(node ojson.Result) {
 		if !node.Exists() || !node.IsObject() {
 			return
 		}
-		node.ForEach(func(k, v gjson.Result) bool {
+		node.ForEach(func(k, v ojson.Result) bool {
 			switch k.String() {
 			case "reasoning_tokens":
 				if !hasReasoning {
@@ -1940,23 +1929,23 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 				}
 				hasBucketFields = true
 			case "text_tokens":
-				if v.Type == gjson.Number && detail.TextOutputTokens == nil {
+				if v.Type == ojson.Number && detail.TextOutputTokens == nil {
 					detail.TextOutputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "image_tokens":
-				if v.Type == gjson.Number && detail.ImageOutputTokens == nil {
+				if v.Type == ojson.Number && detail.ImageOutputTokens == nil {
 					detail.ImageOutputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "audio_tokens":
-				if v.Type == gjson.Number && detail.AudioOutputTokens == nil {
+				if v.Type == ojson.Number && detail.AudioOutputTokens == nil {
 					detail.AudioOutputTokens = usage.Int64Ptr(v.Int())
 				}
 			case "accepted_prediction_tokens":
-				if v.Type == gjson.Number && detail.AcceptedPredictionTokens == nil {
+				if v.Type == ojson.Number && detail.AcceptedPredictionTokens == nil {
 					detail.AcceptedPredictionTokens = usage.Int64Ptr(v.Int())
 				}
 			case "rejected_prediction_tokens":
-				if v.Type == gjson.Number && detail.RejectedPredictionTokens == nil {
+				if v.Type == ojson.Number && detail.RejectedPredictionTokens == nil {
 					detail.RejectedPredictionTokens = usage.Int64Ptr(v.Int())
 				}
 			}
@@ -2017,27 +2006,27 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 	return detail
 }
 
-func populateOpenAIStyleStructuredFields(detail *usage.Detail, usageNode gjson.Result) {
+func populateOpenAIStyleStructuredFields(detail *usage.Detail, usageNode ojson.Result) {
 	if detail == nil || !usageNode.Exists() || !usageNode.IsObject() {
 		return
 	}
 	var (
 		toolDetails *usage.ToolUsageDetails
-		costNode    gjson.Result
-		ticksNode   gjson.Result
-		byokNode    gjson.Result
-		costDetails gjson.Result
+		costNode    ojson.Result
+		ticksNode   ojson.Result
+		byokNode    ojson.Result
+		costDetails ojson.Result
 		hasCost     bool
 	)
-	usageNode.ForEach(func(key, val gjson.Result) bool {
+	usageNode.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "service_tier":
-			if detail.UpstreamServiceTier == "" && val.Type == gjson.String {
+			if detail.UpstreamServiceTier == "" && val.Type == ojson.String {
 				detail.UpstreamServiceTier = cloneTrimmedString(val.String())
 			}
 		case "attribution":
 			if detail.UpstreamServiceTier == "" && val.IsObject() {
-				if t := val.Get("tier"); t.Type == gjson.String {
+				if t := val.Get("tier"); t.Type == ojson.String {
 					detail.UpstreamServiceTier = cloneTrimmedString(t.String())
 				}
 			}
@@ -2046,14 +2035,14 @@ func populateOpenAIStyleStructuredFields(detail *usage.Detail, usageNode gjson.R
 				toolDetails = mergeToolUsageDetails(toolDetails, parsed)
 			}
 		case "num_sources_used":
-			if val.Type == gjson.Number {
+			if val.Type == ojson.Number {
 				if toolDetails == nil {
 					toolDetails = &usage.ToolUsageDetails{}
 				}
 				toolDetails.NumSourcesUsed = usage.Int64Ptr(val.Int())
 			}
 		case "num_server_side_tools_used":
-			if val.Type == gjson.Number {
+			if val.Type == ojson.Number {
 				if toolDetails == nil {
 					toolDetails = &usage.ToolUsageDetails{}
 				}
@@ -2092,11 +2081,11 @@ func populateOpenAIStyleStructuredFields(detail *usage.Detail, usageNode gjson.R
 	}
 }
 
-func parseCollectedOutputItems(itemsByIndex map[int64][]byte, fallback [][]byte) []gjson.Result {
+func parseCollectedOutputItems(itemsByIndex map[int64][]byte, fallback [][]byte) []ojson.Result {
 	if len(itemsByIndex) == 0 && len(fallback) == 0 {
 		return nil
 	}
-	items := make([]gjson.Result, 0, len(itemsByIndex)+len(fallback))
+	items := make([]ojson.Result, 0, len(itemsByIndex)+len(fallback))
 	if len(itemsByIndex) > 0 {
 		indexes := make([]int64, 0, len(itemsByIndex))
 		for idx := range itemsByIndex {
@@ -2110,14 +2099,14 @@ func parseCollectedOutputItems(itemsByIndex map[int64][]byte, fallback [][]byte)
 			}
 		}
 		for _, idx := range indexes {
-			if raw := itemsByIndex[idx]; len(raw) > 0 && gjson.ValidBytes(raw) {
-				items = append(items, gjson.ParseBytes(raw))
+			if raw := itemsByIndex[idx]; len(raw) > 0 && ojson.ValidBytes(raw) {
+				items = append(items, util.ParseGJSONBytesNoCopy(raw))
 			}
 		}
 	}
 	for _, raw := range fallback {
-		if len(raw) > 0 && gjson.ValidBytes(raw) {
-			items = append(items, gjson.ParseBytes(raw))
+		if len(raw) > 0 && ojson.ValidBytes(raw) {
+			items = append(items, util.ParseGJSONBytesNoCopy(raw))
 		}
 	}
 	return items
@@ -2134,14 +2123,14 @@ func applyResponsesCollectedOutputItemsUsage(detail *usage.Detail, itemsByIndex 
 	applyResponsesOutputItemSliceUsage(detail, items)
 }
 
-func applyResponsesOutputItemsUsage(detail *usage.Detail, outputNode gjson.Result) {
+func applyResponsesOutputItemsUsage(detail *usage.Detail, outputNode ojson.Result) {
 	if detail == nil || !outputNode.Exists() || !outputNode.IsArray() {
 		return
 	}
 	applyResponsesOutputItemSliceUsage(detail, outputNode.Array())
 }
 
-func applyResponsesOutputItemSliceUsage(detail *usage.Detail, items []gjson.Result) {
+func applyResponsesOutputItemSliceUsage(detail *usage.Detail, items []ojson.Result) {
 	if detail == nil || len(items) == 0 {
 		return
 	}
@@ -2301,14 +2290,14 @@ func ParseRequestImageDetails(requestPayload []byte, contentType ...string) *usa
 			return parseMultipartImageDetails(requestPayload, params["boundary"])
 		}
 	}
-	if len(requestPayload) == 0 || !gjson.ValidBytes(requestPayload) {
+	if len(requestPayload) == 0 || !ojson.ValidBytes(requestPayload) {
 		return nil
 	}
-	root := gjson.ParseBytes(requestPayload)
+	root := util.ParseGJSONBytesNoCopy(requestPayload)
 	pick := func(paths ...string) string {
 		for _, p := range paths {
-			if v := root.Get(p); v.Type == gjson.String {
-				if s := strings.TrimSpace(v.String()); s != "" {
+			if v := root.Get(p); v.Type == ojson.String {
+				if s := cloneTrimmedString(v.String()); s != "" {
 					return s
 				}
 			}
@@ -2333,15 +2322,15 @@ func ParseRequestImageDetails(requestPayload []byte, contentType ...string) *usa
 				continue
 			}
 			out = &usage.ImageDetails{
-				Size:          strings.TrimSpace(tool.Get("size").String()),
-				Resolution:    strings.TrimSpace(tool.Get("resolution").String()),
-				ImageSize:     strings.TrimSpace(firstExistingUsageNode(tool, "image_size", "imageSize").String()),
-				AspectRatio:   strings.TrimSpace(firstExistingUsageNode(tool, "aspect_ratio", "aspectRatio").String()),
-				Quality:       strings.TrimSpace(tool.Get("quality").String()),
-				Background:    strings.TrimSpace(tool.Get("background").String()),
-				OutputFormat:  strings.TrimSpace(tool.Get("output_format").String()),
-				MimeType:      strings.TrimSpace(firstExistingUsageNode(tool, "mime_type", "mimeType").String()),
-				InputFidelity: strings.TrimSpace(tool.Get("input_fidelity").String()),
+				Size:          cloneTrimmedString(tool.Get("size").String()),
+				Resolution:    cloneTrimmedString(tool.Get("resolution").String()),
+				ImageSize:     cloneTrimmedString(firstExistingUsageNode(tool, "image_size", "imageSize").String()),
+				AspectRatio:   cloneTrimmedString(firstExistingUsageNode(tool, "aspect_ratio", "aspectRatio").String()),
+				Quality:       cloneTrimmedString(tool.Get("quality").String()),
+				Background:    cloneTrimmedString(tool.Get("background").String()),
+				OutputFormat:  cloneTrimmedString(tool.Get("output_format").String()),
+				MimeType:      cloneTrimmedString(firstExistingUsageNode(tool, "mime_type", "mimeType").String()),
+				InputFidelity: cloneTrimmedString(tool.Get("input_fidelity").String()),
 			}
 			break
 		}
@@ -2403,23 +2392,23 @@ func parseMultipartImageDetails(payload []byte, boundary string) *usage.ImageDet
 func ParseOpenAIImageUsage(requestPayload, responsePayload []byte, contentType ...string) usage.Detail {
 	var detail usage.Detail
 	detail.RequestedImageDetails = ParseRequestImageDetails(requestPayload, contentType...)
-	if len(responsePayload) == 0 || !gjson.ValidBytes(responsePayload) {
+	if len(responsePayload) == 0 || !ojson.ValidBytes(responsePayload) {
 		return detail
 	}
-	root := gjson.Parse(unsafeBytesToString(responsePayload))
+	root := util.ParseGJSONBytesNoCopy(responsePayload)
 	var (
-		usageNode     gjson.Result
+		usageNode     ojson.Result
 		serviceTier   string
 		imageCount    int64
 		imgDetails    usage.ImageDetails
 		firstItemMeta usage.ImageDetails
 	)
-	root.ForEach(func(key, val gjson.Result) bool {
+	root.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "usage":
 			usageNode = val
 		case "service_tier":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				serviceTier = cloneTrimmedString(val.String())
 			}
 		case "data":
@@ -2427,8 +2416,8 @@ func ParseOpenAIImageUsage(requestPayload, responsePayload []byte, contentType .
 				arr := val.Array()
 				imageCount = int64(len(arr))
 				if len(arr) > 0 && arr[0].IsObject() {
-					arr[0].ForEach(func(dk, dv gjson.Result) bool {
-						if dv.Type != gjson.String {
+					arr[0].ForEach(func(dk, dv ojson.Result) bool {
+						if dv.Type != ojson.String {
 							return true
 						}
 						switch dk.String() {
@@ -2464,39 +2453,39 @@ func ParseOpenAIImageUsage(requestPayload, responsePayload []byte, contentType .
 				}
 			}
 		case "size":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.Size = cloneTrimmedString(val.String())
 			}
 		case "resolution":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.Resolution = cloneTrimmedString(val.String())
 			}
 		case "image_size", "imageSize":
-			if val.Type == gjson.String && imgDetails.ImageSize == "" {
+			if val.Type == ojson.String && imgDetails.ImageSize == "" {
 				imgDetails.ImageSize = cloneTrimmedString(val.String())
 			}
 		case "aspect_ratio", "aspectRatio":
-			if val.Type == gjson.String && imgDetails.AspectRatio == "" {
+			if val.Type == ojson.String && imgDetails.AspectRatio == "" {
 				imgDetails.AspectRatio = cloneTrimmedString(val.String())
 			}
 		case "quality":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.Quality = cloneTrimmedString(val.String())
 			}
 		case "background":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.Background = cloneTrimmedString(val.String())
 			}
 		case "output_format":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.OutputFormat = cloneTrimmedString(val.String())
 			}
 		case "mime_type", "mimeType":
-			if val.Type == gjson.String && imgDetails.MimeType == "" {
+			if val.Type == ojson.String && imgDetails.MimeType == "" {
 				imgDetails.MimeType = cloneTrimmedString(val.String())
 			}
 		case "input_fidelity":
-			if val.Type == gjson.String {
+			if val.Type == ojson.String {
 				imgDetails.InputFidelity = cloneTrimmedString(val.String())
 			}
 		}
@@ -2561,8 +2550,8 @@ func ParseXAIImageUsage(requestPayload, responsePayload []byte) usage.Detail {
 // ParseXAIVideoUsage extracts token usage and video parameters from an xAI video response.
 func ParseXAIVideoUsage(requestPayload, responsePayload []byte) usage.Detail {
 	detail := ParseOpenAIUsage(responsePayload)
-	root := gjson.ParseBytes(responsePayload)
-	reqRoot := gjson.ParseBytes(requestPayload)
+	root := util.ParseGJSONBytesNoCopy(responsePayload)
+	reqRoot := util.ParseGJSONBytesNoCopy(requestPayload)
 	// Only attach video media attributes when a completed video output or usage is present,
 	// not on an initial async job creation response that only returns {"request_id":"..."}.
 	hasCompletedVideo := root.Get("usage").Exists() || root.Get("video").Exists() || root.Get("data").Exists() || root.Get("url").Exists() || strings.EqualFold(strings.TrimSpace(root.Get("status").String()), "completed")
@@ -2571,8 +2560,8 @@ func ParseXAIVideoUsage(requestPayload, responsePayload []byte) usage.Detail {
 	}
 	pickRespString := func(paths ...string) string {
 		for _, p := range paths {
-			if v := root.Get(p); v.Type == gjson.String {
-				if s := strings.TrimSpace(v.String()); s != "" {
+			if v := root.Get(p); v.Type == ojson.String {
+				if s := cloneTrimmedString(v.String()); s != "" {
 					return s
 				}
 			}
@@ -2587,12 +2576,12 @@ func ParseXAIVideoUsage(requestPayload, responsePayload []byte) usage.Detail {
 		detail.ImageDetails = imgDetails
 	}
 	detail.RequestedImageDetails = ParseRequestImageDetails(requestPayload)
-	if dur := firstExistingUsageNode(root, "duration", "video.duration"); dur.Type == gjson.Number && dur.Float() > 0 {
+	if dur := firstExistingUsageNode(root, "duration", "video.duration"); dur.Type == ojson.Number && dur.Float() > 0 {
 		detail.MediaCounts = &usage.MediaCounts{
 			CompletionMedia: usage.Int64Ptr(1),
 			AudioSeconds:    usage.Float64Ptr(dur.Float()),
 		}
-	} else if dur := reqRoot.Get("duration"); dur.Type == gjson.Number && dur.Float() > 0 {
+	} else if dur := reqRoot.Get("duration"); dur.Type == ojson.Number && dur.Float() > 0 {
 		detail.MediaCounts = &usage.MediaCounts{
 			CompletionMedia: usage.Int64Ptr(1),
 			AudioSeconds:    usage.Float64Ptr(dur.Float()),
@@ -2601,14 +2590,14 @@ func ParseXAIVideoUsage(requestPayload, responsePayload []byte) usage.Detail {
 	return detail
 }
 
-func parseOpenAIToolUsageDetailsNode(node gjson.Result) *usage.ToolUsageDetails {
+func parseOpenAIToolUsageDetailsNode(node ojson.Result) *usage.ToolUsageDetails {
 	if !node.Exists() || !node.IsObject() {
 		return nil
 	}
 	out := &usage.ToolUsageDetails{}
 	hasAny := false
-	node.ForEach(func(key, value gjson.Result) bool {
-		if value.Type != gjson.Number {
+	node.ForEach(func(key, value ojson.Result) bool {
+		if value.Type != ojson.Number {
 			return true
 		}
 		k := strings.TrimSpace(key.String())
@@ -2666,10 +2655,10 @@ func parseOpenAIToolUsageDetailsNode(node gjson.Result) *usage.ToolUsageDetails 
 
 func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
+	root := util.ParseGJSONBytesNoCopy(payload)
 	detail, ok := parseOpenAIStyleUsageWithCache(root, root.Get("usage"))
 	detail.ResponseServiceTier = extractResponseServiceTierFromValidJSON(payload)
 	if detail.UpstreamServiceTier == "" {
@@ -2679,7 +2668,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {
-	root := gjson.ParseBytes(data)
+	root := util.ParseGJSONBytesNoCopy(data)
 	usageNode := root.Get("usage")
 	if !usageNode.Exists() {
 		return usage.Detail{}
@@ -2691,10 +2680,10 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 
 func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	payload := jsonPayload(line)
-	if len(payload) == 0 || !bytes.Contains(payload, openAIStreamUsageMarker) || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !bytes.Contains(payload, openAIStreamUsageMarker) || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
+	root := util.ParseGJSONBytesNoCopy(payload)
 	usageNode := root.Get("usage")
 	if !usageNode.Exists() {
 		usageNode = root.Get("message.usage")
@@ -2705,7 +2694,7 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	return parseClaudeUsageNode(usageNode), true
 }
 
-func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
+func parseClaudeUsageNode(usageNode ojson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
 	rawOutputTokens := usageNode.Get("output_tokens").Int()
@@ -2763,24 +2752,24 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	return detail
 }
 
-func populateClaudeUsageStructuredFields(detail *usage.Detail, usageNode gjson.Result) {
+func populateClaudeUsageStructuredFields(detail *usage.Detail, usageNode ojson.Result) {
 	if detail == nil || !usageNode.Exists() || !usageNode.IsObject() {
 		return
 	}
-	if v := usageNode.Get("service_tier"); v.Type == gjson.String {
+	if v := usageNode.Get("service_tier"); v.Type == ojson.String {
 		detail.UpstreamServiceTier = cloneTrimmedString(v.String())
 	}
-	if v := usageNode.Get("speed"); v.Type == gjson.String {
+	if v := usageNode.Get("speed"); v.Type == ojson.String {
 		detail.Speed = cloneTrimmedString(v.String())
 	}
-	if v := usageNode.Get("inference_geo"); v.Type == gjson.String {
+	if v := usageNode.Get("inference_geo"); v.Type == ojson.String {
 		detail.InferenceGeo = cloneTrimmedString(v.String())
 	}
 	iterations := parseClaudeIterationsNode(usageNode.Get("iterations"))
 	detail.Iterations = usage.IterationsPtr(iterations)
 	cacheDetails := parseClaudeCacheCreationNode(usageNode.Get("cache_creation"))
 	if cacheDetails == nil && len(iterations) > 0 &&
-		(usageNode.Get("cache_creation_input_tokens").Type == gjson.Number || detail.CacheCreationTokens > 0) {
+		(usageNode.Get("cache_creation_input_tokens").Type == ojson.Number || detail.CacheCreationTokens > 0) {
 		cacheDetails = deriveClaudeCacheCreationFromIterations(iterations, detail.CacheCreationTokens)
 	}
 	applyCacheDetailsToUsageDetail(detail, cacheDetails)
@@ -2791,7 +2780,7 @@ func populateClaudeUsageStructuredFields(detail *usage.Detail, usageNode gjson.R
 	detail.CostDetails = parseClaudeCostNode(usageNode)
 }
 
-func applyClaudeContentBlocksUsage(detail *usage.Detail, contentNode gjson.Result) {
+func applyClaudeContentBlocksUsage(detail *usage.Detail, contentNode ojson.Result) {
 	if detail == nil || !contentNode.Exists() || !contentNode.IsArray() {
 		return
 	}
@@ -2877,35 +2866,35 @@ func applyCacheDetailsToUsageDetail(detail *usage.Detail, cacheDetails *usage.Ca
 	detail.CacheCreation12hTokens = usage.CloneInt64Ptr(cacheDetails.Ephemeral12hInputTokens)
 }
 
-func parseClaudeCacheCreationNode(node gjson.Result) *usage.CacheDetails {
+func parseClaudeCacheCreationNode(node ojson.Result) *usage.CacheDetails {
 	if !node.Exists() || !node.IsObject() {
 		return nil
 	}
 	out := &usage.CacheDetails{}
 	hasAny := false
-	node.ForEach(func(key, value gjson.Result) bool {
+	node.ForEach(func(key, value ojson.Result) bool {
 		k := strings.TrimSpace(key.String())
 		switch k {
 		case "ttl":
-			if value.Type == gjson.String {
+			if value.Type == ojson.String {
 				out.TTL = cloneTrimmedString(value.String())
 				hasAny = out.TTL != "" || hasAny
 			}
 			return true
 		case "mode":
-			if value.Type == gjson.String {
+			if value.Type == ojson.String {
 				out.Mode = cloneTrimmedString(value.String())
 				hasAny = out.Mode != "" || hasAny
 			}
 			return true
 		case "retention":
-			if value.Type == gjson.String {
+			if value.Type == ojson.String {
 				out.Retention = cloneTrimmedString(value.String())
 				hasAny = out.Retention != "" || hasAny
 			}
 			return true
 		}
-		if value.Type != gjson.Number {
+		if value.Type != ojson.Number {
 			return true
 		}
 		v := value.Int()
@@ -2944,14 +2933,14 @@ func parseClaudeCacheCreationNode(node gjson.Result) *usage.CacheDetails {
 	return out
 }
 
-func parseClaudeServerToolUseNode(node gjson.Result) *usage.ToolUsageDetails {
+func parseClaudeServerToolUseNode(node ojson.Result) *usage.ToolUsageDetails {
 	if !node.Exists() || !node.IsObject() {
 		return nil
 	}
 	out := &usage.ToolUsageDetails{}
 	hasAny := false
-	node.ForEach(func(key, value gjson.Result) bool {
-		if value.Type != gjson.Number {
+	node.ForEach(func(key, value ojson.Result) bool {
+		if value.Type != ojson.Number {
 			return true
 		}
 		k := strings.TrimSpace(key.String())
@@ -2989,7 +2978,7 @@ func parseClaudeServerToolUseNode(node gjson.Result) *usage.ToolUsageDetails {
 	return out
 }
 
-func parseClaudeIterationsNode(node gjson.Result) []usage.IterationUsage {
+func parseClaudeIterationsNode(node ojson.Result) []usage.IterationUsage {
 	if !node.Exists() || !node.IsArray() {
 		return nil
 	}
@@ -3003,36 +2992,36 @@ func parseClaudeIterationsNode(node gjson.Result) []usage.IterationUsage {
 			continue
 		}
 		it := usage.IterationUsage{}
-		if v := item.Get("type"); v.Type == gjson.String {
+		if v := item.Get("type"); v.Type == ojson.String {
 			it.Type = cloneTrimmedString(v.String())
 		}
-		if v := item.Get("model"); v.Type == gjson.String {
+		if v := item.Get("model"); v.Type == ojson.String {
 			it.Model = cloneTrimmedString(v.String())
 		}
-		if v := item.Get("input_tokens"); v.Type == gjson.Number {
+		if v := item.Get("input_tokens"); v.Type == ojson.Number {
 			it.InputTokens = usage.Int64Ptr(v.Int())
 		}
-		if v := item.Get("output_tokens"); v.Type == gjson.Number {
+		if v := item.Get("output_tokens"); v.Type == ojson.Number {
 			it.OutputTokens = usage.Int64Ptr(v.Int())
 		}
-		if v := firstExistingUsageNode(item, "output_tokens_details.thinking_tokens", "thinking_tokens"); v.Type == gjson.Number {
+		if v := firstExistingUsageNode(item, "output_tokens_details.thinking_tokens", "thinking_tokens"); v.Type == ojson.Number {
 			val := v.Int()
 			if val < 0 {
 				val = 0
 			}
 			it.ThinkingTokens = usage.Int64Ptr(val)
 			it.ReasoningTokens = usage.Int64Ptr(val)
-		} else if v := item.Get("output_tokens_details.reasoning_tokens"); v.Type == gjson.Number {
+		} else if v := item.Get("output_tokens_details.reasoning_tokens"); v.Type == ojson.Number {
 			val := v.Int()
 			if val < 0 {
 				val = 0
 			}
 			it.ReasoningTokens = usage.Int64Ptr(val)
 		}
-		if v := item.Get("cache_read_input_tokens"); v.Type == gjson.Number {
+		if v := item.Get("cache_read_input_tokens"); v.Type == ojson.Number {
 			it.CacheReadInputTokens = usage.Int64Ptr(v.Int())
 		}
-		if v := item.Get("cache_creation_input_tokens"); v.Type == gjson.Number {
+		if v := item.Get("cache_creation_input_tokens"); v.Type == ojson.Number {
 			it.CacheCreationInputTokens = usage.Int64Ptr(v.Int())
 		}
 		it.CacheCreation = parseClaudeCacheCreationNode(item.Get("cache_creation"))
@@ -3111,34 +3100,34 @@ func deriveClaudeCacheCreationFromIterations(iterations []usage.IterationUsage, 
 	return out
 }
 
-func parseClaudeCostNode(usageNode gjson.Result) *usage.CostDetails {
+func parseClaudeCostNode(usageNode ojson.Result) *usage.CostDetails {
 	costNode := usageNode.Get("cost")
 	byokNode := usageNode.Get("is_byok")
 	detailsNode := usageNode.Get("cost_details")
 	out := &usage.CostDetails{}
 	hasAny := false
-	if costNode.Type == gjson.Number {
+	if costNode.Type == ojson.Number {
 		out.Cost = usage.Float64Ptr(costNode.Float())
 		hasAny = true
 	}
-	if ticksNode := usageNode.Get("cost_in_usd_ticks"); ticksNode.Type == gjson.Number {
+	if ticksNode := usageNode.Get("cost_in_usd_ticks"); ticksNode.Type == ojson.Number {
 		out.CostInUSDTicks = usage.Int64Ptr(ticksNode.Int())
 		hasAny = true
 	}
-	if byokNode.Type == gjson.True || byokNode.Type == gjson.False {
+	if byokNode.Type == ojson.True || byokNode.Type == ojson.False {
 		out.IsBYOK = usage.BoolPtr(byokNode.Bool())
 		hasAny = true
 	}
 	if detailsNode.Exists() && detailsNode.IsObject() {
-		if v := detailsNode.Get("upstream_inference_cost"); v.Type == gjson.Number {
+		if v := detailsNode.Get("upstream_inference_cost"); v.Type == ojson.Number {
 			out.UpstreamInferenceCost = usage.Float64Ptr(v.Float())
 			hasAny = true
 		}
-		if v := detailsNode.Get("upstream_inference_prompt_cost"); v.Type == gjson.Number {
+		if v := detailsNode.Get("upstream_inference_prompt_cost"); v.Type == ojson.Number {
 			out.UpstreamInferencePromptCost = usage.Float64Ptr(v.Float())
 			hasAny = true
 		}
-		if v := detailsNode.Get("upstream_inference_completions_cost"); v.Type == gjson.Number {
+		if v := detailsNode.Get("upstream_inference_completions_cost"); v.Type == ojson.Number {
 			out.UpstreamInferenceCompletionsCost = usage.Float64Ptr(v.Float())
 			hasAny = true
 		}
@@ -3149,7 +3138,7 @@ func parseClaudeCostNode(usageNode gjson.Result) *usage.CostDetails {
 	return out
 }
 
-func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
+func parseGeminiFamilyUsageDetail(node ojson.Result) usage.Detail {
 	if !node.Exists() || !node.IsObject() {
 		return usage.Detail{}
 	}
@@ -3162,12 +3151,12 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		cachedTokens     int64
 		serviceTier      string
 		trafficType      string
-		promptDetails    gjson.Result
-		toolUseDetails   gjson.Result
-		cacheDetails     gjson.Result
-		candDetails      gjson.Result
+		promptDetails    ojson.Result
+		toolUseDetails   ojson.Result
+		cacheDetails     ojson.Result
+		candDetails      ojson.Result
 	)
-	node.ForEach(func(key, val gjson.Result) bool {
+	node.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "promptTokenCount", "prompt_token_count":
 			if promptTokens == 0 {
@@ -3194,11 +3183,11 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 				cachedTokens = val.Int()
 			}
 		case "serviceTier", "service_tier":
-			if serviceTier == "" && val.Type == gjson.String {
+			if serviceTier == "" && val.Type == ojson.String {
 				serviceTier = cloneTrimmedString(val.String())
 			}
 		case "trafficType", "traffic_type":
-			if trafficType == "" && val.Type == gjson.String {
+			if trafficType == "" && val.Type == ojson.String {
 				trafficType = cloneTrimmedString(val.String())
 			}
 		case "promptTokensDetails", "prompt_tokens_details":
@@ -3267,11 +3256,11 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 			Extra: map[string]int64{"tool_use_prompt_tokens": toolUseTokens},
 		}
 	}
-	parseModalityList := func(arr gjson.Result, target func(modality string, count int64)) {
+	parseModalityList := func(arr ojson.Result, target func(modality string, count int64)) {
 		if !arr.Exists() || !arr.IsArray() {
 			return
 		}
-		arr.ForEach(func(_, entry gjson.Result) bool {
+		arr.ForEach(func(_, entry ojson.Result) bool {
 			mod := strings.ToUpper(strings.TrimSpace(entry.Get("modality").String()))
 			if mod == "" {
 				return true
@@ -3280,7 +3269,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 			if !cntNode.Exists() {
 				cntNode = entry.Get("token_count")
 			}
-			if cntNode.Type == gjson.Number {
+			if cntNode.Type == ojson.Number {
 				target(mod, cntNode.Int())
 			}
 			return true
@@ -3368,7 +3357,7 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	return detail
 }
 
-func applyGeminiPayloadArtifacts(detail *usage.Detail, root gjson.Result) {
+func applyGeminiPayloadArtifacts(detail *usage.Detail, root ojson.Result) {
 	if detail == nil || !root.Exists() || !root.IsObject() {
 		return
 	}
@@ -3376,19 +3365,19 @@ func applyGeminiPayloadArtifacts(detail *usage.Detail, root gjson.Result) {
 	if !candidates.Exists() {
 		candidates = root.Get("response.candidates")
 	}
-	var preds gjson.Result
+	var preds ojson.Result
 	if strings.Contains(root.Raw, `"predictions"`) {
 		preds = root.Get("predictions")
 	}
 	applyGeminiNodesArtifacts(detail, candidates, preds)
 }
 
-func applyGeminiNodesArtifacts(detail *usage.Detail, candidates, preds gjson.Result) {
+func applyGeminiNodesArtifacts(detail *usage.Detail, candidates, preds ojson.Result) {
 	var callCounter geminiFunctionCallCounter
 	applyGeminiNodesArtifactsWithCounter(detail, candidates, preds, &callCounter)
 }
 
-func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, preds gjson.Result, callCounter *geminiFunctionCallCounter) {
+func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, preds ojson.Result, callCounter *geminiFunctionCallCounter) {
 	if detail == nil {
 		return
 	}
@@ -3408,25 +3397,25 @@ func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, pred
 			imageOutCount     int64
 			firstImageMime    string
 		)
-		candidates.ForEach(func(candPos, cand gjson.Result) bool {
+		candidates.ForEach(func(candPos, cand ojson.Result) bool {
 			if !cand.IsObject() {
 				return true
 			}
 			candIdx := candPos.Int()
-			if idxNode := cand.Get("index"); idxNode.Type == gjson.Number {
+			if idxNode := cand.Get("index"); idxNode.Type == ojson.Number {
 				candIdx = idxNode.Int()
 			}
-			cand.ForEach(func(ck, cv gjson.Result) bool {
+			cand.ForEach(func(ck, cv ojson.Result) bool {
 				switch ck.String() {
 				case "groundingMetadata", "grounding_metadata":
 					if !cv.IsObject() {
 						return true
 					}
-					cv.ForEach(func(gk, gv gjson.Result) bool {
+					cv.ForEach(func(gk, gv ojson.Result) bool {
 						switch gk.String() {
 						case "webSearchQueries", "web_search_queries":
 							if gv.IsArray() {
-								gv.ForEach(func(_, qItem gjson.Result) bool {
+								gv.ForEach(func(_, qItem ojson.Result) bool {
 									if strings.TrimSpace(qItem.String()) != "" {
 										webSearchQueries++
 										webSearchGrounded = true
@@ -3438,7 +3427,7 @@ func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, pred
 							webSearchGrounded = true
 						case "groundingChunks", "grounding_chunks":
 							if gv.IsArray() {
-								gv.ForEach(func(_, ch gjson.Result) bool {
+								gv.ForEach(func(_, ch ojson.Result) bool {
 									switch {
 									case ch.Get("web").Exists():
 										webChunks++
@@ -3462,11 +3451,11 @@ func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, pred
 					}
 				case "content":
 					if parts := cv.Get("parts"); parts.IsArray() {
-						parts.ForEach(func(_, part gjson.Result) bool {
+						parts.ForEach(func(_, part ojson.Result) bool {
 							if !part.IsObject() {
 								return true
 							}
-							part.ForEach(func(pk, pv gjson.Result) bool {
+							part.ForEach(func(pk, pv ojson.Result) bool {
 								switch pk.String() {
 								case "executableCode", "executable_code":
 									codeExecCount++
@@ -3548,20 +3537,20 @@ func applyGeminiNodesArtifactsWithCounter(detail *usage.Detail, candidates, pred
 	if preds.Exists() && preds.IsArray() {
 		var count int64
 		var firstMime string
-		preds.ForEach(func(_, pred gjson.Result) bool {
+		preds.ForEach(func(_, pred ojson.Result) bool {
 			if !pred.IsObject() {
 				return true
 			}
 			var hasImg bool
 			var mime string
-			pred.ForEach(func(pk, pv gjson.Result) bool {
+			pred.ForEach(func(pk, pv ojson.Result) bool {
 				switch pk.String() {
 				case "bytesBase64Encoded", "gcsUri":
-					if pv.Type == gjson.String && len(pv.Raw) > 2 {
+					if pv.Type == ojson.String && len(pv.Raw) > 2 {
 						hasImg = true
 					}
 				case "mimeType":
-					if pv.Type == gjson.String {
+					if pv.Type == ojson.String {
 						mime = cloneTrimmedString(pv.String())
 					}
 				}
@@ -3596,7 +3585,7 @@ func ApplyGeminiRequestImageConfig(detail *usage.Detail, requestPayload []byte) 
 	detail.RequestedImageDetails = ParseRequestImageDetails(requestPayload)
 }
 
-func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
+func parseInteractionsUsageDetail(node ojson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
 	toolUseTokens := firstExistingUsageNode(node, "tool_use_tokens", "total_tool_use_tokens", "toolUseTokens", "totalToolUseTokens").Int()
 	inputTokens, okInput := safeUsageTokenSum(
@@ -3644,7 +3633,7 @@ func hasUsageDetail(detail usage.Detail) bool {
 }
 
 func ParseInteractionsUsage(data []byte) usage.Detail {
-	root := gjson.ParseBytes(data)
+	root := util.ParseGJSONBytesNoCopy(data)
 	node := firstExistingUsageNode(root, "usage", "total_usage", "metadata.total_usage", "metadata.usage", "usageMetadata", "usage_metadata", "interaction.usage", "interaction.total_usage", "interaction.metadata.total_usage")
 	if !node.Exists() {
 		return usage.Detail{}
@@ -3660,7 +3649,7 @@ func ParseInteractionsUsage(data []byte) usage.Detail {
 }
 
 func extractResponseServiceTier(payload []byte) string {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return ""
 	}
 	return extractResponseServiceTierFromValidJSON(payload)
@@ -3668,8 +3657,8 @@ func extractResponseServiceTier(payload []byte) string {
 
 func extractResponseServiceTierFromValidJSON(payload []byte) string {
 	for _, path := range []string{"response.service_tier", "service_tier", "interaction.service_tier"} {
-		if tier := strings.TrimSpace(gjson.GetBytes(payload, path).String()); tier != "" {
-			return tier
+		if tier := strings.TrimSpace(ojson.GetBytesNoCopy(payload, path).String()); tier != "" {
+			return strings.Clone(tier)
 		}
 	}
 	return ""
@@ -3680,7 +3669,7 @@ func ParseInteractionsStreamUsage(line []byte) (usage.Detail, bool) {
 	if len(payload) == 0 {
 		payload = line
 	}
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
 	detail := ParseInteractionsUsage(payload)
@@ -3691,16 +3680,16 @@ func ParseInteractionsStreamUsage(line []byte) (usage.Detail, bool) {
 }
 
 func ParseGeminiUsage(data []byte) usage.Detail {
-	if len(data) == 0 || !gjson.ValidBytes(data) {
+	if len(data) == 0 || !ojson.ValidBytes(data) {
 		return usage.Detail{}
 	}
-	root := gjson.Parse(unsafeBytesToString(data))
+	root := util.ParseGJSONBytesNoCopy(data)
 	var (
-		node           gjson.Result
-		candidatesNode gjson.Result
-		predsNode      gjson.Result
+		node           ojson.Result
+		candidatesNode ojson.Result
+		predsNode      ojson.Result
 	)
-	root.ForEach(func(key, val gjson.Result) bool {
+	root.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "usageMetadata", "usage_metadata":
 			if !node.Exists() {
@@ -3712,7 +3701,7 @@ func ParseGeminiUsage(data []byte) usage.Detail {
 			predsNode = val
 		case "response":
 			if val.IsObject() {
-				val.ForEach(func(rk, rv gjson.Result) bool {
+				val.ForEach(func(rk, rv ojson.Result) bool {
 					switch rk.String() {
 					case "usageMetadata", "usage_metadata":
 						if !node.Exists() {
@@ -3746,11 +3735,11 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	hasCamel := bytes.Contains(payload, geminiUsageMetaMarker)
 	hasSnake := !hasCamel && bytes.Contains(payload, geminiUsageMetaSnakeMarker)
-	if (!hasCamel && !hasSnake) || !gjson.ValidBytes(payload) {
+	if (!hasCamel && !hasSnake) || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
-	var node gjson.Result
+	root := util.ParseGJSONBytesNoCopy(payload)
+	var node ojson.Result
 	if hasCamel {
 		node = root.Get("usageMetadata")
 	} else {
@@ -3769,14 +3758,14 @@ func ParseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
-func firstExistingUsageNode(root gjson.Result, paths ...string) gjson.Result {
+func firstExistingUsageNode(root ojson.Result, paths ...string) ojson.Result {
 	for _, path := range paths {
 		node := root.Get(path)
 		if node.Exists() {
 			return node
 		}
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 func safeUsageTokenSum(values ...int64) (int64, bool) {
@@ -3813,10 +3802,10 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 	}
 	hasCamel := bytes.Contains(payload, geminiUsageMetaMarker)
 	hasSnake := !hasCamel && bytes.Contains(payload, geminiUsageMetaSnakeMarker)
-	if (!hasCamel && !hasSnake) || !gjson.ValidBytes(payload) {
+	if (!hasCamel && !hasSnake) || !ojson.ValidBytes(payload) {
 		return usage.Detail{}, false
 	}
-	root := gjson.Parse(unsafeBytesToString(payload))
+	root := util.ParseGJSONBytesNoCopy(payload)
 	node := root.Get("response.usageMetadata")
 	if !node.Exists() && hasCamel {
 		node = root.Get("usageMetadata")
@@ -3863,7 +3852,7 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			continue
 		}
 		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
-		traceID := gjson.GetBytes(rawJSON, "traceId").String()
+		traceID := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "traceId").String())
 		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
 			rememberStopWithoutUsage(traceID)
 			continue
@@ -3914,19 +3903,19 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 // - Antigravity: response.candidates.0.finishReason
 func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 	jsonBytes := bytes.TrimSpace(rawJSON)
-	if len(jsonBytes) == 0 || !bytes.Contains(jsonBytes, geminiUsageMetaMarker) || !gjson.ValidBytes(jsonBytes) {
+	if len(jsonBytes) == 0 || !bytes.Contains(jsonBytes, geminiUsageMetaMarker) || !ojson.ValidBytes(jsonBytes) {
 		return rawJSON, false
 	}
 
-	root := gjson.Parse(unsafeBytesToString(jsonBytes))
+	root := util.ParseGJSONBytesNoCopy(jsonBytes)
 	var (
 		finishReason string
-		topUsage     gjson.Result
-		respUsage    gjson.Result
-		topUsageKey  gjson.Result
-		respUsageKey gjson.Result
+		topUsage     ojson.Result
+		respUsage    ojson.Result
+		topUsageKey  ojson.Result
+		respUsageKey ojson.Result
 	)
-	root.ForEach(func(key, val gjson.Result) bool {
+	root.ForEach(func(key, val ojson.Result) bool {
 		switch key.String() {
 		case "usageMetadata":
 			topUsage = val
@@ -3937,7 +3926,7 @@ func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 			}
 		case "response":
 			if val.IsObject() {
-				val.ForEach(func(rk, rv gjson.Result) bool {
+				val.ForEach(func(rk, rv ojson.Result) bool {
 					switch rk.String() {
 					case "usageMetadata":
 						respUsage = rv
@@ -3976,29 +3965,32 @@ func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 		}
 	}
 
-	cleaned := jsonBytes
+	doc := ojson.NewDoc(jsonBytes)
 	var changed bool
 	if topUsage.Exists() {
-		cleaned, _ = sjson.SetRawBytes(cleaned, "cpaUsageMetadata", []byte(topUsage.Raw))
-		cleaned, _ = sjson.DeleteBytes(cleaned, "usageMetadata")
+		_ = doc.SetRaw("cpaUsageMetadata", topUsage.Raw)
+		_ = doc.Delete("usageMetadata")
 		changed = true
 	}
 	if respUsage.Exists() {
-		cleaned, _ = sjson.SetRawBytes(cleaned, "response.cpaUsageMetadata", []byte(respUsage.Raw))
-		cleaned, _ = sjson.DeleteBytes(cleaned, "response.usageMetadata")
+		_ = doc.SetRaw("response.cpaUsageMetadata", respUsage.Raw)
+		_ = doc.Delete("response.usageMetadata")
 		changed = true
 	}
-	return cleaned, changed
+	if !changed {
+		return rawJSON, false
+	}
+	return doc.Bytes(), true
 }
 
 func hasUsageMetadata(jsonBytes []byte) bool {
-	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
+	if len(jsonBytes) == 0 || !ojson.ValidBytes(jsonBytes) {
 		return false
 	}
-	if gjson.GetBytes(jsonBytes, "usageMetadata").Exists() {
+	if ojson.GetBytesNoCopy(jsonBytes, "usageMetadata").Exists() {
 		return true
 	}
-	if gjson.GetBytes(jsonBytes, "response.usageMetadata").Exists() {
+	if ojson.GetBytesNoCopy(jsonBytes, "response.usageMetadata").Exists() {
 		return true
 	}
 	return false
@@ -4007,12 +3999,12 @@ func hasUsageMetadata(jsonBytes []byte) bool {
 var finishReasonMarker = []byte(`"finishReason"`)
 
 func isStopChunkWithoutUsage(jsonBytes []byte) bool {
-	if len(jsonBytes) == 0 || !bytes.Contains(jsonBytes, finishReasonMarker) || bytes.Contains(jsonBytes, geminiUsageMetaMarker) || !gjson.ValidBytes(jsonBytes) {
+	if len(jsonBytes) == 0 || !bytes.Contains(jsonBytes, finishReasonMarker) || bytes.Contains(jsonBytes, geminiUsageMetaMarker) || !ojson.ValidBytes(jsonBytes) {
 		return false
 	}
-	finishReason := gjson.GetBytes(jsonBytes, "candidates.0.finishReason")
+	finishReason := ojson.GetBytesNoCopy(jsonBytes, "candidates.0.finishReason")
 	if !finishReason.Exists() {
-		finishReason = gjson.GetBytes(jsonBytes, "response.candidates.0.finishReason")
+		finishReason = ojson.GetBytesNoCopy(jsonBytes, "response.candidates.0.finishReason")
 	}
 	trimmed := strings.TrimSpace(finishReason.String())
 	if !finishReason.Exists() || trimmed == "" {

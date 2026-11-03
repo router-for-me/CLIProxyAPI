@@ -114,12 +114,12 @@
 package signature
 
 import (
-	"encoding/base64"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 	"unicode/utf8"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -193,15 +193,15 @@ func HasDecodableClaudeThinkingSignature(rawSignature string) bool {
 		_, err := InspectAntigravityClaudeCAQSSignature(sig)
 		return err == nil
 	case 'E':
-		decoded, err := base64.StdEncoding.DecodeString(sig)
-		return err == nil && len(decoded) > 0
+		n, err := base64.StdEncoding.ValidateString(sig)
+		return err == nil && n > 0
 	case 'R':
 		decoded, err := base64.StdEncoding.DecodeString(sig)
 		if err != nil || len(decoded) == 0 || decoded[0] != 'E' {
 			return false
 		}
-		innerDecoded, err := base64.StdEncoding.DecodeString(string(decoded))
-		return err == nil && len(innerDecoded) > 0
+		n, err := base64.StdEncoding.ValidateString(string(decoded))
+		return err == nil && n > 0
 	default:
 		return false
 	}
@@ -235,7 +235,7 @@ func stripClaudeSignaturePrefix(rawSignature string) string {
 // ValidateClaudeThinkingSignatures validates every thinking block signature in a
 // Claude messages payload.
 func ValidateClaudeThinkingSignatures(inputRawJSON []byte, opts ...ClaudeSignatureValidationOptions) error {
-	messages := gjson.GetBytes(inputRawJSON, "messages")
+	messages := ojson.GetBytesNoCopy(inputRawJSON, "messages")
 	if !messages.IsArray() {
 		return nil
 	}

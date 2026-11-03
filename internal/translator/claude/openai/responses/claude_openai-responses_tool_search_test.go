@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // Fixtures follow openai/codex: the tool_search spec from
@@ -37,18 +38,18 @@ func codexToolSearchRequest(items ...string) []byte {
 		`],"tool_choice":"auto","stream":true}`)
 }
 
-func convertToolSearchRequest(t *testing.T, request []byte) gjson.Result {
+func convertToolSearchRequest(t *testing.T, request []byte) ojson.Result {
 	t.Helper()
 	out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-5", request, true)
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	return gjson.ParseBytes(out)
+	return util.ParseGJSONBytesNoCopy(out)
 }
 
-func claudeToolNamesOf(req gjson.Result) []string {
+func claudeToolNamesOf(req ojson.Result) []string {
 	var names []string
-	req.Get("tools").ForEach(func(_, tool gjson.Result) bool {
+	req.Get("tools").ForEach(func(_, tool ojson.Result) bool {
 		names = append(names, tool.Get("name").String())
 		return true
 	})
@@ -171,9 +172,9 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolSearchHistoryReplaysAndActiva
 
 func TestConvertOpenAIResponsesRequestToClaude_NamespacedFunctionCallHistoryIsQualified(t *testing.T) {
 	req := convertToolSearchRequest(t, codexToolSearchRequest(codexUserTurn, codexSearchCall1, codexSearchOutput1, codexNSCall, codexNSCallOutput))
-	var replayed gjson.Result
-	req.Get("messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
+	var replayed ojson.Result
+	req.Get("messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
 			if block.Get("id").String() == "call_cal_1" {
 				replayed = block
 			}
@@ -222,7 +223,7 @@ var claudeToolSearchStream = []string{
 	`data: {"type":"message_stop"}`,
 }
 
-func assertCodexToolSearchCall(t *testing.T, label string, item gjson.Result) {
+func assertCodexToolSearchCall(t *testing.T, label string, item ojson.Result) {
 	t.Helper()
 	if item.Get("type").String() != "tool_search_call" || item.Get("call_id").String() != "toolu_search" ||
 		item.Get("execution").String() != "client" || item.Get("status").String() != "completed" ||
@@ -234,7 +235,7 @@ func assertCodexToolSearchCall(t *testing.T, label string, item gjson.Result) {
 	}
 }
 
-func assertOrdinaryToolCalls(t *testing.T, label string, calendar, exec gjson.Result) {
+func assertOrdinaryToolCalls(t *testing.T, label string, calendar, exec ojson.Result) {
 	t.Helper()
 	if calendar.Get("type").String() != "function_call" || calendar.Get("name").String() != "calendar_create_event" ||
 		calendar.Get("namespace").String() != "mcp__codex_apps__" || calendar.Get("arguments").String() != `{"title":"Standup"}` {
@@ -250,8 +251,8 @@ func TestConvertClaudeResponseToOpenAIResponses_ToolSearchBecomesToolSearchCall(
 	request := codexToolSearchRequest(codexUserTurn, codexSearchCall1, codexSearchOutput1)
 
 	var param any
-	var added, done []gjson.Result
-	var completed gjson.Result
+	var added, done []ojson.Result
+	var completed ojson.Result
 	for _, chunk := range claudeToolSearchStream {
 		for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", request, nil, []byte(chunk), &param) {
 			event, data := parseClaudeResponsesSSEEvent(t, output)
@@ -292,9 +293,9 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStream_ToolSearchBecomesToolSe
 	raw := []byte(strings.Join(claudeToolSearchStream, "\n"))
 
 	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", request, nil, raw, nil)
-	output := gjson.GetBytes(out, "output").Array()
+	output := ojson.GetBytesNoCopy(out, "output").Array()
 	if len(output) != 3 {
-		t.Fatalf("output = %s", gjson.GetBytes(out, "output").Raw)
+		t.Fatalf("output = %s", ojson.GetBytesNoCopy(out, "output").Raw)
 	}
 	assertCodexToolSearchCall(t, "non-stream", output[0])
 	assertOrdinaryToolCalls(t, "non-stream", output[1], output[2])
@@ -333,7 +334,7 @@ func TestConvertClaudeResponseToOpenAIResponses_TruncatedToolSearchIsIncomplete(
 			chunks = append(chunks, `data: {"type":"message_delta","delta":{"stop_reason":"`+tc.stopReason+`"},"usage":{"output_tokens":5}}`, `data: {"type":"message_stop"}`)
 
 			var param any
-			var done, terminal gjson.Result
+			var done, terminal ojson.Result
 			for _, chunk := range chunks {
 				for _, output := range ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", request, nil, []byte(chunk), &param) {
 					event, data := parseClaudeResponsesSSEEvent(t, output)
@@ -345,7 +346,7 @@ func TestConvertClaudeResponseToOpenAIResponses_TruncatedToolSearchIsIncomplete(
 					}
 				}
 			}
-			for label, item := range map[string]gjson.Result{"done": done, "terminal": terminal} {
+			for label, item := range map[string]ojson.Result{"done": done, "terminal": terminal} {
 				if item.Get("type").String() != "tool_search_call" || item.Get("status").String() != "incomplete" ||
 					item.Get("arguments").Raw != tc.wantArguments {
 					t.Fatalf("%s item = %s, want incomplete tool_search_call with arguments %s", label, item.Raw, tc.wantArguments)
@@ -390,7 +391,7 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolSearchNameCollisionRoutesCons
 			}
 
 			out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", request, nil, []byte(claudeCall), nil)
-			if got := gjson.GetBytes(out, "output.0.type").String(); got != tc.wantType {
+			if got := ojson.GetBytesNoCopy(out, "output.0.type").String(); got != tc.wantType {
 				t.Fatalf("Claude call became %s, want %s: %s", got, tc.wantType, out)
 			}
 		})
@@ -411,7 +412,7 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolSearchNameCollisionRoutesCons
 func TestConvertOpenAIResponsesRequestToClaude_ToolSearchOutputSkipsDirectlyDeclaredTools(t *testing.T) {
 	declaredOnly := `{"type":"tool_search_output","call_id":"call_search_1","status":"completed","execution":"client","tools":[` + codexExecCommandTool + `]}`
 	req := convertToolSearchRequest(t, codexToolSearchRequest(codexUserTurn, codexSearchCall1, declaredOnly))
-	if got := req.Get("messages.2.content.0.content"); got.Type != gjson.String || got.String() != "Tools now available to call: exec_command." {
+	if got := req.Get("messages.2.content.0.content"); got.Type != ojson.String || got.String() != "Tools now available to call: exec_command." {
 		t.Fatalf("declared-only output content = %s", got.Raw)
 	}
 
@@ -440,9 +441,9 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolSearchOutputDeduplicatesRefer
 		t.Fatalf("calendar declared %d times: %s", len(got), req.Get("tools").Raw)
 	}
 	var references []string
-	req.Get("messages").ForEach(func(_, message gjson.Result) bool {
-		message.Get("content").ForEach(func(_, block gjson.Result) bool {
-			block.Get("content").ForEach(func(_, part gjson.Result) bool {
+	req.Get("messages").ForEach(func(_, message ojson.Result) bool {
+		message.Get("content").ForEach(func(_, block ojson.Result) bool {
+			block.Get("content").ForEach(func(_, part ojson.Result) bool {
 				if part.Get("type").String() == "tool_reference" && part.Get("tool_name").String() == "mcp__codex_apps__calendar_create_event" {
 					references = append(references, block.Get("tool_use_id").String())
 				}
@@ -460,7 +461,7 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolSearchOutputDeduplicatesRefer
 func TestConvertOpenAIResponsesRequestToClaude_ToolSearchOutputWithoutToolsKeepsText(t *testing.T) {
 	empty := `{"type":"tool_search_output","call_id":"call_search_1","status":"completed","execution":"client","tools":[]}`
 	req := convertToolSearchRequest(t, codexToolSearchRequest(codexUserTurn, codexSearchCall1, empty))
-	if got := req.Get("messages.2.content.0.content"); got.Type != gjson.String || got.String() != "No matching tools were found." {
+	if got := req.Get("messages.2.content.0.content"); got.Type != ojson.String || got.String() != "No matching tools were found." {
 		t.Fatalf("empty output content = %s", got.Raw)
 	}
 }
@@ -557,6 +558,6 @@ func TestConvertOpenAIResponsesRequestToClaude_NoDeferredAnchorWithoutNativeTool
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(out), responsesDeferredAnchorName) || strings.Contains(string(off), responsesDeferredAnchorName) {
-		t.Fatalf("switch on/off: on=%s off=%s", gjson.GetBytes(out, "tools").Raw, gjson.GetBytes(off, "tools").Raw)
+		t.Fatalf("switch on/off: on=%s off=%s", ojson.GetBytesNoCopy(out, "tools").Raw, ojson.GetBytesNoCopy(off, "tools").Raw)
 	}
 }

@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing.T) {
@@ -37,7 +38,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -145,7 +146,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
 				thinkingStartFound = true
 				if data.Get("content_block.signature").Exists() {
@@ -203,7 +204,7 @@ func digestCodexThinkingStream(t *testing.T, chunks [][]byte) codexThinkingStrea
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -357,7 +358,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingUsesEarlyCapturedSignatureWh
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "signature_delta" {
 				signatureDeltaCount++
 				if got := data.Get("delta.signature").String(); got != "enc_sig_early" {
@@ -397,7 +398,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingUsesFinalDoneSignature(t *te
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
 				events = append(events, "thinking_start")
 			}
@@ -456,7 +457,7 @@ func TestConvertCodexResponseToClaude_StreamSignatureOnlyReasoningEmitsThinkingS
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -537,7 +538,7 @@ func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *test
 	}`)
 
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 
 	thinking := parsed.Get("content.0")
 	if thinking.Get("type").String() != "thinking" {
@@ -586,7 +587,7 @@ func TestConvertCodexResponseToClaude_StreamTextBeforeToolCallsDoesNotEmitGhostS
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				startIndices = append(startIndices, data.Get("index").Int())
@@ -635,7 +636,7 @@ func TestConvertCodexResponseToClaude_StreamFunctionCallDefersStartUntilDoneName
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() != "tool_use" {
@@ -693,7 +694,7 @@ func TestConvertCodexResponseToClaude_StreamUnnamedFunctionCallDoneByCallIDKeeps
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "tool_use" {
@@ -745,7 +746,7 @@ func TestConvertCodexResponseToClaude_StreamDeferredUnnamedFunctionCallDoesNotRe
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "text" {
 				if got := data.Get("index").Int(); got != 0 {
 					t.Fatalf("text block index = %d, want 0; outputs=%q", got, outputs)
@@ -784,7 +785,7 @@ func TestConvertCodexResponseToClaude_StreamTerminalOutputHydratesOpenFunctionCa
 				continue
 			}
 			position++
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_delta":
 				if data.Get("delta.type").String() == "input_json_delta" && data.Get("delta.partial_json").String() == `{"query":"example"}` {
@@ -907,7 +908,7 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "text_delta" && data.Get("delta.text").String() == "ok" {
 				foundText = true
 				break
@@ -1009,13 +1010,13 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallActionSources(t *testin
 		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
 	}
 
-	var webSearchResultBlock gjson.Result
+	var webSearchResultBlock ojson.Result
 	for _, out := range outputs {
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "web_search_tool_result" {
 				webSearchResultBlock = data.Get("content_block")
 			}
@@ -1062,7 +1063,7 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 				if !strings.HasPrefix(line, "data: ") {
 					continue
 				}
-				data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 				if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "tool_use" {
 					toolID = data.Get("content_block.id").String()
 				}
@@ -1094,7 +1095,7 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 		}`)
 
 		out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-		toolID := gjson.GetBytes(out, "content.0.id").String()
+		toolID := ojson.GetBytesNoCopy(out, "content.0.id").String()
 		if toolID == "" {
 			t.Fatalf("missing nonstream tool_use id. Output: %s", string(out))
 		}
@@ -1189,9 +1190,9 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlock
 	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
 	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 	types := []string{}
-	parsed.Get("content").ForEach(func(_, value gjson.Result) bool {
+	parsed.Get("content").ForEach(func(_, value ojson.Result) bool {
 		types = append(types, value.Get("type").String())
 		return true
 	})
@@ -1222,7 +1223,7 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchStopReasonEndTurn(t *tes
 	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
 	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 	if got := parsed.Get("stop_reason").String(); got != "end_turn" {
 		t.Fatalf("stop_reason = %q, want end_turn when only server web_search and text are present", got)
 	}
@@ -1275,9 +1276,9 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchCallActionSources(t *tes
 		}
 	}`)
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
-	var resultContent gjson.Result
-	parsed.Get("content").ForEach(func(_, block gjson.Result) bool {
+	parsed := util.ParseGJSONBytesNoCopy(out)
+	var resultContent ojson.Result
+	parsed.Get("content").ForEach(func(_, block ojson.Result) bool {
 		if block.Get("type").String() == "web_search_tool_result" {
 			resultContent = block.Get("content")
 			return false
@@ -1374,7 +1375,7 @@ func TestConvertCodexResponseToClaudeNonStream_StopReasonMapping(t *testing.T) {
 			ctx := context.Background()
 			originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
 			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, tt.response, nil)
-			parsed := gjson.ParseBytes(out)
+			parsed := util.ParseGJSONBytesNoCopy(out)
 
 			if got := parsed.Get("stop_reason").String(); got != tt.wantReason {
 				t.Fatalf("stop_reason = %q, want %q. Output: %s", got, tt.wantReason, string(out))
@@ -1399,7 +1400,7 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 	}`)
 
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 
 	if got := parsed.Get("stop_reason").String(); got != "stop_sequence" {
 		t.Fatalf("stop_reason = %q, want stop_sequence. Output: %s", got, string(out))
@@ -1417,22 +1418,22 @@ func findClaudeStreamStopReason(outputs [][]byte) (string, bool) {
 	return messageDelta.Get("delta.stop_reason").String(), true
 }
 
-func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
+func findClaudeStreamMessageDelta(outputs [][]byte) (ojson.Result, bool) {
 	for _, out := range outputs {
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "message_delta" {
 				return data, true
 			}
 		}
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
 }
 
-func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool) {
+func firstClaudeStreamPayloadForEvent(output, event string) (ojson.Result, bool) {
 	var currentEvent string
 	for _, line := range strings.Split(output, "\n") {
 		if strings.HasPrefix(line, "event: ") {
@@ -1442,9 +1443,9 @@ func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool)
 		if currentEvent != event || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
+		return ojson.Parse(strings.TrimPrefix(line, "data: ")), true
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
 }
 
 func TestConvertCodexResponseToClaude_StreamPreservesCacheWriteUsage(t *testing.T) {
@@ -1667,7 +1668,7 @@ func TestConvertCodexResponseToClaudeNonStream_PreservesCacheWriteUsage(t *testi
 			ctx := context.Background()
 			originalRequest := []byte(`{"messages":[]}`)
 			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(tt.responseJSON), nil)
-			parsed := gjson.ParseBytes(out)
+			parsed := util.ParseGJSONBytesNoCopy(out)
 
 			usage := parsed.Get("usage")
 			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
@@ -1896,7 +1897,7 @@ func TestConvertCodexResponseToClaudeNonStream_PreservesReasoningUsage(t *testin
 				}
 			}`, tt.usageJSON)
 			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(responseJSON), nil)
-			parsed := gjson.ParseBytes(out)
+			parsed := util.ParseGJSONBytesNoCopy(out)
 
 			usage := parsed.Get("usage")
 			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
@@ -2028,7 +2029,7 @@ func TestExtractResponsesUsage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			usage := gjson.Parse(tt.rawUsage)
+			usage := ojson.Parse(tt.rawUsage)
 			input, output, cached, cacheWrite := extractResponsesUsage(usage)
 			if input != tt.wantInputTokens {
 				t.Fatalf("input_tokens = %d, want %d", input, tt.wantInputTokens)
@@ -2080,8 +2081,8 @@ func TestConvertCodexResponseToClaude_RestoresLongMidConversationToolAdditionNam
 	if err != nil {
 		t.Fatalf("ConvertClaudeRequestToCodex returned error: %v", err)
 	}
-	topShortName := gjson.GetBytes(translatedReq, "tools.0.name").String()
-	midShortName := gjson.GetBytes(translatedReq, "input.1.tools.0.name").String()
+	topShortName := ojson.GetBytesNoCopy(translatedReq, "tools.0.name").String()
+	midShortName := ojson.GetBytesNoCopy(translatedReq, "input.1.tools.0.name").String()
 	if topShortName == "" || midShortName == "" || topShortName == midShortName {
 		t.Fatalf("expected distinct shortened names for colliding MCP tools, got top=%q mid=%q", topShortName, midShortName)
 	}
@@ -2098,10 +2099,10 @@ func TestConvertCodexResponseToClaude_RestoresLongMidConversationToolAdditionNam
 	// 2. Non-streaming response restoration
 	completedEvent := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-6.1-sol","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":%q,"arguments":"{}"},{"type":"function_call","id":"fc_2","call_id":"call_2","name":%q,"arguments":"{}"}],"usage":{"input_tokens":10,"output_tokens":5}}}`, topShortName, midShortName))
 	nonStreamOut := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-6.1-sol", originalRequest, nil, completedEvent, nil)
-	if got := gjson.GetBytes(nonStreamOut, "content.0.name").String(); got != topLongMCPTool {
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "content.0.name").String(); got != topLongMCPTool {
 		t.Fatalf("non-streaming response content.0.name = %q, want %q; body=%s", got, topLongMCPTool, nonStreamOut)
 	}
-	if got := gjson.GetBytes(nonStreamOut, "content.1.name").String(); got != midLongMCPTool {
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "content.1.name").String(); got != midLongMCPTool {
 		t.Fatalf("non-streaming response content.1.name = %q, want %q; body=%s", got, midLongMCPTool, nonStreamOut)
 	}
 }

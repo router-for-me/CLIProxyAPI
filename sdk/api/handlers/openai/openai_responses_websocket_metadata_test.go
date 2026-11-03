@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -15,7 +16,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 type websocketMetadataExecutor struct {
@@ -98,7 +98,7 @@ func TestResponsesWebsocketFiltersModerationMetadataForStandardClients(t *testin
 				if errRead != nil {
 					t.Fatalf("read websocket: %v; events: %v", errRead, gotTypes)
 				}
-				eventType := gjson.GetBytes(payload, "type").String()
+				eventType := ojson.GetBytesNoCopy(payload, "type").String()
 				gotTypes = append(gotTypes, eventType)
 				if eventType == "error" {
 					t.Fatalf("unexpected error event: %s", payload)
