@@ -566,9 +566,10 @@ func responsesReasoningToInteractions(item ojson.Result) []byte {
 		}
 		return true
 	})
-	step := interactionsTextStep("thought", strings.Join(texts, "\n\n"))
-	step, _ = ojson.SetBytes(step, "signature", sig)
-	return step
+	stepDoc := ojson.NewDocString(`{"type":"thought","content":[{"type":"text","text":""}],"signature":""}`)
+	_ = stepDoc.Set("content.0.text", strings.Join(texts, "\n\n"))
+	_ = stepDoc.Set("signature", sig)
+	return stepDoc.Bytes()
 }
 
 func interactionsTextStep(stepType, text string) []byte {
