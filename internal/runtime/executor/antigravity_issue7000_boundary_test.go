@@ -12,17 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const issue7000LiteralSchema = `{"type":"object","properties":{"anthropic":{"type":"string","enum":["anthropic","json_schema"],"const":"anthropic"},"response_schema":{"$ref":"#/$defs/anthropic"}},"$defs":{"anthropic":{"type":"string"}},"required":["anthropic"],"additionalProperties":false}`
 
-func assertIssue7000PromptSchema(t *testing.T, instruction gjson.Result, schemaJSON string) {
+func assertIssue7000PromptSchema(t *testing.T, instruction ojson.Result, schemaJSON string) {
 	t.Helper()
 	var prompt strings.Builder
 	for _, part := range instruction.Get("parts").Array() {
@@ -50,8 +49,8 @@ func TestIssue7000AntigravityAliasesPreserveOtherFieldsAndToolChoice(t *testing.
 		for index, schemaKey := range []string{"responseSchema", "responseJsonSchema", "response_schema", "response_json_schema"} {
 			for _, mode := range []string{"AUTO", "NONE", "ANY", "VALIDATED"} {
 				t.Run(container+"/"+schemaKey+"/"+mode, func(t *testing.T) {
-					payload := []byte(`{"request":{"generationConfig":{"temperature":0.25},"generation_config":{"stopSequences":["STOP"]},"systemInstruction":{"role":"system","parts":[{"text":"keep system"}]},"contents":[{"role":"user","parts":[{"text":"keep history"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}]}}`)
-					setRaw := func(path, value string) { payload, _ = sjson.SetRawBytes(payload, path, []byte(value)) }
+					payloadDoc := ojson.NewDoc([]byte(`{"request":{"generationConfig":{"temperature":0.25},"generation_config":{"stopSequences":["STOP"]},"systemInstruction":{"role":"system","parts":[{"text":"keep system"}]},"contents":[{"role":"user","parts":[{"text":"keep history"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]}]}}`))
+					setRaw := func(path, value string) { _ = payloadDoc.SetRawBytes(path, []byte(value)) }
 					setRaw("request."+container+"."+schemaKey, issue7000LiteralSchema)
 					setRaw("request."+container+".responseMimeType", `"application/json"`)
 					setRaw("request."+container+".response_mime_type", `"application/json"`)
@@ -62,15 +61,16 @@ func TestIssue7000AntigravityAliasesPreserveOtherFieldsAndToolChoice(t *testing.
 					systemKey := "systemInstruction"
 					if container == "generation_config" {
 						systemKey = "system_instruction"
-						setRaw("request."+systemKey, gjson.GetBytes(payload, "request.systemInstruction").Raw)
-						payload, _ = sjson.DeleteBytes(payload, "request.systemInstruction")
+						setRaw("request."+systemKey, payloadDoc.Get("request.systemInstruction").Raw)
+						_ = payloadDoc.Delete("request.systemInstruction")
 					}
+					payload := payloadDoc.Bytes()
 					body := buildRequestBodyFromRawPayload(t, "claude-opus-5-5-high", payload)
 					encoded, errMarshal := json.Marshal(body)
 					if errMarshal != nil {
 						t.Fatal(errMarshal)
 					}
-					request := gjson.GetBytes(encoded, "request")
+					request := ojson.GetBytes(encoded, "request")
 					assertIssue7000PromptSchema(t, request.Get(systemKey), issue7000LiteralSchema)
 					for path, want := range map[string]string{
 						"generationConfig.temperature": "0.25", "generation_config.stopSequences.0": "STOP",
@@ -92,15 +92,15 @@ func TestIssue7000AntigravityAliasesPreserveOtherFieldsAndToolChoice(t *testing.
 					if mode == "ANY" || mode == "VALIDATED" {
 						wantMode = "AUTO"
 						for _, key := range []string{"allowedFunctionNames", "allowed_function_names"} {
-							if gjson.GetBytes(encoded, toolPath+"."+key).Exists() {
+							if ojson.GetBytes(encoded, toolPath+"."+key).Exists() {
 								t.Errorf("forced-tool allowlist survived AUTO downgrade: %s", key)
 							}
 						}
 					}
-					if got := gjson.GetBytes(encoded, toolPath+".mode").String(); got != wantMode {
+					if got := ojson.GetBytes(encoded, toolPath+".mode").String(); got != wantMode {
 						t.Errorf("tool choice = %q, want %q", got, wantMode)
 					}
-					if !gjson.GetBytes(encoded, toolPath+".streamFunctionCallArguments").Bool() {
+					if !ojson.GetBytes(encoded, toolPath+".streamFunctionCallArguments").Bool() {
 						t.Error("unrelated tool configuration was removed")
 					}
 					if toolContainer == "tool_config" && request.Get("toolConfig").Exists() {
@@ -132,11 +132,11 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}
-			if got := gjson.GetBytes(encoded, "request.generationConfig.responseSchema").Exists(); got == tc.convert {
+			if got := ojson.GetBytes(encoded, "request.generationConfig.responseSchema").Exists(); got == tc.convert {
 				t.Errorf("native schema presence = %t, conversion = %t", got, tc.convert)
 			}
 			if tc.convert {
-				assertIssue7000PromptSchema(t, gjson.GetBytes(encoded, "request.systemInstruction"), `{"type":"object","properties":{"title":{"type":"string"}}}`)
+				assertIssue7000PromptSchema(t, ojson.GetBytes(encoded, "request.systemInstruction"), `{"type":"object","properties":{"title":{"type":"string"}}}`)
 			}
 		})
 	}
@@ -148,10 +148,10 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}
-			if got := gjson.GetBytes(encoded, "request.systemInstruction.parts.#").Int(); got != 1 {
+			if got := ojson.GetBytes(encoded, "request.systemInstruction.parts.#").Int(); got != 1 {
 				t.Errorf("plain request gained instructions: %s", encoded)
 			}
-			if got := gjson.GetBytes(encoded, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
+			if got := ojson.GetBytes(encoded, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
 				t.Errorf("unrelated legacy tool behavior changed: %q", got)
 			}
 		})
@@ -195,19 +195,20 @@ func TestIssue7000AntigravityExecutionAndFinalPayloadRules(t *testing.T) {
 						cfg.Payload.Filter = []config.PayloadFilterRule{{Models: models, Params: []string{"systemInstruction", "toolConfig", "contents.0"}}}
 					}
 					model := "claude-opus-5-5-high"
-					payload := []byte(`{"model":"` + model + `","temperature":0.25,"tool_choice":"auto"}`)
+					payloadDoc := ojson.NewDoc([]byte(`{"model":"` + model + `","temperature":0.25,"tool_choice":"auto"}`))
 					if format == sdktranslator.FormatOpenAI {
-						payload, _ = sjson.SetRawBytes(payload, "messages", []byte(`[{"role":"system","content":"keep anthropic system"},{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]`))
-						payload, _ = sjson.SetRawBytes(payload, "response_format", []byte(`{"type":"json_schema","json_schema":{"schema":`+issue7000LiteralSchema+`}}`))
-						payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}]`))
+						_ = payloadDoc.SetRawBytes("messages", []byte(`[{"role":"system","content":"keep anthropic system"},{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]`))
+						_ = payloadDoc.SetRawBytes("response_format", []byte(`{"type":"json_schema","json_schema":{"schema":`+issue7000LiteralSchema+`}}`))
+						_ = payloadDoc.SetRawBytes("tools", []byte(`[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}}]`))
 					} else {
 						model = "claude-sonnet-5-5-high"
-						payload, _ = sjson.SetBytes(payload, "model", model)
-						payload, _ = sjson.SetBytes(payload, "instructions", "keep anthropic system")
-						payload, _ = sjson.SetRawBytes(payload, "input", []byte(`[{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]`))
-						payload, _ = sjson.SetRawBytes(payload, "text.format", []byte(`{"type":"json_schema","schema":`+issue7000LiteralSchema+`}`))
-						payload, _ = sjson.SetRawBytes(payload, "tools", []byte(`[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]`))
+						_ = payloadDoc.Set("model", model)
+						_ = payloadDoc.Set("instructions", "keep anthropic system")
+						_ = payloadDoc.SetRawBytes("input", []byte(`[{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]`))
+						_ = payloadDoc.SetRawBytes("text.format", []byte(`{"type":"json_schema","schema":`+issue7000LiteralSchema+`}`))
+						_ = payloadDoc.SetRawBytes("tools", []byte(`[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}]`))
 					}
+					payload := payloadDoc.Bytes()
 					exec := NewAntigravityExecutor(cfg)
 					auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "antigravity", Attributes: map[string]string{"base_url": server.URL}, Metadata: map[string]any{"access_token": "token", "project_id": "project-test", "expired": time.Now().Add(time.Hour).Format(time.RFC3339)}}
 					req := cliproxyexecutor.Request{Model: model, Payload: payload}
@@ -233,7 +234,7 @@ func TestIssue7000AntigravityExecutionAndFinalPayloadRules(t *testing.T) {
 						}
 					}
 					body := <-captured
-					request := gjson.GetBytes(body, "request")
+					request := ojson.GetBytes(body, "request")
 					if got := request.Get("tools.0.functionDeclarations.0.name").String(); got != "lookup" {
 						t.Errorf("real tool lost: %s", body)
 					}

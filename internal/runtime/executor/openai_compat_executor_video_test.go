@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutor_VideoInput(t *testing.T) {
@@ -88,10 +88,10 @@ func TestOpenAICompatExecutor_VideoInput(t *testing.T) {
 				if captured.path != "/v1/chat/completions" {
 					t.Fatalf("upstream path = %q, want /v1/chat/completions", captured.path)
 				}
-				if got := gjson.GetBytes(captured.body, "model").String(); got != "video-model" {
+				if got := ojson.GetBytes(captured.body, "model").String(); got != "video-model" {
 					t.Fatalf("upstream model = %q, want video-model", got)
 				}
-				content := gjson.GetBytes(captured.body, "messages.0.content").Array()
+				content := ojson.GetBytes(captured.body, "messages.0.content").Array()
 				if len(content) != 3 {
 					t.Fatalf("upstream content has %d parts, want text and two videos: %s", len(content), captured.body)
 				}

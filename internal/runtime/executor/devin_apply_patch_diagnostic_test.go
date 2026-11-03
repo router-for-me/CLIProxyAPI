@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -241,7 +241,7 @@ func TestDevinApplyPatchRecoversCompleteBarePatchFromInvalidJSONStr(t *testing.T
 					if errExecute != nil {
 						t.Fatalf("Execute failed: %v", errExecute)
 					}
-					outputs := gjson.GetBytes(resp.Payload, "output").Array()
+					outputs := ojson.GetBytes(resp.Payload, "output").Array()
 					if tc.wantShell {
 						if len(outputs) != 2 || outputs[0].Get("type").String() != "function_call" || outputs[0].Get("name").String() != "shell" {
 							t.Fatalf("unexpected mixed output items: %s", resp.Payload)
@@ -273,8 +273,8 @@ func TestDevinApplyPatchRecoversCompleteBarePatchFromInvalidJSONStr(t *testing.T
 							continue
 						}
 						payload := bytes.TrimSpace(line[5:])
-						if gjson.GetBytes(payload, "type").String() == "response.custom_tool_call_input.done" {
-							doneInputs = append(doneInputs, gjson.GetBytes(payload, "input").String())
+						if ojson.GetBytes(payload, "type").String() == "response.custom_tool_call_input.done" {
+							doneInputs = append(doneInputs, ojson.GetBytes(payload, "input").String())
 						}
 					}
 				}
