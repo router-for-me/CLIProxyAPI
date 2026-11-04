@@ -58,6 +58,7 @@ require (
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	go.etcd.io/bbolt v1.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
