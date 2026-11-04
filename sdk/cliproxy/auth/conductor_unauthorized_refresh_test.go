@@ -1082,7 +1082,7 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 		t.Fatal("VerifyInference must fail when stream ends with response.incomplete")
 	}
 
-	// Operator-triggered VerifyInference pins to primary, uses an isolated session and minimal 1-token prompt, and marks InferenceVerified = true upon response.completed.
+	// Operator-triggered VerifyInference pins to primary, uses an isolated session and a minimal prompt, and marks InferenceVerified = true upon response.completed.
 	executor.mu.Lock()
 	executor.streamPayloads = nil
 	executor.streamCalls = nil
@@ -1102,8 +1102,9 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 	if gotSession := verifyOpts.Headers.Get("X-Session-Id"); gotSession == "" || len(gotSession) < 7 || gotSession[:7] != "verify-" {
 		t.Fatalf("VerifyInference X-Session-Id = %q, want isolated verify-* session", gotSession)
 	}
-	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":1`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
-		t.Fatalf("VerifyInference payload = %s, want minimal 1-token non-stored prompt", string(verifyReq.Payload))
+	// 16 is the smallest max_output_tokens the OpenAI Responses API accepts.
+	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":16`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
+		t.Fatalf("VerifyInference payload = %s, want a minimal 16-token non-stored prompt", string(verifyReq.Payload))
 	}
 	if !afterVerify.InferenceVerified || afterVerify.RecoveryStageAt(now) != RecoveryStageInferenceVerified {
 		t.Fatalf("expected InferenceVerified=true and stage=inference_verified after VerifyInference, got %v / %q", afterVerify.InferenceVerified, afterVerify.RecoveryStageAt(now))
@@ -1111,6 +1112,17 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 	if afterVerify.RenewalVerified {
 		t.Fatal("RenewalVerified must remain false until first automatic refresh succeeds")
 	}
+
+	// A reasoning model can use up the budget before it finishes: an answer cut at max_output_tokens still verifies.
+	executor.mu.Lock()
+	executor.streamPayloads = [][]byte{[]byte(`data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}` + "\n\n")}
+	executor.mu.Unlock()
+	if afterBudget, errBudget := m.VerifyInference(ctx, primary.ID, model); errBudget != nil || !afterBudget.InferenceVerified {
+		t.Fatalf("VerifyInference cut at max_output_tokens: err=%v, want verified", errBudget)
+	}
+	executor.mu.Lock()
+	executor.streamPayloads = nil
+	executor.mu.Unlock()
 
 	// Subsequent refresh cycle verifies renewal.
 	executor.mu.Lock()
