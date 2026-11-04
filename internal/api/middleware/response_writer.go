@@ -119,9 +119,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		return n, err
 	}
 
-	if w.shouldBufferResponseBody() {
-		w.body.Write(data)
-	}
+	w.bufferResponseBodyBytes(data)
 
 	return n, err
 }
@@ -163,6 +161,8 @@ func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCod
 	}
 }
 
+const maxDeferredErrorStreamBodyBytes = 256 << 10 // 256 KiB
+
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
@@ -177,8 +177,51 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if status >= http.StatusBadRequest {
 		return true
 	}
-	const maxDeferredErrorStreamBodyBytes = 256 << 10 // 256 KiB
 	return w.body != nil && w.body.Len() < maxDeferredErrorStreamBodyBytes
+}
+
+func (w *ResponseWriterWrapper) bufferResponseBodyBytes(data []byte) {
+	if len(data) == 0 || w.body == nil || !w.shouldBufferResponseBody() {
+		return
+	}
+	if w.logger != nil && w.logger.IsEnabled() {
+		w.body.Write(data)
+		return
+	}
+	if w.effectiveStatusCode() >= http.StatusBadRequest {
+		w.body.Write(data)
+		return
+	}
+	remaining := maxDeferredErrorStreamBodyBytes - w.body.Len()
+	if remaining <= 0 {
+		return
+	}
+	if len(data) > remaining {
+		data = data[:remaining]
+	}
+	w.body.Write(data)
+}
+
+func (w *ResponseWriterWrapper) bufferResponseBodyString(data string) {
+	if len(data) == 0 || w.body == nil || !w.shouldBufferResponseBody() {
+		return
+	}
+	if w.logger != nil && w.logger.IsEnabled() {
+		w.body.WriteString(data)
+		return
+	}
+	if w.effectiveStatusCode() >= http.StatusBadRequest {
+		w.body.WriteString(data)
+		return
+	}
+	remaining := maxDeferredErrorStreamBodyBytes - w.body.Len()
+	if remaining <= 0 {
+		return
+	}
+	if len(data) > remaining {
+		data = data[:remaining]
+	}
+	w.body.WriteString(data)
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -204,9 +247,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		return n, err
 	}
 
-	if w.shouldBufferResponseBody() {
-		w.body.WriteString(data)
-	}
+	w.bufferResponseBodyString(data)
 	return n, err
 }
 

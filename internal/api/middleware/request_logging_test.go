@@ -956,3 +956,32 @@ func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
 		t.Fatalf("an oversized window must leave the raw bytes, got %q", got)
 	}
 }
+
+func TestResponseWriterLogOnErrorOnlyCapsSingleLargeWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+
+	logger := logging.NewFileRequestLogger(false, t.TempDir(), "", 10)
+	wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+		URL:    "/v1/messages",
+		Method: http.MethodPost,
+	})
+	wrapper.logOnErrorOnly = true
+
+	largePayload := bytes.Repeat([]byte("a"), 4<<20) // 4 MiB
+	if _, err := wrapper.Write(largePayload); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if wrapper.body.Len() != maxDeferredErrorStreamBodyBytes {
+		t.Fatalf("wrapper.body.Len() = %d, want %d", wrapper.body.Len(), maxDeferredErrorStreamBodyBytes)
+	}
+
+	if _, err := wrapper.WriteString("extra"); err != nil {
+		t.Fatalf("WriteString failed: %v", err)
+	}
+	if wrapper.body.Len() != maxDeferredErrorStreamBodyBytes {
+		t.Fatalf("wrapper.body.Len() after WriteString = %d, want %d", wrapper.body.Len(), maxDeferredErrorStreamBodyBytes)
+	}
+}

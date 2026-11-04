@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,5 +180,17 @@ func TestClaudeExecutorChatRefusalStaysSuccessful(t *testing.T) {
 	}
 	if got := ojson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q: %s", got, resp.Payload)
+	}
+}
+
+func TestWrapClaudeFastRequestErrorPreservesClassifiedStatusCode(t *testing.T) {
+	inner := statusErr{code: http.StatusBadRequest, msg: "claude refusal (cyber): blocked"}
+	wrapped := wrapClaudeFastRequestError(true, http.StatusOK, inner)
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(wrapped, &statusCoder) || statusCoder == nil {
+		t.Fatalf("expected wrapped error to implement StatusCode()")
+	}
+	if got := statusCoder.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("statusCoder.StatusCode() = %d, want %d", got, http.StatusBadRequest)
 	}
 }
