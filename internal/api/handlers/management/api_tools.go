@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,11 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -188,9 +191,20 @@ func (h *Handler) APICall(c *gin.Context) {
 		body.Data = strings.ReplaceAll(body.Data, "$TOKEN$", replacement)
 	}
 
+	useCBORPayload := headerContainsValue(reqHeaders, "Content-Type", "application/cbor")
+
 	var requestBody io.Reader
 	if body.Data != "" {
-		requestBody = strings.NewReader(body.Data)
+		if useCBORPayload {
+			cborPayload, errEncode := encodeJSONStringToCBOR(body.Data)
+			if errEncode != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json data for cbor content-type"})
+				return
+			}
+			requestBody = bytes.NewReader(cborPayload)
+		} else {
+			requestBody = strings.NewReader(body.Data)
+		}
 	}
 
 	req, errNewRequest := http.NewRequestWithContext(c.Request.Context(), method, urlStr, requestBody)
@@ -233,10 +247,17 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	responseBodyText := string(respBody)
+	if headerContainsValue(reqHeaders, "Accept", "application/cbor") || strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/cbor") {
+		if decodedBody, errDecode := decodeCBORBodyToTextOrJSON(respBody); errDecode == nil {
+			responseBodyText = decodedBody
+		}
+	}
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
-		Body:       string(respBody),
+		Body:       responseBodyText,
 	})
 }
 
@@ -287,6 +308,11 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth, 
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
 		token, errToken := h.resolveXAIToken(ctx, auth, requestProxyURL)
+		return token, errToken
+	}
+
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "kiro") {
+		token, errToken := h.resolveKiroToken(ctx, auth, requestProxyURL)
 		return token, errToken
 	}
 
@@ -1017,4 +1043,141 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 		return nil
 	}
 	return transport
+}
+
+func (h *Handler) resolveKiroToken(ctx context.Context, auth *coreauth.Auth, requestProxyURL string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	current := tokenValueForAuth(auth)
+	if current != "" && !kiroTokenNeedsRefresh(auth) {
+		return current, nil
+	}
+
+	var cfg *config.Config
+	if h != nil {
+		cfg = h.cfg
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	authenticator := sdkAuth.NewKiroAuthenticator()
+	updatedAuth, errRefresh := authenticator.Refresh(ctx, cfg, auth)
+	if errRefresh != nil {
+		if current != "" {
+			return current, nil
+		}
+		return "", errRefresh
+	}
+
+	if updatedAuth != nil && updatedAuth.Metadata != nil {
+		auth.Metadata = updatedAuth.Metadata
+		if h.authManager != nil {
+			_, _ = h.authManager.Update(ctx, auth)
+		}
+		if savePath, errSave := h.saveTokenRecord(ctx, auth); errSave != nil {
+			log.WithError(errSave).Warn("management APICall: failed to persist refreshed kiro oauth token")
+		} else if savePath != "" {
+			log.Debugf("management APICall: refreshed kiro token saved to %s", savePath)
+		}
+		return tokenValueForAuth(auth), nil
+	}
+
+	return current, nil
+}
+
+func kiroTokenNeedsRefresh(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	expiresAtStr, _ := auth.Metadata["expires_at"].(string)
+	if expiresAtStr == "" {
+		expiresAtStr, _ = auth.Metadata["expiresAt"].(string)
+	}
+	if expiresAtStr == "" {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339, expiresAtStr)
+	if err != nil {
+		return false
+	}
+	return time.Now().Add(5 * time.Minute).After(expiresAt)
+}
+
+func headerContainsValue(headers map[string]string, targetKey, targetValue string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for key, value := range headers {
+		if !strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(targetKey)) {
+			continue
+		}
+		if strings.Contains(strings.ToLower(value), strings.ToLower(strings.TrimSpace(targetValue))) {
+			return true
+		}
+	}
+	return false
+}
+
+func encodeJSONStringToCBOR(jsonString string) ([]byte, error) {
+	var payload any
+	if errUnmarshal := json.Unmarshal([]byte(jsonString), &payload); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return cbor.Marshal(payload)
+}
+
+func decodeCBORBodyToTextOrJSON(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+
+	var payload any
+	if errUnmarshal := cbor.Unmarshal(raw, &payload); errUnmarshal != nil {
+		return "", errUnmarshal
+	}
+
+	jsonCompatible := cborValueToJSONCompatible(payload)
+	switch typed := jsonCompatible.(type) {
+	case string:
+		return typed, nil
+	case []byte:
+		return string(typed), nil
+	default:
+		jsonBytes, errMarshal := json.Marshal(jsonCompatible)
+		if errMarshal != nil {
+			return "", errMarshal
+		}
+		return string(jsonBytes), nil
+	}
+}
+
+func cborValueToJSONCompatible(value any) any {
+	switch typed := value.(type) {
+	case map[any]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[fmt.Sprint(key)] = cborValueToJSONCompatible(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = cborValueToJSONCompatible(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cborValueToJSONCompatible(item)
+		}
+		return out
+	default:
+		return typed
+	}
 }

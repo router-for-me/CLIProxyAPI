@@ -251,6 +251,18 @@ func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Au
 	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		if strings.HasPrefix(strings.ToLower(filepath.Base(path)), "kiro-") {
+			provider = "kiro"
+		} else if _, okArn := metadata["profile_arn"]; okArn {
+			provider = "kiro"
+		} else if _, okArnCamel := metadata["profileArn"]; okArnCamel {
+			provider = "kiro"
+		}
+	}
+	if strings.EqualFold(provider, "enterprise") && strings.HasPrefix(strings.ToLower(filepath.Base(path)), "kiro-") {
+		provider = "kiro"
+	}
 	if strings.EqualFold(provider, "gemini") {
 		return nil, nil
 	}
