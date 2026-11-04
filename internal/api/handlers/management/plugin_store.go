@@ -255,13 +255,33 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	pluginIsBusy := func() bool { return pluginBusy(host, id) }
+	var manifest pluginstore.Manifest
+	// Validation runs before any file is written and keeps h.mu held through the
+	// config save, so a rejected install leaves disk and handler state unchanged.
+	// ValidateInstall runs at most once and returns holding h.mu on success; every
+	// path after the install releases it.
+	installLocked := false
 	installOptions := pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
 		GOOS:         goos,
 		GOARCH:       goarch,
 		PluginLoaded: pluginIsBusy,
+		ValidateInstall: func(planned pluginstore.InstallResult) error {
+			if manifest.ID == "" {
+				var errManifest error
+				if manifest, errManifest = pluginStoreManifestForInstall(source, plugin, planned); errManifest != nil {
+					return errManifest
+				}
+			}
+			h.mu.Lock()
+			if !h.pluginInstallValidLocked(c, id, manifest) {
+				h.mu.Unlock()
+				return errPluginInstallRejected
+			}
+			installLocked = true
+			return nil
+		},
 	}
-	var manifest pluginstore.Manifest
 	var result pluginstore.InstallResult
 	var errInstall error
 	switch pluginstore.PluginInstallType(plugin) {
@@ -280,6 +300,12 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errInstall != nil {
+		if installLocked {
+			h.mu.Unlock()
+		}
+		if errors.Is(errInstall, errPluginInstallRejected) {
+			return
+		}
 		if writePluginStoreRateLimit(c, errInstall) {
 			return
 		}
@@ -308,7 +334,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	}
 	restartRequired := false
 
-	h.mu.Lock()
+	if !installLocked {
+		h.mu.Lock()
+	}
 	if h.cfg == nil {
 		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -325,6 +353,10 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			"message": fmt.Sprintf("plugin file installed at %s but enabling it in config failed: %s", result.Path, errEnable.Error()),
 			"path":    result.Path,
 		})
+		return
+	}
+	if !h.validateConfigLocked(c, h.cfg) {
+		h.mu.Unlock()
 		return
 	}
 	if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
@@ -394,13 +426,21 @@ func installPluginStoreGitHubRelease(ctx context.Context, client pluginstore.Cli
 	}
 	tags := pluginStoreReleaseTagCandidates(requestedVersion)
 	errs := make([]error, 0, len(tags))
+	// A tag that reached validation was the release; retrying would validate twice.
+	validated := false
+	if validate := options.ValidateInstall; validate != nil {
+		options.ValidateInstall = func(planned pluginstore.InstallResult) error {
+			validated = true
+			return validate(planned)
+		}
+	}
 	for _, tag := range tags {
 		result, errInstall := client.InstallVersion(ctx, plugin, tag, version, options)
 		if errInstall == nil {
 			return result, nil
 		}
 		var rateLimit *pluginstore.RateLimitError
-		if errors.As(errInstall, &rateLimit) || ctx.Err() != nil {
+		if validated || errors.As(errInstall, &rateLimit) || ctx.Err() != nil {
 			return pluginstore.InstallResult{}, errInstall
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", tag, errInstall))
@@ -490,11 +530,32 @@ func normalizePluginStoreRequestedVersion(version string) string {
 	return version
 }
 
+// errPluginInstallRejected aborts an install whose rejection response is already written.
+var errPluginInstallRejected = errors.New("plugin install rejected by application config")
+
+// pluginInstallValidLocked validates the config that enabling id would produce,
+// writing the error response on rejection. Enable failures are reported after the
+// install, as before. Callers must hold h.mu.
+func (h *Handler) pluginInstallValidLocked(c *gin.Context, id string, storeManifest pluginstore.Manifest) bool {
+	if h.cfg == nil {
+		return true
+	}
+	candidate := h.cfg.CloneForRuntime()
+	if enablePluginConfig(candidate, id, storeManifest) != nil {
+		return true
+	}
+	return h.validateConfigLocked(c, candidate)
+}
+
 // enablePluginConfigLocked sets plugins.configs.<id>.enabled and store while
 // preserving the rest of the plugin's raw configuration. Callers must hold h.mu.
 func (h *Handler) enablePluginConfigLocked(id string, storeManifest pluginstore.Manifest) error {
-	ensurePluginConfigMap(h.cfg)
-	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
+	return enablePluginConfig(h.cfg, id, storeManifest)
+}
+
+func enablePluginConfig(cfg *config.Config, id string, storeManifest pluginstore.Manifest) error {
+	ensurePluginConfigMap(cfg)
+	node := pluginConfigNode(cfg.Plugins.Configs[id])
 	storeNode, errStoreNode := pluginStoreManifestYAMLNode(storeManifest)
 	if errStoreNode != nil {
 		return errStoreNode
@@ -505,7 +566,7 @@ func (h *Handler) enablePluginConfigLocked(id string, storeManifest pluginstore.
 	if errConfig != nil {
 		return fmt.Errorf("decode plugin config: %w", errConfig)
 	}
-	h.cfg.Plugins.Configs[id] = updated
+	cfg.Plugins.Configs[id] = updated
 	return nil
 }
 

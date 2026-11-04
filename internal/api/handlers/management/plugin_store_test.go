@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"net/http"
@@ -936,6 +937,84 @@ plugins:
 	}
 	if raw := marshalPluginRaw(t, snapshotItem); !strings.Contains(raw, "mode: fast") {
 		t.Fatalf("snapshot plugin raw config lost custom field:\n%s", raw)
+	}
+}
+
+func TestInstallPluginFromStoreRejectedByValidatorLeavesDiskAndConfigUnchanged(t *testing.T) {
+	workspace := t.TempDir()
+	homeDir := filepath.Join(workspace, "home")
+	if errMkdir := os.MkdirAll(homeDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", homeDir, errMkdir)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	t.Chdir(workspace)
+
+	cfg, errParse := config.ParseConfigBytes([]byte(`
+plugins:
+  enabled: false
+  dir: "~/.cli-proxy-api/plugins"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	pluginsDir := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "library-data")
+	archiveName := "sample-provider_0.1.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	configPath := writeTestConfigFile(t)
+	configBefore, errReadConfig := os.ReadFile(configPath)
+	if errReadConfig != nil {
+		t.Fatal(errReadConfig)
+	}
+	h := &Handler{
+		cfg:                    cfg,
+		configFilePath:         configPath,
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient{
+			"https://registry.example/registry.json": registryJSON(t),
+			"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+				"tag_name": "v0.1.0",
+				"assets": [
+					{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+					{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+				]
+			}`),
+			"https://downloads.example/" + archiveName: archiveData,
+			"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+		},
+	}
+	h.SetConfigValidator(func(next *config.Config) error {
+		if _, ok := next.Plugins.Configs["sample-provider"]; ok {
+			return errors.New("application rejects sample-provider")
+		}
+		return nil
+	})
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(ConfigV8ContextKey, true)
+	c.Params = gin.Params{{Key: "id", Value: "sample-provider"}}
+	c.Request = httptest.NewRequest(http.MethodPost, "/v8/management/plugin-store/sample-provider/install", nil)
+
+	h.InstallPluginFromStore(c)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	targetPath := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH, "sample-provider-v0.1.0"+managementPluginExtension(runtime.GOOS))
+	if _, errStat := os.Stat(targetPath); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("rejected install left a plugin file: stat error = %v", errStat)
+	}
+	if _, ok := h.cfg.Plugins.Configs["sample-provider"]; ok {
+		t.Fatal("rejected install left the plugin in handler config")
+	}
+	configAfter, errReadConfig := os.ReadFile(configPath)
+	if errReadConfig != nil {
+		t.Fatal(errReadConfig)
+	}
+	if string(configAfter) != string(configBefore) {
+		t.Fatal("rejected install changed the config file")
 	}
 }
 

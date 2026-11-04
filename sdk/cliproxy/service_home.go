@@ -186,7 +186,7 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 	merged.TLS = baseCfg.TLS
 	merged.Home = baseCfg.Home
 	storeAuth := merged.Plugins.StoreAuth
-	forceHomeRuntimeConfig(&merged)
+	internalconfig.ForceHomeRuntimeConfig(&merged)
 	syncCfg := merged
 	syncCfg.Plugins.StoreAuth = storeAuth
 

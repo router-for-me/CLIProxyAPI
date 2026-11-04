@@ -136,3 +136,24 @@ The embedded server calls this automatically for built‑in providers; for custo
 - Toggle debug logs: Management API GET/PUT `/v0/management/debug`
 - Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher
 
+
+## Config validation hook
+
+`Hooks.ValidateConfig` lets an embedding application reject configuration on
+startup (after Home mode's runtime overrides, and again after `OnBeforeStart`),
+every watcher reload, and v8
+management saves, before it is persisted or published. The callback receives an
+isolated snapshot, must not perform blocking runtime work, and returns an error
+to reject the update. Rejected management saves leave the file and the handler's
+config unchanged. A rejected config file is not adopted by the watcher, so no
+credentials are refreshed from it. Deprecated `/v0/management` endpoints are not
+validated. Without a validator, behavior is unchanged.
+
+```go
+builder.WithHooks(cliproxy.Hooks{ValidateConfig: func(cfg *config.Config) error {
+    if cfg.Host != "127.0.0.1" {
+        return errors.New("loopback bind required")
+    }
+    return nil
+}})
+```

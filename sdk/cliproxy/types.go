@@ -115,6 +115,8 @@ type WatcherWrapper struct {
 	rereadDiscardedFileSnapshot  func(auth *coreauth.Auth)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
+	reloadConfig                 func()
+	setConfigValidator           func(validate func(*config.Config) error)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -141,6 +143,14 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	w.setConfig(cfg)
 }
 
+// SetConfigValidator rejects reloaded config files before the watcher adopts them.
+func (w *WatcherWrapper) SetConfigValidator(validate func(*config.Config) error) {
+	if w == nil || w.setConfigValidator == nil {
+		return
+	}
+	w.setConfigValidator(validate)
+}
+
 // ReloadConfigIfChanged asks the underlying watcher to reload config from disk.
 func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
 	if w == nil || w.reloadConfigIfChanged == nil {
@@ -148,6 +158,14 @@ func (w *WatcherWrapper) ReloadConfigIfChanged() bool {
 	}
 	w.reloadConfigIfChanged()
 	return true
+}
+
+// ReloadConfig asks the underlying watcher to reload config from disk even when unchanged.
+func (w *WatcherWrapper) ReloadConfig() {
+	if w == nil || w.reloadConfig == nil {
+		return
+	}
+	w.reloadConfig()
 }
 
 // SetPluginAuthParser updates the plugin auth parser used by the watcher.

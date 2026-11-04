@@ -214,9 +214,15 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 		t.Fatalf("expected unchanged config to be skipped, callback count %d", reloads)
 	}
 
+	// A forced reload applies an unchanged file, e.g. after a plugin unload.
+	w.ReloadConfig()
+	if reloads != 2 {
+		t.Fatalf("expected forced reload of unchanged config, callback count %d", reloads)
+	}
+
 	writeConfig(9090, true)
 	w.reloadConfigIfChanged()
-	if reloads != 2 {
+	if reloads != 3 {
 		t.Fatalf("expected changed config to trigger reload, callback count %d", reloads)
 	}
 	w.clientsMutex.RLock()

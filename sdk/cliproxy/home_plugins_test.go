@@ -687,7 +687,7 @@ func TestForceHomeRuntimeConfigClearsStoreAuth(t *testing.T) {
 	cfg.Plugins.StoreAuth = []sdkpluginstore.AuthConfig{{
 		Match: "https://downloads.example/", Type: sdkpluginstore.AuthTypeBearer, TokenEnv: "PLUGIN_TOKEN",
 	}}
-	forceHomeRuntimeConfig(cfg)
+	config.ForceHomeRuntimeConfig(cfg)
 	if cfg.Plugins.StoreAuth != nil {
 		t.Fatalf("Plugins.StoreAuth = %#v, want nil in Home mode", cfg.Plugins.StoreAuth)
 	}

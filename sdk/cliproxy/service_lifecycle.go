@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -61,7 +62,7 @@ func (s *Service) Run(ctx context.Context) error {
 	homeEnabled := cfg != nil && cfg.Home.Enabled
 	if homeEnabled {
 		s.cfgMu.Lock()
-		forceHomeRuntimeConfig(s.cfg)
+		internalconfig.ForceHomeRuntimeConfig(s.cfg)
 		cfg = s.cfg
 		s.cfgMu.Unlock()
 		redisqueue.SetUsageStatisticsEnabled(true)
@@ -172,6 +173,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.currentConfig())
+		// OnBeforeStart may mutate the config Build already validated.
+		if s.hooks.ValidateConfig != nil {
+			if errValidate := s.hooks.ValidateConfig(s.currentConfig().CloneForRuntime()); errValidate != nil {
+				return fmt.Errorf("cliproxy: validate application config after OnBeforeStart: %w", errValidate)
+			}
+		}
 	}
 
 	s.serverErr = make(chan error, 1)
@@ -216,6 +223,9 @@ func (s *Service) Run(ctx context.Context) error {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
 		watcherWrapper.SetConfig(s.currentConfig())
+		if s.hooks.ValidateConfig != nil {
+			watcherWrapper.SetConfigValidator(s.hooks.ValidateConfig)
+		}
 		s.registerPluginAuthParser()
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())

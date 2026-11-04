@@ -28,6 +28,9 @@ type InstallOptions struct {
 	// BeforeWrite runs after the archive has been downloaded and verified, but
 	// before an existing target plugin file is replaced.
 	BeforeWrite func() error
+	// ValidateInstall runs after the archive is verified and before any plugin
+	// file is written. An error aborts the install with the plugin dir unchanged.
+	ValidateInstall func(InstallResult) error
 }
 
 // ErrLoadedPluginLocked is returned when an install would overwrite a plugin
@@ -134,13 +137,10 @@ func (c Client) installRelease(ctx context.Context, plugin Plugin, release Relea
 		return InstallResult{}, errVerify
 	}
 	plugin.Version = version
-	result, errInstall := InstallArchive(archiveData, plugin, options)
-	if errInstall != nil {
-		return InstallResult{}, errInstall
-	}
-	result.InstallType = InstallTypeGitHubRelease
-	result.ReleaseTag = strings.TrimSpace(release.TagName)
-	return result, nil
+	return installArchive(archiveData, plugin, options, InstallResult{
+		InstallType: InstallTypeGitHubRelease,
+		ReleaseTag:  strings.TrimSpace(release.TagName),
+	})
 }
 
 func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPlan, options InstallOptions) (InstallResult, error) {
@@ -169,12 +169,7 @@ func (c Client) InstallDirect(ctx context.Context, plugin Plugin, plan InstallPl
 	if errVerify := VerifyArtifactChecksum(artifact, archiveData); errVerify != nil {
 		return InstallResult{}, errVerify
 	}
-	result, errInstall := InstallArchive(archiveData, plugin, options)
-	if errInstall != nil {
-		return InstallResult{}, errInstall
-	}
-	result.InstallType = InstallTypeDirect
-	return result, nil
+	return installArchive(archiveData, plugin, options, InstallResult{InstallType: InstallTypeDirect})
 }
 
 func (c Client) directPluginFromManifest(ctx context.Context, manifest Manifest) (Plugin, error) {
@@ -241,6 +236,11 @@ func directPluginVersion(plugin Plugin, id string, version string) (Plugin, erro
 }
 
 func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {
+	return installArchive(archiveData, plugin, options, InstallResult{})
+}
+
+// installArchive fills result with the archive's install target; callers set the source fields.
+func installArchive(archiveData []byte, plugin Plugin, options InstallOptions, result InstallResult) (InstallResult, error) {
 	options = normalizeInstallOptions(options)
 	id := strings.TrimSpace(plugin.ID)
 	if !validPluginID(id) {
@@ -271,19 +271,23 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	} else if !errors.Is(errStat, os.ErrNotExist) {
 		return InstallResult{}, fmt.Errorf("stat target plugin: %w", errStat)
 	}
+	result.ID = id
+	result.Version = strings.TrimSpace(plugin.Version)
+	result.Path = targetPath
+	result.Overwritten = overwritten
 	if overwritten {
 		existingData, errReadExisting := os.ReadFile(targetPath)
 		if errReadExisting != nil {
 			return InstallResult{}, fmt.Errorf("read target plugin: %w", errReadExisting)
 		}
 		if bytes.Equal(existingData, libraryData) {
-			return InstallResult{
-				ID:          id,
-				Version:     strings.TrimSpace(plugin.Version),
-				Path:        targetPath,
-				Overwritten: true,
-				Skipped:     true,
-			}, nil
+			result.Skipped = true
+			return result, nil
+		}
+	}
+	if options.ValidateInstall != nil {
+		if errValidate := options.ValidateInstall(result); errValidate != nil {
+			return InstallResult{}, fmt.Errorf("validate plugin install: %w", errValidate)
 		}
 	}
 	// Re-check immediately before replacing an existing file: the same version
@@ -299,12 +303,7 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	if errWrite := writeFileAtomic(targetPath, libraryData, mode); errWrite != nil {
 		return InstallResult{}, errWrite
 	}
-	return InstallResult{
-		ID:          id,
-		Version:     strings.TrimSpace(plugin.Version),
-		Path:        targetPath,
-		Overwritten: overwritten,
-	}, nil
+	return result, nil
 }
 
 func installTargetPath(options InstallOptions, id string, version string) (string, error) {

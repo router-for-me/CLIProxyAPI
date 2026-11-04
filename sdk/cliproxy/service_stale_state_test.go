@@ -81,7 +81,7 @@ func TestForceHomeRuntimeConfigEnablesUsageStatistics(t *testing.T) {
 		WebsocketAuth:          false,
 	}
 
-	forceHomeRuntimeConfig(cfg)
+	internalconfig.ForceHomeRuntimeConfig(cfg)
 
 	if !cfg.UsageStatisticsEnabled {
 		t.Fatal("expected home runtime config to force usage statistics enabled")

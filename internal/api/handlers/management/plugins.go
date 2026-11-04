@@ -330,6 +330,42 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 	h.persistLocked(c)
 }
 
+// beforePluginDeleteCommit lets tests run a concurrent save while DeletePlugin is unlocked.
+var beforePluginDeleteCommit = func() {}
+
+// preparePluginDeleteLocked resolves id's artifact from the current config and
+// validates the config without it, writing the error response on failure.
+// Caller must hold h.mu.
+func (h *Handler) preparePluginDeleteLocked(c *gin.Context, id string) (path string, configured, ok bool) {
+	item, configured := h.cfg.Plugins.Configs[id]
+	pluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(normalizedPluginsDir(h.cfg.Plugins.Dir))
+	if errResolvePluginsDir != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
+		return "", false, false
+	}
+	var desiredVersions map[string]string
+	if configured {
+		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})
+	}
+	path, errPath := pluginFilePath(pluginsDir, id, desiredVersions)
+	if errPath != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
+		return "", false, false
+	}
+	if path == "" && !configured {
+		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+		return "", false, false
+	}
+	if configured {
+		candidate := h.cfg.CloneForRuntime()
+		delete(candidate.Plugins.Configs, id)
+		if !h.validateConfigLocked(c, candidate) {
+			return "", false, false
+		}
+	}
+	return path, configured, true
+}
+
 // DeletePlugin removes the selected local plugin file and its saved config.
 func (h *Handler) DeletePlugin(c *gin.Context) {
 	id, okID := pluginIDFromRequest(c)
@@ -347,44 +383,53 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
-	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
-	item, configured := h.cfg.Plugins.Configs[id]
 	host := h.pluginHost
+	// Reject early, before unloading; the final check below runs under h.mu.
+	_, _, ok := h.preparePluginDeleteLocked(c, id)
 	h.mu.Unlock()
-
-	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
-	if errResolvePluginsDir != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()})
-		return
-	}
-	pluginsDir = resolvedPluginsDir
-	var desiredVersions map[string]string
-	if configured {
-		desiredVersions = pluginStoreDesiredVersions(map[string]config.PluginInstanceConfig{id: item})
-	}
-	path, errPath := pluginFilePath(pluginsDir, id, desiredVersions)
-	if errPath != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
-		return
-	}
-	if path == "" && !configured {
-		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
+	if !ok {
 		return
 	}
 
-	if pluginBusy(host, id) && (host == nil || !host.UnloadPlugin(id)) && pluginBusy(host, id) {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":            "plugin_delete_requires_restart",
-			"message":          "loaded plugin cannot be deleted while the server is running",
-			"restart_required": true,
-		})
-		return
+	unloaded := false
+	if pluginBusy(host, id) {
+		unloaded = host.UnloadPlugin(id)
+		if !unloaded && pluginBusy(host, id) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error":            "plugin_delete_requires_restart",
+				"message":          "loaded plugin cannot be deleted while the server is running",
+				"restart_required": true,
+			})
+			return
+		}
 	}
 
+	reloadCtx := c.Request.Context()
+	if unloaded {
+		// The unload changed runtime state the config file does not record.
+		reloadCtx = WithForcedConfigReload(reloadCtx)
+	}
+	beforePluginDeleteCommit()
+	// Resolve and validate again under h.mu, held through removal and save, so a
+	// concurrent save cannot change the config this deletion acts on.
+	h.mu.Lock()
+	path, configured, ok := h.preparePluginDeleteLocked(c, id)
+	if !ok {
+		if !unloaded {
+			h.mu.Unlock()
+			return
+		}
+		// The unload cannot be undone here, so reapply the config that stays in effect.
+		cfgSnapshot := h.reloadSnapshotConfigLocked()
+		h.mu.Unlock()
+		h.reloadConfigAfterManagementSaveAsync(reloadCtx, cfgSnapshot)
+		return
+	}
 	fileDeleted := false
 	if path != "" {
 		if errRemove := os.Remove(path); errRemove != nil {
 			if !errors.Is(errRemove, os.ErrNotExist) {
+				h.mu.Unlock()
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()})
 				return
 			}
@@ -393,7 +438,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 
-	h.mu.Lock()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
 		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
@@ -410,7 +454,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+	h.reloadConfigAfterManagementSaveAsync(reloadCtx, cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{
 		"status":             "deleted",
 		"id":                 htmlsanitize.String(id),

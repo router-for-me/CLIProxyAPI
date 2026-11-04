@@ -50,7 +50,17 @@ func (w *Watcher) ReloadConfigIfChanged() {
 	w.reloadConfigIfChanged()
 }
 
-func (w *Watcher) reloadConfigIfChanged() {
+// ReloadConfig reloads config from disk even when the file is unchanged.
+func (w *Watcher) ReloadConfig() {
+	if w == nil {
+		return
+	}
+	w.reloadConfigFromDisk(true)
+}
+
+func (w *Watcher) reloadConfigIfChanged() { w.reloadConfigFromDisk(false) }
+
+func (w *Watcher) reloadConfigFromDisk(force bool) {
 	// File events and post-save reloads may arrive together; an older read must
 	// not apply after a newer one.
 	w.configApplyMu.Lock()
@@ -72,7 +82,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 	currentHash := w.lastConfigHash
 	w.clientsMutex.RUnlock()
 
-	if currentHash != "" && currentHash == newHash {
+	if !force && currentHash != "" && currentHash == newHash {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
 		return
 	}
@@ -109,6 +119,16 @@ func (w *Watcher) reloadConfig() bool {
 			log.Errorf("failed to resolve auth directory from config: %v", errResolveAuthDir)
 		} else {
 			newConfig.AuthDir = resolvedAuthDir
+		}
+	}
+
+	w.clientsMutex.RLock()
+	validate := w.configValidator
+	w.clientsMutex.RUnlock()
+	if validate != nil {
+		if errValidate := validate(newConfig.CloneForRuntime()); errValidate != nil {
+			log.WithError(errValidate).Warn("rejected config reload with invalid application settings")
+			return false
 		}
 	}
 

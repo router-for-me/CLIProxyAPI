@@ -9,6 +9,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -69,6 +70,11 @@ type Builder struct {
 // These callbacks provide opportunities to perform custom initialization
 // and cleanup operations during service startup and shutdown.
 type Hooks struct {
+	// ValidateConfig rejects invalid application configuration before build or any
+	// reload publication. The callback receives an isolated snapshot and must not
+	// perform blocking runtime work.
+	ValidateConfig func(*config.Config) error
+
 	// OnBeforeStart is called before the service starts, allowing configuration
 	// modifications or additional setup.
 	OnBeforeStart func(*config.Config)
@@ -207,6 +213,16 @@ func (b *Builder) Build() (*Service, error) {
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
+	if b.hooks.ValidateConfig != nil {
+		// Validate what Run will publish: Home mode rewrites several runtime controls.
+		snapshot := b.cfg.CloneForRuntime()
+		if snapshot.Home.Enabled {
+			internalconfig.ForceHomeRuntimeConfig(snapshot)
+		}
+		if errValidate := b.hooks.ValidateConfig(snapshot); errValidate != nil {
+			return nil, fmt.Errorf("cliproxy: validate application config: %w", errValidate)
+		}
+	}
 	b.cfg.NormalizePluginsConfig()
 	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
@@ -301,8 +317,9 @@ func (b *Builder) Build() (*Service, error) {
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
-		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
-			service.reloadConfigFromWatcher()
+		api.WithConfigValidator(b.hooks.ValidateConfig),
+		api.WithConfigReloadHook(func(ctx context.Context, _ *config.Config) {
+			service.reloadConfigAfterManagementSave(ctx)
 		}),
 	)
 	return service, nil
