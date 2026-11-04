@@ -10,9 +10,11 @@ import (
 // response may already be committed: when a 429 ends the stream and every
 // eligible credential is then out of quota with a reset more than
 // usageLimitMinResetIn away, the stream's final error becomes the usage-limit
-// cooldown, so the handler's terminal error event carries the reset. The
-// failure itself is still recorded once, by wrapStreamResult.
-func (m *Manager) withStreamUsageLimit(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, result *cliproxyexecutor.StreamResult) *cliproxyexecutor.StreamResult {
+// cooldown, so the handler's terminal error event carries the reset. It stays
+// retryable while the Antigravity credits fallback can still serve the next
+// request, as a request that fails before any output tries that fallback first.
+// The failure itself is still recorded once, by wrapStreamResult.
+func (m *Manager) withStreamUsageLimit(ctx context.Context, providers []string, model, routeModel string, opts cliproxyexecutor.Options, result *cliproxyexecutor.StreamResult) *cliproxyexecutor.StreamResult {
 	if !QuotaCooldownUsageLimitModeEnabled() || m.HomeEnabled() {
 		return result
 	}
@@ -21,7 +23,7 @@ func (m *Manager) withStreamUsageLimit(ctx context.Context, providers []string, 
 		defer close(out)
 		for chunk := range result.Chunks {
 			if chunk.Err != nil {
-				if usageLimitErr := m.usageLimitResponseError(ctx, providers, model, opts, chunk.Err); usageLimitErr != nil {
+				if usageLimitErr := m.usageLimitResponseError(ctx, providers, model, opts, chunk.Err); usageLimitErr != nil && !m.antigravityCreditsCanServe(ctx, providers, routeModel, opts, chunk.Err) {
 					chunk.Err = usageLimitErr
 				}
 			}
@@ -34,4 +36,14 @@ func (m *Manager) withStreamUsageLimit(ctx context.Context, providers []string, 
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
+}
+
+// antigravityCreditsCanServe reports whether the Antigravity credits fallback
+// would run after err and has a credential to try for routeModel.
+func (m *Manager) antigravityCreditsCanServe(ctx context.Context, providers []string, routeModel string, opts cliproxyexecutor.Options, err error) bool {
+	if !hasAntigravityProvider(providers) || !shouldAttemptAntigravityCreditsFallback(m, err, providers) {
+		return false
+	}
+	candidates, errCandidates := m.findAllAntigravityCreditsCandidateAuths(ctx, routeModel, opts)
+	return errCandidates == nil && len(candidates) > 0
 }

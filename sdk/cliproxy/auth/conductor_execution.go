@@ -273,7 +273,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
-			return m.withStreamUsageLimit(ctx, normalized, retryModel, opts, result), nil
+			return m.withStreamUsageLimit(ctx, normalized, retryModel, req.Model, opts, result), nil
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
 			preferredUpstreamErr = errStream
