@@ -194,3 +194,24 @@ func TestWrapClaudeFastRequestErrorPreservesClassifiedStatusCode(t *testing.T) {
 		t.Fatalf("statusCoder.StatusCode() = %d, want %d", got, http.StatusBadRequest)
 	}
 }
+
+func TestClaudeExecutorExecuteReturnsBadRequestOnPolicyRefusal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"claude-sonnet-5-5","id":"msg_cyber","type":"message","role":"assistant","content":[],"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback."},"usage":{"input_tokens":4,"output_tokens":0}}`))
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{ID: "cyber-refusal", Attributes: map[string]string{"api_key": "sk-ant-test", "base_url": server.URL}}
+	payload := []byte(`{"model":"claude-sonnet-5-5","stream":false,"messages":[{"role":"user","content":"test"}]}`)
+	_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "claude-sonnet-5-5", Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload})
+	if errExecute == nil {
+		t.Fatal("expected policy refusal error, got nil")
+	}
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(errExecute, &statusCoder) || statusCoder == nil || statusCoder.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected HTTP 400 status error, got %v", errExecute)
+	}
+}
