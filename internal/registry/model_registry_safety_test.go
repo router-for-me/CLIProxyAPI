@@ -253,7 +253,7 @@ func TestMultiClientRegistration_PreservesProbedCapabilities(t *testing.T) {
 		SupportsWebSearch: false,
 	}})
 
-	// A probes successfully -> SupportsWebSearch = true
+	// A applies a capability mutation -> SupportsWebSearch = true
 	epochA := r.ClientRegistrationEpoch("client-A")
 	r.ApplyClientModelCapabilities("client-A", epochA, func(modelID string, info *ModelInfo) {
 		if modelID == "gemini-3.1-flash-lite" {
@@ -296,7 +296,7 @@ func TestMultiClientRegistration_PreservesProbedCapabilities(t *testing.T) {
 func TestReRegisterClient_ClearsStaleProbedCapabilitiesWhenNoOtherClientSupports(t *testing.T) {
 	r := newTestModelRegistry()
 
-	// 1. Client A registers model and probes successfully (SupportsWebSearch=true)
+	// 1. Client A registers model and applies a capability mutation (SupportsWebSearch=true)
 	r.RegisterClient("client-A", "antigravity", []*ModelInfo{{
 		ID:                "gemini-3.1-flash-lite",
 		SupportsWebSearch: false,

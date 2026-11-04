@@ -472,8 +472,8 @@ func TestModelSupportsWebSearch_StaticVetoTakesPrecedence(t *testing.T) {
 	reg.RegisterClient("client-veto", "antigravity", []*registry.ModelInfo{
 		{
 			ID:                 modelID,
-			SupportsWebSearch:  true,                                                // dynamic probe said true
-			NativeCapabilities: &registry.NativeCapabilities{WebSearch: &vetoFalse}, // static models.json vetoes
+			SupportsWebSearch:  true,                                                // legacy catalog flag says true
+			NativeCapabilities: &registry.NativeCapabilities{WebSearch: &vetoFalse}, // explicit native capability vetoes
 		},
 	})
 	defer reg.UnregisterClient("client-veto")
