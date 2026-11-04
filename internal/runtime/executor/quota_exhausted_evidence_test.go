@@ -57,6 +57,15 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		return headers
 	}
 	claudeBody := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`)
+	compatFrames := map[string]string{
+		"error":          `{"error":{"type":"insufficient_quota","status":429}}`,
+		"response.error": `{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"status":429,"code":"insufficient_quota","message":"You exceeded your current quota"}}}`,
+		"top-level":      `{"status":429,"code":"insufficient_quota","message":"You exceeded your current quota"}`,
+	}
+	compatFrameErr := func(frame, eventName string) error {
+		err, _ := openAICompatStreamDataError([]byte(frame), eventName, http.Header{"Retry-After": {"7200"}})
+		return err
+	}
 	googleRateLimit := []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Rate limited","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"7200s"}]}}`)
 	tests := []struct {
 		name       string
@@ -64,6 +73,8 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		want       bool
 		wantWindow int64
 		wantReset  time.Duration
+		// wantMsg, when set, is the error text the client must still get.
+		wantMsg string
 	}{
 		{name: "codex usage_limit_reached without window headers", err: newCodexStatusErr(http.StatusTooManyRequests, codexUsageLimit), want: true},
 		{name: "codex 5-hour window", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("40"), codexUsageLimit), want: true, wantWindow: 300, wantReset: time.Hour},
@@ -82,10 +93,9 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`), http.Header{"Retry-After": {"7200"}}, false)
 			return err
 		}(), want: true, wantReset: 2 * time.Hour},
-		{name: "openai-compat stream insufficient_quota frame with the reset in Retry-After", err: func() error {
-			err, _ := openAICompatStreamDataError([]byte(`{"error":{"type":"insufficient_quota","status":429}}`), "", http.Header{"Retry-After": {"7200"}})
-			return err
-		}(), want: true, wantReset: 2 * time.Hour},
+		{name: "openai-compat stream insufficient_quota frame with the reset in Retry-After", err: compatFrameErr(compatFrames["error"], ""), want: true, wantReset: 2 * time.Hour, wantMsg: compatFrames["error"]},
+		{name: "openai-compat stream response.failed with a nested insufficient_quota", err: compatFrameErr(compatFrames["response.error"], "response.failed"), want: true, wantReset: 2 * time.Hour, wantMsg: compatFrames["response.error"]},
+		{name: "openai-compat stream insufficient_quota as top-level fields", err: compatFrameErr(compatFrames["top-level"], ""), want: true, wantReset: 2 * time.Hour, wantMsg: compatFrames["top-level"]},
 		{name: "openai-compat stream QUOTA_EXHAUSTED frame", err: func() error {
 			frame := ojson.NewDocString(googleQuotaExhaustedBody)
 			if errSet := frame.Set("status", http.StatusTooManyRequests); errSet != nil {
@@ -118,6 +128,9 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			got, window, reset := quotaEvidenceOf(test.err)
 			if got != test.want || window != test.wantWindow || reset != test.wantReset {
 				t.Fatalf("evidence = (%t, %d, %v), want (%t, %d, %v); err=%v", got, window, reset, test.want, test.wantWindow, test.wantReset, test.err)
+			}
+			if test.wantMsg != "" && test.err.Error() != test.wantMsg {
+				t.Fatalf("error text = %s, want the frame unchanged: %s", test.err.Error(), test.wantMsg)
 			}
 		})
 	}

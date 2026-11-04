@@ -1194,8 +1194,22 @@ func openAICompatStreamDataError(payload []byte, eventName string, headers http.
 		status = http.StatusBadGateway
 	}
 	err := statusErr{code: status, msg: string(payload)}
-	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, headers, payload)
+	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, headers, openAICompatStreamErrorBody(payload))
 	return err, true
+}
+
+// openAICompatStreamErrorBody returns the error of a stream error frame in the
+// {"error":{...}} shape the quota checks read, wherever the frame carries it:
+// under error, under response.error (a response.failed event), or as top-level
+// fields. The frame passed to the client stays as it was.
+func openAICompatStreamErrorBody(payload []byte) []byte {
+	if errorNode := ojson.GetBytesNoCopy(payload, "error"); errorNode.Exists() && errorNode.Raw != "null" {
+		return payload
+	}
+	if errorNode := ojson.GetBytesNoCopy(payload, "response.error"); errorNode.Exists() && errorNode.Raw != "null" {
+		return []byte(`{"error":` + errorNode.Raw + `}`)
+	}
+	return []byte(`{"error":` + string(payload) + `}`)
 }
 
 type statusErr struct {
