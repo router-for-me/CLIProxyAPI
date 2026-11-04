@@ -47,7 +47,7 @@ func registryRegister(t *testing.T, authID, provider, model string) {
 }
 
 func poolRefusal(m *Manager, now time.Time) *usageLimitRefusal {
-	return m.usageLimitRefusalForPool([]string{"codex"}, "gpt-5", authSelectionEligibility{}, "", now)
+	return m.usageLimitRefusalForPool([]string{"codex"}, "gpt-5", authSelectionEligibility{}, now)
 }
 
 func TestUsageLimitRefusalForPool(t *testing.T) {
@@ -237,7 +237,7 @@ func TestUsageLimitModeOpenAICompatAliasPool(t *testing.T) {
 		// One backend that can serve again keeps the retryable answer.
 		auth := m.auths["pool-auth-"+t.Name()]
 		delete(auth.ModelStates, m.stateModelForExecution(auth, "public", "backend-b", true))
-		if refusal := m.usageLimitRefusalForPool([]string{openAICompatPoolProviderKey}, "public", authSelectionEligibility{}, "", time.Now()); refusal != nil {
+		if refusal := m.usageLimitRefusalForPool([]string{openAICompatPoolProviderKey}, "public", authSelectionEligibility{}, time.Now()); refusal != nil {
 			t.Fatalf("%s: refusal = %+v with backend-b available", path, refusal)
 		}
 	}
