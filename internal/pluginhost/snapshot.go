@@ -1,10 +1,12 @@
 package pluginhost
 
 import (
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type capabilityRecord struct {
@@ -17,18 +19,24 @@ type capabilityRecord struct {
 }
 
 type Snapshot struct {
-	enabled bool
-	records []capabilityRecord
+	enabled                   bool
+	records                   []capabilityRecord
+	quotaSupportedProvidersMu sync.RWMutex
+	quotaSupportedProviders   map[string][]string
 }
 
 // RegisteredPluginInfo describes a plugin that is active in the current runtime snapshot.
 type RegisteredPluginInfo struct {
-	ID            string
-	Priority      int
-	Metadata      pluginapi.Metadata
-	SupportsOAuth bool
-	OAuthProvider string
-	Menus         []RegisteredPluginMenu
+	ID                   string
+	Priority             int
+	Metadata             pluginapi.Metadata
+	SupportsOAuth        bool
+	OAuthProvider        string
+	OAuthProviders       []string
+	OAuthProviderEntries []pluginapi.AuthProviderEntry
+	SupportsQuota        bool
+	QuotaProvider        string
+	Menus                []RegisteredPluginMenu
 }
 
 // RegisteredPluginMenu describes a plugin-owned resource menu entry.
@@ -39,7 +47,9 @@ type RegisteredPluginMenu struct {
 }
 
 func emptySnapshot() *Snapshot {
-	return &Snapshot{}
+	return &Snapshot{
+		quotaSupportedProviders: make(map[string][]string),
+	}
 }
 
 func (h *Host) activeRecords() []capabilityRecord {
@@ -68,20 +78,35 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	menusByPlugin := h.registeredPluginMenus()
 	out := make([]RegisteredPluginInfo, 0, len(records))
 	for _, record := range records {
-		authProvider := record.plugin.Capabilities.AuthProvider
+		hasOAuth := hasRecordAuthProvider(record)
 		oauthProvider := ""
-		if authProvider != nil && !h.isPluginFused(record.id) {
-			if identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider); okIdentifier {
-				oauthProvider = identifier
+		var oauthProviders []string
+		var oauthProviderEntries []pluginapi.AuthProviderEntry
+		if hasOAuth && !h.isPluginFused(record.id) {
+			if identifiers, entries, okIdentifiers := h.callRecordAuthProviderMetadata(record); okIdentifiers && len(identifiers) > 0 {
+				oauthProvider = identifiers[0]
+				oauthProviders = identifiers
+				oauthProviderEntries = entries
+			}
+		}
+		quotaProvider := record.plugin.Capabilities.QuotaProvider
+		quotaIdentifier := ""
+		if quotaProvider != nil && !h.isPluginFused(record.id) {
+			if identifier, okIdentifier := h.callQuotaIdentifier(record.id, quotaProvider); okIdentifier {
+				quotaIdentifier = identifier
 			}
 		}
 		out = append(out, RegisteredPluginInfo{
-			ID:            record.id,
-			Priority:      record.priority,
-			Metadata:      clonePluginMetadata(record.meta),
-			SupportsOAuth: authProvider != nil,
-			OAuthProvider: oauthProvider,
-			Menus:         menusByPlugin[record.id],
+			ID:                   record.id,
+			Priority:             record.priority,
+			Metadata:             clonePluginMetadata(record.meta),
+			SupportsOAuth:        hasOAuth,
+			OAuthProvider:        oauthProvider,
+			OAuthProviders:       oauthProviders,
+			OAuthProviderEntries: oauthProviderEntries,
+			SupportsQuota:        quotaProvider != nil,
+			QuotaProvider:        quotaIdentifier,
+			Menus:                menusByPlugin[record.id],
 		})
 	}
 	return out
@@ -155,6 +180,15 @@ func cloneConfigFields(fields []pluginapi.ConfigField) []pluginapi.ConfigField {
 	copy(out, fields)
 	for index := range out {
 		out[index].EnumValues = append([]string(nil), fields[index].EnumValues...)
+		out[index].Default = cloneConfigFieldValue(fields[index].Default)
 	}
 	return out
+}
+
+func cloneConfigFieldValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	visited := make(map[metadataCloneVisit]reflect.Value)
+	return cloneInterceptorMetadataAny(reflect.ValueOf(value), visited)
 }

@@ -3,11 +3,12 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 type countingPayloadMarshaler struct {
@@ -32,8 +33,8 @@ func TestSetStringIfDifferentNormalizesWrongType(t *testing.T) {
 	input := []byte(`{"model":123}`)
 	original := bytes.Clone(input)
 	output := SetStringIfDifferent(input, "model", "123")
-	model := gjson.GetBytes(output, "model")
-	if model.Type != gjson.String || model.String() != "123" {
+	model := ojson.GetBytes(output, "model")
+	if model.Type != ojson.String || model.String() != "123" {
 		t.Fatalf("model = %s, want string 123", model.Raw)
 	}
 	if !bytes.Equal(input, original) {
@@ -52,7 +53,7 @@ func TestSetBoolIfDifferentReusesCanonicalValue(t *testing.T) {
 func TestSetBoolIfDifferentNormalizesWrongType(t *testing.T) {
 	input := []byte(`{"stream":"true"}`)
 	output := SetBoolIfDifferent(input, "stream", true)
-	if stream := gjson.GetBytes(output, "stream"); stream.Type != gjson.True {
+	if stream := ojson.GetBytes(output, "stream"); stream.Type != ojson.True {
 		t.Fatalf("stream = %s, want boolean true", stream.Raw)
 	}
 }
@@ -68,9 +69,41 @@ func TestSetRawIfDifferentReusesIdenticalRawValue(t *testing.T) {
 func TestSetRawIfDifferentUpdatesDifferentRawValue(t *testing.T) {
 	input := []byte(`{"metadata":"executor"}`)
 	output := SetRawIfDifferent(input, "metadata", []byte(`{"source":"executor"}`))
-	metadata := gjson.GetBytes(output, "metadata")
+	metadata := ojson.GetBytes(output, "metadata")
 	if !metadata.IsObject() || metadata.Get("source").String() != "executor" {
 		t.Fatalf("metadata = %s, want object", metadata.Raw)
+	}
+}
+
+func TestSetIfDifferentDocMutations(t *testing.T) {
+	doc := ojson.NewDoc([]byte(`{"model":"gpt-test","stream":true,"metadata":{"source":"executor"}}`))
+	if SetStringIfDifferentDoc(doc, "model", "gpt-test") {
+		t.Fatal("SetStringIfDifferentDoc reported change for identical string")
+	}
+	if !SetStringIfDifferentDoc(doc, "model", "gpt-4o") {
+		t.Fatal("SetStringIfDifferentDoc did not report change for updated string")
+	}
+	if SetBoolIfDifferentDoc(doc, "stream", true) {
+		t.Fatal("SetBoolIfDifferentDoc reported change for identical bool")
+	}
+	if !SetBoolIfDifferentDoc(doc, "stream", false) {
+		t.Fatal("SetBoolIfDifferentDoc did not report change for updated bool")
+	}
+	if SetRawIfDifferentDoc(doc, "metadata", []byte(`{"source":"executor"}`)) {
+		t.Fatal("SetRawIfDifferentDoc reported change for identical raw value")
+	}
+	if !SetRawIfDifferentDoc(doc, "metadata", []byte(`{"source":"updated"}`)) {
+		t.Fatal("SetRawIfDifferentDoc did not report change for updated raw value")
+	}
+	out := doc.Bytes()
+	if got := ojson.GetBytesNoCopy(out, "model").String(); got != "gpt-4o" {
+		t.Fatalf("model = %q, want gpt-4o", got)
+	}
+	if ojson.GetBytesNoCopy(out, "stream").Bool() {
+		t.Fatalf("stream = true, want false")
+	}
+	if got := ojson.GetBytesNoCopy(out, "metadata.source").String(); got != "updated" {
+		t.Fatalf("metadata.source = %q, want updated", got)
 	}
 }
 
@@ -197,7 +230,7 @@ func TestApplyPayloadConfigProjectionOverrideWritesEveryMatch(t *testing.T) {
 	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
 	for _, path := range []string{"items.0.value", "items.1.value"} {
-		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+		if got := ojson.GetBytes(output, path).Raw; got != `[1,2]` {
 			t.Fatalf("%s = %s, want [1,2]", path, got)
 		}
 	}
@@ -213,7 +246,7 @@ func TestApplyPayloadConfigProjectionOverrideRawWritesEveryMatch(t *testing.T) {
 	input := []byte(`{"items":[{"value":1},{"value":2}]}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
 	for _, path := range []string{"items.0.value", "items.1.value"} {
-		if got := gjson.GetBytes(output, path).Raw; got != `[1,2]` {
+		if got := ojson.GetBytes(output, path).Raw; got != `[1,2]` {
 			t.Fatalf("%s = %s, want [1,2]", path, got)
 		}
 	}
@@ -228,8 +261,8 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 	}}
 	input := []byte(`{"value":"YWJj"}`)
 	output := ApplyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "")
-	value := gjson.GetBytes(output, "value")
-	if value.Type != gjson.String || value.String() != "abc" {
+	value := ojson.GetBytes(output, "value")
+	if value.Type != ojson.String || value.String() != "abc" {
 		t.Fatalf("value = %s, want string abc", value.Raw)
 	}
 }
@@ -237,7 +270,7 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 func TestSetPayloadValueIfDifferentUsesSJSONNumberEncoding(t *testing.T) {
 	input := []byte(`{"value":1.2}`)
 	output := setPayloadValueIfDifferent(input, "value", float32(1.2))
-	if got := gjson.GetBytes(output, "value").Raw; got != "1.2000000476837158" {
+	if got := ojson.GetBytes(output, "value").Raw; got != "1.2000000476837158" {
 		t.Fatalf("value = %s, want sjson float32 encoding", got)
 	}
 	canonical := []byte(`{"value":1.2000000476837158}`)
@@ -255,7 +288,7 @@ func TestSetPayloadValueIfDifferentCallsMarshalerOnce(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("MarshalJSON calls = %d, want 1", calls)
 		}
-		if got := gjson.GetBytes(output, "value").String(); got != "new" {
+		if got := ojson.GetBytes(output, "value").String(); got != "new" {
 			t.Fatalf("value = %q, want new", got)
 		}
 	}
@@ -279,4 +312,194 @@ func BenchmarkSetStringIfDifferentLargeCanonicalPayload(b *testing.B) {
 	for b.Loop() {
 		benchmarkPayloadMutationOutput = SetStringIfDifferent(input, "model", "gpt-test")
 	}
+}
+
+func TestConfigExampleDocumentsCodexAdditionalToolsPayloadFilter(t *testing.T) {
+	data, err := os.ReadFile("../../../../config.example.yaml")
+	if err != nil {
+		t.Fatalf("failed to read config.example.yaml: %v", err)
+	}
+	content := string(data)
+	const expectedPath = `'input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#'`
+	if !strings.Contains(content, expectedPath) {
+		t.Fatalf("config.example.yaml does not contain expected additional_tools path: %s", expectedPath)
+	}
+}
+
+func TestApplyPayloadConfig_CodexAdditionalToolsFilter(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{
+				{
+					Models: []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params: []string{
+						`input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#`,
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("removes target tool and preserves other tools across namespaces", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"role": "developer",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch", "description": "patch"},
+								{"type": "custom", "name": "exec_command", "description": "exec"}
+							]
+						},
+						{
+							"type": "namespace",
+							"name": "collaboration",
+							"tools": [
+								{"type": "custom", "name": "share", "description": "share"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+
+		var structured struct {
+			Input []struct {
+				Type  string `json:"type"`
+				Tools []struct {
+					Name  string `json:"name"`
+					Tools []struct {
+						Name string `json:"name"`
+					} `json:"tools"`
+				} `json:"tools"`
+			} `json:"input"`
+		}
+		if errUnmarshal := json.Unmarshal(output, &structured); errUnmarshal != nil {
+			t.Fatalf("failed to unmarshal output: %v", errUnmarshal)
+		}
+		if len(structured.Input) != 1 {
+			t.Fatalf("input len = %d, want 1", len(structured.Input))
+		}
+		if len(structured.Input[0].Tools) != 2 {
+			t.Fatalf("namespaces len = %d, want 2", len(structured.Input[0].Tools))
+		}
+		fnNamespace := structured.Input[0].Tools[0]
+		if fnNamespace.Name != "functions" || len(fnNamespace.Tools) != 1 || fnNamespace.Tools[0].Name != "exec_command" {
+			t.Fatalf("functions namespace tools = %+v, want only exec_command", fnNamespace.Tools)
+		}
+		collabNamespace := structured.Input[0].Tools[1]
+		if collabNamespace.Name != "collaboration" || len(collabNamespace.Tools) != 1 || collabNamespace.Tools[0].Name != "share" {
+			t.Fatalf("collaboration namespace tools = %+v, want share", collabNamespace.Tools)
+		}
+	})
+
+	t.Run("non-matching target tool is a no-op", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"role": "developer",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "exec_command", "description": "exec"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if !bytes.Equal(output, input) {
+			t.Fatalf("expected payload to be untouched when rule does not match, got: %s", string(output))
+		}
+	})
+
+	t.Run("removes matches across multiple additional_tools elements", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [{"type": "custom", "name": "apply_patch"}]
+						}
+					]
+				},
+				{
+					"type": "message",
+					"role": "user",
+					"content": "hello"
+				},
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch"},
+								{"type": "custom", "name": "view_image"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if strings.Contains(string(output), "apply_patch") {
+			t.Fatalf("apply_patch remained after multi-element filter: %s", string(output))
+		}
+		if !strings.Contains(string(output), "view_image") {
+			t.Fatalf("view_image was removed: %s", string(output))
+		}
+		if !strings.Contains(string(output), "hello") {
+			t.Fatalf("user message was removed: %s", string(output))
+		}
+	})
+
+	t.Run("removes multiple matches within the same namespace array", func(t *testing.T) {
+		input := []byte(`{
+			"model": "gpt-5-codex",
+			"input": [
+				{
+					"type": "additional_tools",
+					"tools": [
+						{
+							"type": "namespace",
+							"name": "functions",
+							"tools": [
+								{"type": "custom", "name": "apply_patch", "id": "p1"},
+								{"type": "custom", "name": "exec_command"},
+								{"type": "custom", "name": "apply_patch", "id": "p2"}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output := ApplyPayloadConfigWithRoot(cfg, "gpt-5-codex", "codex", "", input, nil, "", "")
+		if strings.Contains(string(output), "apply_patch") {
+			t.Fatalf("apply_patch remained after multi-match array filter: %s", string(output))
+		}
+		if !strings.Contains(string(output), "exec_command") {
+			t.Fatalf("exec_command was removed: %s", string(output))
+		}
+	})
 }

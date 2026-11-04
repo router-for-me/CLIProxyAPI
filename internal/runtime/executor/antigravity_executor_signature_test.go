@@ -3,9 +3,9 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,17 +13,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -58,7 +58,7 @@ func issue4959ResponsesModelFirstPayload() []byte {
 		`]}`)
 }
 
-func contentHasNamedPart(content gjson.Result, partKind, name string) bool {
+func contentHasNamedPart(content ojson.Result, partKind, name string) bool {
 	for _, part := range content.Get("parts").Array() {
 		if part.Get(partKind+".name").String() == name {
 			return true
@@ -67,7 +67,7 @@ func contentHasNamedPart(content gjson.Result, partKind, name string) bool {
 	return false
 }
 
-func assertIssue4959LeadingUserContents(t *testing.T, contents []gjson.Result) {
+func assertIssue4959LeadingUserContents(t *testing.T, contents []ojson.Result) {
 	t.Helper()
 	if len(contents) < 3 {
 		t.Fatalf("contents too short: %d", len(contents))
@@ -168,25 +168,64 @@ func TestSanitizeAntigravityGeminiRequestSignaturesFinalizesParallelCalls(t *tes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{}}},{"functionCall":{"name":"second","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"first","response":{"result":"ok"}}},{"functionResponse":{"name":"second","response":{"result":"ok"}}}]}]}}`)
+			payloadDoc := ojson.NewDoc([]byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{}}},{"functionCall":{"name":"second","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"name":"first","response":{"result":"ok"}}},{"functionResponse":{"name":"second","response":{"result":"ok"}}}]}]}}`))
 			if tt.firstSignature != "" {
-				payload, _ = sjson.SetBytes(payload, "request.contents.0.parts.0.thoughtSignature", tt.firstSignature)
+				_ = payloadDoc.Set("request.contents.0.parts.0.thoughtSignature", tt.firstSignature)
 			}
 			if tt.secondSignature != "" {
-				payload, _ = sjson.SetBytes(payload, "request.contents.0.parts.1.thoughtSignature", tt.secondSignature)
+				_ = payloadDoc.Set("request.contents.0.parts.1.thoughtSignature", tt.secondSignature)
 			}
+			payload := payloadDoc.Bytes()
 
 			output := sanitizeAntigravityGeminiRequestSignatures("gemini-3.5-flash", payload)
-			if got := gjson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != tt.wantFirstSignature {
+			if got := ojson.GetBytes(output, "request.contents.0.parts.0.thoughtSignature").String(); got != tt.wantFirstSignature {
 				t.Fatalf("first signature = %q, want %q; output=%s", got, tt.wantFirstSignature, output)
 			}
-			if signature := gjson.GetBytes(output, "request.contents.0.parts.1.thoughtSignature"); signature.Exists() {
+			if signature := ojson.GetBytes(output, "request.contents.0.parts.1.thoughtSignature"); signature.Exists() {
 				t.Fatalf("second parallel call should remain unsigned; output=%s", output)
 			}
-			if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "model" {
+			if got := ojson.GetBytes(output, "request.contents.1.role").String(); got != "model" {
 				t.Fatalf("functionResponse role = %q, want native Antigravity model role; output=%s", got, output)
 			}
 		})
+	}
+}
+
+func TestAntigravityGeminiSignatureNormalizationDoesNotRepeatLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+	payload := []byte(`{"contents":[{"role":"model","parts":[` +
+		`{"functionCall":{"name":"first","args":{}},"thoughtSignature":"` + issue4959GeminiThoughtSignature() + `"},` +
+		`{"functionCall":{"name":"second","args":{}},"thoughtSignature":"skip_thought_signature_validator"},` +
+		`{"functionCall":{"name":"third","args":{}},"thoughtSignature":"google#skip_thought_signature_validator"}]}]}`)
+	translationReq := sdktranslator.RequestEnvelope{Model: "gemini-3.8-flash-high", Stream: true}
+	original, working, errTranslate := helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{},
+		sdktranslator.FormatGemini, sdktranslator.FormatAntigravity, translationReq, payload, payload)
+	if errTranslate != nil {
+		t.Fatalf("translate request pair: %v", errTranslate)
+	}
+	working = sanitizeAntigravityGeminiRequestSignatures(translationReq.Model, working)
+
+	if got := ojson.GetBytes(working, "request.contents.0.parts.0.thoughtSignature").String(); got != issue4959GeminiThoughtSignature() {
+		t.Fatalf("native signature changed: %s", working)
+	}
+	for _, body := range [][]byte{original, working} {
+		for _, index := range []int{1, 2} {
+			if ojson.GetBytes(body, fmt.Sprintf("request.contents.0.parts.%d.thoughtSignature", index)).Exists() {
+				t.Fatalf("sibling bypass was not removed: %s", body)
+			}
+		}
+	}
+	sanitizeLogs := 0
+	for _, entry := range hook.AllEntries() {
+		if strings.HasPrefix(entry.Message, "gemini request: suppressed repeated thoughtSignature sanitizations") {
+			t.Fatalf("suppressed repeated log should no longer be emitted: %q", entry.Message)
+		}
+		if strings.HasPrefix(entry.Message, "gemini request: sanitized ") {
+			sanitizeLogs++
+		}
+	}
+	if sanitizeLogs != 1 {
+		t.Fatalf("expected exactly 1 aggregate log entry, got %d", sanitizeLogs)
 	}
 }
 
@@ -197,10 +236,10 @@ func TestAntigravitySensitiveWordsObfuscatesSystemInstructionOnly(t *testing.T) 
 	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"Use proxy safely"}]},"contents":[{"role":"user","parts":[{"text":"proxy remains unchanged"}]}]}}`)
 
 	got := executor.obfuscateSensitiveWords(payload)
-	if systemText := gjson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u200Broxy safely" {
+	if systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u200Broxy safely" {
 		t.Fatalf("system instruction = %q, want zero-width obfuscation", systemText)
 	}
-	if contentText := gjson.GetBytes(got, "request.contents.0.parts.0.text").String(); contentText != "proxy remains unchanged" {
+	if contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String(); contentText != "proxy remains unchanged" {
 		t.Fatalf("content text = %q, want unchanged", contentText)
 	}
 }
@@ -248,7 +287,7 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 	}
 
 	body := <-captured
-	got := gjson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
+	got := ojson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
 	want := "You are H\u200Bermes Agent, an intelligent AI assistant created by N\u200Bous Research."
 	if got != want {
 		t.Fatalf("system instruction = %q, want %q; body=%s", got, want, body)
@@ -304,7 +343,7 @@ func TestAntigravityStreamDoesNotEmitSyntheticTerminalOnReadError(t *testing.T) 
 			streamErr = chunk.Err
 			continue
 		}
-		if finishReason := gjson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finishReason == "STOP" {
+		if finishReason := ojson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finishReason == "STOP" {
 			t.Fatalf("read error must not emit synthetic STOP: %s", chunk.Payload)
 		}
 	}
@@ -316,7 +355,7 @@ func TestAntigravityStreamDoesNotEmitSyntheticTerminalOnReadError(t *testing.T) 
 func TestAntigravityStreamPrependsLeadingUserForGemini(t *testing.T) {
 	assertLeadingFunctionHistory := func(t *testing.T, body []byte) {
 		t.Helper()
-		contents := gjson.GetBytes(body, "request.contents").Array()
+		contents := ojson.GetBytes(body, "request.contents").Array()
 		if len(contents) != 3 || contents[0].Get("role").String() != "user" {
 			t.Fatalf("upstream roles malformed: %s", body)
 		}
@@ -445,7 +484,7 @@ func TestAntigravityStreamPrependsLeadingUserForIssue4959ResponsesHistory(t *tes
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
 	}
-	assertIssue4959LeadingUserContents(t, gjson.GetBytes(<-captured, "request.contents").Array())
+	assertIssue4959LeadingUserContents(t, ojson.GetBytes(<-captured, "request.contents").Array())
 }
 
 func issue5358ResponsesTrailingReasoningPayload() []byte {
@@ -467,7 +506,7 @@ func TestAntigravityStreamAppendsTrailingUserForGeminiTrailingModelTurn(t *testi
 		}
 		captured <- body
 
-		contents := gjson.GetBytes(body, "request.contents").Array()
+		contents := ojson.GetBytes(body, "request.contents").Array()
 		if len(contents) > 0 {
 			lastRole := contents[len(contents)-1].Get("role").String()
 			if lastRole == "model" || lastRole == "assistant" {
@@ -502,7 +541,7 @@ func TestAntigravityStreamAppendsTrailingUserForGeminiTrailingModelTurn(t *testi
 		}
 	}
 	body := <-captured
-	contents := gjson.GetBytes(body, "request.contents").Array()
+	contents := ojson.GetBytes(body, "request.contents").Array()
 	if len(contents) == 0 {
 		t.Fatalf("request.contents empty; body=%s", body)
 	}
@@ -512,6 +551,81 @@ func TestAntigravityStreamAppendsTrailingUserForGeminiTrailingModelTurn(t *testi
 	}
 	if got := lastContent.Get("parts.0.text").String(); got != "" {
 		t.Fatalf("trailing turn text = %q, want empty string; body=%s", got, body)
+	}
+}
+
+func issue6524ResponsesTrailingToolOutputPayload(output string) []byte {
+	return []byte(`{"model":"gemini-3-flash","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"look at a.png"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"view_image","arguments":"{\"path\":\"a.png\"}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":` + output + `}` +
+		`],"tools":[{"type":"function","name":"view_image","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]}`)
+}
+
+func issue6524CaptureStreamContents(t *testing.T, payload []byte) []ojson.Result {
+	t.Helper()
+	captured := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	auth := testAntigravityAuth(server.URL)
+	auth.Metadata["project_id"] = "project-1"
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gemini-3-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream() error = %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	body := <-captured
+	contents := ojson.GetBytes(body, "request.contents").Array()
+	if len(contents) < 2 {
+		t.Fatalf("request.contents too short; body=%s", body)
+	}
+	return contents
+}
+
+func TestAntigravityStreamAppendsTrailingUserAfterImageOnlyFunctionResponse(t *testing.T) {
+	contents := issue6524CaptureStreamContents(t, issue6524ResponsesTrailingToolOutputPayload(
+		`[{"type":"input_image","image_url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="}]`,
+	))
+	lastContent := contents[len(contents)-1]
+	if got := lastContent.Get("role").String(); got != "user" {
+		t.Fatalf("trailing turn role = %q, want user; contents=%v", got, contents)
+	}
+	if lastContent.Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("trailing turn should not be the function response turn; contents=%v", contents)
+	}
+	responseContent := contents[len(contents)-2]
+	if !responseContent.Get("parts.0.functionResponse.parts.0.inlineData").Exists() {
+		t.Fatalf("expected function response with inline image before trailing user turn; contents=%v", contents)
+	}
+}
+
+func TestAntigravityStreamKeepsTrailingTextFunctionResponse(t *testing.T) {
+	contents := issue6524CaptureStreamContents(t, issue6524ResponsesTrailingToolOutputPayload(`"ok"`))
+	lastContent := contents[len(contents)-1]
+	if !lastContent.Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("trailing text function response turn should stay last; contents=%v", contents)
 	}
 }
 
@@ -564,7 +678,7 @@ func TestAntigravityStreamPrependsLeadingUserAfterReplayInsertsFunctionCall(t *t
 	}
 
 	body := <-captured
-	contents := gjson.GetBytes(body, "request.contents").Array()
+	contents := ojson.GetBytes(body, "request.contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("contents len = %d, want 3; body=%s", len(contents), body)
 	}
@@ -640,7 +754,7 @@ func TestAntigravityStreamDoesNotPrependLeadingUserForClaudeTarget(t *testing.T)
 			}
 
 			body := <-captured
-			contents := gjson.GetBytes(body, "request.contents").Array()
+			contents := ojson.GetBytes(body, "request.contents").Array()
 			if len(contents) != 2 || contents[0].Get("role").String() != "model" || contents[1].Get("role").String() != "user" {
 				t.Fatalf("Claude target history changed: %s", body)
 			}
@@ -787,7 +901,7 @@ func TestAntigravityCountTokensMatchesTargetLeadingUserPolicy(t *testing.T) {
 				t.Fatalf("CountTokens() error = %v", errCount)
 			}
 
-			contents := gjson.GetBytes(upstreamBody, "request.contents").Array()
+			contents := ojson.GetBytes(upstreamBody, "request.contents").Array()
 			roles := make([]string, 0, len(contents))
 			for _, content := range contents {
 				roles = append(roles, content.Get("role").String())
@@ -843,16 +957,16 @@ func TestAntigravityExecutorCountTokensSanitizesGeminiToolHistory(t *testing.T) 
 	if len(upstreamBody) == 0 {
 		t.Fatal("countTokens upstream body was not captured")
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.1.parts.0.thoughtSignature").String(); got != nativeSignature {
+	if got := ojson.GetBytes(upstreamBody, "request.contents.1.parts.0.thoughtSignature").String(); got != nativeSignature {
 		t.Fatalf("first call signature = %q, want native signature; body=%s", got, upstreamBody)
 	}
-	if signature := gjson.GetBytes(upstreamBody, "request.contents.1.parts.1.thoughtSignature"); signature.Exists() {
+	if signature := ojson.GetBytes(upstreamBody, "request.contents.1.parts.1.thoughtSignature"); signature.Exists() {
 		t.Fatalf("second sibling bypass was not removed: %s", upstreamBody)
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.2.role").String(); got != "model" {
+	if got := ojson.GetBytes(upstreamBody, "request.contents.2.role").String(); got != "model" {
 		t.Fatalf("functionResponse role = %q, want model; body=%s", got, upstreamBody)
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.2.parts.0.functionResponse.id").String(); got != "call-1" {
+	if got := ojson.GetBytes(upstreamBody, "request.contents.2.parts.0.functionResponse.id").String(); got != "call-1" {
 		t.Fatalf("first functionResponse.id = %q, want call-1; body=%s", got, upstreamBody)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(upstreamBody); errPairing != nil {
@@ -905,15 +1019,15 @@ func TestAntigravityExecutorCountTokensReconstructsCompactedClaudeToolCall(t *te
 	if len(upstreamBody) == 0 {
 		t.Fatal("countTokens upstream body was not captured")
 	}
-	leadingText := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text")
-	if gjson.GetBytes(upstreamBody, "request.contents.0.role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+	leadingText := ojson.GetBytes(upstreamBody, "request.contents.0.parts.0.text")
+	if ojson.GetBytes(upstreamBody, "request.contents.0.role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
 		t.Fatalf("synthetic leading user missing after replay insert: %s", upstreamBody)
 	}
-	call := gjson.GetBytes(upstreamBody, "request.contents.1.parts.0")
+	call := ojson.GetBytes(upstreamBody, "request.contents.1.parts.0")
 	if call.Get("functionCall.id").String() != nativeID || call.Get("functionCall.name").String() != "Bash" || call.Get("thoughtSignature").String() != nativeSignature {
 		t.Fatalf("native function call provenance was not reconstructed: %s", upstreamBody)
 	}
-	response := gjson.GetBytes(upstreamBody, "request.contents.2.parts.0.functionResponse")
+	response := ojson.GetBytes(upstreamBody, "request.contents.2.parts.0.functionResponse")
 	if response.Get("id").String() != nativeID || response.Get("name").String() != "Bash" {
 		t.Fatalf("native function response provenance was not reconstructed: %s", upstreamBody)
 	}
@@ -931,10 +1045,10 @@ func TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersMixedParallelRespo
 		t.Fatal("permuted input unexpectedly passed function call pairing validation")
 	}
 	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
-	if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "user" {
+	if got := ojson.GetBytes(output, "request.contents.1.role").String(); got != "user" {
 		t.Fatalf("mixed functionResponse/user content role = %q, want user; output=%s", got, output)
 	}
-	parts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	parts := ojson.GetBytes(output, "request.contents.1.parts").Array()
 	if len(parts) != 4 {
 		t.Fatalf("mixed response parts = %d, want 4; output=%s", len(parts), output)
 	}
@@ -958,13 +1072,13 @@ func TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersMixedParallelRespo
 func TestNormalizeAntigravityGeminiFunctionResponseRolesOrdersParallelResponses(t *testing.T) {
 	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read","args":{"file":"one"}}},{"functionCall":{"id":"call-2","name":"read","args":{"file":"two"}}}]},{"role":" Model ","parts":[{"functionResponse":{"id":"call-2","name":"read","response":{"result":"two"}}},{"functionResponse":{"id":"call-1","name":"read","response":{"result":"one"}}}]}]}}`)
 	output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
-	if got := gjson.GetBytes(output, "request.contents.1.role").String(); got != "model" {
+	if got := ojson.GetBytes(output, "request.contents.1.role").String(); got != "model" {
 		t.Fatalf("functionResponse role = %q, want model; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call-1" {
+	if got := ojson.GetBytes(output, "request.contents.1.parts.0.functionResponse.id").String(); got != "call-1" {
 		t.Fatalf("first functionResponse.id = %q, want call-1; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "request.contents.1.parts.1.functionResponse.id").String(); got != "call-2" {
+	if got := ojson.GetBytes(output, "request.contents.1.parts.1.functionResponse.id").String(); got != "call-2" {
 		t.Fatalf("second functionResponse.id = %q, want call-2; output=%s", got, output)
 	}
 	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate != nil {
@@ -980,10 +1094,10 @@ func TestNormalizeAntigravityGeminiFunctionResponseRolesDoesNotCrossEmptyContent
 	} {
 		payload := []byte(`{"request":{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read","args":{}}},{"functionCall":{"id":"call-2","name":"read","args":{}}}]},` + boundary + `,{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"read","response":{"result":"two"}}},{"functionResponse":{"id":"call-1","name":"read","response":{"result":"one"}}}]}]}}`)
 		output := normalizeAntigravityGeminiFunctionResponseRoles(payload)
-		if got := gjson.GetBytes(output, "request.contents.2.role").String(); got != "model" {
+		if got := ojson.GetBytes(output, "request.contents.2.role").String(); got != "model" {
 			t.Fatalf("pure functionResponse role = %q, want model; output=%s", got, output)
 		}
-		if got := gjson.GetBytes(output, "request.contents.2.parts.0.functionResponse.id").String(); got != "call-2" {
+		if got := ojson.GetBytes(output, "request.contents.2.parts.0.functionResponse.id").String(); got != "call-2" {
 			t.Fatalf("response crossed content boundary %s and was reordered: first id=%q; output=%s", boundary, got, output)
 		}
 		if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(output); errValidate == nil {
@@ -1004,7 +1118,7 @@ func TestAntigravityExecutor_GeminiTargetPreservesGeminiThinkingCarrier(t *testi
 	if err != nil {
 		t.Fatalf("validateAntigravityRequestSignatures() error = %v", err)
 	}
-	content := gjson.GetBytes(output, "messages.0.content").Array()
+	content := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content length = %d, want text plus valid Gemini carrier: %s", len(content), output)
 	}
@@ -1030,7 +1144,7 @@ func TestAntigravityExecutor_StrictBypassStripsInvalidSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict bypass should strip invalid signatures instead of rejecting request: %v", err)
 	}
-	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	parts := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(parts) != 1 {
 		t.Fatalf("content length = %d, want 1 after invalid thinking strip: %s", len(parts), output)
 	}
@@ -1109,7 +1223,7 @@ func TestClaudeExecutor_LogsSanitizedClaudeUpstreamSignatures(t *testing.T) {
 	}`)
 
 	output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "claude-sonnet-4-5")
-	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	parts := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(parts) != 2 {
 		t.Fatalf("content length = %d, want 2 after invalid thinking strip: %s", len(parts), output)
 	}
@@ -1207,13 +1321,13 @@ func TestAntigravityExecutorCountTokensStripsStatefulFields(t *testing.T) {
 	if len(upstreamBody) == 0 {
 		t.Fatal("countTokens upstream body was not captured")
 	}
-	if gjson.GetBytes(upstreamBody, "request.toolConfig").Exists() {
+	if ojson.GetBytes(upstreamBody, "request.toolConfig").Exists() {
 		t.Fatalf("upstream countTokens body retained request.toolConfig: %s", upstreamBody)
 	}
-	if gjson.GetBytes(upstreamBody, "request.labels").Exists() {
+	if ojson.GetBytes(upstreamBody, "request.labels").Exists() {
 		t.Fatalf("upstream countTokens body retained request.labels: %s", upstreamBody)
 	}
-	if gjson.GetBytes(upstreamBody, "request.sessionId").Exists() {
+	if ojson.GetBytes(upstreamBody, "request.sessionId").Exists() {
 		t.Fatalf("upstream countTokens body retained request.sessionId: %s", upstreamBody)
 	}
 }

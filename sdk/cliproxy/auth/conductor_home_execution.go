@@ -7,8 +7,9 @@ import (
 	"sync"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
@@ -72,6 +73,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
@@ -130,13 +132,16 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			return cliproxyexecutor.Response{}, errBind
 		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
+		clearSchedulerSelectionID(opts.Metadata)
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = coreusage.WithSelectionID(execCtx, "")
 		execCtx = newUpstreamAttemptContext(execCtx)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAlias(auth, routeModel)
+		// Home owns credential availability; execute its dispatch without local state filtering.
+		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
 			aliasResult.OriginalAlias = responseAlias
 		}
@@ -198,9 +203,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
 			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
 			if !restoreExecutionModel {
-				execReq = attachResolvedAPIKeyModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel)
-				execReq = attachResolvedHomeModelInfo(execReq, selection.modelInfo)
+				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
@@ -232,11 +237,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
 			}
+			executor := executorForAuth(selection.Executor, preparedAuth)
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
-					return selection.Executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
+					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
 				}
-				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
@@ -272,9 +278,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
+			roundTiming.Observe(errExecute)
 			lastErr = errExecute
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
+					errExecute = annotateTrustedRetryAfterByHint(errExecute)
+					syncPreferredUpstreamError(&upstreamErr, errExecute)
+					lastErr = errExecute
 					releaseAttempt()
 					selection.End("request_stopped")
 					return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
@@ -357,7 +367,7 @@ func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth,
 	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
 		return req
 	}
-	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	updated, errDelete := ojson.DeleteBytes(req.Payload, "generate")
 	if errDelete != nil {
 		return req
 	}

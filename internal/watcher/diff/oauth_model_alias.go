@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 type OAuthModelAliasSummary struct {
@@ -80,6 +80,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 			continue
 		}
 		key := name + "->" + aliasVal
+		if alias.OpenAPI != nil {
+			key += fmt.Sprintf("|openapi=%t", *alias.OpenAPI)
+		}
 		if alias.Fork {
 			key += "|fork"
 		}

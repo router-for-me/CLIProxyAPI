@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // Download single auth file by name
@@ -57,13 +59,17 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 
 	fileHeaders, errMultipart := h.multipartAuthFileHeaders(c)
 	if errMultipart != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid multipart form: %v", errMultipart)})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errMultipart, http.StatusBadRequest), gin.H{"error": fmt.Sprintf("invalid multipart form: %v", errMultipart)})
 		return
 	}
 	if len(fileHeaders) == 1 {
 		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
+				return
+			}
+			if errors.Is(errUpload, errInvalidAuthFile) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errUpload.Error()})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
@@ -118,11 +124,15 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	}
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(400, gin.H{"error": "failed to read body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), gin.H{"error": "failed to read body"})
 		return
 	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, errInvalidAuthFile) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})
@@ -156,13 +166,22 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
+			errDelete := func() error {
+				release := h.beginSIWCFileMutation(ctx, full)
+				defer release()
+				if errRemove := os.Remove(full); errRemove != nil {
+					return nil
+				}
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
+					return errDel
 				}
 				deleted++
 				h.removeAuth(ctx, full)
+				return nil
+			}()
+			if errDelete != nil {
+				c.JSON(500, gin.H{"error": errDelete.Error()})
+				return
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
@@ -171,7 +190,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 
 	names, errNames := requestedAuthFileNamesForDelete(c)
 	if errNames != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errNames.Error()})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errNames, http.StatusBadRequest), gin.H{"error": errNames.Error()})
 		return
 	}
 	if len(names) == 0 {
@@ -269,13 +288,41 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	release := h.beginSIWCFileMutation(ctx, dst)
+	defer release()
+	if errWrite := h.writeAuthFileBytes(dst, data, auth); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
 	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, auth); errHook != nil {
+			return fmt.Errorf("post-auth persist hook failed: %w", errHook)
+		}
+	}
 	return nil
+}
+
+func (h *Handler) writeAuthFileBytes(dst string, data []byte, auth *coreauth.Auth) error {
+	if h.shouldLockCodexAuthFile(auth) {
+		return codex.WithFileLock(dst, func() error {
+			return os.WriteFile(dst, data, 0o600)
+		})
+	}
+	return os.WriteFile(dst, data, 0o600)
+}
+
+func (h *Handler) shouldLockCodexAuthFile(auth *coreauth.Auth) bool {
+	if coreauth.IsCodexAuthRecord(auth) {
+		return true
+	}
+	if h != nil && h.authManager != nil && auth != nil && auth.ID != "" {
+		if existing, ok := h.authManager.GetByID(auth.ID); ok && coreauth.IsCodexAuthRecord(existing) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -289,6 +336,10 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to read body")
 	}
 	body = bytes.TrimSpace(body)
@@ -361,6 +412,8 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
+	release := h.beginSIWCFileMutation(ctx, targetPath)
+	defer release()
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
@@ -451,12 +504,29 @@ func (h *Handler) authIDForPath(path string) string {
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
+	return h.registerAuthFromFileWithID(ctx, path, data, "")
+}
+
+func (h *Handler) registerAuthFromFileWithID(ctx context.Context, path string, data []byte, preferredID string) error {
 	if h.authManager == nil {
 		return nil
 	}
 	auth, err := h.buildAuthFromFileData(path, data)
 	if err != nil {
 		return err
+	}
+	if trimmedID := strings.TrimSpace(preferredID); trimmedID != "" && auth != nil && auth.ID != trimmedID {
+		auth.ID = trimmedID
+		if existing, ok := h.authManager.GetByID(trimmedID); ok && existing != nil {
+			auth.CreatedAt = existing.CreatedAt
+			if !coreauth.CredentialsChanged(existing, auth) {
+				if auth.LastRefreshedAt.IsZero() {
+					auth.LastRefreshedAt = existing.LastRefreshedAt
+				}
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+			}
+			auth.Runtime = existing.Runtime
+		}
 	}
 	return h.upsertAuthRecord(ctx, auth)
 }
@@ -474,9 +544,13 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(data, &metadata); err != nil {
-		return nil, fmt.Errorf("invalid auth file: %w", err)
+		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, err)
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
+	// Loading tolerates invalid exclusion rules, so reject them here before anything is persisted.
+	if _, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(metadata); errExcluded != nil {
+		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errExcluded)
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -501,7 +575,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		}
 		generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
 		if errSynthesize != nil {
-			return nil, fmt.Errorf("invalid auth file: %w", errSynthesize)
+			return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errSynthesize)
 		}
 		if len(generated) > 0 && generated[0] != nil {
 			auth = generated[0].Clone()
@@ -530,10 +604,12 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if h != nil && h.authManager != nil {
 		if existing, ok := h.authManager.GetByID(authID); ok {
 			auth.CreatedAt = existing.CreatedAt
-			if !hasLastRefresh {
-				auth.LastRefreshedAt = existing.LastRefreshedAt
+			if !coreauth.CredentialsChanged(existing, auth) {
+				if !hasLastRefresh {
+					auth.LastRefreshedAt = existing.LastRefreshedAt
+				}
+				auth.NextRefreshAfter = existing.NextRefreshAfter
 			}
-			auth.NextRefreshAfter = existing.NextRefreshAfter
 			auth.Runtime = existing.Runtime
 		}
 	}

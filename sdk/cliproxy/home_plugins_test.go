@@ -7,16 +7,20 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -687,4 +691,169 @@ func TestForceHomeRuntimeConfigClearsStoreAuth(t *testing.T) {
 	if cfg.Plugins.StoreAuth != nil {
 		t.Fatalf("Plugins.StoreAuth = %#v, want nil in Home mode", cfg.Plugins.StoreAuth)
 	}
+}
+
+func TestStageHomeOverlay_InstalledPluginAtRuntime_Issue6225(t *testing.T) {
+	pluginsDir := t.TempDir()
+	platform := homeplugins.CurrentPlatform()
+	ext := ".so"
+	switch platform.GOOS {
+	case "darwin":
+		ext = ".dylib"
+	case "windows":
+		ext = ".dll"
+	}
+	pluginFileName := "myplugin-v1.0.0" + ext
+	if errWrite := os.WriteFile(filepath.Join(pluginsDir, pluginFileName), []byte("dummy"), 0o755); errWrite != nil {
+		t.Fatalf("write dummy plugin file: %v", errWrite)
+	}
+
+	baseCfg := &config.Config{}
+	baseCfg.Home.Enabled = true
+	baseCfg.Home.NodeID = "node-1"
+	baseCfg.Plugins.Enabled = true
+	baseCfg.Plugins.Dir = pluginsDir
+	baseCfg.Plugins.Configs = map[string]config.PluginInstanceConfig{}
+
+	enabled := true
+	remoteCfg := &config.Config{}
+	remoteCfg.Home.Enabled = true
+	remoteCfg.Home.NodeID = "node-1"
+	remoteCfg.Plugins.Enabled = true
+	remoteCfg.Plugins.Dir = pluginsDir
+	remoteCfg.Plugins.Configs = map[string]config.PluginInstanceConfig{
+		"myplugin": {Enabled: &enabled},
+	}
+
+	client, writes := newHomePluginTaskTestClient(t, nil, 0)
+
+	service := &Service{
+		cfg:        baseCfg,
+		pluginHost: pluginhost.New(),
+		homePluginSyncFetch: func(context.Context, sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+			return sdkpluginstore.PluginSyncResponse{
+				SchemaVersion: sdkpluginstore.PluginSyncSchemaVersion,
+				ExpiresAt:     time.Now().UTC().Add(time.Minute),
+				Items:         []sdkpluginstore.PluginSyncItem{},
+			}, nil
+		},
+	}
+
+	work, errStage := service.stageHomeOverlayWithClient(context.Background(), remoteCfg, client)
+	if errStage != nil {
+		t.Fatalf("stageHomeOverlayWithClient() error = %v, want successful stage without premature load failure", errStage)
+	}
+	if work == nil {
+		t.Fatal("stageHomeOverlayWithClient() returned nil work")
+	}
+	if len(work.statusWork) != 1 {
+		t.Fatalf("len(work.statusWork) = %d, want 1", len(work.statusWork))
+	}
+	if !work.statusWork[0].needsLoadMarking {
+		t.Fatal("statusWork[0].needsLoadMarking = false, want true")
+	}
+
+	if errFinalize := service.finalizeHomePluginWork(context.Background(), client, work); errFinalize != nil {
+		t.Fatalf("finalizeHomePluginWork() error = %v", errFinalize)
+	}
+	if writes.Load() != 1 {
+		t.Fatalf("plugin status writes = %d, want 1", writes.Load())
+	}
+	if work.statusWork[0].needsLoadMarking {
+		t.Fatal("statusWork[0].needsLoadMarking = true after finalize, want false")
+	}
+	if gotLoadStatus := work.statusWork[0].report.Plugins[0].LoadStatus; gotLoadStatus != "failed" {
+		t.Fatalf("LoadStatus = %q, want 'failed' for unapplied plugin", gotLoadStatus)
+	}
+}
+
+func TestHomeConfigWorkQueue_TryDequeueLatest_Issue6225(t *testing.T) {
+	q := newHomeConfigWorkQueue()
+	if _, ok := q.tryDequeueLatest(); ok {
+		t.Fatal("tryDequeueLatest() on empty queue = true, want false")
+	}
+
+	q.enqueue([]byte("payload-1"))
+	q.enqueue([]byte("payload-2"))
+	q.enqueue([]byte("payload-3"))
+
+	latest, ok := q.tryDequeueLatest()
+	if !ok {
+		t.Fatal("tryDequeueLatest() = false, want true")
+	}
+	if string(latest) != "payload-3" {
+		t.Fatalf("tryDequeueLatest() = %q, want payload-3", string(latest))
+	}
+
+	if _, ok := q.tryDequeueLatest(); ok {
+		t.Fatal("tryDequeueLatest() after draining = true, want false")
+	}
+}
+
+func TestHomeConfigWorkerPreemptsFailingConfigWithNewerPayload_Issue6225(t *testing.T) {
+	client, _ := newHomePluginTaskTestClient(t, nil, 0)
+	baseCfg := &config.Config{}
+	baseCfg.Home.Enabled = true
+	baseCfg.Routing.Strategy = "initial"
+
+	service := &Service{
+		cfg:            baseCfg,
+		homeGeneration: 1,
+		homePluginSyncFetch: func(_ context.Context, _ sdkpluginstore.PluginSyncRequest) (sdkpluginstore.PluginSyncResponse, error) {
+			return sdkpluginstore.PluginSyncResponse{
+				SchemaVersion: sdkpluginstore.PluginSyncSchemaVersion,
+				ExpiresAt:     time.Now().Add(time.Minute),
+			}, nil
+		},
+	}
+
+	queue := newHomeConfigWorkQueue()
+	// Enqueue an invalid payload that fails config parsing and triggers the retry loop
+	queue.enqueue([]byte("invalid: yaml: ["))
+	// Enqueue a valid recovered config payload that should preempt the failing one during retry
+	queue.enqueue([]byte("plugins:\n  enabled: true\nrouting:\n  strategy: recovered\n"))
+
+	ready := make(chan struct{})
+	close(ready)
+	lifetimeCtx, cancelLifetime := context.WithCancel(context.Background())
+	workerDone := make(chan struct{})
+	t.Cleanup(func() {
+		cancelLifetime()
+		select {
+		case <-workerDone:
+		case <-time.After(time.Second):
+		}
+	})
+
+	cancelBound := atomic.Int64{}
+	cancelBound.Store(int64(time.Second))
+	published := atomic.Bool{}
+	published.Store(true)
+
+	go func() {
+		defer close(workerDone)
+		service.runHomeConfigWorker(lifetimeCtx, context.Background(), 1, client, executionregistry.New(), queue, ready, &published, &cancelBound)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		service.cfgMu.RLock()
+		strat := service.cfg.Routing.Strategy
+		service.cfgMu.RUnlock()
+		if strat == "recovered" {
+			return
+		}
+		pollTimer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-lifetimeCtx.Done():
+			pollTimer.Stop()
+			return
+		case <-pollTimer.C:
+		}
+	}
+
+	service.cfgMu.RLock()
+	currentStrat := service.cfg.Routing.Strategy
+	service.cfgMu.RUnlock()
+	t.Fatalf("worker never recovered to strategy 'recovered', current=%q", currentStrat)
 }

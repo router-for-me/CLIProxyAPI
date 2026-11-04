@@ -3,8 +3,8 @@ package cliproxy
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // NewFileTokenClientProvider returns the default token-backed client loader.
@@ -29,7 +29,7 @@ func NewAPIKeyClientProvider() APIKeyClientProvider {
 type apiKeyClientProvider struct{}
 
 func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error) {
-	geminiCount, vertexCompatCount, claudeCount, codexCount, xaiCount, openAICompat := watcher.BuildAPIKeyClients(cfg)
+	geminiCount, vertexCompatCount, claudeCount, codexCount, xaiCount, metaCount, openAICompat := watcher.BuildAPIKeyClients(cfg)
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -43,6 +43,7 @@ func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*A
 		ClaudeKeyCount:       claudeCount,
 		CodexKeyCount:        codexCount,
 		XAIKeyCount:          xaiCount,
+		MetaKeyCount:         metaCount,
 		OpenAICompatCount:    openAICompat,
 	}, nil
 }

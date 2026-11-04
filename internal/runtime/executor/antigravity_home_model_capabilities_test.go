@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type antigravityHomeModelCapabilityDispatcher struct {
@@ -90,10 +90,10 @@ func TestAntigravityHomeModelThinkingLevelRemainsLevel(t *testing.T) {
 	}
 
 	upstreamBody := <-requestBodies
-	if got := gjson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
+	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
 		t.Fatalf("thinkingLevel = %q, want medium; body=%s", got, upstreamBody)
 	}
-	if budget := gjson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+	if budget := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
 		t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, upstreamBody)
 	}
 }

@@ -7,19 +7,20 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // ConvertClaudeRequestToCodex parses and transforms a Claude Code API request into the internal client format.
@@ -41,25 +42,48 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in internal client format
-func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
-	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
+func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return ConvertClaudeRequestToCodexContext(context.Background(), modelName, inputRawJSON, stream)
+
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
-// empty signatures for configured compatibility endpoints.
-func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
-	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
+// empty or unknown-format signatures for configured compatibility endpoints.
+func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return ConvertClaudeRequestToCodexWithCompatContext(context.Background(), modelName, inputRawJSON, stream)
 }
 
-func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks bool) []byte {
+func ConvertClaudeRequestToCodexContext(ctx context.Context, modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false, translatorcommon.VisibleCodexCommentary(ctx))
+}
+
+func ConvertClaudeRequestToCodexWithCompatContext(ctx context.Context, modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true, translatorcommon.VisibleCodexCommentary(ctx))
+}
+
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks, visibleCommentary bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 
-	template := []byte(`{"model":"","instructions":"","input":[]}`)
+	templateDoc := ojson.NewDocString(`{"model":"","instructions":"","input":[]}`)
 
-	rootResult := gjson.ParseBytes(rawJSON)
-	toolNameMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
-	template, _ = sjson.SetBytes(template, "model", modelName)
+	rootResult := util.ParseGJSONBytesNoCopy(rawJSON)
+	mayHaveToolAddition := claudePayloadMayContainToolAddition(rawJSON)
+	toolNameMap := buildReverseMapFromClaudeOriginalToShortFromResult(rootResult, mayHaveToolAddition)
+	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, rawJSON)
+	_ = templateDoc.Set("model", modelName)
+	maxOutputTokens := rootResult.Get("max_tokens")
+	if !maxOutputTokens.Exists() {
+		maxOutputTokens = rootResult.Get("max_output_tokens")
+	}
+	if maxOutputTokens.Type == ojson.Number {
+		_ = templateDoc.Set("max_output_tokens", maxOutputTokens.Int())
+	}
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
+	toolsResult := rootResult.Get("tools")
+	var declaredToolsByName map[string]ojson.Result
+	declaredToolsIndexed := false
+	hasAdditionalTools := false
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
@@ -72,11 +96,11 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			}
 
 			content := []byte(`{"type":"input_text","text":""}`)
-			content, _ = sjson.SetBytes(content, "text", text)
+			content, _ = ojson.SetBytes(content, "text", text)
 			contentItems = append(contentItems, content)
 		}
 
-		if systemsResult.Type == gjson.String {
+		if systemsResult.Type == ojson.String {
 			appendSystemText(systemsResult.String())
 		} else if systemsResult.IsArray() {
 			systemResults := systemsResult.Array()
@@ -90,7 +114,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 
 		if len(contentItems) > 0 {
 			message := []byte(`{"type":"message","role":"developer"}`)
-			message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
+			message, _ = ojson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
 			inputItems = append(inputItems, message)
 		}
 	}
@@ -101,18 +125,31 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		messageResults := messagesResult.Array()
 		var pendingToolUseIDs []string
 		var pendingSystemReminders [][]byte
+		var pendingCommentaryMirror string
 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			if messageRole != "assistant" {
+				pendingCommentaryMirror = ""
+			}
 			if messageRole == "system" {
-				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
+				systemContent := messageResult.Get("content")
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(systemContent); ok {
 					message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
-					message, _ = sjson.SetBytes(message, "content.0.text", reminderText)
+					message, _ = ojson.SetBytes(message, "content.0.text", reminderText)
 					if len(pendingToolUseIDs) > 0 {
 						pendingSystemReminders = append(pendingSystemReminders, message)
 					} else {
 						inputItems = append(inputItems, message)
+					}
+				}
+				if additionalTools, ok := convertClaudeSystemAdditionalTools(systemContent, toolsResult, &declaredToolsByName, &declaredToolsIndexed, toolNameMap); ok {
+					hasAdditionalTools = true
+					if len(pendingToolUseIDs) > 0 {
+						pendingSystemReminders = append(pendingSystemReminders, additionalTools)
+					} else {
+						inputItems = append(inputItems, additionalTools)
 					}
 				}
 				continue
@@ -124,64 +161,109 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			}
 			pendingToolUseIDs = nil
 			contentItems := make([][]byte, 0, 4)
+			// Counts only what this turn itself sends, not system reminders flushed beside it.
+			// Empty text is forwarded but does not count: it can hide an emptied attachment.
+			turnSendable := 0
+			bufferedSendable := 0
 
 			flushMessage := func() {
 				if len(contentItems) > 0 {
-					message := []byte(`{"type":"message","role":""}`)
-					message, _ = sjson.SetBytes(message, "role", messageRole)
-					message, _ = sjson.SetRawBytes(message, "content", translatorcommon.JoinRawArray(contentItems))
-					inputItems = append(inputItems, message)
+					turnSendable += bufferedSendable
+					bufferedSendable = 0
+					messageDoc := ojson.NewDocString(`{"type":"message","role":""}`)
+					_ = messageDoc.Set("role", messageRole)
+					_ = messageDoc.SetRawBytes("content", translatorcommon.JoinRawArray(contentItems))
+					inputItems = append(inputItems, messageDoc.Bytes())
 					contentItems = contentItems[:0]
 				}
 			}
 
 			appendTextContent := func(text string) {
+				if messageRole == "assistant" && pendingCommentaryMirror != "" {
+					expected := pendingCommentaryMirror
+					pendingCommentaryMirror = ""
+					if text == expected {
+						return
+					}
+				}
 				partType := "input_text"
 				if messageRole == "assistant" {
 					partType = "output_text"
 				}
-				content := []byte(`{"type":"","text":""}`)
-				content, _ = sjson.SetBytes(content, "type", partType)
-				content, _ = sjson.SetBytes(content, "text", text)
-				contentItems = append(contentItems, content)
+				contentDoc := ojson.NewDocString(`{"type":"","text":""}`)
+				_ = contentDoc.Set("type", partType)
+				_ = contentDoc.Set("text", text)
+				contentItems = append(contentItems, contentDoc.Bytes())
+				if text != "" {
+					bufferedSendable++
+				}
 			}
 
-			appendImageContent := func(dataURL string) {
-				content := []byte(`{"type":"input_image","image_url":""}`)
-				content, _ = sjson.SetBytes(content, "image_url", dataURL)
+			appendImageContent := func(content []byte) {
+				pendingCommentaryMirror = ""
 				contentItems = append(contentItems, content)
+				bufferedSendable++
 			}
 
 			appendDocumentContent := func(dataURL string) {
+				pendingCommentaryMirror = ""
 				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
-				content, _ = sjson.SetBytes(content, "file_data", dataURL)
+				content, _ = ojson.SetBytes(content, "file_data", dataURL)
 				contentItems = append(contentItems, content)
+				bufferedSendable++
 			}
 
-			appendReasoningContent := func(part gjson.Result) {
+			appendCommentaryContent := func(part ojson.Result) {
+				if messageRole != "assistant" {
+					return
+				}
+				text := part.Get("thinking").String()
+				if text == "" {
+					return
+				}
+				// A relayed commentary block becomes its own assistant message item
+				// carrying phase "commentary", mirroring the Codex output item it
+				// came from. The internal marker is consumed here and never
+				// forwarded upstream.
+				flushMessage()
+				content := []byte(`{"type":"output_text","text":""}`)
+				content, _ = ojson.SetBytes(content, "text", text)
+				message := []byte(`{"type":"message","role":"assistant","phase":"commentary"}`)
+				message, _ = ojson.SetRawBytes(message, "content", translatorcommon.JoinRawArray([][]byte{content}))
+				inputItems = append(inputItems, message)
+			}
+
+			appendReasoningContent := func(part ojson.Result) {
 				if messageRole != "assistant" {
 					return
 				}
 
+				pendingCommentaryMirror = ""
 				rawSignature := part.Get("signature").String()
-				signature, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, rawSignature)
+				if sigcompat.IsCodexCommentarySignatureMarker(rawSignature) {
+					appendCommentaryContent(part)
+					if visibleCommentary {
+						pendingCommentaryMirror = part.Get("thinking").String()
+					}
+					return
+				}
+				signature, ok := translatorcommon.CodexReplaySignatureForTarget(signatureTargetModel, rawSignature)
+				if !ok && preserveEmptyThinkingBlocks && part.Get("signature").Type == ojson.String && strings.TrimSpace(rawSignature) != "" &&
+					sigcompat.DetectSignatureProviderForBlock(rawSignature, sigcompat.SignatureBlockKindClaudeThinking) == sigcompat.SignatureProviderUnknown {
+					signature = rawSignature
+					ok = true
+				}
 				if !ok {
 					if preserveEmptyThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 						signature = rawSignature
 					} else {
-						if !codexClaudeTargetAcceptsGrokSignature(modelName) {
-							return
-						}
-						if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err != nil {
-							return
-						}
-						signature = rawSignature
+						return
 					}
 				}
 
 				flushMessage()
 				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
-				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
+				reasoningItem, _ = ojson.SetBytes(reasoningItem, "encrypted_content", signature)
 				inputItems = append(inputItems, reasoningItem)
 			}
 
@@ -190,6 +272,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				for j := 0; j < len(messageContentResults); j++ {
 					messageContentResult := messageContentResults[j]
 					contentType := messageContentResult.Get("type").String()
+					if contentType != "text" && contentType != "thinking" {
+						pendingCommentaryMirror = ""
+					}
 
 					switch contentType {
 					case "text":
@@ -205,51 +290,29 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							inputItems = append(inputItems, pendingSystemReminders...)
 							pendingSystemReminders = nil
 						}
-						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Exists() {
-							data := sourceResult.Get("data").String()
-							if data == "" {
-								data = sourceResult.Get("base64").String()
-							}
-							if data != "" {
-								mediaType := sourceResult.Get("media_type").String()
-								if mediaType == "" {
-									mediaType = sourceResult.Get("mime_type").String()
-								}
-								if mediaType == "" {
-									mediaType = "application/octet-stream"
-								}
-								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-								appendImageContent(dataURL)
-							}
+						if imagePart, ok := claudeImageInputPart(messageContentResult.Get("source")); ok {
+							appendImageContent(imagePart)
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
-					case "document":
+					case "document", "container_upload":
 						if len(pendingSystemReminders) > 0 {
 							inputItems = append(inputItems, pendingSystemReminders...)
 							pendingSystemReminders = nil
 						}
-						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Get("type").String() != "base64" {
-							continue
-						}
-						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
-						if !strings.EqualFold(mediaType, "application/pdf") {
-							continue
-						}
-						data := sourceResult.Get("data").String()
-						if data == "" {
-							data = sourceResult.Get("base64").String()
-						}
-						if data != "" {
-							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+						if dataURL, ok := claudeDocumentDataURL(messageContentResult); ok {
+							appendDocumentContent(dataURL)
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
 					case "tool_use":
+						pendingCommentaryMirror = ""
 						flushMessage()
 						if id := messageContentResult.Get("id").String(); id != "" {
 							pendingToolUseIDs = append(pendingToolUseIDs, id)
 						}
-						functionCallMessage := []byte(`{"type":"function_call"}`)
-						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
+						functionCallMessageDoc := ojson.NewDocString(`{"type":"function_call"}`)
+						_ = functionCallMessageDoc.Set("call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()))
 						{
 							name := messageContentResult.Get("name").String()
 							if short, ok := toolNameMap[name]; ok {
@@ -257,14 +320,14 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							} else {
 								name = shortenNameIfNeeded(name)
 							}
-							functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "name", name)
+							_ = functionCallMessageDoc.Set("name", name)
 						}
-						functionCallMessage, _ = sjson.SetBytes(functionCallMessage, "arguments", messageContentResult.Get("input").Raw)
-						inputItems = append(inputItems, functionCallMessage)
+						_ = functionCallMessageDoc.Set("arguments", messageContentResult.Get("input").Raw)
+						inputItems = append(inputItems, functionCallMessageDoc.Bytes())
 					case "tool_result":
 						flushMessage()
-						functionCallOutputMessage := []byte(`{"type":"function_call_output"}`)
-						functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String()))
+						functionCallOutputMessageDoc := ojson.NewDocString(`{"type":"function_call_output"}`)
+						_ = functionCallOutputMessageDoc.Set("call_id", shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String()))
 
 						contentResult := messageContentResult.Get("content")
 						if contentResult.IsArray() {
@@ -290,26 +353,27 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
 
 											toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
-											toolResultContent, _ = sjson.SetBytes(toolResultContent, "image_url", dataURL)
+											toolResultContent, _ = ojson.SetBytes(toolResultContent, "image_url", dataURL)
 											toolResultContentItems = append(toolResultContentItems, toolResultContent)
 										}
 									}
 								} else if toolResultContentType == "text" {
 									toolResultContent := []byte(`{"type":"input_text","text":""}`)
-									toolResultContent, _ = sjson.SetBytes(toolResultContent, "text", contentResults[k].Get("text").String())
+									toolResultContent, _ = ojson.SetBytes(toolResultContent, "text", contentResults[k].Get("text").String())
 									toolResultContentItems = append(toolResultContentItems, toolResultContent)
 								}
 							}
 							if len(toolResultContentItems) > 0 {
-								functionCallOutputMessage, _ = sjson.SetRawBytes(functionCallOutputMessage, "output", translatorcommon.JoinRawArray(toolResultContentItems))
+								_ = functionCallOutputMessageDoc.SetRawBytes("output", translatorcommon.JoinRawArray(toolResultContentItems))
 							} else {
-								functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+								_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
 							}
 						} else {
-							functionCallOutputMessage, _ = sjson.SetBytes(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+							_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
 						}
 
-						inputItems = append(inputItems, functionCallOutputMessage)
+						inputItems = append(inputItems, functionCallOutputMessageDoc.Bytes())
+						turnSendable++
 					}
 				}
 				flushMessage()
@@ -317,13 +381,16 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					inputItems = append(inputItems, pendingSystemReminders...)
 					pendingSystemReminders = nil
 				}
-			} else if messageContentsResult.Type == gjson.String {
+			} else if messageContentsResult.Type == ojson.String {
 				appendTextContent(messageContentsResult.String())
 				flushMessage()
 				if len(pendingSystemReminders) > 0 {
 					inputItems = append(inputItems, pendingSystemReminders...)
 					pendingSystemReminders = nil
 				}
+			}
+			if messageRole == "user" {
+				drops.EndTurn(turnSendable)
 			}
 		}
 
@@ -333,47 +400,24 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	}
 
 	// Convert tools declarations to the expected format for the Codex API.
-	toolsResult := rootResult.Get("tools")
+	hasWebSearchTool := false
 	var toolItems [][]byte
-	if toolsResult.IsArray() {
+	if toolsResult.IsArray() || hasAdditionalTools {
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
-		template, _ = sjson.SetRawBytes(template, "tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
+		_ = templateDoc.SetRawBytes("tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
+	}
+	if toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
 		toolItems = make([][]byte, 0, len(toolResults))
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
 			if isClaudeWebSearchToolType(toolResult.Get("type").String()) {
+				hasWebSearchTool = true
 				toolItems = append(toolItems, convertClaudeWebSearchToolToCodex(toolResult))
 				continue
 			}
-			tool := []byte(toolResult.Raw)
-			if toolResult.Get("type").Type != gjson.String || toolResult.Get("type").String() != "function" {
-				tool, _ = sjson.SetBytes(tool, "type", "function")
-			}
-			// Apply shortened name if needed
-			if v := toolResult.Get("name"); v.Exists() {
-				originalName := v.String()
-				name := originalName
-				if short, ok := toolNameMap[name]; ok {
-					name = short
-				} else {
-					name = shortenNameIfNeeded(name)
-				}
-				if v.Type != gjson.String || name != originalName {
-					tool, _ = sjson.SetBytes(tool, "name", name)
-				}
-			}
-			tool, _ = sjson.SetRawBytes(tool, "parameters", []byte(normalizeToolParameters(toolResult.Get("input_schema").Raw)))
-			for _, path := range []string{"input_schema", "parameters.$schema", "cache_control", "defer_loading"} {
-				if gjson.GetBytes(tool, path).Exists() {
-					tool, _ = sjson.DeleteBytes(tool, path)
-				}
-			}
-			if gjson.GetBytes(tool, "strict").Type != gjson.False {
-				tool, _ = sjson.SetBytes(tool, "strict", false)
-			}
-			toolItems = append(toolItems, tool)
+			toolItems = append(toolItems, convertClaudeFunctionToolToCodex(toolResult, toolNameMap))
 		}
 	}
 
@@ -384,10 +428,14 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	}
 
 	// Add additional configuration parameters for the Codex API.
-	template, _ = sjson.SetBytes(template, "parallel_tool_calls", parallelToolCalls)
+	_ = templateDoc.Set("parallel_tool_calls", parallelToolCalls)
 
-	// Convert thinking.budget_tokens to reasoning.effort.
+	// Convert Claude thinking budgets and effort to reasoning.effort.
 	reasoningEffort := "medium"
+	effort := ""
+	if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == ojson.String {
+		effort = strings.ToLower(strings.TrimSpace(v.String()))
+	}
 	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		switch thinkingConfig.Get("type").String() {
 		case "enabled":
@@ -400,10 +448,6 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		case "adaptive", "auto":
 			// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 			// Pass through directly; ApplyThinking handles clamping to target model's levels.
-			effort := ""
-			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
-				effort = strings.ToLower(strings.TrimSpace(v.String()))
-			}
 			if effort != "" {
 				reasoningEffort = effort
 			} else {
@@ -414,21 +458,27 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				reasoningEffort = effort
 			}
 		}
+	} else if !thinkingConfig.Exists() && effort != "" {
+		reasoningEffort = effort
 	}
-	template, _ = sjson.SetBytes(template, "reasoning.effort", reasoningEffort)
+	_ = templateDoc.Set("reasoning.effort", reasoningEffort)
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead
 	// of coupling it to reasoning effort.
 	serviceTier := normalizeCodexServiceTier(rootResult.Get("service_tier"))
-	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
+	if speed := rootResult.Get("speed"); speed.Type == ojson.String && speed.String() == "fast" {
 		serviceTier = "priority"
 	}
 	if serviceTier != "" {
-		template, _ = sjson.SetBytes(template, "service_tier", serviceTier)
+		_ = templateDoc.Set("service_tier", serviceTier)
 	}
-	template, _ = sjson.SetBytes(template, "stream", true)
-	template, _ = sjson.SetBytes(template, "store", false)
-	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
+	_ = templateDoc.Set("stream", true)
+	_ = templateDoc.Set("store", false)
+	includeFields := []string{"reasoning.encrypted_content"}
+	if hasWebSearchTool {
+		includeFields = append(includeFields, "web_search_call.action.sources")
+	}
+	_ = templateDoc.Set("include", includeFields)
 
 	// Map Claude output_config.format to Codex Responses text.format.
 	if format := rootResult.Get("output_config.format"); format.IsObject() && format.Get("type").String() == "json_schema" && format.Get("schema").IsObject() {
@@ -437,7 +487,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 			name = n
 		}
 		strict := true
-		if s := format.Get("strict"); s.Exists() && s.Type == gjson.False {
+		if s := format.Get("strict"); s.Exists() && s.Type == ojson.False {
 			strict = false
 		}
 		// OpenAI strict mode requires every declared property to be listed
@@ -446,28 +496,23 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		if strict && codexSchemaMissesRequired(format.Get("schema")) {
 			strict = false
 		}
-		translatedFormat := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
-		translatedFormat, _ = sjson.SetBytes(translatedFormat, "name", name)
-		translatedFormat, _ = sjson.SetBytes(translatedFormat, "strict", strict)
-		translatedFormat, _ = sjson.SetRawBytes(translatedFormat, "schema", []byte(format.Get("schema").Raw))
-		template, _ = sjson.SetRawBytes(template, "text.format", translatedFormat)
+		translatedFormatDoc := ojson.NewDocString(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
+		_ = translatedFormatDoc.Set("name", name)
+		_ = translatedFormatDoc.Set("strict", strict)
+		_ = translatedFormatDoc.SetRawBytes("schema", []byte(format.Get("schema").Raw))
+		_ = templateDoc.SetRawBytes("text.format", translatedFormatDoc.Bytes())
 	}
 
 	if toolsResult.IsArray() {
-		template, _ = sjson.SetRawBytes(template, "tools", translatorcommon.JoinRawArray(toolItems))
+		_ = templateDoc.SetRawBytes("tools", translatorcommon.JoinRawArray(toolItems))
 	}
-	template = translatorcommon.SetRawArrayItems(template, "input", inputItems)
+	translatorcommon.SetRawArrayItemsDoc(templateDoc, "input", inputItems)
 
-	return template
+	return templateDoc.Bytes(), drops.Err()
 }
 
-func codexClaudeTargetAcceptsGrokSignature(modelName string) bool {
-	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
-	return strings.Contains(baseModel, "grok")
-}
-
-func normalizeCodexServiceTier(result gjson.Result) string {
-	if !result.Exists() || result.Type != gjson.String {
+func normalizeCodexServiceTier(result ojson.Result) string {
+	if !result.Exists() || result.Type != ojson.String {
 		return ""
 	}
 
@@ -500,13 +545,13 @@ func isClaudeWebSearchToolType(toolType string) bool {
 	return toolType == "web_search_20250305" || toolType == "web_search_20260209"
 }
 
-func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
+func buildClaudeWebSearchToolNameSet(tools ojson.Result) map[string]struct{} {
 	names := map[string]struct{}{}
 	if !tools.IsArray() {
 		return names
 	}
 
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		toolType := tool.Get("type").String()
 		if !isClaudeWebSearchToolType(toolType) {
 			return true
@@ -521,13 +566,13 @@ func buildClaudeWebSearchToolNameSet(tools gjson.Result) map[string]struct{} {
 	return names
 }
 
-func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
-	if !toolChoice.Exists() || toolChoice.Type == gjson.Null {
+func convertClaudeToolChoiceToCodex(toolChoice ojson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
+	if !toolChoice.Exists() || toolChoice.Type == ojson.Null {
 		return []byte(`"auto"`)
 	}
 
 	choiceType := toolChoice.Get("type").String()
-	if choiceType == "" && toolChoice.Type == gjson.String {
+	if choiceType == "" && toolChoice.Type == ojson.String {
 		choiceType = toolChoice.String()
 	}
 
@@ -553,23 +598,28 @@ func convertClaudeToolChoiceToCodex(toolChoice gjson.Result, toolNameMap map[str
 		}
 
 		choice := []byte(`{"type":"function","name":""}`)
-		choice, _ = sjson.SetBytes(choice, "name", name)
+		choice, _ = ojson.SetBytes(choice, "name", name)
 		return choice
 	default:
 		return []byte(`"auto"`)
 	}
 }
 
-func convertClaudeWebSearchToolToCodex(tool gjson.Result) []byte {
-	out := []byte(`{"type":"web_search"}`)
+func convertClaudeWebSearchToolToCodex(tool ojson.Result) []byte {
+	outDoc := ojson.NewDocString(`{"type":"web_search"}`)
 	if allowedDomains := tool.Get("allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
-		out, _ = sjson.SetRawBytes(out, "filters.allowed_domains", []byte(allowedDomains.Raw))
+		_ = outDoc.SetRawBytes("filters.allowed_domains", []byte(allowedDomains.Raw))
 	}
 	if userLocation := tool.Get("user_location"); userLocation.Exists() && userLocation.IsObject() {
-		out, _ = sjson.SetRawBytes(out, "user_location", []byte(userLocation.Raw))
+		_ = outDoc.SetRawBytes("user_location", []byte(userLocation.Raw))
 	}
-	return out
+	return outDoc.Bytes()
 }
+
+// gatewayToolNamePattern matches gateway tool ids of the form
+// `[mcp_]<server words>-<hex id...>_<tool>`, e.g.
+// `mcp_github-12345678-9abc-def0-1234-56789abcdef0-12345678_add-issue-comment`.
+var gatewayToolNamePattern = regexp.MustCompile(`^(?:mcp_)?([a-z][a-z0-9-]*?)-[0-9a-f]{6,}(?:-[0-9a-f]+)*_(.+)$`)
 
 // shortenNameIfNeeded applies a simple shortening rule for a single name.
 func shortenNameIfNeeded(name string) string {
@@ -580,11 +630,20 @@ func shortenNameIfNeeded(name string) string {
 	if strings.HasPrefix(name, "mcp__") {
 		idx := strings.LastIndex(name, "__")
 		if idx > 0 {
-			cand := "mcp__" + name[idx+2:]
-			if len(cand) > limit {
-				return cand[:limit]
+			rest := name[idx+2:]
+			cand := "mcp__" + rest
+			if len(cand) <= limit {
+				return cand
 			}
-			return cand
+			// Plain truncation keeps only the shared server prefix, so every tool of a
+			// long-named server collapses to the same 64 characters and the model cannot
+			// tell them apart. Keep the server's words and the tool's own name instead.
+			if m := gatewayToolNamePattern.FindStringSubmatch(rest); m != nil {
+				if readable := "mcp__" + m[1] + "_" + m[2]; len(readable) <= limit {
+					return readable
+				}
+			}
+			return cand[:limit]
 		}
 	}
 	return name[:limit]
@@ -596,22 +655,7 @@ func buildShortNameMap(names []string) map[string]string {
 	used := map[string]struct{}{}
 	m := map[string]string{}
 
-	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
-		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
-				}
-				return cand
-			}
-		}
-		return n[:limit]
-	}
+	baseCandidate := shortenNameIfNeeded
 
 	makeUnique := func(cand string) string {
 		if _, ok := used[cand]; !ok {
@@ -636,33 +680,232 @@ func buildShortNameMap(names []string) map[string]string {
 	}
 
 	for _, n := range names {
+		n = strings.Clone(n)
+		if _, exists := m[n]; exists {
+			continue
+		}
 		cand := baseCandidate(n)
-		uniq := makeUnique(cand)
+		uniq := strings.Clone(makeUnique(cand))
 		used[uniq] = struct{}{}
 		m[n] = uniq
 	}
 	return m
 }
 
-// buildReverseMapFromClaudeOriginalToShort builds original->short map, used to map tool_use names to short.
-func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string {
-	tools := gjson.GetBytes(original, "tools")
-	m := map[string]string{}
-	if !tools.IsArray() {
-		return m
+func convertClaudeFunctionToolToCodex(toolResult ojson.Result, toolNameMap map[string]string) []byte {
+	toolDoc := ojson.NewDocString(toolResult.Raw)
+	if toolResult.Get("type").Type != ojson.String || toolResult.Get("type").String() != "function" {
+		_ = toolDoc.Set("type", "function")
 	}
-	var names []string
-	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
-		n := arr[i].Get("name").String()
-		if n != "" {
-			names = append(names, n)
+	// Apply shortened name if needed
+	if v := toolResult.Get("name"); v.Exists() {
+		originalName := v.String()
+		name := originalName
+		if short, ok := toolNameMap[name]; ok {
+			name = short
+		} else {
+			name = shortenNameIfNeeded(name)
+		}
+		if v.Type != ojson.String || name != originalName {
+			_ = toolDoc.Set("name", name)
 		}
 	}
-	if len(names) > 0 {
-		m = buildShortNameMap(names)
+	normalizedParams := normalizeToolParameters(toolResult.Get("input_schema").Raw)
+	_ = toolDoc.SetRawBytes("parameters", []byte(normalizedParams))
+	for _, path := range []string{"input_schema", "cache_control", "defer_loading"} {
+		if toolResult.Get(path).Exists() {
+			_ = toolDoc.Delete(path)
+		}
 	}
-	return m
+	if ojson.GetBytesNoCopy([]byte(normalizedParams), "$schema").Exists() {
+		_ = toolDoc.Delete("parameters.$schema")
+	}
+	if toolResult.Get("strict").Type != ojson.False {
+		_ = toolDoc.Set("strict", false)
+	}
+	return toolDoc.Bytes()
+}
+
+func ensureClaudeDeclaredToolsIndexed(toolsResult ojson.Result, declaredToolsByName *map[string]ojson.Result, declaredToolsIndexed *bool) {
+	if *declaredToolsIndexed {
+		return
+	}
+	*declaredToolsIndexed = true
+	if !toolsResult.IsArray() {
+		return
+	}
+	toolArr := toolsResult.Array()
+	if *declaredToolsByName == nil {
+		*declaredToolsByName = make(map[string]ojson.Result, len(toolArr))
+	}
+	for i := 0; i < len(toolArr); i++ {
+		if name := toolArr[i].Get("name").String(); name != "" {
+			if _, exists := (*declaredToolsByName)[name]; !exists {
+				(*declaredToolsByName)[name] = toolArr[i]
+			}
+		}
+	}
+}
+
+// convertClaudeSystemAdditionalTools converts mid-conversation tool_addition blocks
+// inside a role=system message into a Responses additional_tools input item.
+func convertClaudeSystemAdditionalTools(content, toolsResult ojson.Result, declaredToolsByName *map[string]ojson.Result, declaredToolsIndexed *bool, toolNameMap map[string]string) ([]byte, bool) {
+	if !content.IsArray() {
+		return nil, false
+	}
+	parts := content.Array()
+	var toolItems [][]byte
+	var indexByName map[string]int
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		if part.Get("type").String() != "tool_addition" {
+			continue
+		}
+		toolSpec := part.Get("tool")
+		var def ojson.Result
+		switch toolSpec.Get("type").String() {
+		case "tool_definition":
+			def = toolSpec.Get("definition")
+			if def.IsObject() {
+				if name := def.Get("name").String(); name != "" {
+					ensureClaudeDeclaredToolsIndexed(toolsResult, declaredToolsByName, declaredToolsIndexed)
+					if *declaredToolsByName == nil {
+						*declaredToolsByName = make(map[string]ojson.Result)
+					}
+					(*declaredToolsByName)[name] = def
+				}
+			}
+		case "tool_reference":
+			ensureClaudeDeclaredToolsIndexed(toolsResult, declaredToolsByName, declaredToolsIndexed)
+			refName := toolSpec.Get("name").String()
+			if refName == "" {
+				refName = toolSpec.Get("tool_name").String()
+			}
+			if refName != "" && *declaredToolsByName != nil {
+				def = (*declaredToolsByName)[refName]
+			}
+		default:
+			if candidate := toolSpec.Get("definition"); candidate.IsObject() {
+				def = candidate
+				if name := def.Get("name").String(); name != "" {
+					ensureClaudeDeclaredToolsIndexed(toolsResult, declaredToolsByName, declaredToolsIndexed)
+					if *declaredToolsByName == nil {
+						*declaredToolsByName = make(map[string]ojson.Result)
+					}
+					(*declaredToolsByName)[name] = def
+				}
+			}
+		}
+		if !def.IsObject() || isClaudeWebSearchToolType(def.Get("type").String()) {
+			continue
+		}
+		origName := strings.TrimSpace(def.Get("name").String())
+		if origName == "" {
+			continue
+		}
+		converted := convertClaudeFunctionToolToCodex(def, toolNameMap)
+		if indexByName == nil {
+			indexByName = make(map[string]int)
+		}
+		if idx, exists := indexByName[origName]; exists {
+			toolItems[idx] = converted
+		} else {
+			indexByName[origName] = len(toolItems)
+			toolItems = append(toolItems, converted)
+		}
+	}
+	if len(toolItems) == 0 {
+		return nil, false
+	}
+	item := []byte(`{"type":"additional_tools","role":"developer","tools":[]}`)
+	item, _ = ojson.SetRawBytes(item, "tools", translatorcommon.JoinRawArray(toolItems))
+	return item, true
+}
+
+func collectClaudeDeclaredToolNames(rootResult ojson.Result, hasToolAddition bool) []string {
+	var names []string
+	tools := rootResult.Get("tools")
+	if tools.IsArray() {
+		arr := tools.Array()
+		names = make([]string, 0, len(arr))
+		for i := 0; i < len(arr); i++ {
+			n := arr[i].Get("name").String()
+			if n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	if !hasToolAddition {
+		return names
+	}
+	messages := rootResult.Get("messages")
+	if !messages.IsArray() {
+		return names
+	}
+	for _, msg := range messages.Array() {
+		if msg.Get("role").String() != "system" {
+			continue
+		}
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for _, part := range content.Array() {
+			if part.Get("type").String() != "tool_addition" {
+				continue
+			}
+			tool := part.Get("tool")
+			if tool.Get("type").String() == "tool_definition" || tool.Get("definition").IsObject() {
+				def := tool.Get("definition")
+				if isClaudeWebSearchToolType(def.Get("type").String()) {
+					continue
+				}
+				if n := def.Get("name").String(); n != "" {
+					names = append(names, n)
+				}
+			}
+		}
+	}
+	return names
+}
+
+func buildReverseMapFromClaudeOriginalToShortFromResult(rootResult ojson.Result, hasToolAddition bool) map[string]string {
+	names := collectClaudeDeclaredToolNames(rootResult, hasToolAddition)
+	if len(names) == 0 {
+		return map[string]string{}
+	}
+	return buildShortNameMap(names)
+}
+
+func claudePayloadMayContainToolAddition(rawJSON []byte) bool {
+	return bytes.Contains(rawJSON, []byte("tool_addition")) ||
+		bytes.Contains(rawJSON, []byte(`\u`)) ||
+		bytes.Contains(rawJSON, []byte(`\U`))
+}
+
+// buildReverseMapFromClaudeOriginalToShort builds original->short map, used to map tool_use names to short.
+func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string {
+	mayHaveToolAddition := claudePayloadMayContainToolAddition(original)
+	if !mayHaveToolAddition {
+		tools := ojson.GetBytesNoCopy(original, "tools")
+		m := map[string]string{}
+		if !tools.IsArray() {
+			return m
+		}
+		var names []string
+		arr := tools.Array()
+		for i := 0; i < len(arr); i++ {
+			n := arr[i].Get("name").String()
+			if n != "" {
+				names = append(names, n)
+			}
+		}
+		if len(names) > 0 {
+			m = buildShortNameMap(names)
+		}
+		return m
+	}
+	return buildReverseMapFromClaudeOriginalToShortFromResult(util.ParseGJSONBytesNoCopy(original), true)
 }
 
 // normalizeToolParameters ensures object schemas contain at least an empty properties map,
@@ -670,7 +913,7 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 // Unicode property escapes (\p{...} / \P{...}) that cause upstream schema validation failures.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "null" || !gjson.Valid(raw) {
+	if raw == "" || raw == "null" || !ojson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
 	var root map[string]any
@@ -778,11 +1021,11 @@ var (
 // property missing from its sibling required list (recursively). OpenAI
 // strict mode rejects such schemas with HTTP 400, so callers downgrade
 // text.format.strict instead of emitting an unsatisfiable schema.
-func codexSchemaMissesRequired(schema gjson.Result) bool {
+func codexSchemaMissesRequired(schema ojson.Result) bool {
 	if !schema.IsObject() {
 		if schema.IsArray() {
 			miss := false
-			schema.ForEach(func(_, child gjson.Result) bool {
+			schema.ForEach(func(_, child ojson.Result) bool {
 				if codexSchemaMissesRequired(child) {
 					miss = true
 					return false
@@ -800,7 +1043,7 @@ func codexSchemaMissesRequired(schema gjson.Result) bool {
 		}
 		names := make(map[string]struct{}, len(required.Array()))
 		for _, item := range required.Array() {
-			if item.Type == gjson.String {
+			if item.Type == ojson.String {
 				names[item.String()] = struct{}{}
 			}
 		}
@@ -816,7 +1059,7 @@ func codexSchemaMissesRequired(schema gjson.Result) bool {
 			continue
 		}
 		miss := false
-		children.ForEach(func(_, child gjson.Result) bool {
+		children.ForEach(func(_, child ojson.Result) bool {
 			if codexSchemaMissesRequired(child) {
 				miss = true
 				return false
@@ -833,4 +1076,57 @@ func codexSchemaMissesRequired(schema gjson.Result) bool {
 		}
 	}
 	return false
+}
+
+// claudeDocumentDataURL turns an inline PDF into a Codex input_file URL. Anything
+// else, a file id included, is not representable and is reported by the caller.
+// claudeImageInputPart maps a Claude image source onto a Responses input_image
+// part. Base64 bytes become a data URL, an http(s) url passes through and a file
+// id is carried as file_id. It reports false for a source with none of them.
+func claudeImageInputPart(source ojson.Result) ([]byte, bool) {
+	if !source.Exists() {
+		return nil, false
+	}
+	part := []byte(`{"type":"input_image"}`)
+	data := source.Get("data").String()
+	if data == "" {
+		data = source.Get("base64").String()
+	}
+	switch {
+	case data != "":
+		mediaType := source.Get("media_type").String()
+		if mediaType == "" {
+			mediaType = source.Get("mime_type").String()
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		part, _ = ojson.SetBytes(part, "image_url", fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+	case source.Get("type").String() == "url" && translatorcommon.IsHTTPURL(source.Get("url").String()):
+		part, _ = ojson.SetBytes(part, "image_url", strings.TrimSpace(source.Get("url").String()))
+	case source.Get("type").String() == "file" && source.Get("file_id").String() != "":
+		part, _ = ojson.SetBytes(part, "file_id", source.Get("file_id").String())
+	default:
+		return nil, false
+	}
+	return part, true
+}
+
+func claudeDocumentDataURL(part ojson.Result) (string, bool) {
+	source := part.Get("source")
+	if source.Get("type").String() == "base64" {
+		mediaType := strings.TrimSpace(source.Get("media_type").String())
+		if !strings.EqualFold(mediaType, "application/pdf") {
+			return "", false
+		}
+		data := source.Get("data").String()
+		if data == "" {
+			data = source.Get("base64").String()
+		}
+		if data == "" {
+			return "", false
+		}
+		return fmt.Sprintf("data:%s;base64,%s", mediaType, data), true
+	}
+	return "", false
 }

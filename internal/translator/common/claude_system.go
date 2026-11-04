@@ -3,8 +3,8 @@ package common
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const (
@@ -12,9 +12,16 @@ const (
 	claudeSystemReminderEnd   = "</system-reminder>"
 )
 
+// SystemReminderText wraps text in the <system-reminder> envelope so non-Claude
+// upstream formats treat demoted mid-session system or developer instructions
+// as system directives rather than user speech.
+func SystemReminderText(text string) string {
+	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd
+}
+
 // ClaudeMessageSystemReminderText converts a Claude message-level system value
 // into ordinary user-visible reminder text for non-Claude upstream formats.
-func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
+func ClaudeMessageSystemReminderText(content ojson.Result) (string, bool) {
 	parts := claudeSystemTextParts(content)
 	if len(parts) == 0 {
 		return "", false
@@ -23,14 +30,14 @@ func ClaudeMessageSystemReminderText(content gjson.Result) (string, bool) {
 	if strings.TrimSpace(text) == "" {
 		return "", false
 	}
-	return claudeSystemReminderStart + "\n" + text + "\n" + claudeSystemReminderEnd, true
+	return SystemReminderText(text), true
 }
 
-func claudeSystemTextParts(content gjson.Result) []string {
+func claudeSystemTextParts(content ojson.Result) []string {
 	if !content.Exists() {
 		return nil
 	}
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		text := content.String()
 		if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
 			return nil
@@ -41,7 +48,7 @@ func claudeSystemTextParts(content gjson.Result) []string {
 		return nil
 	}
 	parts := make([]string, 0)
-	content.ForEach(func(_, item gjson.Result) bool {
+	content.ForEach(func(_, item ojson.Result) bool {
 		if item.Get("type").String() != "text" {
 			return true
 		}
@@ -58,7 +65,7 @@ func claudeSystemTextParts(content gjson.Result) []string {
 // BuildClaudeStructuredOutputInstruction formats structured output settings
 // (from Chat Completions response_format or Responses text.format) as explicit
 // instructions to inject into Claude's system prompt.
-func BuildClaudeStructuredOutputInstruction(format gjson.Result) string {
+func BuildClaudeStructuredOutputInstruction(format ojson.Result) string {
 	if !format.Exists() {
 		return ""
 	}

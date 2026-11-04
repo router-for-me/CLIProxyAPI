@@ -3,20 +3,20 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -93,7 +93,7 @@ func TestGeminiExecutorExecute_SanitizesClaudeCAISSignature(t *testing.T) {
 		t.Fatalf("upstream request leaked raw Claude CAIS signature: %s", upstreamBody)
 	}
 
-	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	contents := ojson.GetBytes(upstreamBody, "contents").Array()
 	for _, content := range contents {
 		if content.Get("role").String() == "model" {
 			for _, part := range content.Get("parts").Array() {
@@ -230,7 +230,7 @@ func TestGeminiExecutorExecute_FunctionCall_ReplacesClaudeSignatureWithBypass(t 
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	gotSig := gjson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
+	gotSig := ojson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
 	if gotSig != internalsignature.GeminiSkipThoughtSignatureValidator {
 		t.Fatalf("first functionCall thoughtSignature = %q, want bypass sentinel %q; upstreamBody=%s",
 			gotSig, internalsignature.GeminiSkipThoughtSignatureValidator, upstreamBody)
@@ -295,7 +295,7 @@ func TestGeminiExecutorExecute_PreservesNativeGeminiSignature(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	gotSig := gjson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
+	gotSig := ojson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
 	if gotSig != nativeSig {
 		t.Fatalf("thoughtSignature = %q, want preserved native signature %q; upstreamBody=%s",
 			gotSig, nativeSig, upstreamBody)
@@ -346,9 +346,72 @@ func TestGeminiExecutorExecute_UnsignedRequestNotCorrupted(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	text := gjson.GetBytes(upstreamBody, "contents.0.parts.0.text").String()
+	text := ojson.GetBytes(upstreamBody, "contents.0.parts.0.text").String()
 	if text != "Hello world" {
 		t.Fatalf("text = %q, want 'Hello world'; upstreamBody=%s", text, upstreamBody)
+	}
+}
+
+func TestGeminiExecutorExecute_ClaudeToolCallsSeparatedByTextKeepBypassSignatures(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "test-api-key",
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model: "gemini-4-argon",
+		Payload: []byte(`{
+			"model": "gemini-4-argon",
+			"max_tokens": 16,
+			"tools": [{"name": "Read", "description": "read file", "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}}}],
+			"messages": [
+				{"role": "user", "content": "read files"},
+				{"role": "assistant", "content": [
+					{"type": "tool_use", "id": "t1", "name": "Read", "input": {"p": "/x1"}},
+					{"type": "text", "text": "more"},
+					{"type": "tool_use", "id": "t2", "name": "Read", "input": {"p": "/x2"}}
+				]},
+				{"role": "user", "content": [
+					{"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+					{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}
+				]}
+			]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := ojson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("first functionCall thoughtSignature = %q, want %q; upstreamBody=%s",
+			got, internalsignature.GeminiSkipThoughtSignatureValidator, upstreamBody)
+	}
+	if got := ojson.GetBytes(upstreamBody, "contents.1.parts.1.text").String(); got != "more" {
+		t.Fatalf("middle text part = %q, want 'more'; upstreamBody=%s", got, upstreamBody)
+	}
+	if got := ojson.GetBytes(upstreamBody, "contents.1.parts.2.thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("functionCall after text thoughtSignature = %q, want %q; upstreamBody=%s",
+			got, internalsignature.GeminiSkipThoughtSignatureValidator, upstreamBody)
 	}
 }
 
@@ -546,7 +609,7 @@ func TestGeminiVertexExecutorExecute_PreservesNativeGeminiSignature(t *testing.T
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	gotSig := gjson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
+	gotSig := ojson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String()
 	if gotSig != nativeSig {
 		t.Fatalf("thoughtSignature = %q, want preserved native signature %q; upstreamBody=%s",
 			gotSig, nativeSig, upstreamBody)
@@ -598,7 +661,7 @@ func TestGeminiVertexExecutorExecute_UnsignedRequestNotCorrupted(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	text := gjson.GetBytes(upstreamBody, "contents.0.parts.0.text").String()
+	text := ojson.GetBytes(upstreamBody, "contents.0.parts.0.text").String()
 	if text != "Hello world" {
 		t.Fatalf("text = %q, want 'Hello world'; upstreamBody=%s", text, upstreamBody)
 	}

@@ -1,8 +1,8 @@
 package signature
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -101,6 +101,69 @@ func TestInspectGeminiThoughtSignature_AcceptsCapturedGemini31FlashLiteEnvelope(
 	}
 	if info.OpaquePayloadLen != 50 {
 		t.Fatalf("OpaquePayloadLen = %d, want 50", info.OpaquePayloadLen)
+	}
+}
+
+func TestInspectGeminiThoughtSignature_AcceptsServerSideToolProtobufEnvelope(t *testing.T) {
+	// Real live capture from Gemini 3.8 Flash toolCall (googleSearch)
+	const liveCapturedToolCallSig = "ErUDCrIDCAISrQMBEU0yD9ECvDhSY1DQJNUGafArdfd2mDfO8VQq7XjLx/91zESuo0QPSdkRFWkLeVIocSQmQULonYMOJcs6XDLV2LTRC9myb3MCCP9CUoWbEeqhAvXKTScyS3nwBDDVJYuDDbY3YvR4V86T/DnU3qufpaVZ3wQOiJVyBVZ515dYTN+XGq7SuUc3RpfAqVU06jgxaCM0WKV4Df5mGMJWb25e/aFG2Jc7upSqpf3n6aElj+4c/eWr4GdKd0TUIElXBZ0HEN/vNcWzD3F0S4MeVbk1LDakL6HG6oyaSS2gocxYNYxqm9mdMHaXYa4mIYqWqmqBEnbgcHp8H4fgqBxc3Cx8C3otV8IarO5OALaVDA3NaXB1zjLet1587kEpkCNr9OvrYOES2nCl/i4EgbPK01nlXo+Wwm5jsZU5nEG4/Z0bErzqC5TKwOsqpJ7afL2sPWI0IGrXhXL+QCumWCS5iUtwybSkL7CYSk9GC+iY+ev6FAmC4V5JEc4OaWOc9+m/29LniN/iPTSxtUQSZT94pUa3/irIIdH7ReAS3cpeM6OTvumR1PwNxXx3XM1mEGc="
+
+	info, err := InspectGeminiThoughtSignature(liveCapturedToolCallSig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true})
+	if err != nil {
+		t.Fatalf("captured Gemini 3.8 Flash server-side toolCall envelope should be known: %v", err)
+	}
+	if info.Envelope != GeminiThoughtSignatureEnvelopeProtobufField2 {
+		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeProtobufField2)
+	}
+	if !info.KnownEnvelope {
+		t.Fatal("KnownEnvelope should be true for server-side toolCall envelope")
+	}
+	if provider := DetectSignatureProviderForBlock(liveCapturedToolCallSig, SignatureBlockKindGeminiModelPart); provider != SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProviderForBlock = %q, want %q", provider, SignatureProviderGemini)
+	}
+}
+
+func TestInspectGeminiThoughtSignature_RejectsMalformedToolInvocationPayload(t *testing.T) {
+	// 1. Truncated protobuf
+	truncated := testGemini3ThoughtSignature([]byte{0x08, 0x02, 0x12, 0x10, 0x01}) // declares 16 bytes, only gives 1
+	if info, err := InspectGeminiThoughtSignature(truncated, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil && info.KnownEnvelope {
+		t.Fatal("truncated inner protobuf payload should not be a known envelope")
+	}
+
+	// 2. Valid protobuf without Tink 0x01 prefix in any bytes field
+	noTink := testGemini3ThoughtSignature([]byte{0x08, 0x02, 0x12, 0x04, 0x99, 0x98, 0x97, 0x96})
+	if info, err := InspectGeminiThoughtSignature(noTink, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil && info.KnownEnvelope {
+		t.Fatal("protobuf payload without Tink 0x01 prefix should not be a known envelope")
+	}
+
+	// 3. Protobuf with pure varint, no bytes field
+	pureVarint := testGemini3ThoughtSignature([]byte{0x08, 0x02, 0x10, 0x05})
+	if info, err := InspectGeminiThoughtSignature(pureVarint, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil && info.KnownEnvelope {
+		t.Fatal("protobuf payload without length-delimited bytes field should not be a known envelope")
+	}
+}
+
+func TestValidateGeminiFunctionCallPairing_AcceptsServerSideToolBlocks(t *testing.T) {
+	input := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"toolCall": {"id": "search_1", "toolType": "GOOGLE_SEARCH_WEB"}},
+					{"toolResponse": {"id": "search_1", "response": {}}},
+					{"functionCall": {"id": "call_1", "name": "do_something", "args": {}}}
+				]
+			},
+			{
+				"role": "user",
+				"parts": [
+					{"functionResponse": {"id": "call_1", "name": "do_something", "response": {"result": "ok"}}}
+				]
+			}
+		]
+	}`)
+	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
+		t.Fatalf("pairing validator should accept server-side tool blocks alongside functionCall: %v", err)
 	}
 }
 
@@ -288,6 +351,41 @@ func TestValidateGeminiThoughtSignatures_RejectsSentinelOutsideFirstFunctionCall
 			}
 		})
 	}
+}
+
+func TestValidateGeminiThoughtSignatures_CallAfterTextStartsNewGroup(t *testing.T) {
+	t.Run("rejects_unsigned_call_after_text", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"id": "call-1", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"},
+					{"text": "more"},
+					{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}}
+				]
+			}]
+		}`)
+		err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true})
+		if err == nil || !strings.Contains(err.Error(), "missing thoughtSignature on first functionCall") {
+			t.Fatalf("expected missing thoughtSignature error on call after text, got %v", err)
+		}
+	})
+
+	t.Run("accepts_sentinel_on_call_after_text", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"id": "call-1", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"},
+					{"text": "more"},
+					{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"}
+				]
+			}]
+		}`)
+		if err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); err != nil {
+			t.Fatalf("expected sentinel on call after text to be valid, got %v", err)
+		}
+	})
 }
 
 func TestValidateGeminiThoughtSignatures_RejectsNonCanonicalNestedSignature(t *testing.T) {
@@ -548,4 +646,118 @@ func agyGeminiThoughtSignatureSamplesPath() (string, bool) {
 		return path, false
 	}
 	return path, true
+}
+
+// testGeminiBareTinkSignature builds a synthetic Vertex-style bare-Tink
+// signature: one TINK prefix byte, a four-byte big-endian key id, then filler
+// ciphertext up to total length n. The shape mirrors the 2026-10-26 Vertex
+// captures without embedding any real provider payload.
+func testGeminiBareTinkSignature(n int) string {
+	if n < geminiBareTinkMinLen {
+		n = geminiBareTinkMinLen
+	}
+	payload := []byte{0x01, 0x8f, 0x3d, 0x6b, 0x5f}
+	for len(payload) < n {
+		payload = append(payload, byte(0xA0+len(payload)%0x20))
+	}
+	return testGeminiThoughtSignature(payload)
+}
+
+func TestInspectGeminiThoughtSignature_AcceptsVertexBareTinkEnvelope(t *testing.T) {
+	sig := testGeminiBareTinkSignature(606)
+
+	info, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true})
+	if err != nil {
+		t.Fatalf("Vertex bare-Tink envelope should be a known envelope: %v", err)
+	}
+	if info.Envelope != GeminiThoughtSignatureEnvelopeBareTink {
+		t.Fatalf("Envelope = %q, want %q", info.Envelope, GeminiThoughtSignatureEnvelopeBareTink)
+	}
+	if !info.KnownEnvelope {
+		t.Fatal("KnownEnvelope should be true for the bare-Tink envelope")
+	}
+	if info.FirstByte != 0x01 {
+		t.Fatalf("FirstByte = %#02x, want 0x01", info.FirstByte)
+	}
+	if info.RecordCount != 1 {
+		t.Fatalf("RecordCount = %d, want 1", info.RecordCount)
+	}
+	if info.OpaquePayloadLen != 606 {
+		t.Fatalf("OpaquePayloadLen = %d, want 606", info.OpaquePayloadLen)
+	}
+	if info.HasObservedMarker {
+		t.Fatal("bare-Tink payload starts with 0x01, not the 0x12 observed marker")
+	}
+
+	if provider := DetectSignatureProviderForBlock(sig, SignatureBlockKindGeminiModelPart); provider != SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProviderForBlock(model part) = %q, want %q", provider, SignatureProviderGemini)
+	}
+	if provider := DetectSignatureProviderForBlock(sig, SignatureBlockKindGeminiFunctionCall); provider != SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProviderForBlock(functionCall) = %q, want %q", provider, SignatureProviderGemini)
+	}
+
+	decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall)
+	if decision.Action != SignatureActionPreserve {
+		t.Fatalf("action = %q (%s), want %q", decision.Action, decision.Reason, SignatureActionPreserve)
+	}
+	if got := GeminiReplaySignatureOrBypass(sig, SignatureBlockKindGeminiFunctionCall); got != sig {
+		t.Fatalf("replay signature was rewritten: %q", got[:16])
+	}
+}
+
+func TestInspectGeminiThoughtSignature_RejectsShortBareTinkEnvelope(t *testing.T) {
+	// Below prefix + key id + auth-tag floor the payload is not a bounded
+	// bare-Tink envelope and must degrade to the bypass decision instead of
+	// being replayed verbatim.
+	sig := testGeminiThoughtSignature(append([]byte{0x01, 0x8f, 0x3d}, make([]byte, 10)...))
+
+	if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
+		t.Fatal("short payload should not be a known bare-Tink envelope")
+	}
+	decision := DecideSignatureCompatibility(SignatureProviderGemini, sig, SignatureBlockKindGeminiFunctionCall)
+	if decision.Action != SignatureActionReplaceWithGeminiBypass {
+		t.Fatalf("action = %q, want %q", decision.Action, SignatureActionReplaceWithGeminiBypass)
+	}
+	if decision.ReplacementSignature != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("replacement = %q, want %q", decision.ReplacementSignature, GeminiSkipThoughtSignatureValidator)
+	}
+}
+
+func TestDetectSignatureProvider_VertexBareTinkNeverClaimsOtherFamilies(t *testing.T) {
+	sig := testGeminiBareTinkSignature(405)
+	// Block-kind scoping: on Claude targets the blob must not be read as a
+	// Claude envelope; it stays a Gemini-shaped payload and Claude's own
+	// decision path drops it.
+	if got := DetectSignatureProviderForBlock(sig, SignatureBlockKindClaudeThinking); got != SignatureProviderGemini {
+		t.Fatalf("Claude-thinking block detection = %q, want %q (bare-Tink stays Gemini-shaped)", got, SignatureProviderGemini)
+	}
+	if IsValidClaudeCAISSignature(sig) {
+		t.Fatal("bare-Tink payload must not satisfy the Claude CAIS validator")
+	}
+}
+
+func TestInspectGeminiThoughtSignature_BareTinkRequiresVertexKeyID(t *testing.T) {
+	// The prefix byte alone matches ~1/256 of uniform random payloads, so an
+	// unenveloped 0x01 blob with an unknown key id must not be claimed.
+	payload := []byte{0x01, 0x69, 0x14, 0x7d, 0x13}
+	for len(payload) < 405 {
+		payload = append(payload, byte(0xA0+len(payload)%0x20))
+	}
+	sig := testGeminiThoughtSignature(payload)
+
+	if IsGeminiVertexBareTinkSignature(sig) {
+		t.Fatal("0x01 payload with a non-Vertex key id must not be a bare-Tink envelope")
+	}
+	if _, err := InspectGeminiThoughtSignature(sig, GeminiThoughtSignatureValidationOptions{RequireKnownEnvelope: true}); err == nil {
+		t.Fatal("unknown key id must not be a known envelope")
+	}
+	if got := DetectSignatureProvider(sig); got == SignatureProviderGemini {
+		t.Fatalf("DetectSignatureProvider = %q, must not claim Gemini", got)
+	}
+	if !IsGeminiVertexBareTinkSignature(testGeminiBareTinkSignature(405)) {
+		t.Fatal("Vertex key id must be recognized")
+	}
+	if !IsGeminiVertexBareTinkSignature("gemini#" + testGeminiBareTinkSignature(405)) {
+		t.Fatal("provider-prefixed Vertex signature must be recognized")
+	}
 }

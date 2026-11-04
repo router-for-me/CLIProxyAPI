@@ -1,15 +1,19 @@
 package handlers
 
 import (
+	"encoding/json"
+	"maps"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"golang.org/x/net/context"
 )
 
@@ -241,6 +245,11 @@ func nextStreamChunk(ctx context.Context, pending *[]coreexecutor.StreamChunk, c
 		case <-ctx.Done():
 			return coreexecutor.StreamChunk{}, false, true
 		case chunk, ok = <-chunks:
+			// A channel closed together with the cancellation was cut by it: the select above picks at random when both are
+			// ready, and the plain close would be reported as a success.
+			if !ok && ctx.Err() != nil {
+				return coreexecutor.StreamChunk{}, false, true
+			}
 		}
 	} else {
 		chunk, ok = <-chunks
@@ -336,7 +345,13 @@ func (h *BaseAPIHandler) interceptorHost() PluginInterceptorHost {
 	if h == nil {
 		return nil
 	}
-	return h.PluginHost
+	h.runtimeMu.RLock()
+	host := h.PluginHost
+	h.runtimeMu.RUnlock()
+	if isNilPluginInterceptorHost(host) {
+		return nil
+	}
+	return host
 }
 
 func streamInterceptorsEnabled(host PluginInterceptorHost) bool {
@@ -366,6 +381,7 @@ type requestAfterAuthCapture struct {
 	body                    []byte
 	originalRequest         []byte
 	originalRequestReplaced bool
+	path                    string
 }
 
 func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterceptRequest, resp coreexecutor.RequestAfterAuthInterceptResponse) {
@@ -373,14 +389,15 @@ func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterc
 		return
 	}
 	headers := mergeRequestInterceptorHeaders(req.Headers, resp.Headers, resp.ClearHeaders)
-	body := cloneBytes(req.Body)
+	var body []byte
 	var originalRequest []byte
 	originalRequestReplaced := false
 	if len(resp.Body) > 0 {
-		body = cloneBytes(resp.Body)
-		originalRequest = cloneBytes(resp.Body)
+		body = resp.Body
+		originalRequest = resp.Body
 		originalRequestReplaced = true
 	}
+	path := strings.TrimSpace(resp.Path)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -389,6 +406,7 @@ func (c *requestAfterAuthCapture) record(req coreexecutor.RequestAfterAuthInterc
 	c.body = body
 	c.originalRequest = originalRequest
 	c.originalRequestReplaced = originalRequestReplaced
+	c.path = path
 }
 
 func (c *requestAfterAuthCapture) apply(req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Request, coreexecutor.Options) {
@@ -400,10 +418,18 @@ func (c *requestAfterAuthCapture) apply(req coreexecutor.Request, opts coreexecu
 	if !c.set {
 		return req, opts
 	}
-	req.Payload = cloneBytes(c.body)
-	opts.Headers = cloneHeader(c.headers)
 	if c.originalRequestReplaced {
-		opts.OriginalRequest = cloneBytes(c.originalRequest)
+		req.Payload = c.body
+		opts.OriginalRequest = c.originalRequest
+	}
+	opts.Headers = cloneHeader(c.headers)
+	if c.path != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[coreexecutor.RequestPathMetadataKey] = c.path
 	}
 	return req, opts
 }
@@ -477,18 +503,62 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(ctx context.Context,
 		RequestedModel: requestedModel,
 		Stream:         opts.Stream,
 		Headers:        cloneHeader(opts.Headers),
-		Body:           cloneBytes(req.Payload),
+		Body:           req.Payload,
+		CallerScope:    callerScopeFromMetadata(opts.Metadata),
 		Metadata:       opts.Metadata,
 	}, skipPluginID)
 	opts.Headers = finalInterceptorHeaders(opts.Headers, resp.Headers)
 	if len(resp.Body) > 0 {
-		req.Payload = cloneBytes(resp.Body)
-		opts.OriginalRequest = cloneBytes(resp.Body)
+		req.Payload = resp.Body
+		opts.OriginalRequest = resp.Body
+	}
+	if strings.TrimSpace(resp.Path) != "" {
+		if opts.Metadata == nil {
+			opts.Metadata = make(map[string]any, 1)
+		} else {
+			opts.Metadata = maps.Clone(opts.Metadata)
+		}
+		opts.Metadata[coreexecutor.RequestPathMetadataKey] = strings.TrimSpace(resp.Path)
 	}
 	if resp.Terminate {
 		return req, opts, requestTerminationError(resp)
 	}
 	return req, opts, nil
+}
+
+func (h *BaseAPIHandler) requestBeforeAuthInterceptor(requestID, skipPluginID string) coreexecutor.RequestBeforeAuthInterceptor {
+	if !requestInterceptorsEnabled(h.interceptorHost()) {
+		return nil
+	}
+	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
+		host := h.interceptorHost()
+		if !requestInterceptorsEnabled(host) {
+			return coreexecutor.RequestAfterAuthInterceptResponse{}
+		}
+		resp := interceptRequestBeforeAuth(ctx, host, pluginapi.RequestInterceptRequest{
+			RequestID:      requestID,
+			TraceID:        logging.GetRequestID(ctx),
+			SourceFormat:   req.SourceFormat.String(),
+			ToFormat:       "",
+			Model:          req.Model,
+			RequestedModel: req.RequestedModel,
+			Stream:         req.Stream,
+			Headers:        cloneHeader(req.Headers),
+			Body:           req.Body,
+			CallerScope:    callerScopeFromMetadata(req.Metadata),
+			Metadata:       req.Metadata,
+		}, skipPluginID)
+		return coreexecutor.RequestAfterAuthInterceptResponse{
+			Path:            strings.TrimSpace(resp.Path),
+			Headers:         resp.Headers,
+			Body:            resp.Body,
+			ClearHeaders:    resp.ClearHeaders,
+			Terminate:       resp.Terminate,
+			StatusCode:      normalizedTerminationStatus(resp.StatusCode),
+			ResponseHeaders: resp.ResponseHeaders,
+			ResponseBody:    resp.ResponseBody,
+		}
+	}
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCapture, requestID, skipPluginID string) coreexecutor.RequestAfterAuthInterceptor {
@@ -559,10 +629,12 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		RequestedModel: req.RequestedModel,
 		Stream:         req.Stream,
 		Headers:        cloneHeader(req.Headers),
-		Body:           cloneBytes(req.Body),
+		Body:           req.Body,
+		CallerScope:    callerScopeFromMetadata(req.Metadata),
 		Metadata:       req.Metadata,
 	}, skipPluginID)
 	return coreexecutor.RequestAfterAuthInterceptResponse{
+		Path:            strings.TrimSpace(resp.Path),
 		Headers:         resp.Headers,
 		Body:            resp.Body,
 		ClearHeaders:    resp.ClearHeaders,
@@ -573,7 +645,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 	}
 }
 
-func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string) ([]byte, http.Header) {
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
 		return body, responseHeaders
@@ -592,9 +664,115 @@ func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestI
 		StatusCode:      statusCode,
 		Metadata:        opts.Metadata,
 	}, skipPluginID)
-	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), PassthroughHeadersEnabled(h.Cfg))
+	responseHeaders = downstreamHeadersAfterInterceptors(rawResponseHeaders, finalInterceptorHeaders(rawResponseHeaders, resp.Headers), passthrough)
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
+}
+
+// ModelDetailIDContextKey requests selection from the final, plugin-filtered catalog.
+const ModelDetailIDContextKey = "cliproxy.model_detail_id"
+
+// WriteModelListResponse serializes the model-list payload, applies plugin response interceptors
+// if a plugin host is configured, and writes the resulting headers and body to the Gin context.
+func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if c == nil {
+		return
+	}
+	var body []byte
+	switch v := payload.(type) {
+	case []byte:
+		body = cloneBytes(v)
+	default:
+		var errMarshal error
+		body, errMarshal = json.Marshal(payload)
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
+			return
+		}
+	}
+
+	rawResponseHeaders := http.Header{
+		"Content-Type": []string{"application/json; charset=utf-8"},
+	}
+
+	var lifecycle *requestLifecycleTracker
+	host := h.interceptorHost()
+	if host != nil {
+		ctx := context.Background()
+		var reqHeaders http.Header
+		if c.Request != nil {
+			reqHeaders = cloneHeader(c.Request.Header)
+			if reqCtx := c.Request.Context(); reqCtx != nil {
+				ctx = reqCtx
+			}
+		}
+		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, nil, "")
+		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+			RequestID:       lifecycle.requestID(),
+			SourceFormat:    sourceFormat,
+			Model:           "",
+			RequestedModel:  "",
+			Stream:          false,
+			RequestHeaders:  reqHeaders,
+			ResponseHeaders: cloneHeader(rawResponseHeaders),
+			OriginalRequest: nil,
+			RequestBody:     nil,
+			Body:            cloneBytes(body),
+			StatusCode:      http.StatusOK,
+			Metadata:        nil,
+		}, "")
+		if len(resp.Body) > 0 {
+			body = cloneBytes(resp.Body)
+		}
+		if resp.Headers != nil {
+			for key, values := range resp.Headers {
+				c.Writer.Header()[key] = append([]string(nil), values...)
+			}
+		}
+	}
+
+	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
+		c.Writer.Header().Del("Content-Length")
+		var catalog struct {
+			Data   []json.RawMessage `json:"data"`
+			Models []json.RawMessage `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(body, &catalog); errUnmarshal != nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, errUnmarshal)
+			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "Invalid model catalog", "type": "api_error"}})
+			return
+		}
+		var selected json.RawMessage
+		for _, model := range append(catalog.Data, catalog.Models...) {
+			var entry struct {
+				ID   string `json:"id"`
+				Slug string `json:"slug"`
+			}
+			if errUnmarshal := json.Unmarshal(model, &entry); errUnmarshal != nil {
+				continue
+			}
+			if entry.ID == "" {
+				entry.ID = entry.Slug
+			}
+			if entry.ID != "" && entry.ID == modelID {
+				selected = model
+				break
+			}
+		}
+		if selected == nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusNotFound, nil)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"message": "Model not found", "type": "invalid_request_error", "code": "model_not_found"}})
+			return
+		}
+		body = selected
+	}
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	if c.Writer.Header().Get("Content-Type") == "" {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	}
+	c.Set("API_RESPONSE", cloneBytes(body))
+	c.Status(http.StatusOK)
+	_, _ = c.Writer.Write(body)
 }

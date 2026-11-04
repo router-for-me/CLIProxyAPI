@@ -4,12 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,24 @@ func Parse(raw string) (Setting, error) {
 	}
 }
 
+// ValidRequestProxy reports whether raw is a concrete execution proxy override.
+// The host must be present, and an explicit port must be in the range 1-65535.
+func ValidRequestProxy(raw string) bool {
+	setting, errParse := Parse(raw)
+	if errParse != nil || setting.Mode != ModeProxy || setting.URL == nil {
+		return false
+	}
+	if strings.TrimSpace(setting.URL.Hostname()) == "" {
+		return false
+	}
+	port := setting.URL.Port()
+	if port == "" {
+		return true
+	}
+	number, errPort := strconv.Atoi(port)
+	return errPort == nil && number >= 1 && number <= 65535
+}
+
 func cloneDefaultTransport() *http.Transport {
 	if transport, ok := http.DefaultTransport.(*http.Transport); ok && transport != nil {
 		return transport.Clone()
@@ -85,6 +104,14 @@ func NewDirectTransport() *http.Transport {
 	clone := cloneDefaultTransport()
 	clone.Proxy = nil
 	return clone
+}
+
+// socksForwardDialer dials the SOCKS5 proxy itself. It mirrors net/http's
+// DefaultTransport dialer so the resulting upstream socket gets TCP keepalive:
+// proxy.Direct would leave keepalive at the OS default of hours, which lets a
+// silently dead peer pin an otherwise reusable connection.
+func socksForwardDialer() *net.Dialer {
+	return &net.Dialer{KeepAlive: 30 * time.Second}
 }
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
@@ -107,7 +134,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 				password, _ := setting.URL.User.Password()
 				proxyAuth = &proxy.Auth{User: username, Password: password}
 			}
-			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, proxy.Direct)
+			dialer, errSOCKS5 := proxy.SOCKS5("tcp", setting.URL.Host, proxyAuth, socksForwardDialer())
 			if errSOCKS5 != nil {
 				return nil, setting.Mode, fmt.Errorf("create SOCKS5 dialer failed: %w", errSOCKS5)
 			}

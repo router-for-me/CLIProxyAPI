@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
 // IsAuthTokenPayloadKey returns true if key is a credential or token lifecycle field
@@ -28,8 +30,27 @@ func MergeExistingAuthMetadata(target *Auth, existingMap map[string]any) {
 	if target.Metadata == nil {
 		target.Metadata = make(map[string]any)
 	}
+	if _, explicitlySet := target.Metadata["disabled"]; !explicitlySet {
+		if disabled, ok := existingMap["disabled"].(bool); ok {
+			target.Disabled = disabled
+		}
+	}
+	_, targetHadOAuthProvider := target.Metadata["oauth_provider"]
+	_, targetHadPortal := target.Metadata["portal"]
 	for k, v := range existingMap {
 		if IsAuthTokenPayloadKey(k) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(target.Provider), "meta") {
+			switch CanonicalCredentialMetadataKey(k) {
+			case "api_key", "dca_token", "dca_expired", "dca_expires_at":
+				continue
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(k), "portal") && targetHadOAuthProvider {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(k), "oauth_provider") && targetHadPortal {
 			continue
 		}
 		if _, exists := target.Metadata[k]; !exists {
@@ -59,7 +80,10 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 		return merged
 	}
 
+	merged.CodexRefreshPatch = updated.CodexRefreshPatch
+
 	// 1. Refresh Lifecycle Timestamps
+	applyPreservedRejectedTokens(current, merged, true)
 	if !updated.LastRefreshedAt.IsZero() {
 		merged.LastRefreshedAt = updated.LastRefreshedAt
 	}
@@ -108,7 +132,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Status = current.Status
 			merged.Unavailable = current.Unavailable
 			merged.StatusMessage = current.StatusMessage
-		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) {
+		} else if current.Quota.Exceeded && current.Quota.Reason == "credential_quota" && current.Quota.NextRecoverAt.After(time.Now()) && !devinQuotaObservationRestored(merged, current, time.Now()) {
 			// Preserve active credential quota
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
@@ -118,7 +142,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if updated.Status == StatusActive || updated.Status == "" {
+		} else if (updated.Status == StatusActive || updated.Status == "") && (!merged.RequiresSignIn || merged.HasValidAccessToken(time.Now())) && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false
@@ -127,7 +151,28 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 		}
 	}
 
+	// 2b. Quota observations: adopt the refreshed snapshot when it is newer.
+	// Without this, executor Refresh results (e.g. Devin quota reset signals)
+	// never reach the stored auth and cannot drive scheduling. Cooldown
+	// fields stay with current so concurrent failures are never lost.
+	// The merge happens after the status branches above (they only copy
+	// scalar fields), so ordering relative to them is safe.
+	merged.Quota = mergeQuotaObservation(merged.Quota, updated.Quota)
+
 	// 3. ModelStates: three-way merge to preserve concurrent cooldown/quota
+	// Independent layers follow the same current-wins rule: executor refresh
+	// results are derived from the base snapshot and never move them.
+	for model, mergedState := range merged.ModelStates {
+		if mergedState == nil {
+			continue
+		}
+		if currentState := current.ModelStates[model]; currentState != nil {
+			if currentState.credentialQuotaShadow != nil && mergedState.credentialQuotaShadow == nil {
+				mergedState.credentialQuotaShadow = currentState.credentialQuotaShadow.cloneShallow()
+			}
+			mergedState.credentialQuotaPropagated = mergedState.credentialQuotaPropagated || currentState.credentialQuotaPropagated
+		}
+	}
 	var baseModels map[string]*ModelState
 	if base != nil {
 		baseModels = base.ModelStates
@@ -197,6 +242,34 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 			if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
 				continue
 			}
+			if updated.CodexRefreshPatch != nil && codex.IsCodexCredentialKey(strings.ToLower(strings.TrimSpace(k))) {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(k), "siwc") {
+				siwcUpd, okUpd := v.(map[string]any)
+				if !okUpd || len(siwcUpd) == 0 {
+					continue
+				}
+				baseVal, hadInBase := baseMeta[k]
+				changedByExecutor := !hadInBase || !reflect.DeepEqual(baseVal, v)
+				if changedByExecutor {
+					mergedSIWC := make(map[string]any)
+					if curSIWC, okCur := current.Metadata[k].(map[string]any); okCur {
+						for sk, sv := range curSIWC {
+							mergedSIWC[sk] = sv
+						}
+					} else if bSIWC, okBase := baseVal.(map[string]any); okBase {
+						for sk, sv := range bSIWC {
+							mergedSIWC[sk] = sv
+						}
+					}
+					for sk, sv := range siwcUpd {
+						mergedSIWC[sk] = sv
+					}
+					merged.Metadata[k] = mergedSIWC
+				}
+				continue
+			}
 			baseVal, hadInBase := baseMeta[k]
 			currentVal, hadInCurrent := current.Metadata[k]
 
@@ -213,7 +286,8 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 		// Deletions by executor: only delete if user didn't modify the field concurrently
 		if baseMeta != nil {
 			for k, baseVal := range baseMeta {
-				if strings.EqualFold(strings.TrimSpace(k), "proxy_url") {
+				trimmedKey := strings.ToLower(strings.TrimSpace(k))
+				if trimmedKey == "proxy_url" || trimmedKey == "siwc" || trimmedKey == "use_siwc" {
 					continue
 				}
 				if _, inUpdated := updated.Metadata[k]; !inUpdated {
@@ -225,6 +299,10 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 				}
 			}
 		}
+	}
+
+	if updated.CodexRefreshPatch != nil {
+		merged.Metadata = updated.CodexRefreshPatch.Apply(merged.Metadata)
 	}
 
 	// 2. Storage and Runtime

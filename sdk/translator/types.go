@@ -3,10 +3,14 @@ package translator
 
 import "context"
 
-// RequestTransform is a function type that converts a request payload from a source schema to a target schema.
-// It takes the model name, the raw JSON payload of the request, and a boolean indicating if the request is for a streaming response.
-// It returns the converted request payload as a byte slice.
-type RequestTransform func(model string, rawJSON []byte, stream bool) []byte
+// RequestTransform converts a request payload from a source schema to a target schema.
+// A non-nil error is a request-scoped refusal. Registry.Register stores it on
+// RequestEnvelope.Err so executors can reject the request before calling upstream.
+// TranslateRequest still returns only the body for legacy callers.
+type RequestTransform func(model string, rawJSON []byte, stream bool) ([]byte, error)
+
+// RequestEnvelopeTransform translates a request while preserving request-scoped metadata.
+type RequestEnvelopeTransform func(ctx context.Context, req RequestEnvelope) RequestEnvelope
 
 // ResponseStreamTransform is a function type that converts a streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the current response chunk, and an optional parameter.

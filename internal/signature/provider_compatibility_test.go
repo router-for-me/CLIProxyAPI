@@ -1,11 +1,11 @@
 package signature
 
 import (
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -41,6 +41,7 @@ func TestBase64AlphabetSet_MatchesEncoderAlphabets(t *testing.T) {
 	}{
 		{"grok unpadded std", grokEncryptedContentCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"},
 		{"gpt base64url", gptReasoningSignatureCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="},
+		{"meta base64url unpadded", metaReasoningSignatureCharSet, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"},
 	}
 	for _, tc := range cases {
 		allowed := map[byte]bool{}
@@ -59,7 +60,7 @@ func TestBase64AlphabetSet_MatchesEncoderAlphabets(t *testing.T) {
 // replaySafeEnvelopeFixtures returns one fixture per self-describing provider
 // envelope that carries replayable state. Every entry must survive the structural
 // pre-filter, because losing one would silently reclassify that provider.
-func replaySafeEnvelopeFixtures() map[string]struct {
+func replaySafeEnvelopeFixtures(t *testing.T) map[string]struct {
 	sig  string
 	want SignatureProvider
 } {
@@ -67,11 +68,14 @@ func replaySafeEnvelopeFixtures() map[string]struct {
 		sig  string
 		want SignatureProvider
 	}{
-		"claude single-layer E":  {testClaudeThinkingSignature(), SignatureProviderClaude},
-		"claude double-layer R":  {testUnpaddedAntigravityClaudeThinkingSignature(), SignatureProviderClaude},
-		"claude CAIS":            {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
-		"gemini protobuf field2": {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
-		"gpt fernet":             {testGPTReasoningSignature(), SignatureProviderGPT},
+		"claude single-layer E":   {testClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude double-layer R":   {testUnpaddedAntigravityClaudeThinkingSignature(), SignatureProviderClaude},
+		"claude CAIS":             {testClaudeCAISSignature("claude-fable-5"), SignatureProviderClaude},
+		"antigravity CAQS":        {antigravityCAQSFixture(t), SignatureProviderClaude},
+		"gemini protobuf field2":  {testGeminiThoughtSignatureEnvelope(), SignatureProviderGemini},
+		"gemini vertex bare tink": {testGeminiBareTinkSignature(405), SignatureProviderGemini},
+		"gpt fernet":              {testGPTReasoningSignature(), SignatureProviderGPT},
+		"meta muse":               {testMetaReasoningSignature(1024), SignatureProviderMeta},
 	}
 }
 
@@ -82,7 +86,7 @@ func replaySafeEnvelopeFixtures() map[string]struct {
 // through to the residual class. Adding a provider envelope without registering
 // its base64 first character fails here.
 func TestSelfDescribingSignatureFirstChars_CoversEveryKnownEnvelope(t *testing.T) {
-	for name, fixture := range replaySafeEnvelopeFixtures() {
+	for name, fixture := range replaySafeEnvelopeFixtures(t) {
 		if !maybeSelfDescribingSignatureEnvelope(fixture.sig) {
 			t.Errorf("%s: first char %q is not in selfDescribingSignatureFirstChars %q; register it or detection will skip this envelope",
 				name, string(fixture.sig[0]), selfDescribingSignatureFirstChars)
@@ -133,7 +137,7 @@ func TestGeminiASCIIUUIDIsGateIndependent(t *testing.T) {
 // classification of each envelope so a reordering of the validator chain cannot
 // silently reassign one provider's signatures to another.
 func TestDetectSignatureProviderForBlock_ClassifiesEveryKnownEnvelope(t *testing.T) {
-	for name, fixture := range replaySafeEnvelopeFixtures() {
+	for name, fixture := range replaySafeEnvelopeFixtures(t) {
 		if got := DetectSignatureProvider(fixture.sig); got != fixture.want {
 			t.Errorf("%s: DetectSignatureProvider = %q, want %q", name, got, fixture.want)
 		}
@@ -349,7 +353,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_NormalizesSameProviderClaude(t
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != expectedSig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != expectedSig {
 		t.Fatalf("signature = %q, want normalized %q", got, expectedSig)
 	}
 }
@@ -362,7 +366,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsClaudeThinkingForGemini(t
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
 	}
-	content := gjson.GetBytes(output, "messages.0.content").Array()
+	content := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("content length = %d, want 1: %s", len(content), output)
 	}
@@ -380,7 +384,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_PreservesGeminiThinkingForGemi
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != nativeSig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != nativeSig {
 		t.Fatalf("signature = %q, want normalized %q", got, nativeSig)
 	}
 }
@@ -393,7 +397,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_PreservesGPTForGPT(t *testing.
 	if report.Preserved != 1 || report.DroppedBlocks != 0 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	if got := gjson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
+	if got := ojson.GetBytes(output, "messages.0.content.0.signature").String(); got != sig {
 		t.Fatalf("signature = %q, want preserved %q", got, sig)
 	}
 }
@@ -406,7 +410,7 @@ func TestSanitizeClaudeMessagesSignaturesForModel_DropsEmptyAssistantMessage(t *
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1", report.DroppedBlocks)
 	}
-	messages := gjson.GetBytes(output, "messages").Array()
+	messages := ojson.GetBytes(output, "messages").Array()
 	if len(messages) != 1 {
 		t.Fatalf("messages length = %d, want 1: %s", len(messages), output)
 	}
@@ -422,7 +426,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_DropsInvalidThinkingAndCleansTo
 	if report.DroppedBlocks != 1 {
 		t.Fatalf("DroppedBlocks = %d, want 1; report=%+v", report.DroppedBlocks, report)
 	}
-	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	parts := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(parts) != 2 {
 		t.Fatalf("content length = %d, want 2: %s", len(parts), output)
 	}
@@ -458,7 +462,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_NormalizesValidThinkingAndDrops
 	if report.Preserved != 1 || report.DroppedBlocks != 1 {
 		t.Fatalf("unexpected report: %+v", report)
 	}
-	messages := gjson.GetBytes(output, "messages").Array()
+	messages := ojson.GetBytes(output, "messages").Array()
 	if len(messages) != 2 {
 		t.Fatalf("messages length = %d, want 2: %s", len(messages), output)
 	}

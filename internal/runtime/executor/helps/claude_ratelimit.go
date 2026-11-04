@@ -2,6 +2,8 @@ package helps
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/json"
+	"math"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -14,11 +16,16 @@ import (
 const (
 	defaultClaudeRateLimitFuzzMinSeconds = 1
 	defaultClaudeRateLimitFuzzMaxSeconds = 30
+	// maxClaudeRateLimitWindow is the longest Anthropic rate-limit window (7 days)
+	// plus a small clock-skew allowance. A later header timestamp is a billing
+	// boundary, not a recoverable rate limit.
+	maxClaudeRateLimitWindow = 7*24*time.Hour + time.Hour
 )
 
 // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether response headers explicitly
-// declare an Anthropic shared 5h or 7d rate-limit rejection. A Fable-only 7d_oi rejection
-// remains model-scoped when both shared windows are explicitly allowed (status "allowed" or "allowed_warning").
+// declare an Anthropic shared 5h or 7d rate-limit rejection. An overage-only or Fable-only rejection
+// remains model-scoped when shared subscription windows are not rejected (status "allowed", "allowed_warning",
+// or unexhausted when omitted).
 func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	if headers == nil {
 		return false
@@ -36,15 +43,185 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 		return false
 	}
 	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
-	return !isFableOnlyRejection(status5h, status7d, status7dOI)
+	return !isOverageOrFableOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 }
 
 func isClaudeWindowAllowed(status string) bool {
 	return status == "allowed" || status == "allowed_warning"
 }
 
-func isFableOnlyRejection(status5h, status7d, status7dOI string) bool {
-	return isClaudeWindowAllowed(status5h) && isClaudeWindowAllowed(status7d) && status7dOI == "rejected"
+func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h, status7d, status7dOI string) bool {
+	if status5h == "rejected" || status7d == "rejected" {
+		return false
+	}
+
+	overageStatus := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Status")))
+	overageDisabledReason := strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"))
+	representativeClaim := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Representative-Claim")))
+
+	isOverageRejected := status7dOI == "rejected" ||
+		overageStatus == "rejected" ||
+		overageDisabledReason != "" ||
+		strings.Contains(representativeClaim, "overage")
+
+	if !isOverageRejected {
+		return false
+	}
+
+	shared5hAllowed := isClaudeWindowAllowed(status5h)
+	shared7dAllowed := isClaudeWindowAllowed(status7d)
+
+	if shared5hAllowed && shared7dAllowed {
+		return true
+	}
+
+	// When Anthropic evaluates an overage-only or 7d_oi claim, it often omits
+	// the 5h status header (and omits 5h utilization entirely when the 5h window
+	// has no usage or does not exist on the account tier). Treat an omitted 5h
+	// utilization on a rejected response, or an explicit healthy 5h utilization
+	// below 1.0, as unexhausted when 7d is allowed.
+	if shared7dAllowed && status5h == "" {
+		if isClaudeUtilizationHealthy(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization")) {
+			return true
+		}
+		if unifiedStatus == "rejected" &&
+			!hasHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization") {
+			return true
+		}
+	}
+	if shared5hAllowed && status7d == "" {
+		if isClaudeUtilizationHealthy(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Utilization")) {
+			return true
+		}
+	}
+
+	// Anthropic omits both shared-window headers when it did not evaluate them.
+	// Only a rejected overage claim uses that absence. An allowed or missing
+	// unified status must still honor a short Retry-After. Other signals
+	// (overage disabled, overage status rejected) do not widen this exception.
+	if unifiedStatus == "rejected" && status5h == "" && status7d == "" && strings.Contains(representativeClaim, "overage") {
+		util5h := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization")
+		util7d := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Utilization")
+		util5hAbsentOrHealthy := strings.TrimSpace(util5h) == "" || isClaudeUtilizationHealthy(util5h)
+		util7dAbsentOrHealthy := strings.TrimSpace(util7d) == "" || isClaudeUtilizationHealthy(util7d)
+		if util5hAbsentOrHealthy && util7dAbsentOrHealthy {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isClaudeUtilizationHealthy(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, errParse := strconv.ParseFloat(raw, 64)
+	if errParse != nil || math.IsNaN(u) || math.IsInf(u, 0) {
+		return false
+	}
+	return u >= 0 && u < 1.0
+}
+
+// claudeQuotaStatusHeaders are the Anthropic headers whose non-empty value, under any
+// casing or in any repeated entry, declares a quota window. An overage status declares
+// its own window, which keeps the conservative parser in charge.
+var claudeQuotaStatusHeaders = []string{
+	"Anthropic-Ratelimit-Unified-Status",
+	"Anthropic-Ratelimit-Unified-5h-Status",
+	"Anthropic-Ratelimit-Unified-7d-Status",
+	"Anthropic-Ratelimit-Unified-7d_oi-Status",
+	"Anthropic-Ratelimit-Unified-Overage-Status",
+}
+
+// ParseClaudeRateLimitResetForError is ParseClaudeRateLimitReset with one narrow,
+// body-aware exception. An explicit per-minute rate-limit error carries no quota
+// window, so an unclassified unified reset must not stretch its short Retry-After
+// into an hours-long cooldown. The exception applies only when the body is exactly
+// one complete per-minute message, no status header declares a quota window, and
+// Retry-After is a single unambiguous value usable by the downstream deadline
+// filter. Every other input keeps the conservative header-only result.
+func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now time.Time) *time.Duration {
+	if headers == nil || !claudeBodyIsExplicitPerMinuteRateLimit(body) || claudeHeadersHaveQuotaStatus(headers) {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	rawRetryAfter, ok := singleHeaderValueCaseInsensitive(headers, "Retry-After")
+	if !ok {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	retryAt, okRetry := parseRetryAfterHeader(rawRetryAfter, now)
+	if !okRetry || !retryAt.After(now) || retryAt.Sub(now) > maxClaudeRateLimitWindow {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	// Only the unclassified unified reset can stretch the cooldown here: every
+	// window-specific reset is consulted solely when its window is rejected.
+	rateHeaders := headers.Clone()
+	for name := range rateHeaders {
+		if strings.EqualFold(name, "Anthropic-Ratelimit-Unified-Reset") {
+			delete(rateHeaders, name)
+		}
+	}
+	return ParseClaudeRateLimitReset(rateHeaders, now)
+}
+
+// claudeBodyIsExplicitPerMinuteRateLimit reports whether body is exactly one of the
+// complete per-minute rate-limit messages, ignoring case and surrounding whitespace.
+// Substring matching is unsafe here: a per-minute mention can also be negated or
+// accompany genuine quota exhaustion.
+func claudeBodyIsExplicitPerMinuteRateLimit(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &envelope); errUnmarshal != nil || envelope.Error.Type != "rate_limit_error" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.Error.Message)) {
+	case "this request would exceed the requests per minute rate limit. please try again later.",
+		"this request would exceed the input tokens per minute rate limit. please try again later.",
+		"this request would exceed the output tokens per minute rate limit. please try again later.":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudeHeadersHaveQuotaStatus(headers http.Header) bool {
+	for _, name := range claudeQuotaStatusHeaders {
+		for key, values := range headers {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			for _, value := range values {
+				if strings.TrimSpace(value) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// singleHeaderValueCaseInsensitive returns the sole value of target. A repeated value
+// or a differently cased alias key is ambiguous even when the values agree, because a
+// canonical lookup could then consume a different value than the one validated.
+func singleHeaderValueCaseInsensitive(headers http.Header, target string) (string, bool) {
+	value := ""
+	found := false
+	for key, values := range headers {
+		if !strings.EqualFold(key, target) {
+			continue
+		}
+		if found || len(values) != 1 {
+			return "", false
+		}
+		found = true
+		value = values[0]
+	}
+	return value, found
 }
 
 // ParseClaudeRateLimitReset inspects Anthropic response headers for shared and Fable-specific
@@ -64,7 +241,7 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	status5h := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Status")))
 	status7d := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d-Status")))
 	status7dOI := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")))
-	fableOnlyRejection := isFableOnlyRejection(status5h, status7d, status7dOI)
+	overageOnlyRejection := isOverageOrFableOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 
 	var candidateDeadlines []time.Time
 	var rejectedWindows []string
@@ -82,13 +259,15 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		rejectedWindows = append(rejectedWindows, "7d_oi")
 	}
 
-	// 1. Retry-After header
-	if rawRetryAfter := getHeaderCaseInsensitive(headers, "Retry-After"); rawRetryAfter != "" {
-		if !containsString(rejectedWindows, "retry-after") {
-			rejectedWindows = append(rejectedWindows, "retry-after")
-		}
-		if t, ok := parseRetryAfterHeader(rawRetryAfter, now); ok && t.After(now) {
-			candidateDeadlines = append(candidateDeadlines, t)
+	// 1. Retry-After header (skipped for an overage/Fable-only rejection, which does not describe the credential)
+	if !overageOnlyRejection {
+		if rawRetryAfter := getHeaderCaseInsensitive(headers, "Retry-After"); rawRetryAfter != "" {
+			if !containsString(rejectedWindows, "retry-after") {
+				rejectedWindows = append(rejectedWindows, "retry-after")
+			}
+			if t, ok := parseRetryAfterHeader(rawRetryAfter, now); ok && t.After(now) {
+				candidateDeadlines = append(candidateDeadlines, t)
+			}
 		}
 	}
 
@@ -110,8 +289,8 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		}
 	}
 
-	// 4. Fable-specific 7-day window reset (only when rejected and not a Fable-only rejection)
-	if status7dOI == "rejected" && !fableOnlyRejection {
+	// 4. Fable-specific 7-day window reset (only when rejected and not an overage/Fable-only rejection)
+	if status7dOI == "rejected" && !overageOnlyRejection {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset"); raw != "" {
 			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
 				candidateDeadlines = append(candidateDeadlines, t)
@@ -120,7 +299,7 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	}
 
 	// 5. Unified reset header:
-	unifiedRejected := !fableOnlyRejection && (unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
+	unifiedRejected := !overageOnlyRejection && (unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected" || status7dOI == "rejected" ||
 		(unifiedStatus == "" && !isClaudeWindowAllowed(status5h) && !isClaudeWindowAllowed(status7d)))
 
 	if unifiedRejected {
@@ -128,12 +307,18 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 			if !containsString(rejectedWindows, "unified") {
 				rejectedWindows = append(rejectedWindows, "unified")
 			}
-			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
-				candidateDeadlines = append(candidateDeadlines, t)
+			// When the representative claim is overage and this timestamp matches
+			// the overage reset, it is the billing-period boundary, not a rate-limit
+			// recovery time.
+			if !claudeUnifiedResetIsOverageBillingBoundary(headers, raw) {
+				if resetAt, ok := parseUnixOrTimestamp(raw); ok && resetAt.After(now) {
+					candidateDeadlines = append(candidateDeadlines, resetAt)
+				}
 			}
 		}
 	}
 
+	candidateDeadlines = filterClaudeRateLimitDeadlines(candidateDeadlines, now)
 	if len(candidateDeadlines) == 0 {
 		if len(rejectedWindows) > 0 {
 			log.WithFields(log.Fields{
@@ -177,6 +362,37 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	return &effectiveDuration
 }
 
+func claudeUnifiedResetIsOverageBillingBoundary(headers http.Header, unifiedReset string) bool {
+	claim := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Representative-Claim")))
+	if !strings.Contains(claim, "overage") {
+		return false
+	}
+	overageReset := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Reset")
+	unifiedAt, okUnified := parseUnixOrTimestamp(unifiedReset)
+	overageAt, okOverage := parseUnixOrTimestamp(overageReset)
+	if !okUnified || !okOverage {
+		return false
+	}
+	return unifiedAt.Equal(overageAt)
+}
+
+func filterClaudeRateLimitDeadlines(deadlines []time.Time, now time.Time) []time.Time {
+	if len(deadlines) == 0 {
+		return deadlines
+	}
+	kept := deadlines[:0]
+	for _, deadline := range deadlines {
+		if !deadline.After(now) {
+			continue
+		}
+		if deadline.Sub(now) > maxClaudeRateLimitWindow {
+			continue
+		}
+		kept = append(kept, deadline)
+	}
+	return kept
+}
+
 func containsString(list []string, target string) bool {
 	for _, item := range list {
 		if item == target {
@@ -199,6 +415,18 @@ func getHeaderCaseInsensitive(h http.Header, target string) string {
 		}
 	}
 	return ""
+}
+
+func hasHeaderCaseInsensitive(h http.Header, target string) bool {
+	if h == nil {
+		return false
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, target) && len(v) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func parseUnixOrTimestamp(raw string) (time.Time, bool) {

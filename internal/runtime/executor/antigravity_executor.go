@@ -15,18 +15,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	internalsignature "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -40,7 +41,7 @@ const (
 	antigravityClientSecret                = "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"
 	antigravityAuthType                    = "antigravity"
 	antigravityRequestTokenSafetyWindow    = 5 * time.Minute
-	antigravityCreditsHintRefreshInterval  = 10 * time.Minute
+	antigravityCreditsHintRefreshInterval  = cliproxyauth.AntigravityCreditsHintRefreshInterval
 	antigravityCreditsHintRefreshTimeout   = 5 * time.Second
 	antigravityShortQuotaCooldownThreshold = 5 * time.Minute
 	antigravityInstantRetryThreshold       = 3 * time.Second
@@ -69,6 +70,14 @@ func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
 	}
 	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
+}
+
+func (e *AntigravityExecutor) obfuscateSensitiveWordsDoc(doc *ojson.Doc) bool {
+	if doc == nil || e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+		return false
+	}
+	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	return helps.ObfuscateSensitiveWordsInSystemInstructionDoc(doc, matcher)
 }
 
 // Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
@@ -435,11 +444,12 @@ func antigravityCredentialScope(prefix, secret string) string {
 // negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
 // The underlying Transport is always shared so keep-alive connections survive across
 // requests instead of forcing a fresh TCP + TLS handshake every time.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
-	if proxyURL := antigravityProxyURL(cfg, auth); proxyURL != "" {
+	if proxyURL := antigravityProxyURL(ctx, cfg, auth); proxyURL != "" {
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
 			return &http.Client{Transport: transport, Timeout: timeout}
 		}
@@ -447,7 +457,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		// context transport fallback, preserving the previous behavior.
 	}
 
-	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
@@ -472,7 +482,10 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	return client
 }
 
-func antigravityProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+func antigravityProxyURL(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if proxyURL := cliproxyexecutor.RequestProxyURL(ctx); proxyURL != "" {
+		return proxyURL
+	}
 	if auth != nil {
 		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
 			return proxyURL
@@ -488,8 +501,16 @@ func sanitizeAntigravityGeminiRequestSignatures(modelName string, rawJSON []byte
 	if !antigravityUsesReasoningReplayCache(modelName) {
 		return rawJSON
 	}
-	rawJSON = internalsignature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
+	rawJSON = internalsignature.SanitizeNonVertexGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	return normalizeAntigravityGeminiFunctionResponseRoles(rawJSON)
+}
+
+func sanitizeAntigravityGeminiRequestSignaturesDoc(modelName string, doc *ojson.Doc) {
+	if doc == nil || !antigravityUsesReasoningReplayCache(modelName) {
+		return
+	}
+	internalsignature.SanitizeNonVertexGeminiRequestThoughtSignaturesDoc(doc, "request.contents")
+	normalizeAntigravityGeminiFunctionResponseRolesDoc(doc)
 }
 
 // ensureAntigravityGeminiLeadingUserContent prepends a synthetic empty user turn
@@ -502,6 +523,13 @@ func ensureAntigravityGeminiLeadingUserContent(modelName string, payload []byte)
 	return helps.EnsureGeminiLeadingUserContent(payload, "request.contents")
 }
 
+func ensureAntigravityGeminiLeadingUserContentDoc(modelName string, doc *ojson.Doc) bool {
+	if doc == nil || strings.Contains(strings.ToLower(modelName), "claude") {
+		return false
+	}
+	return helps.EnsureGeminiLeadingUserContentDoc(doc, "request.contents")
+}
+
 // ensureAntigravityGeminiTrailingUserContent appends a synthetic empty user turn
 // if the final turn is a model turn. Claude targets are left unchanged because
 // the adapter rejects empty text parts.
@@ -512,13 +540,34 @@ func ensureAntigravityGeminiTrailingUserContent(modelName string, payload []byte
 	return helps.EnsureGeminiTrailingUserContent(payload, "request.contents")
 }
 
+func ensureAntigravityGeminiTrailingUserContentDoc(modelName string, doc *ojson.Doc) bool {
+	if doc == nil || strings.Contains(strings.ToLower(modelName), "claude") {
+		return false
+	}
+	return helps.EnsureGeminiTrailingUserContentDoc(doc, "request.contents")
+}
+
 // ensureAntigravityGeminiBoundaryUserContent normalizes both leading and trailing
-// turns for Gemini targets. Claude targets are left unchanged.
+// turns for Gemini targets. A trailing reasoning-only model turn is dropped first
+// so the request does not rely only on a synthetic empty user turn (#6530).
+// Claude targets are left unchanged.
 func ensureAntigravityGeminiBoundaryUserContent(modelName string, payload []byte) []byte {
 	if strings.Contains(strings.ToLower(modelName), "claude") {
 		return payload
 	}
+	payload = helps.DropGeminiTrailingThoughtOnlyContent(payload, "request.contents")
 	return helps.EnsureGeminiBoundaryUserContent(payload, "request.contents")
+}
+
+func ensureAntigravityGeminiBoundaryUserContentDoc(modelName string, doc *ojson.Doc) bool {
+	if doc == nil || strings.Contains(strings.ToLower(modelName), "claude") {
+		return false
+	}
+	changed := helps.DropGeminiTrailingThoughtOnlyContentDoc(doc, "request.contents")
+	if helps.EnsureGeminiBoundaryUserContentDoc(doc, "request.contents") {
+		changed = true
+	}
+	return changed
 }
 
 type antigravityContentEdit struct {
@@ -527,6 +576,26 @@ type antigravityContentEdit struct {
 	start       int
 	end         int
 	replacement []byte
+}
+
+func normalizeAntigravityGeminiFunctionResponseRolesDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		return false
+	}
+	wrapped := []byte(`{"request":{"contents":` + contents.Raw + `}}`)
+	normalized := normalizeAntigravityGeminiFunctionResponseRoles(wrapped)
+	if bytes.Equal(normalized, wrapped) {
+		return false
+	}
+	updatedContents := util.GetGJSONBytesNoCopy(normalized, "request.contents")
+	if !updatedContents.IsArray() || updatedContents.Raw == contents.Raw {
+		return false
+	}
+	return doc.SetRawBytes("request.contents", []byte(updatedContents.Raw)) == nil
 }
 
 // normalizeAntigravityGeminiFunctionResponseRoles edits each response turn in
@@ -547,7 +616,7 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 	edits := make([]antigravityContentEdit, 0)
 	var pending []functionRef
 	validOffsets := true
-	contents.ForEach(func(contentIndex, content gjson.Result) bool {
+	contents.ForEach(func(contentIndex, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			pending = nil
@@ -558,7 +627,7 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		var responseParts, otherParts []json.RawMessage
 		partCount := 0
 		hasOtherPart := false
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			partCount++
 			switch {
 			case part.Get("functionCall").Exists():
@@ -591,7 +660,7 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 			return true
 		}
 
-		var contentJSON []byte
+		var contentDoc *ojson.Doc
 		contentChanged := false
 		if len(pending) > 0 && len(responses) > 0 {
 			ordered := make([]json.RawMessage, 0, partCount)
@@ -617,9 +686,8 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 				ordered = append(ordered, otherParts...)
 				encoded, errMarshal := json.Marshal(ordered)
 				if errMarshal == nil && !bytes.Equal(encoded, []byte(parts.Raw)) {
-					contentJSON = []byte(content.Raw)
-					if updated, errSet := sjson.SetRawBytes(contentJSON, "parts", encoded); errSet == nil {
-						contentJSON = updated
+					contentDoc = ojson.NewDoc([]byte(content.Raw))
+					if errSet := contentDoc.SetRawBytes("parts", encoded); errSet == nil {
 						contentChanged = true
 					}
 				}
@@ -627,17 +695,17 @@ func normalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byte {
 		}
 		pending = nil
 		if !hasOtherPart && content.Get("role").String() != "model" {
-			if contentJSON == nil {
-				contentJSON = []byte(content.Raw)
+			if contentDoc == nil {
+				contentDoc = ojson.NewDoc([]byte(content.Raw))
 			}
-			if updated, errSet := sjson.SetBytes(contentJSON, "role", "model"); errSet == nil {
-				contentJSON = updated
+			if errSet := contentDoc.Set("role", "model"); errSet == nil {
 				contentChanged = true
 			}
 		}
-		if !contentChanged {
+		if !contentChanged || contentDoc == nil {
 			return true
 		}
+		contentJSON := contentDoc.Bytes()
 
 		start := content.Index
 		end := start + len(content.Raw)
@@ -662,7 +730,7 @@ func applyAntigravityIndexedEdits(rawJSON []byte, edits []antigravityContentEdit
 	if len(edits) == 0 {
 		return rawJSON
 	}
-	if !validOffsets {
+	if !validOffsets || !ojson.ValidBytes(rawJSON) {
 		return applyAntigravityContentEditsWithSJSON(rawJSON, edits)
 	}
 
@@ -691,17 +759,21 @@ func applyAntigravityIndexedEdits(rawJSON []byte, edits []antigravityContentEdit
 // applyAntigravityContentEditsWithSJSON preserves the legacy path semantics if
 // a GJSON result cannot be proven to point into the original request bytes.
 func applyAntigravityContentEditsWithSJSON(rawJSON []byte, edits []antigravityContentEdit) []byte {
-	out := rawJSON
+	doc := ojson.NewDoc(rawJSON)
+	changed := false
 	for _, edit := range edits {
 		path := edit.path
 		if path == "" {
 			path = fmt.Sprintf("request.contents.%d", edit.index)
 		}
-		if updated, errSet := sjson.SetRawBytes(out, path, edit.replacement); errSet == nil {
-			out = updated
+		if errSet := doc.SetRawBytes(path, edit.replacement); errSet == nil {
+			changed = true
 		}
 	}
-	return out
+	if !changed {
+		return rawJSON
+	}
+	return doc.Bytes()
 }
 
 // repairAntigravityGeminiFunctionResponseNames copies missing or placeholder
@@ -713,12 +785,12 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	callIDToName := make(map[string]string)
-	contents.ForEach(func(_, content gjson.Result) bool {
+	contents.ForEach(func(_, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			fc := part.Get("functionCall")
 			if fc.Exists() {
 				id := strings.TrimSpace(fc.Get("id").String())
@@ -737,12 +809,12 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 
 	edits := make([]antigravityContentEdit, 0)
 	validOffsets := true
-	contents.ForEach(func(contentIdx, content gjson.Result) bool {
+	contents.ForEach(func(contentIdx, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
-		parts.ForEach(func(partIdx, part gjson.Result) bool {
+		parts.ForEach(func(partIdx, part ojson.Result) bool {
 			fr := part.Get("functionResponse")
 			if !fr.Exists() {
 				return true
@@ -756,7 +828,7 @@ func repairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 			if !ok {
 				return true
 			}
-			updatedPart, errSet := sjson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
+			updatedPart, errSet := ojson.SetBytes([]byte(part.Raw), "functionResponse.name", realName)
 			if errSet != nil {
 				return true
 			}
@@ -833,10 +905,32 @@ func hasAntigravityGoogleSearchTool(payload []byte) bool {
 	return false
 }
 
+func hasAntigravityResponsesWebSearchTool(rawJSON []byte) bool {
+	tools := util.GetGJSONBytesNoCopy(rawJSON, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		switch tool.Get("type").String() {
+		case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+			return true
+		}
+	}
+	return false
+}
+
 func shouldResolveAntigravityWebSearchGroundingURLs(from sdktranslator.Format, originalRequestRawJSON, requestRawJSON []byte) bool {
-	return from.String() == "claude" &&
-		hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON) &&
-		hasAntigravityGoogleSearchTool(requestRawJSON)
+	if !hasAntigravityGoogleSearchTool(requestRawJSON) {
+		return false
+	}
+	switch from {
+	case sdktranslator.FormatClaude:
+		return hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON)
+	case sdktranslator.FormatOpenAIResponse:
+		return hasAntigravityResponsesWebSearchTool(originalRequestRawJSON)
+	default:
+		return false
+	}
 }
 
 func (e *AntigravityExecutor) resolveWebSearchGroundingURLs(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, originalRequestRawJSON, requestRawJSON, responseRawJSON []byte) []byte {
@@ -853,12 +947,12 @@ func countClaudeThinkingBlocks(rawJSON []byte) int {
 	}
 
 	count := 0
-	messages.ForEach(func(_, message gjson.Result) bool {
+	messages.ForEach(func(_, message ojson.Result) bool {
 		content := message.Get("content")
 		if !content.IsArray() {
 			return true
 		}
-		content.ForEach(func(_, part gjson.Result) bool {
+		content.ForEach(func(_, part ojson.Result) bool {
 			if part.Get("type").String() == "thinking" {
 				count++
 			}
@@ -943,5 +1037,8 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	}
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	return httpClient.Do(httpReq)
+	return helps.WithAntigravityHTTPClientTrace(httpClient, auth, "http_request").Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *AntigravityExecutor) SupportsApplyPatch() bool { return e != nil }

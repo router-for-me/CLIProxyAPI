@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Regression for a production incident: a Claude turn that interleaved thinking
@@ -53,19 +53,19 @@ func TestInterleavedThinkingAndSearchSurvivesRoundTrip(t *testing.T) {
 		[]byte(`data: {"type":"message_stop"}`))
 
 	outputs := translateClaudeResponsesStreamThroughRegistry(chunks)
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, o := range outputs {
 		if ev, data := parseClaudeResponsesSSEEvent(t, o); ev == "response.completed" {
 			completed = data
 		}
 	}
 	var items []json.RawMessage
-	completed.Get("response.output").ForEach(func(_, v gjson.Result) bool {
+	completed.Get("response.output").ForEach(func(_, v ojson.Result) bool {
 		items = append(items, json.RawMessage(v.Raw))
 		return true
 	})
 	req, _ := json.Marshal(map[string]any{"model": "claude-test", "input": items})
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", req, false)
 
 	got := claudeAssistantBlockTypes(t, out)
 	want := []string{

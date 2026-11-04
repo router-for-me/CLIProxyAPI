@@ -2,16 +2,18 @@ package openai
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func newResponsesStreamTestHandler(t *testing.T) (*OpenAIResponsesAPIHandler, *httptest.ResponseRecorder, *gin.Context, http.Flusher) {
@@ -94,6 +96,85 @@ func TestResponsesSSEFramerUsesErrorEventOverPayloadType(t *testing.T) {
 	}
 }
 
+func TestForwardResponsesStreamPreservesResponseFailedEventAndEnvelopeForAllClients(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		userAgent string
+	}{
+		{name: "standard client", userAgent: "openai-python/1.0"},
+		{name: "codex client", userAgent: "Codex Desktop/26.803.41515"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+			c.Request.Header.Set("User-Agent", tc.userAgent)
+
+			data := make(chan []byte, 2)
+			errs := make(chan *interfaces.ErrorMessage)
+			data <- []byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"id\":\"msg_1_0\",\"type\":\"message\",\"status\":\"incomplete\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}}\n\n")
+			data <- []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":2,\"response\":{\"id\":\"msg_1\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"Claude stopped because the conversation filled the model context window (stop_reason: model_context_window_exceeded).\"},\"output\":[{\"id\":\"msg_1_0\",\"type\":\"message\",\"status\":\"incomplete\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"total_tokens\":14}}}\n\n")
+			close(data)
+			close(errs)
+
+			h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+			body := recorder.Body.String()
+			if strings.Count(body, "event: response.failed") != 1 || strings.Contains(body, "event: error") {
+				t.Fatalf("expected one response.failed event and no error event, got: %q", body)
+			}
+			parts := strings.Split(strings.TrimSpace(body), "\n\n")
+			last := parts[len(parts)-1]
+			payload, ok := responsesSSEDataPayload([]byte(last))
+			if !ok {
+				t.Fatalf("no data payload in terminal frame: %q", last)
+			}
+			resp := ojson.GetBytesNoCopy(payload, "response")
+			if resp.Get("id").String() != "msg_1" || resp.Get("status").String() != "failed" {
+				t.Fatalf("response envelope lost id or status: %s", payload)
+			}
+			if resp.Get("error.code").String() != "context_length_exceeded" {
+				t.Fatalf("response.error.code = %q, want context_length_exceeded: %s", resp.Get("error.code").String(), payload)
+			}
+			if resp.Get("output.#").Int() != 1 || resp.Get("usage.total_tokens").Int() != 14 {
+				t.Fatalf("response output or usage lost: %s", payload)
+			}
+		})
+	}
+}
+
+func TestForwardResponsesStreamResponseFailedPreservesLongOutputWhileSanitizingError(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	longText := strings.Repeat("a", 3000)
+	longEncrypted := strings.Repeat("c", 3000)
+
+	frame := "event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":3,\"response\":{\"id\":\"msg_long\",\"object\":\"response\",\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"window exceeded Bearer secret-token-123\"},\"output\":[{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"encrypted_content\":\"" + longEncrypted + "\",\"summary\":[]},{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"incomplete\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"" + longText + "\"}]},{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"incomplete\",\"call_id\":\"call_1\",\"name\":\"write\",\"arguments\":{\"raw\":\"" + strings.Repeat("b", 3000) + "\"}}],\"usage\":{\"input_tokens\":10,\"output_tokens\":20,\"total_tokens\":30}}}\n\n"
+	data := make(chan []byte, 1)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte(frame)
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	body := recorder.Body.String()
+	payload, ok := responsesSSEDataPayload([]byte(strings.TrimSpace(body)))
+	if !ok {
+		t.Fatalf("missing data payload: %q", body)
+	}
+	resp := ojson.GetBytesNoCopy(payload, "response")
+	if got := resp.Get("output.0.encrypted_content").String(); got != longEncrypted {
+		t.Fatalf("encrypted_content len = %d, want %d", len(got), len(longEncrypted))
+	}
+	if got := resp.Get("output.1.content.0.text").String(); got != longText {
+		t.Fatalf("output text len = %d, want %d", len(got), len(longText))
+	}
+	if got := resp.Get("output.2.arguments.raw").String(); len(got) != 3000 {
+		t.Fatalf("function_call arguments len = %d, want 3000", len(got))
+	}
+	if strings.Contains(resp.Get("error.message").String(), "secret-token-123") || !strings.Contains(resp.Get("error.message").String(), "[REDACTED]") {
+		t.Fatalf("error.message was not sanitized: %q", resp.Get("error.message").String())
+	}
+}
+
 func TestForwardResponsesStreamSeparatesDataOnlySSEChunks(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
@@ -141,14 +222,14 @@ func TestForwardResponsesStreamRepairsEmptyCompletedOutputFromDoneItems(t *testi
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
-	output := gjson.Get(payload, "response.output")
+	output := ojson.Get(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 2 {
 		t.Fatalf("expected repaired completed output with 2 items, got %s", output.Raw)
 	}
-	if got := gjson.Get(payload, "response.output.1.name").String(); got != "shell" {
+	if got := ojson.Get(payload, "response.output.1.name").String(); got != "shell" {
 		t.Fatalf("expected function_call name to be preserved, got %q in %s", got, payload)
 	}
-	if got := gjson.Get(payload, "response.output.1.arguments").String(); got != `{"cmd":"pwd"}` {
+	if got := ojson.Get(payload, "response.output.1.arguments").String(); got != `{"cmd":"pwd"}` {
 		t.Fatalf("expected function_call arguments to be preserved, got %q in %s", got, payload)
 	}
 }
@@ -172,14 +253,14 @@ func TestForwardResponsesStreamRepairsMixedIndexedAndUnindexedDoneItems(t *testi
 	}
 
 	payload := strings.TrimPrefix(parts[2], "data: ")
-	output := gjson.Get(payload, "response.output")
+	output := ojson.Get(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 2 {
 		t.Fatalf("expected repaired completed output with 2 items, got %s", output.Raw)
 	}
-	if got := gjson.Get(payload, "response.output.0.name").String(); got != "shell" {
+	if got := ojson.Get(payload, "response.output.0.name").String(); got != "shell" {
 		t.Fatalf("expected indexed function_call to be preserved first, got %q in %s", got, payload)
 	}
-	if got := gjson.Get(payload, "response.output.1.id").String(); got != "msg-1" {
+	if got := ojson.Get(payload, "response.output.1.id").String(); got != "msg-1" {
 		t.Fatalf("expected unindexed message to be appended, got %q in %s", got, payload)
 	}
 }
@@ -212,7 +293,7 @@ func TestForwardResponsesStreamRepairsMultilineCompletedOutputAsSSEDataLines(t *
 	if !ok {
 		t.Fatalf("expected completed frame to contain data payload: %q", parts[1])
 	}
-	output := gjson.GetBytes(payload, "response.output")
+	output := ojson.GetBytesNoCopy(payload, "response.output")
 	if !output.IsArray() || len(output.Array()) != 1 {
 		t.Fatalf("expected repaired completed output with 1 item, got %s from %q", output.Raw, payload)
 	}
@@ -310,5 +391,415 @@ func TestForwardResponsesStreamDropsIncompleteTrailingDataChunkOnFlush(t *testin
 	}
 	if !strings.Contains(got, "event: error") {
 		t.Fatalf("unterminated framing test stream did not end with an error: %q", got)
+	}
+}
+
+func TestForwardResponsesStreamErrorEventPreservesNestedError(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	c.Request.Header.Set("User-Agent", "codex_vscode/0.153.4 (Ubuntu 22.4.0; x86_64)")
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+
+	go func() {
+		data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n")
+		data <- []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n")
+
+		errText := `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null}}`
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(errText),
+		}
+		close(data)
+		close(errs)
+	}()
+
+	framer := &responsesSSEFramer{}
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
+
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: error\n") {
+		t.Fatalf("expected event: error in output, got: %q", body)
+	}
+
+	parts := strings.Split(strings.TrimSpace(body), "\n\n")
+	if len(parts) < 3 {
+		t.Fatalf("expected at least 3 SSE events, got %d. Body: %q", len(parts), body)
+	}
+
+	lastPart := strings.TrimSpace(parts[len(parts)-1])
+	if !strings.HasPrefix(lastPart, "event: error\ndata: ") {
+		t.Fatalf("last event is not error event: %q", lastPart)
+	}
+
+	jsonPayload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	var payload struct {
+		Type           string         `json:"type"`
+		Error          map[string]any `json:"error"`
+		SequenceNumber int            `json:"sequence_number"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(jsonPayload), &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error event payload: %v (raw: %s)", errUnmarshal, jsonPayload)
+	}
+	if payload.Type != "error" {
+		t.Fatalf("payload.Type = %q, want error", payload.Type)
+	}
+	if payload.SequenceNumber != 2 {
+		t.Fatalf("payload.SequenceNumber = %d, want 2", payload.SequenceNumber)
+	}
+	if payload.Error["type"] != "invalid_request" {
+		t.Fatalf("payload.Error.type = %v, want invalid_request", payload.Error["type"])
+	}
+	if payload.Error["code"] != "cyber_policy" {
+		t.Fatalf("payload.Error.code = %v, want cyber_policy", payload.Error["code"])
+	}
+	if param, exists := payload.Error["param"]; !exists || param != nil {
+		t.Fatalf("payload.Error.param = %v, want null/nil", param)
+	}
+}
+
+func TestResponsesSSEFramerRepairErrorPayloadCalculatesCorrectSequenceNumber(t *testing.T) {
+	// Case 1: First frame is an error without sequence_number -> should be 0
+	framer1 := &responsesSSEFramer{}
+	var out1 bytes.Buffer
+	framer1.WriteChunk(&out1, []byte("event: error\ndata: {\"error\":{\"code\":\"bad_request\"}}\n\n"))
+	var p1 struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	payload1 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out1.String()), "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload1), &p1); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if p1.SequenceNumber != 0 {
+		t.Fatalf("first frame error sequence_number = %d, want 0", p1.SequenceNumber)
+	}
+
+	// Case 2: Two data frames then an error frame without sequence_number -> should be 2
+	framer2 := &responsesSSEFramer{}
+	var out2 bytes.Buffer
+	framer2.WriteChunk(&out2, []byte("event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0}\n\n"))
+	framer2.WriteChunk(&out2, []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n"))
+	out2.Reset()
+	framer2.WriteChunk(&out2, []byte("event: error\ndata: {\"error\":{\"code\":\"cyber_policy\"}}\n\n"))
+	var p2 struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	payload2 := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out2.String()), "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload2), &p2); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if p2.SequenceNumber != 2 {
+		t.Fatalf("third frame error sequence_number = %d, want 2", p2.SequenceNumber)
+	}
+}
+
+func TestForwardResponsesStreamErrorEventPreservesExplicitSequenceNumber(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+	c.Request.Header.Set("User-Agent", "codex_vscode/0.153.4")
+
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+
+	go func() {
+		errText := `{"error":{"type":"invalid_request","code":"custom"},"sequence_number":9}`
+		errs <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(errText),
+		}
+		close(data)
+		close(errs)
+	}()
+
+	framer := &responsesSSEFramer{}
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, framer)
+
+	body := recorder.Body.String()
+	var p struct {
+		Type           string         `json:"type"`
+		SequenceNumber int            `json:"sequence_number"`
+		Error          map[string]any `json:"error"`
+	}
+	lastPart := strings.TrimSpace(strings.Split(strings.TrimSpace(body), "\n\n")[0])
+	payload := strings.TrimSpace(strings.TrimPrefix(lastPart, "event: error\ndata: "))
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		t.Fatalf("unmarshal error payload: %v (raw: %s)", err, payload)
+	}
+	if p.SequenceNumber != 9 {
+		t.Fatalf("explicit sequence_number = %d, want 9", p.SequenceNumber)
+	}
+}
+
+func TestResponsesStreamErrorTextSanitizesNestedSensitiveFieldsAndDotKeys(t *testing.T) {
+	inputJSON := `{"error":{"metadata":{"message":"Bearer test-secret"},"vendor.detail":"Bearer test-secret","access_token":"test-secret","normal_key":"safe_value"},"sequence_number":3}`
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(inputJSON),
+	}
+	out := responsesStreamErrorText(errMsg, http.StatusBadRequest)
+
+	var parsed struct {
+		Error          map[string]any `json:"error"`
+		SequenceNumber int            `json:"sequence_number"`
+	}
+	if errUnmarshal := json.Unmarshal([]byte(out), &parsed); errUnmarshal != nil {
+		t.Fatalf("unmarshal error text output: %v (raw: %s)", errUnmarshal, out)
+	}
+
+	if parsed.SequenceNumber != 3 {
+		t.Fatalf("sequence_number = %d, want 3", parsed.SequenceNumber)
+	}
+	if parsed.Error["access_token"] != "[REDACTED]" {
+		t.Fatalf("access_token was not redacted: %v", parsed.Error["access_token"])
+	}
+	if parsed.Error["vendor.detail"] != "Bearer [REDACTED]" {
+		t.Fatalf("vendor.detail was not properly redacted without path corruption: %v", parsed.Error["vendor.detail"])
+	}
+	meta, ok := parsed.Error["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata is not a map: %v", parsed.Error["metadata"])
+	}
+	if meta["message"] != "Bearer [REDACTED]" {
+		t.Fatalf("nested metadata.message was not redacted: %v", meta["message"])
+	}
+	if parsed.Error["normal_key"] != "safe_value" {
+		t.Fatalf("normal_key = %v, want safe_value", parsed.Error["normal_key"])
+	}
+}
+
+func TestResponsesStreamErrorTextPreservesTokenCountersAndLargeInts(t *testing.T) {
+	inputJSON := `{"error":{"input_tokens":42,"token_limit":8192,"request_id":9007199254740993,"access_token":"secret123"}}`
+	errMsg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(inputJSON),
+	}
+	out := responsesStreamErrorText(errMsg, http.StatusBadRequest)
+
+	// Verify exact raw representation doesn't lose precision for 9007199254740993
+	if !strings.Contains(out, "9007199254740993") {
+		t.Fatalf("large integer precision was lost: %s", out)
+	}
+	if strings.Contains(out, "9007199254740992") {
+		t.Fatalf("large integer was corrupted by float64 conversion: %s", out)
+	}
+
+	var parsed struct {
+		Error map[string]any `json:"error"`
+	}
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.UseNumber()
+	if errUnmarshal := dec.Decode(&parsed); errUnmarshal != nil {
+		t.Fatalf("unmarshal error: %v", errUnmarshal)
+	}
+
+	if parsed.Error["access_token"] != "[REDACTED]" {
+		t.Fatalf("access_token should be redacted: %v", parsed.Error["access_token"])
+	}
+	if parsed.Error["input_tokens"] != json.Number("42") {
+		t.Fatalf("input_tokens should remain number 42, got %v", parsed.Error["input_tokens"])
+	}
+	if parsed.Error["token_limit"] != json.Number("8192") {
+		t.Fatalf("token_limit should remain number 8192, got %v", parsed.Error["token_limit"])
+	}
+}
+
+func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "error"}
+
+	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, rateLimitsFrame)
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	framer.WriteChunk(&output, timingFrame)
+
+	subscriptionUsageFrame := []byte("event: response.subscription_usage\ndata: {\"subscription\":{\"tier\":\"1234567890123456\",\"weekly\":{\"resets_at\":1792368000,\"used_percent\":80},\"window\":{\"resets_at\":1792272519,\"used_percent\":10,\"window_duration_mins\":300}},\"type\":\"response.subscription_usage\"}\n\n")
+	framer.WriteChunk(&output, subscriptionUsageFrame)
+
+	moderationFrame := []byte("event: response.metadata\ndata: {\"type\":\"response.metadata\",\"metadata\":{\"openai_chatgpt_moderation_metadata\":{\"prompt\":{}}}}\n\n")
+	framer.WriteChunk(&output, moderationFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "event: response.metadata") || strings.Contains(got, "openai_chatgpt_moderation_metadata") {
+		t.Fatalf("expected response.metadata to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "response.subscription_usage") || strings.Contains(got, "1234567890123456") {
+		t.Fatalf("expected response.subscription_usage to be stripped, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestForwardResponsesStream_FiltersUpstreamPrivateEvents(t *testing.T) {
+	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
+
+	data := make(chan []byte, 5)
+	errs := make(chan *interfaces.ErrorMessage)
+	data <- []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	data <- []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	data <- []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	data <- []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	data <- []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	close(data)
+	close(errs)
+
+	h.forwardResponsesStream(c, flusher, func(error) {}, data, errs, nil)
+
+	got := recorder.Body.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped in stream, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped in stream, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped in stream, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in stream output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in stream output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_PreservesMetadataForCodexClient(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	moderationFrame := []byte("event: response.metadata\ndata: {\"type\":\"response.metadata\",\"metadata\":{\"openai_chatgpt_moderation_metadata\":{\"prompt\":{}}}}\n\n")
+	framer.WriteChunk(&output, moderationFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if !strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.metadata") {
+		t.Fatalf("expected response.metadata to be preserved for official Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_FiltersDataOnlyPrivateEventsAndNonJSON(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "error"}
+
+	// Data-only frame with private type
+	dataOnlyPrivateFrame := []byte("data: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, dataOnlyPrivateFrame)
+
+	// Non-JSON payload with private event line
+	nonJSONPrivateFrame := []byte("event: codex.rate_limits\ndata: not-json-data\n\n")
+	framer.WriteChunk(&output, nonJSONPrivateFrame)
+
+	// Event-only frame without data
+	eventOnlyPrivateFrame := []byte("event: codex.response.metadata\n\n")
+	framer.WriteChunk(&output, eventOnlyPrivateFrame)
+
+	// Standard response.created
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	// Standard response.completed
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "not-json-data") {
+		t.Fatalf("expected not-json-data to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be stripped, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+}
+
+func TestResponsesSSEFramer_CodexClientFiltersRateLimitsAndTiming(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "response.failed", isCodexClient: true}
+
+	rateLimitsFrame := []byte("event: codex.rate_limits\ndata: {\"type\":\"codex.rate_limits\",\"rate_limits\":{\"primary\":{\"used_percent\":42}}}\n\n")
+	framer.WriteChunk(&output, rateLimitsFrame)
+
+	metadataFrame := []byte("event: codex.response.metadata\ndata: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-turn-state\":\"turn-1\"}}\n\n")
+	framer.WriteChunk(&output, metadataFrame)
+
+	timingFrame := []byte("event: responsesapi.websocket_timing\ndata: {\"type\":\"responsesapi.websocket_timing\",\"timing\":{\"duration_ms\":100}}\n\n")
+	framer.WriteChunk(&output, timingFrame)
+
+	subscriptionUsageFrame := []byte("event: response.subscription_usage\ndata: {\"subscription\":{\"tier\":\"1234567890123456\",\"weekly\":{\"resets_at\":1792368000,\"used_percent\":80},\"window\":{\"resets_at\":1792272519,\"used_percent\":10,\"window_duration_mins\":300}},\"type\":\"response.subscription_usage\"}\n\n")
+	framer.WriteChunk(&output, subscriptionUsageFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\"}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "codex.rate_limits") {
+		t.Fatalf("expected codex.rate_limits to be stripped for Codex client, got: %q", got)
+	}
+	if strings.Contains(got, "responsesapi.websocket_timing") {
+		t.Fatalf("expected responsesapi.websocket_timing to be stripped for Codex client, got: %q", got)
+	}
+	if strings.Contains(got, "response.subscription_usage") || strings.Contains(got, "1234567890123456") {
+		t.Fatalf("expected response.subscription_usage to be stripped for Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "codex.response.metadata") {
+		t.Fatalf("expected codex.response.metadata to be preserved for official Codex client, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
 	}
 }

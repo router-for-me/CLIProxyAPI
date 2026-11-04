@@ -9,13 +9,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 var (
@@ -52,6 +52,9 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	MessageStopSent bool
 	// Tool call content block index mapping
 	ToolCallBlockIndexes map[int]int
+	// OmittedToolCallIndexes maps a chunk-local tool_calls array position to the
+	// active accumulator key when the upstream omits tool_calls[].index.
+	OmittedToolCallIndexes map[int]int
 	// Index assigned to text content block
 	TextContentBlockIndex int
 	// Index assigned to thinking content block
@@ -67,6 +70,14 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	UsageOutputTokens     int64
 	UsageCachedTokens     int64
 	UsageCacheWriteTokens int64
+	// ToolNameMapResolved tracks whether ToolNameMap has been resolved from
+	// the original request once per stream.
+	ToolNameMapResolved bool
+	// StreamResolved and StreamRequested cache whether the original request
+	// asked for streaming, resolved once per stream so large request bodies
+	// are not re-parsed on every chunk.
+	StreamResolved  bool
+	StreamRequested bool
 }
 
 // InterleavedContentChunk stores a buffered chunk of text or thinking arriving while a tool call is open
@@ -130,29 +141,71 @@ func ConvertOpenAIResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
-	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
-		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	state := (*param).(*ConvertOpenAIResponseToAnthropicParams)
+	if !state.ToolNameMapResolved {
+		if state.ToolNameMap == nil {
+			state.ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+		}
+		state.ToolNameMapResolved = true
 	}
 
 	// Check if this is the [DONE] marker
 	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
-		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
+		return convertOpenAIDoneToAnthropic(state)
 	}
 
-	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
-	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
-		return convertOpenAINonStreamingToAnthropic(rawJSON)
-	} else {
-		return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+	if !state.StreamResolved {
+		streamResult := ojson.GetBytesNoCopy(originalRequestRawJSON, "stream")
+		state.StreamRequested = streamResult.Exists() && streamResult.Type != ojson.False
+		state.StreamResolved = true
 	}
+	if !state.StreamRequested {
+		return convertOpenAINonStreamingToAnthropic(rawJSON)
+	}
+	return convertOpenAIStreamingChunkToAnthropic(rawJSON, state)
+}
+
+func hasValidToolCallArguments(param *ConvertOpenAIResponseToAnthropicParams) bool {
+	if param == nil || len(param.ToolCallsAccumulator) == 0 {
+		return true
+	}
+	for _, acc := range param.ToolCallsAccumulator {
+		if acc == nil {
+			continue
+		}
+		if !acc.StartEmitted && acc.Name == "" && acc.ID == "" && acc.Arguments.Len() == 0 {
+			continue
+		}
+		if acc.Arguments.Len() == 0 {
+			continue
+		}
+		argsStr := strings.TrimSpace(acc.Arguments.String())
+		if argsStr == "" {
+			return false
+		}
+		if argsStr == "{}" {
+			continue
+		}
+		fixed := util.FixJSON(argsStr)
+		if !ojson.Valid(fixed) || !ojson.Parse(fixed).IsObject() {
+			return false
+		}
+	}
+	return true
 }
 
 func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) string {
 	if param == nil {
 		return ""
 	}
+	if param.FinishReason == "length" || param.FinishReason == "content_filter" {
+		return param.FinishReason
+	}
 	if param.SawToolCall {
-		return "tool_calls"
+		if hasValidToolCallArguments(param) {
+			return "tool_calls"
+		}
+		return "length"
 	}
 	return param.FinishReason
 }
@@ -166,15 +219,15 @@ func terminalOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) s
 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
 func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 	var results [][]byte
 
 	// Initialize parameters if needed
 	if param.MessageID == "" {
-		param.MessageID = root.Get("id").String()
+		param.MessageID = strings.Clone(root.Get("id").String())
 	}
 	if param.Model == "" {
-		param.Model = root.Get("model").String()
+		param.Model = strings.Clone(root.Get("model").String())
 	}
 	if param.CreatedAt == 0 {
 		param.CreatedAt = root.Get("created").Int()
@@ -185,50 +238,47 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	if delta := root.Get("choices.0.delta"); delta.Exists() {
 		if !param.MessageStarted {
 			// Send message_start event
-			messageStartJSON := []byte(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
-			messageStartJSON, _ = sjson.SetBytes(messageStartJSON, "message.id", param.MessageID)
-			messageStartJSON, _ = sjson.SetBytes(messageStartJSON, "message.model", param.Model)
-			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_start", messageStartJSON, 2))
+			messageStartDoc := ojson.NewDocString(`{"type":"message_start","message":{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
+			_ = messageStartDoc.Set("message.id", param.MessageID)
+			_ = messageStartDoc.Set("message.model", param.Model)
+			results = append(results, translatorcommon.AppendSSEEventBytes(nil, "message_start", messageStartDoc.Bytes(), 2))
 			param.MessageStarted = true
 
 			// Don't send content_block_start for text here - wait for actual content
 		}
 
 		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-				if reasoningText == "" {
-					continue
-				}
-				if param.OpenToolCallIndex != -1 {
-					if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "thinking" {
-						param.InterleavedContentChunks[n-1].Text += reasoningText
-					} else {
-						param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
-							Type: "thinking",
-							Text: reasoningText,
-						})
-					}
+		for _, reasoningText := range collectOpenAIObjectReasoningTexts(delta) {
+			if reasoningText == "" {
+				continue
+			}
+			if param.OpenToolCallIndex != -1 {
+				if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "thinking" {
+					param.InterleavedContentChunks[n-1].Text += reasoningText
 				} else {
-					stopTextContentBlock(param, &results)
-					if !param.ThinkingContentBlockStarted {
-						if param.ThinkingContentBlockIndex == -1 {
-							param.ThinkingContentBlockIndex = param.NextContentBlockIndex
-							param.NextContentBlockIndex++
-						}
-						contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
-						contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-						contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", param.ThinkingContentBlockIndex)
-						results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-						param.ThinkingContentBlockStarted = true
-					}
-
-					thinkingDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`
-					thinkingDeltaJSONBytes := []byte(thinkingDeltaJSON)
-					thinkingDeltaJSONBytes, _ = sjson.SetBytes(thinkingDeltaJSONBytes, "index", param.ThinkingContentBlockIndex)
-					thinkingDeltaJSONBytes, _ = sjson.SetBytes(thinkingDeltaJSONBytes, "delta.thinking", reasoningText)
-					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", thinkingDeltaJSONBytes, 2))
+					param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
+						Type: "thinking",
+						Text: strings.Clone(reasoningText),
+					})
 				}
+			} else {
+				stopTextContentBlock(param, &results)
+				if !param.ThinkingContentBlockStarted {
+					if param.ThinkingContentBlockIndex == -1 {
+						param.ThinkingContentBlockIndex = param.NextContentBlockIndex
+						param.NextContentBlockIndex++
+					}
+					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
+					contentBlockStartJSONBytes, _ = ojson.SetBytes(contentBlockStartJSONBytes, "index", param.ThinkingContentBlockIndex)
+					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
+					param.ThinkingContentBlockStarted = true
+				}
+
+				thinkingDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
+				_ = thinkingDeltaDoc.Set("index", param.ThinkingContentBlockIndex)
+				_ = thinkingDeltaDoc.Set("delta.thinking", reasoningText)
+				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", thinkingDeltaDoc.Bytes(), 2))
 			}
 		}
 
@@ -242,7 +292,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				} else {
 					param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
 						Type: "text",
-						Text: content.String(),
+						Text: strings.Clone(content.String()),
 					})
 				}
 				param.ContentAccumulator.WriteString(content.String())
@@ -256,16 +306,15 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					}
 					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
 					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-					contentBlockStartJSONBytes, _ = sjson.SetBytes(contentBlockStartJSONBytes, "index", param.TextContentBlockIndex)
+					contentBlockStartJSONBytes, _ = ojson.SetBytes(contentBlockStartJSONBytes, "index", param.TextContentBlockIndex)
 					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
 					param.TextContentBlockStarted = true
 				}
 
-				contentDeltaJSON := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`
-				contentDeltaJSONBytes := []byte(contentDeltaJSON)
-				contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "index", param.TextContentBlockIndex)
-				contentDeltaJSONBytes, _ = sjson.SetBytes(contentDeltaJSONBytes, "delta.text", content.String())
-				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaJSONBytes, 2))
+				contentDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
+				_ = contentDeltaDoc.Set("index", param.TextContentBlockIndex)
+				_ = contentDeltaDoc.Set("delta.text", content.String())
+				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaDoc.Bytes(), 2))
 
 				// Accumulate content
 				param.ContentAccumulator.WriteString(content.String())
@@ -278,10 +327,34 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				param.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
 
-			toolCalls.ForEach(func(arrayIndex, toolCall gjson.Result) bool {
+			toolCalls.ForEach(func(arrayIndex, toolCall ojson.Result) bool {
+				var incomingID string
+				if id := toolCall.Get("id"); id.Exists() && id.Type == ojson.String {
+					incomingID = id.String()
+				}
+
 				index := int(toolCall.Get("index").Int())
 				if !toolCall.Get("index").Exists() {
-					index = int(arrayIndex.Int())
+					pos := int(arrayIndex.Int())
+					index = pos
+					if param.OmittedToolCallIndexes != nil {
+						if mapped, ok := param.OmittedToolCallIndexes[pos]; ok {
+							index = mapped
+						}
+					}
+					if existing, exists := param.ToolCallsAccumulator[index]; exists && existing != nil && incomingID != "" && existing.ID != "" && existing.ID != incomingID {
+						nextIndex := index + 1
+						for k := range param.ToolCallsAccumulator {
+							if k >= nextIndex {
+								nextIndex = k + 1
+							}
+						}
+						index = nextIndex
+						if param.OmittedToolCallIndexes == nil {
+							param.OmittedToolCallIndexes = make(map[int]int)
+						}
+						param.OmittedToolCallIndexes[pos] = index
+					}
 				}
 
 				// Initialize accumulator if needed
@@ -294,10 +367,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 				// Handle tool call ID. Only accept JSON-string, non-empty
 				// values so malformed upstream fields do not overwrite a
 				// valid ID or coerce into a content_block.id.
-				if id := toolCall.Get("id"); id.Exists() && id.Type == gjson.String {
-					if idStr := id.String(); idStr != "" {
-						accumulator.ID = idStr
-					}
+				if incomingID != "" && !accumulator.StartEmitted {
+					accumulator.ID = strings.Clone(incomingID)
 				}
 
 				// Handle function name and arguments
@@ -307,8 +378,8 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					// field across chunks; reassigning after start could drift
 					// from what was already announced.
 					if !accumulator.StartEmitted {
-						if name := function.Get("name"); name.Exists() && name.Type == gjson.String && name.String() != "" {
-							accumulator.Name = util.MapToolName(param.ToolNameMap, name.String())
+						if name := function.Get("name"); name.Exists() && name.Type == ojson.String && name.String() != "" {
+							accumulator.Name = strings.Clone(util.MapToolName(param.ToolNameMap, name.String()))
 						}
 					}
 
@@ -341,12 +412,20 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		switch {
+		case reason == "length":
+			param.FinishReason = "length"
+		case reason == "content_filter":
+			param.FinishReason = "content_filter"
 		case param.SawToolCall:
-			param.FinishReason = "tool_calls"
+			if hasValidToolCallArguments(param) {
+				param.FinishReason = "tool_calls"
+			} else {
+				param.FinishReason = "length"
+			}
 		case reason == "tool_calls":
 			param.FinishReason = "stop"
 		default:
-			param.FinishReason = reason
+			param.FinishReason = strings.Clone(reason)
 		}
 
 		finalizeOpenAIAnthropicContentBlocks(param, &results)
@@ -356,18 +435,20 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 	// Cache usage information whenever present
 	usage := root.Get("usage")
-	hasUsage := usage.Exists() && usage.Type != gjson.Null
+	hasUsage := usage.Exists() && usage.Type != ojson.Null
 	if hasUsage {
 		param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens = extractOpenAIUsage(usage)
 	}
 
 	// Emit message_delta and message_stop only when generation is finished:
-	// 1. Upstream provided a finish_reason, or
-	// 2. Upstream sent a trailing usage-only chunk (choices array is empty or absent) after content/tools started.
+	// - Upstream sent a trailing usage-only chunk (choices array is empty or absent) after content/tools started, or
+	// - Upstream sent [DONE] (handled in convertOpenAIDoneToAnthropic).
+	// Content chunks with finish_reason and preliminary usage must not emit message_delta early,
+	// because authoritative token counts (such as cached_tokens) can arrive in the trailing usage-only chunk.
 	isTrailingUsageChunk := hasUsage && !root.Get("choices.0").Exists() &&
 		(param.FinishReason != "" || param.SawToolCall || param.TextContentBlockStarted || param.ThinkingContentBlockStarted || param.ContentAccumulator.Len() > 0 || len(param.InterleavedContentChunks) > 0)
 
-	if !param.MessageDeltaSent && (param.FinishReason != "" || isTrailingUsageChunk) && hasUsage {
+	if !param.MessageDeltaSent && isTrailingUsageChunk {
 		finalizeOpenAIAnthropicContentBlocks(param, &results)
 		emitAnthropicMessageDelta(param, &results, param.UsageInputTokens, param.UsageOutputTokens, param.UsageCachedTokens, param.UsageCacheWriteTokens)
 		emitMessageStopIfNeeded(param, &results)
@@ -393,82 +474,83 @@ func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams)
 
 // convertOpenAINonStreamingToAnthropic converts OpenAI non-streaming response to Anthropic format
 func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
-	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
-	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
-	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
+	outDoc := ojson.NewDocString(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	_ = outDoc.Set("id", root.Get("id").String())
+	_ = outDoc.Set("model", root.Get("model").String())
 
 	// Process message content and tool calls
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 		var contentBlocks [][]byte
 
-		reasoningNode := choice.Get("message.reasoning_content")
-		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+		for _, reasoningText := range collectOpenAIObjectReasoningTexts(choice.Get("message")) {
 			if reasoningText == "" {
 				continue
 			}
 			block := []byte(`{"type":"thinking","thinking":""}`)
-			block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+			block, _ = ojson.SetBytes(block, "thinking", reasoningText)
 			contentBlocks = append(contentBlocks, block)
 		}
 
 		// Handle text content
 		if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
 			block := []byte(`{"type":"text","text":""}`)
-			block, _ = sjson.SetBytes(block, "text", content.String())
+			block, _ = ojson.SetBytes(block, "text", content.String())
 			contentBlocks = append(contentBlocks, block)
 		}
 
 		// Handle tool calls
+		hasToolCall := false
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-				toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", toolCall.Get("function.name").String())
+			toolCalls.ForEach(func(_, toolCall ojson.Result) bool {
+				hasToolCall = true
+				toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
+				_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+				_ = toolUseDoc.Set("name", toolCall.Get("function.name").String())
 
 				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
-				if argsStr != "" && gjson.Valid(argsStr) {
-					argsJSON := gjson.Parse(argsStr)
+				if argsStr != "" && ojson.Valid(argsStr) {
+					argsJSON := ojson.Parse(argsStr)
 					if argsJSON.IsObject() {
-						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+						_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
 					} else {
-						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+						_ = toolUseDoc.SetRaw("input", `{}`)
 					}
 				} else {
-					toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+					_ = toolUseDoc.SetRaw("input", `{}`)
 				}
 
-				contentBlocks = append(contentBlocks, toolUseBlock)
+				contentBlocks = append(contentBlocks, toolUseDoc.Bytes())
 				return true
 			})
 		}
 
 		if len(contentBlocks) > 0 {
-			out = translatorcommon.SetRawArrayItems(out, "content", contentBlocks)
+			translatorcommon.SetRawArrayItemsDoc(outDoc, "content", contentBlocks)
 		}
 
 		// Set stop reason
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
+		if finishReason := choice.Get("finish_reason"); finishReason.Exists() || hasToolCall {
+			_ = outDoc.Set("stop_reason", mapOpenAINonStreamFinishReasonToAnthropic(finishReason.String(), hasToolCall))
 		}
 	}
 
 	// Set usage information
 	if usage := root.Get("usage"); usage.Exists() {
 		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(usage)
-		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+		_ = outDoc.Set("usage.input_tokens", inputTokens)
+		_ = outDoc.Set("usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+			_ = outDoc.Set("usage.cache_read_input_tokens", cachedTokens)
 		}
 		if cacheWriteTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheWriteTokens)
+			_ = outDoc.Set("usage.cache_creation_input_tokens", cacheWriteTokens)
 		}
 	}
 
-	return [][]byte{out}
+	return [][]byte{outDoc.Bytes()}
 }
 
 // mapOpenAIFinishReasonToAnthropic maps OpenAI finish reasons to Anthropic equivalents
@@ -489,6 +571,13 @@ func mapOpenAIFinishReasonToAnthropic(openAIReason string) string {
 	}
 }
 
+func mapOpenAINonStreamFinishReasonToAnthropic(openAIReason string, hasToolCall bool) string {
+	if hasToolCall && openAIReason != "length" && openAIReason != "content_filter" {
+		return "tool_use"
+	}
+	return mapOpenAIFinishReasonToAnthropic(openAIReason)
+}
+
 func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToolIndex int) int {
 	if idx, ok := p.ToolCallBlockIndexes[openAIToolIndex]; ok {
 		return idx
@@ -499,14 +588,27 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 	return idx
 }
 
-func collectOpenAIReasoningTexts(node gjson.Result) []string {
+func collectOpenAIObjectReasoningTexts(obj ojson.Result) []string {
+	if !obj.Exists() {
+		return nil
+	}
+	for _, path := range []string{"reasoning_content", "reasoning", "reasoning_details"} {
+		texts := collectOpenAIReasoningTexts(obj.Get(path))
+		if len(texts) > 0 {
+			return texts
+		}
+	}
+	return nil
+}
+
+func collectOpenAIReasoningTexts(node ojson.Result) []string {
 	var texts []string
 	if !node.Exists() {
 		return texts
 	}
 
 	if node.IsArray() {
-		node.ForEach(func(_, value gjson.Result) bool {
+		node.ForEach(func(_, value ojson.Result) bool {
 			texts = append(texts, collectOpenAIReasoningTexts(value)...)
 			return true
 		})
@@ -514,11 +616,11 @@ func collectOpenAIReasoningTexts(node gjson.Result) []string {
 	}
 
 	switch node.Type {
-	case gjson.String:
+	case ojson.String:
 		if text := node.String(); text != "" {
 			texts = append(texts, text)
 		}
-	case gjson.JSON:
+	case ojson.JSON:
 		if text := node.Get("text"); text.Exists() {
 			if textStr := text.String(); textStr != "" {
 				texts = append(texts, textStr)
@@ -536,7 +638,7 @@ func stopThinkingContentBlock(param *ConvertOpenAIResponseToAnthropicParams, res
 		return
 	}
 	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
-	contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", param.ThinkingContentBlockIndex)
+	contentBlockStopJSON, _ = ojson.SetBytes(contentBlockStopJSON, "index", param.ThinkingContentBlockIndex)
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
 	param.ThinkingContentBlockStarted = false
 	param.ThinkingContentBlockIndex = -1
@@ -555,7 +657,7 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 		return
 	}
 	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
-	contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", param.TextContentBlockIndex)
+	contentBlockStopJSON, _ = ojson.SetBytes(contentBlockStopJSON, "index", param.TextContentBlockIndex)
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
 	param.TextContentBlockStarted = false
 	param.TextContentBlockIndex = -1
@@ -566,11 +668,11 @@ func emitToolUseStart(param *ConvertOpenAIResponseToAnthropicParams, openAIToolI
 	stopTextContentBlock(param, results)
 
 	blockIndex := param.toolContentBlockIndex(openAIToolIndex)
-	contentBlockStartJSON := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
-	contentBlockStartJSON, _ = sjson.SetBytes(contentBlockStartJSON, "index", blockIndex)
-	contentBlockStartJSON, _ = sjson.SetBytes(contentBlockStartJSON, "content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
-	contentBlockStartJSON, _ = sjson.SetBytes(contentBlockStartJSON, "content_block.name", accumulator.Name)
-	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSON, 2))
+	contentBlockStartDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
+	_ = contentBlockStartDoc.Set("index", blockIndex)
+	_ = contentBlockStartDoc.Set("content_block.id", util.SanitizeClaudeToolID(accumulator.ID))
+	_ = contentBlockStartDoc.Set("content_block.name", accumulator.Name)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartDoc.Bytes(), 2))
 	accumulator.StartEmitted = true
 	param.SawToolCall = true
 	param.OpenToolCallIndex = openAIToolIndex
@@ -613,14 +715,14 @@ func finalizeSingleToolCall(param *ConvertOpenAIResponseToAnthropicParams, openA
 
 	// Send complete input_json_delta with all accumulated arguments
 	if accumulator.Arguments.Len() > 0 {
-		inputDeltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "index", blockIndex)
-		inputDeltaJSON, _ = sjson.SetBytes(inputDeltaJSON, "delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
-		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaJSON, 2))
+		inputDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
+		_ = inputDeltaDoc.Set("index", blockIndex)
+		_ = inputDeltaDoc.Set("delta.partial_json", util.FixJSON(accumulator.Arguments.String()))
+		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", inputDeltaDoc.Bytes(), 2))
 	}
 
 	contentBlockStopJSON := []byte(`{"type":"content_block_stop","index":0}`)
-	contentBlockStopJSON, _ = sjson.SetBytes(contentBlockStopJSON, "index", blockIndex)
+	contentBlockStopJSON, _ = ojson.SetBytes(contentBlockStopJSON, "index", blockIndex)
 	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", contentBlockStopJSON, 2))
 	delete(param.ToolCallBlockIndexes, openAIToolIndex)
 	param.OpenToolCallIndex = -1
@@ -640,29 +742,29 @@ func emitBufferedInterleavedContent(param *ConvertOpenAIResponseToAnthropicParam
 		switch chunk.Type {
 		case "thinking":
 			startJSON := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
-			startJSON, _ = sjson.SetBytes(startJSON, "index", idx)
+			startJSON, _ = ojson.SetBytes(startJSON, "index", idx)
 			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", startJSON, 2))
 
-			deltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
-			deltaJSON, _ = sjson.SetBytes(deltaJSON, "index", idx)
-			deltaJSON, _ = sjson.SetBytes(deltaJSON, "delta.thinking", chunk.Text)
-			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", deltaJSON, 2))
+			deltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
+			_ = deltaDoc.Set("index", idx)
+			_ = deltaDoc.Set("delta.thinking", chunk.Text)
+			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", deltaDoc.Bytes(), 2))
 
 			stopJSON := []byte(`{"type":"content_block_stop","index":0}`)
-			stopJSON, _ = sjson.SetBytes(stopJSON, "index", idx)
+			stopJSON, _ = ojson.SetBytes(stopJSON, "index", idx)
 			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", stopJSON, 2))
 		case "text":
 			startJSON := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
-			startJSON, _ = sjson.SetBytes(startJSON, "index", idx)
+			startJSON, _ = ojson.SetBytes(startJSON, "index", idx)
 			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", startJSON, 2))
 
-			deltaJSON := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
-			deltaJSON, _ = sjson.SetBytes(deltaJSON, "index", idx)
-			deltaJSON, _ = sjson.SetBytes(deltaJSON, "delta.text", chunk.Text)
-			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", deltaJSON, 2))
+			deltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
+			_ = deltaDoc.Set("index", idx)
+			_ = deltaDoc.Set("delta.text", chunk.Text)
+			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", deltaDoc.Bytes(), 2))
 
 			stopJSON := []byte(`{"type":"content_block_stop","index":0}`)
-			stopJSON, _ = sjson.SetBytes(stopJSON, "index", idx)
+			stopJSON, _ = ojson.SetBytes(stopJSON, "index", idx)
 			*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_stop", stopJSON, 2))
 		}
 	}
@@ -698,17 +800,17 @@ func emitAnthropicMessageDelta(param *ConvertOpenAIResponseToAnthropicParams, re
 	if param == nil || param.MessageDeltaSent {
 		return
 	}
-	messageDeltaJSON := []byte(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-	messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "delta.stop_reason", mapOpenAIFinishReasonToAnthropic(terminalOpenAIFinishReason(param)))
-	messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.input_tokens", inputTokens)
-	messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.output_tokens", outputTokens)
+	messageDeltaDoc := ojson.NewDocString(`{"type":"message_delta","delta":{"stop_reason":"","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+	_ = messageDeltaDoc.Set("delta.stop_reason", mapOpenAIFinishReasonToAnthropic(terminalOpenAIFinishReason(param)))
+	_ = messageDeltaDoc.Set("usage.input_tokens", inputTokens)
+	_ = messageDeltaDoc.Set("usage.output_tokens", outputTokens)
 	if cachedTokens > 0 {
-		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_read_input_tokens", cachedTokens)
+		_ = messageDeltaDoc.Set("usage.cache_read_input_tokens", cachedTokens)
 	}
 	if cacheWriteTokens > 0 {
-		messageDeltaJSON, _ = sjson.SetBytes(messageDeltaJSON, "usage.cache_creation_input_tokens", cacheWriteTokens)
+		_ = messageDeltaDoc.Set("usage.cache_creation_input_tokens", cacheWriteTokens)
 	}
-	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaJSON, 2))
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "message_delta", messageDeltaDoc.Bytes(), 2))
 	param.MessageDeltaSent = true
 }
 
@@ -734,23 +836,19 @@ func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int
 func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	_ = requestRawJSON
 
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
-	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
-	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
-	out, _ = sjson.SetBytes(out, "model", root.Get("model").String())
+	outDoc := ojson.NewDocString(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
+	_ = outDoc.Set("id", root.Get("id").String())
+	_ = outDoc.Set("model", root.Get("model").String())
 
 	hasToolCall := false
-	stopReasonSet := false
+	finishReason := ""
 	var blocks [][]byte
 
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0]
-
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "stop_reason", mapOpenAIFinishReasonToAnthropic(finishReason.String()))
-			stopReasonSet = true
-		}
+		finishReason = choice.Get("finish_reason").String()
 
 		if message := choice.Get("message"); message.Exists() {
 			if contentResult := message.Get("content"); contentResult.Exists() {
@@ -763,7 +861,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 							return
 						}
 						block := []byte(`{"type":"text","text":""}`)
-						block, _ = sjson.SetBytes(block, "text", textBuilder.String())
+						block, _ = ojson.SetBytes(block, "text", textBuilder.String())
 						blocks = append(blocks, block)
 						textBuilder.Reset()
 					}
@@ -773,7 +871,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 							return
 						}
 						block := []byte(`{"type":"thinking","thinking":""}`)
-						block, _ = sjson.SetBytes(block, "thinking", thinkingBuilder.String())
+						block, _ = ojson.SetBytes(block, "thinking", thinkingBuilder.String())
 						blocks = append(blocks, block)
 						thinkingBuilder.Reset()
 					}
@@ -788,25 +886,25 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 							flushText()
 							toolCalls := item.Get("tool_calls")
 							if toolCalls.IsArray() {
-								toolCalls.ForEach(func(_, tc gjson.Result) bool {
+								toolCalls.ForEach(func(_, tc ojson.Result) bool {
 									hasToolCall = true
-									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-									toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(tc.Get("id").String()))
-									toolUse, _ = sjson.SetBytes(toolUse, "name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
+									toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
+									_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(tc.Get("id").String()))
+									_ = toolUseDoc.Set("name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
 
 									argsStr := util.FixJSON(tc.Get("function.arguments").String())
-									if argsStr != "" && gjson.Valid(argsStr) {
-										argsJSON := gjson.Parse(argsStr)
+									if argsStr != "" && ojson.Valid(argsStr) {
+										argsJSON := ojson.Parse(argsStr)
 										if argsJSON.IsObject() {
-											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+											_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
 										} else {
-											toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
+											_ = toolUseDoc.SetRaw("input", `{}`)
 										}
 									} else {
-										toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(`{}`))
+										_ = toolUseDoc.SetRaw("input", `{}`)
 									}
 
-									blocks = append(blocks, toolUse)
+									blocks = append(blocks, toolUseDoc.Bytes())
 									return true
 								})
 							}
@@ -823,47 +921,45 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 					flushThinking()
 					flushText()
-				} else if contentResult.Type == gjson.String {
+				} else if contentResult.Type == ojson.String {
 					textContent := contentResult.String()
 					if textContent != "" {
 						block := []byte(`{"type":"text","text":""}`)
-						block, _ = sjson.SetBytes(block, "text", textContent)
+						block, _ = ojson.SetBytes(block, "text", textContent)
 						blocks = append(blocks, block)
 					}
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					block := []byte(`{"type":"thinking","thinking":""}`)
-					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					blocks = append(blocks, block)
+			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
+				if reasoningText == "" {
+					continue
 				}
+				block := []byte(`{"type":"thinking","thinking":""}`)
+				block, _ = ojson.SetBytes(block, "thinking", reasoningText)
+				blocks = append(blocks, block)
 			}
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				toolCalls.ForEach(func(_, toolCall ojson.Result) bool {
 					hasToolCall = true
-					toolUseBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
-					toolUseBlock, _ = sjson.SetBytes(toolUseBlock, "name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
+					toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
+					_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(toolCall.Get("id").String()))
+					_ = toolUseDoc.Set("name", util.MapToolName(toolNameMap, toolCall.Get("function.name").String()))
 
 					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
-					if argsStr != "" && gjson.Valid(argsStr) {
-						argsJSON := gjson.Parse(argsStr)
+					if argsStr != "" && ojson.Valid(argsStr) {
+						argsJSON := ojson.Parse(argsStr)
 						if argsJSON.IsObject() {
-							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(argsJSON.Raw))
+							_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
 						} else {
-							toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+							_ = toolUseDoc.SetRaw("input", `{}`)
 						}
 					} else {
-						toolUseBlock, _ = sjson.SetRawBytes(toolUseBlock, "input", []byte(`{}`))
+						_ = toolUseDoc.SetRaw("input", `{}`)
 					}
 
-					blocks = append(blocks, toolUseBlock)
+					blocks = append(blocks, toolUseDoc.Bytes())
 					return true
 				})
 			}
@@ -871,38 +967,32 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 	}
 
 	if len(blocks) > 0 {
-		out, _ = sjson.SetRawBytes(out, "content", translatorcommon.JoinRawArray(blocks))
+		_ = outDoc.SetRawBytes("content", translatorcommon.JoinRawArray(blocks))
 	}
 
 	if respUsage := root.Get("usage"); respUsage.Exists() {
 		inputTokens, outputTokens, cachedTokens, cacheWriteTokens := extractOpenAIUsage(respUsage)
-		out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
-		out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
+		_ = outDoc.Set("usage.input_tokens", inputTokens)
+		_ = outDoc.Set("usage.output_tokens", outputTokens)
 		if cachedTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usage.cache_read_input_tokens", cachedTokens)
+			_ = outDoc.Set("usage.cache_read_input_tokens", cachedTokens)
 		}
 		if cacheWriteTokens > 0 {
-			out, _ = sjson.SetBytes(out, "usage.cache_creation_input_tokens", cacheWriteTokens)
+			_ = outDoc.Set("usage.cache_creation_input_tokens", cacheWriteTokens)
 		}
 	}
 
-	if !stopReasonSet {
-		if hasToolCall {
-			out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
-		} else {
-			out, _ = sjson.SetBytes(out, "stop_reason", "end_turn")
-		}
-	}
+	_ = outDoc.Set("stop_reason", mapOpenAINonStreamFinishReasonToAnthropic(finishReason, hasToolCall))
 
-	return out
+	return outDoc.Bytes()
 }
 
 func ClaudeTokenCount(ctx context.Context, count int64) []byte {
 	return translatorcommon.ClaudeInputTokensJSON(count)
 }
 
-func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
-	if !usage.Exists() || usage.Type == gjson.Null {
+func extractOpenAIUsage(usage ojson.Result) (int64, int64, int64, int64) {
+	if !usage.Exists() || usage.Type == ojson.Null {
 		return 0, 0, 0, 0
 	}
 
@@ -910,16 +1000,31 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	outputTokens := usage.Get("completion_tokens").Int()
 	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
 	cacheWriteTokens := usage.Get("prompt_tokens_details.cache_write_tokens").Int()
-	if cacheWriteTokens == 0 {
+	if cacheWriteTokens <= 0 {
 		cacheWriteTokens = usage.Get("prompt_tokens_details.cache_creation_tokens").Int()
 	}
 
+	deductTokens := int64(0)
 	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
+		deductTokens += cachedTokens
+	}
+	if cacheWriteTokens > 0 {
+		if math.MaxInt64-deductTokens < cacheWriteTokens {
+			deductTokens = math.MaxInt64
+		} else {
+			deductTokens += cacheWriteTokens
+		}
+	}
+
+	if deductTokens > 0 {
+		if inputTokens >= deductTokens {
+			inputTokens -= deductTokens
 		} else {
 			inputTokens = 0
 		}
+	}
+	if inputTokens < 0 {
+		inputTokens = 0
 	}
 
 	return inputTokens, outputTokens, cachedTokens, cacheWriteTokens

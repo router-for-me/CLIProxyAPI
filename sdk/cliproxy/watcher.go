@@ -3,9 +3,9 @@ package cliproxy
 import (
 	"context"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func defaultWatcherFactory(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error) {
@@ -25,6 +25,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 			w.SetConfig(cfg)
 		},
 		snapshotAuths: func() []*coreauth.Auth { return w.SnapshotCoreAuths() },
+		snapshotAuthFile: func(path string) ([]*coreauth.Auth, error) {
+			return w.SnapshotAuthFile(path)
+		},
 		setUpdateQueue: func(queue chan<- watcher.AuthUpdate) {
 			w.SetAuthUpdateQueue(queue)
 		},
@@ -33,6 +36,12 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		},
 		dispatchPersistedAuth: func(update watcher.AuthUpdate) bool {
 			return w.DispatchPersistedAuthUpdate(update)
+		},
+		dispatchPersistedAuthWithRev: func(update *watcher.AuthUpdate) (bool, uint64) {
+			return w.DispatchPersistedAuthUpdateWithRevision(update)
+		},
+		rereadDiscardedFileSnapshot: func(auth *coreauth.Auth) {
+			w.RereadDiscardedFileSnapshot(auth)
 		},
 		setPluginAuthParser: func(parser PluginAuthParser) {
 			w.SetPluginAuthParser(parser)
