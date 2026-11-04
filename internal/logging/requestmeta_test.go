@@ -35,33 +35,29 @@ func TestWithFreshResponseHeadersHolderIsolatesAttempts(t *testing.T) {
 }
 
 func TestResponseHeadersReceivedAtTracksSetAndMerge(t *testing.T) {
-	clock := time.Unix(1790000000, 0)
-	previous := responseHeadersNow
-	responseHeadersNow = func() time.Time { return clock }
-	t.Cleanup(func() { responseHeadersNow = previous })
+	first := time.Unix(1790000000, 0)
+	later := first.Add(10 * time.Minute)
 
 	ctx := WithResponseHeadersHolder(context.Background())
 	if got := GetResponseHeadersReceivedAt(ctx); !got.IsZero() {
 		t.Fatalf("received at before headers = %v, want zero", got)
 	}
 
-	SetResponseHeaders(ctx, http.Header{"X-Codex-Primary-Reset-After-Seconds": []string{"3600"}})
-	if got := GetResponseHeadersReceivedAt(ctx); !got.Equal(clock) {
-		t.Fatalf("received at after set = %v, want %v", got, clock)
+	SetResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Reset-After-Seconds": []string{"3600"}}, first)
+	if got := GetResponseHeadersReceivedAt(ctx); !got.Equal(first) {
+		t.Fatalf("received at after set = %v, want %v", got, first)
 	}
 
-	first := clock
-	clock = clock.Add(10 * time.Minute)
-	MergeResponseHeaders(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"12"}})
-	if got := GetResponseHeadersReceivedAt(ctx); !got.Equal(clock) {
-		t.Fatalf("received at after merge = %v, want %v", got, clock)
+	MergeResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"12"}}, later)
+	if got := GetResponseHeadersReceivedAt(ctx); !got.Equal(later) {
+		t.Fatalf("received at after merge = %v, want %v", got, later)
 	}
 	// A partial merge keeps the receipt time of headers it did not carry.
 	if got := GetResponseHeaderReceivedAt(ctx, "x-codex-primary-reset-after-seconds"); !got.Equal(first) {
 		t.Fatalf("unmerged header received at = %v, want %v", got, first)
 	}
-	if got := GetResponseHeaderReceivedAt(ctx, "X-Codex-Primary-Used-Percent"); !got.Equal(clock) {
-		t.Fatalf("merged header received at = %v, want %v", got, clock)
+	if got := GetResponseHeaderReceivedAt(ctx, "X-Codex-Primary-Used-Percent"); !got.Equal(later) {
+		t.Fatalf("merged header received at = %v, want %v", got, later)
 	}
 
 	if got := GetResponseHeadersReceivedAt(context.Background()); !got.IsZero() {

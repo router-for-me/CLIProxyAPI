@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"net/http"
-	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -135,16 +134,13 @@ func TestMarkResultAnchorsQuotaObservationAtHeaderReceipt(t *testing.T) {
 		t.Fatalf("Register(%s) error = %v", id, errRegister)
 	}
 
-	// Headers arrive when the stream opens; the result is recorded after it drains.
+	// Headers arrived when the stream opened a minute ago; the result is recorded after it drains.
 	ctx := internallogging.WithResponseHeadersHolder(context.Background())
-	internallogging.SetResponseHeaders(ctx, http.Header{
+	receivedAt := time.Now().Add(-time.Minute)
+	internallogging.SetResponseHeadersAt(ctx, http.Header{
 		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
 		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
-	})
-	receivedAt := internallogging.GetResponseHeadersReceivedAt(ctx)
-	for !time.Now().After(receivedAt) {
-		runtime.Gosched()
-	}
+	}, receivedAt)
 	manager.MarkResult(ctx, Result{AuthID: id, Provider: "codex", Success: true})
 
 	auth, ok := manager.GetByID(id)
@@ -203,19 +199,13 @@ func TestMarkResultRebasesRelativeResetAcrossPartialMerges(t *testing.T) {
 	}
 
 	ctx := internallogging.WithResponseHeadersHolder(context.Background())
-	internallogging.SetResponseHeaders(ctx, http.Header{
+	firstReceipt := time.Now().Add(-10 * time.Minute)
+	internallogging.SetResponseHeadersAt(ctx, http.Header{
 		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
 		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
-	})
-	firstReceipt := internallogging.GetResponseHeadersReceivedAt(ctx)
-	waitPast := func(at time.Time) {
-		for !time.Now().After(at) {
-			runtime.Gosched()
-		}
-	}
-	waitPast(firstReceipt.Add(1200 * time.Millisecond))
+	}, firstReceipt)
 	// A later websocket quota frame merges only the usage percentage.
-	internallogging.MergeResponseHeaders(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"20"}})
+	internallogging.MergeResponseHeadersAt(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"20"}}, firstReceipt.Add(5*time.Minute))
 	manager.MarkResult(ctx, Result{AuthID: id, Provider: "codex", Success: true})
 
 	auth, ok := manager.GetByID(id)
@@ -224,9 +214,7 @@ func TestMarkResultRebasesRelativeResetAcrossPartialMerges(t *testing.T) {
 	}
 	reset, okReset := quotaWindowReset(auth)
 	want := firstReceipt.Add(time.Hour)
-	// Rebased values are whole seconds, so allow half a second of rounding.
-	tolerance := 600 * time.Millisecond
-	if !okReset || reset.Sub(want) > tolerance || want.Sub(reset) > tolerance {
-		t.Fatalf("reset = %v, %v; want about %v (anchored at the first receipt)", reset, okReset, want)
+	if !okReset || !reset.Equal(want) {
+		t.Fatalf("reset = %v, %v; want %v (anchored at the first receipt)", reset, okReset, want)
 	}
 }

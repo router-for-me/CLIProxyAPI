@@ -19,12 +19,12 @@ const soonestResetProbeInterval = time.Hour
 // the next reset is spent first. Reset times come from the passive quota
 // snapshot (Quota.Signals) recorded from upstream response headers.
 //
-// A credential of a provider that reports quota headers but has no parseable
-// reset yet (for example after a restart) is picked once per probe interval
-// so its reset time is learned; otherwise the first observed credential would win
-// every pick and the strategy would degrade to fill-first. Credentials whose
-// observed window has already reset come after credentials with a future
-// reset. Ties and unknowns keep fill-first order.
+// A Codex or Claude credential without a parseable reset yet (for example
+// after a restart) is picked once per probe interval so its reset time is
+// learned; otherwise the first observed credential would win every pick and
+// the strategy would degrade to fill-first. Credentials whose observed window
+// has already reset come after credentials with a future reset. Ties and
+// unknowns keep fill-first order.
 type SoonestResetSelector struct {
 	nowFunc func() time.Time
 
@@ -74,7 +74,7 @@ func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, candidate := range available {
-		if candidate == nil || !ProviderSupportsQuotaObservation(candidate.Provider) {
+		if candidate == nil || !providerReportsQuotaReset(candidate.Provider) {
 			continue
 		}
 		if _, known := quotaWindowReset(candidate); known {
@@ -90,6 +90,17 @@ func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth
 		return candidate
 	}
 	return nil
+}
+
+// providerReportsQuotaReset reports whether quotaWindowReset understands the
+// provider's quota snapshot, so a probe request can teach its reset time.
+func providerReportsQuotaReset(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "claude":
+		return true
+	default:
+		return false
+	}
 }
 
 // quotaWindowResetAt reports the future reset time of the longest quota

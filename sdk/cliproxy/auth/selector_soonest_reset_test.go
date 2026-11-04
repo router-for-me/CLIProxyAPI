@@ -244,15 +244,17 @@ func TestSoonestResetSelectorPick_DoesNotProbeProvidersWithoutQuotaHeaders(t *te
 	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
 	auths := []*Auth{
 		{ID: "a", Provider: "gemini"},
-		{ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(time.Hour))},
+		// Devin reports quota, but not in a reset format this selector parses.
+		{ID: "b", Provider: "devin"},
+		{ID: "c", Provider: "codex", Quota: codexWeeklySignals(now.Add(time.Hour))},
 	}
 
 	got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	if got.ID != "b" {
-		t.Fatalf("Pick() = %q, want b", got.ID)
+	if got.ID != "c" {
+		t.Fatalf("Pick() = %q, want c", got.ID)
 	}
 }
 

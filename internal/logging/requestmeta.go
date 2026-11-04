@@ -40,9 +40,6 @@ type responseHeadersHolder struct {
 	receivedAt map[string]time.Time
 }
 
-// responseHeadersNow is replaced in tests.
-var responseHeadersNow = time.Now
-
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -122,6 +119,12 @@ func SetResponseStatus(ctx context.Context, status int) {
 }
 
 func SetResponseHeaders(ctx context.Context, headers http.Header) {
+	SetResponseHeadersAt(ctx, headers, time.Now())
+}
+
+// SetResponseHeadersAt replaces the response headers in ctx and records
+// receivedAt as the receipt time of each of them.
+func SetResponseHeadersAt(ctx context.Context, headers http.Header, receivedAt time.Time) {
 	if ctx == nil {
 		return
 	}
@@ -132,16 +135,21 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
-	now := responseHeadersNow()
 	holder.receivedAt = make(map[string]time.Time, len(holder.headers))
 	for key := range holder.headers {
-		holder.receivedAt[key] = now
+		holder.receivedAt[key] = receivedAt
 	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
 // such as quota metadata delivered in a websocket event.
 func MergeResponseHeaders(ctx context.Context, headers http.Header) {
+	MergeResponseHeadersAt(ctx, headers, time.Now())
+}
+
+// MergeResponseHeadersAt merges headers into ctx and records receivedAt as the
+// receipt time of the merged headers only.
+func MergeResponseHeadersAt(ctx context.Context, headers http.Header, receivedAt time.Time) {
 	if ctx == nil || len(headers) == 0 {
 		return
 	}
@@ -157,14 +165,13 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	if holder.receivedAt == nil {
 		holder.receivedAt = make(map[string]time.Time, len(headers))
 	}
-	now := responseHeadersNow()
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if canonicalKey == "" {
 			continue
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
-		holder.receivedAt[canonicalKey] = now
+		holder.receivedAt[canonicalKey] = receivedAt
 	}
 }
 
