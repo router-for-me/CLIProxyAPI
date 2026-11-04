@@ -1,6 +1,6 @@
 package executor
 
-import "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
@@ -15,3 +15,6 @@ func (e *CodexExecutor) Identifier() string { return "codex" }
 func (e *CodexExecutor) modelLevelCooling() bool {
 	return e != nil && e.cfg != nil && e.cfg.Codex.ModelLevelCooling
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *CodexExecutor) SupportsApplyPatch() bool { return e != nil }

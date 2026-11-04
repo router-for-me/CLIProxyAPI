@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
@@ -184,8 +184,10 @@ func TestOAuthModelAliasChannel_APIKeyOnlyProviderUnsupported(t *testing.T) {
 func TestOAuthModelAliasChannel_Kimi(t *testing.T) {
 	t.Parallel()
 
-	if got := OAuthModelAliasChannel("kimi", "oauth"); got != "kimi" {
-		t.Fatalf("OAuthModelAliasChannel() = %q, want %q", got, "kimi")
+	for _, provider := range []string{"kimi", "kimi-ai", "kimi.ai", "kimi.com"} {
+		if got := OAuthModelAliasChannel(provider, "oauth"); got != provider {
+			t.Fatalf("OAuthModelAliasChannel(%q) = %q, want %q", provider, got, provider)
+		}
 	}
 }
 

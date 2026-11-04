@@ -10,11 +10,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type failingClaudeInputCodec struct{}
@@ -426,8 +426,8 @@ func messageStartInputTokens(chunks [][]byte) int64 {
 				continue
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-			if gjson.Get(payload, "type").String() == "message_start" {
-				return gjson.Get(payload, "message.usage.input_tokens").Int()
+			if ojson.Get(payload, "type").String() == "message_start" {
+				return ojson.Get(payload, "message.usage.input_tokens").Int()
 			}
 		}
 	}

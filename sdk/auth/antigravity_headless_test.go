@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 )
 
 type mockRoundTripper func(req *http.Request) (*http.Response, error)

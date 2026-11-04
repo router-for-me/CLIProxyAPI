@@ -1,0 +1,72 @@
+package executor
+
+import (
+	"context"
+	"errors"
+)
+
+// ErrNoActiveUpstreamWebsocket means response.interrupt has no live upstream socket.
+var ErrNoActiveUpstreamWebsocket = errors.New("no active upstream websocket for response.interrupt")
+
+// ErrUpstreamWebsocketInterruptRejected means a live upstream socket owns the
+// current turn, but response.interrupt does not target its running response
+// (unknown id, or that response already finished). Handlers must reject the
+// frame outright and must not fall back to local cancellation, which would
+// cancel a healthy websocket turn.
+var ErrUpstreamWebsocketInterruptRejected = errors.New("response.interrupt does not target the active upstream response")
+
+// WebsocketInput is a frame from the single downstream reader. Err terminates
+// the connection; Payload is owned by the receiver and must not be replayed.
+type WebsocketInput struct {
+	Payload []byte
+	Err     error
+	// Epoch is the downstream input epoch at read time; a loss advances it.
+	Epoch uint64
+}
+type websocketInputKey struct{}
+
+func WithWebsocketInput(ctx context.Context, input <-chan WebsocketInput) context.Context {
+	return context.WithValue(ctx, websocketInputKey{}, input)
+}
+func WebsocketInputFromContext(ctx context.Context) <-chan WebsocketInput {
+	if ctx == nil {
+		return nil
+	}
+	input, _ := ctx.Value(websocketInputKey{}).(<-chan WebsocketInput)
+	return input
+}
+
+// WithWebsocketAuthCheck supplies the live account-state check for a bound
+// connection. It may reject further frames but never select another account.
+type websocketAuthCheckKey struct{}
+
+func WithWebsocketAuthCheck(ctx context.Context, check func(string) bool) context.Context {
+	return context.WithValue(ctx, websocketAuthCheckKey{}, check)
+}
+func WebsocketAuthEnabled(ctx context.Context, authID string) bool {
+	if ctx == nil {
+		return true
+	}
+	check, _ := ctx.Value(websocketAuthCheckKey{}).(func(string) bool)
+	return check == nil || check(authID)
+}
+
+type websocketTurnAuthorizerKey struct{}
+
+// WithWebsocketTurnAuthorizer supplies a per-turn frontend access check for
+// follow-up response.create and response.append frames on a duplex socket.
+// Returning a non-empty error payload rejects the turn while keeping the socket open.
+func WithWebsocketTurnAuthorizer(ctx context.Context, authorize func([]byte) ([]byte, error)) context.Context {
+	return context.WithValue(ctx, websocketTurnAuthorizerKey{}, authorize)
+}
+
+func AuthorizeWebsocketTurn(ctx context.Context, payload []byte) ([]byte, error) {
+	if ctx == nil {
+		return nil, nil
+	}
+	authorize, _ := ctx.Value(websocketTurnAuthorizerKey{}).(func([]byte) ([]byte, error))
+	if authorize == nil {
+		return nil, nil
+	}
+	return authorize(payload)
+}

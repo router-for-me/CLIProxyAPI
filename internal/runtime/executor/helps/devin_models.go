@@ -3,8 +3,8 @@ package helps
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // knownDevinSuffixes lists recognized model uid suffixes.
@@ -16,12 +16,38 @@ var knownDevinSuffixes = []string{
 	"-xhigh",
 	"-max",
 	"-fast",
+	"-slow",
 	"-priority",
 	"-low-priority",
 	"-medium-priority",
 	"-high-priority",
 	"-xhigh-priority",
 	"-max-priority",
+	"-low-fast",
+	"-medium-fast",
+	"-high-fast",
+	"-xhigh-fast",
+	"-max-fast",
+	"-none-fast",
+	"-thinking-1m",
+	"-thinking",
+	"-max-1m",
+	"-none-1m",
+	"-minimal-lightning",
+	"-low-lightning",
+	"-medium-lightning",
+	"-high-lightning",
+	"-xhigh-lightning",
+	"-max-lightning",
+	"-none-lightning",
+	"_none",
+	"_minimal",
+	"_low",
+	"_medium",
+	"_high",
+	"_xhigh",
+	"_max",
+	"_thinking",
 }
 
 // Special private Devin upstream aliases that cannot be dynamically inferred.
@@ -100,7 +126,10 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		thinkingLevel = strings.TrimSpace(cleanModel[colonIdx+1:])
 	}
 
-	// 4. Normalize requested effort
+	// 4. Normalize requested effort. Compound "<level>-fast" requests select upstream
+	// fast-mode variants (see step 10); NormalizeThinkingLevel cannot represent them,
+	// so keep the raw level alongside the normalized effort.
+	rawLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
 	effort := NormalizeThinkingLevel(thinkingLevel, budgetTokens)
 	lowerBase := strings.ToLower(baseModel)
 	canonicalBase := strings.ReplaceAll(lowerBase, ".", "-")
@@ -117,6 +146,23 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	}
 	if canonicalBase == "gemini-3-flash" {
 		canonicalBase = "gemini-3-8-flash"
+	}
+
+	normalizedUnder := strings.ReplaceAll(canonicalBase, "-", "_")
+	switch normalizedUnder {
+	case "model_gpt_5_2":
+		gptLevels := []string{"none", "low", "medium", "high", "xhigh"}
+		eff := clampEffort(effort, gptLevels, "low")
+		return "MODEL_GPT_5_2_" + strings.ToUpper(eff)
+	case "model_google_gemini_3_0_flash":
+		gemLevels := []string{"minimal", "low", "medium", "high"}
+		eff := clampEffort(effort, gemLevels, "high")
+		return "MODEL_GOOGLE_GEMINI_3_0_FLASH_" + strings.ToUpper(eff)
+	case "model_claude_4_5_opus":
+		if effort != "" && effort != "none" {
+			return "MODEL_CLAUDE_4_5_OPUS_THINKING"
+		}
+		return "MODEL_CLAUDE_4_5_OPUS"
 	}
 
 	// 6. Look up dynamic model metadata from the Devin catalog (devin_models.json)
@@ -150,16 +196,66 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 			return "glm-5-2-max"
 		}
 		return "glm-5-2"
+	case "glm-5-2-1m":
+		if effort == "none" {
+			return "glm-5-2-none-1m"
+		}
+		if effort == "max" {
+			return "glm-5-2-max-1m"
+		}
+		return "glm-5-2-1m"
+	case "claude-opus-4-6", "claude-sonnet-4-6":
+		if effort != "" && effort != "none" {
+			return canonicalBase + "-thinking"
+		}
+		return canonicalBase
+	case "claude-opus-4-6-1m":
+		if effort != "" && effort != "none" {
+			return "claude-opus-4-6-thinking-1m"
+		}
+		return canonicalBase
+	case "claude-sonnet-4-6-1m":
+		if effort != "" && effort != "none" {
+			return "claude-sonnet-4-6-thinking-1m"
+		}
+		return canonicalBase
 	}
 
-	// 8. If model has no thinking levels defined in catalog, treat as bare model
+	// 8. Lightning tier: upstream UIDs keep the effort before the suffix
+	// (swe-2-high-lightning), unlike every other model which appends effort.
+	if strings.HasSuffix(canonicalBase, "-lightning") {
+		stem := strings.TrimSuffix(canonicalBase, "-lightning")
+		if HasDevinEffortSuffix(stem) {
+			// Already a full upstream UID such as swe-2-high-lightning
+			return canonicalBase
+		}
+		if len(allowedLevels) == 0 {
+			return canonicalBase
+		}
+		defaultEffort := selectDefaultDevinEffort(stem, allowedLevels)
+		clamped := clampEffort(effort, allowedLevels, defaultEffort)
+		return stem + "-" + clamped + "-lightning"
+	}
+
+	// 9. If model has no thinking levels defined in catalog, treat as bare model
 	if len(allowedLevels) == 0 {
 		return canonicalBase
 	}
 
-	// 9. Model has thinking levels: determine default effort and clamp
+	// 10. Fast-mode variants: a strict "<level>-fast" request keeps its level
+	// clamped to the catalog, never to the plain default.
+	if base, isFast := strings.CutSuffix(rawLevel, "-fast"); isFast && devinLevelIndex(base) != -1 {
+		defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
+		clamped := clampEffort(base, allowedLevels, defaultEffort)
+		return canonicalBase + "-" + clamped + "-fast"
+	}
+
+	// 11. Model has thinking levels: determine default effort and clamp
 	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
 	clamped := clampEffort(effort, allowedLevels, defaultEffort)
+	if effort == "fast" {
+		return canonicalBase + "-" + clamped + "-fast"
+	}
 	return canonicalBase + "-" + clamped
 }
 

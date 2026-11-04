@@ -9,13 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -29,21 +28,28 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if xaiIsVideoRequest(opts) {
 		return e.executeVideos(ctx, auth, req, opts)
 	}
+	if xaiIsSpeechRequest(opts) {
+		return e.executeSpeech(ctx, auth, req, opts)
+	}
 
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
 
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, true)
+	prepared, err := e.prepareResponsesRequestDoc(ctx, req, opts, true)
 	if err != nil {
 		return resp, err
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
-	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	doc := prepared.ensureDoc()
+	sanitizeXAIInputEncryptedContentForBaseURLDoc(doc, baseURL)
+	helps.FinalizePayloadDoc(helps.WithPayloadFinalizer(ctx, prepared.finalizePayload), doc)
+	prepared.body = doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(prepared.body))
 	if err != nil {
 		return resp, err
@@ -86,90 +92,135 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 	namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
+	var upstreamUsage helps.StreamUsageBuffer
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		upstreamUsage.ObserveResponsesStream(eventData)
+		prepared.applyPatch.RememberDispatcherEvent(eventData)
 		eventData = namespaceRestorer.restore(eventData)
+		if prepared.webSearchAlias != "" {
+			eventData = restoreXAIClientWebSearchName(eventData, prepared.webSearchAlias)
+		}
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
 			continue
 		}
-		eventType := gjson.GetBytes(eventData, "type").String()
-		switch eventType {
-		case "response.output_item.done":
-			xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-		case "response.completed", "response.incomplete":
-			if detail, ok := helps.ParseCodexUsage(eventData); ok {
-				reporter.Publish(ctx, detail)
+		events, errBridge := prepared.applyPatch.Transform(eventData)
+		if errBridge != nil {
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			upstreamUsage.PublishFailure(ctx, reporter, errBridge)
+			return resp, errBridge
+		}
+		for _, eventData := range events {
+			reporter.ObserveResponseModel(eventData)
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
+			switch eventType {
+			case "response.output_item.done":
+				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.incomplete":
+				completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+				completedData = xaiNormalizeReasoningSummaryData(completedData)
+				if eventType == "response.completed" {
+					// A truncated turn carries no replayable terminal state, so only a
+					// completed response may refresh the reasoning replay cache.
+					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
+				}
+				var param any
+				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
+				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+					errTranslation := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+					upstreamUsage.PublishFailure(ctx, reporter, errTranslation)
+					return cliproxyexecutor.Response{}, errTranslation
+				}
+				if !upstreamUsage.Publish(ctx, reporter) {
+					if detail, ok := helps.ParseCodexUsageWithOutputItems(completedData, outputItemsByIndex, outputItemsFallback); ok {
+						reporter.Publish(ctx, detail)
+					}
+				}
+				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
+					out = helps.EnsureResponsesUsageDetails(out)
+				}
+				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 			}
-			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-			completedData = xaiNormalizeReasoningSummaryData(completedData)
-			if eventType == "response.completed" {
-				// A truncated turn carries no replayable terminal state, so only a
-				// completed response may refresh the reasoning replay cache.
-				cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
-			}
-			var param any
-			out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
-			if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
-				out = helps.EnsureResponsesUsageDetails(out)
-			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
 
+	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+		errFinish = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		upstreamUsage.PublishFailure(ctx, reporter, errFinish)
+		return resp, errFinish
+	}
 	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	prepared, data, headers, errCompact := e.executeCompactRequest(ctx, auth, req, opts)
-	if errCompact != nil {
-		return resp, errCompact
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return resp, errCompactRequest
 	}
 
+	defer reporter.TrackFailure(ctx, &err)
+	upstreamUsage := helps.ParseOpenAIUsage(data)
+	converted, errBridge := prepared.applyPatch.Bridge.TransformNonStream(data)
+	if errBridge != nil {
+		errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		reporter.PublishFailureWithDetail(ctx, upstreamUsage, errBridge)
+		return resp, errBridge
+	}
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, converted, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+		errTranslation := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		reporter.PublishFailureWithDetail(ctx, upstreamUsage, errTranslation)
+		return cliproxyexecutor.Response{}, errTranslation
+	}
+	reporter.Publish(ctx, upstreamUsage)
 	if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
 	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
-func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, error) {
+func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*xaiPreparedRequest, []byte, http.Header, *helps.UsageReporter, error) {
 	token, _ := xaiCreds(auth)
 	// Compact must not use xaiChatBaseURL: CLI chat-proxy returns 404 for
 	// /responses/compact and a 404 cools down the whole xAI auth pool.
 	baseURL := xaiCompactBaseURL(auth)
 	logXAIResolvedBaseURL(ctx, baseURL)
 
-	prepared, err := e.prepareResponsesRequestTo(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
+	prepared, err := e.prepareResponsesRequestToDoc(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
-	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
+	doc := prepared.ensureDoc()
+	_ = doc.Delete("stream")
+	_ = doc.Delete("tools")
 	// Compact deletes tools after prepareResponsesRequestTo, which can now keep
 	// image_generation and rewrite its forced choice to "required" on grok-4.6+.
 	// Drop the leftover selection so compact does not send tool_choice without tools.
-	prepared.body = normalizeXAIToolChoiceForTools(prepared.body)
+	normalizeXAIToolChoiceForToolsDoc(doc)
 	for _, field := range []string{"max_output_tokens", "temperature", "top_p", "top_k", "stop"} {
-		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
+		_ = doc.Delete(field)
 	}
-	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
-	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
-		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
+	xaiRemoveInputItemsByTypeDoc(doc, "compaction_trigger")
+	if previousResponseID := strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "previous_response_id").String()); previousResponseID != "" {
+		_ = doc.Set("previous_response_id", previousResponseID)
 	}
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
-	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	sanitizeXAIInputEncryptedContentForBaseURLDoc(doc, baseURL)
+	helps.FinalizePayloadDoc(helps.WithPayloadFinalizer(ctx, prepared.finalizePayload), doc)
+	prepared.body = doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// Official API / custom compact endpoints use standard API headers, not CLI
 	// chat-proxy identity headers (which applyXAIChatHeaders may still attach for OAuth chat).
@@ -181,7 +232,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -193,28 +244,28 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = xaiStatusErr(httpResp.StatusCode, data)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
-	reporter.EnsurePublished(ctx)
+	reporter.ObserveResponseModel(data)
 	clearXAIReasoningReplayAfterCompaction(ctx, prepared.replayScope)
-	return prepared, data, httpResp.Header.Clone(), nil
+	return prepared, data, httpResp.Header.Clone(), reporter, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	prepared, data, headers, err := e.executeCompactRequest(ctx, auth, req, opts)
-	if err != nil {
-		return nil, err
+	prepared, data, headers, reporter, errCompactRequest := e.executeCompactRequest(ctx, auth, req, opts)
+	if errCompactRequest != nil {
+		return nil, errCompactRequest
 	}
 
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	headers = headers.Clone()
 	if headers == nil {
 		headers = make(http.Header)
@@ -231,7 +282,7 @@ func (e *XAIExecutor) executeCompactionTriggerStream(ctx context.Context, auth *
 }
 
 func xaiInputHasItemType(body []byte, itemType string) bool {
-	input := gjson.GetBytes(body, "input")
+	input := ojson.GetBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return false
 	}
@@ -244,9 +295,20 @@ func xaiInputHasItemType(body []byte, itemType string) bool {
 }
 
 func xaiRemoveInputItemsByType(body []byte, itemType string) []byte {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !xaiRemoveInputItemsByTypeDoc(doc, itemType) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+func xaiRemoveInputItemsByTypeDoc(doc *ojson.Doc, itemType string) bool {
+	if doc == nil {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() {
+		return false
 	}
 
 	var buf bytes.Buffer
@@ -264,21 +326,17 @@ func xaiRemoveInputItemsByType(body []byte, itemType string) []byte {
 	}
 	buf.WriteByte(']')
 
-	updated, err := sjson.SetRawBytes(body, "input", buf.Bytes())
-	if err != nil {
-		return body
-	}
-	return updated
+	return doc.SetRawBytes("input", buf.Bytes()) == nil
 }
 
 func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compactData []byte) [][]byte {
 	responseID := xaiCompactionResponseID(compactData)
 	now := time.Now().Unix()
-	createdAt := gjson.GetBytes(compactData, "created_at").Int()
+	createdAt := ojson.GetBytesNoCopy(compactData, "created_at").Int()
 	if createdAt == 0 {
 		createdAt = now
 	}
-	completedAt := gjson.GetBytes(compactData, "completed_at").Int()
+	completedAt := ojson.GetBytesNoCopy(compactData, "completed_at").Int()
 	if completedAt == 0 {
 		completedAt = now
 	}
@@ -294,35 +352,37 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 	completedResponse := xaiBuildCompactionBaseResponse(prepared, compactData, responseID, createdAt, "completed")
 	requestModelName := ""
 	if prepared != nil {
-		requestModelName = gjson.GetBytes(prepared.originalPayload, "model").String()
+		requestModelName = ojson.GetBytesNoCopy(prepared.originalPayload, "model").String()
 		if requestModelName == "" {
 			requestModelName = prepared.baseModel
 		}
 	}
 	if requestModelName == "" {
-		requestModelName = gjson.GetBytes(compactData, "model").String()
+		requestModelName = ojson.GetBytesNoCopy(compactData, "model").String()
 	}
 	if requestModelName != "" {
-		createdResponse, _ = sjson.SetBytes(createdResponse, "model", requestModelName)
-		inProgressResponse, _ = sjson.SetBytes(inProgressResponse, "model", requestModelName)
+		createdResponse, _ = ojson.SetBytes(createdResponse, "model", requestModelName)
+		inProgressResponse, _ = ojson.SetBytes(inProgressResponse, "model", requestModelName)
 	}
-	completedResponse, _ = sjson.SetBytes(completedResponse, "completed_at", completedAt)
-	completedResponse, _ = sjson.SetRawBytes(completedResponse, "output", output)
-	if usage := gjson.GetBytes(compactData, "usage"); usage.Exists() {
-		completedResponse, _ = sjson.SetRawBytes(completedResponse, "usage", []byte(usage.Raw))
+	completedDoc := ojson.NewDoc(completedResponse)
+	_ = completedDoc.Set("completed_at", completedAt)
+	_ = completedDoc.SetRawBytes("output", output)
+	if usage := ojson.GetBytesNoCopy(compactData, "usage"); usage.Exists() {
+		_ = completedDoc.SetRawBytes("usage", []byte(usage.Raw))
 	}
+	completedResponse = completedDoc.Bytes()
 
 	createdPayload := []byte(`{"type":"response.created","sequence_number":0}`)
-	createdPayload, _ = sjson.SetRawBytes(createdPayload, "response", createdResponse)
+	createdPayload, _ = ojson.SetRawBytes(createdPayload, "response", createdResponse)
 	inProgressPayload := []byte(`{"type":"response.in_progress","sequence_number":1}`)
-	inProgressPayload, _ = sjson.SetRawBytes(inProgressPayload, "response", inProgressResponse)
+	inProgressPayload, _ = ojson.SetRawBytes(inProgressPayload, "response", inProgressResponse)
 	addedPayload := []byte(`{"type":"response.output_item.added","sequence_number":2,"output_index":0}`)
-	addedPayload, _ = sjson.SetRawBytes(addedPayload, "item", item)
+	addedPayload, _ = ojson.SetRawBytes(addedPayload, "item", item)
 	keepalivePayload := []byte(`{"type":"keepalive","sequence_number":3}`)
 	donePayload := []byte(`{"type":"response.output_item.done","sequence_number":4,"output_index":0}`)
-	donePayload, _ = sjson.SetRawBytes(donePayload, "item", item)
+	donePayload, _ = ojson.SetRawBytes(donePayload, "item", item)
 	completedPayload := []byte(`{"type":"response.completed","sequence_number":5}`)
-	completedPayload, _ = sjson.SetRawBytes(completedPayload, "response", completedResponse)
+	completedPayload, _ = ojson.SetRawBytes(completedPayload, "response", completedResponse)
 	completedPayload = helps.EnsureResponsesUsageDetails(completedPayload)
 
 	return [][]byte{
@@ -336,18 +396,18 @@ func xaiBuildCompactionTriggerStreamChunks(prepared *xaiPreparedRequest, compact
 }
 
 func xaiBuildCompactionBaseResponse(prepared *xaiPreparedRequest, compactData []byte, responseID string, createdAt int64, status string) []byte {
-	response := []byte(`{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null,"incomplete_details":null,"output":[]}`)
-	response, _ = sjson.SetBytes(response, "id", responseID)
-	response, _ = sjson.SetBytes(response, "created_at", createdAt)
-	response, _ = sjson.SetBytes(response, "status", status)
-	if model := gjson.GetBytes(compactData, "model").String(); model != "" {
-		response, _ = sjson.SetBytes(response, "model", model)
+	respDoc := ojson.NewDoc([]byte(`{"id":"","object":"response","created_at":0,"status":"","background":false,"error":null,"incomplete_details":null,"output":[]}`))
+	_ = respDoc.Set("id", responseID)
+	_ = respDoc.Set("created_at", createdAt)
+	_ = respDoc.Set("status", status)
+	if model := ojson.GetBytesNoCopy(compactData, "model").String(); model != "" {
+		_ = respDoc.Set("model", model)
 	} else if prepared != nil && prepared.baseModel != "" {
-		response, _ = sjson.SetBytes(response, "model", prepared.baseModel)
+		_ = respDoc.Set("model", prepared.baseModel)
 	}
 
 	if prepared == nil {
-		return response
+		return respDoc.Bytes()
 	}
 	for _, field := range []string{
 		"instructions",
@@ -366,30 +426,39 @@ func xaiBuildCompactionBaseResponse(prepared *xaiPreparedRequest, compactData []
 		"user",
 		"metadata",
 	} {
-		if value := gjson.GetBytes(prepared.body, field); value.Exists() {
-			response, _ = sjson.SetRawBytes(response, field, []byte(value.Raw))
+		if value := ojson.GetBytesNoCopy(prepared.body, field); value.Exists() {
+			_ = respDoc.SetRawBytes(field, []byte(value.Raw))
 		}
 	}
-	return response
+	return respDoc.Bytes()
 }
 
 func xaiCompactionOutputItem(compactData []byte, responseID string) []byte {
-	itemResult := gjson.GetBytes(compactData, "output.0")
+	itemResult := ojson.GetBytesNoCopy(compactData, "output.0")
 	item := []byte(`{"type":"compaction"}`)
-	if itemResult.Exists() && itemResult.Type == gjson.JSON {
+	if itemResult.Exists() && itemResult.Type == ojson.JSON {
 		item = []byte(itemResult.Raw)
 	}
-	if !gjson.GetBytes(item, "type").Exists() {
-		item, _ = sjson.SetBytes(item, "type", "compaction")
+	itemDoc := ojson.NewDoc(item)
+	changed := false
+	if !itemDoc.Get("type").Exists() {
+		if itemDoc.Set("type", "compaction") == nil {
+			changed = true
+		}
 	}
-	if !gjson.GetBytes(item, "id").Exists() {
-		item, _ = sjson.SetBytes(item, "id", xaiCompactionItemID(responseID))
+	if !itemDoc.Get("id").Exists() {
+		if itemDoc.Set("id", xaiCompactionItemID(responseID)) == nil {
+			changed = true
+		}
 	}
-	return item
+	if !changed {
+		return item
+	}
+	return itemDoc.Bytes()
 }
 
 func xaiCompactionResponseID(compactData []byte) string {
-	if responseID := strings.TrimSpace(gjson.GetBytes(compactData, "id").String()); responseID != "" {
+	if responseID := strings.TrimSpace(ojson.GetBytesNoCopy(compactData, "id").String()); responseID != "" {
 		if strings.HasPrefix(responseID, "resp_") {
 			return responseID
 		}

@@ -10,12 +10,13 @@ import (
 	"sync"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -281,7 +282,7 @@ func isHomeRequestRetryExceededError(err error) bool {
 }
 
 func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
-	if lastErr == nil {
+	if lastErr == nil || isRequestStopError(errPick) {
 		return false
 	}
 	if !homeMode {
@@ -356,14 +357,16 @@ type homeAuthDispatchResponse struct {
 }
 
 type homeDispatchModelInfo struct {
-	ID                  string                    `json:"id"`
-	Type                string                    `json:"type,omitempty"`
-	InputTokenLimit     int                       `json:"inputTokenLimit,omitempty"`
-	OutputTokenLimit    int                       `json:"outputTokenLimit,omitempty"`
-	ContextLength       int                       `json:"context_length,omitempty"`
-	MaxCompletionTokens int                       `json:"max_completion_tokens,omitempty"`
-	Thinking            *registry.ThinkingSupport `json:"thinking,omitempty"`
-	UserDefined         bool                      `json:"user_defined"`
+	ID                         string                       `json:"id"`
+	Type                       string                       `json:"type,omitempty"`
+	InputTokenLimit            int                          `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit           int                          `json:"outputTokenLimit,omitempty"`
+	ContextLength              int                          `json:"context_length,omitempty"`
+	MaxCompletionTokens        int                          `json:"max_completion_tokens,omitempty"`
+	Thinking                   *registry.ThinkingSupport    `json:"thinking,omitempty"`
+	NativeCapabilities         *registry.NativeCapabilities `json:"native_capabilities,omitempty"`
+	SupportConfigurationUpdate *bool                        `json:"support_configuration_update,omitempty"`
+	UserDefined                bool                         `json:"user_defined"`
 }
 
 func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
@@ -371,14 +374,16 @@ func (m *homeDispatchModelInfo) registryModelInfo() *registry.ModelInfo {
 		return nil
 	}
 	return &registry.ModelInfo{
-		ID:                  strings.TrimSpace(m.ID),
-		Type:                strings.TrimSpace(m.Type),
-		InputTokenLimit:     m.InputTokenLimit,
-		OutputTokenLimit:    m.OutputTokenLimit,
-		ContextLength:       m.ContextLength,
-		MaxCompletionTokens: m.MaxCompletionTokens,
-		Thinking:            m.Thinking,
-		UserDefined:         m.UserDefined,
+		ID:                         strings.TrimSpace(m.ID),
+		Type:                       strings.TrimSpace(m.Type),
+		InputTokenLimit:            m.InputTokenLimit,
+		OutputTokenLimit:           m.OutputTokenLimit,
+		ContextLength:              m.ContextLength,
+		MaxCompletionTokens:        m.MaxCompletionTokens,
+		Thinking:                   m.Thinking,
+		NativeCapabilities:         m.NativeCapabilities,
+		SupportConfigurationUpdate: m.SupportConfigurationUpdate != nil && *m.SupportConfigurationUpdate,
+		UserDefined:                m.UserDefined,
 	}
 }
 
@@ -421,6 +426,7 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 	if apiKey == "" || ctx == nil {
 		return
 	}
+	coreusage.SetCapturedAPIKey(ctx, apiKey)
 	ginCtx, ok := ctx.Value("gin").(interface{ Set(string, any) })
 	if !ok || ginCtx == nil {
 		return
@@ -681,6 +687,10 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 		return false
 	}
 	_ = m.endMismatchedHomeSessionSelections(ctx, sessionID, credentialID, routeModel, false)
+	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
+	if !selection.Active() {
+		return false
+	}
 	key := homeSessionSelectionKey{credentialID: credentialID, routeModel: routeModel}
 	m.mu.Lock()
 	if m.homeSessionSelections == nil {
@@ -694,7 +704,6 @@ func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliprox
 	previous := selections[key]
 	selections[key] = selection
 	m.mu.Unlock()
-	m.rememberHomeRuntimeAuth(sessionID, selectionAuth)
 	if previous != nil && previous != selection {
 		previous.End("target_replaced")
 	}
@@ -784,7 +793,9 @@ func (m *Manager) bindHomeSelectionRuntimeAuth(ctx context.Context, opts cliprox
 	}
 	m.rememberHomeSelectionRuntimeAuth(sessionID, selection)
 	if errBind := selection.Bind(func() error {
-		m.forgetHomeRuntimeAuth(sessionID, authID, selection)
+		if !selection.retained.Load() {
+			m.forgetHomeRuntimeAuth(sessionID, authID, selection)
+		}
 		return nil
 	}); errBind != nil {
 		selection.runtimeAuthBound.Store(false)
@@ -970,7 +981,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	if retainedOK {
 		return retained, nil
 	}
+	if errLoss := cliproxyexecutor.WebsocketInputLossError(ctx); errLoss != nil {
+		return nil, errLoss
+	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
+		if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) && pinnedAuthID != "" {
+			if _, ok := m.GetExecutionSessionAuthByID(sessionID, pinnedAuthID); ok {
+				return nil, &cliproxyexecutor.UpstreamWebsocketTurnError{FullContextRequired: true}
+			}
+		}
 		if pinnedAuthID != "" {
 			if errEnd := m.endMismatchedHomeSessionSelections(ctx, sessionID, pinnedAuthID, requestedModel, true); errEnd != nil {
 				return nil, errEnd
@@ -997,6 +1016,11 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 
+	if opts.Metadata != nil {
+		if opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] == nil && requestedModel != "" {
+			opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = requestedModel
+		}
+	}
 	sessionID, parentSessionID := m.homeDispatchSessionIDs(opts)
 	if sessionID != "" && opts.Metadata != nil {
 		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = sessionID
@@ -1007,6 +1031,14 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		}
 	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
+	if opts.Metadata != nil {
+		if nodeKind, ok := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+			if dispatchHeaders == nil {
+				dispatchHeaders = make(http.Header)
+			}
+			dispatchHeaders.Set("X-Node-Kind", strings.TrimSpace(nodeKind))
+		}
+	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -1195,6 +1227,9 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 		return nil, &Error{Code: "home_unavailable", Message: "home execution registry unavailable", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
 	}
 	selection.modelInfo = dispatch.ModelInfo.registryModelInfo()
+	if dispatch.ModelInfo != nil {
+		selection.configurationUpdateSupport = dispatch.ModelInfo.SupportConfigurationUpdate
+	}
 	if pinnedAuthID == "" && dispatch.RequestRetry != nil && *dispatch.RequestRetry >= 0 {
 		selection.requestRetry = *dispatch.RequestRetry
 		selection.hasRequestRetry = true
@@ -1277,7 +1312,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
-		executor, ok := m.executors[providerKey]
+		executor, ok := m.executorLocked(providerKey)
 		if !ok {
 			continue
 		}
@@ -1289,6 +1324,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	m.mu.RUnlock()
 
+	now := time.Now()
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
 	for _, candidate := range candidates {
@@ -1298,6 +1334,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		}
 		if okHint && hint.Known {
 			if !hint.Available {
+				if IsAntigravityCreditsHintFresh(hint, now) {
+					continue
+				}
+				unknown = append(unknown, candidate)
 				continue
 			}
 			known = append(known, candidate)
@@ -1330,7 +1370,7 @@ func hasAntigravityProvider(providers []string) bool {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
-	if isRequestTerminatedError(lastErr) {
+	if isRequestTerminatedError(lastErr) || isRequestStopError(lastErr) {
 		return false
 	}
 	status := statusCodeFromError(lastErr)
@@ -1386,7 +1426,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
+		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
+		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue
@@ -1402,8 +1444,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
+			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -1449,6 +1492,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
+		clearSchedulerSelectionID(creditsOpts.Metadata)
+		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
+		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue

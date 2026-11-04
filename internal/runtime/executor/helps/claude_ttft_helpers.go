@@ -3,7 +3,7 @@ package helps
 import (
 	"bytes"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // IsClaudeTokenEvent reports whether an Anthropic Messages SSE chunk carries
@@ -34,11 +34,11 @@ func IsClaudeTokenEvent(payload []byte) bool {
 		}
 	}
 
-	eventType := gjson.GetBytes(payload, "type").String()
+	eventType := ojson.GetBytesNoCopy(payload, "type").String()
 	switch eventType {
 	// Substantive streaming block deltas
 	case "content_block_delta":
-		delta := gjson.GetBytes(payload, "delta")
+		delta := ojson.GetBytesNoCopy(payload, "delta")
 		if len(delta.Get("text").String()) > 0 {
 			return true
 		}
@@ -55,7 +55,7 @@ func IsClaudeTokenEvent(payload []byte) bool {
 
 	// Initial block start when populated upfront
 	case "content_block_start":
-		cb := gjson.GetBytes(payload, "content_block")
+		cb := ojson.GetBytesNoCopy(payload, "content_block")
 		if len(cb.Get("text").String()) > 0 || len(cb.Get("thinking").String()) > 0 {
 			return true
 		}
@@ -63,7 +63,7 @@ func IsClaudeTokenEvent(payload []byte) bool {
 
 	// Terminal completion events fallback
 	case "message_delta":
-		return len(gjson.GetBytes(payload, "delta.stop_reason").String()) > 0
+		return len(ojson.GetBytesNoCopy(payload, "delta.stop_reason").String()) > 0
 	case "message_stop", "error":
 		return true
 
@@ -73,8 +73,8 @@ func IsClaudeTokenEvent(payload []byte) bool {
 
 	default:
 		// Non-streaming / complete message payload fallback
-		if gjson.GetBytes(payload, "content").IsArray() {
-			for _, block := range gjson.GetBytes(payload, "content").Array() {
+		if ojson.GetBytesNoCopy(payload, "content").IsArray() {
+			for _, block := range ojson.GetBytesNoCopy(payload, "content").Array() {
 				if len(block.Get("text").String()) > 0 || len(block.Get("thinking").String()) > 0 {
 					return true
 				}
@@ -91,6 +91,9 @@ func IsClaudeTokenEvent(payload []byte) bool {
 // represents the first meaningful token event. It records first-packet arrival time as fallback
 // and returns immediately with zero allocations once effective token TTFT is set.
 func ObserveClaudeTokenEvent(reporter *UsageReporter, payload []byte) {
+	if reporter != nil && len(payload) > 0 {
+		reporter.ObserveResponseModel(payload)
+	}
 	if reporter == nil || len(payload) == 0 {
 		return
 	}

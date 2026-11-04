@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 var (
@@ -20,12 +20,14 @@ var (
 const (
 	xaiImageHandlerType        = "openai-image"
 	xaiVideoHandlerType        = "openai-video"
+	xaiSpeechHandlerType       = "openai-speech"
 	xaiCustomToolType          = "custom"
 	xaiFunctionToolType        = "function"
 	xaiImageGenerationToolType = "image_generation"
 	xaiNamespaceToolType       = "namespace"
 	xaiToolSearchType          = "tool_search"
 	xaiWebSearchToolType       = "web_search"
+	xaiClientWebSearchAlias    = "clientfn_web_search"
 	xaiXSearchToolType         = "x_search"
 	xaiMaxTools                = 200
 	// Codex Desktop injects codex_app.automation_update with a large oneOf+$ref
@@ -42,13 +44,18 @@ const (
 	xaiVideosEditsPath          = "/videos/edits"
 	xaiVideosExtensionsPath     = "/videos/extensions"
 	xaiVideosPath               = "/videos"
+	xaiTTSPath                  = "/tts"
 	xaiIdempotencyKeyMetaKey    = "idempotency_key"
 	xaiComposerModelPrefix      = "grok-composer-"
 	xaiTokenAuthHeader          = "X-XAI-Token-Auth"
 	xaiTokenAuthValue           = "xai-grok-cli"
 	xaiClientVersionHeader      = "x-grok-client-version"
-	// Keep in sync with the current Grok CLI client version that chat-proxy expects.
-	xaiClientVersionValue         = "0.2.120"
+	// Keep in sync with the current Grok CLI client version that chat-proxy
+	// expects. The server rejects older versions with HTTP 426; it required
+	// 1.0.13+ as of 2026-10-01 (#6249).
+	// This hardcoded value serves as fallback if npm registry resolution fails.
+	xaiClientVersionFallback      = helps.DefaultXAIFallbackClientVersion
+	xaiClientVersionValue         = xaiClientVersionFallback
 	xaiClientIdentifierHeader     = "x-grok-client-identifier"
 	xaiClientIdentifierValue      = "grok-shell"
 	xaiAuthenticateResponseHeader = "x-authenticateresponse"
@@ -71,6 +78,18 @@ func NewXAIExecutor(cfg *config.Config) *XAIExecutor {
 	return &XAIExecutor{cfg: cfg}
 }
 
+// xaiClientVersion returns the active Grok CLI client version (dynamically fetched
+// from npm or falling back to xaiClientVersionFallback).
+func xaiClientVersion() string {
+	return helps.GetXAIClientVersion()
+}
+
+// StartXAIVersionUpdater starts the periodic Grok CLI version updater from npm.
+// proxyURL is the global outbound proxy; an empty value inherits the process environment.
+func StartXAIVersionUpdater(ctx context.Context, proxyURL string) {
+	helps.StartXAIVersionUpdater(ctx, proxyURL)
+}
+
 // Identifier returns the provider identifier.
 func (e *XAIExecutor) Identifier() string {
 	return "xai"
@@ -87,6 +106,7 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	} else {
 		req.Header.Del("Authorization")
 	}
+	ensureXAIUserAgent(req)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -110,3 +130,6 @@ func (e *XAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *XAIExecutor) SupportsApplyPatch() bool { return e != nil }

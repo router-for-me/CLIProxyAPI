@@ -10,11 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	xcurrency "golang.org/x/text/currency"
 )
 
@@ -252,7 +254,7 @@ func (h *Handler) FetchPluginQuota(c *gin.Context) {
 	pluginID := strings.TrimSpace(c.Param("id"))
 	var body credentialQuotaRequest
 	if errBind := c.ShouldBindJSON(&body); errBind != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errBind, http.StatusBadRequest), gin.H{"error": "invalid request body"})
 		return
 	}
 	authIndex := body.resolveAuthIndex()
@@ -306,7 +308,12 @@ func (h *Handler) ResetPluginQuota(c *gin.Context) {
 	}
 	if authIndex == "" {
 		var body credentialQuotaRequest
-		_ = c.ShouldBindJSON(&body)
+		if errBind := c.ShouldBindJSON(&body); errBind != nil {
+			if status := clienterror.HTTPStatusFromError(errBind); status == http.StatusRequestEntityTooLarge {
+				c.JSON(status, gin.H{"error": errBind.Error()})
+				return
+			}
+		}
 		authIndex = body.resolveAuthIndex()
 	}
 	if authIndex == "" {
@@ -494,7 +501,7 @@ func (h *Handler) executeQuotaProbe(c *gin.Context, auth *coreauth.Auth, probe m
 				hasPlan := quotaResp.Subscription != nil && strings.TrimSpace(quotaResp.Subscription.Plan) != ""
 				// Filter groups to retain only buckets with an actual valid numeric remaining fraction in raw JSON
 				filteredGroups := make([]pluginapi.QuotaGroup, 0, len(quotaResp.Groups))
-				groupsRes := gjson.GetBytes(respBytes, "groups")
+				groupsRes := ojson.GetBytesNoCopy(respBytes, "groups")
 				if groupsRes.IsArray() {
 					for gIdx, grp := range groupsRes.Array() {
 						if gIdx >= len(quotaResp.Groups) {
@@ -557,7 +564,7 @@ func filterUsableQuotaSummary(raw []byte) []pluginapi.QuotaMetric {
 			}
 		}
 	}
-	summaryResult := gjson.ParseBytes(rawSummary)
+	summaryResult := util.ParseGJSONBytesNoCopy(rawSummary)
 	if !summaryResult.IsArray() {
 		return nil
 	}
@@ -568,28 +575,28 @@ func filterUsableQuotaSummary(raw []byte) []pluginapi.QuotaMetric {
 		key := strings.TrimSpace(keyResult.String())
 		label := strings.TrimSpace(labelResult.String())
 		value := rawMetric.Get("value")
-		if keyResult.Type != gjson.String || labelResult.Type != gjson.String || key == "" || label == "" || value.Type != gjson.Number || math.IsNaN(value.Float()) || math.IsInf(value.Float(), 0) {
+		if keyResult.Type != ojson.String || labelResult.Type != ojson.String || key == "" || label == "" || value.Type != ojson.Number || math.IsNaN(value.Float()) || math.IsInf(value.Float(), 0) {
 			continue
 		}
 		metric := pluginapi.QuotaMetric{
-			Key:   key,
-			Label: label,
+			Key:   strings.Clone(key),
+			Label: strings.Clone(label),
 			Value: value.Float(),
 		}
-		if unitResult := rawMetric.Get("unit"); unitResult.Type == gjson.String {
-			metric.Unit = strings.TrimSpace(unitResult.String())
+		if unitResult := rawMetric.Get("unit"); unitResult.Type == ojson.String {
+			metric.Unit = strings.Clone(strings.TrimSpace(unitResult.String()))
 		}
-		if formatResult := rawMetric.Get("format"); formatResult.Type == gjson.String {
+		if formatResult := rawMetric.Get("format"); formatResult.Type == ojson.String {
 			format := strings.TrimSpace(formatResult.String())
 			switch format {
 			case "number":
-				metric.Format = format
+				metric.Format = strings.Clone(format)
 			case "currency":
-				if currencyResult := rawMetric.Get("currency"); currencyResult.Type == gjson.String {
+				if currencyResult := rawMetric.Get("currency"); currencyResult.Type == ojson.String {
 					code := strings.ToUpper(strings.TrimSpace(currencyResult.String()))
 					if _, err := xcurrency.ParseISO(code); err == nil {
-						metric.Format = format
-						metric.Currency = code
+						metric.Format = strings.Clone(format)
+						metric.Currency = strings.Clone(code)
 					}
 				}
 			}
@@ -599,18 +606,18 @@ func filterUsableQuotaSummary(raw []byte) []pluginapi.QuotaMetric {
 	return usable
 }
 
-func parseNumericFraction(res gjson.Result) (float64, bool) {
+func parseNumericFraction(res ojson.Result) (float64, bool) {
 	if !res.Exists() {
 		return 0, false
 	}
 	switch res.Type {
-	case gjson.Number:
+	case ojson.Number:
 		val := res.Float()
 		if math.IsNaN(val) || math.IsInf(val, 0) {
 			return 0, false
 		}
 		return val, true
-	case gjson.String:
+	case ojson.String:
 		s := strings.TrimSpace(res.String())
 		if s == "" {
 			return 0, false
@@ -628,41 +635,41 @@ func parseNumericFraction(res gjson.Result) (float64, bool) {
 func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.QuotaFetchResponse, error) {
 	out := pluginapi.QuotaFetchResponse{}
 	if planPath, ok := mapping["plan"].(string); ok && planPath != "" {
-		if res := gjson.GetBytes(respBytes, planPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+		if res := ojson.GetBytesNoCopy(respBytes, planPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
 			if out.Subscription == nil {
 				out.Subscription = &pluginapi.QuotaSubscription{}
 			}
-			out.Subscription.Plan = res.String()
+			out.Subscription.Plan = strings.Clone(res.String())
 		}
 	}
 	if tierPath, ok := mapping["tier_name"].(string); ok && tierPath != "" {
-		if res := gjson.GetBytes(respBytes, tierPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+		if res := ojson.GetBytesNoCopy(respBytes, tierPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
 			if out.Subscription == nil {
 				out.Subscription = &pluginapi.QuotaSubscription{}
 			}
-			out.Subscription.TierName = res.String()
+			out.Subscription.TierName = strings.Clone(res.String())
 		}
 	} else if tierPath, ok := mapping["tierName"].(string); ok && tierPath != "" {
-		if res := gjson.GetBytes(respBytes, tierPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+		if res := ojson.GetBytesNoCopy(respBytes, tierPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
 			if out.Subscription == nil {
 				out.Subscription = &pluginapi.QuotaSubscription{}
 			}
-			out.Subscription.TierName = res.String()
+			out.Subscription.TierName = strings.Clone(res.String())
 		}
 	}
 	if tierIDPath, ok := mapping["tier_id"].(string); ok && tierIDPath != "" {
-		if res := gjson.GetBytes(respBytes, tierIDPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+		if res := ojson.GetBytesNoCopy(respBytes, tierIDPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
 			if out.Subscription == nil {
 				out.Subscription = &pluginapi.QuotaSubscription{}
 			}
-			out.Subscription.TierID = res.String()
+			out.Subscription.TierID = strings.Clone(res.String())
 		}
 	} else if tierIDPath, ok := mapping["tierId"].(string); ok && tierIDPath != "" {
-		if res := gjson.GetBytes(respBytes, tierIDPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+		if res := ojson.GetBytesNoCopy(respBytes, tierIDPath); res.Exists() && strings.TrimSpace(res.String()) != "" {
 			if out.Subscription == nil {
 				out.Subscription = &pluginapi.QuotaSubscription{}
 			}
-			out.Subscription.TierID = res.String()
+			out.Subscription.TierID = strings.Clone(res.String())
 		}
 	}
 
@@ -675,21 +682,21 @@ func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.Quota
 			}
 			group := pluginapi.QuotaGroup{}
 			if namePath, okName := gm["display_name"].(string); okName {
-				if res := gjson.GetBytes(respBytes, namePath); res.Exists() && strings.TrimSpace(res.String()) != "" {
-					group.DisplayName = res.String()
+				if res := ojson.GetBytesNoCopy(respBytes, namePath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+					group.DisplayName = strings.Clone(res.String())
 				} else {
 					group.DisplayName = namePath
 				}
 			} else if namePath, okName := gm["displayName"].(string); okName {
-				if res := gjson.GetBytes(respBytes, namePath); res.Exists() && strings.TrimSpace(res.String()) != "" {
-					group.DisplayName = res.String()
+				if res := ojson.GetBytesNoCopy(respBytes, namePath); res.Exists() && strings.TrimSpace(res.String()) != "" {
+					group.DisplayName = strings.Clone(res.String())
 				} else {
 					group.DisplayName = namePath
 				}
 			}
 
 			if bucketsPath, okBP := gm["buckets_path"].(string); okBP && bucketsPath != "" {
-				arrayRes := gjson.GetBytes(respBytes, bucketsPath)
+				arrayRes := ojson.GetBytesNoCopy(respBytes, bucketsPath)
 				if arrayRes.IsArray() && len(arrayRes.Array()) > 0 {
 					winKey, _ := gm["window_key"].(string)
 					if winKey == "" {
@@ -731,10 +738,10 @@ func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.Quota
 							continue
 						}
 						bucket := pluginapi.QuotaBucket{
-							Window:            item.Get(winKey).String(),
+							Window:            strings.Clone(item.Get(winKey).String()),
 							RemainingFraction: frac,
-							ResetTime:         item.Get(resetKey).String(),
-							Description:       item.Get(descKey).String(),
+							ResetTime:         strings.Clone(item.Get(resetKey).String()),
+							Description:       strings.Clone(item.Get(descKey).String()),
 						}
 						group.Buckets = append(group.Buckets, bucket)
 					}
@@ -750,7 +757,7 @@ func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.Quota
 					var hasFraction bool
 					var frac float64
 					if rf, ok := bm["remaining_fraction"].(string); ok && rf != "" {
-						if val, okNum := parseNumericFraction(gjson.GetBytes(respBytes, rf)); okNum {
+						if val, okNum := parseNumericFraction(ojson.GetBytesNoCopy(respBytes, rf)); okNum {
 							frac = val
 							hasFraction = true
 						}
@@ -758,8 +765,8 @@ func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.Quota
 					if !hasFraction {
 						if rem, okRem := bm["remaining_amount"].(string); okRem && rem != "" {
 							if tot, okTot := bm["total_amount"].(string); okTot && tot != "" {
-								remVal, okRemNum := parseNumericFraction(gjson.GetBytes(respBytes, rem))
-								totVal, okTotNum := parseNumericFraction(gjson.GetBytes(respBytes, tot))
+								remVal, okRemNum := parseNumericFraction(ojson.GetBytesNoCopy(respBytes, rem))
+								totVal, okTotNum := parseNumericFraction(ojson.GetBytesNoCopy(respBytes, tot))
 								if okRemNum && okTotNum && totVal > 0 {
 									frac = remVal / totVal
 									hasFraction = true
@@ -774,22 +781,22 @@ func mapProbeResponse(respBytes []byte, mapping map[string]any) (pluginapi.Quota
 						RemainingFraction: frac,
 					}
 					if win, ok := bm["window"].(string); ok {
-						if res := gjson.GetBytes(respBytes, win); res.Exists() {
-							bucket.Window = res.String()
+						if res := ojson.GetBytesNoCopy(respBytes, win); res.Exists() {
+							bucket.Window = strings.Clone(res.String())
 						} else {
 							bucket.Window = win
 						}
 					}
 					if desc, ok := bm["description"].(string); ok {
-						if res := gjson.GetBytes(respBytes, desc); res.Exists() {
-							bucket.Description = res.String()
+						if res := ojson.GetBytesNoCopy(respBytes, desc); res.Exists() {
+							bucket.Description = strings.Clone(res.String())
 						} else {
 							bucket.Description = desc
 						}
 					}
 					if reset, ok := bm["reset_time"].(string); ok {
-						if res := gjson.GetBytes(respBytes, reset); res.Exists() {
-							bucket.ResetTime = res.String()
+						if res := ojson.GetBytesNoCopy(respBytes, reset); res.Exists() {
+							bucket.ResetTime = strings.Clone(res.String())
 						} else {
 							bucket.ResetTime = reset
 						}

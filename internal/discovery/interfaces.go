@@ -54,8 +54,8 @@ func FilterInterfaces(include, exclude []string) ([]net.Interface, error) {
 			continue
 		}
 
-		// 4. Default allow-list: only common physical LAN adapter names are
-		// accepted unless the user explicitly provides an include list.
+		// 4. Default allow-list: accept common physical LAN adapters and
+		// bonded LAN interfaces unless the user provides an include list.
 		if len(include) == 0 {
 			if isVirtualOrTunnel(name) || !isLikelyPhysicalLAN(name) {
 				continue
@@ -107,7 +107,7 @@ func isVirtualOrTunnel(name string) bool {
 
 func isLikelyPhysicalLAN(name string) bool {
 	for _, prefix := range []string{
-		"en", "eth", "em", "igb", "ix", "re", "wl", "wlan", "wifi", "wi-fi", "ethernet",
+		"en", "eth", "em", "igb", "ix", "re", "wl", "wlan", "wifi", "wi-fi", "ethernet", "bond",
 	} {
 		if strings.HasPrefix(name, prefix) {
 			return true

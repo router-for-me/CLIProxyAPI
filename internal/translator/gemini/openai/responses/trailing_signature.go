@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // Keep text signature carriers off the client-visible reasoning timeline. The
@@ -23,16 +23,16 @@ func cacheGeminiResponsesTextSignatures(modelName, messageID, text string, signa
 		if _, ok := compatibleGeminiResponsesCarrierSignature(signature, geminiResponsesCarrierText); !ok {
 			return false
 		}
-		item := []byte(`{"type":"thought_signature","targetKind":"text"}`)
-		item, _ = sjson.SetBytes(item, "thoughtSignature", signature)
-		item, _ = sjson.SetBytes(item, "targetHash", textHash)
-		items = append(items, item)
+		itemDoc := ojson.NewDocString(`{"type":"thought_signature","targetKind":"text"}`)
+		_ = itemDoc.Set("thoughtSignature", signature)
+		_ = itemDoc.Set("targetHash", textHash)
+		items = append(items, itemDoc.Bytes())
 	}
 	return cache.CacheAntigravityReasoningReplayItems(thinking.ParseSuffix(modelName).ModelName, "gemini-responses-text:"+messageID, items)
 }
 
-func restoreGeminiResponsesTextSignatures(modelName string, items []gjson.Result) []gjson.Result {
-	var restored []gjson.Result
+func restoreGeminiResponsesTextSignatures(modelName string, items []ojson.Result) []ojson.Result {
+	var restored []ojson.Result
 	skip := make(map[int]bool)
 	for index, item := range items {
 		if skip[index] {
@@ -54,14 +54,14 @@ func restoreGeminiResponsesTextSignatures(modelName string, items []gjson.Result
 		replayed := make(map[string]bool)
 		textHash := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 		for _, raw := range cached {
-			entry := gjson.ParseBytes(raw)
+			entry := util.ParseGJSONBytesNoCopy(raw)
 			signature := entry.Get("thoughtSignature").String()
 			if entry.Get("targetHash").String() != textHash {
 				continue
 			}
 			carrier := []byte(`{"type":"reasoning","summary":[]}`)
-			carrier, _ = sjson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
-			restored = append(restored, gjson.ParseBytes(carrier))
+			carrier, _ = ojson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
+			restored = append(restored, util.ParseGJSONBytesNoCopy(carrier))
 			replayed[signature] = true
 		}
 		for adjacent := index + 1; adjacent < len(items) && isOpenAIResponsesDetachedCarrier(items[adjacent]); adjacent++ {

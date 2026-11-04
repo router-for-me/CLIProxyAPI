@@ -45,12 +45,16 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 		ConfigFields: []ConfigField{{
 			Name:        "mode",
 			Type:        ConfigFieldTypeEnum,
+			Default:     "safe",
 			EnumValues:  []string{"safe", "fast"},
 			Description: "Execution mode.",
 		}},
 	}
 	if meta.Logo == "" || len(meta.ConfigFields) != 1 {
 		t.Fatalf("metadata missing logo or config fields: %#v", meta)
+	}
+	if meta.ConfigFields[0].Default != "safe" {
+		t.Fatalf("config field default = %#v, want safe", meta.ConfigFields[0].Default)
 	}
 }
 
@@ -186,13 +190,16 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		Alt:            "chat",
 		ForcedProvider: "gemini",
 		AuthID:         "exact-auth-123",
+		ProxyURL:       "socks5://127.0.0.1:1080",
+		Path:           "/v1/messages",
+		CallerScope:    "opaque-caller-scope-123",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
 		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
 	}
 	requestJSON := string(rawRequest)
-	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id"} {
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url", "path", "caller_scope"} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
 		}
@@ -210,7 +217,10 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		decodedRequest.Query.Get("alt") != "beta" ||
 		decodedRequest.Alt != request.Alt ||
 		decodedRequest.ForcedProvider != request.ForcedProvider ||
-		decodedRequest.AuthID != request.AuthID {
+		decodedRequest.AuthID != request.AuthID ||
+		decodedRequest.ProxyURL != request.ProxyURL ||
+		decodedRequest.Path != request.Path ||
+		decodedRequest.CallerScope != request.CallerScope {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
@@ -349,6 +359,9 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 		AuthID:          request.Candidates[0].ID,
 		DelegateBuiltin: SchedulerBuiltinRoundRobin,
 		Handled:         true,
+		Reject:          false,
+		RejectCode:      "",
+		RejectReason:    "",
 	}
 
 	if request.Plugin.Name != "scheduler-plugin" {
@@ -387,6 +400,159 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin || !response.Handled {
 		t.Fatalf("SchedulerPickResponse = %#v", response)
+	}
+
+	rejectedResponse := SchedulerPickResponse{
+		Handled:      true,
+		Reject:       true,
+		RejectCode:   "policy_violation",
+		RejectReason: "all candidates exceed usage quota",
+	}
+	if !rejectedResponse.Reject || rejectedResponse.RejectCode != "policy_violation" || rejectedResponse.RejectReason != "all candidates exceed usage quota" {
+		t.Fatalf("rejectedResponse = %#v", rejectedResponse)
+	}
+}
+
+func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
+	tests := []struct {
+		name         string
+		payload      string
+		wantAuthID   string
+		wantDelegate string
+		wantHandled  bool
+		wantReject   bool
+		wantCode     string
+		wantReason   string
+	}{
+		{
+			name:         "legacy pascal case auth id",
+			payload:      `{"AuthID":"auth-legacy","DelegateBuiltin":"","Handled":true}`,
+			wantAuthID:   "auth-legacy",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "legacy pascal case delegate",
+			payload:      `{"AuthID":"","DelegateBuiltin":"round-robin","Handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "round-robin",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case auth id",
+			payload:      `{"auth_id":"auth-snake","delegate_builtin":"","handled":true}`,
+			wantAuthID:   "auth-snake",
+			wantDelegate: "",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:         "snake case delegate",
+			payload:      `{"auth_id":"","delegate_builtin":"fill-first","handled":true}`,
+			wantAuthID:   "",
+			wantDelegate: "fill-first",
+			wantHandled:  true,
+			wantReject:   false,
+		},
+		{
+			name:        "snake case terminal rejection",
+			payload:     `{"handled":true,"reject":true,"reject_code":"quota_exceeded","reject_reason":"quota exhausted"}`,
+			wantHandled: true,
+			wantReject:  true,
+			wantCode:    "quota_exceeded",
+			wantReason:  "quota exhausted",
+		},
+		{
+			name:        "pascal case terminal rejection",
+			payload:     `{"Handled":true,"Reject":true,"RejectCode":"policy_violation","RejectReason":"blocked by policy"}`,
+			wantHandled: true,
+			wantReject:  true,
+			wantCode:    "policy_violation",
+			wantReason:  "blocked by policy",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp SchedulerPickResponse
+			if errUnmarshal := json.Unmarshal([]byte(tc.payload), &resp); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			if resp.AuthID != tc.wantAuthID {
+				t.Fatalf("AuthID = %q, want %q", resp.AuthID, tc.wantAuthID)
+			}
+			if resp.DelegateBuiltin != tc.wantDelegate {
+				t.Fatalf("DelegateBuiltin = %q, want %q", resp.DelegateBuiltin, tc.wantDelegate)
+			}
+			if resp.Handled != tc.wantHandled {
+				t.Fatalf("Handled = %v, want %v", resp.Handled, tc.wantHandled)
+			}
+			if resp.Reject != tc.wantReject {
+				t.Fatalf("Reject = %v, want %v", resp.Reject, tc.wantReject)
+			}
+			if resp.RejectCode != tc.wantCode {
+				t.Fatalf("RejectCode = %q, want %q", resp.RejectCode, tc.wantCode)
+			}
+			if resp.RejectReason != tc.wantReason {
+				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T) {
+	// Verify that explicit false or empty string in incoming JSON correctly overwrites pre-existing true/non-empty values.
+	resp := SchedulerPickResponse{
+		AuthID:          "old-auth",
+		DelegateBuiltin: "old-delegate",
+		Handled:         true,
+		Reject:          true,
+		RejectCode:      "old-code",
+		RejectReason:    "old-reason",
+	}
+
+	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`
+	if errUnmarshal := json.Unmarshal([]byte(payload), &resp); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+
+	if resp.Handled {
+		t.Fatalf("Handled = %v, want false", resp.Handled)
+	}
+	if resp.Reject {
+		t.Fatalf("Reject = %v, want false", resp.Reject)
+	}
+	if resp.AuthID != "" {
+		t.Fatalf("AuthID = %q, want empty", resp.AuthID)
+	}
+	if resp.DelegateBuiltin != "" {
+		t.Fatalf("DelegateBuiltin = %q, want empty", resp.DelegateBuiltin)
+	}
+	if resp.RejectCode != "" {
+		t.Fatalf("RejectCode = %q, want empty", resp.RejectCode)
+	}
+	if resp.RejectReason != "" {
+		t.Fatalf("RejectReason = %q, want empty", resp.RejectReason)
+	}
+
+	// Verify that omitting fields in incoming JSON leaves existing fields intact.
+	resp2 := SchedulerPickResponse{
+		AuthID:  "keep-auth",
+		Handled: true,
+	}
+	if errUnmarshal := json.Unmarshal([]byte(`{"reject":true}`), &resp2); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if resp2.AuthID != "keep-auth" {
+		t.Fatalf("AuthID = %q, want keep-auth", resp2.AuthID)
+	}
+	if !resp2.Handled {
+		t.Fatalf("Handled = %v, want true", resp2.Handled)
+	}
+	if !resp2.Reject {
+		t.Fatalf("Reject = %v, want true", resp2.Reject)
 	}
 }
 
@@ -662,6 +828,47 @@ func TestBaseURLInUsageRecordAndHostAuthFileEntry(t *testing.T) {
 	}
 }
 
+func TestUsageRecordResponseModelServiceTierAndStream(t *testing.T) {
+	record := UsageRecord{
+		Provider:            "codex",
+		Model:               "gpt-5.6-luna",
+		ResponseModel:       "gpt-5.6-luna-2026-05-13",
+		ResponseServiceTier: "scale",
+		Stream:              true,
+	}
+	if record.ResponseModel != "gpt-5.6-luna-2026-05-13" {
+		t.Fatalf("UsageRecord.ResponseModel = %q, want %q", record.ResponseModel, "gpt-5.6-luna-2026-05-13")
+	}
+	if record.ResponseServiceTier != "scale" {
+		t.Fatalf("UsageRecord.ResponseServiceTier = %q, want %q", record.ResponseServiceTier, "scale")
+	}
+	if !record.Stream {
+		t.Fatalf("UsageRecord.Stream = %v, want true", record.Stream)
+	}
+}
+
+func TestUsageRecordRequestIDAndTraceID(t *testing.T) {
+	record := UsageRecord{
+		RequestID:   "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:     "00000001",
+		SelectionID: "7e57d004-2b97-4e7a-b45f-5387367791cd",
+		Provider:    "codex",
+		Model:       "gpt-5.6-luna",
+	}
+	if record.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
+		t.Fatalf("UsageRecord.RequestID = %q, want %q", record.RequestID, "b5db448b-3d6d-495c-9c71-f925b68926cb")
+	}
+	if record.TraceID != "00000001" {
+		t.Fatalf("UsageRecord.TraceID = %q, want %q", record.TraceID, "00000001")
+	}
+	if record.SelectionID != "7e57d004-2b97-4e7a-b45f-5387367791cd" {
+		t.Fatalf("UsageRecord.SelectionID = %q, want %q", record.SelectionID, "7e57d004-2b97-4e7a-b45f-5387367791cd")
+	}
+	if SelectionIDMetadataKey != "selection_id" {
+		t.Fatalf("SelectionIDMetadataKey = %q, want selection_id", SelectionIDMetadataKey)
+	}
+}
+
 func TestQuotaPayloadJSON(t *testing.T) {
 	// Test camelCase input
 	camelJSON := []byte(`{
@@ -742,5 +949,54 @@ func TestQuotaBucketZeroRemainingFractionPreserved(t *testing.T) {
 	}
 	if bucket.RemainingFraction != 0 {
 		t.Fatalf("expected remainingFraction 0 to be preserved, got %f", bucket.RemainingFraction)
+	}
+}
+
+func TestHostAuthModelsTypes(t *testing.T) {
+	emptyReqData, errMarshalEmpty := json.Marshal(HostAuthModelsRequest{})
+	if errMarshalEmpty != nil {
+		t.Fatalf("marshal empty request: %v", errMarshalEmpty)
+	}
+	if string(emptyReqData) != "{}" {
+		t.Fatalf("marshaled empty request = %s, want {}", string(emptyReqData))
+	}
+
+	req := HostAuthModelsRequest{AuthIndex: "idx-codex-1"}
+	reqData, errMarshalReq := json.Marshal(req)
+	if errMarshalReq != nil {
+		t.Fatalf("marshal request: %v", errMarshalReq)
+	}
+	var decodedReq HostAuthModelsRequest
+	if errUnmarshalReq := json.Unmarshal(reqData, &decodedReq); errUnmarshalReq != nil {
+		t.Fatalf("unmarshal request: %v", errUnmarshalReq)
+	}
+	if decodedReq != req {
+		t.Fatalf("decoded request = %#v, want %#v", decodedReq, req)
+	}
+
+	resp := HostAuthModelsResponse{
+		Credentials: []HostAuthModels{
+			{
+				ID:        "codex-auth-1",
+				AuthIndex: "idx-codex-1",
+				Provider:  "codex",
+				Models:    []string{"codex/gpt-5.6-sol", "codex/gpt-6-astra"},
+			},
+		},
+	}
+	respData, errMarshalResp := json.Marshal(resp)
+	if errMarshalResp != nil {
+		t.Fatalf("marshal response: %v", errMarshalResp)
+	}
+	var decodedResp HostAuthModelsResponse
+	if errUnmarshalResp := json.Unmarshal(respData, &decodedResp); errUnmarshalResp != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshalResp)
+	}
+	if len(decodedResp.Credentials) != 1 ||
+		decodedResp.Credentials[0].ID != "codex-auth-1" ||
+		decodedResp.Credentials[0].AuthIndex != "idx-codex-1" ||
+		decodedResp.Credentials[0].Provider != "codex" ||
+		len(decodedResp.Credentials[0].Models) != 2 {
+		t.Fatalf("decoded response = %#v, want %#v", decodedResp, resp)
 	}
 }

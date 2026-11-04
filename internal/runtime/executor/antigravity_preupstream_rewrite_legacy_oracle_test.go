@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func legacyAntigravityCountClaudeToolProvenanceIDs(payload []byte) int {
@@ -71,7 +70,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 		var calls, responses []functionRef
 		var responseParts, otherParts []json.RawMessage
 		hasOtherPart := false
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			switch {
 			case part.Get("functionCall").Exists():
 				calls = append(calls, functionRef{id: part.Get("functionCall.id").String(), name: part.Get("functionCall.name").String()})
@@ -122,7 +121,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 			if len(ordered) == len(responseParts) {
 				ordered = append(ordered, otherParts...)
 				if encoded, errMarshal := json.Marshal(ordered); errMarshal == nil {
-					if updated, errSet := sjson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
+					if updated, errSet := ojson.SetRawBytes(out, fmt.Sprintf("request.contents.%d.parts", contentIndex), encoded); errSet == nil {
 						out = updated
 					}
 				}
@@ -130,7 +129,7 @@ func legacyNormalizeAntigravityGeminiFunctionResponseRoles(rawJSON []byte) []byt
 		}
 		pending = nil
 		if !hasOtherPart && content.Get("role").String() != "model" {
-			if updated, errSet := sjson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
+			if updated, errSet := ojson.SetBytes(out, fmt.Sprintf("request.contents.%d.role", contentIndex), "model"); errSet == nil {
 				out = updated
 			}
 		}
@@ -144,12 +143,12 @@ func legacyRepairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 		return rawJSON
 	}
 	callIDToName := make(map[string]string)
-	contents.ForEach(func(_, content gjson.Result) bool {
+	contents.ForEach(func(_, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			fc := part.Get("functionCall")
 			if fc.Exists() {
 				id := strings.TrimSpace(fc.Get("id").String())
@@ -167,12 +166,12 @@ func legacyRepairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 	}
 
 	out := rawJSON
-	contents.ForEach(func(contentIdx, content gjson.Result) bool {
+	contents.ForEach(func(contentIdx, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
-		parts.ForEach(func(partIdx, part gjson.Result) bool {
+		parts.ForEach(func(partIdx, part ojson.Result) bool {
 			fr := part.Get("functionResponse")
 			if fr.Exists() {
 				id := strings.TrimSpace(fr.Get("id").String())
@@ -180,7 +179,7 @@ func legacyRepairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 				if id != "" && (name == "" || name == "unknown") {
 					if realName, ok := callIDToName[id]; ok {
 						path := fmt.Sprintf("request.contents.%d.parts.%d.functionResponse.name", contentIdx.Int(), partIdx.Int())
-						if updated, errSet := sjson.SetBytes(out, path, realName); errSet == nil {
+						if updated, errSet := ojson.SetBytes(out, path, realName); errSet == nil {
 							out = updated
 						}
 					}
@@ -196,7 +195,7 @@ func legacyRepairAntigravityGeminiFunctionResponseNames(rawJSON []byte) []byte {
 func legacySanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		oldPath := base + ".parametersJsonSchema"
-		if !gjson.Get(payloadStr, oldPath).Exists() {
+		if !ojson.Get(payloadStr, oldPath).Exists() {
 			continue
 		}
 		renamed, errRename := util.RenameKey(payloadStr, oldPath, base+".parameters")
@@ -229,11 +228,11 @@ func legacySanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySc
 
 func legacyCleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
 	for _, schemaPath := range schemaPaths {
-		schema := gjson.Get(payloadStr, schemaPath)
+		schema := ojson.Get(payloadStr, schemaPath)
 		if !schema.Exists() {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(clean(schema.Raw)))
+		updated, errSet := ojson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(clean(schema.Raw)))
 		if errSet != nil {
 			continue
 		}

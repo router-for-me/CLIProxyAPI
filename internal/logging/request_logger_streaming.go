@@ -13,8 +13,11 @@ import (
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
 type FileStreamingLogWriter struct {
-	// logFilePath is the final log file path.
-	logFilePath string
+	// logsDir is the target directory for log files.
+	logsDir string
+
+	// logFilename is the target log file name.
+	logFilename string
 
 	// url is the request URL (masked upstream in middleware).
 	url string
@@ -214,12 +217,12 @@ func (w *FileStreamingLogWriter) Close() error {
 	default:
 	}
 
-	if w.logFilePath == "" {
+	if w.logFilename == "" {
 		w.cleanupTempFiles()
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, _, errOpen := createUniqueLogFile(w.logsDir, w.logFilename)
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)

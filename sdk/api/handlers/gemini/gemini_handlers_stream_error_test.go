@@ -9,13 +9,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 const (
@@ -90,4 +91,87 @@ func TestGeminiStreamGenerateContentDoesNotLoseErrorBeforeFirstPayload(t *testin
 		}(i)
 	}
 	wg.Wait()
+}
+
+type preFTKeepAliveGeminiExecutor struct {
+	chunks chan coreexecutor.StreamChunk
+}
+
+func (*preFTKeepAliveGeminiExecutor) Identifier() string { return "pre-ft-keepalive-gemini-executor" }
+
+func (*preFTKeepAliveGeminiExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *preFTKeepAliveGeminiExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func (*preFTKeepAliveGeminiExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (*preFTKeepAliveGeminiExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (*preFTKeepAliveGeminiExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestGeminiStreamGenerateContentSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &preFTKeepAliveGeminiExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "pre-ft-keepalive-gemini-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-gemini-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("gemini upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewGeminiAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1beta/models/*action", h.GeminiHandler)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/"+model+":streamGenerateContent", strings.NewReader("{\"contents\":[{\"parts\":[{\"text\":\"hi\"}]}]}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "event: error\ndata: ") || !strings.Contains(body, "gemini upstream failed after keepalive") {
+		t.Fatalf("missing Gemini SSE JSON error event after keepalive: %q", body)
+	}
 }

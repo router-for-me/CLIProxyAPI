@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 var (
@@ -82,7 +82,7 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := EnsureGeminiLeadingUserContent([]byte(tt.inputJSON), tt.path)
-			contents := gjson.GetBytes(out, tt.path).Array()
+			contents := ojson.GetBytes(out, tt.path).Array()
 			roles := make([]string, 0, len(contents))
 			for _, content := range contents {
 				roles = append(roles, content.Get("role").String())
@@ -92,7 +92,7 @@ func TestEnsureGeminiLeadingUserContent(t *testing.T) {
 				t.Fatalf("roles = %q, want %q; output=%s", got, expectedRoles, out)
 			}
 			if tt.wantLeadingEmpty {
-				text := gjson.GetBytes(out, tt.path+".0.parts.0.text")
+				text := ojson.GetBytes(out, tt.path+".0.parts.0.text")
 				if !text.Exists() || text.String() != "" {
 					t.Fatalf("leading empty user part missing; output=%s", out)
 				}
@@ -140,6 +140,26 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 			wantRoles: "model,model",
 		},
 		{
+			name:              "trailing model functionResponse with nested inlineData gets empty user",
+			inputJSON:         `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"view_image"}}]},{"role":"model","parts":[{"functionResponse":{"name":"view_image","response":{"result":""},"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}}]}]}`,
+			path:              "contents",
+			wantRoles:         "model,model,user",
+			wantTrailingEmpty: true,
+		},
+		{
+			name:              "trailing model functionResponse with nested fileData gets empty user",
+			inputJSON:         `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"view_image"}}]},{"role":"model","parts":[{"functionResponse":{"name":"view_image","response":{"result":""},"parts":[{"fileData":{"mimeType":"image/png","fileUri":"gs://b/a.png"}}]}}]}]}`,
+			path:              "contents",
+			wantRoles:         "model,model,user",
+			wantTrailingEmpty: true,
+		},
+		{
+			name:      "trailing user functionResponse with nested inlineData is unchanged",
+			inputJSON: `{"contents":[{"role":"model","parts":[{"functionCall":{"name":"view_image"}}]},{"role":"user","parts":[{"functionResponse":{"name":"view_image","response":{"result":""},"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}}]}]}`,
+			path:      "contents",
+			wantRoles: "model,user",
+		},
+		{
 			name:              "trailing model functionCall gets empty user",
 			inputJSON:         `{"contents":[{"role":"user","parts":[{"text":"hello"}]},{"role":"model","parts":[{"functionCall":{"name":"run"}}]}]}`,
 			path:              "contents",
@@ -177,7 +197,7 @@ func TestEnsureGeminiTrailingUserContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := EnsureGeminiTrailingUserContent([]byte(tt.inputJSON), tt.path)
-			contents := gjson.GetBytes(out, tt.path).Array()
+			contents := ojson.GetBytes(out, tt.path).Array()
 			roles := make([]string, 0, len(contents))
 			for _, content := range contents {
 				roles = append(roles, content.Get("role").String())
@@ -201,7 +221,7 @@ func TestEnsureGeminiBoundaryUserContent(t *testing.T) {
 	// A single model turn should get both leading and trailing user turns
 	inputJSON := `{"contents":[{"role":"model","parts":[{"text":"single answer"}]}]}`
 	out := EnsureGeminiBoundaryUserContent([]byte(inputJSON), "contents")
-	contents := gjson.GetBytes(out, "contents").Array()
+	contents := ojson.GetBytes(out, "contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("contents len = %d, want 3; out=%s", len(contents), out)
 	}
@@ -213,5 +233,47 @@ func TestEnsureGeminiBoundaryUserContent(t *testing.T) {
 	}
 	if contents[2].Get("role").String() != "user" || contents[2].Get("parts.0.text").String() != "" {
 		t.Fatalf("trailing user turn missing: %s", out)
+	}
+}
+
+func TestDropGeminiTrailingThoughtOnlyContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "drops trailing thought turns",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true}]},{"role":"model","parts":[{"text":"b","thought":true,"thoughtSignature":"sig"}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]}]`,
+		},
+		{
+			name:  "keeps visible model text",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true},{"text":"answer"}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true},{"text":"answer"}]}]`,
+		},
+		{
+			name:  "keeps function call",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"functionCall":{"name":"run","args":{}}}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"thought":true,"functionCall":{"name":"run","args":{}}}]}]`,
+		},
+		{
+			name:  "keeps earlier signed reasoning",
+			input: `{"contents":[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig"}]},{"role":"user","parts":[{"text":"next"}]},{"role":"model","parts":[{"text":"b","thought":true}]}]}`,
+			want:  `[{"role":"user","parts":[{"text":"hi"}]},{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig"}]},{"role":"user","parts":[{"text":"next"}]}]`,
+		},
+		{
+			name:  "keeps the only turn",
+			input: `{"contents":[{"role":"model","parts":[{"text":"a","thought":true}]}]}`,
+			want:  `[{"role":"model","parts":[{"text":"a","thought":true}]}]`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := DropGeminiTrailingThoughtOnlyContent([]byte(tt.input), "contents")
+			if got := ojson.GetBytes(out, "contents").Raw; got != tt.want {
+				t.Fatalf("contents = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

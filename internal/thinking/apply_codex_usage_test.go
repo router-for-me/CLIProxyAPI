@@ -1,11 +1,17 @@
 package thinking_test
 
 import (
+	"bytes"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 func TestExtractCodexReasoningEffortWithConfigurationUpdate(t *testing.T) {
@@ -105,12 +111,20 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdate(t *testing.T) {
 			wantTranslatedEffort: "xhigh",
 		},
 		{
-			name:                 "model suffix takes precedence over configuration_update for request effort",
+			name:                 "source configuration_update takes precedence over suffix for request effort",
 			provider:             "codex",
 			model:                "gpt-6-astra(high)",
 			body:                 `{"model":"gpt-6-astra","reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`,
-			wantRequestEffort:    "high",
+			wantRequestEffort:    "low",
 			wantTranslatedEffort: "low",
+		},
+		{
+			name:                 "suffix takes precedence over top-level without updates",
+			provider:             "openai-response",
+			model:                "gpt-6-astra(high)",
+			body:                 `{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","tools":[]}]}`,
+			wantRequestEffort:    "high",
+			wantTranslatedEffort: "xhigh",
 		},
 	}
 
@@ -129,6 +143,307 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdate(t *testing.T) {
 	}
 }
 
+func TestExtractCodexReasoningEffortWithConfigurationUpdateTargetRouting(t *testing.T) {
+	const source = `{"reasoning":{"effort":"xhigh"},"input":[{"type":"configuration_update","reasoning":{"effort":"medium"}},{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"configuration_update","reasoning":{"effort":null}},{"role":"user","content":"ok"}]}`
+	for _, supported := range []bool{true, false} {
+		name := "unsupported"
+		if supported {
+			name = "supported"
+		}
+		t.Run(name, func(t *testing.T) {
+			info := &registry.ModelInfo{ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: supported, Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high", "xhigh"}}}
+			body, err := thinking.ApplyThinkingWithModelInfoAndSummary([]byte(source), []byte(source), "opaque-route(high)", "openai-response", "codex", "codex", info, thinking.SummaryConfig{})
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
+			}
+			if got := thinking.ExtractReasoningEffort([]byte(source), "openai-response", "opaque-route(high)"); got != "low" {
+				t.Fatalf("source effort = %q, want low", got)
+			}
+			want := "high"
+			if supported {
+				want = "low"
+			}
+			if got := thinking.ExtractTranslatedReasoningEffort(body, "codex"); got != want {
+				t.Fatalf("final effort = %q, want %q; body=%s", got, want, body)
+			}
+			if got := ojson.GetBytes(body, "reasoning.effort").String(); got != "high" {
+				t.Fatalf("final top-level effort = %q, want high; body=%s", got, body)
+			}
+			if hasUpdate := ojson.GetBytes(body, "input.0.type").String() == "configuration_update"; hasUpdate != supported {
+				t.Fatalf("final update present = %t, want %t; body=%s", hasUpdate, supported, body)
+			}
+		})
+	}
+}
+
+func TestApplyConfigurationUpdateRouting(t *testing.T) {
+	const model = "configured-responses"
+	tests := []struct {
+		name       string
+		body       string
+		format     string
+		suffix     string
+		supported  bool
+		noThinking bool
+		skipEffort bool
+		wantEffort string
+		wantInput  string
+		wantSame   bool
+	}{
+		{
+			name:      "supported native request preserves baseline and updates byte for byte",
+			body:      `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported: true, wantEffort: "xhigh", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`, wantSame: true,
+		},
+		{
+			name:      "supported no-effort request remains unchanged",
+			body:      `{"reasoning":{"summary":"auto"},"input":[{"type":"configuration_update","tools":[]},{"role":"user","content":"ok"}]}`,
+			supported: true, wantInput: `[{"type":"configuration_update","tools":[]},{"role":"user","content":"ok"}]`, wantSame: true,
+		},
+		{
+			name:       "supported native request without thinking metadata preserves baseline summary and updates",
+			body:       `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported:  true,
+			noThinking: true,
+			wantEffort: "xhigh",
+			wantInput:  `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`,
+			wantSame:   true,
+		},
+		{
+			name:       "supported native suffix still strips effort without thinking metadata",
+			body:       `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported:  true,
+			noThinking: true,
+			suffix:     "high",
+			wantInput:  `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported suffix only rewrites the top-level effort",
+			body:      `{"reasoning":{"effort":"xhigh","summary":"auto","other":7},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported: true, suffix: "high", wantEffort: "high", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported suffix keeps effective input effort for current turn",
+			body:      `{"reasoning":{"summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported: true, suffix: "high", wantEffort: "high", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported invalid suffix leaves native payload untouched",
+			body:      `{"reasoning":{"generate_summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			supported: true, suffix: "invalid", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`, wantSame: true,
+		},
+		{
+			name:       "unsupported latest nonempty update wins and other input order stays unchanged",
+			body:       `{"reasoning":{"effort":"xhigh","summary":"auto","other":7},"input":[{"role":"user","content":"first"},{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"configuration_update","reasoning":{"effort":"  "}},{"role":"assistant","content":"reply"},{"type":"configuration_update","reasoning":{"effort":"medium"}},{"type":"configuration_update","tools":[]},{"role":"user","content":"last"}]}`,
+			wantEffort: "medium", wantInput: `[{"role":"user","content":"first"},{"role":"assistant","content":"reply"},{"role":"user","content":"last"}]`,
+		},
+		{
+			name:       "unsupported ignores empty and nonstring efforts",
+			body:       `{"reasoning":{"summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"configuration_update","reasoning":{"effort":42}},{"type":"configuration_update","reasoning":{"effort":null}},{"type":"configuration_update","reasoning":{"effort":"  "}},{"role":"user","content":"ok"}]}`,
+			wantEffort: "low", wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:   "unsupported suffix takes precedence and still removes updates",
+			body:   `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			suffix: "high", wantEffort: "high", wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:       "unsupported without top-level reasoning promotes the last update",
+			body:       `{"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			wantEffort: "low", wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "unsupported removes updates with no effort without inventing one",
+			body:      `{"reasoning":{"summary":"auto"},"input":[{"type":"configuration_update","tools":[]},{"role":"user","content":"ok"}]}`,
+			wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:       "unsupported without thinking support still removes updates",
+			body:       `{"reasoning":{"summary":"auto"},"input":[{"type":"configuration_update","tools":[]},{"role":"user","content":"ok"}]}`,
+			noThinking: true, wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:       "unsupported without thinking support strips effort but keeps summary",
+			body:       `{"reasoning":{"effort":"xhigh","summary":"auto","other":7},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			noThinking: true, wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:   "unsupported openai-response alias removes updates",
+			body:   `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
+			format: "openai-response", wantEffort: "low", wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:     "invalid JSON is untouched",
+			body:     `{"reasoning":{"effort":"xhigh"},"input":[`,
+			wantSame: true, skipEffort: true,
+		},
+		{
+			name:      "nonarray input is untouched",
+			body:      `{"reasoning":{"summary":"auto"},"input":{"type":"configuration_update","reasoning":{"effort":"low"}}}`,
+			wantInput: `{"type":"configuration_update","reasoning":{"effort":"low"}}`, wantSame: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			format := tc.format
+			if format == "" {
+				format = "codex"
+			}
+			thinkingSupport := &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}
+			if tc.noThinking {
+				thinkingSupport = nil
+			}
+			info := &registry.ModelInfo{ID: model, Type: "codex", SupportConfigurationUpdate: tc.supported, Thinking: thinkingSupport}
+			body := []byte(tc.body)
+			applied, err := thinking.ApplyThinkingWithModelInfo(body, body, model+suffixForTest(tc.suffix), format, format, "codex", info)
+			if err != nil {
+				t.Fatalf("ApplyThinkingWithModelInfo() error = %v", err)
+			}
+			if tc.wantSame && !bytes.Equal(applied, body) {
+				t.Fatalf("body changed: got %s, want %s", applied, body)
+			}
+			if !tc.skipEffort {
+				if got := ojson.GetBytes(applied, "reasoning.effort").String(); got != tc.wantEffort {
+					t.Errorf("reasoning.effort = %q, want %q; body=%s", got, tc.wantEffort, applied)
+				}
+			}
+			if tc.wantInput != "" && ojson.GetBytes(applied, "input").Raw != tc.wantInput {
+				t.Errorf("input = %s, want %s; body=%s", ojson.GetBytes(applied, "input").Raw, tc.wantInput, applied)
+			}
+			if ojson.GetBytes(body, "reasoning.summary").Exists() {
+				if got := ojson.GetBytes(applied, "reasoning.summary").String(); got != "auto" {
+					t.Errorf("reasoning.summary = %q, want auto; body=%s", got, applied)
+				}
+			}
+			if ojson.GetBytes(body, "reasoning.other").Exists() && ojson.GetBytes(applied, "reasoning.other").Int() != 7 {
+				t.Errorf("reasoning.other changed: %s", applied)
+			}
+			if tc.supported && tc.suffix != "" {
+				if got := thinking.ExtractTranslatedReasoningEffort(applied, format); got != "low" {
+					t.Errorf("effective effort = %q, want low; body=%s", got, applied)
+				}
+			}
+		})
+	}
+}
+
+func suffixForTest(suffix string) string {
+	if suffix == "" {
+		return ""
+	}
+	return "(" + suffix + ")"
+}
+
+func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
+	logger := log.StandardLogger()
+	previousLevel := logger.GetLevel()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.DebugLevel)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+	})
+
+	tests := []struct {
+		name         string
+		body         string
+		wantEffort   string
+		wantLevel    thinking.ThinkingLevel
+		wantMode     thinking.ThinkingMode
+		wantBaseline thinking.ThinkingLevel
+	}{
+		{
+			name:       "update overrides top-level baseline",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"role":"user","content":"ok"}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "latest update wins",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"type":"configuration_update","reasoning":{"effort":"max"}}]}`,
+			wantEffort: "max", wantLevel: thinking.LevelMax, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "trailing empty and nonstring updates keep last effective effort",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}},{"type":"configuration_update","reasoning":{"effort":null}},{"type":"configuration_update","reasoning":{"effort":42}},{"type":"configuration_update","reasoning":{"effort":"  "}}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "top-level fallback without update",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"role":"user","content":"ok"}]}`,
+			wantEffort: "high", wantLevel: thinking.LevelHigh, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
+		},
+		{
+			name:       "update without top-level effort",
+			body:       `{"model":"gpt-6-sol","input":[{"type":"configuration_update","reasoning":{"effort":"xhigh"}}]}`,
+			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel,
+		},
+		{
+			name:       "update disables thinking",
+			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
+			wantEffort: "none", wantMode: thinking.ModeNone, wantBaseline: thinking.LevelHigh,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, bound := range []bool{false, true} {
+				name := "registry lookup"
+				if bound {
+					name = "resolved model"
+				}
+				t.Run(name, func(t *testing.T) {
+					hook.Reset()
+					body := []byte(tc.body)
+					var applied []byte
+					var err error
+					if bound {
+						modelInfo := registry.LookupModelInfo("gpt-6-sol", "codex")
+						if modelInfo == nil || !modelInfo.SupportConfigurationUpdate {
+							t.Fatal("gpt-6-sol must support configuration updates")
+						}
+						applied, err = thinking.ApplyThinkingWithModelInfo(body, body, "gpt-6-sol", "codex", "codex", "codex", modelInfo)
+					} else {
+						applied, err = thinking.ApplyThinking(body, "gpt-6-sol", "codex", "codex", "codex")
+					}
+					if err != nil {
+						t.Fatalf("ApplyThinking() error = %v", err)
+					}
+					if !bytes.Equal(applied, body) {
+						t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
+					}
+					if got := thinking.ExtractTranslatedReasoningEffort(applied, "codex"); got != tc.wantEffort {
+						t.Errorf("effective effort = %q, want %q", got, tc.wantEffort)
+					}
+
+					for _, message := range []string{
+						"thinking: original config from request |",
+						"thinking: processed config to apply |",
+					} {
+						found := false
+						for _, entry := range hook.AllEntries() {
+							if entry.Message != message {
+								continue
+							}
+							found = true
+							if entry.Level != log.DebugLevel || entry.Data["provider"] != "codex" || entry.Data["model"] != "gpt-6-sol" ||
+								entry.Data["mode"] != tc.wantMode || entry.Data["budget"] != 0 || entry.Data["level"] != tc.wantLevel {
+								t.Errorf("unexpected native Responses log %q fields: %v", message, entry.Data)
+							}
+							baseline, hasBaseline := entry.Data["baseline_level"]
+							if tc.wantBaseline == "" && hasBaseline || tc.wantBaseline != "" && baseline != tc.wantBaseline {
+								t.Errorf("baseline_level = %v (present: %t), want %q", baseline, hasBaseline, tc.wantBaseline)
+							}
+						}
+						if !found {
+							t.Errorf("missing native Responses debug log %q", message)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T) {
 	// Preserving request-level baseline sent upstream ensures prompt prefix cache preservation.
 	body := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`)
@@ -138,13 +453,13 @@ func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T
 	}
 
 	// Verify top-level request baseline is preserved for upstream prompt caching.
-	if gotTopEffort := gjson.GetBytes(applied, "reasoning.effort").String(); gotTopEffort != "xhigh" {
+	if gotTopEffort := ojson.GetBytes(applied, "reasoning.effort").String(); gotTopEffort != "xhigh" {
 		t.Fatalf("ApplyThinking() top-level reasoning.effort = %q, want %q", gotTopEffort, "xhigh")
 	}
-	if gotSummary := gjson.GetBytes(applied, "reasoning.summary").String(); gotSummary != "auto" {
+	if gotSummary := ojson.GetBytes(applied, "reasoning.summary").String(); gotSummary != "auto" {
 		t.Fatalf("ApplyThinking() reasoning.summary = %q, want %q", gotSummary, "auto")
 	}
-	if gotInputEffort := gjson.GetBytes(applied, "input.0.reasoning.effort").String(); gotInputEffort != "low" {
+	if gotInputEffort := ojson.GetBytes(applied, "input.0.reasoning.effort").String(); gotInputEffort != "low" {
 		t.Fatalf("ApplyThinking() input[0].reasoning.effort = %q, want %q", gotInputEffort, "low")
 	}
 
@@ -152,5 +467,26 @@ func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T
 	effort := thinking.ExtractTranslatedReasoningEffort(applied, "codex")
 	if effort != "low" {
 		t.Fatalf("ExtractTranslatedReasoningEffort(applied) = %q, want %q", effort, "low")
+	}
+}
+
+func TestCrossMethodDocMutationsAndThinking(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5","reasoning_effort":"low","extra":"remove_me"}`)
+	doc := ojson.NewDoc(raw)
+	if errSet := doc.Set("model", "gpt-5"); errSet != nil {
+		t.Fatalf("doc.Set error: %v", errSet)
+	}
+	if errThink := thinking.ApplyThinkingDoc(doc, "gpt-5(high)", "openai", "openai", "openai"); errThink != nil {
+		t.Fatalf("ApplyThinkingDoc error: %v", errThink)
+	}
+	if got := doc.Get("reasoning_effort").String(); got != "high" {
+		t.Fatalf("doc.Get(reasoning_effort) = %q, want high", got)
+	}
+	if errDel := util.DeleteJSONDocIfExists(doc, "extra"); errDel != nil {
+		t.Fatalf("DeleteJSONDocIfExists error: %v", errDel)
+	}
+	out := doc.Bytes()
+	if ojson.GetBytesNoCopy(out, "extra").Exists() {
+		t.Fatalf("expected extra to be deleted in %s", string(out))
 	}
 }
