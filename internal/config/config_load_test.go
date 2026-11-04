@@ -303,6 +303,13 @@ func TestHoldsAnyScalarValueFindsPlaintextLeftByWriteBack(t *testing.T) {
 	if !HoldsAnyScalarValue([]byte("&password "+secret+": value\nmanagement:\n  secret-key: x\n"), secrets) {
 		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as an anchored mapping key")
 	}
+	// A tagged scalar counts as the value it decodes to.
+	if !HoldsAnyScalarValue([]byte("password: !!binary cGxhaW4tYW5jaG9yZWQtc2VjcmV0\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as a !!binary scalar")
+	}
+	if !HoldsAnyScalarValue([]byte("!!binary cGxhaW4tYW5jaG9yZWQtc2VjcmV0: value\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as a !!binary mapping key")
+	}
 	if !HoldsAnyScalarValue([]byte("a: [unclosed\n"), secrets) {
 		t.Fatal("HoldsAnyScalarValue() = false for YAML that does not parse")
 	}

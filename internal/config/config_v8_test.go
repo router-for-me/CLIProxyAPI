@@ -900,6 +900,11 @@ func TestHasPlaintextSecretKey(t *testing.T) {
 		{"key: &k secret-key\nmanagement:\n  *k : plain-secret\n", true},
 		{"key: &k secret-key\nremote-management:\n  *k : plain-secret\n", true},
 		{"key: &k secret-key\nmanagement:\n  *k : '" + hashed + "'\n", false},
+		// A tagged key name is matched as the loader decodes it.
+		{"remote-management: {!!binary c2VjcmV0LWtleQ==: plain-secret}\n", true},
+		{"!!binary bWFuYWdlbWVudA==: {secret-key: plain-secret}\n", true},
+		{"management: {!!str secret-key: plain-secret}\n", true},
+		{"remote-management: {!!binary c2VjcmV0LWtleQ==: '" + hashed + "'}\n", false},
 	} {
 		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
 			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)

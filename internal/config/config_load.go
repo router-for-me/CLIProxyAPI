@@ -276,13 +276,14 @@ func HoldsAnyScalarValue(data []byte, values []string) bool {
 
 // yamlScalarOrKeyExists is yamlScalarExists with mapping keys and comments
 // included: the hashed write-back keeps a value's comments, so a comment that
-// repeats the plaintext (`secret-key: s3cret # s3cret`) still holds it.
+// repeats the plaintext (`secret-key: s3cret # s3cret`) still holds it. A tagged
+// scalar matches by its raw spelling and by the value it decodes to.
 func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
 	if strings.Contains(node.HeadComment, value) || strings.Contains(node.LineComment, value) || strings.Contains(node.FootComment, value) {
 		return true
 	}
 	if node.Kind == yaml.ScalarNode {
-		return node.ShortTag() != "!!null" && node.Value == value
+		return node.ShortTag() != "!!null" && (node.Value == value || yamlScalarText(node) == value)
 	}
 	for _, child := range node.Content {
 		if yamlScalarOrKeyExists(child, value) {
@@ -295,8 +296,8 @@ func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
 // yamlKeyValues returns the values key has in mapping, its own and those merged
 // in, each resolved through aliases to the node that defines it. Key names are
 // resolved too: `*k : value` with `k` anchoring "secret-key" sets secret-key, as
-// the loader decodes it. seen stops a merge that refers back to a mapping being
-// searched.
+// the loader decodes it, and so are tagged ones (`!!binary c2VjcmV0LWtleQ==`).
+// seen stops a merge that refers back to a mapping being searched.
 func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*yaml.Node {
 	mapping = resolveYAMLAlias(mapping)
 	if mapping == nil || mapping.Kind != yaml.MappingNode || seen[mapping] {
@@ -310,7 +311,7 @@ func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*
 			continue
 		}
 		if name.Tag != "!!merge" {
-			if name.Value == key && value != nil {
+			if yamlScalarText(name) == key && value != nil {
 				values = append(values, value)
 			}
 			continue
@@ -324,6 +325,19 @@ func yamlKeyValues(mapping *yaml.Node, key string, seen map[*yaml.Node]bool) []*
 		}
 	}
 	return values
+}
+
+// yamlScalarText returns a scalar as the loader decodes it, so a tagged spelling
+// such as `!!binary c2VjcmV0LWtleQ==` reads as secret-key. A node that does not
+// decode as a string keeps its raw value.
+func yamlScalarText(node *yaml.Node) string {
+	if node.Kind == yaml.ScalarNode {
+		var decoded string
+		if node.Decode(&decoded) == nil {
+			return decoded
+		}
+	}
+	return node.Value
 }
 
 func resolveYAMLAlias(node *yaml.Node) *yaml.Node {
