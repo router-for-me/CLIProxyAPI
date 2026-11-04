@@ -2458,18 +2458,23 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 // max_output_tokens: the upstream accepted the credential and generated, which is all verification asks.
 // Reasoning models spend a small budget before any text, so a natural completion cannot be required.
 func verificationStoppedAtOutputBudget(payload []byte) bool {
+	// A non-streaming body is one JSON document that may span lines; only SSE is read line by line.
+	if trimmed := bytes.TrimSpace(payload); len(trimmed) > 0 && trimmed[0] == '{' {
+		return incompleteAtOutputBudget(trimmed)
+	}
 	for _, rawLine := range bytes.Split(payload, []byte("\n")) {
 		data := bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(rawLine), []byte("data:")))
-		if len(data) < 2 || data[0] != '{' {
-			continue
-		}
-		reason := ojson.GetBytesNoCopy(data, "response.incomplete_details.reason")
-		if !reason.Exists() {
-			reason = ojson.GetBytesNoCopy(data, "incomplete_details.reason")
-		}
-		if reason.String() == "max_output_tokens" {
+		if len(data) >= 2 && data[0] == '{' && incompleteAtOutputBudget(data) {
 			return true
 		}
 	}
 	return false
+}
+
+func incompleteAtOutputBudget(data []byte) bool {
+	reason := ojson.GetBytesNoCopy(data, "response.incomplete_details.reason")
+	if !reason.Exists() {
+		reason = ojson.GetBytesNoCopy(data, "incomplete_details.reason")
+	}
+	return reason.String() == "max_output_tokens"
 }

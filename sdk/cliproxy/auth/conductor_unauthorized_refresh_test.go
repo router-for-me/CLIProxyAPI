@@ -1120,6 +1120,10 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 	if afterBudget, errBudget := m.VerifyInference(ctx, primary.ID, model); errBudget != nil || !afterBudget.InferenceVerified {
 		t.Fatalf("VerifyInference cut at max_output_tokens: err=%v, want verified", errBudget)
 	}
+	// The non-streaming fallback returns one JSON document, which may span lines.
+	if !verificationStoppedAtOutputBudget([]byte("{\n  \"status\": \"incomplete\",\n  \"incomplete_details\": {\n    \"reason\": \"max_output_tokens\"\n  }\n}")) {
+		t.Fatal("a multiline response cut at max_output_tokens must verify")
+	}
 	executor.mu.Lock()
 	executor.streamPayloads = nil
 	executor.mu.Unlock()
