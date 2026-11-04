@@ -3,7 +3,6 @@ package auth
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"maps"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
@@ -60,11 +60,6 @@ type AntigravityModelProbeRequest struct {
 	UserAgent   string
 }
 
-type antigravityFetchAvailableModelsResponse struct {
-	WebSearchModelIDs []string                   `json:"webSearchModelIds"`
-	Models            map[string]json.RawMessage `json:"models"`
-}
-
 // FetchAntigravityAvailableModels performs a single-shot POST /v1internal:fetchAvailableModels request
 // and parses the returned per-account model catalog and webSearchModelIds.
 func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelProbeRequest) (AntigravityModelCapabilityHints, AntigravityProbeStatus) {
@@ -100,11 +95,9 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 		defer transport.CloseIdleConnections()
 	}
 
-	body, errMarshal := json.Marshal(map[string]string{"project": strings.TrimSpace(req.ProjectID)})
-	if errMarshal != nil {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
-	}
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+AntigravityModelsPath, bytes.NewReader(body))
+	doc := ojson.NewDoc([]byte("{}"))
+	doc.Set("project", strings.TrimSpace(req.ProjectID))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+AntigravityModelsPath, bytes.NewReader(doc.Bytes()))
 	if errReq != nil {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
@@ -164,32 +157,58 @@ func sanitizeAntigravityPersistedEndpoint(endpoint string) string {
 	return trimmed
 }
 
-// ParseAntigravityModelCapabilityHints decodes a fetchAvailableModels response payload.
+// ParseAntigravityModelCapabilityHints decodes a fetchAvailableModels response payload using ojson.
 func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabilityHints, bool) {
-	var parsed antigravityFetchAvailableModelsResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return AntigravityModelCapabilityHints{}, false
 	}
-	if len(parsed.Models) > antigravityMaxCatalogModels || len(parsed.WebSearchModelIDs) > antigravityMaxCatalogModels {
+	top := ojson.ParseBytes(body)
+	if !top.IsObject() {
 		return AntigravityModelCapabilityHints{}, false
 	}
-	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs))
-	for _, modelID := range parsed.WebSearchModelIDs {
-		modelID = NormalizeAntigravityModelID(modelID)
-		if modelID != "" {
-			webSearchModels[modelID] = struct{}{}
+
+	webSearchResult := top.Get("webSearchModelIds")
+	webSearchModels := make(map[string]struct{})
+	if webSearchResult.Exists() && webSearchResult.Type != ojson.Null {
+		if !webSearchResult.IsArray() {
+			return AntigravityModelCapabilityHints{}, false
+		}
+		array := webSearchResult.Array()
+		if len(array) > antigravityMaxCatalogModels {
+			return AntigravityModelCapabilityHints{}, false
+		}
+		for _, item := range array {
+			if item.Type != ojson.String {
+				return AntigravityModelCapabilityHints{}, false
+			}
+			if normalized := NormalizeAntigravityModelID(item.Str); normalized != "" {
+				webSearchModels[normalized] = struct{}{}
+			}
 		}
 	}
+
+	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
-	if parsed.Models != nil {
-		modelIDs = make(map[string]struct{}, len(parsed.Models))
-		for id := range parsed.Models {
+	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
+		if !modelsResult.IsObject() {
+			return AntigravityModelCapabilityHints{}, false
+		}
+		modelMap := modelsResult.Map()
+		if len(modelMap) > antigravityMaxCatalogModels {
+			return AntigravityModelCapabilityHints{}, false
+		}
+		modelIDs = make(map[string]struct{}, len(modelMap))
+		for id := range modelMap {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
 			}
 		}
 	}
-	return AntigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels, ModelIDs: modelIDs}, true
+
+	return AntigravityModelCapabilityHints{
+		WebSearchModelIDs: webSearchModels,
+		ModelIDs:          modelIDs,
+	}, true
 }
 
 // BuildPersistedAntigravityCapabilityHints serializes capability hints for storage in auth metadata.
