@@ -218,3 +218,44 @@ func TestMarkResultRebasesRelativeResetAcrossPartialMerges(t *testing.T) {
 		t.Fatalf("reset = %v, %v; want %v (anchored at the first receipt)", reset, okReset, want)
 	}
 }
+
+func TestMarkResultKeepsNewerResetOverLateUnrelatedMerge(t *testing.T) {
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	manager.RegisterExecutor(&soonestResetExecutor{resets: map[string]time.Duration{}})
+	const id = "soonest-reset-rollover"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", id, errRegister)
+	}
+
+	t1 := time.Now().Add(-30 * time.Minute)
+	t2 := t1.Add(10 * time.Minute)
+	t3 := t2.Add(10 * time.Minute)
+	resetHeaders := func(after time.Duration) http.Header {
+		return http.Header{
+			"X-Codex-Primary-Window-Minutes":      []string{"10080"},
+			"X-Codex-Primary-Reset-After-Seconds": []string{strconv.Itoa(int(after.Seconds()))},
+		}
+	}
+
+	// The older attempt saw the pre-rollover reset at t1 and is still streaming.
+	older := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeadersAt(older, resetHeaders(time.Hour), t1)
+
+	// A newer attempt saw the post-rollover window at t2 and finished first.
+	newer := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeadersAt(newer, resetHeaders(7*24*time.Hour), t2)
+	manager.MarkResult(newer, Result{AuthID: id, Provider: "codex", Success: true})
+
+	// The older attempt merges only a credits header at t3, then finishes.
+	internallogging.MergeResponseHeadersAt(older, http.Header{"X-Codex-Credits-Balance": []string{"0"}}, t3)
+	manager.MarkResult(older, Result{AuthID: id, Provider: "codex", Success: true})
+
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil {
+		t.Fatalf("GetByID(%s) failed", id)
+	}
+	reset, okReset := quotaWindowReset(auth)
+	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) || !auth.Quota.ObservedAt.Equal(t2) {
+		t.Fatalf("reset = %v (observed %v); want %v observed at %v", reset, auth.Quota.ObservedAt, want, t2)
+	}
+}

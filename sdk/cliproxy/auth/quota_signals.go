@@ -66,6 +66,35 @@ func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers h
 	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
 }
 
+// quotaResetReceivedAt returns the newest receipt time among the reset headers
+// in headers, or the zero time when none is present. Snapshots are ordered by
+// when their reset values arrived: an attempt can merge unrelated headers
+// (credits, additional limits) late while still holding an older reset, and
+// must not be taken for a newer reset observation.
+func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time) time.Time {
+	var latest time.Time
+	if receivedAt == nil {
+		return latest
+	}
+	for key := range headers {
+		if !isQuotaResetHeader(key) {
+			continue
+		}
+		if received := receivedAt(key); received.After(latest) {
+			latest = received
+		}
+	}
+	return latest
+}
+
+func isQuotaResetHeader(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if strings.HasSuffix(lower, "-reset-after-seconds") || strings.HasSuffix(lower, "-reset-at") {
+		return true
+	}
+	return strings.HasPrefix(lower, "anthropic-ratelimit-unified-") && strings.HasSuffix(lower, "-reset")
+}
+
 // rebaseRelativeQuotaHeaders rewrites relative reset values so they count from
 // observedAt. A websocket quota frame can merge only some headers, so a
 // Reset-After-Seconds value received earlier than observedAt would otherwise

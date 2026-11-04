@@ -114,8 +114,10 @@ func quotaWindowResetAt(auth *Auth, now time.Time) (time.Time, bool) {
 }
 
 // quotaWindowReset reports the reset time of the longest quota window in the
-// auth's passive quota snapshot, past or future. Codex reports a primary and
-// an optional secondary window; Claude reports unified 5h and 7d windows.
+// auth's passive quota snapshot, past or future. Only the current provider's
+// keys are read, so a snapshot kept across an in-place provider change cannot
+// leak the former provider's deadline. Codex reports a primary and an
+// optional secondary window; Claude reports unified 5h and 7d windows.
 func quotaWindowReset(auth *Auth) (time.Time, bool) {
 	if auth == nil || len(auth.Quota.Signals) == 0 {
 		return time.Time{}, false
@@ -123,19 +125,21 @@ func quotaWindowReset(auth *Auth) (time.Time, bool) {
 	signals := auth.Quota.Signals
 
 	var reset time.Time
-	longest := int64(-1)
-	for _, prefix := range []string{"X-Codex-Primary-", "X-Codex-Secondary-"} {
-		windowReset, ok := codexWindowResetAt(signals, prefix, auth.Quota.ObservedAt)
-		if !ok {
-			continue
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "codex":
+		longest := int64(-1)
+		for _, prefix := range []string{"X-Codex-Primary-", "X-Codex-Secondary-"} {
+			windowReset, ok := codexWindowResetAt(signals, prefix, auth.Quota.ObservedAt)
+			if !ok {
+				continue
+			}
+			minutes, _ := strconv.ParseInt(strings.TrimSpace(signals[prefix+"Window-Minutes"]), 10, 64)
+			if minutes > longest {
+				longest = minutes
+				reset = windowReset
+			}
 		}
-		minutes, _ := strconv.ParseInt(strings.TrimSpace(signals[prefix+"Window-Minutes"]), 10, 64)
-		if minutes > longest {
-			longest = minutes
-			reset = windowReset
-		}
-	}
-	if reset.IsZero() {
+	case "claude":
 		for _, key := range []string{"Anthropic-Ratelimit-Unified-7d-Reset", "Anthropic-Ratelimit-Unified-Reset"} {
 			if parsed, ok := parseUnixSeconds(signals[key]); ok {
 				reset = parsed

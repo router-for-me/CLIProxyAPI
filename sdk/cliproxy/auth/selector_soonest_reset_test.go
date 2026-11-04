@@ -26,9 +26,9 @@ func TestSoonestResetSelectorPick_PrefersSoonestReset(t *testing.T) {
 	now := time.Unix(1790000000, 0)
 	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
 	auths := []*Auth{
-		{ID: "a", Quota: codexWeeklySignals(now.Add(6 * 24 * time.Hour))},
-		{ID: "b", Quota: codexWeeklySignals(now.Add(5 * time.Hour))},
-		{ID: "c", Quota: codexWeeklySignals(now.Add(2 * 24 * time.Hour))},
+		{ID: "a", Provider: "codex", Quota: codexWeeklySignals(now.Add(6 * 24 * time.Hour))},
+		{ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(5 * time.Hour))},
+		{ID: "c", Provider: "codex", Quota: codexWeeklySignals(now.Add(2 * 24 * time.Hour))},
 	}
 
 	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
@@ -47,8 +47,8 @@ func TestSoonestResetSelectorPick_UnknownResetComesLast(t *testing.T) {
 	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
 	auths := []*Auth{
 		{ID: "a"},
-		{ID: "b", Quota: codexWeeklySignals(now.Add(-time.Hour))},
-		{ID: "c", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))},
+		{ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(-time.Hour))},
+		{ID: "c", Provider: "codex", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))},
 	}
 
 	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
@@ -81,8 +81,8 @@ func TestSoonestResetSelectorPick_RespectsPriority(t *testing.T) {
 	now := time.Unix(1790000000, 0)
 	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
 	auths := []*Auth{
-		{ID: "high", Attributes: map[string]string{"priority": "10"}, Quota: codexWeeklySignals(now.Add(6 * 24 * time.Hour))},
-		{ID: "low", Quota: codexWeeklySignals(now.Add(time.Hour))},
+		{ID: "high", Provider: "codex", Attributes: map[string]string{"priority": "10"}, Quota: codexWeeklySignals(now.Add(6 * 24 * time.Hour))},
+		{ID: "low", Provider: "codex", Quota: codexWeeklySignals(now.Add(time.Hour))},
 	}
 
 	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
@@ -99,11 +99,11 @@ func TestSoonestResetSelectorPick_SkipsCoolingAuth(t *testing.T) {
 
 	now := time.Unix(1790000000, 0)
 	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
-	exhausted := &Auth{ID: "a", Quota: codexWeeklySignals(now.Add(time.Hour))}
+	exhausted := &Auth{ID: "a", Provider: "codex", Quota: codexWeeklySignals(now.Add(time.Hour))}
 	exhausted.Quota.Exceeded = true
 	exhausted.Quota.Reason = "credential_quota"
 	exhausted.Quota.NextRecoverAt = now.Add(time.Hour)
-	auths := []*Auth{exhausted, {ID: "b", Quota: codexWeeklySignals(now.Add(4 * 24 * time.Hour))}}
+	auths := []*Auth{exhausted, {ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(4 * 24 * time.Hour))}}
 
 	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
 	if err != nil {
@@ -122,13 +122,15 @@ func TestQuotaWindowResetAt(t *testing.T) {
 	fiveHour := now.Add(2 * time.Hour)
 
 	tests := []struct {
-		name  string
-		quota QuotaState
-		want  time.Time
-		ok    bool
+		name     string
+		provider string
+		quota    QuotaState
+		want     time.Time
+		ok       bool
 	}{
 		{
-			name: "codex uses the longest window",
+			name:     "codex uses the longest window",
+			provider: "codex",
 			quota: QuotaState{Signals: map[string]string{
 				"X-Codex-Primary-Window-Minutes":   "300",
 				"X-Codex-Primary-Reset-At":         strconv.FormatInt(fiveHour.Unix(), 10),
@@ -142,7 +144,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			// Shape of a live Codex weekly-only response: the unused secondary
 			// window reports zero minutes and an empty reset-at (which the
 			// snapshot drops as invalid).
-			name: "codex ignores an empty secondary window",
+			name:     "codex ignores an empty secondary window",
+			provider: "codex",
 			quota: QuotaState{
 				ObservedAt: now,
 				Signals: map[string]string{
@@ -157,7 +160,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			ok:   true,
 		},
 		{
-			name: "codex reset-after is relative to the observation",
+			name:     "codex reset-after is relative to the observation",
+			provider: "codex",
 			quota: QuotaState{
 				ObservedAt: now.Add(-time.Hour),
 				Signals: map[string]string{
@@ -169,7 +173,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			ok:   true,
 		},
 		{
-			name: "claude prefers the 7d window",
+			name:     "claude prefers the 7d window",
+			provider: "claude",
 			quota: QuotaState{Signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-5h-Reset": strconv.FormatInt(fiveHour.Unix(), 10),
 				"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(weekly.Unix(), 10),
@@ -179,7 +184,8 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			ok:   true,
 		},
 		{
-			name: "claude falls back to the representative reset",
+			name:     "claude falls back to the representative reset",
+			provider: "claude",
 			quota: QuotaState{Signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-Reset": strconv.FormatInt(fiveHour.Unix(), 10),
 			}},
@@ -187,18 +193,26 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			ok:   true,
 		},
 		{
-			name: "past reset is ignored",
+			name:     "past reset is ignored",
+			provider: "claude",
 			quota: QuotaState{Signals: map[string]string{
 				"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(-time.Minute).Unix(), 10),
 			}},
 		},
 		{
-			name: "no snapshot",
+			// Snapshot preserved across an in-place reload from Codex to Claude.
+			name:     "former provider keys are ignored",
+			provider: "claude",
+			quota:    codexWeeklySignals(weekly),
+		},
+		{
+			name:     "no snapshot",
+			provider: "codex",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := quotaWindowResetAt(&Auth{ID: "x", Quota: tt.quota}, now)
+			got, ok := quotaWindowResetAt(&Auth{ID: "x", Provider: tt.provider, Quota: tt.quota}, now)
 			if ok != tt.ok || !got.Equal(tt.want) {
 				t.Fatalf("quotaWindowResetAt() = %v, %v; want %v, %v", got, ok, tt.want, tt.ok)
 			}
@@ -287,7 +301,9 @@ func TestSoonestResetSelectorPick_ReprobesPartialSnapshots(t *testing.T) {
 		Signals:    map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"},
 	}}
 	auths := []*Auth{
-		{ID: "a", Provider: "claude", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))},
+		{ID: "a", Provider: "claude", Quota: QuotaState{Signals: map[string]string{
+			"Anthropic-Ratelimit-Unified-7d-Reset": strconv.FormatInt(now.Add(3*24*time.Hour).Unix(), 10),
+		}}},
 		partial,
 	}
 
