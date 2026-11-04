@@ -743,7 +743,10 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		// Only the quota evidence of the other paths: the retry hint stays as it was.
+		streamErr := statusErr{code: httpResp.StatusCode, msg: string(body)}
+		streamErr.quotaExhausted, streamErr.quotaResetAfter = openAICompatQuotaExhaustion(httpResp.StatusCode, httpResp.Header, body)
+		return nil, streamErr
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)

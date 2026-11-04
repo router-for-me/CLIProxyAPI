@@ -96,28 +96,34 @@ type usageLimitCandidate struct {
 // quota exhaustion. Selection blocks a credential under its selection model;
 // otherwise it can still serve the request through any execution model whose
 // state is not blocked, so every one of those must be blocked by evidence and
-// the credential reopens with the first of them.
-func candidateQuotaBlock(candidate usageLimitCandidate, now time.Time) (time.Time, int64, bool) {
+// the credential reopens with the first of them. A model disabled on the
+// credential never serves the request and is left out; skip reports a
+// credential with every model left out, which is no candidate at all.
+func candidateQuotaBlock(candidate usageLimitCandidate, now time.Time) (resetAt time.Time, window int64, ok, skip bool) {
 	models := candidate.stateModels
 	if blocked, _, _ := isAuthBlockedForModel(candidate.auth, candidate.selectionModel, now); blocked || len(models) == 0 {
 		models = []string{candidate.selectionModel}
 	}
-	var resetAt time.Time
-	var window int64
 	for _, model := range models {
 		blocked, reason, next := isAuthBlockedForModel(candidate.auth, model, now)
-		if !blocked || reason != blockReasonCooldown || !next.After(now) {
-			return time.Time{}, 0, false
+		if blocked && reason == blockReasonDisabled {
+			continue
 		}
-		modelWindow, ok := quotaExhaustionEvidence(candidate.auth, model, now)
-		if !ok {
-			return time.Time{}, 0, false
+		if !blocked || reason != blockReasonCooldown || !next.After(now) {
+			return time.Time{}, 0, false, false
+		}
+		modelWindow, evidenced := quotaExhaustionEvidence(candidate.auth, model, now)
+		if !evidenced {
+			return time.Time{}, 0, false, false
 		}
 		if resetAt.IsZero() || next.Before(resetAt) {
 			resetAt, window = next, modelWindow
 		}
 	}
-	return resetAt, window, true
+	if resetAt.IsZero() {
+		return time.Time{}, 0, false, true
+	}
+	return resetAt, window, true, false
 }
 
 // quotaExhaustionEvidence reports whether the cooldown that blocks auth for
@@ -206,7 +212,10 @@ func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eli
 				candidate.stateModels = append(candidate.stateModels, m.stateModelForExecution(auth, model, upstreamModel, pooled))
 			}
 		}
-		resetAt, window, ok := candidateQuotaBlock(candidate, now)
+		resetAt, window, ok, skip := candidateQuotaBlock(candidate, now)
+		if skip {
+			continue
+		}
 		if !ok {
 			return nil
 		}

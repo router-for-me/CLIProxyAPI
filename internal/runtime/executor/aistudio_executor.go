@@ -186,7 +186,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		helps.AppendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
 	}
 	if wsResp.Status < 200 || wsResp.Status >= 300 {
-		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
+		return resp, newGoogleStatusErr(wsResp.Status, wsResp.Headers, wsResp.Body)
 	}
 	reporter.ObserveResponseModel(wsResp.Body)
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -291,7 +291,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			body.Write(firstEvent.Payload)
 		}
 		if firstEvent.Type == wsrelay.MessageTypeStreamEnd {
-			return nil, statusErr{code: firstEvent.Status, msg: body.String()}
+			return nil, newGoogleStatusErr(firstEvent.Status, firstEvent.Headers, body.Bytes())
 		}
 		for event := range wsStream {
 			if event.Err != nil {
@@ -315,7 +315,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				break
 			}
 		}
-		return nil, statusErr{code: firstEvent.Status, msg: body.String()}
+		return nil, newGoogleStatusErr(firstEvent.Status, firstEvent.Headers, body.Bytes())
 	}
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func(first wsrelay.StreamEvent) {
@@ -435,7 +435,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
 				}
 				if event.Status < http.StatusOK || event.Status >= http.StatusMultipleChoices {
-					errResponse := statusErr{code: event.Status, msg: string(event.Payload)}
+					errResponse := newGoogleStatusErr(event.Status, event.Headers, event.Payload)
 					helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
 					reporter.PublishFailure(ctx, errResponse)
 					select {
