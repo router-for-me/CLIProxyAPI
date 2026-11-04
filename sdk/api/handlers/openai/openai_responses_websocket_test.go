@@ -6488,6 +6488,9 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 		// poolExhausted also puts auth-b out of quota before the
 		// continuation, so the replay gets the usage limit.
 		poolExhausted bool
+		// fullRequest sends the second turn as a full new request instead
+		// of a continuation; it is still pinned to auth-a.
+		fullRequest bool
 	}{
 		{name: "unauthorized to websocket", status: http.StatusUnauthorized, backupWebsocket: true},
 		{name: "unauthorized to http", status: http.StatusUnauthorized, backupWebsocket: false},
@@ -6495,10 +6498,12 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 		{name: "rate limit to http", status: http.StatusTooManyRequests, backupWebsocket: false},
 		{name: "pinned usage limit to websocket", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true},
 		{name: "pinned usage limit with pool exhausted", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true, poolExhausted: true},
+		{name: "pinned usage limit on full request", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true, fullRequest: true},
+		{name: "pinned usage limit on full request with pool exhausted", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true, poolExhausted: true, fullRequest: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			modelName := fmt.Sprintf("credential-failure-%d-%t-%t-model", tc.status, tc.backupWebsocket, tc.usageLimit)
+			modelName := fmt.Sprintf("credential-failure-%d-%t-%t-%t-model", tc.status, tc.backupWebsocket, tc.usageLimit, tc.fullRequest)
 			selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
 			executor := &websocketPinnedFailoverExecutor{failStatus: tc.status}
 			if tc.usageLimit {
@@ -6567,14 +6572,37 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 				})
 			}
 
+			fullReplay := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"},{"type":"message","id":"out-auth-a-1"},{"type":"message","id":"msg-2"}]}`, modelName)
 			secondRequest := `{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`
+			if tc.fullRequest {
+				secondRequest = fullReplay
+			}
 			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(secondRequest)); errWrite != nil {
 				t.Fatalf("write second websocket message: %v", errWrite)
 			}
-			_, _, errReadClose := conn.ReadMessage()
-			var replayClose *websocket.CloseError
-			if !errors.As(errReadClose, &replayClose) || replayClose.Code != websocket.CloseServiceRestart || replayClose.Text != wsHTTPReplayRequiredCloseReason {
-				t.Fatalf("credential failure response = %v, want replay close %d %q", errReadClose, websocket.CloseServiceRestart, wsHTTPReplayRequiredCloseReason)
+			_, closePayload, errReadClose := conn.ReadMessage()
+			switch {
+			case tc.fullRequest && tc.poolExhausted:
+				// No credential can serve: the turn itself ends in the usage limit.
+				if errReadClose != nil {
+					t.Fatalf("full request read: %v", errReadClose)
+				}
+				assertWebsocketUsageLimitEvent(t, closePayload)
+				if got := executor.AuthIDs(); len(got) != 2 {
+					t.Fatalf("selected auth IDs = %v, want no further upstream call", got)
+				}
+				return
+			case tc.fullRequest:
+				// auth-b can still serve, so the client gets no usage limit;
+				// the socket closes and the client sends the turn again.
+				if errReadClose == nil {
+					t.Fatalf("full request response = %s, want the socket closed without an event", closePayload)
+				}
+			default:
+				var replayClose *websocket.CloseError
+				if !errors.As(errReadClose, &replayClose) || replayClose.Code != websocket.CloseServiceRestart || replayClose.Text != wsHTTPReplayRequiredCloseReason {
+					t.Fatalf("credential failure response = %v, want replay close %d %q", errReadClose, websocket.CloseServiceRestart, wsHTTPReplayRequiredCloseReason)
+				}
 			}
 			if got := executor.AuthIDs(); len(got) != 2 || got[0] != "auth-a" || got[1] != "auth-a" {
 				t.Fatalf("selected auth IDs before replay = %v, want [auth-a auth-a]", got)
@@ -6585,7 +6613,6 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 				t.Fatalf("dial replay websocket: %v", errDialReplay)
 			}
 			defer func() { _ = replayConn.Close() }()
-			fullReplay := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1"},{"type":"message","id":"out-auth-a-1"},{"type":"message","id":"msg-2"}]}`, modelName)
 			if errWrite := replayConn.WriteMessage(websocket.TextMessage, []byte(fullReplay)); errWrite != nil {
 				t.Fatalf("write full replay: %v", errWrite)
 			}
