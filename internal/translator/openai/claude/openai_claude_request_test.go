@@ -1,11 +1,15 @@
 package claude
 
 import (
-	"encoding/base64"
+	"context"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
+	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent tests the mapping
@@ -179,8 +183,8 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
-			resultJSON := gjson.ParseBytes(result)
+			result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			resultJSON := util.ParseGJSONBytesNoCopy(result)
 
 			// Find the relevant message
 			messages := resultJSON.Get("messages").Array()
@@ -192,7 +196,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			}
 
 			// Check the last non-system message
-			var targetMsg gjson.Result
+			var targetMsg ojson.Result
 			for i := len(messages) - 1; i >= 0; i-- {
 				if messages[i].Get("role").String() != "system" {
 					targetMsg = messages[i]
@@ -219,7 +223,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			switch {
 			case content.IsArray():
 				gotHasContent = len(content.Array()) > 0
-			case content.Type == gjson.String:
+			case content.Type == ojson.String:
 				gotHasContent = content.String() != ""
 			default:
 				gotHasContent = false
@@ -232,7 +236,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 			if tt.wantHasContent && tt.wantContentText != "" {
 				// Find text content
 				var foundText string
-				content.ForEach(func(_, v gjson.Result) bool {
+				content.ForEach(func(_, v ojson.Result) bool {
 					if v.Get("type").String() == "text" {
 						foundText = v.Get("text").String()
 						return false
@@ -293,8 +297,8 @@ func TestConvertClaudeRequestToOpenAI_SignedThinkingCompatibility(t *testing.T) 
 				}]
 			}`
 
-			result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
-			assistantMsg := gjson.GetBytes(result, "messages.0")
+			result, _ := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+			assistantMsg := ojson.GetBytesNoCopy(result, "messages.0")
 			gotReasoningContent := assistantMsg.Get("reasoning_content").String()
 			gotHasReasoningContent := assistantMsg.Get("reasoning_content").Exists()
 
@@ -332,8 +336,8 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 
 	messages := resultJSON.Get("messages").Array()
 
@@ -370,8 +374,8 @@ func TestConvertClaudeRequestToOpenAI_MessageSystemRoleWrapsAsUserReminder(t *te
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
 	if len(messages) != 6 {
@@ -425,8 +429,8 @@ func TestConvertClaudeRequestToOpenAI_PreservesToolAdjacencyWithInterveningSyste
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
-	messages := gjson.GetBytes(result, "messages").Array()
+	result, _ := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	messages := ojson.GetBytesNoCopy(result, "messages").Array()
 
 	// Expected roles order:
 	// 0: user ("Execute tools")
@@ -520,12 +524,12 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
-			resultJSON := gjson.ParseBytes(result)
+			result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			resultJSON := util.ParseGJSONBytesNoCopy(result)
 			messages := resultJSON.Get("messages").Array()
 
 			hasSys := false
-			var sysMsg gjson.Result
+			var sysMsg ojson.Result
 			if len(messages) > 0 && messages[0].Get("role").String() == "system" {
 				hasSys = true
 				sysMsg = messages[0]
@@ -584,8 +588,8 @@ func TestConvertClaudeRequestToOpenAI_ToolSchemaAddsMissingObjectProperties(t *t
 		"messages": [{"role": "user", "content": "hello"}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
-	outputJSON := gjson.ParseBytes(output)
+	output, _ := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	if got := outputJSON.Get("tools.0.function.parameters.properties"); !got.Exists() || !got.IsObject() {
 		t.Fatalf("root object properties missing or invalid: %s", outputJSON.Get("tools.0.function.parameters").Raw)
@@ -619,8 +623,8 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
 	// OpenAI requires: tool messages MUST immediately follow assistant(tool_calls).
@@ -676,8 +680,8 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
 	// assistant(tool_calls) + tool(result)
@@ -690,7 +694,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 	}
 
 	toolContent := messages[1].Get("content").String()
-	parsed := gjson.Parse(toolContent)
+	parsed := ojson.Parse(toolContent)
 	if parsed.Get("foo").String() != "bar" {
 		t.Fatalf("Expected tool content JSON foo=bar, got %q", toolContent)
 	}
@@ -729,28 +733,41 @@ func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	toolContent := messages[1].Get("content")
-	if !toolContent.IsArray() {
-		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	// The tool message keeps only the textual payload; OpenAI drops image parts there.
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("Expected second message role %q, got %q", "tool", got)
 	}
-	if got := toolContent.Get("0.type").String(); got != "text" {
-		t.Fatalf("Expected first tool content type %q, got %q", "text", got)
+	if messages[1].Get("content").IsArray() {
+		t.Fatalf("Tool content must not be an array, got %s", messages[1].Get("content").Raw)
 	}
-	if got := toolContent.Get("0.text").String(); got != "tool ok" {
-		t.Fatalf("Expected first tool content text %q, got %q", "tool ok", got)
+	if got := messages[1].Get("content").String(); got != "tool ok" {
+		t.Fatalf("Expected tool content %q, got %q", "tool ok", got)
 	}
-	if got := toolContent.Get("1.type").String(); got != "image_url" {
-		t.Fatalf("Expected second tool content type %q, got %q", "image_url", got)
+
+	// The image is relayed as a user message directly after the tool result.
+	relay := messages[2]
+	if got := relay.Get("role").String(); got != "user" {
+		t.Fatalf("Expected relay message role %q, got %q", "user", got)
 	}
-	if got := toolContent.Get("1.image_url.url").String(); got != "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" {
+	relayContent := relay.Get("content")
+	if !relayContent.IsArray() {
+		t.Fatalf("Expected relay content array, got %s", relayContent.Raw)
+	}
+	if got := relayContent.Get("0.text").String(); got != toolResultImageRelayNotice {
+		t.Fatalf("Expected relay notice %q, got %q", toolResultImageRelayNotice, got)
+	}
+	if got := relayContent.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected relay content type %q, got %q", "image_url", got)
+	}
+	if got := relayContent.Get("1.image_url.url").String(); got != "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==" {
 		t.Fatalf("Unexpected image_url: %q", got)
 	}
 }
@@ -784,23 +801,171 @@ func TestConvertClaudeRequestToOpenAI_ToolResultURLImageOnly(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	toolContent := messages[1].Get("content")
-	if !toolContent.IsArray() {
-		t.Fatalf("Expected tool content array, got %s", toolContent.Raw)
+	// An image-only tool_result still needs a non-empty text payload on the tool message.
+	if got := messages[1].Get("content").String(); got != toolResultImagePlaceholder {
+		t.Fatalf("Expected tool content %q, got %q", toolResultImagePlaceholder, got)
 	}
-	if got := toolContent.Get("0.type").String(); got != "image_url" {
-		t.Fatalf("Expected tool content type %q, got %q", "image_url", got)
+
+	relayContent := messages[2].Get("content")
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected relay message role %q, got %q", "user", got)
 	}
-	if got := toolContent.Get("0.image_url.url").String(); got != "https://example.com/tool.png" {
+	if got := relayContent.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected relay content type %q, got %q", "image_url", got)
+	}
+	if got := relayContent.Get("1.image_url.url").String(); got != "https://example.com/tool.png" {
 		t.Fatalf("Unexpected image_url: %q", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultImageMergesIntoUserText(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "screenshot", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": [
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "iVBORw0KGgoAAAANSUhEUg=="
+								}
+							}
+						]
+					},
+					{"type": "text", "text": "What color?"}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// The relayed image joins the user text instead of adding a second user turn.
+	if len(messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[2].Get("role").String(); got != "user" {
+		t.Fatalf("Expected third message role %q, got %q", "user", got)
+	}
+
+	content := messages[2].Get("content")
+	if got := len(content.Array()); got != 3 {
+		t.Fatalf("Expected 3 user content parts, got %d: %s", got, content.Raw)
+	}
+	if got := content.Get("0.text").String(); got != toolResultImageRelayNotice {
+		t.Fatalf("Expected relay notice %q, got %q", toolResultImageRelayNotice, got)
+	}
+	if got := content.Get("1.type").String(); got != "image_url" {
+		t.Fatalf("Expected second part type %q, got %q", "image_url", got)
+	}
+	if got := content.Get("2.text").String(); got != "What color?" {
+		t.Fatalf("Expected trailing user text %q, got %q", "What color?", got)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_MultipleToolResultsWithImages(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "shot1", "input": {}},
+					{"type": "tool_use", "id": "call_2", "name": "shot2", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": [
+							{"type": "text", "text": "result 1"},
+							{
+								"type": "image",
+								"source": {
+									"type": "base64",
+									"media_type": "image/png",
+									"data": "img1"
+								}
+							}
+						]
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_2",
+						"content": {
+							"type": "image",
+							"source": {
+								"type": "url",
+								"url": "https://example.com/2.png"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
+	messages := resultJSON.Get("messages").Array()
+
+	// Expected: assistant(2 tool calls), tool(call_1), tool(call_2), user(relay 2 images)
+	if len(messages) != 4 {
+		t.Fatalf("Expected 4 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" || messages[1].Get("tool_call_id").String() != "call_1" {
+		t.Fatalf("Expected tool 1 message, got: %s", messages[1].Raw)
+	}
+	if got := messages[1].Get("content").String(); got != "result 1" {
+		t.Fatalf("Expected tool 1 content 'result 1', got %q", got)
+	}
+	if got := messages[2].Get("role").String(); got != "tool" || messages[2].Get("tool_call_id").String() != "call_2" {
+		t.Fatalf("Expected tool 2 message, got: %s", messages[2].Raw)
+	}
+	if got := messages[2].Get("content").String(); got != toolResultImagePlaceholder {
+		t.Fatalf("Expected tool 2 placeholder, got %q", got)
+	}
+	if got := messages[3].Get("role").String(); got != "user" {
+		t.Fatalf("Expected user relay message, got: %s", messages[3].Raw)
+	}
+	relayContent := messages[3].Get("content").Array()
+	if len(relayContent) != 3 {
+		t.Fatalf("Expected 3 parts in relay (notice + 2 images), got %d: %s", len(relayContent), messages[3].Get("content").Raw)
+	}
+	if got := relayContent[0].Get("text").String(); got != toolResultImageRelayNotice {
+		t.Fatalf("Expected notice %q, got %q", toolResultImageRelayNotice, got)
+	}
+	if got := relayContent[1].Get("image_url.url").String(); got != "data:image/png;base64,img1" {
+		t.Fatalf("Expected image 1 url, got %q", got)
+	}
+	if got := relayContent[2].Get("image_url.url").String(); got != "https://example.com/2.png" {
+		t.Fatalf("Expected image 2 url, got %q", got)
 	}
 }
 
@@ -819,8 +984,8 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
 	// New behavior: content + tool_calls unified in single assistant message
@@ -871,8 +1036,8 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
+	result, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
 	messages := resultJSON.Get("messages").Array()
 
 	// Unsigned thinking is dropped, while text and tool_calls remain unified.
@@ -913,10 +1078,10 @@ func TestConvertClaudeRequestToOpenAI_StripsClaudeCodeAttribution(t *testing.T) 
 		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
-	messages := gjson.GetBytes(output, "messages").Array()
+	output, _ := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
+	messages := ojson.GetBytesNoCopy(output, "messages").Array()
 	if len(messages) == 0 || messages[0].Get("role").String() != "system" {
-		t.Fatalf("Expected first message to be system, got: %s", gjson.GetBytes(output, "messages").Raw)
+		t.Fatalf("Expected first message to be system, got: %s", ojson.GetBytesNoCopy(output, "messages").Raw)
 	}
 
 	content := messages[0].Get("content").Array()
@@ -956,8 +1121,8 @@ func TestConvertClaudeRequestToOpenAI_StopSequences(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			output := ConvertClaudeRequestToOpenAI("gpt-4o", []byte(tt.inputJSON), false)
-			stopRes := gjson.GetBytes(output, "stop")
+			output, _ := ConvertClaudeRequestToOpenAI("gpt-4o", []byte(tt.inputJSON), false)
+			stopRes := ojson.GetBytesNoCopy(output, "stop")
 			if !stopRes.Exists() {
 				t.Fatalf("expected 'stop' field in output, got: %s", string(output))
 			}
@@ -997,8 +1162,8 @@ func TestConvertClaudeRequestToOpenAI_ToolWithoutInputSchemaDefaultsParameters(t
 		"messages": [{"role": "user", "content": "hello"}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
-	outputJSON := gjson.ParseBytes(output)
+	output, _ := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	for i, toolName := range []string{"web_search", "no_schema_custom", "null_schema_custom"} {
 		path := fmt.Sprintf("tools.%d.function", i)
@@ -1046,8 +1211,8 @@ func TestConvertClaudeRequestToOpenAI_StripsUnsupportedUnicodePropertyEscapePatt
 		}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
-	outputJSON := gjson.ParseBytes(output)
+	output, _ := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	params := outputJSON.Get("tools.0.function.parameters")
 	if !params.Exists() {
@@ -1098,8 +1263,8 @@ func TestConvertClaudeRequestToOpenAI_PreservesNonSchemaPatternKeys(t *testing.T
 		}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
-	outputJSON := gjson.ParseBytes(output)
+	output, _ := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	params := outputJSON.Get("tools.0.function.parameters")
 	if !params.Exists() {
@@ -1140,8 +1305,8 @@ func TestConvertClaudeRequestToOpenAI_StripsPatternPropertiesIncompatibleKeys(t 
 		}]
 	}`)
 
-	output := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
-	outputJSON := gjson.ParseBytes(output)
+	output, _ := ConvertClaudeRequestToOpenAI("gpt-5.6", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	params := outputJSON.Get("tools.0.function.parameters")
 	if !params.Exists() {
@@ -1154,5 +1319,570 @@ func TestConvertClaudeRequestToOpenAI_StripsPatternPropertiesIncompatibleKeys(t 
 	}
 	if _, exists := patternProps[`^[a-z]+$`]; !exists {
 		t.Errorf("expected patternProperties key '^[a-z]+$' to be preserved, got: %s", params.Get("patternProperties").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultPreservesFunctionName(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"max_tokens": 64,
+		"tools": [
+			{
+				"name": "get_weather",
+				"description": "Get weather",
+				"input_schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			},
+			{
+				"name": "get_time",
+				"description": "Get time",
+				"input_schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"]
+				}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "What's the weather and time in Jakarta?"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_01ABC", "name": "get_weather", "input": {"city": "Jakarta"}},
+					{"type": "tool_use", "id": "toolu_02DEF", "name": "get_time", "input": {"city": "Jakarta"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_01ABC", "content": "32C, humid"},
+					{"type": "tool_result", "tool_use_id": "toolu_02DEF", "content": "12:00 PM"}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("gemini-3.8-flash", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
+	messages := resultJSON.Get("messages").Array()
+
+	var toolMessages []ojson.Result
+	for _, msg := range messages {
+		if msg.Get("role").String() == "tool" {
+			toolMessages = append(toolMessages, msg)
+		}
+	}
+
+	if len(toolMessages) != 2 {
+		t.Fatalf("expected 2 tool messages, got %d. Output: %s", len(toolMessages), result)
+	}
+
+	if got := toolMessages[0].Get("tool_call_id").String(); got != "toolu_01ABC" {
+		t.Errorf("toolMessages[0].tool_call_id = %q, want %q", got, "toolu_01ABC")
+	}
+	if got := toolMessages[0].Get("name").String(); got != "get_weather" {
+		t.Errorf("toolMessages[0].name = %q, want %q", got, "get_weather")
+	}
+	if got := toolMessages[0].Get("content").String(); got != "32C, humid" {
+		t.Errorf("toolMessages[0].content = %q, want %q", got, "32C, humid")
+	}
+
+	if got := toolMessages[1].Get("tool_call_id").String(); got != "toolu_02DEF" {
+		t.Errorf("toolMessages[1].tool_call_id = %q, want %q", got, "toolu_02DEF")
+	}
+	if got := toolMessages[1].Get("name").String(); got != "get_time" {
+		t.Errorf("toolMessages[1].name = %q, want %q", got, "get_time")
+	}
+	if got := toolMessages[1].Get("content").String(); got != "12:00 PM" {
+		t.Errorf("toolMessages[1].content = %q, want %q", got, "12:00 PM")
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolResultUnknownIDNoName(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "orphan_call_1", "content": "result"}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("gemini-3.8-flash", []byte(inputJSON), false)
+	resultJSON := util.ParseGJSONBytesNoCopy(result)
+	toolMsg := resultJSON.Get("messages.0")
+
+	if got := toolMsg.Get("role").String(); got != "tool" {
+		t.Fatalf("expected tool role, got %q", got)
+	}
+	if got := toolMsg.Get("tool_call_id").String(); got != "orphan_call_1" {
+		t.Errorf("tool_call_id = %q, want %q", got, "orphan_call_1")
+	}
+	if toolMsg.Get("name").Exists() {
+		t.Errorf("expected no name for unknown tool_use_id, got %q", toolMsg.Get("name").String())
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairingByID(t *testing.T) {
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Run analysis"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "fetch_data", "input": {"id": 123}},
+					{"type": "tool_use", "id": "call_2", "name": "calc_metric", "input": {"scale": 1.5}}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "Waiting for results to continue"},
+					{"type": "thinking", "thinking": "Thinking about next steps", "signature": "sig_abc"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Reminder: keep timeout short"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_2", "content": "metric_ok"},
+					{"type": "tool_result", "tool_use_id": "call_1", "content": "data_ok"}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := ojson.GetBytesNoCopy(result, "messages").Array()
+
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+
+	// Tool results must be paired immediately following the assistant tool_calls message.
+	// Expected:
+	// messages[0]: user ("Run analysis")
+	// messages[1]: assistant (tool_calls [call_1, call_2])
+	// messages[2]: tool (tool_call_id: call_2 or call_1)
+	// messages[3]: tool (tool_call_id: call_1 or call_2)
+	// messages[4]: assistant (content: "Waiting for results to continue", reasoning_content: ...)
+	// messages[5]: user ("Reminder: keep timeout short")
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || !messages[1].Get("tool_calls").Exists() {
+		t.Fatalf("messages[1] must be assistant with tool_calls, got %s", roles[1])
+	}
+	if roles[2] != "tool" || roles[3] != "tool" {
+		t.Fatalf("messages[2] and messages[3] must be tool messages immediately following assistant tool_calls, got roles: %v", roles)
+	}
+	toolIDs := []string{messages[2].Get("tool_call_id").String(), messages[3].Get("tool_call_id").String()}
+	if toolIDs[0] != "call_2" || toolIDs[1] != "call_1" {
+		t.Fatalf("expected tool messages to strictly preserve input relative order [call_2, call_1], got: %v", toolIDs)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolCallPairing_OrphanAndIncompletePreserved(t *testing.T) {
+	// Orphan tool results and incomplete histories must not be rearranged or guessed
+	inputJSON := `{
+		"model": "deepseek-v4.1-flash",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Start"}]},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_alpha", "name": "do_a", "input": {}},
+					{"type": "tool_use", "id": "call_beta", "name": "do_b", "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "Waiting on results"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_unmatched", "content": "orphan_result"}
+				]
+			}
+		]
+	}`
+
+	result, _ := ConvertClaudeRequestToOpenAI("deepseek-v4.1-flash", []byte(inputJSON), false)
+	messages := ojson.GetBytesNoCopy(result, "messages").Array()
+
+	// Incomplete history (call_alpha and call_beta are unanswered) and orphan result
+	// (call_unmatched has no matching assistant tool_calls) must remain untouched.
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Get("role").String())
+	}
+	// messages[0]: user
+	// messages[1]: assistant (tool_calls [call_alpha, call_beta])
+	// messages[2]: user ("Waiting on results")
+	// messages[3]: tool (tool_call_id: call_unmatched)
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %s", len(messages), result)
+	}
+	if roles[1] != "assistant" || roles[2] != "user" || roles[3] != "tool" {
+		t.Fatalf("expected untouched order [user, assistant, user, tool], got: %v", roles)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_ToolChoice(t *testing.T) {
+	t.Run("none does not become auto", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "Answer without calling tools."}],
+			"tool_choice": {"type": "none"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}},
+				{"name": "tool_b", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result, _ := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := ojson.GetBytesNoCopy(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to be 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("disable_parallel_tool_use maps to parallel_tool_calls false", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result, _ := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		parallel := ojson.GetBytesNoCopy(result, "parallel_tool_calls")
+		if !parallel.Exists() || parallel.Bool() {
+			t.Fatalf("expected parallel_tool_calls to be false, got %v. Output: %s", parallel.Value(), result)
+		}
+	})
+
+	t.Run("unknown tool_choice type fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "unknown_future_restriction"},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result, _ := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := ojson.GetBytesNoCopy(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool choice with empty name fails closed to none", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": {"type": "tool", "name": ""},
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result, _ := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		gotToolChoice := ojson.GetBytesNoCopy(result, "tool_choice").String()
+		if gotToolChoice != "none" {
+			t.Fatalf("expected tool_choice to fail closed to 'none', got %q. Output: %s", gotToolChoice, result)
+		}
+	})
+
+	t.Run("tool_choice null does not set tool_choice", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5.4",
+			"max_tokens": 64,
+			"messages": [{"role": "user", "content": "test"}],
+			"tool_choice": null,
+			"tools": [
+				{"name": "tool_a", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+			]
+		}`
+		result, _ := ConvertClaudeRequestToOpenAI("gpt-5.4", []byte(inputJSON), false)
+		if ojson.GetBytesNoCopy(result, "tool_choice").Exists() {
+			t.Fatalf("expected tool_choice not to be set when tool_choice is null, got: %s", result)
+		}
+	})
+}
+
+func TestConvertClaudeRequestToOpenAI_EnabledThinkingEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		inputJSON  string
+		wantEffort string
+	}{
+		{
+			name:       "explicit output_config effort is preserved without budget",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`,
+			wantEffort: "high",
+		},
+		{
+			name:       "legacy budget remains authoritative when both are present",
+			inputJSON:  `{"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}`,
+			wantEffort: "medium",
+		},
+		{
+			name:       "enabled without budget or effort keeps auto default",
+			inputJSON:  `{"thinking":{"type":"enabled"}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with empty effort string falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":""}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with whitespace-only effort falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":"   "}}`,
+			wantEffort: "auto",
+		},
+		{
+			name:       "enabled with non-string effort falls back to auto",
+			inputJSON:  `{"thinking":{"type":"enabled"},"output_config":{"effort":123}}`,
+			wantEffort: "auto",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, _ := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+			if got := ojson.GetBytesNoCopy(out, "reasoning_effort").String(); got != tt.wantEffort {
+				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_NormalizesBooleanSubschemas(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-opus",
+		"tools": [
+			{
+				"name": "patch_tool",
+				"description": "Applies a JSON patch",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"patch": {"type": "array", "items": true},
+						"anything": true,
+						"disabled": false,
+						"enabled_flag": {"type": "boolean", "default": true, "enum": [true, false]},
+						"either": {"anyOf": [true, {"type": "string"}]},
+						"nested_obj": {
+							"type": "object",
+							"properties": {"foo": {"type": "string"}},
+							"additionalProperties": true
+						}
+					},
+					"additionalProperties": false,
+					"$defs": {
+						"wildcard": true
+					}
+				}
+			}
+		],
+		"messages": [{"role": "user", "content": "hello"}]
+	}`)
+
+	output, _ := ConvertClaudeRequestToOpenAI("test-model", inputJSON, false)
+	outputJSON := util.ParseGJSONBytesNoCopy(output)
+
+	params := outputJSON.Get("tools.0.function.parameters")
+	if !params.Exists() {
+		t.Fatalf("parameters missing: %s", outputJSON.Raw)
+	}
+
+	// items: true -> items: {}
+	patchItems := params.Get("properties.patch.items")
+	if !patchItems.Exists() || patchItems.Type == ojson.True || patchItems.Raw == "true" {
+		t.Fatalf("array items boolean subschema not normalized: %s", params.Get("properties.patch").Raw)
+	}
+	if !patchItems.IsObject() || patchItems.Raw != "{}" {
+		t.Fatalf("array items boolean subschema should be empty object {}: %s", patchItems.Raw)
+	}
+
+	// anything: true -> anything: {}
+	anything := params.Get("properties.anything")
+	if !anything.Exists() || !anything.IsObject() || anything.Raw != "{}" {
+		t.Fatalf("boolean property subschema not normalized to empty object {}: %s", anything.Raw)
+	}
+
+	// either.anyOf.0: true -> {}
+	eitherBranch := params.Get("properties.either.anyOf.0")
+	if !eitherBranch.Exists() || !eitherBranch.IsObject() || eitherBranch.Raw != "{}" {
+		t.Fatalf("boolean anyOf branch not normalized to empty object {}: %s", eitherBranch.Raw)
+	}
+
+	// $defs.wildcard: true -> {}
+	wildcard := params.Get("$defs.wildcard")
+	if !wildcard.Exists() || !wildcard.IsObject() || wildcard.Raw != "{}" {
+		t.Fatalf("boolean $defs subschema not normalized to empty object {}: %s", wildcard.Raw)
+	}
+
+	// additionalProperties: false must remain boolean false
+	if addProps := params.Get("additionalProperties"); !addProps.Exists() || addProps.Type != ojson.False {
+		t.Fatalf("additionalProperties: false must be preserved as boolean false, got: %s", addProps.Raw)
+	}
+
+	// nested_obj.additionalProperties: true must remain boolean true
+	if nestedAddProps := params.Get("properties.nested_obj.additionalProperties"); !nestedAddProps.Exists() || nestedAddProps.Type != ojson.True {
+		t.Fatalf("nested additionalProperties: true must be preserved as boolean true, got: %s", nestedAddProps.Raw)
+	}
+
+	// disabled: false must remain boolean false
+	if disabled := params.Get("properties.disabled"); !disabled.Exists() || disabled.Type != ojson.False {
+		t.Fatalf("disabled: false must be preserved as boolean false, got: %s", disabled.Raw)
+	}
+
+	// enabled_flag data values default: true and enum: [true, false] must remain boolean data values
+	if defVal := params.Get("properties.enabled_flag.default"); !defVal.Exists() || defVal.Type != ojson.True {
+		t.Fatalf("enabled_flag.default should remain boolean true, got: %s", defVal.Raw)
+	}
+	if enum0 := params.Get("properties.enabled_flag.enum.0"); !enum0.Exists() || enum0.Type != ojson.True {
+		t.Fatalf("enabled_flag.enum.0 should remain boolean true, got: %s", enum0.Raw)
+	}
+	if enum1 := params.Get("properties.enabled_flag.enum.1"); !enum1.Exists() || enum1.Type != ojson.False {
+		t.Fatalf("enabled_flag.enum.1 should remain boolean false, got: %s", enum1.Raw)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_UncachedFileKeepsOldDrop(t *testing.T) {
+	input := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"container_upload","file_id":"file-absent"}]}]}`)
+	body1, errConvert1 := ConvertClaudeRequestToOpenAI("gpt-5", input, false)
+	if errConvert1 != nil {
+		t.Fatal(errConvert1)
+	}
+	output := string(body1)
+	if strings.Contains(output, "file_data") {
+		t.Fatalf("output = %s", output)
+	}
+	if !strings.Contains(output, `"text":"read"`) {
+		t.Fatalf("text was lost: %s", output)
+	}
+}
+
+func claudeToOpenAIEnvelope(model string, input []byte) sdktranslator.RequestEnvelope {
+	return sdktranslator.TranslateRequestEnvelope(context.Background(), sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, sdktranslator.RequestEnvelope{
+		Format: sdktranslator.FormatClaude,
+		Model:  model,
+		Body:   input,
+	})
+}
+
+func TestClaudeFileOnlyRequestSurfacesUnsupportedPart(t *testing.T) {
+	input := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file-absent"}]}]}`)
+	envelope := claudeToOpenAIEnvelope("gpt-5", input)
+	if envelope.Err == nil {
+		t.Fatalf("expected an unsupported part error, body = %s", envelope.Body)
+	}
+	if !strings.Contains(envelope.Err.Error(), "container_upload") {
+		t.Fatalf("err = %v", envelope.Err)
+	}
+}
+
+func TestClaudeBase64DocumentBecomesFilePart(t *testing.T) {
+	input := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}]}`)
+	envelope := claudeToOpenAIEnvelope("gpt-5", input)
+	if envelope.Err != nil {
+		t.Fatalf("err = %v", envelope.Err)
+	}
+	part := ojson.GetBytesNoCopy(envelope.Body, "messages.0.content.0")
+	if part.Get("type").String() != "file" || part.Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" {
+		t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
+	}
+}
+
+func TestClaudeTextWithUncachedFileKeepsText(t *testing.T) {
+	input := []byte(`{"model":"gpt-5","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"container_upload","file_id":"file-absent"}]}]}`)
+	envelope := claudeToOpenAIEnvelope("gpt-5", input)
+	if envelope.Err != nil {
+		t.Fatalf("err = %v", envelope.Err)
+	}
+	if !strings.Contains(string(envelope.Body), `"text":"read"`) {
+		t.Fatalf("body = %s", envelope.Body)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_MidConversationToolAdditionAppendsToTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5",
+		"tools": [
+			{
+				"name": "Read",
+				"description": "Read file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "start"},
+			{
+				"role": "system",
+				"content": [
+					{"type": "text", "text": "<system-reminder>SubagentHandback is now available</system-reminder>"},
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"name": "SubagentHandback",
+								"description": "Deliver subagent report",
+								"input_schema": {
+									"type": "object",
+									"properties": {"summary": {"type": "string"}},
+									"required": ["summary"]
+								}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	output, err := ConvertClaudeRequestToOpenAI("gpt-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToOpenAI returned error: %v", err)
+	}
+	tools := ojson.GetBytesNoCopy(output, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools in OpenAI request, got %d: %s", len(tools), ojson.GetBytesNoCopy(output, "tools").Raw)
+	}
+	if got := tools[1].Get("function.name").String(); got != "SubagentHandback" {
+		t.Fatalf("tools[1].function.name = %q, want SubagentHandback", got)
+	}
+	if got := tools[1].Get("function.parameters.properties.summary.type").String(); got != "string" {
+		t.Fatalf("unexpected tools[1] parameters: %s", tools[1].Get("function.parameters").Raw)
+	}
+
+	openAIResp := []byte(`{"id":"chatcmpl_1","model":"gpt-5","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"subagenthandback","arguments":"{\"summary\":\"done\"}"}}]}}]}`)
+	claudeResp := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "gpt-5", inputJSON, output, openAIResp, nil)
+	if got := ojson.GetBytesNoCopy(claudeResp, "content.0.name").String(); got != "SubagentHandback" {
+		t.Fatalf("ConvertOpenAIResponseToClaudeNonStream tool name = %q, want SubagentHandback; resp=%s", got, claudeResp)
 	}
 }

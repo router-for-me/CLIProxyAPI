@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -269,6 +269,18 @@ func AntigravityDefaultCallbackURI() string {
 // AntigravityUserAgent returns the canonical User-Agent string used by the Antigravity Hub family.
 func AntigravityUserAgent() string {
 	return misc.AntigravityUserAgent()
+}
+
+// StartAntigravityVersionUpdater starts background refresh for the Antigravity Hub version.
+// Pass a process-lifetime ctx; it runs only once and is not auto-started by SDK packages.
+func StartAntigravityVersionUpdater(ctx context.Context) {
+	misc.StartAntigravityVersionUpdater(ctx)
+}
+
+// AntigravityRequestUserAgent returns the User-Agent for Antigravity runtime requests,
+// falling back to AntigravityUserAgent when userAgent is empty.
+func AntigravityRequestUserAgent(userAgent string) string {
+	return misc.AntigravityRequestUserAgent(userAgent)
 }
 
 // BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity.

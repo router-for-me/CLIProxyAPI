@@ -6,18 +6,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type handlerInterceptorTestHost struct {
@@ -55,7 +57,6 @@ func (h *handlerInterceptorTestHost) InterceptRequestBeforeAuth(ctx context.Cont
 	}
 	return pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    cloneBytes(req.Body),
 	}
 }
 
@@ -65,7 +66,6 @@ func (h *handlerInterceptorTestHost) InterceptRequestAfterAuth(ctx context.Conte
 	}
 	return pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    cloneBytes(req.Body),
 	}
 }
 
@@ -1633,5 +1633,124 @@ func TestHandlerWebSocketResponseObserverForwardsToPluginHost(t *testing.T) {
 	}
 	if observed[0].RequestID == "" {
 		t.Fatal("RequestID is empty, want populated request ID")
+	}
+}
+
+func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var intercepted bool
+	var capturedReq pluginapi.ResponseInterceptRequest
+	var completion pluginapi.RequestCompletion
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			intercepted = true
+			capturedReq = req
+			headers := cloneHeader(req.ResponseHeaders)
+			headers.Set("X-Custom-Model-Header", "filtered")
+			return pluginapi.ResponseInterceptResponse{
+				Headers: headers,
+				Body:    []byte(`{"object":"list","data":[{"id":"intercepted-model"}]}`),
+			}
+		},
+		completeRequest: func(_ context.Context, comp pluginapi.RequestCompletion) {
+			completion = comp
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Request.Header.Set("Authorization", "Bearer test-token")
+
+	payload := gin.H{"object": "list", "data": []map[string]any{{"id": "original-model"}}}
+	handler.WriteModelListResponse(ctx, "openai", payload)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if !intercepted {
+		t.Fatal("InterceptResponse was not called")
+	}
+	if capturedReq.SourceFormat != "openai" {
+		t.Fatalf("SourceFormat = %q, want openai", capturedReq.SourceFormat)
+	}
+	if capturedReq.RequestHeaders.Get("Authorization") != "Bearer test-token" {
+		t.Fatalf("RequestHeaders missing auth: %#v", capturedReq.RequestHeaders)
+	}
+	if rec.Header().Get("X-Custom-Model-Header") != "filtered" {
+		t.Fatalf("X-Custom-Model-Header = %q, want filtered", rec.Header().Get("X-Custom-Model-Header"))
+	}
+	if !strings.Contains(rec.Body.String(), "intercepted-model") {
+		t.Fatalf("body = %s, want intercepted-model", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "original-model") {
+		t.Fatalf("body should not contain original-model: %s", rec.Body.String())
+	}
+	if completion.Outcome != pluginapi.RequestCompletionSucceeded {
+		t.Fatalf("completion outcome = %v, want succeeded", completion.Outcome)
+	}
+	if apiResp, ok := ctx.Get("API_RESPONSE"); !ok || !strings.Contains(string(apiResp.([]byte)), "intercepted-model") {
+		t.Fatalf("API_RESPONSE not recorded properly: %#v", apiResp)
+	}
+}
+
+func TestRequestAfterAuthCapture_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
+	capture := &requestAfterAuthCapture{}
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := coreexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}
+	opts := coreexecutor.Options{
+		OriginalRequest: payload,
+	}
+
+	// Read-only after-auth response: Body is empty
+	capture.record(coreexecutor.RequestAfterAuthInterceptRequest{
+		Body: payload,
+	}, coreexecutor.RequestAfterAuthInterceptResponse{
+		Body: nil,
+	})
+
+	appliedReq, appliedOpts := capture.apply(req, opts)
+	if unsafe.SliceData(appliedReq.Payload) != unsafe.SliceData(req.Payload) {
+		t.Fatal("requestAfterAuthCapture.apply reallocated req.Payload when interceptor did not mutate body")
+	}
+	if unsafe.SliceData(appliedOpts.OriginalRequest) != unsafe.SliceData(opts.OriginalRequest) {
+		t.Fatal("requestAfterAuthCapture.apply reallocated opts.OriginalRequest when interceptor did not mutate body")
+	}
+}
+
+func TestApplyRequestInterceptors_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
+	// A read-only interceptor returns an empty/nil Body.
+	host := &handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(ctx context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{
+				Headers: req.Headers,
+			}
+		},
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetPluginHost(host)
+
+	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+	req := coreexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}
+	opts := coreexecutor.Options{
+		OriginalRequest: payload,
+	}
+
+	gotReq, gotOpts, err := handler.applyRequestInterceptorsBeforeAuth(context.Background(), "openai", "gpt-5.4", "req-1", req, opts, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if unsafe.SliceData(gotReq.Payload) != unsafe.SliceData(req.Payload) {
+		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated req.Payload when interceptor did not mutate body")
+	}
+	if unsafe.SliceData(gotOpts.OriginalRequest) != unsafe.SliceData(opts.OriginalRequest) {
+		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated opts.OriginalRequest when interceptor did not mutate body")
 	}
 }

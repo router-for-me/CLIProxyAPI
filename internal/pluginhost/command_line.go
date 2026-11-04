@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 

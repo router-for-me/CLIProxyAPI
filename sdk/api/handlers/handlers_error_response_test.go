@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,12 +14,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 type directResponseTestError struct {
@@ -353,6 +355,96 @@ func TestEnrichAuthSelectionError_DoesNotModifyModelCooldownError(t *testing.T) 
 	}
 	if isAuthSelectionUnavailable(errPick) {
 		t.Fatal("isAuthSelectionUnavailable(modelCooldownError) = true, want false")
+	}
+}
+
+func TestBuildErrorResponseBodyWithError_TerminalAuthEnforcesContractOnJSONInput(t *testing.T) {
+	terminalErr := coreauth.NewTerminalAuthError(&coreauth.Error{
+		Code:       "auth_unavailable",
+		Message:    "no auth available",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}, errors.New("upstream failed"))
+
+	// Valid JSON errText should NOT bypass terminal classification.
+	jsonErrText := `{"error":{"message":"token refresh failed: revoked","type":"server_error","code":"internal_server_error"}}`
+	body := BuildErrorResponseBodyWithError(http.StatusServiceUnavailable, jsonErrText, terminalErr)
+
+	var payload struct {
+		Error struct {
+			Type      string `json:"type"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Retryable *bool  `json:"retryable"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error body: %v", errUnmarshal)
+	}
+	if payload.Error.Type != "authentication_error" {
+		t.Fatalf("type = %q, want authentication_error", payload.Error.Type)
+	}
+	if payload.Error.Code != "upstream_authentication_required" {
+		t.Fatalf("code = %q, want upstream_authentication_required", payload.Error.Code)
+	}
+	if payload.Error.Retryable == nil || *payload.Error.Retryable {
+		t.Fatalf("retryable = %v, want false", payload.Error.Retryable)
+	}
+	if !strings.Contains(payload.Error.Message, "token refresh failed: revoked") {
+		t.Fatalf("message = %q, want extracted upstream message", payload.Error.Message)
+	}
+
+	// Non-terminal error with JSON errText preserves original JSON.
+	normalBody := BuildErrorResponseBodyWithError(http.StatusInternalServerError, jsonErrText, errors.New("normal error"))
+	if string(normalBody) != jsonErrText {
+		t.Fatalf("expected untouched JSON for non-terminal error, got %s", string(normalBody))
+	}
+}
+
+func TestBuildErrorResponseBodyWithError_RequestTimeoutIsServerError(t *testing.T) {
+	body := BuildErrorResponseBodyWithError(http.StatusRequestTimeout, "upstream request timeout", nil)
+	var payload struct {
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error body: %v", errUnmarshal)
+	}
+	if payload.Error.Type != "server_error" {
+		t.Fatalf("type = %q, want server_error", payload.Error.Type)
+	}
+	if payload.Error.Code != "request_timeout" {
+		t.Fatalf("code = %q, want request_timeout", payload.Error.Code)
+	}
+	if payload.Error.Message != "upstream request timeout" {
+		t.Fatalf("message = %q, want upstream request timeout", payload.Error.Message)
+	}
+}
+
+func TestBuildErrorResponseBody_CompactsPrettyPrintedJSON(t *testing.T) {
+	prettyJSON := "{\n  \"error\": {\n    \"code\": 500,\n    \"message\": \"Internal error encountered.\",\n    \"status\": \"INTERNAL\"\n  }\n}"
+	body := BuildErrorResponseBody(http.StatusInternalServerError, prettyJSON)
+	if strings.Contains(string(body), "\n") {
+		t.Fatalf("expected compacted JSON without newlines for SSE compatibility, got:\n%s", string(body))
+	}
+	expected := `{"error":{"code":500,"message":"Internal error encountered.","status":"INTERNAL"}}`
+	if string(body) != expected {
+		t.Fatalf("body = %s, want %s", string(body), expected)
+	}
+}
+
+func TestEnrichAuthSelectionError_PropagatesTerminalAuth(t *testing.T) {
+	terminalErr := coreauth.NewTerminalAuthError(&coreauth.Error{
+		Code:       "auth_unavailable",
+		Message:    "no auth available",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}, errors.New("token refresh failed with status 401"))
+
+	enriched := enrichAuthSelectionError(terminalErr, []string{"codex"}, "gpt-5.6-sol")
+	if !coreauth.IsTerminalAuthError(enriched) {
+		t.Fatalf("expected IsTerminalAuthError to remain true after enrichment, got %T: %v", enriched, enriched)
 	}
 }
 
@@ -827,6 +919,17 @@ func TestStatusFromErrorMapsContextStatuses(t *testing.T) {
 	}
 	if got := statusFromError(errors.New("boom")); got != 0 {
 		t.Fatalf("statusFromError(plain) = %d, want 0", got)
+	}
+}
+
+func TestExecutionErrorMessage_UnsupportedPartKeepsNameAnd400(t *testing.T) {
+	err := &translatorcommon.UnsupportedPartError{Type: "container_upload"}
+	msg := ExecutionErrorMessage(err)
+	if msg == nil || msg.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %v", msg)
+	}
+	if msg.Error == nil || !strings.Contains(msg.Error.Error(), "container_upload") {
+		t.Fatalf("part name lost: %v", msg.Error)
 	}
 }
 

@@ -3,7 +3,7 @@ package helps
 import (
 	"bytes"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // IsGeminiTokenEvent reports whether a Google Gemini / Antigravity streaming chunk carries
@@ -28,13 +28,13 @@ func IsGeminiTokenEvent(payload []byte) bool {
 	}
 
 	// Terminal error fallback
-	if gjson.GetBytes(payload, "error.message").Exists() || gjson.GetBytes(payload, "error").Exists() || gjson.GetBytes(payload, "response.error").Exists() {
+	if ojson.GetBytesNoCopy(payload, "error.message").Exists() || ojson.GetBytesNoCopy(payload, "error").Exists() || ojson.GetBytesNoCopy(payload, "response.error").Exists() {
 		return true
 	}
 
-	candidatesNode := gjson.GetBytes(payload, "candidates")
+	candidatesNode := ojson.GetBytesNoCopy(payload, "candidates")
 	if !candidatesNode.Exists() {
-		candidatesNode = gjson.GetBytes(payload, "response.candidates")
+		candidatesNode = ojson.GetBytesNoCopy(payload, "response.candidates")
 	}
 	candidates := candidatesNode.Array()
 	if len(candidates) == 0 {
@@ -51,7 +51,7 @@ func IsGeminiTokenEvent(payload []byte) bool {
 			if len(part.Get("thoughtText").String()) > 0 {
 				return true
 			}
-			if thought := part.Get("thought"); thought.Type == gjson.String && len(thought.String()) > 0 {
+			if thought := part.Get("thought"); thought.Type == ojson.String && len(thought.String()) > 0 {
 				return true
 			}
 			if len(part.Get("functionCall.name").String()) > 0 {
@@ -75,6 +75,9 @@ func IsGeminiTokenEvent(payload []byte) bool {
 // if the frame represents the first meaningful token event. It records first-packet arrival time
 // as fallback and returns immediately with zero allocations once effective token TTFT is set.
 func ObserveGeminiTokenEvent(reporter *UsageReporter, payload []byte) {
+	if reporter != nil && len(payload) > 0 {
+		reporter.ObserveResponseModel(payload)
+	}
 	if reporter == nil || len(payload) == 0 {
 		return
 	}

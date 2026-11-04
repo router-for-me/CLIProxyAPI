@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
@@ -19,9 +19,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
-			ClientIP:      "192.0.2.10",
-			XForwardedFor: "203.0.113.5, 198.51.100.8",
-			UserAgent:     "test-client/1.0",
+			ClientIP:         "192.0.2.10",
+			ResolvedClientIP: "203.0.113.5",
+			XForwardedFor:    "203.0.113.5, 198.51.100.8",
+			UserAgent:        "test-client/1.0",
 		})
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -31,21 +32,23 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(ctx, coreusage.Record{
-			Provider:            "openai",
-			ExecutorType:        "KimiExecutor",
-			Model:               "gpt-5.4",
-			Alias:               "client-gpt",
-			APIKey:              "test-key",
-			AuthIndex:           "0",
-			AccessTokenSHA256:   "token-version-hash",
-			AuthType:            "apikey",
-			Source:              "user@example.com",
-			ReasoningEffort:     "medium",
-			ServiceTier:         "auto",
-			ResponseServiceTier: "default",
-			Generate:            coreusage.GenerateFlag(true),
-			RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-			Latency:             1500 * time.Millisecond,
+			Provider:             "openai",
+			ExecutorType:         "KimiExecutor",
+			Model:                "gpt-5.4",
+			Alias:                "client-gpt",
+			APIKey:               "test-key",
+			AuthIndex:            "0",
+			AccessTokenSHA256:    "token-version-hash",
+			AuthType:             "apikey",
+			Source:               "user@example.com",
+			ReasoningEffort:      "medium",
+			ServiceTier:          "auto",
+			EffectiveServiceTier: "priority",
+			ResponseServiceTier:  "default",
+			ResponseModel:        "gpt-5.6-luna",
+			Generate:             coreusage.GenerateFlag(true),
+			RequestedAt:          time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Latency:              1500 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 20,
@@ -66,12 +69,15 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireMissingField(t, payload, "user_api_key")
 		requireStringField(t, payload, "request_id", "ctx-request-id")
 		requireStringField(t, payload, "client_ip", "192.0.2.10")
+		requireStringField(t, payload, "resolved_client_ip", "203.0.113.5")
 		requireStringField(t, payload, "x_forwarded_for", "203.0.113.5, 198.51.100.8")
 		requireStringField(t, payload, "user_agent", "test-client/1.0")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
+		requireStringField(t, payload, "effective_service_tier", "priority")
 		requireMissingField(t, payload, "request_service_tier")
 		requireStringField(t, payload, "response_service_tier", "default")
+		requireStringField(t, payload, "response_model", "gpt-5.6-luna")
 		requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 		requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30)
 		requireTokensBoolField(t, payload, "cache_read_tokens_present", true)
@@ -219,6 +225,7 @@ func TestUsageQueuePluginEmitsSingleCanonicalAutoTier(t *testing.T) {
 
 		payload := popSinglePayload(t)
 		requireStringField(t, payload, "service_tier", "auto")
+		requireMissingField(t, payload, "effective_service_tier")
 		requireMissingField(t, payload, "request_service_tier")
 	})
 }
@@ -705,6 +712,273 @@ func TestUsageQueuePluginPayloadSameOriginFallback(t *testing.T) {
 		requireStringField(t, payload, "session_id", wantSession)
 		if _, exists := payload["parent_session_id"]; exists {
 			t.Fatalf("expected parent_session_id to be omitted when record is independent root, got %s", payload["parent_session_id"])
+		}
+	})
+}
+
+func TestUsageQueuePlugin_SchemeB_ExecutionIDAndTraceID(t *testing.T) {
+	prevEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(true)
+	SetUsageStatisticsEnabled(true)
+	t.Cleanup(func() {
+		SetEnabled(prevEnabled)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+	})
+
+	plugin := &usageQueuePlugin{}
+	ctx := internallogging.WithRequestID(context.Background(), "000000ab")
+	execUUID := "12345678-1234-4234-8234-123456789abc"
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		RequestID: execUUID,
+		TraceID:   "000000ab",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	payload := popSinglePayload(t)
+	// Scheme B: request_id preserves the 8-character hex trace ID
+	requireStringField(t, payload, "request_id", "000000ab")
+	// Scheme B: execution_id carries the UUID v4 execution instance ID
+	requireStringField(t, payload, "execution_id", execUUID)
+	// Scheme B: trace_id explicitly carries the 8-character hex trace ID
+	requireStringField(t, payload, "trace_id", "000000ab")
+}
+
+func TestUsageQueuePlugin_SchemeB_StrictLegacyRequestIDPreservation(t *testing.T) {
+	prevEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(true)
+	SetUsageStatisticsEnabled(true)
+	t.Cleanup(func() {
+		SetEnabled(prevEnabled)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+	})
+
+	plugin := &usageQueuePlugin{}
+	ctx := internallogging.WithRequestID(context.Background(), "legacy-log-id")
+	execUUID := "12345678-1234-4234-8234-123456789abc"
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		RequestID: execUUID,
+		TraceID:   "custom-trace-id",
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		Detail: coreusage.Detail{
+			InputTokens: 5,
+		},
+	})
+
+	payload := popSinglePayload(t)
+	// request_id strictly preserves legacy GetRequestID(ctx)
+	requireStringField(t, payload, "request_id", "legacy-log-id")
+	// execution_id carries the UUID v4
+	requireStringField(t, payload, "execution_id", execUUID)
+	// trace_id reflects the record.TraceID
+	requireStringField(t, payload, "trace_id", "custom-trace-id")
+}
+
+func TestUsageQueuePluginPayloadDistinguishesNativeKey(t *testing.T) {
+	withEnabledQueue(t, func() {
+		t.Run("native_key", func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(w)
+			ginCtx.Set("userApiKey", "sk-native-key-123")
+			ginCtx.Set("accessProvider", "config-inline")
+
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			ctx = internallogging.WithRequestID(ctx, "req-native-1")
+
+			plugin := &usageQueuePlugin{}
+			plugin.HandleUsage(ctx, coreusage.Record{
+				Provider: "openai",
+				Model:    "gpt-5.4",
+				APIKey:   "sk-native-key-123",
+			})
+
+			payload := popSinglePayload(t)
+			requireStringField(t, payload, "api_key", "sk-native-key-123")
+			requireBoolField(t, payload, "is_native_key", true)
+			requireStringField(t, payload, "access_provider", "config-inline")
+		})
+
+		t.Run("plugin_key", func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			ginCtx, _ := gin.CreateTestContext(w)
+			ginCtx.Set("userApiKey", "plugin-principal-456")
+			ginCtx.Set("accessProvider", "custom-auth-plugin")
+
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			ctx = internallogging.WithRequestID(ctx, "req-plugin-1")
+
+			plugin := &usageQueuePlugin{}
+			plugin.HandleUsage(ctx, coreusage.Record{
+				Provider: "openai",
+				Model:    "gpt-5.4",
+				APIKey:   "plugin-principal-456",
+			})
+
+			payload := popSinglePayload(t)
+			requireStringField(t, payload, "api_key", "plugin-principal-456")
+			requireBoolField(t, payload, "is_native_key", false)
+			requireStringField(t, payload, "access_provider", "custom-auth-plugin")
+		})
+
+		t.Run("record_explicit_native", func(t *testing.T) {
+			ctx := internallogging.WithRequestID(context.Background(), "req-explicit-1")
+
+			plugin := &usageQueuePlugin{}
+			plugin.HandleUsage(ctx, coreusage.Record{
+				Provider:       "openai",
+				Model:          "gpt-5.4",
+				APIKey:         "sk-explicit-native",
+				IsNativeKey:    true,
+				AccessProvider: "config-inline",
+			})
+
+			payload := popSinglePayload(t)
+			requireStringField(t, payload, "api_key", "sk-explicit-native")
+			requireBoolField(t, payload, "is_native_key", true)
+			requireStringField(t, payload, "access_provider", "config-inline")
+		})
+
+		t.Run("unauthenticated", func(t *testing.T) {
+			ctx := internallogging.WithRequestID(context.Background(), "req-unauth-1")
+
+			plugin := &usageQueuePlugin{}
+			plugin.HandleUsage(ctx, coreusage.Record{
+				Provider: "openai",
+				Model:    "gpt-5.4",
+			})
+
+			payload := popSinglePayload(t)
+			requireBoolField(t, payload, "is_native_key", false)
+			requireMissingField(t, payload, "access_provider")
+		})
+	})
+}
+
+func TestUsageQueuePluginEmitsFailCode(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:    "gemini",
+			Model:       "gemini-3.1-pro-preview",
+			AuthIndex:   "0",
+			AuthType:    "apikey",
+			RequestedAt: time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+			Failed:      true,
+			Fail: coreusage.Failure{
+				StatusCode: http.StatusBadGateway,
+				Body:       "upstream stream closed before finishReason",
+				Code:       coreusage.FailureStreamTruncatedCode,
+			},
+		})
+
+		payload := popSinglePayload(t)
+		raw, ok := payload["fail"]
+		if !ok {
+			t.Fatal("payload missing fail")
+		}
+		var got struct {
+			StatusCode int    `json:"status_code"`
+			Body       string `json:"body"`
+			Code       string `json:"code"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &got); errUnmarshal != nil {
+			t.Fatalf("unmarshal fail: %v", errUnmarshal)
+		}
+		if got.Code != coreusage.FailureStreamTruncatedCode {
+			t.Fatalf("fail.code = %q, want %q", got.Code, coreusage.FailureStreamTruncatedCode)
+		}
+		if got.StatusCode != http.StatusBadGateway {
+			t.Fatalf("fail.status_code = %d, want %d", got.StatusCode, http.StatusBadGateway)
+		}
+	})
+}
+
+func TestUsageQueuePluginPublishesAnthropicStructuredUsageDetails(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := internallogging.WithRequestID(context.Background(), "claude-req-1")
+		ctx = internallogging.WithEndpoint(ctx, "POST /v1/messages")
+		ctx = internallogging.WithResponseStatusHolder(ctx)
+		internallogging.SetResponseStatus(ctx, http.StatusOK)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(ctx, coreusage.Record{
+			Provider:            "claude",
+			ExecutorType:        "ClaudeExecutor",
+			Model:               "claude-opus-5-5",
+			ResponseServiceTier: "standard",
+			Detail: coreusage.Detail{
+				InputTokens:           6,
+				OutputTokens:          483,
+				ReasoningTokens:       45,
+				CachedTokens:          3036,
+				CacheReadTokens:       3036,
+				CacheCreationTokens:   8846,
+				TotalTokens:           12371,
+				CacheCreation5mTokens: coreusage.Int64Ptr(5810),
+				CacheCreation1hTokens: coreusage.Int64Ptr(3036),
+				CacheDetails: &coreusage.CacheDetails{
+					Ephemeral5mInputTokens: coreusage.Int64Ptr(5810),
+					Ephemeral1hInputTokens: coreusage.Int64Ptr(3036),
+					ByTTL:                  map[string]int64{"5m": 5810, "1h": 3036},
+				},
+				WebSearchRequests: coreusage.Int64Ptr(1),
+				ToolUsageDetails: &coreusage.ToolUsageDetails{
+					WebSearchCalls: coreusage.Int64Ptr(1),
+					WebFetchCalls:  coreusage.Int64Ptr(0),
+				},
+				Iterations: coreusage.IterationsPtr([]coreusage.IterationUsage{
+					{
+						Type:                     "message",
+						InputTokens:              coreusage.Int64Ptr(4),
+						OutputTokens:             coreusage.Int64Ptr(53),
+						CacheReadInputTokens:     coreusage.Int64Ptr(0),
+						CacheCreationInputTokens: coreusage.Int64Ptr(3036),
+						CacheCreation5mTokens:    coreusage.Int64Ptr(0),
+						CacheCreation1hTokens:    coreusage.Int64Ptr(3036),
+					},
+					{
+						Type:                     "message",
+						InputTokens:              coreusage.Int64Ptr(2),
+						OutputTokens:             coreusage.Int64Ptr(430),
+						CacheReadInputTokens:     coreusage.Int64Ptr(3036),
+						CacheCreationInputTokens: coreusage.Int64Ptr(5810),
+						CacheCreation5mTokens:    coreusage.Int64Ptr(5810),
+						CacheCreation1hTokens:    coreusage.Int64Ptr(0),
+					},
+				}),
+				Speed:        "standard",
+				InferenceGeo: "global",
+			},
+		})
+
+		payload := popSinglePayload(t)
+		tokens := requireTokensPayload(t, payload)
+		requireIntField(t, tokens, "cache_creation_5m_tokens", 5810)
+		requireIntField(t, tokens, "cache_creation_1h_tokens", 3036)
+		requireMissingField(t, tokens, "cache_creation_30m_tokens")
+		requireIntField(t, payload, "web_search_requests", 1)
+		requireStringField(t, payload, "speed", "standard")
+		requireStringField(t, payload, "inference_geo", "global")
+		if _, ok := payload["iterations"]; !ok {
+			t.Fatal("expected iterations in payload")
+		}
+		if _, ok := payload["tool_usage_details"]; !ok {
+			t.Fatal("expected tool_usage_details in payload")
 		}
 	})
 }

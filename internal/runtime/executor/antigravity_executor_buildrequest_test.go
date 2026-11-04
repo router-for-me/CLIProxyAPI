@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestResolveAntigravityRequestBaseURL(t *testing.T) {
@@ -35,9 +38,21 @@ func TestResolveAntigravityRequestBaseURL(t *testing.T) {
 	})
 }
 
-func TestAntigravityLoadCodeAssistBaseURLRemainsProdByDefault(t *testing.T) {
-	if got := antigravityLoadCodeAssistBaseURL(&cliproxyauth.Auth{}); got != antigravityBaseURLProd {
-		t.Fatalf("loadCodeAssist base URL = %q, want %q", got, antigravityBaseURLProd)
+func TestAntigravityLoadCodeAssistBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want string
+	}{
+		{"default daily", &cliproxyauth.Auth{}, antigravityBaseURLDaily},
+		{"custom attribute", &cliproxyauth.Auth{Attributes: map[string]string{"base_url": antigravityBaseURLProd + "/"}}, antigravityBaseURLProd},
+		{"custom metadata", &cliproxyauth.Auth{Metadata: map[string]any{"base_url": "https://enterprise.example.com/"}}, "https://enterprise.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityLoadCodeAssistBaseURL(tc.auth); got != tc.want {
+				t.Fatalf("loadCodeAssist base URL = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -239,17 +254,25 @@ func TestAntigravityBuildRequest_PreservesIndependentWebSearchRequestType(t *tes
 
 func TestShouldResolveAntigravityWebSearchGroundingURLsRequiresTypedWebSearchAndSearchRequest(t *testing.T) {
 	original := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
+	originalResponses := []byte(`{"tools":[{"type":"web_search"}]}`)
+	originalResponsesPreview := []byte(`{"tools":[{"type":"web_search_preview_2025_03_11"}]}`)
 	translatedWithGoogleSearch := []byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`)
 	translatedWithoutGoogleSearch := []byte(`{"request":{"contents":[]}}`)
 
 	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithGoogleSearch) {
 		t.Fatal("expected typed Claude web search translated to web_search request to resolve grounding URLs")
 	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponses, translatedWithGoogleSearch) {
+		t.Fatal("expected typed OpenAI Responses web search translated to web_search request to resolve grounding URLs")
+	}
+	if !shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAIResponse, originalResponsesPreview, translatedWithGoogleSearch) {
+		t.Fatal("expected web_search_preview_2025_03_11 translated to web_search request to resolve grounding URLs")
+	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatClaude, original, translatedWithoutGoogleSearch) {
 		t.Fatal("expected request without googleSearch to skip grounding URL resolution")
 	}
 	if shouldResolveAntigravityWebSearchGroundingURLs(sdktranslator.FormatOpenAI, original, translatedWithGoogleSearch) {
-		t.Fatal("expected non-Claude source format to skip grounding URL resolution")
+		t.Fatal("expected non-Claude/non-Responses source format to skip grounding URL resolution")
 	}
 }
 
@@ -260,7 +283,7 @@ func TestAntigravityPrepareRequestAuth_FetchesMissingProjectID(t *testing.T) {
 		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 	}}
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+		if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
 			t.Fatalf("unexpected project discovery request: %s", req.URL.String())
 		}
 		if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
@@ -336,6 +359,84 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	}
 	if got := status.StatusCode(); got != http.StatusBadRequest {
 		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	}
+}
+
+func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T) {
+	sseResponse := "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n"
+	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
+		for _, level := range []string{"low", "medium", "high"} {
+			for _, stream := range []bool{false, true} {
+				modeName := "non_stream"
+				if stream {
+					modeName = "stream"
+				}
+				t.Run(model+"/"+level+"/"+modeName, func(t *testing.T) {
+					var capturedBody []byte
+					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						raw, errRead := io.ReadAll(req.Body)
+						if errRead != nil {
+							return nil, errRead
+						}
+						if errClose := req.Body.Close(); errClose != nil {
+							return nil, errClose
+						}
+						capturedBody = raw
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": {"text/event-stream"}},
+							Body:       io.NopCloser(strings.NewReader(sseResponse)),
+							Request:    req,
+						}, nil
+					}))
+
+					executor := NewAntigravityExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{
+						ID:       "ag-claude-55-test",
+						Provider: "antigravity",
+						Metadata: map[string]any{
+							"access_token": "token",
+							"project_id":   "project-1",
+							"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+						},
+					}
+					payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"maxOutputTokens":128000,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + level + `"}}}`)
+					req := cliproxyexecutor.Request{Model: model, Payload: payload}
+					opts := cliproxyexecutor.Options{
+						SourceFormat:    sdktranslator.FormatGemini,
+						ResponseFormat:  sdktranslator.FormatGemini,
+						OriginalRequest: payload,
+						Stream:          stream,
+					}
+
+					if stream {
+						res, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+						if errStream != nil {
+							t.Fatalf("ExecuteStream() error = %v", errStream)
+						}
+						for chunk := range res.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("stream chunk error = %v", chunk.Err)
+							}
+						}
+					} else {
+						if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+							t.Fatalf("Execute() error = %v", errExec)
+						}
+					}
+
+					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
+						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, capturedBody)
+					}
+					if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+						t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
+					}
+					if include := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+						t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, capturedBody)
+					}
+				})
+			}
+		}
 	}
 }
 

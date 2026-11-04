@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/MoeForge/moego/ojson"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -429,12 +429,12 @@ func marshalAntigravityReasoningReplayHomeValue(items [][]byte, branch string) (
 	if branch == "" {
 		branch = newAntigravityReasoningReplayGeneration()
 	}
-	marker := []byte(`{"type":"","generation":"","branch":""}`)
-	marker, _ = sjson.SetBytes(marker, "type", antigravityReasoningReplayGenerationItemType)
-	marker, _ = sjson.SetBytes(marker, "generation", newAntigravityReasoningReplayGeneration())
-	marker, _ = sjson.SetBytes(marker, "branch", branch)
+	doc := ojson.NewDocString(`{"type":"","generation":"","branch":""}`)
+	_ = doc.Set("type", antigravityReasoningReplayGenerationItemType)
+	_ = doc.Set("generation", newAntigravityReasoningReplayGeneration())
+	_ = doc.Set("branch", branch)
 	stored := make([][]byte, 0, len(items)+1)
-	stored = append(stored, marker)
+	stored = append(stored, doc.Bytes())
 	stored = append(stored, items...)
 	return json.Marshal(stored)
 }
@@ -443,10 +443,10 @@ func decodeAntigravityReasoningReplayHomeValue(raw []byte) (items [][]byte, dele
 	if errUnmarshal := json.Unmarshal(raw, &items); errUnmarshal != nil {
 		return nil, false, "", "", false
 	}
-	if len(items) == 0 || strings.TrimSpace(gjson.GetBytes(items[0], "type").String()) != antigravityReasoningReplayGenerationItemType {
+	if len(items) == 0 || strings.TrimSpace(ojson.GetBytesNoCopy(items[0], "type").String()) != antigravityReasoningReplayGenerationItemType {
 		return items, false, "", "", true
 	}
-	marker := gjson.ParseBytes(items[0])
+	marker := util.ParseGJSONBytesNoCopy(items[0])
 	deleted = marker.Get("deleted").Bool()
 	generation = strings.TrimSpace(marker.Get("generation").String())
 	branch = strings.TrimSpace(marker.Get("branch").String())
@@ -466,11 +466,11 @@ func antigravityReasoningReplayItemsPrefix(prefix, items [][]byte) bool {
 }
 
 func newAntigravityReasoningReplayTombstone() []byte {
-	marker := []byte(`{"type":"","generation":"","branch":"","deleted":true}`)
-	marker, _ = sjson.SetBytes(marker, "type", antigravityReasoningReplayGenerationItemType)
-	marker, _ = sjson.SetBytes(marker, "generation", newAntigravityReasoningReplayGeneration())
-	marker, _ = sjson.SetBytes(marker, "branch", newAntigravityReasoningReplayGeneration())
-	raw, _ := json.Marshal([][]byte{marker})
+	doc := ojson.NewDocString(`{"type":"","generation":"","branch":"","deleted":true}`)
+	_ = doc.Set("type", antigravityReasoningReplayGenerationItemType)
+	_ = doc.Set("generation", newAntigravityReasoningReplayGeneration())
+	_ = doc.Set("branch", newAntigravityReasoningReplayGeneration())
+	raw, _ := json.Marshal([][]byte{doc.Bytes()})
 	return raw
 }
 
@@ -517,7 +517,7 @@ func normalizeAntigravityReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 }
 
 func normalizeAntigravityReasoningReplayItem(item []byte) ([]byte, bool) {
-	itemResult := gjson.ParseBytes(item)
+	itemResult := util.ParseGJSONBytesNoCopy(item)
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
 	case "thought_signature":
 		return normalizeAntigravityThoughtSignatureReplayItem(itemResult)
@@ -528,7 +528,7 @@ func normalizeAntigravityReasoningReplayItem(item []byte) ([]byte, bool) {
 	}
 }
 
-func normalizeAntigravityThoughtSignatureReplayItem(itemResult gjson.Result) ([]byte, bool) {
+func normalizeAntigravityThoughtSignatureReplayItem(itemResult ojson.Result) ([]byte, bool) {
 	sig := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
 	if sig == "" {
 		sig = strings.TrimSpace(itemResult.Get("thought_signature").String())
@@ -536,30 +536,30 @@ func normalizeAntigravityThoughtSignatureReplayItem(itemResult gjson.Result) ([]
 	if sig == "" || sig == "skip_thought_signature_validator" || len(sig) < minAntigravityThoughtSignatureReplayLen {
 		return nil, false
 	}
-	normalized := []byte(`{"type":"thought_signature"}`)
-	normalized, _ = sjson.SetBytes(normalized, "thoughtSignature", sig)
-	if contentIndex := itemResult.Get("contentIndex"); contentIndex.Type == gjson.Number {
-		normalized, _ = sjson.SetBytes(normalized, "contentIndex", contentIndex.Int())
+	doc := ojson.NewDocString(`{"type":"thought_signature"}`)
+	_ = doc.Set("thoughtSignature", sig)
+	if contentIndex := itemResult.Get("contentIndex"); contentIndex.Type == ojson.Number {
+		_ = doc.Set("contentIndex", contentIndex.Int())
 	}
-	if partIndex := itemResult.Get("partIndex"); partIndex.Type == gjson.Number {
-		normalized, _ = sjson.SetBytes(normalized, "partIndex", partIndex.Int())
+	if partIndex := itemResult.Get("partIndex"); partIndex.Type == ojson.Number {
+		_ = doc.Set("partIndex", partIndex.Int())
 	}
 	if targetKind := strings.TrimSpace(itemResult.Get("targetKind").String()); targetKind == "text" || targetKind == "thought" {
-		normalized, _ = sjson.SetBytes(normalized, "targetKind", targetKind)
+		_ = doc.Set("targetKind", targetKind)
 	}
 	if targetHash := strings.TrimSpace(itemResult.Get("targetHash").String()); targetHash != "" {
-		normalized, _ = sjson.SetBytes(normalized, "targetHash", targetHash)
+		_ = doc.Set("targetHash", targetHash)
 	}
-	if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Type == gjson.Number && targetOccurrence.Int() >= 0 {
-		normalized, _ = sjson.SetBytes(normalized, "targetOccurrence", targetOccurrence.Int())
+	if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Type == ojson.Number && targetOccurrence.Int() >= 0 {
+		_ = doc.Set("targetOccurrence", targetOccurrence.Int())
 	}
 	if contextHash := strings.TrimSpace(itemResult.Get("contextHash").String()); contextHash != "" {
-		normalized, _ = sjson.SetBytes(normalized, "contextHash", contextHash)
+		_ = doc.Set("contextHash", contextHash)
 	}
-	return normalized, true
+	return doc.Bytes(), true
 }
 
-func normalizeAntigravityFunctionCallPartReplayItem(itemResult gjson.Result) ([]byte, bool) {
+func normalizeAntigravityFunctionCallPartReplayItem(itemResult ojson.Result) ([]byte, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	if callID == "" {
 		callID = strings.TrimSpace(itemResult.Get("id").String())
@@ -583,33 +583,33 @@ func normalizeAntigravityFunctionCallPartReplayItem(itemResult gjson.Result) ([]
 	if name == "" || !args.Exists() {
 		return nil, false
 	}
-	normalized := []byte(`{"type":"function_call_part"}`)
+	doc := ojson.NewDocString(`{"type":"function_call_part"}`)
 	if callID != "" {
-		normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
+		_ = doc.Set("call_id", callID)
 	}
-	normalized, _ = sjson.SetBytes(normalized, "name", name)
-	if args.Type == gjson.String {
-		normalized, _ = sjson.SetBytes(normalized, "args", args.String())
+	_ = doc.Set("name", name)
+	if args.Type == ojson.String {
+		_ = doc.Set("args", args.String())
 	} else {
-		normalized, _ = sjson.SetRawBytes(normalized, "args", []byte(args.Raw))
+		_ = doc.SetRaw("args", args.Raw)
 	}
 	sig := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
 	if sig != "" && sig != "skip_thought_signature_validator" {
-		normalized, _ = sjson.SetBytes(normalized, "thoughtSignature", sig)
+		_ = doc.Set("thoughtSignature", sig)
 	}
-	if contentIndex := itemResult.Get("contentIndex"); contentIndex.Type == gjson.Number {
-		normalized, _ = sjson.SetBytes(normalized, "contentIndex", contentIndex.Int())
+	if contentIndex := itemResult.Get("contentIndex"); contentIndex.Type == ojson.Number {
+		_ = doc.Set("contentIndex", contentIndex.Int())
 	}
-	if partIndex := itemResult.Get("partIndex"); partIndex.Type == gjson.Number {
-		normalized, _ = sjson.SetBytes(normalized, "partIndex", partIndex.Int())
+	if partIndex := itemResult.Get("partIndex"); partIndex.Type == ojson.Number {
+		_ = doc.Set("partIndex", partIndex.Int())
 	}
-	if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Type == gjson.Number && targetOccurrence.Int() >= 0 {
-		normalized, _ = sjson.SetBytes(normalized, "targetOccurrence", targetOccurrence.Int())
+	if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Type == ojson.Number && targetOccurrence.Int() >= 0 {
+		_ = doc.Set("targetOccurrence", targetOccurrence.Int())
 	}
 	if contextHash := strings.TrimSpace(itemResult.Get("contextHash").String()); contextHash != "" {
-		normalized, _ = sjson.SetBytes(normalized, "contextHash", contextHash)
+		_ = doc.Set("contextHash", contextHash)
 	}
-	return normalized, true
+	return doc.Bytes(), true
 }
 
 func cloneAntigravityReasoningReplayItems(items [][]byte) [][]byte {

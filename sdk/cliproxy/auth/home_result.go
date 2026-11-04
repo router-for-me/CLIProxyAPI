@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 const homeResultExecutorType = "home-result"
@@ -46,12 +46,22 @@ func (m *Manager) reportHomeUnauthorized(ctx context.Context, auth *Auth, provid
 	if alias == "" {
 		alias = model
 	}
+	accessProvider := coreusage.AccessProviderFromContext(ctx)
+	isNativeKey := false
+	if nativeExplicit, ok := coreusage.IsNativeKeyFromContext(ctx); ok {
+		isNativeKey = nativeExplicit
+	} else if accessProvider != "" {
+		isNativeKey = coreusage.IsNativeAccessProvider(accessProvider)
+	}
 	clientMeta := logging.GetClientRequestMetadata(ctx)
 	coreusage.PublishRecord(ctx, coreusage.Record{
 		Provider:          provider,
 		ExecutorType:      homeResultExecutorType,
 		Model:             model,
 		Alias:             alias,
+		APIKey:            coreusage.APIKeyFromContext(ctx),
+		IsNativeKey:       isNativeKey,
+		AccessProvider:    accessProvider,
 		SessionID:         clientMeta.SessionID,
 		ParentSessionID:   clientMeta.ParentSessionID,
 		AuthID:            auth.ID,

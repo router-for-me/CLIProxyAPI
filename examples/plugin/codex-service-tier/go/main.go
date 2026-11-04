@@ -39,9 +39,9 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -213,7 +213,7 @@ func decodeFastConfig(configYAML []byte) (bool, error) {
 }
 
 func setPriorityServiceTier(body []byte) ([]byte, bool) {
-	updated, errSet := sjson.SetBytes(body, "service_tier", "priority")
+	updated, errSet := ojson.SetBytes(body, "service_tier", "priority")
 	if errSet != nil {
 		return nil, false
 	}

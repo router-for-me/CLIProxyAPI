@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,8 +27,15 @@ type callbackForwarder struct {
 }
 
 func isWebUIRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
 	raw := strings.TrimSpace(c.Query("is_webui"))
 	if raw == "" {
+		if val, ok := c.Get(oauthSessionIsWebUIContextKey); ok {
+			b, _ := val.(bool)
+			return b
+		}
 		return false
 	}
 	switch strings.ToLower(raw) {
@@ -144,28 +153,20 @@ func (h *Handler) managementCallbackURL(path string) (string, error) {
 	return fmt.Sprintf("%s://127.0.0.1:%d%s", scheme, h.cfg.Port, path), nil
 }
 
-func pluginAuthProviderFromPath(path string) (string, bool) {
-	path = strings.TrimSpace(path)
-	const prefix = "/v0/management/"
-	const suffix = "-auth-url"
-	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
-		return "", false
-	}
-	provider := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	if provider == "" {
-		return "", false
-	}
-	for _, r := range provider {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= '0' && r <= '9':
-		case r == '-':
-		default:
+func pluginAuthProviderFromURL(requestURL *url.URL) (string, bool) {
+	path := strings.TrimSpace(requestURL.Path)
+	var provider string
+	if path == "/v8/management/oauth/auth-url" {
+		provider = requestURL.Query().Get("provider")
+	} else {
+		const prefix, suffix = "/v0/management/", "-auth-url"
+		if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 			return "", false
 		}
+		provider = strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
 	}
-	return provider, true
+	provider, errNormalize := NormalizePluginOAuthCallbackProvider(provider)
+	return provider, errNormalize == nil
 }
 
 func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
@@ -178,24 +179,51 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 	if host == nil {
 		return false
 	}
-	provider, ok := pluginAuthProviderFromPath(c.Request.URL.Path)
+	provider, ok := pluginAuthProviderFromURL(c.Request.URL)
+	if !ok && strings.TrimSpace(c.Request.URL.Path) == "/v8/management/oauth/auth-url" {
+		normalized, errNormalize := NormalizePluginOAuthCallbackProvider(oauthSessionProviderFromContext(c))
+		if errNormalize == nil {
+			provider, ok = normalized, true
+		}
+	}
 	if !ok || !host.HasAuthProvider(provider) {
 		return false
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
 	ctx := PopulateAuthContext(context.Background(), c)
-	baseURL, errBaseURL := h.managementCallbackURL("/v0/management/oauth-callback")
+	if sessionProxyURL != "" {
+		ctx = pluginhost.WithOAuthProxyURL(ctx, sessionProxyURL)
+	}
+	callbackPath := "/v0/management/oauth-callback"
+	query := c.Request.URL.Query()
+	if c.Request.URL.Path == "/v8/management/oauth/auth-url" {
+		callbackPath = "/v8/management/oauth/callback"
+		query.Del("provider")
+	}
+	baseURL, errBaseURL := h.managementCallbackURL(callbackPath)
 	if errBaseURL != nil {
 		log.WithError(errBaseURL).Error("failed to compute plugin auth callback URL")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL)
+	metadata := queryValuesToMetadata(query)
+	if extraMeta := oauthSessionExtraMetadataFromContext(c); len(extraMeta) > 0 {
+		if metadata == nil {
+			metadata = make(map[string]any, len(extraMeta))
+		}
+		for k, v := range extraMeta {
+			if _, exists := metadata[k]; !exists {
+				metadata[k] = v
+			}
+		}
+	}
+	resp, handled, errStart := host.StartLogin(ctx, provider, baseURL, metadata)
 	if !handled {
 		return false
 	}
 	if errStart != nil {
-		log.WithError(errStart).Error("failed to start plugin auth login")
+		log.Errorf("failed to start plugin auth login: %s", redactSessionProxyInString(errStart.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
@@ -210,11 +238,34 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "invalid oauth state"})
 		return true
 	}
-	if errRegister := RegisterPluginOAuthSession(state, provider, resp.Metadata); errRegister != nil {
+	if errRegister := RegisterPluginOAuthSessionWithProxy(state, provider, resp.Metadata, sessionProxyURL); errRegister != nil {
 		log.WithError(errRegister).WithField("provider", provider).Error("failed to register plugin oauth session")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to generate authorization url"})
 		return true
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": resp.URL, "state": state})
+	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
+	if hasSessionTarget {
+		SetOAuthSessionTarget(state, sessionTarget)
+	}
+	respPayload := gin.H{"status": "ok", "url": resp.URL, "state": state}
+	if hasSessionTarget {
+		respPayload["target_auth_id"] = sessionTarget.AuthID
+	}
+	c.JSON(http.StatusOK, respPayload)
 	return true
+}
+
+func queryValuesToMetadata(values url.Values) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	metadata := make(map[string]any, len(values))
+	for k, v := range values {
+		if len(v) == 1 {
+			metadata[k] = v[0]
+		} else if len(v) > 1 {
+			metadata[k] = append([]string(nil), v...)
+		}
+	}
+	return metadata
 }

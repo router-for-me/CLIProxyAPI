@@ -6,11 +6,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
@@ -49,11 +50,11 @@ func (codexEmptyIncompleteStreamError) IsRequestScoped() bool {
 // response.completed.response.output empty. Keep the stream path aligned with the
 // already-patched non-stream path by reconstructing response.output from those items.
 func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback *[][]byte) {
-	itemResult := gjson.GetBytes(eventData, "item")
-	if !itemResult.Exists() || itemResult.Type != gjson.JSON {
+	itemResult := ojson.GetBytesNoCopy(eventData, "item")
+	if !itemResult.Exists() || itemResult.Type != ojson.JSON {
 		return
 	}
-	outputIndexResult := gjson.GetBytes(eventData, "output_index")
+	outputIndexResult := ojson.GetBytesNoCopy(eventData, "output_index")
 	if outputIndexResult.Exists() {
 		outputItemsByIndex[outputIndexResult.Int()] = []byte(itemResult.Raw)
 		return
@@ -61,12 +62,12 @@ func collectCodexOutputItemDone(eventData []byte, outputItemsByIndex map[int64][
 	*outputItemsFallback = append(*outputItemsFallback, []byte(itemResult.Raw))
 }
 
-func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []gjson.Result, outputItemsByIndex map[int64][]byte) []byte {
-	patchedData := eventData
+func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []ojson.Result, outputItemsByIndex map[int64][]byte) []byte {
+	var doc *ojson.Doc
+	changed := false
 	for outputIndex, outputItem := range outputItems {
-		itemData := []byte(outputItem.Raw)
-		itemID := gjson.GetBytes(itemData, "id")
-		if itemID.Exists() && itemID.Type != gjson.Null && (itemID.Type != gjson.String || strings.TrimSpace(itemID.String()) != "") {
+		itemID := outputItem.Get("id")
+		if itemID.Exists() && itemID.Type != ojson.Null && (itemID.Type != ojson.String || strings.TrimSpace(itemID.String()) != "") {
 			continue
 		}
 
@@ -74,22 +75,26 @@ func hydrateCodexCompletedOutputItemIDs(eventData []byte, outputItems []gjson.Re
 		if !ok {
 			continue
 		}
-		completedID := gjson.GetBytes(completedItem, "id")
-		if completedID.Type != gjson.String || strings.TrimSpace(completedID.String()) == "" {
+		completedID := ojson.GetBytesNoCopy(completedItem, "id")
+		if completedID.Type != ojson.String || strings.TrimSpace(completedID.String()) == "" {
 			continue
 		}
 
-		updatedData, errSet := sjson.SetRawBytes(patchedData, "response.output."+strconv.Itoa(outputIndex)+".id", []byte(completedID.Raw))
-		if errSet != nil {
-			continue
+		if doc == nil {
+			doc = ojson.NewDoc(eventData)
 		}
-		patchedData = updatedData
+		if errSet := doc.SetRawBytes("response.output."+strconv.Itoa(outputIndex)+".id", []byte(completedID.Raw)); errSet == nil {
+			changed = true
+		}
 	}
-	return patchedData
+	if !changed || doc == nil {
+		return eventData
+	}
+	return doc.Bytes()
 }
 
 func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]byte, outputItemsFallback [][]byte) []byte {
-	outputResult := gjson.GetBytes(eventData, "response.output")
+	outputResult := ojson.GetBytesNoCopy(eventData, "response.output")
 	if outputResult.Exists() && outputResult.IsArray() && len(outputResult.Array()) > 0 {
 		return hydrateCodexCompletedOutputItemIDs(eventData, outputResult.Array(), outputItemsByIndex)
 	}
@@ -135,7 +140,7 @@ func patchCodexCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]
 		outputArray = buf.Bytes()
 	}
 
-	completedDataPatched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
+	completedDataPatched, _ := ojson.SetRawBytes(eventData, "response.output", outputArray)
 	return completedDataPatched
 }
 
@@ -176,33 +181,33 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 
 func codexTerminalFailureStatus(body []byte) int {
 	for _, path := range []string{"error.status_code", "error.status"} {
-		if status := int(gjson.GetBytes(body, path).Int()); status >= 400 && status <= 599 {
+		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
 			return status
 		}
 	}
 
-	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
-	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
+	errorType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
 	switch {
 	case errorCode == "cyber_policy":
 		return http.StatusBadRequest
-	case errorType == "invalid_request_error", errorType == "bad_request_error":
-		return http.StatusBadRequest
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
 	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
 		return http.StatusUnauthorized
 	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
 		return http.StatusForbidden
-	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
-		return http.StatusNotFound
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error", errorType == "bad_request_error":
+		return http.StatusBadRequest
 	default:
 		return http.StatusBadGateway
 	}
 }
 
 func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	var body []byte
 	switch eventType {
 	case "error":
@@ -221,6 +226,9 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	if len(body) == 0 {
 		body = []byte(`{"error":{"message":"upstream stream failed without error details"}}`)
 	}
+	if seq := ojson.GetBytesNoCopy(eventData, "sequence_number"); seq.Exists() {
+		body, _ = ojson.SetBytes(body, "sequence_number", seq.Int())
+	}
 	return body, true
 }
 
@@ -228,7 +236,7 @@ func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	if codexTerminalErrorIsContextLength(body) {
 		return true
 	}
-	if isCodexUsageLimitError(body) || isCodexModelCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
 		return true
 	}
 	code, _, ok := codexStatusErrorClassification(http.StatusBadRequest, body)
@@ -236,69 +244,69 @@ func codexTerminalStreamErrShouldHandle(body []byte) bool {
 }
 
 func codexTerminalErrorBody(eventData []byte, path string) []byte {
-	errorResult := gjson.GetBytes(eventData, path)
+	errorResult := ojson.GetBytesNoCopy(eventData, path)
 	if !errorResult.Exists() {
 		return nil
 	}
-	body := []byte(`{"error":{}}`)
-	if errorResult.Type == gjson.JSON {
-		body, _ = sjson.SetRawBytes(body, "error", []byte(errorResult.Raw))
+	doc := ojson.NewDoc([]byte(`{"error":{}}`))
+	if errorResult.Type == ojson.JSON {
+		_ = doc.SetRawBytes("error", []byte(errorResult.Raw))
 	} else if message := strings.TrimSpace(errorResult.String()); message != "" {
-		body, _ = sjson.SetBytes(body, "error.message", message)
+		_ = doc.Set("error.message", message)
 	}
-	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
-		if message := strings.TrimSpace(gjson.GetBytes(eventData, "response.error.message").String()); message != "" {
-			body, _ = sjson.SetBytes(body, "error.message", message)
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		if message := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "response.error.message").String()); message != "" {
+			_ = doc.Set("error.message", message)
 		}
 	}
-	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
-		if code := strings.TrimSpace(gjson.GetBytes(body, "error.code").String()); code != "" {
-			body, _ = sjson.SetBytes(body, "error.message", code)
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
+			_ = doc.Set("error.message", code)
 		}
 	}
-	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
-		if errorType := strings.TrimSpace(gjson.GetBytes(body, "error.type").String()); errorType != "" {
-			body, _ = sjson.SetBytes(body, "error.message", errorType)
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		if errorType := strings.TrimSpace(doc.Get("error.type").String()); errorType != "" {
+			_ = doc.Set("error.message", errorType)
 		}
 	}
-	return body
+	return doc.Bytes()
 }
 
 func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
-	message := strings.TrimSpace(gjson.GetBytes(eventData, "message").String())
-	code := strings.TrimSpace(gjson.GetBytes(eventData, "code").String())
-	errorType := strings.TrimSpace(gjson.GetBytes(eventData, "error_type").String())
-	param := strings.TrimSpace(gjson.GetBytes(eventData, "param").String())
+	message := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "message").String())
+	code := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "code").String())
+	errorType := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "error_type").String())
+	param := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "param").String())
 	if message == "" && code == "" && errorType == "" && param == "" {
 		return nil
 	}
 
-	body := []byte(`{"error":{}}`)
+	doc := ojson.NewDoc([]byte(`{"error":{}}`))
 	if message != "" {
-		body, _ = sjson.SetBytes(body, "error.message", message)
+		_ = doc.Set("error.message", message)
 	}
 	if code != "" {
-		body, _ = sjson.SetBytes(body, "error.code", code)
+		_ = doc.Set("error.code", code)
 	}
 	if errorType != "" {
-		body, _ = sjson.SetBytes(body, "error.type", errorType)
+		_ = doc.Set("error.type", errorType)
 	}
 	if param != "" {
-		body, _ = sjson.SetBytes(body, "error.param", param)
+		_ = doc.Set("error.param", param)
 	}
-	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
 		if code != "" {
-			body, _ = sjson.SetBytes(body, "error.message", code)
+			_ = doc.Set("error.message", code)
 		} else if errorType != "" {
-			body, _ = sjson.SetBytes(body, "error.message", errorType)
+			_ = doc.Set("error.message", errorType)
 		}
 	}
-	return body
+	return doc.Bytes()
 }
 
 func codexTerminalErrorIsContextLength(body []byte) bool {
-	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	message := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.message").String()))
 	return errorCode == "context_length_exceeded" ||
 		errorCode == "context_too_large" ||
 		strings.Contains(message, "context window") ||
@@ -310,17 +318,33 @@ func newCodexStatusErr(statusCode int, body []byte) statusErr {
 	return newCodexStatusErrWithCooling(statusCode, body, false)
 }
 
+func newCodexStatusErrWithHeaders(statusCode int, headers http.Header, body []byte) statusErr {
+	return newCodexStatusErrWithHeadersAndCooling(statusCode, headers, body, false)
+}
+
 func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling bool) statusErr {
+	return newCodexStatusErrWithHeadersAndCooling(statusCode, nil, body, modelLevelCooling)
+}
+
+func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
-	if isCodexModelCapacityError(body) || isUsageLimit {
+	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
+	if transientCapacity || isUsageLimit {
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped}
+	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
+	// A usage_limit_reached body reset describes quota recovery and wins over
+	// the generic Retry-After header. Every other 429 honours the upstream
+	// header so per-turn admission limits cool until their real deadline.
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
+	} else if errCode == http.StatusTooManyRequests {
+		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
+			err.retryAfter = retryAfter
+		}
 	}
 	return err
 }
@@ -330,9 +354,9 @@ func classifyCodexStatusError(statusCode int, body []byte) []byte {
 	if !ok {
 		return body
 	}
-	message := gjson.GetBytes(body, "error.message").String()
+	message := ojson.GetBytesNoCopy(body, "error.message").String()
 	if message == "" {
-		message = gjson.GetBytes(body, "message").String()
+		message = ojson.GetBytesNoCopy(body, "message").String()
 	}
 	if message == "" {
 		message = strings.TrimSpace(string(body))
@@ -340,21 +364,21 @@ func classifyCodexStatusError(statusCode int, body []byte) []byte {
 	if message == "" {
 		message = http.StatusText(statusCode)
 	}
-	out := []byte(`{"error":{}}`)
-	out, _ = sjson.SetBytes(out, "error.message", message)
-	out, _ = sjson.SetBytes(out, "error.type", errType)
-	out, _ = sjson.SetBytes(out, "error.code", code)
-	return out
+	doc := ojson.NewDoc([]byte(`{"error":{}}`))
+	_ = doc.Set("error.message", message)
+	_ = doc.Set("error.type", errType)
+	_ = doc.Set("error.code", code)
+	return doc.Bytes()
 }
 
 func codexStatusErrorClassification(statusCode int, body []byte) (code string, errType string, ok bool) {
-	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	errorMessage := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.message").String()))
 	if errorMessage == "" {
-		errorMessage = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+		errorMessage = strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "message").String()))
 	}
 	lower := strings.ToLower(strings.TrimSpace(string(body)))
-	upstreamCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	upstreamType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
+	upstreamCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	upstreamType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
 	isInvalidRequest := upstreamType == "" || upstreamType == "invalid_request_error"
 
 	switch {
@@ -371,13 +395,99 @@ func codexStatusErrorClassification(statusCode int, body []byte) (code string, e
 	}
 }
 
+// isCodexTurnRateLimitError reports whether the error body is Codex's
+// per-turn admission rejection (issue 7017): the upstream is at capacity for
+// this turn while the credential quota is not exhausted. The stable signal
+// is the dedicated error code; when the code is absent, a rate_limit_error
+// whose message says the service is at capacity is accepted. Generic
+// rate_limit_exceeded rejections are intentionally excluded: they keep their
+// existing generic 429 handling.
+func isCodexTurnRateLimitError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	codes := []string{
+		ojson.GetBytesNoCopy(errorBody, "error.code").String(),
+		ojson.GetBytesNoCopy(errorBody, "code").String(),
+		ojson.GetBytesNoCopy(errorBody, "body.error.code").String(),
+	}
+	hasOtherCode := false
+	for _, candidate := range codes {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(candidate, "turn_rate_limit_exceeded") {
+			return true
+		}
+		hasOtherCode = true
+	}
+	// The capacity-message fallback applies only when no dedicated error
+	// code is present; an explicit other code keeps its existing handling.
+	if hasOtherCode {
+		return false
+	}
+	errorTypes := []string{
+		ojson.GetBytesNoCopy(errorBody, "error.type").String(),
+		ojson.GetBytesNoCopy(errorBody, "type").String(),
+		ojson.GetBytesNoCopy(errorBody, "body.error.type").String(),
+	}
+	rateLimitTyped := false
+	for _, candidate := range errorTypes {
+		if strings.EqualFold(strings.TrimSpace(candidate), "rate_limit_error") {
+			rateLimitTyped = true
+			break
+		}
+	}
+	if !rateLimitTyped {
+		return false
+	}
+	messages := []string{
+		ojson.GetBytesNoCopy(errorBody, "error.message").String(),
+		ojson.GetBytesNoCopy(errorBody, "message").String(),
+		ojson.GetBytesNoCopy(errorBody, "body.error.message").String(),
+	}
+	for _, candidate := range messages {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(candidate)), "at capacity") {
+			return true
+		}
+	}
+	return false
+}
+
+// codexErrorCodeOf returns the dedicated error code across the layouts the
+// Codex upstream uses.
+func codexErrorCodeOf(errorBody []byte) string {
+	for _, path := range []string{"error.code", "code", "body.error.code"} {
+		if code := strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String()); code != "" {
+			return strings.Clone(code)
+		}
+	}
+	return ""
+}
+
+// isCodexTransientCapacityError covers every Codex capacity rejection that
+// is transient and model-scoped: the legacy model-at-capacity wording and
+// the per-turn admission rejection. An explicit error code other than the
+// capacity codes keeps its existing handling, so a generic
+// rate_limit_exceeded rejection is never downgraded by message text.
+func isCodexTransientCapacityError(errorBody []byte) bool {
+	if code := codexErrorCodeOf(errorBody); code != "" &&
+		!strings.EqualFold(code, "turn_rate_limit_exceeded") &&
+		!strings.EqualFold(code, "model_at_capacity") &&
+		!strings.EqualFold(code, "model_is_at_capacity") {
+		return false
+	}
+	return isCodexModelCapacityError(errorBody) || isCodexTurnRateLimitError(errorBody)
+}
+
 func isCodexModelCapacityError(errorBody []byte) bool {
 	if len(errorBody) == 0 {
 		return false
 	}
 	candidates := []string{
-		gjson.GetBytes(errorBody, "error.message").String(),
-		gjson.GetBytes(errorBody, "message").String(),
+		ojson.GetBytesNoCopy(errorBody, "error.message").String(),
+		ojson.GetBytesNoCopy(errorBody, "message").String(),
 		string(errorBody),
 	}
 	for _, candidate := range candidates {
@@ -385,8 +495,10 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		if lower == "" {
 			continue
 		}
-		if strings.Contains(lower, "selected model is at capacity") ||
-			strings.Contains(lower, "model is at capacity. please try a different model") {
+		if strings.Contains(lower, "model is at capacity") ||
+			strings.Contains(lower, "model_at_capacity") ||
+			strings.Contains(lower, "model_is_at_capacity") ||
+			(strings.Contains(lower, "model") && strings.Contains(lower, "at capacity")) {
 			return true
 		}
 	}
@@ -404,8 +516,9 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 		return false
 	}
 	candidates := []string{
-		gjson.GetBytes(errorBody, "error.type").String(),
-		gjson.GetBytes(errorBody, "type").String(),
+		ojson.GetBytesNoCopy(errorBody, "error.type").String(),
+		ojson.GetBytesNoCopy(errorBody, "type").String(),
+		ojson.GetBytesNoCopy(errorBody, "body.error.type").String(),
 	}
 	for _, candidate := range candidates {
 		if strings.EqualFold(strings.TrimSpace(candidate), "usage_limit_reached") {
@@ -419,7 +532,7 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
 	}
-	for _, quota := range []gjson.Result{gjson.GetBytes(errorBody, "error"), gjson.ParseBytes(errorBody)} {
+	for _, quota := range []ojson.Result{ojson.GetBytesNoCopy(errorBody, "error"), util.ParseGJSONBytesNoCopy(errorBody), ojson.GetBytesNoCopy(errorBody, "body.error")} {
 		if !strings.EqualFold(strings.TrimSpace(quota.Get("type").String()), "usage_limit_reached") {
 			continue
 		}
@@ -438,30 +551,160 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	return nil
 }
 
-// codexBootstrapMaxBufferedEvents bounds how many handshake metadata events may be held
-// back while probing for an upstream rejection embedded in an HTTP 200 stream. The websocket
-// transport prefixes response events with codex.response.metadata and codex.rate_limits frames,
-// so the limit must comfortably exceed the four handshake frames observed in practice. Once the
-// limit is reached the stream is released and the original unbuffered semantics apply.
-const codexBootstrapMaxBufferedEvents = 16
+// codexBootstrapNowMu protects codexBootstrapNow across concurrent tests and goroutines.
+var (
+	codexBootstrapNowMu sync.RWMutex
+	codexBootstrapNow   = time.Now
+)
 
-// isCodexHandshakeMetadataEvent reports whether an event carries no generated output and is
-// therefore safe to hold back before the downstream response headers are committed. Keeping a type
-// allow-list rather than a fixed event count matters for the websocket transport, where the
-// handshake frames arrive before response.created and would otherwise exhaust a small counter
-// before the rejection event is seen.
-func isCodexHandshakeMetadataEvent(eventType string) bool {
-	switch eventType {
-	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata":
+func nowCodexBootstrap() time.Time {
+	codexBootstrapNowMu.RLock()
+	fn := codexBootstrapNow
+	codexBootstrapNowMu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return time.Now()
+}
+
+func setCodexBootstrapNowForTest(fn func() time.Time) func() {
+	codexBootstrapNowMu.Lock()
+	orig := codexBootstrapNow
+	codexBootstrapNow = fn
+	codexBootstrapNowMu.Unlock()
+	return func() {
+		codexBootstrapNowMu.Lock()
+		codexBootstrapNow = orig
+		codexBootstrapNowMu.Unlock()
+	}
+}
+
+// codexBootstrapMaxBufferedFrames bounds how many upstream frames may be held back while probing
+// for a rejection embedded in an HTTP 200 stream. It counts frames read from the upstream, not
+// chunks handed downstream: a frame the downstream translator does not recognise renders as zero
+// chunks, so a chunk count is a bound only for the formats that happen to render every frame.
+//
+// The two transports spend the budget differently: the SSE executor charges one unit per line it
+// holds, the websocket executor one per message it reads whether or not it holds it. So the same
+// number protects 15 heartbeats under the three-line event:/data:/blank shape a keepalive arrives
+// in - 45 lines, with the rejection frame's own event: line spending a 46th - and more under terser
+// framings; config.example.yaml lists the measured count for each. It is sized for that worst case
+// rather than for a fixed event count, because deriving the unit from the framing is what lets an
+// upstream evade the bound.
+const codexBootstrapMaxBufferedFrames = 48
+
+// codexBootstrapMaxBufferedBytes caps what a single bootstrap retains, counted over the upstream
+// frames and the chunks they translate into. A frame budget alone would not bound that: on SSE
+// scanner.Buffer allows 50MB per line, and the websocket dialer sets no read limit at all. The check
+// runs before the frame is taken, so one oversized frame cannot be admitted on the strength of an
+// empty buffer - but it bounds what is retained, not the peak: the transport has already
+// materialised the frame by the time it is consulted.
+const codexBootstrapMaxBufferedBytes = 1 << 20
+
+// isCodexBootstrapBufferableEvent reports whether a frame may be held back before the downstream
+// response headers are committed, i.e. whether nothing observable has happened yet.
+//
+// The list is closed on purpose. "Nothing has happened yet" cannot be derived from the absence of a
+// TTFT token: TTFT deliberately ignores server-side tool traffic such as
+// response.shell_call_output_content.delta and its .done counterpart, and holding one of those back
+// would let a later rejection replay a tool call, and its side effects, on another credential. An
+// unrecognised frame therefore releases the stream.
+//
+// Beyond the handshake preamble the list covers what upstream interleaves before the first token:
+// keepalive heartbeats, and the *.added frames that announce an item or part with no content yet.
+func isCodexBootstrapBufferableEvent(eventType string, payload []byte) bool {
+	// An empty data: frame is the SSE heartbeat idiom and carries nothing at all, which is how the
+	// websocket loop already treats an empty message. Without this it would fall through to the
+	// default and release the stream, turning the feature off for any upstream that sends one.
+	if len(bytes.TrimSpace(payload)) == 0 {
 		return true
+	}
+	switch eventType {
+	// response.metadata carries prompt-moderation flags, not generated output. Upstream now sends it
+	// between response.in_progress and a server_is_overloaded rejection, so releasing on it leaked
+	// the rejection to the client instead of failing over (issue #6856).
+	case "response.created", "response.in_progress", "codex.rate_limits", "codex.response.metadata", "response.metadata", "keepalive":
+		return true
+	case "response.output_item.added":
+		return isCodexBufferableOutputItem(payload)
+	case "response.content_part.added":
+		return isCodexEmptyPart(payload)
+	case "response.reasoning_summary_part.added":
+		return isCodexEmptyPart(payload)
 	default:
 		return false
 	}
 }
 
-// observeCodexTokenEvent inspects a stream payload and marks TTFT on the first substantive token event.
+// isCodexBufferableOutputItem reports whether an announced output item is one the model produces by
+// itself and has not started producing, so nothing is running upstream yet. The emptiness checks
+// cover message and reasoning text, tool arguments, and encrypted reasoning. Every other item type
+// is released, which covers the server-side operations that may already have been dispatched - a
+// web_search_call is announced with status "in_progress" and its searching event follows
+// immediately, and failing the attempt over after one would run it again on another credential - and
+// errs the same way for anything else this list has not been taught about.
+func isCodexBufferableOutputItem(payload []byte) bool {
+	item := ojson.GetBytesNoCopy(payload, "item")
+	switch item.Get("type").String() {
+	case "message":
+		return isCodexEmptyContentList(item.Get("content"))
+	case "reasoning":
+		if item.Get("encrypted_content").String() != "" {
+			return false
+		}
+		return isCodexEmptyContentList(item.Get("summary")) && isCodexEmptyContentList(item.Get("content"))
+	case "function_call":
+		return item.Get("arguments").String() == ""
+	case "custom_tool_call":
+		return item.Get("input").String() == ""
+	default:
+		return false
+	}
+}
+
+// isCodexEmptyContentList reports whether every entry of an item's content or summary array is a
+// textual shape this list knows about and is still empty. An entry whose type is not on the list may
+// carry content in a field this check cannot see - an output_audio entry keeps it in "audio" - so it
+// is treated as already produced.
+func isCodexEmptyContentList(list ojson.Result) bool {
+	for _, entry := range list.Array() {
+		switch entry.Get("type").String() {
+		case "output_text", "summary_text", "text", "reasoning_text":
+			if entry.Get("text").String() != "" {
+				return false
+			}
+		case "refusal":
+			if entry.Get("refusal").String() != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isCodexEmptyPart reports whether an announced part is a textual one that is still empty. The part
+// type is matched against a closed list for the same reason the event type is: a part shape this
+// list has not been taught about may carry content in a field the emptiness check cannot see, so it
+// releases the stream instead.
+func isCodexEmptyPart(payload []byte) bool {
+	part := ojson.GetBytesNoCopy(payload, "part")
+	switch part.Get("type").String() {
+	case "output_text", "summary_text", "text", "reasoning_text":
+		return part.Get("text").String() == ""
+	case "refusal":
+		return part.Get("refusal").String() == ""
+	default:
+		return false
+	}
+}
+
+// observeCodexTokenEvent inspects a stream payload, marks TTFT on the first substantive
+// token event, and records the model the upstream reports serving.
 func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 	helps.ObserveResponsesTokenEvent(reporter, payload)
+	reporter.ObserveResponseModel(payload)
 }
 
 // newCodexBootstrapOverloadErr reports a buffered overload rejection with its real status.
@@ -479,11 +722,14 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
 func isCodexOverloadBootstrapFailure(body []byte) bool {
-	errorType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.type").String()))
-	errorCode := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.code").String()))
-	errorMessage := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if isCodexTransientCapacityError(body) {
+		return true
+	}
+	errorType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	errorMessage := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.message").String()))
 	if errorMessage == "" {
-		errorMessage = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+		errorMessage = strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "message").String()))
 	}
 	switch {
 	case errorType == "service_unavailable_error", errorCode == "server_is_overloaded":

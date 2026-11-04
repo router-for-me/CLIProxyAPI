@@ -3,31 +3,40 @@ package common
 import (
 	"strings"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-// SetResponsesToolCallIdentity writes a resolved Responses tool name and namespace.
-func SetResponsesToolCallIdentity(item []byte, name, namespace, itemPath string) []byte {
+// SetResponsesToolCallIdentityDoc writes a resolved Responses tool name and namespace into doc.
+func SetResponsesToolCallIdentityDoc(doc *ojson.Doc, name, namespace, itemPath string) {
+	if doc == nil {
+		return
+	}
 	namePath := "name"
 	namespacePath := "namespace"
 	if itemPath != "" {
 		namePath = itemPath + ".name"
 		namespacePath = itemPath + ".namespace"
 	}
-	item, _ = sjson.SetBytes(item, namePath, name)
+	_ = doc.Set(namePath, name)
 	if namespace != "" {
-		item, _ = sjson.SetBytes(item, namespacePath, namespace)
+		_ = doc.Set(namespacePath, namespace)
 	} else {
-		item, _ = sjson.DeleteBytes(item, namespacePath)
+		_ = doc.Delete(namespacePath)
 	}
-	return item
+}
+
+// SetResponsesToolCallIdentity writes a resolved Responses tool name and namespace.
+func SetResponsesToolCallIdentity(item []byte, name, namespace, itemPath string) []byte {
+	doc := ojson.NewDoc(item)
+	SetResponsesToolCallIdentityDoc(doc, name, namespace, itemPath)
+	return doc.Bytes()
 }
 
 // ExtractResponsesCallID extracts the tool call ID from a Responses API item,
 // prioritizing dedicated tool call references over generic item IDs:
-// call_id -> tool_call_id -> callId -> id
-func ExtractResponsesCallID(node gjson.Result) string {
+// call_id -> tool_call_id -> callId -> id (excluding fco_ output item IDs)
+func ExtractResponsesCallID(node ojson.Result) string {
 	if callID := strings.TrimSpace(node.Get("call_id").String()); callID != "" {
 		return callID
 	}
@@ -37,7 +46,11 @@ func ExtractResponsesCallID(node gjson.Result) string {
 	if callId := strings.TrimSpace(node.Get("callId").String()); callId != "" {
 		return callId
 	}
-	return strings.TrimSpace(node.Get("id").String())
+	id := strings.TrimSpace(node.Get("id").String())
+	if strings.HasPrefix(id, "fco_") {
+		return ""
+	}
+	return id
 }
 
 // NormalizeResponsesToolCallOutputs scans a slice of Responses input items,
@@ -48,12 +61,12 @@ func ExtractResponsesCallID(node gjson.Result) string {
 // 3. FIFO queue fallback for remaining outputs that omit a call ID (skipping pending calls reserved by future explicit outputs).
 // Outputs that already carry an explicit call ID that does not match any pending call
 // are never rewritten or stolen.
-func NormalizeResponsesToolCallOutputs(items []gjson.Result) []gjson.Result {
+func NormalizeResponsesToolCallOutputs(items []ojson.Result) []ojson.Result {
 	if len(items) == 0 {
 		return items
 	}
 
-	normalized := make([]gjson.Result, len(items))
+	normalized := make([]ojson.Result, len(items))
 	copy(normalized, items)
 
 	explicitOutputCounts := make(map[string]int)
@@ -160,8 +173,8 @@ func NormalizeResponsesToolCallOutputs(items []gjson.Result) []gjson.Result {
 					matchedOut := outputs[outIdx]
 					if matchedOut.Get("call_id").String() != pendingID {
 						raw := []byte(matchedOut.Raw)
-						raw, _ = sjson.SetBytes(raw, "call_id", pendingID)
-						normalized[start+outIdx] = gjson.ParseBytes(raw)
+						raw, _ = ojson.SetBytes(raw, "call_id", pendingID)
+						normalized[start+outIdx] = util.ParseGJSONBytesNoCopy(raw)
 					}
 				}
 				pendingCallIDs = remainingPending

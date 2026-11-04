@@ -3,14 +3,18 @@ package synthesizer
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -174,6 +178,114 @@ func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_KimiAI(t *testing.T) {
+	tempDir := t.TempDir()
+	authDataAI := map[string]any{
+		"type":          "kimi-ai",
+		"access_token":  "kimi-ai-token",
+		"refresh_token": "kimi-ai-refresh",
+	}
+	dataAI, errMarshal := json.Marshal(authDataAI)
+	if errMarshal != nil {
+		t.Fatalf("marshal kimi-ai auth: %v", errMarshal)
+	}
+	if errWriteFile := os.WriteFile(filepath.Join(tempDir, "kimi-ai-auth.json"), dataAI, 0644); errWriteFile != nil {
+		t.Fatalf("failed to write kimi-ai auth file: %v", errWriteFile)
+	}
+
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Provider != "kimi-ai" {
+		t.Fatalf("provider = %q, want kimi-ai", auths[0].Provider)
+	}
+	if got := auths[0].Attributes["base_url"]; got != "https://api.kimi.ai/coding" {
+		t.Fatalf("base_url = %q, want https://api.kimi.ai/coding", got)
+	}
+	if got := auths[0].Attributes["domain"]; got != "kimi.ai" {
+		t.Fatalf("domain = %q, want kimi.ai", got)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_KimiDomainExplicitOverrides(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// 1. type: kimi, domain: ai -> should normalize to kimi.ai and api.kimi.ai
+	f1 := filepath.Join(tempDir, "kimi-type-ai-domain.json")
+	d1, errMarshal1 := json.Marshal(map[string]any{
+		"type":          "kimi",
+		"domain":        "ai",
+		"access_token":  "token-1",
+		"refresh_token": "refresh-1",
+	})
+	if errMarshal1 != nil {
+		t.Fatalf("marshal error: %v", errMarshal1)
+	}
+	if errWrite := os.WriteFile(f1, d1, 0644); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	// 2. type: kimi-ai, domain: kimi.com -> should preserve kimi.com and api.kimi.com
+	f2 := filepath.Join(tempDir, "kimi-ai-type-com-domain.json")
+	d2, errMarshal2 := json.Marshal(map[string]any{
+		"type":          "kimi-ai",
+		"domain":        "kimi.com",
+		"access_token":  "token-2",
+		"refresh_token": "refresh-2",
+	})
+	if errMarshal2 != nil {
+		t.Fatalf("marshal error: %v", errMarshal2)
+	}
+	if errWrite := os.WriteFile(f2, d2, 0644); errWrite != nil {
+		t.Fatalf("write error: %v", errWrite)
+	}
+
+	auths, errSynthesize := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+	})
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	authMap := make(map[string]*coreauth.Auth)
+	for _, a := range auths {
+		authMap[filepath.Base(a.FileName)] = a
+	}
+
+	a1 := authMap["kimi-type-ai-domain.json"]
+	if a1 == nil {
+		t.Fatal("missing a1")
+	}
+	if a1.Attributes["domain"] != "kimi.ai" {
+		t.Errorf("a1 domain = %q, want kimi.ai", a1.Attributes["domain"])
+	}
+	if a1.Attributes["base_url"] != "https://api.kimi.ai/coding" {
+		t.Errorf("a1 base_url = %q, want https://api.kimi.ai/coding", a1.Attributes["base_url"])
+	}
+
+	a2 := authMap["kimi-ai-type-com-domain.json"]
+	if a2 == nil {
+		t.Fatal("missing a2")
+	}
+	if a2.Attributes["domain"] != "kimi.com" {
+		t.Errorf("a2 domain = %q, want kimi.com", a2.Attributes["domain"])
+	}
+	if a2.Attributes["base_url"] != "https://api.kimi.com/coding" {
+		t.Errorf("a2 base_url = %q, want https://api.kimi.com/coding", a2.Attributes["base_url"])
+	}
+}
+
 func TestFileSynthesizer_Synthesize_IgnoresGeminiProviderFile(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -273,6 +385,50 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	}
 	if gotProject := auths[1].Metadata["project_id"]; gotProject != "project-a" {
 		t.Fatalf("project_id = %#v, want project-a", gotProject)
+	}
+}
+
+func TestSynthesizeAuthFileAppliesSourcePriorityToPluginAuths(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		raw          string
+		want         string
+		wantMetadata any
+	}{
+		{name: "number", raw: `{"type":"plugin","priority":1}`, want: "1", wantMetadata: float64(1)},
+		{name: "string", raw: `{"type":"plugin","priority":" 2 "}`, want: "2", wantMetadata: " 2 "},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fullPath := filepath.Join(t.TempDir(), "plugin.json")
+			ctx := &SynthesisContext{
+				Config:  &config.Config{},
+				AuthDir: filepath.Dir(fullPath),
+				PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+					return []*coreauth.Auth{
+						{ID: "first", Provider: "plugin", Metadata: map[string]any{"project_id": "first"}},
+						{ID: "second", Provider: "plugin", Metadata: map[string]any{"project_id": "second"}},
+					}, true, nil
+				}),
+			}
+			auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(testCase.raw))
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 2 {
+				t.Fatalf("SynthesizeAuthFile() len = %d, want 2", len(auths))
+			}
+			for _, auth := range auths {
+				if got := auth.Attributes["priority"]; got != testCase.want {
+					t.Errorf("auth %s priority attribute = %q, want %q", auth.ID, got, testCase.want)
+				}
+				if got := auth.Attributes[coreauth.AttributeFilePriority]; got != "true" {
+					t.Errorf("auth %s file priority marker = %q, want true", auth.ID, got)
+				}
+				if got := auth.Metadata["priority"]; got != testCase.wantMetadata {
+					t.Errorf("auth %s priority metadata = %v, want %v", auth.ID, got, testCase.wantMetadata)
+				}
+			}
+		})
 	}
 }
 
@@ -637,7 +793,7 @@ func TestFileSynthesizer_Synthesize_WeightParsing(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
+func TestFileSynthesizer_Synthesize_OAuthExcludedModelsCredentialPriority(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
 		"type":            "claude",
@@ -670,7 +826,51 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	}
 
 	got := auths[0].Attributes["excluded_models"]
-	want := "custom-model,model-b,shared"
+	want := "custom-model,model-b"
+	if got != want {
+		t.Fatalf("expected excluded_models %q, got %q", want, got)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_MetaOAuthExcludedModelsCredentialPriority(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":            "meta",
+		"auth_kind":       "oauth",
+		"api_key":         "LLM|minted",
+		"excluded_models": []string{"muse-spark-1.2"},
+	}
+	data, _ := json.Marshal(authData)
+	errWriteFile := os.WriteFile(filepath.Join(tempDir, "meta.json"), data, 0644)
+	if errWriteFile != nil {
+		t.Fatalf("failed to write auth file: %v", errWriteFile)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			OAuthExcludedModels: map[string][]string{
+				"meta": {"muse-spark-1.1"},
+			},
+		},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("unexpected error: %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if gotKind := auths[0].Attributes["auth_kind"]; gotKind != "oauth" {
+		t.Fatalf("expected auth_kind=oauth, got %q", gotKind)
+	}
+
+	got := auths[0].Attributes["excluded_models"]
+	want := "muse-spark-1.2"
 	if got != want {
 		t.Fatalf("expected excluded_models %q, got %q", want, got)
 	}
@@ -829,4 +1029,218 @@ func TestFileSynthesizer_Synthesize_NoteParsing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func makeTestCodexJWT(planType string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	authInfo := map[string]any{
+		"chatgpt_account_id": "acc-123",
+	}
+	if planType != "" {
+		authInfo["chatgpt_plan_type"] = planType
+	}
+	claimsMap := map[string]any{
+		"email":                       "user@example.com",
+		"https://api.openai.com/auth": authInfo,
+	}
+	payloadBytes, _ := json.Marshal(claimsMap)
+	claims := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	return header + "." + claims + "."
+}
+
+func TestSynthesizeAuthFile_CodexPlanType(t *testing.T) {
+	tests := []struct {
+		name     string
+		fileJSON map[string]any
+		wantPlan string
+	}{
+		{
+			name: "explicit plan_type in metadata",
+			fileJSON: map[string]any{
+				"type":      "codex",
+				"plan_type": "pro",
+			},
+			wantPlan: "pro",
+		},
+		{
+			name: "id_token with plan_type",
+			fileJSON: map[string]any{
+				"type":     "codex",
+				"id_token": makeTestCodexJWT("team"),
+			},
+			wantPlan: "team",
+		},
+		{
+			name: "id_token without plan_type defaults to free",
+			fileJSON: map[string]any{
+				"type":     "codex",
+				"id_token": makeTestCodexJWT(""),
+			},
+			wantPlan: "free",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			filePath := filepath.Join(tempDir, "codex.json")
+			data, errMarshal := json.Marshal(tt.fileJSON)
+			if errMarshal != nil {
+				t.Fatalf("marshal error: %v", errMarshal)
+			}
+			if errWrite := os.WriteFile(filePath, data, 0600); errWrite != nil {
+				t.Fatalf("write error: %v", errWrite)
+			}
+
+			auths, errSynthesize := SynthesizeAuthFile(&SynthesisContext{
+				Config:      &config.Config{},
+				AuthDir:     tempDir,
+				Now:         time.Now(),
+				IDGenerator: NewStableIDGenerator(),
+			}, filePath, data)
+
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile error: %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("expected 1 auth, got %d", len(auths))
+			}
+			if got := auths[0].Attributes["plan_type"]; got != tt.wantPlan {
+				t.Fatalf("plan_type attribute = %q, want %q", got, tt.wantPlan)
+			}
+		})
+	}
+}
+
+func TestFileSynthesizerRecordsIncompleteFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	emptyPath := filepath.Join(tempDir, "empty.json")
+	partialPath := filepath.Join(tempDir, "partial.json")
+	validZeroPath := filepath.Join(tempDir, "valid_zero.json")
+	validAuthPath := filepath.Join(tempDir, "valid_auth.json")
+
+	if errWrite := os.WriteFile(emptyPath, nil, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errWrite := os.WriteFile(partialPath, []byte(`{"type":"codex"`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errWrite := os.WriteFile(validZeroPath, []byte(`{}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if errWrite := os.WriteFile(validAuthPath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+	auths, errSynthesize := NewFileSynthesizer().Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 || auths[0].ID != "valid_auth.json" {
+		t.Fatalf("Synthesize() auths = %#v, want only valid_auth.json", auths)
+	}
+	if _, ok := ctx.IncompleteFiles[emptyPath]; !ok {
+		t.Fatalf("expected empty file %s in IncompleteFiles, got %#v", emptyPath, ctx.IncompleteFiles)
+	}
+	if _, ok := ctx.IncompleteFiles[partialPath]; !ok {
+		t.Fatalf("expected partial file %s in IncompleteFiles, got %#v", partialPath, ctx.IncompleteFiles)
+	}
+	if _, ok := ctx.IncompleteFiles[validZeroPath]; ok {
+		t.Fatalf("did not expect valid zero-auth file %s in IncompleteFiles", validZeroPath)
+	}
+	if _, ok := ctx.IncompleteFiles[validAuthPath]; ok {
+		t.Fatalf("did not expect valid auth file %s in IncompleteFiles", validAuthPath)
+	}
+
+	t.Run("dangling_symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		danglingPath := filepath.Join(dir, "dangling.json")
+		if errSymlink := os.Symlink(filepath.Join(dir, "missing.json"), danglingPath); errSymlink != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("symlink unavailable: %v", errSymlink)
+			}
+			t.Fatal(errSymlink)
+		}
+		if _, errRead := os.ReadFile(danglingPath); !errors.Is(errRead, fs.ErrNotExist) {
+			t.Fatalf("ReadFile() error = %v, want fs.ErrNotExist", errRead)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[danglingPath]; ok {
+			t.Fatal("dangling symlink must not be recorded in IncompleteFiles")
+		}
+	})
+
+	t.Run("unreadable_file", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("requires Unix file permissions and a non-root user")
+		}
+		dir := t.TempDir()
+		unreadablePath := filepath.Join(dir, "unreadable.json")
+		if errWrite := os.WriteFile(unreadablePath, []byte(`{"type":"codex"}`), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		t.Cleanup(func() {
+			if errChmod := os.Chmod(unreadablePath, 0o600); errChmod != nil {
+				t.Error(errChmod)
+			}
+		})
+		if errChmod := os.Chmod(unreadablePath, 0); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		if _, errRead := os.ReadFile(unreadablePath); !errors.Is(errRead, fs.ErrPermission) {
+			t.Fatalf("ReadFile() error = %v, want fs.ErrPermission", errRead)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[unreadablePath]; !ok {
+			t.Fatal("unreadable auth file must be recorded in IncompleteFiles")
+		}
+	})
+
+	t.Run("unreadable_directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("requires Unix file permissions and a non-root user")
+		}
+		dir := t.TempDir()
+		t.Cleanup(func() {
+			if errChmod := os.Chmod(dir, 0o700); errChmod != nil {
+				t.Error(errChmod)
+			}
+		})
+		if errChmod := os.Chmod(dir, 0); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		if _, errReadDir := os.ReadDir(dir); !errors.Is(errReadDir, fs.ErrPermission) {
+			t.Fatalf("ReadDir() error = %v, want fs.ErrPermission", errReadDir)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[dir]; !ok {
+			t.Fatal("unreadable auth directory must be recorded in IncompleteFiles")
+		}
+	})
+
+	t.Run("missing_directory", func(t *testing.T) {
+		missingDir := filepath.Join(t.TempDir(), "missing")
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: missingDir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if len(ctx.IncompleteFiles) != 0 {
+			t.Fatalf("missing auth directory must not be recorded in IncompleteFiles, got %#v", ctx.IncompleteFiles)
+		}
+	})
 }

@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type kimiLocalBadRequestError struct{}
@@ -30,8 +30,17 @@ func TestKimiThinkingReplayModelFamily(t *testing.T) {
 		{model: "kimi-k3", want: "k3"},
 		{model: "k3-256k", want: "k3"},
 		{model: "kimi-k3-256k(high)", want: "k3"},
+		{model: "k3.1-pro", want: "k3.1-pro"},
+		{model: "k3.1-pro-highspeed", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro-highspeed(max)", want: "k3.1-pro"},
+		{model: "kimi-k3.1-pro[1m](high)", want: "k3.1-pro"},
 		{model: "kimi-k2.7-code", want: "kimi-for-coding"},
 		{model: "kimi-k2.7-code-highspeed", want: "kimi-for-coding-highspeed"},
+		{model: "kimi-k2.8", want: "kimi-for-coding"},
+		{model: "kimi-k2.8-code", want: "kimi-for-coding"},
+		{model: "kimi-k2.8(max)", want: "kimi-for-coding"},
+		{model: "kimi-k2.8-code[1m](high)", want: "kimi-for-coding"},
 		{model: "kimi-for-coding", want: "kimi-for-coding"},
 		{model: "kimi-for-coding-highspeed(high)", want: "kimi-for-coding-highspeed"},
 	}
@@ -63,7 +72,7 @@ func TestRestoreKimiThinkingReplayContentPreservesCompleteAssistantContent(t *te
 	if !restored {
 		t.Fatal("expected cached thinking content to be restored")
 	}
-	got := gjson.GetBytes(updated, "messages.1.content")
+	got := ojson.GetBytes(updated, "messages.1.content")
 	if !kimiJSONEqual([]byte(got.Raw), cached) {
 		t.Fatalf("restored content = %s, want complete cached content %s", got.Raw, cached)
 	}
@@ -106,7 +115,7 @@ func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 	if scope.modelFamily != "k3" {
 		t.Fatalf("K3 replay family = %q, want k3", scope.modelFamily)
 	}
-	if !gjson.GetBytes(prepared.Payload, "messages.0.content.0.signature").Exists() {
+	if !ojson.GetBytes(prepared.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("K3 variant switch did not restore cached thinking: %s", prepared.Payload)
 	}
 
@@ -115,8 +124,46 @@ func TestPrepareKimiThinkingReplayRequestSharesOnlyK3Variants(t *testing.T) {
 	if scopeK27.modelFamily != "kimi-for-coding-highspeed" {
 		t.Fatalf("K2.7 replay family = %q, want kimi-for-coding-highspeed", scopeK27.modelFamily)
 	}
-	if gjson.GetBytes(preparedK27.Payload, "messages.0.content.0.signature").Exists() {
+	if ojson.GetBytes(preparedK27.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("K2.7 variants must remain isolated: %s", preparedK27.Payload)
+	}
+}
+
+func TestPrepareKimiThinkingReplayRequestSharesK31Variants(t *testing.T) {
+	for _, models := range [][2]string{
+		{"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"},
+		{"kimi-k3.1-pro-highspeed", "kimi-k3.1-pro"},
+	} {
+		t.Run(models[0]+"_to_"+models[1], func(t *testing.T) {
+			internalcache.ClearKimiThinkingReplayCache()
+			t.Cleanup(internalcache.ClearKimiThinkingReplayCache)
+
+			const cached = `[{"type":"thinking","thinking":"reasoning","signature":"kimi-signature"},{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]`
+			payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"path":"README.md"}}]}]}`)
+			opts := cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatClaude,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "k31-family-switch",
+				},
+			}
+			ctx := context.Background()
+			_, sourceScope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: models[0], Payload: payload}, opts)
+			cacheKimiThinkingReplayContent(ctx, sourceScope, []byte(cached))
+
+			prepared, scope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: models[1], Payload: payload}, opts)
+			if scope.modelFamily != "k3.1-pro" || !scope.replayApplied {
+				t.Fatalf("variant switch scope = %+v, want shared K3.1 replay", scope)
+			}
+			if !kimiJSONEqual([]byte(ojson.GetBytes(prepared.Payload, "messages.0.content").Raw), []byte(cached)) {
+				t.Fatalf("variant switch did not preserve complete cached content: %s", prepared.Payload)
+			}
+			for _, isolatedModel := range []string{"kimi-k3", "kimi-k3-256k", "kimi-k2.8"} {
+				_, isolatedScope := prepareKimiThinkingReplayRequest(ctx, cliproxyexecutor.Request{Model: isolatedModel, Payload: payload}, opts)
+				if isolatedScope.replayApplied {
+					t.Fatalf("%s received K3.1 replay", isolatedModel)
+				}
+			}
+		})
 	}
 }
 
@@ -138,14 +185,14 @@ func TestKimiThinkingReplayScopeIsolatesClaudeCodeCallers(t *testing.T) {
 	}
 
 	preparedA, _ := prepareKimiThinkingReplayRequest(callerAContext, req, opts)
-	if !gjson.GetBytes(preparedA.Payload, "messages.0.content.0.signature").Exists() {
+	if !ojson.GetBytes(preparedA.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("caller A did not receive its replay: %s", preparedA.Payload)
 	}
 	preparedB, callerBScope := prepareKimiThinkingReplayRequest(testContextWithAPIKey("caller-b"), req, opts)
 	if callerBScope.sessionKey == callerAScope.sessionKey {
 		t.Fatal("different downstream API keys shared one replay scope")
 	}
-	if gjson.GetBytes(preparedB.Payload, "messages.0.content.0.signature").Exists() {
+	if ojson.GetBytes(preparedB.Payload, "messages.0.content.0.signature").Exists() {
 		t.Fatalf("caller B received caller A replay: %s", preparedB.Payload)
 	}
 	_, unauthenticatedScope := prepareKimiThinkingReplayRequest(context.Background(), req, opts)
@@ -201,7 +248,7 @@ func TestKimiExecutorClaudeNonStreamReplaysThinkingAcrossK3VariantSwitch(t *test
 	if len(upstreamBodies) != 2 {
 		t.Fatalf("upstream request count = %d, want 2", len(upstreamBodies))
 	}
-	gotContent := gjson.GetBytes(upstreamBodies[1], "messages.1.content")
+	gotContent := ojson.GetBytes(upstreamBodies[1], "messages.1.content")
 	if !kimiJSONEqual([]byte(gotContent.Raw), []byte(cachedContent)) {
 		t.Fatalf("second upstream assistant content = %s, want %s", gotContent.Raw, cachedContent)
 	}
@@ -346,7 +393,7 @@ func TestKimiExecutorClaudeStreamReplaysThinkingAcrossK3VariantSwitch(t *testing
 	if len(upstreamBodies) != 2 {
 		t.Fatalf("upstream request count = %d, want 2", len(upstreamBodies))
 	}
-	content := gjson.GetBytes(upstreamBodies[1], "messages.1.content")
+	content := ojson.GetBytes(upstreamBodies[1], "messages.1.content")
 	if got := content.Get("0.thinking").String(); got != "stream reasoning" {
 		t.Fatalf("replayed stream thinking = %q, want stream reasoning; content=%s", got, content.Raw)
 	}
