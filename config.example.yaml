@@ -1202,8 +1202,8 @@ multimedia:
   disable-image-generation: false
 
   # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.
-  # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
-  # gpt-image-2-base-model: "gpt-5.4-mini"
+  # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.6-luna".
+  # gpt-image-2-base-model: "gpt-5.6-luna"
 
   # Grok video routes accept grok-imagine-video, grok-imagine-video-1.5,
   # grok-imagine-video-1.5-preview, and grok-imagine-video-1.5-lite.
