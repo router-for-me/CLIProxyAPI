@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -423,6 +424,47 @@ type PprofConfig struct {
 type DiscoveryInterfacesConfig struct {
 	Include []string `yaml:"include" json:"include"`
 	Exclude []string `yaml:"exclude" json:"exclude"`
+}
+
+// KVStoreConfig holds configuration for the local persistent bbolt KV store.
+type KVStoreConfig struct {
+	// Disabled turns off the local bbolt KV store when true (fallback to in-memory).
+	// Defaults to false (bbolt enabled by default in non-Home mode).
+	Disabled bool `yaml:"disabled" json:"disabled"`
+
+	// Path is the file system path to the bbolt database file.
+	// When empty, it defaults to "<auth-dir>/kv.db".
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+// EffectivePath returns the trimmed Path or DefaultKVStorePath ("kv.db") when empty.
+func (c KVStoreConfig) EffectivePath() string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	return DefaultKVStorePath
+}
+
+// EffectivePathForAuthDir returns the trimmed Path when explicitly configured,
+// or joins the given authDir (falling back to DefaultAuthDir when authDir is empty)
+// with DefaultKVStorePath ("<auth-dir>/kv.db").
+func (c KVStoreConfig) EffectivePathForAuthDir(authDir string) string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	baseDir := strings.TrimSpace(authDir)
+	if baseDir == "" {
+		baseDir = DefaultAuthDir
+	}
+	return filepath.Join(baseDir, DefaultKVStorePath)
+}
+
+// EffectiveKVStorePath returns the configured KVStore.Path or "<auth-dir>/kv.db" when empty.
+func (cfg *Config) EffectiveKVStorePath() string {
+	if cfg == nil {
+		return filepath.Join(DefaultAuthDir, DefaultKVStorePath)
+	}
+	return cfg.KVStore.EffectivePathForAuthDir(cfg.AuthDir)
 }
 
 // DiscoveryConfig controls local network mDNS / DNS-SD service advertising.

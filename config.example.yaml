@@ -90,6 +90,13 @@ server:
     #   exclude: []                     # Additional interface patterns to exclude
     # auth-required: true               # Advertise auth=1 (credentials required)
 
+  # Local persistent KV store settings (bbolt). Ignored when Home mode is enabled.
+  kv-store:
+    # Disable local bbolt KV persistence and fall back to in-memory maps (default: false).
+    disabled: false
+    # File path for the bbolt database (default: "<auth-dir>/kv.db" when empty).
+    path: ""
+
 # Management API settings
 management:
   # Whether to allow remote (non-localhost) management access.
