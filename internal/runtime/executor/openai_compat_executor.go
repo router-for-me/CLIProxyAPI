@@ -1260,6 +1260,10 @@ func openAICompatQuotaExhaustion(status int, headers http.Header, body []byte) (
 	exhausted, resetAfter := helps.GoogleQuotaExhaustion(status, headers, body, time.Now())
 	if status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body) {
 		exhausted = true
+		if retryAfter := parseRetryAfterHeader(headers, time.Now()); resetAfter == nil && retryAfter != nil && *retryAfter > 0 {
+			// The reset of an insufficient_quota comes only as Retry-After.
+			resetAfter = retryAfter
+		}
 	}
 	return exhausted, resetAfter
 }

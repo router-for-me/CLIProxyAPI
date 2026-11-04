@@ -243,7 +243,7 @@ func selectorRequiresPositiveWeight(selector Selector) bool {
 // usageLimitResponseError applies the usage-limit response mode to the final
 // error of a request. When the mode is active, the final error is a 429 (or no
 // credential could run the request, as when a pooled alias has every backend
-// cooling), and every eligible credential is out of quota with a reset more
+// cooling or selection found no usable credential), and every eligible credential is out of quota with a reset more
 // than usageLimitMinResetIn away, it returns a model cooldown reported as a
 // final usage limit. Otherwise it returns nil and the caller keeps its error,
 // so the retryable mode keeps today's behavior.
@@ -252,7 +252,7 @@ func (m *Manager) usageLimitResponseError(ctx context.Context, providers []strin
 		return nil
 	}
 	var authErr *Error
-	if statusCodeFromError(err) != http.StatusTooManyRequests && !(errors.As(err, &authErr) && authErr.Code == "auth_not_found") {
+	if statusCodeFromError(err) != http.StatusTooManyRequests && !(errors.As(err, &authErr) && (authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable")) {
 		return nil
 	}
 	now := time.Now()

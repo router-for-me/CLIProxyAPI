@@ -82,6 +82,7 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			return err
 		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai insufficient_quota", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}`)), want: true},
+		{name: "openai insufficient_quota with an immediate Retry-After", err: newOpenAICompatStatusError(http.StatusTooManyRequests, http.Header{"Retry-After": {"0"}}, []byte(`{"error":{"type":"insufficient_quota"}}`)), want: true},
 		{name: "openai rate_limit_exceeded", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"requests","code":"rate_limit_exceeded"}}`))},
 		{name: "openai insufficient_quota on a non-429", err: newOpenAICompatStatusError(http.StatusForbidden, nil, []byte(`{"error":{"type":"insufficient_quota"}}`))},
 		{name: "vertex openapi QUOTA_EXHAUSTED", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(googleQuotaExhaustedBody)), want: true, wantReset: 2 * time.Hour},

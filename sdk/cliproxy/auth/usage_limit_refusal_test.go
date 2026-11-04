@@ -296,3 +296,17 @@ func TestUsageLimitRefusalSkipsZeroWeightUnderWeightedSelection(t *testing.T) {
 		})
 	}
 }
+
+// When selection already finds no usable credential, the pool check decides:
+// a credential with the model disabled makes the scheduler answer
+// auth_unavailable rather than a cooldown, and the usage limit still applies.
+func TestUsageLimitModeAppliesToSelectionUnavailable(t *testing.T) {
+	SetQuotaCooldownResponseMode("usage-limit")
+	t.Cleanup(func() { SetQuotaCooldownResponseMode("") })
+	disabled := &Auth{ID: "model-disabled", Provider: "codex", Status: StatusActive, ModelStates: map[string]*ModelState{"gpt-5": {Status: StatusDisabled}}}
+	m := usageLimitManager(t, credentialQuotaAuth("exhausted", true, time.Now().Add(2*time.Hour), 300), disabled)
+	_, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5"}, cliproxyexecutor.Options{})
+	if resetAt, ok := UsageLimitResetAt(err); !ok || time.Until(resetAt) < 2*time.Hour-time.Minute {
+		t.Fatalf("err = %v, want a usage limit", err)
+	}
+}

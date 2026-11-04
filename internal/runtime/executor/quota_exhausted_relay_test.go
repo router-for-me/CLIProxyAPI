@@ -61,6 +61,7 @@ func TestAIStudioReportsGoogleQuotaExhaustion(t *testing.T) {
 func TestOpenAICompatImageStreamReportsQuotaExhaustion(t *testing.T) {
 	const body = `{"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"quota"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "7200")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(body))
 	}))
@@ -71,7 +72,7 @@ func TestOpenAICompatImageStreamReportsQuotaExhaustion(t *testing.T) {
 		Model: "gpt-image-2", Payload: []byte(`{"model":"gpt-image-2","prompt":"test"}`),
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-image"), Stream: true})
 	hint, _ := err.(interface{ RetryAfter() *time.Duration })
-	if exhausted, _, _ := quotaEvidenceOf(err); !exhausted || err.Error() != body || (hint != nil && hint.RetryAfter() != nil) {
-		t.Fatalf("err = %T %v, want insufficient_quota evidence with the error and retry hint unchanged", err, err)
+	if exhausted, _, reset := quotaEvidenceOf(err); !exhausted || reset != 2*time.Hour || err.Error() != body || (hint != nil && hint.RetryAfter() != nil) {
+		t.Fatalf("err = %T %v, want insufficient_quota evidence with the Retry-After reset and the error and retry hint unchanged", err, err)
 	}
 }
