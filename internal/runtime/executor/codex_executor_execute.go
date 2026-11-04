@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -131,6 +132,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	receivedAt := time.Now()
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
@@ -169,7 +171,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			sawOutputDelta = true
 		}
 
-		if streamErr, terminalBody, ok := codexTerminalFailureErrWithHeaders(eventData, httpResp.Header, e.modelLevelCooling()); ok {
+		if streamErr, terminalBody, ok := codexTerminalFailureErrWithHeaders(eventData, httpResp.Header, receivedAt, e.modelLevelCooling()); ok {
 			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 				return resp, errClearReplay
 			}
