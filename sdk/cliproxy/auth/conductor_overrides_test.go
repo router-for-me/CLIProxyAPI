@@ -3048,6 +3048,38 @@ func TestManager_MarkResult_DisableCooling_UnknownSeqReplacesReset(t *testing.T)
 	}
 }
 
+// A forced-cooldown 429 (a continue-and-cooldown rule) on a cooling-disabled
+// credential is still the upstream's newer word: it replaces a recorded reset,
+// shorter or not, and an explicit zero clears it, so retry scheduling never waits
+// on the obsolete deadline instead of the forced cooldown.
+func TestManager_MarkResult_DisableCooling_ForcedCooldown429ReplacesReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-forced-429-reset", "test-model-forced-429-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reset := func() time.Time {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	mark := func(code string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+			Error: &Error{Code: code, HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+
+	mark("", 2*time.Hour)
+	mark(ErrorCodeForceCooldown, time.Minute)
+	if got := reset(); got.After(time.Now().Add(2 * time.Minute)) {
+		t.Fatalf("reset after a newer forced-cooldown 1m hint = %v, want about 1m ahead", got)
+	}
+	mark("", 2*time.Hour)
+	mark(ErrorCodeForceCooldown, 0)
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after a newer forced-cooldown Retry-After: 0 = %v, want it cleared", got)
+	}
+}
+
 // A reset cleared by a newer Retry-After: 0 must stay cleared across a
 // reconciliation: the state reset there keeps the watermark, so an older 429
 // completing afterwards cannot reinstall its stale hint.

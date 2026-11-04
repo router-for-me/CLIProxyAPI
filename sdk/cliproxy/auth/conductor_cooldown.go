@@ -1009,7 +1009,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
-					disableCooling := m.cooldownDisabledForAuth(auth)
+					authCoolingDisabled := m.cooldownDisabledForAuth(auth)
+					disableCooling := authCoolingDisabled
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
 					}
@@ -1070,8 +1071,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// before it, completing out of order, may only extend a live reset, so
 					// a stale result never shortens a newer hint or revives a cleared one.
 					// An unknown sequence (zero, direct MarkResult callers) is exempt from
-					// the ordering guard and counts as newer.
-					if disableCooling && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
+					// the ordering guard and counts as newer. A forced cooldown still
+					// updates the reset: retry scheduling waits on it for any
+					// cooling-disabled credential, so an obsolete one must not outlive it.
+					if authCoolingDisabled && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
 						newer := result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq
 						stale := result.ExecutionSeq > 0 && !newer
 						if *result.RetryAfter > 0 {
