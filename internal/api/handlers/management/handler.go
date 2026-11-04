@@ -305,8 +305,12 @@ func (h *Handler) reloadConfigAfterManagementSave(ctx context.Context, snapshot 
 
 	h.mu.Lock()
 	if snapshot.generation < h.appliedReloadGeneration {
-		h.mu.Unlock()
-		return
+		if !ForcedConfigReload(ctx) {
+			h.mu.Unlock()
+			return
+		}
+		// A newer unforced reload may have skipped an unchanged file, so force the current config.
+		snapshot = h.reloadSnapshotConfigLocked()
 	}
 	hook := h.configReloadHook
 	host := h.pluginHost

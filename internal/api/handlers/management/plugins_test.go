@@ -84,6 +84,43 @@ func TestConfigReloadGenerationSkipsOlderSnapshot(t *testing.T) {
 	}
 }
 
+func TestForcedReloadSurvivesNewerUnforcedReload(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample": pluginConfigFromYAML(t, "enabled: true\nmode: old\n"),
+				},
+			},
+		},
+	}
+	type reload struct {
+		mode   string
+		forced bool
+	}
+	var reloads []reload
+	h.SetConfigReloadHook(func(ctx context.Context, cfg *config.Config) {
+		reloads = append(reloads, reload{pluginRawScalarValue(t, cfg.Plugins.Configs["sample"], "mode"), ForcedConfigReload(ctx)})
+	})
+
+	h.mu.Lock()
+	forced := h.reloadSnapshotConfigLocked()
+	item := h.cfg.Plugins.Configs["sample"]
+	setPluginRawScalarValue(t, &item.Raw, "mode", "new")
+	h.cfg.Plugins.Configs["sample"] = item
+	newer := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+
+	h.reloadConfigAfterManagementSave(context.Background(), newer)
+	h.reloadConfigAfterManagementSave(WithForcedConfigReload(context.Background()), forced)
+
+	if len(reloads) != 2 || reloads[1] != (reload{"new", true}) {
+		t.Fatalf("reloads = %#v, want the superseded forced reload to apply the newest config", reloads)
+	}
+}
+
 func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	t.Parallel()
 
