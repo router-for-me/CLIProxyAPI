@@ -35,8 +35,8 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 	codexUsageLimit := []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`)
 	codexHeaders := func(secondaryUsed string) http.Header {
 		return http.Header{
-			"X-Codex-Primary-Used-Percent": {"100"}, "X-Codex-Primary-Window-Minutes": {"300"}, "X-Codex-Primary-Reset-At": {"1793590000"},
-			"X-Codex-Secondary-Used-Percent": {secondaryUsed}, "X-Codex-Secondary-Window-Minutes": {"10080"}, "X-Codex-Secondary-Reset-At": {"1794000000"},
+			"X-Codex-Primary-Used-Percent": {"100"}, "X-Codex-Primary-Window-Minutes": {"300"}, "X-Codex-Primary-Reset-After-Seconds": {"3600"},
+			"X-Codex-Secondary-Used-Percent": {secondaryUsed}, "X-Codex-Secondary-Window-Minutes": {"10080"}, "X-Codex-Secondary-Reset-After-Seconds": {"259200"},
 		}
 	}
 	unix := func(d time.Duration) string { return strconv.FormatInt(time.Now().Add(d).Unix(), 10) }
@@ -63,8 +63,9 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		wantReset  time.Duration
 	}{
 		{name: "codex usage_limit_reached without window headers", err: newCodexStatusErr(http.StatusTooManyRequests, codexUsageLimit), want: true},
-		{name: "codex 5-hour window", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("40"), codexUsageLimit), want: true, wantWindow: 300},
-		{name: "codex weekly window resets last", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("100"), codexUsageLimit), want: true, wantWindow: 10080},
+		{name: "codex 5-hour window", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("40"), codexUsageLimit), want: true, wantWindow: 300, wantReset: time.Hour},
+		{name: "codex reset only in the window headers", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("40"), []byte(`{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)), want: true, wantWindow: 300, wantReset: time.Hour},
+		{name: "codex weekly window resets last", err: newCodexStatusErrWithHeaders(http.StatusTooManyRequests, codexHeaders("100"), codexUsageLimit), want: true, wantWindow: 10080, wantReset: 72 * time.Hour},
 		{name: "codex generic rate limit", err: newCodexStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"type":"rate_limit_exceeded","message":"Rate limit reached"}}`))},
 		{name: "codex websocket usage_limit_reached", err: func() error {
 			err, _ := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"},"headers":{"x-codex-primary-used-percent":"100","x-codex-primary-window-minutes":"300"}}`))
@@ -73,7 +74,7 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		{name: "codex HTTP stream usage_limit_reached reads the response headers", err: func() error {
 			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`), codexHeaders("40"), false)
 			return err
-		}(), want: true, wantWindow: 300},
+		}(), want: true, wantWindow: 300, wantReset: time.Hour},
 		{name: "openai-compat stream QUOTA_EXHAUSTED frame", err: func() error {
 			err, _ := openAICompatStreamDataError([]byte(`{"status":429,`+googleQuotaExhaustedBody[1:]), "")
 			return err
@@ -87,6 +88,8 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		{name: "antigravity QUOTA_EXHAUSTED", err: newAntigravityStatusErr(http.StatusTooManyRequests, []byte(googleQuotaExhaustedBody)), want: true},
 		{name: "antigravity quota keyword only", err: newAntigravityStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 2h."}}`))},
 		{name: "claude unified 5h rejection", err: classifyClaudeUpstreamError(http.StatusTooManyRequests, claudeRejected(2*time.Hour, 0), claudeBody), want: true, wantWindow: 300},
+		{name: "claude fast unified 5h rejection", err: newClaudeFastDirectResponseError(&http.Response{StatusCode: http.StatusTooManyRequests, Header: claudeRejected(2*time.Hour, 0)}, claudeBody), want: true, wantWindow: 300},
+		{name: "claude fast ordinary 429", err: newClaudeFastDirectResponseError(&http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"30"}}}, claudeBody)},
 		{name: "claude 7d rejection with model-level cooling", err: classifyClaudeUpstreamErrorWithCooling(http.StatusTooManyRequests, claudeRejected(0, 72*time.Hour), claudeBody, true), want: true, wantWindow: 10080},
 		{name: "claude 5h resets after weekly", err: classifyClaudeUpstreamError(http.StatusTooManyRequests, claudeRejected(4*time.Hour, time.Hour), claudeBody), want: true, wantWindow: 300},
 		{name: "claude weekly resets after 5h", err: classifyClaudeUpstreamError(http.StatusTooManyRequests, claudeRejected(time.Hour, 72*time.Hour), claudeBody), want: true, wantWindow: 10080},

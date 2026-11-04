@@ -55,7 +55,8 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
 	}
 	if isUsageLimit && status == http.StatusTooManyRequests {
-		statusError.quotaExhausted, statusError.quotaWindowMinutes = true, helps.CodexExhaustedWindowMinutes(headers)
+		statusError.quotaExhausted = true
+		statusError.quotaWindowMinutes, statusError.quotaResetAfter = helps.CodexExhaustedWindow(headers)
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit
 	// immediate-retry contract, then the generic Retry-After header.

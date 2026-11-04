@@ -185,7 +185,7 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 func codexTerminalFailureErrWithHeaders(eventData []byte, headers http.Header, modelLevelCooling bool) (statusErr, []byte, bool) {
 	streamErr, body, ok := codexTerminalFailureErrWithCooling(eventData, modelLevelCooling)
 	if ok && streamErr.quotaExhausted {
-		streamErr.quotaWindowMinutes = helps.CodexExhaustedWindowMinutes(headers)
+		streamErr.quotaWindowMinutes, streamErr.quotaResetAfter = helps.CodexExhaustedWindow(headers)
 	}
 	return streamErr, body, ok
 }
@@ -348,7 +348,8 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	if isUsageLimit {
-		err.quotaExhausted, err.quotaWindowMinutes = true, helps.CodexExhaustedWindowMinutes(headers)
+		err.quotaExhausted = true
+		err.quotaWindowMinutes, err.quotaResetAfter = helps.CodexExhaustedWindow(headers)
 	}
 	// A usage_limit_reached body reset describes quota recovery and wins over
 	// the generic Retry-After header. Every other 429 honours the upstream
