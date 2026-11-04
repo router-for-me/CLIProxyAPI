@@ -144,6 +144,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		err = errDo
 		return nil, err
 	}
+	receivedAt := time.Now()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		bodyBytes, errRead := io.ReadAll(httpResp.Body)
@@ -303,7 +304,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
 				}
-				streamErr = newAntigravityStatusErr(statusCode, httpResp.Header, payload)
+				streamErr = newAntigravityStatusErr(statusCode, helps.QuotaResetHeadersSince(httpResp.Header, receivedAt), payload)
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {

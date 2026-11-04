@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -63,7 +64,7 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		"top-level":      `{"status":429,"code":"insufficient_quota","message":"You exceeded your current quota"}`,
 	}
 	compatFrameErr := func(frame, eventName string) error {
-		err, _ := openAICompatStreamDataError([]byte(frame), eventName, http.Header{"Retry-After": {"7200"}})
+		err, _ := openAICompatStreamDataError([]byte(frame), eventName, http.Header{"Retry-After": {"7200"}}, time.Now())
 		return err
 	}
 	googleRateLimit := []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Rate limited","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"7200s"}]}}`)
@@ -86,11 +87,11 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			return err
 		}(), want: true, wantWindow: 300},
 		{name: "codex HTTP stream usage_limit_reached reads the response headers", err: func() error {
-			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`), codexHeaders("40"), false)
+			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`), codexHeaders("40"), time.Now(), false)
 			return err
 		}(), want: true, wantWindow: 300, wantReset: time.Hour},
 		{name: "codex HTTP stream usage_limit_reached with the reset only in Retry-After", err: func() error {
-			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`), http.Header{"Retry-After": {"7200"}}, false)
+			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`), http.Header{"Retry-After": {"7200"}}, time.Now(), false)
 			return err
 		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai-compat stream insufficient_quota frame with the reset in Retry-After", err: compatFrameErr(compatFrames["error"], ""), want: true, wantReset: 2 * time.Hour, wantMsg: compatFrames["error"]},
@@ -101,7 +102,7 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			if errSet := frame.Set("status", http.StatusTooManyRequests); errSet != nil {
 				return errSet
 			}
-			err, _ := openAICompatStreamDataError(frame.Bytes(), "", nil)
+			err, _ := openAICompatStreamDataError(frame.Bytes(), "", nil, time.Now())
 			return err
 		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai insufficient_quota", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}`)), want: true},
@@ -133,6 +134,34 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 				t.Fatalf("error text = %s, want the frame unchanged: %s", test.err.Error(), test.wantMsg)
 			}
 		})
+	}
+}
+
+// A quota error read later in a stream takes a relative reset from the
+// response's headers counted from when the response arrived: 25 minutes into
+// an advertised 30-minute reset, 5 minutes remain.
+func TestStreamQuotaHeaderResetsCountFromResponseReceipt(t *testing.T) {
+	receivedAt := time.Now().Add(-25 * time.Minute)
+	retryAfter := http.Header{"Retry-After": {"1800"}}
+	codexWindow := http.Header{"X-Codex-Primary-Used-Percent": {"100"}, "X-Codex-Primary-Window-Minutes": {"300"}, "X-Codex-Primary-Reset-After-Seconds": {"1800"}}
+	codexLimit := []byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)
+	codexErr := func(headers http.Header) error {
+		err, _, _ := codexTerminalFailureErrWithHeaders(codexLimit, headers, receivedAt, false)
+		return err
+	}
+	compatErr, _ := openAICompatStreamDataError([]byte(`{"error":{"type":"insufficient_quota","status":429}}`), "", retryAfter, receivedAt)
+	for name, err := range map[string]error{
+		"codex window header":       codexErr(codexWindow),
+		"codex Retry-After":         codexErr(retryAfter),
+		"openai-compat Retry-After": compatErr,
+		"antigravity Retry-After":   newAntigravityStatusErr(http.StatusTooManyRequests, helps.QuotaResetHeadersSince(retryAfter, receivedAt), []byte(googleQuotaExhaustedNoDelayBody)),
+	} {
+		if exhausted, _, reset := quotaEvidenceOf(err); !exhausted || reset < 4*time.Minute+58*time.Second || reset > 5*time.Minute+time.Second {
+			t.Errorf("%s: evidence = (%t, %v), want exhausted with about 5m left; err=%v", name, exhausted, reset, err)
+		}
+	}
+	if got := retryAfter.Get("Retry-After"); got != "1800" {
+		t.Fatalf("response headers changed: Retry-After = %q", got)
 	}
 }
 

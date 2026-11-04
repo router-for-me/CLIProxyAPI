@@ -12,6 +12,39 @@ const (
 	claudeSevenDayWindowMinutes = 7 * 24 * 60
 )
 
+// QuotaResetHeadersSince returns headers, received at receivedAt, with their
+// relative quota resets (a delay-seconds Retry-After and the Codex
+// x-codex-*-reset-after-seconds headers) shortened by the time since then, so
+// an error read later in the stream reopens when the response said, not that
+// long after the error. Only whole seconds count, so a reset never ends early.
+// headers is returned as is when nothing changes.
+func QuotaResetHeadersSince(headers http.Header, receivedAt time.Time) http.Header {
+	elapsed := int64(time.Since(receivedAt) / time.Second)
+	if len(headers) == 0 || elapsed <= 0 {
+		return headers
+	}
+	var out http.Header
+	set := func(name, value string) {
+		if out == nil {
+			out = headers.Clone()
+		}
+		out.Set(name, value)
+	}
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(headers.Get("Retry-After")), 10, 64); err == nil && seconds >= 0 {
+		set("Retry-After", strconv.FormatInt(max(seconds-elapsed, 0), 10))
+	}
+	for _, slot := range []string{"Primary", "Secondary"} {
+		name := "X-Codex-" + slot + "-Reset-After-Seconds"
+		if after, err := strconv.ParseFloat(strings.TrimSpace(getHeaderCaseInsensitive(headers, name)), 64); err == nil {
+			set(name, strconv.FormatFloat(max(after-float64(elapsed), 0), 'f', -1, 64))
+		}
+	}
+	if out == nil {
+		return headers
+	}
+	return out
+}
+
 // CodexExhaustedWindow reports the length, in minutes, of the Codex rate-limit
 // window a usage_limit_reached refusal exhausted: of the x-codex-primary-* and
 // x-codex-secondary-* windows at 100% use, the one that resets last, because
