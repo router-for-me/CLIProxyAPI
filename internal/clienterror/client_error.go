@@ -3,12 +3,11 @@ package clienterror
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // StatusClientClosedRequest is the nginx-style status used when the client
@@ -49,6 +48,10 @@ func HTTPStatusFromError(err error) int {
 		if code := sc.StatusCode(); code > 0 {
 			return code
 		}
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge
 	}
 	if errors.Is(err, context.Canceled) {
 		return StatusClientClosedRequest
@@ -92,6 +95,22 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusUnauthorized && hasAuthenticationErrorBody(err) {
 		return false
 	}
+	// Claude's missing thread state is tied to the stale continuation ID rather
+	// than the selected credential. Let the client replay the full conversation.
+	if IsClaudeThreadNotFound(status, err) {
+		return true
+	}
+	// Devin's MCP tool configuration and content-policy rejections are caused by
+	// the request payload rather than credential permissions.
+	if IsDevinRequestPermissionDenied(status, err) {
+		return true
+	}
+	// Anthropic reports an exhausted API credit balance as 400 with an
+	// invalid_request_error body. Preserve credential cooldown and rotation
+	// without weakening generic 400 request-fault handling.
+	if IsCreditBalanceTooLow(status, err) {
+		return false
+	}
 	// Model not found indicates a credential-model capability mismatch rather than
 	// a caller request error. Preserve rotation and cooldown for the model.
 	if hasModelNotFoundErrorBody(err) {
@@ -129,16 +148,113 @@ func IsItemNotPersisted(message string) bool {
 		strings.Contains(lower, "items are not persisted when `store` is set to false")
 }
 
+// IsClaudeThreadNotFound reports the Claude 404 response for a stale
+// previous_message_id continuation from either a structured JSON response
+// or a plain-text error message.
+func IsClaudeThreadNotFound(status int, err error) bool {
+	if status != http.StatusNotFound || err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" {
+		return false
+	}
+	if ojson.Valid(body) {
+		msg := strings.ToLower(ojson.Get(body, "error.message").String())
+		return strings.EqualFold(strings.TrimSpace(ojson.Get(body, "error.type").String()), "not_found_error") &&
+			strings.Contains(msg, "thread state") &&
+			strings.Contains(msg, "previous_message_id")
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
+}
+
+// IsDevinRequestPermissionDenied reports whether a 403 error from Devin is
+// deterministically caused by the request payload (such as the MCP tool
+// configuration filter or the prompt content policy filter) rather than
+// credential permissions.
+func IsDevinRequestPermissionDenied(status int, err error) bool {
+	if status <= 0 && err != nil {
+		status = HTTPStatusFromError(err)
+	}
+	if status != http.StatusForbidden || err == nil {
+		return false
+	}
+	if isDevinRequestPermissionDeniedText(err.Error()) {
+		return true
+	}
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		return isDevinRequestPermissionDeniedText(string(responseBody.ResponseBody()))
+	}
+	return false
+}
+
+func isDevinRequestPermissionDeniedText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" || !strings.Contains(lower, "permission_denied") {
+		return false
+	}
+	return strings.Contains(lower, "unable to process request due to an mcp configuration issue") ||
+		strings.Contains(lower, "blocked by our content policy")
+}
+
+// IsCreditBalanceTooLow reports the Anthropic 400 response returned when a
+// credential's API credit balance is exhausted.
+func IsCreditBalanceTooLow(status int, err error) bool {
+	if status <= 0 && err != nil {
+		status = HTTPStatusFromError(err)
+	}
+	if status != http.StatusBadRequest || err == nil {
+		return false
+	}
+	return hasCreditBalanceTooLowBody(err)
+}
+
+func hasCreditBalanceTooLowBody(err error) bool {
+	if err == nil {
+		return false
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+		msg := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+		if strings.HasPrefix(msg, "your credit balance is too low") {
+			return true
+		}
+	}
+	return false
+}
+
 func hasModelNotFoundErrorBody(err error) bool {
 	if err == nil {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if code == "model_not_found" || code == "model_not_found_error" {
 			return true
 		}
@@ -151,11 +267,11 @@ func hasAuthenticationErrorBody(err error) bool {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-		if errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String())); errType == "authentication_error" {
+		if errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())); errType == "authentication_error" {
 			return true
 		}
 	}
@@ -167,17 +283,17 @@ func hasRequestFaultBody(err error) bool {
 		return false
 	}
 	body := strings.TrimSpace(err.Error())
-	if body == "" || !json.Valid([]byte(body)) {
+	if body == "" || !ojson.Valid(body) {
 		return false
 	}
 	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-		code := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if _, ok := requestFaultCodes[code]; ok {
 			return true
 		}
 	}
 	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-		errType := strings.ToLower(strings.TrimSpace(gjson.Get(body, path).String()))
+		errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
 		if _, ok := requestFaultTypes[errType]; ok {
 			return true
 		}

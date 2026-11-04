@@ -82,9 +82,8 @@ func ResolvedHomeModelOptions(req cliproxyexecutor.Request) (internalconfig.Open
 }
 
 // CodexAPIKeyModelIsCompat reports whether the selected codex-api-key model has
-// is-compat enabled. When true and codex.optimize-multi-agent-v2 is also true,
-// Codex MultiAgentV2 agent_message items are converted into portable Responses
-// message/user input for third-party Responses-compatible endpoints.
+// is-compat enabled. When true, Codex MultiAgentV2 agent_message items are converted
+// into portable Responses message/user input for third-party Responses-compatible endpoints.
 func CodexAPIKeyModelIsCompat(cfg *internalconfig.Config, auth *Auth, model string) bool {
 	if cfg == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
@@ -399,7 +398,19 @@ func compileAPIKeyModelCapabilitiesForAuth(cfg *internalconfig.Config, auth *Aut
 		}
 	case "vertex":
 		if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
-			compileConfiguredModelCapabilities(out, entry.Models, "gemini")
+			for _, configured := range entry.Models {
+				support := configured.Thinking
+				openAPI := isVertexOpenAPIConfigModel(configured.Name)
+				if configured.OpenAPI != nil {
+					openAPI = *configured.OpenAPI
+				} else if entry.OpenAPI != nil {
+					openAPI = *entry.OpenAPI
+				}
+				if support == nil && openAPI && modelconfig.ResolveModelInfo(configured.Name, "gemini", nil).Thinking == nil {
+					support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
+				}
+				addConfiguredModelCapability(out, configured.Name, configured.Alias, "gemini", support, false)
+			}
 		}
 	case "meta":
 		if entry := resolveMetaAPIKeyConfig(cfg, auth); entry != nil {
@@ -485,4 +496,20 @@ func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, n
 		}
 	}
 	return modelInfo
+}
+
+// isVertexOpenAPIConfigModel recognizes partner models without depending on executors.
+func isVertexOpenAPIConfigModel(model string) bool {
+	base := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	if strings.HasPrefix(strings.ToLower(base), "publishers/") {
+		publisher, tail, ok := strings.Cut(base[len("publishers/"):], "/")
+		if !ok || !strings.HasPrefix(strings.ToLower(tail), "models/") {
+			return false
+		}
+		base = strings.TrimSpace(publisher) + "/" + strings.TrimSpace(tail[len("models/"):])
+	}
+	publisher, name, ok := strings.Cut(base, "/")
+	publisher, name = strings.TrimSpace(publisher), strings.TrimSpace(name)
+	return ok && publisher != "" && name != "" && !strings.Contains(name, "/") &&
+		!strings.EqualFold(publisher, "google") && !strings.EqualFold(publisher, "models") && !strings.EqualFold(publisher, "publishers")
 }

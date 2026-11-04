@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_VideoInput(t *testing.T) {
@@ -61,8 +61,8 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_VideoInput(t *test
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
 				raw := []byte(`{"input":[{"role":"user","content":[` + tt.part + `]}]}`)
-				out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("video-model", raw, stream)
-				content := gjson.GetBytes(out, "messages.0.content").Array()
+				out, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("video-model", raw, stream)
+				content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 				if len(content) != 1 {
 					t.Fatalf("video content was lost: got %d parts, want 1; output=%s", len(content), out)
 				}
@@ -97,8 +97,8 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MixedVideoInputOrd
 	if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
 		t.Fatal(err)
 	}
-	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("video-model", raw, false)
-	if got := gjson.GetBytes(out, "messages.0.content").Value(); !reflect.DeepEqual(got, want) {
+	out, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("video-model", raw, false)
+	if got := ojson.GetBytesNoCopy(out, "messages.0.content").Value(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("mixed content order or media changed: output=%s", out)
 	}
 }

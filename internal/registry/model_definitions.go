@@ -18,6 +18,9 @@ const (
 	xaiBuiltinVideoModelID             = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID           = "grok-imagine-video-1.5"
 	xaiBuiltinVideo15PreviewID         = "grok-imagine-video-1.5-preview"
+	xaiBuiltinVideo15LiteModelID       = "grok-imagine-video-1.5-lite"
+	xaiBuiltinSpeechModelID            = "grok-tts"
+	xaiBuiltinSpeechVoiceModelID       = "grok-voice-tts-1.0"
 )
 
 // staticModelsJSON mirrors the top-level structure of models.json.
@@ -255,10 +258,10 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	)
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
-// not depend on remote models.json updates.
+// WithXAIBuiltins injects hard-coded xAI image, video, and speech model definitions
+// that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinVideo15LiteModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -407,6 +410,47 @@ func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
 	}
 }
 
+func xaiBuiltinVideo15LiteModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        xaiBuiltinVideo15LiteModelID,
+		Object:                    "model",
+		Created:                   1787702400, // 2026-08-26
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Video 1.5 Lite",
+		Name:                      xaiBuiltinVideo15LiteModelID,
+		Description:               "xAI Grok Imagine Video 1.5 Lite supports text-to-video and image-to-video generation. Output pricing per second: $0.02 at 480p, $0.03 at 720p, and $0.14 at 1080p.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"video"},
+	}
+}
+
+func xaiBuiltinSpeechModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinSpeechModelID,
+		Object:      "model",
+		Created:     1773619200, // 2026-03-16
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok TTS",
+		Name:        xaiBuiltinSpeechModelID,
+		Description: "xAI Grok unary text-to-speech model.",
+	}
+}
+
+func xaiBuiltinSpeechVoiceModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinSpeechVoiceModelID,
+		Object:      "model",
+		Created:     1773619200, // 2026-03-16
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Voice TTS 1.0",
+		Name:        xaiBuiltinSpeechVoiceModelID,
+		Description: "xAI Grok unary text-to-speech model.",
+	}
+}
+
 func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	if len(extras) == 0 {
 		return models
@@ -517,9 +561,19 @@ func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
-	for _, model := range GetStaticModelDefinitionsByChannel(channel) {
+	models := GetStaticModelDefinitionsByChannel(channel)
+	for _, model := range models {
 		if model != nil && model.ID == modelID {
 			return cloneModelInfo(model)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(channel), "claude") {
+		for _, familyID := range claudeFamilyModelIDs(modelID) {
+			for _, model := range models {
+				if model != nil && model.ID == familyID {
+					return cloneModelInfo(model)
+				}
+			}
 		}
 	}
 	return nil
@@ -547,9 +601,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
-		data.Devin,
-		staticDevinModels,
-		data.Meta,
+		GetDevinModels(),
+		GetMetaModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
@@ -559,5 +612,45 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		}
 	}
 
+	// Dated and bracketed Claude variants (claude-sonnet-5-5-20261001,
+	// claude-opus-5-5[1m]) share the capabilities of their catalog entry.
+	for _, familyID := range claudeFamilyModelIDs(modelID) {
+		for _, m := range data.Claude {
+			if m != nil && m.ID == familyID {
+				return cloneModelInfo(m)
+			}
+		}
+	}
+
 	return nil
+}
+
+// claudeFamilyModelIDs returns the catalog IDs a Claude model variant may belong
+// to: without a "[...]" context suffix, then also without a "-YYYYMMDD" date.
+func claudeFamilyModelIDs(modelID string) []string {
+	if !strings.HasPrefix(modelID, "claude-") {
+		return nil
+	}
+	var ids []string
+	base := modelID
+	if i := strings.IndexByte(base, '['); i > 0 && strings.HasSuffix(base, "]") {
+		base = base[:i]
+		ids = append(ids, base)
+	}
+	if n := len(base); n > 9 && base[n-9] == '-' && isEightDigits(base[n-8:]) {
+		ids = append(ids, base[:n-9])
+	}
+	return ids
+}
+
+func isEightDigits(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

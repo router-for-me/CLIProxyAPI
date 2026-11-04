@@ -5,86 +5,104 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
-func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	rawJSON := inputRawJSON
-
-	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
-	if inputResult.Type == gjson.String {
-		input, _ := sjson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
-		inputResult = util.GetGJSONBytesNoCopy(rawJSON, "input")
+	var doc *ojson.Doc
+	ensureDoc := func() *ojson.Doc {
+		if doc == nil {
+			doc = ojson.NewDoc(rawJSON)
+		}
+		return doc
 	}
 
-	rawJSON = setCodexRequiredBool(rawJSON, "stream", true)
-	rawJSON = setCodexRequiredBool(rawJSON, "store", false)
-	rawJSON = setCodexRequiredBool(rawJSON, "parallel_tool_calls", true)
-	rawJSON = setCodexRequiredInclude(rawJSON)
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	rawJSON = deleteCodexRequestFields(rawJSON, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
-	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
-		if serviceTier.Type == gjson.String {
+	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
+	if inputResult.Type == ojson.String {
+		input, _ := ojson.SetBytes([]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`), "0.content.0.text", inputResult.String())
+		_ = ensureDoc().SetRawBytes("input", input)
+		inputResult = util.ParseGJSONBytesNoCopy(input)
+	}
+
+	setCodexRequiredBoolDoc(rawJSON, ensureDoc, "stream", true)
+	setCodexRequiredBoolDoc(rawJSON, ensureDoc, "store", false)
+	if ojson.GetBytesNoCopy(rawJSON, "parallel_tool_calls").Type != ojson.False {
+		setCodexRequiredBoolDoc(rawJSON, ensureDoc, "parallel_tool_calls", true)
+	}
+	setCodexRequiredIncludeDoc(rawJSON, ensureDoc)
+	// Preserve max_output_tokens and fill it from legacy token limits when unset.
+	if maxOutputTokens := ojson.GetBytesNoCopy(rawJSON, "max_output_tokens"); !maxOutputTokens.Exists() || maxOutputTokens.Type == ojson.Null {
+		for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+			if v := ojson.GetBytesNoCopy(rawJSON, path); v.Type == ojson.Number {
+				_ = ensureDoc().Set("max_output_tokens", v.Int())
+				break
+			}
+		}
+	}
+	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "max_completion_tokens", "max_tokens", "temperature", "top_p")
+	if serviceTier := ojson.GetBytesNoCopy(rawJSON, "service_tier"); serviceTier.Exists() {
+		if serviceTier.Type == ojson.String {
 			switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {
 			case "priority", "fast":
 				if serviceTier.String() != "priority" {
-					rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", "priority")
+					_ = ensureDoc().Set("service_tier", "priority")
 				}
 			case "ultrafast":
 				if serviceTier.String() != "ultrafast" {
-					rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", "ultrafast")
+					_ = ensureDoc().Set("service_tier", "ultrafast")
 				}
 			default:
-				rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+				_ = ensureDoc().Delete("service_tier")
 			}
 		} else {
-			rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+			_ = ensureDoc().Delete("service_tier")
 		}
 	}
 
-	rawJSON = deleteCodexRequestFields(rawJSON, "truncation", "prompt_cache_options", "prompt_cache_retention")
-	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
-	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
+	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "truncation", "prompt_cache_options", "prompt_cache_retention")
+	inputResult = stripCodexResponsesCacheBreakpointsDoc(rawJSON, inputResult, ensureDoc)
+	applyResponsesCompactionCompatibilityDoc(rawJSON, ensureDoc)
 
 	// Delete the user field as it is not supported by the Codex upstream.
-	rawJSON = deleteCodexRequestFields(rawJSON, "user")
+	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "user")
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloper(rawJSON)
-	rawJSON = normalizeCodexBuiltinTools(rawJSON)
-	rawJSON = normalizeEmptyFunctionCallArguments(rawJSON)
+	inputResult = convertSystemRoleToDeveloperDoc(inputResult, ensureDoc)
+	normalizeCodexBuiltinToolsDoc(rawJSON, ensureDoc)
+	normalizeEmptyFunctionCallArgumentsDoc(inputResult, ensureDoc)
 
-	return rawJSON
+	if doc != nil {
+		return doc.Bytes(), nil
+	}
+	return rawJSON, nil
 }
 
-// normalizeEmptyFunctionCallArguments rewrites blank string arguments on
+// normalizeEmptyFunctionCallArgumentsDoc rewrites blank string arguments on
 // history function_call items to "{}". Some Responses clients serialize
 // parameter-less tool calls as an empty string, which strict Codex Responses
 // upstreams reject with "`arguments` must be valid JSON". Only blank strings
 // are touched: non-empty strings (even invalid JSON) pass through unchanged
 // so other errors keep their original shape, and custom_tool_call items use
 // the separate input field and are never affected.
-func normalizeEmptyFunctionCallArguments(rawJSON []byte) []byte {
-	inputResult := util.GetGJSONBytesNoCopy(rawJSON, "input")
+func normalizeEmptyFunctionCallArgumentsDoc(inputResult ojson.Result, ensureDoc func() *ojson.Doc) {
 	if !inputResult.IsArray() {
-		return rawJSON
+		return
 	}
 	items := inputResult.Array()
 	if len(items) == 0 {
-		return rawJSON
+		return
 	}
 	changed := false
 	rebuilt := make([][]byte, 0, len(items))
 	for _, item := range items {
 		itemRaw := []byte(item.Raw)
 		if item.IsObject() && item.Get("type").String() == "function_call" {
-			if args := item.Get("arguments"); args.Type == gjson.String && strings.TrimSpace(args.String()) == "" {
-				if updated, errSet := sjson.SetBytes(itemRaw, "arguments", "{}"); errSet == nil {
+			if args := item.Get("arguments"); args.Type == ojson.String && strings.TrimSpace(args.String()) == "" {
+				if updated, errSet := ojson.SetBytes(itemRaw, "arguments", "{}"); errSet == nil {
 					itemRaw = updated
 					changed = true
 				}
@@ -93,82 +111,86 @@ func normalizeEmptyFunctionCallArguments(rawJSON []byte) []byte {
 		rebuilt = append(rebuilt, itemRaw)
 	}
 	if !changed {
-		return rawJSON
+		return
 	}
-	updated, errSetRaw := sjson.SetRawBytes(rawJSON, "input", translatorcommon.JoinRawArray(rebuilt))
-	if errSetRaw != nil {
-		return rawJSON
-	}
-	return updated
+	_ = ensureDoc().SetRawBytes("input", translatorcommon.JoinRawArray(rebuilt))
 }
 
-func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
-	current := gjson.GetBytes(rawJSON, path)
-	if value && current.Type == gjson.True || !value && current.Type == gjson.False {
-		return rawJSON
+func setCodexRequiredBoolDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, path string, value bool) {
+	current := ojson.GetBytesNoCopy(rawJSON, path)
+	if value && current.Type == ojson.True || !value && current.Type == ojson.False {
+		return
 	}
-
-	updated, errSet := sjson.SetBytes(rawJSON, path, value)
-	if errSet != nil {
-		return rawJSON
-	}
-	return updated
+	_ = ensureDoc().Set(path, value)
 }
 
-func setCodexRequiredInclude(rawJSON []byte) []byte {
-	current := gjson.GetBytes(rawJSON, "include")
-	values := current.Array()
-	if current.IsArray() && len(values) == 1 && values[0].Type == gjson.String && values[0].String() == "reasoning.encrypted_content" {
-		return rawJSON
+func setCodexRequiredIncludeDoc(rawJSON []byte, ensureDoc func() *ojson.Doc) {
+	current := ojson.GetBytesNoCopy(rawJSON, "include")
+	includeSources := false
+	if current.IsArray() {
+		values := current.Array()
+		for _, value := range values {
+			if value.Type == ojson.String && value.String() == "web_search_call.action.sources" {
+				includeSources = true
+				break
+			}
+		}
+		if !includeSources && len(values) == 1 && values[0].Type == ojson.String && values[0].String() == "reasoning.encrypted_content" {
+			return
+		}
+		if includeSources && len(values) == 2 &&
+			values[0].Type == ojson.String && values[0].String() == "reasoning.encrypted_content" &&
+			values[1].Type == ojson.String && values[1].String() == "web_search_call.action.sources" {
+			return
+		}
 	}
 
-	updated, errSet := sjson.SetRawBytes(rawJSON, "include", []byte(`["reasoning.encrypted_content"]`))
-	if errSet != nil {
-		return rawJSON
+	encoded := []byte(`["reasoning.encrypted_content"]`)
+	if includeSources {
+		encoded = []byte(`["reasoning.encrypted_content","web_search_call.action.sources"]`)
 	}
-	return updated
+	_ = ensureDoc().SetRawBytes("include", encoded)
 }
 
-func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
+func deleteCodexRequestFieldsDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, paths ...string) {
 	for _, path := range paths {
-		if !gjson.GetBytes(rawJSON, path).Exists() {
+		if !ojson.GetBytesNoCopy(rawJSON, path).Exists() {
 			continue
 		}
-
-		updated, errDelete := sjson.DeleteBytes(rawJSON, path)
-		if errDelete == nil {
-			rawJSON = updated
-		}
+		_ = ensureDoc().Delete(path)
 	}
-	return rawJSON
 }
 
-// stripCodexResponsesCacheBreakpoints removes any "prompt_cache_breakpoint" hint
+// stripCodexResponsesCacheBreakpointsDoc removes any "prompt_cache_breakpoint" hint
 // attached to input items: inside content-part arrays (message input[].content[]
 // and function_call_output input[].output[]) or as an item-level field. Some
 // clients (e.g. GitHub Copilot CLI) attach this field per content item when
 // targeting the OpenAI Responses format. Codex Responses rejects it outright:
 // {"error":{"message":"prompt_cache_breakpoint is not supported on this model", ...}}.
 // The top-level prompt_cache_options strip above does not cover these nested cases.
-func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
+func stripCodexResponsesCacheBreakpointsDoc(rawJSON []byte, input ojson.Result, ensureDoc func() *ojson.Doc) ojson.Result {
 	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
-		return rawJSON
+		return input
 	}
-
-	input := util.GetGJSONBytesNoCopy(rawJSON, "input")
 	if !input.IsArray() {
-		return rawJSON
+		return input
 	}
 
 	inputItems := input.Array()
 	if len(inputItems) == 0 {
-		return rawJSON
+		return input
 	}
 
 	changed := false
 	rebuiltInput := make([][]byte, 0, len(inputItems))
 	for _, item := range inputItems {
-		itemRaw := []byte(item.Raw)
+		var itemDoc *ojson.Doc
+		ensureItemDoc := func() *ojson.Doc {
+			if itemDoc == nil {
+				itemDoc = ojson.NewDocString(item.Raw)
+			}
+			return itemDoc
+		}
 		for _, arrayPath := range []string{"content", "output"} {
 			arrayResult := item.Get(arrayPath)
 			if !arrayResult.IsArray() {
@@ -178,33 +200,33 @@ func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 			if !arrayChanged {
 				continue
 			}
-			if updatedItem, errSet := sjson.SetRawBytes(itemRaw, arrayPath, updatedArray); errSet == nil {
-				itemRaw = updatedItem
+			if errSet := ensureItemDoc().SetRawBytes(arrayPath, updatedArray); errSet == nil {
 				changed = true
 			}
 		}
 		if item.Get("prompt_cache_breakpoint").Exists() {
-			if updatedItem, errDelete := sjson.DeleteBytes(itemRaw, "prompt_cache_breakpoint"); errDelete == nil {
-				itemRaw = updatedItem
+			if errDelete := ensureItemDoc().Delete("prompt_cache_breakpoint"); errDelete == nil {
 				changed = true
 			}
 		}
-		rebuiltInput = append(rebuiltInput, itemRaw)
+		if itemDoc != nil {
+			rebuiltInput = append(rebuiltInput, itemDoc.Bytes())
+		} else {
+			rebuiltInput = append(rebuiltInput, []byte(item.Raw))
+		}
 	}
 	if !changed {
-		return rawJSON
+		return input
 	}
 
-	updated, errSet := sjson.SetRawBytes(rawJSON, "input", translatorcommon.JoinRawArray(rebuiltInput))
-	if errSet != nil {
-		return rawJSON
-	}
-	return updated
+	joined := translatorcommon.JoinRawArray(rebuiltInput)
+	_ = ensureDoc().SetRawBytes("input", joined)
+	return util.ParseGJSONBytesNoCopy(joined)
 }
 
 // stripPromptCacheBreakpointFromContent removes "prompt_cache_breakpoint" from each
 // content part that carries it and reports whether anything changed.
-func stripPromptCacheBreakpointFromContent(content gjson.Result) ([]byte, bool) {
+func stripPromptCacheBreakpointFromContent(content ojson.Result) ([]byte, bool) {
 	parts := content.Array()
 	hasBreakpoint := false
 	for _, part := range parts {
@@ -222,7 +244,7 @@ func stripPromptCacheBreakpointFromContent(content gjson.Result) ([]byte, bool) 
 	for _, part := range parts {
 		partRaw := []byte(part.Raw)
 		if part.Get("prompt_cache_breakpoint").Exists() {
-			if updated, errDelete := sjson.DeleteBytes(partRaw, "prompt_cache_breakpoint"); errDelete == nil {
+			if updated, errDelete := ojson.DeleteBytes(partRaw, "prompt_cache_breakpoint"); errDelete == nil {
 				partRaw = updated
 				changed = true
 			}
@@ -243,13 +265,11 @@ func stripPromptCacheBreakpointFromContent(content gjson.Result) ([]byte, bool) 
 //
 // Compatibility strategy:
 // 1) Remove context_management before forwarding to Codex upstream.
-func applyResponsesCompactionCompatibility(rawJSON []byte) []byte {
-	if !gjson.GetBytes(rawJSON, "context_management").Exists() {
-		return rawJSON
+func applyResponsesCompactionCompatibilityDoc(rawJSON []byte, ensureDoc func() *ojson.Doc) {
+	if !ojson.GetBytesNoCopy(rawJSON, "context_management").Exists() {
+		return
 	}
-
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "context_management")
-	return rawJSON
+	_ = ensureDoc().Delete("context_management")
 }
 
 // convertSystemRoleToDeveloper traverses the input array and converts any message items
@@ -259,7 +279,54 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	return convertSystemRoleToDeveloperWithInput(rawJSON, util.GetGJSONBytesNoCopy(rawJSON, "input"))
 }
 
-func convertSystemRoleToDeveloperWithInput(rawJSON []byte, inputResult gjson.Result) []byte {
+func convertSystemRoleToDeveloperDoc(inputResult ojson.Result, ensureDoc func() *ojson.Doc) ojson.Result {
+	if !inputResult.IsArray() {
+		return inputResult
+	}
+
+	inputItems := inputResult.Array()
+	if len(inputItems) == 0 {
+		return inputResult
+	}
+
+	hasSystemRole := false
+	for _, item := range inputItems {
+		if item.IsObject() && item.Get("role").String() == "system" {
+			hasSystemRole = true
+			break
+		}
+	}
+	if !hasSystemRole {
+		return inputResult
+	}
+
+	changed := false
+	rebuiltInput := make([]json.RawMessage, 0, len(inputItems))
+	for _, item := range inputItems {
+		itemRaw := []byte(item.Raw)
+		if item.IsObject() && item.Get("role").String() == "system" {
+			updatedItem, errSetItem := ojson.SetRawBytes(itemRaw, "role", []byte(`"developer"`))
+			if errSetItem != nil {
+				return inputResult
+			}
+			itemRaw = updatedItem
+			changed = true
+		}
+		rebuiltInput = append(rebuiltInput, json.RawMessage(itemRaw))
+	}
+	if !changed {
+		return inputResult
+	}
+
+	inputRaw, errMarshalInput := json.Marshal(rebuiltInput)
+	if errMarshalInput != nil {
+		return inputResult
+	}
+	_ = ensureDoc().SetRawBytes("input", inputRaw)
+	return util.ParseGJSONBytesNoCopy(inputRaw)
+}
+
+func convertSystemRoleToDeveloperWithInput(rawJSON []byte, inputResult ojson.Result) []byte {
 	if !inputResult.IsArray() {
 		return rawJSON
 	}
@@ -285,7 +352,7 @@ func convertSystemRoleToDeveloperWithInput(rawJSON []byte, inputResult gjson.Res
 	for _, item := range inputItems {
 		itemRaw := []byte(item.Raw)
 		if item.IsObject() && item.Get("role").String() == "system" {
-			updatedItem, errSetItem := sjson.SetRawBytes(itemRaw, "role", []byte(`"developer"`))
+			updatedItem, errSetItem := ojson.SetRawBytes(itemRaw, "role", []byte(`"developer"`))
 			if errSetItem != nil {
 				return rawJSON
 			}
@@ -302,35 +369,35 @@ func convertSystemRoleToDeveloperWithInput(rawJSON []byte, inputResult gjson.Res
 	if errMarshalInput != nil {
 		return rawJSON
 	}
-	updated, errSetInput := sjson.SetRawBytes(rawJSON, "input", inputRaw)
+	updated, errSetInput := ojson.SetRawBytes(rawJSON, "input", inputRaw)
 	if errSetInput != nil {
 		return rawJSON
 	}
 	return updated
 }
 
-// normalizeCodexBuiltinTools rewrites legacy/preview built-in tool variants to the
+// normalizeCodexBuiltinToolsDoc rewrites legacy/preview built-in tool variants to the
 // stable names expected by the current Codex upstream.
-func normalizeCodexBuiltinTools(rawJSON []byte) []byte {
-	result := normalizeCodexBuiltinToolArray(rawJSON, "tools")
-	result = normalizeCodexBuiltinToolAtPath(result, "tool_choice.type")
-	return normalizeCodexBuiltinToolArray(result, "tool_choice.tools")
+func normalizeCodexBuiltinToolsDoc(rawJSON []byte, ensureDoc func() *ojson.Doc) {
+	normalizeCodexBuiltinToolArrayDoc(rawJSON, ensureDoc, "tools")
+	normalizeCodexBuiltinToolAtPathDoc(rawJSON, ensureDoc, "tool_choice.type")
+	normalizeCodexBuiltinToolArrayDoc(rawJSON, ensureDoc, "tool_choice.tools")
 }
 
-func normalizeCodexBuiltinToolArray(rawJSON []byte, path string) []byte {
-	tools := gjson.GetBytes(rawJSON, path)
+func normalizeCodexBuiltinToolArrayDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, path string) {
+	tools := ojson.GetBytesNoCopy(rawJSON, path)
 	if !tools.IsArray() {
-		return rawJSON
+		return
 	}
 
 	changed := false
 	var toolItems [][]byte
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		item := []byte(tool.Raw)
 		currentType := tool.Get("type").String()
 		normalizedType := normalizeCodexBuiltinToolType(currentType)
 		if normalizedType != "" {
-			updated, errSetType := sjson.SetBytes(item, "type", normalizedType)
+			updated, errSetType := ojson.SetBytes(item, "type", normalizedType)
 			if errSetType == nil {
 				item = updated
 				changed = true
@@ -341,30 +408,24 @@ func normalizeCodexBuiltinToolArray(rawJSON []byte, path string) []byte {
 		return true
 	})
 	if !changed {
-		return rawJSON
+		return
 	}
 
-	updated, errSetTools := sjson.SetRawBytes(rawJSON, path, translatorcommon.JoinRawArray(toolItems))
-	if errSetTools != nil {
-		return rawJSON
-	}
-	return updated
+	_ = ensureDoc().SetRawBytes(path, translatorcommon.JoinRawArray(toolItems))
 }
 
-func normalizeCodexBuiltinToolAtPath(rawJSON []byte, path string) []byte {
-	currentType := gjson.GetBytes(rawJSON, path).String()
+func normalizeCodexBuiltinToolAtPathDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, path string) {
+	currentType := ojson.GetBytesNoCopy(rawJSON, path).String()
 	normalizedType := normalizeCodexBuiltinToolType(currentType)
 	if normalizedType == "" {
-		return rawJSON
+		return
 	}
 
-	updated, err := sjson.SetBytes(rawJSON, path, normalizedType)
-	if err != nil {
-		return rawJSON
+	if errSet := ensureDoc().Set(path, normalizedType); errSet != nil {
+		return
 	}
 
 	log.Debugf("codex responses: normalized builtin tool type at %s from %q to %q", path, currentType, normalizedType)
-	return updated
 }
 
 // normalizeCodexBuiltinToolType centralizes the current known Codex Responses

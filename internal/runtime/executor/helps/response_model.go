@@ -2,28 +2,15 @@ package helps
 
 import (
 	"strings"
-	"sync"
-	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/tidwall/gjson"
 )
 
 const (
 	// maxResponseModelLength is a defensive bound on an upstream-controlled string
 	// reaching logs and usage records; known model ids stay under ~128 bytes.
-	maxResponseModelLength      = 128
-	maxCodexResponseModelLength = maxResponseModelLength
-
-	// modelSubstitutionWarnWindow bounds how often one credential and model pair
-	// warns: on an affected credential every request is substituted.
-	modelSubstitutionWarnWindow      = 10 * time.Minute
-	codexModelSubstitutionWarnWindow = modelSubstitutionWarnWindow
-
-	// modelSubstitutionWarnMaxEntries caps the throttle state, naturally bounded by
-	// credentials times models; memory safety wins over perfect throttling.
-	modelSubstitutionWarnMaxEntries      = 1024
-	codexModelSubstitutionWarnMaxEntries = modelSubstitutionWarnMaxEntries
+	maxResponseModelLength = 128
 )
 
 // extractResponseModelEvent returns the model an upstream reports serving, read
@@ -48,41 +35,41 @@ func extractResponseModelEvent(payload []byte, provider string) (model string, t
 
 // extractClaudeResponseModelEvent extracts the response model from an Anthropic Claude response.
 func extractClaudeResponseModelEvent(data []byte) (model string, terminal bool) {
-	eventType := gjson.GetBytes(data, "type").String()
+	eventType := ojson.GetBytesNoCopy(data, "type").String()
 	switch eventType {
 	case "message_start":
-		m := gjson.GetBytes(data, "message.model")
-		if m.Type == gjson.String {
+		m := ojson.GetBytesNoCopy(data, "message.model")
+		if m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
 		}
 		return "", false
 	case "message_stop":
 		return "", true
 	case "message":
-		m := gjson.GetBytes(data, "model")
-		if m.Type == gjson.String {
+		m := ojson.GetBytesNoCopy(data, "model")
+		if m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, true
+				return strings.Clone(s), true
 			}
 		}
 		return "", true
 	default:
-		if !gjson.ValidBytes(data) {
+		if !ojson.ValidBytes(data) {
 			return "", false
 		}
-		if m := gjson.GetBytes(data, "message.model"); m.Type == gjson.String {
+		if m := ojson.GetBytesNoCopy(data, "message.model"); m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
-		} else if m := gjson.GetBytes(data, "model"); m.Type == gjson.String {
+		} else if m := ojson.GetBytesNoCopy(data, "model"); m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
 		}
 		return "", false
@@ -91,37 +78,44 @@ func extractClaudeResponseModelEvent(data []byte) (model string, terminal bool) 
 
 // extractGeminiResponseModelEvent extracts the response model from a Google Gemini / Vertex / AIStudio response.
 func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) {
-	if !gjson.ValidBytes(data) {
+	if !ojson.ValidBytes(data) {
 		return "", false
 	}
-	m := gjson.GetBytes(data, "response.modelVersion")
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "modelVersion")
+	m := ojson.GetBytesNoCopy(data, "response.modelVersion")
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "modelVersion")
 	}
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "interaction.model")
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "interaction.model")
 	}
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "model")
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "model")
 	}
 	var served string
-	if m.Type == gjson.String {
+	if m.Type == ojson.String {
 		served = strings.TrimSpace(m.String())
 		if len(served) > maxResponseModelLength {
 			served = ""
+		} else {
+			served = strings.Clone(served)
 		}
 	}
-	cand := gjson.GetBytes(data, "candidates.0.finishReason")
+	cand := ojson.GetBytesNoCopy(data, "candidates.0.finishReason")
 	if !cand.Exists() {
-		cand = gjson.GetBytes(data, "response.candidates.0.finishReason")
+		cand = ojson.GetBytesNoCopy(data, "response.candidates.0.finishReason")
 	}
 	terminal = cand.Exists() && cand.String() != ""
 	if !terminal {
-		eventType := gjson.GetBytes(data, "event_type").String()
+		objectType := ojson.GetBytesNoCopy(data, "object").String()
+		finishReason := ojson.GetBytesNoCopy(data, "choices.0.finish_reason").String()
+		terminal = objectType == "chat.completion" || finishReason != ""
+	}
+	if !terminal {
+		eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 		if eventType == "" {
-			eventType = gjson.GetBytes(data, "type").String()
+			eventType = ojson.GetBytesNoCopy(data, "type").String()
 		}
-		status := gjson.GetBytes(data, "interaction.status").String()
+		status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 		terminal = isInteractionsTerminal(eventType, status)
 	}
 	return served, terminal
@@ -129,64 +123,64 @@ func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) 
 
 // extractGenericResponseModelEvent extracts the response model from standard JSON / SSE responses.
 func extractGenericResponseModelEvent(data []byte) (model string, terminal bool) {
-	if !gjson.ValidBytes(data) {
+	if !ojson.ValidBytes(data) {
 		return "", false
 	}
-	if m := gjson.GetBytes(data, "response.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "response.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			eventType := gjson.GetBytes(data, "type").String()
+			eventType := ojson.GetBytesNoCopy(data, "type").String()
 			terminal := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete"
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	if m := gjson.GetBytes(data, "interaction.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "interaction.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			eventType := gjson.GetBytes(data, "event_type").String()
+			eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 			if eventType == "" {
-				eventType = gjson.GetBytes(data, "type").String()
+				eventType = ojson.GetBytesNoCopy(data, "type").String()
 			}
-			status := gjson.GetBytes(data, "interaction.status").String()
+			status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 			terminal := isInteractionsTerminal(eventType, status)
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	if m := gjson.GetBytes(data, "modelVersion"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "modelVersion"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			cand := gjson.GetBytes(data, "candidates.0.finishReason")
-			return served, cand.Exists() && cand.String() != ""
+			cand := ojson.GetBytesNoCopy(data, "candidates.0.finishReason")
+			return strings.Clone(served), cand.Exists() && cand.String() != ""
 		}
 	}
-	if m := gjson.GetBytes(data, "response.modelVersion"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "response.modelVersion"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			cand := gjson.GetBytes(data, "response.candidates.0.finishReason")
-			return served, cand.Exists() && cand.String() != ""
+			cand := ojson.GetBytesNoCopy(data, "response.candidates.0.finishReason")
+			return strings.Clone(served), cand.Exists() && cand.String() != ""
 		}
 	}
-	if m := gjson.GetBytes(data, "message.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "message.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			return served, false
+			return strings.Clone(served), false
 		}
 	}
-	if m := gjson.GetBytes(data, "model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			objectType := gjson.GetBytes(data, "object").String()
-			finishReason := gjson.GetBytes(data, "choices.0.finish_reason").String()
-			status := gjson.GetBytes(data, "status").String()
+			objectType := ojson.GetBytesNoCopy(data, "object").String()
+			finishReason := ojson.GetBytesNoCopy(data, "choices.0.finish_reason").String()
+			status := ojson.GetBytesNoCopy(data, "status").String()
 			terminal := objectType == "chat.completion" || finishReason != "" || status == "completed" || status == "incomplete"
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	eventType := gjson.GetBytes(data, "event_type").String()
+	eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 	if eventType == "" {
-		eventType = gjson.GetBytes(data, "type").String()
+		eventType = ojson.GetBytesNoCopy(data, "type").String()
 	}
-	status := gjson.GetBytes(data, "interaction.status").String()
+	status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 	if isInteractionsTerminal(eventType, status) || eventType == "message_stop" {
 		return "", true
 	}
@@ -214,24 +208,24 @@ func extractCodexResponseModelEvent(payload []byte) (model string, terminal bool
 	}
 	// The event type is checked before the payload is validated, so the hot path
 	// (output deltas) stays a single cheap lookup.
-	carriesModel, terminal := codexResponseModelEventKind(gjson.GetBytes(data, "type").String())
+	carriesModel, terminal := codexResponseModelEventKind(ojson.GetBytesNoCopy(data, "type").String())
 	if !carriesModel {
 		return "", false
 	}
-	if !gjson.ValidBytes(data) {
+	if !ojson.ValidBytes(data) {
 		return "", false
 	}
 	// The value is upstream-controlled: reject non-string and oversized names
 	// rather than propagating them into logs and usage records.
-	modelResult := gjson.GetBytes(data, "response.model")
-	if modelResult.Type != gjson.String {
+	modelResult := ojson.GetBytesNoCopy(data, "response.model")
+	if modelResult.Type != ojson.String {
 		return "", terminal
 	}
 	model = strings.TrimSpace(modelResult.String())
-	if len(model) > maxCodexResponseModelLength {
+	if len(model) > maxResponseModelLength {
 		return "", terminal
 	}
-	return model, terminal
+	return strings.Clone(model), terminal
 }
 
 // codexResponseModelEventKind reports whether a codex event embeds the authoritative
@@ -253,23 +247,11 @@ func normalizeModelName(model string) string {
 	return strings.TrimSpace(thinking.ParseSuffix(strings.ToLower(strings.TrimSpace(model))).ModelName)
 }
 
-// normalizeCodexModelName lower-cases a model id and drops its thinking suffix,
-// which never reaches the upstream request body.
-func normalizeCodexModelName(model string) string {
-	return normalizeModelName(model)
-}
-
 func stripModelProviderPrefix(model string) string {
 	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
 		return model[idx+1:]
 	}
 	return model
-}
-
-// IsCodexModelSubstituted reports whether the upstream served a model other than the
-// requested one; a dated alias pins a snapshot of the same model and is accepted.
-func IsCodexModelSubstituted(requested, served string) bool {
-	return IsModelSubstituted(requested, served)
 }
 
 // IsModelSubstituted reports whether the upstream served a model other than the
@@ -321,12 +303,6 @@ func isDatedModelAlias(base, dated string) bool {
 	return isModelDateSuffix(suffix) || isModelNumericVersionSuffix(suffix)
 }
 
-// isCodexDatedModelAlias reports whether dated is base plus a release date suffix,
-// which upstreams use to pin the exact snapshot of the same model.
-func isCodexDatedModelAlias(base, dated string) bool {
-	return isDatedModelAlias(base, dated)
-}
-
 func isModelDateSuffix(suffix string) bool {
 	switch len(suffix) {
 	case len("YYYY-MM-DD"):
@@ -339,11 +315,6 @@ func isModelDateSuffix(suffix string) bool {
 	default:
 		return false
 	}
-}
-
-// isCodexModelDateSuffix reports whether suffix is a YYYY-MM-DD or YYYYMMDD date.
-func isCodexModelDateSuffix(suffix string) bool {
-	return isModelDateSuffix(suffix)
 }
 
 func isModelNumericVersionSuffix(suffix string) bool {
@@ -364,62 +335,3 @@ func isModelDigits(value string) bool {
 	}
 	return true
 }
-
-// isCodexModelDigits reports whether value is a non-empty run of ASCII digits.
-func isCodexModelDigits(value string) bool {
-	return isModelDigits(value)
-}
-
-type codexModelSubstitutionKey struct {
-	provider  string
-	authID    string
-	requested string
-	served    string
-}
-
-// codexModelSubstitutionThrottle records the last warning per key; nowFunc is
-// injectable so tests can advance the window without sleeping.
-type codexModelSubstitutionThrottle struct {
-	mu       sync.Mutex
-	nowFunc  func() time.Time
-	lastWarn map[codexModelSubstitutionKey]time.Time
-}
-
-func newCodexModelSubstitutionThrottle(nowFunc func() time.Time) *codexModelSubstitutionThrottle {
-	if nowFunc == nil {
-		nowFunc = time.Now
-	}
-	return &codexModelSubstitutionThrottle{
-		nowFunc:  nowFunc,
-		lastWarn: make(map[codexModelSubstitutionKey]time.Time),
-	}
-}
-
-// allow reports whether the key may emit a warning now and records the decision.
-// Suppressed repeats stay silent instead of moving to a lower level.
-func (t *codexModelSubstitutionThrottle) allow(key codexModelSubstitutionKey) bool {
-	if t == nil {
-		return true
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.nowFunc()
-	if last, ok := t.lastWarn[key]; ok && now.Sub(last) < codexModelSubstitutionWarnWindow {
-		return false
-	}
-	if len(t.lastWarn) >= codexModelSubstitutionWarnMaxEntries {
-		for storedKey, storedAt := range t.lastWarn {
-			if now.Sub(storedAt) >= codexModelSubstitutionWarnWindow {
-				delete(t.lastWarn, storedKey)
-			}
-		}
-		if len(t.lastWarn) >= codexModelSubstitutionWarnMaxEntries {
-			clear(t.lastWarn)
-		}
-	}
-	t.lastWarn[key] = now
-	return true
-}
-
-// codexModelSubstitutionWarns throttles substitution warnings process-wide.
-var codexModelSubstitutionWarns = newCodexModelSubstitutionThrottle(time.Now)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -98,6 +99,146 @@ func TestChatCompletionsHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) 
 	runOpenAIStreamErrorTest(t, "/v1/chat/completions", `{"model":"initial-failure-chat-model","messages":[{"role":"user","content":"hi"}],"stream":true}`)
 }
 
+type preFTKeepAliveChatExecutor struct {
+	chunks chan coreexecutor.StreamChunk
+}
+
+func (*preFTKeepAliveChatExecutor) Identifier() string { return "pre-ft-keepalive-chat-executor" }
+
+func (*preFTKeepAliveChatExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (e *preFTKeepAliveChatExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func (*preFTKeepAliveChatExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (*preFTKeepAliveChatExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, errors.New("not implemented")
+}
+
+func (*preFTKeepAliveChatExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, errors.New("not implemented")
+}
+
+func TestChatCompletionsHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &preFTKeepAliveChatExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "pre-ft-keepalive-chat-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-chat-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("chat upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/chat/completions", h.ChatCompletions)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("{\"model\":\""+model+"\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "data: {\"error\":") || !strings.Contains(body, "chat upstream failed after keepalive") {
+		t.Fatalf("missing SSE JSON error payload after keepalive: %q", body)
+	}
+}
+
 func TestCompletionsHandlerDoesNotLoseErrorBeforeFirstPayload(t *testing.T) {
 	runOpenAIStreamErrorTest(t, "/v1/completions", `{"model":"initial-failure-chat-model","prompt":"hi","stream":true}`)
+}
+
+func TestCompletionsHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	executor := &preFTKeepAliveChatExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "pre-ft-keepalive-completions-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-completions-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("completions upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/completions", h.Completions)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader("{\"model\":\""+model+"\",\"prompt\":\"hi\",\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "data: {\"error\":") || !strings.Contains(body, "completions upstream failed after keepalive") {
+		t.Fatalf("missing SSE JSON error payload after keepalive: %q", body)
+	}
 }

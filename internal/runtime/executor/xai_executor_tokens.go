@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
 // CountTokens estimates token count for xAI Responses requests.
 func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	prepared, err := e.prepareResponsesRequest(ctx, req, opts, false)
+	prepared, err := e.prepareResponsesRequestDoc(ctx, req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -22,6 +24,9 @@ func (e *XAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, 
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai executor: tokenizer init failed: %w", err)
 	}
+	doc := prepared.ensureDoc()
+	helps.FinalizePayloadDoc(helps.WithPayloadFinalizer(ctx, prepared.finalizePayload), doc)
+	prepared.body = doc.Bytes()
 	count, err := countXAIInputTokens(enc, prepared.body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("xai executor: token counting failed: %w", err)
@@ -39,7 +44,7 @@ func countXAIInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 		return 0, nil
 	}
 
-	root := gjson.ParseBytes(body)
+	root := util.ParseGJSONBytesNoCopy(body)
 	segments := make([]string, 0, 32)
 	xaiAppendTokenString(&segments, root.Get("instructions"))
 	xaiCollectInputTokenSegments(root.Get("input"), &segments)
@@ -61,8 +66,8 @@ func countXAIInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	return int64(count), nil
 }
 
-func xaiCollectInputTokenSegments(input gjson.Result, segments *[]string) {
-	if input.Type == gjson.String {
+func xaiCollectInputTokenSegments(input ojson.Result, segments *[]string) {
+	if input.Type == ojson.String {
 		xaiAppendTokenString(segments, input)
 		return
 	}
@@ -86,8 +91,8 @@ func xaiCollectInputTokenSegments(input gjson.Result, segments *[]string) {
 	}
 }
 
-func xaiCollectContentTokenSegments(content gjson.Result, segments *[]string) {
-	if content.Type == gjson.String {
+func xaiCollectContentTokenSegments(content ojson.Result, segments *[]string) {
+	if content.Type == ojson.String {
 		xaiAppendTokenString(segments, content)
 		return
 	}
@@ -115,7 +120,7 @@ func xaiCollectContentTokenSegments(content gjson.Result, segments *[]string) {
 	}
 }
 
-func xaiCollectToolTokenSegments(tools gjson.Result, segments *[]string) {
+func xaiCollectToolTokenSegments(tools ojson.Result, segments *[]string) {
 	if !tools.IsArray() {
 		return
 	}
@@ -129,17 +134,17 @@ func xaiCollectToolTokenSegments(tools gjson.Result, segments *[]string) {
 	}
 }
 
-func xaiAppendTokenString(segments *[]string, value gjson.Result) {
+func xaiAppendTokenString(segments *[]string, value ojson.Result) {
 	if text := strings.TrimSpace(value.String()); text != "" {
 		*segments = append(*segments, text)
 	}
 }
 
-func xaiAppendTokenJSON(segments *[]string, value gjson.Result) {
+func xaiAppendTokenJSON(segments *[]string, value ojson.Result) {
 	if !value.Exists() {
 		return
 	}
-	if value.Type == gjson.String {
+	if value.Type == ojson.String {
 		xaiAppendTokenString(segments, value)
 		return
 	}

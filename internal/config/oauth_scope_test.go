@@ -14,6 +14,7 @@ func TestV8OAuthScopeSurvivesSnapshotsAndSaves(t *testing.T) {
 oauth:
   providers:
     codex: {disable-codex-cloaking: true, model-level-cooling: true}
+    aistudio: {ws-auth: true}
     claude:
       disable-claude-cloak-mode: true
       header-defaults: {user-agent: oauth-agent}
@@ -39,8 +40,11 @@ api-keys:
 	for name, value := range map[string]*Config{"parsed": cfg, "cloned": cfg.CloneForRuntime(), "snapshot": decoded} {
 		t.Run(name, func(t *testing.T) {
 			api := value.ForAPIKey()
-			if api.Codex.DisableCodexCloaking || api.Codex.ModelLevelCooling || api.DisableClaudeCloakMode || api.ClaudeHeaderDefaults.UserAgent != "" || api.XAI.InjectXSearch {
-				t.Fatal("API-key view inherited OAuth-only settings")
+			if api.WebsocketAuth {
+				t.Fatal("API-key view inherited OAuth-only relay settings")
+			}
+			if !api.Codex.DisableCodexCloaking || !api.Codex.ModelLevelCooling || !api.DisableClaudeCloakMode || api.ClaudeHeaderDefaults.UserAgent != "oauth-agent" || !api.XAI.InjectXSearch {
+				t.Fatal("API-key view lost shared upstream settings")
 			}
 			if !api.Codex.StreamBootstrapBuffering || api.CodexKey[0].DisableCodexCloaking == nil || !*api.CodexKey[0].DisableCodexCloaking {
 				t.Fatal("API-key view lost a legacy setting or explicit key override")
@@ -62,7 +66,7 @@ api-keys:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.ForAPIKey().Codex.DisableCodexCloaking || !reloaded.Codex.DisableCodexCloaking {
+	if !reloaded.ForAPIKey().Codex.DisableCodexCloaking || !reloaded.Codex.DisableCodexCloaking || reloaded.ForAPIKey().WebsocketAuth {
 		t.Fatal("save/reload lost OAuth scope")
 	}
 }
@@ -106,8 +110,8 @@ func TestV8MigrationUpdatesScopeAfterSaving(t *testing.T) {
 			if !reflect.DeepEqual(cfg.OAuthOnlyFields, disk.OAuthOnlyFields) {
 				t.Fatal("saved config and runtime have different OAuth scopes")
 			}
-			if cfg.ForAPIKey().Codex.DisableCodexCloaking == migrate || cfg.ForAPIKey().XAI.InjectXSearch == migrate {
-				t.Fatal("incorrect API-key scope after save")
+			if !cfg.ForAPIKey().Codex.DisableCodexCloaking || !cfg.ForAPIKey().XAI.InjectXSearch {
+				t.Fatal("migration lost shared API-key settings")
 			}
 			after := cfg.CloneForRuntime()
 			after.OAuthOnlyFields = nil

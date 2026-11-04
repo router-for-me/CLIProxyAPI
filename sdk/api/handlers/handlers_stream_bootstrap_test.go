@@ -620,6 +620,54 @@ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testin
 	}
 }
 
+func TestExecuteStreamWithPreFTKeepAlive_CancelWaitsForBootstrapGoroutine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	started := make(chan struct{})
+	releaseExec := make(chan struct{})
+	execExited := false
+	executor := &bootstrapStreamExecutor{stream: func(ctx context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		close(started)
+		<-ctx.Done()
+		<-releaseExec
+		execExited = true
+		return nil, ctx.Err()
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	defer reqCancel()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+
+	cliCtx, cliCancel := context.WithCancel(context.Background())
+	defer cliCancel()
+	tickChan := make(chan time.Time)
+
+	done := make(chan bool, 1)
+	go func() {
+		_, _, _, ok := handler.ExecuteStreamWithPreFTKeepAlive(
+			c, cliCtx, func(error) { cliCancel() }, "openai", "bootstrap-model", []byte("{\"model\":\"bootstrap-model\"}"), "", tickChan, func() bool { return true },
+		)
+		done <- ok
+	}()
+
+	<-started
+	reqCancel()
+	select {
+	case <-done:
+		t.Fatal("ExecuteStreamWithPreFTKeepAlive returned before bootstrap goroutine finished")
+	default:
+	}
+	close(releaseExec)
+	if ok := <-done; ok {
+		t.Fatal("ExecuteStreamWithPreFTKeepAlive ok = true, want false after cancel")
+	}
+	if !execExited {
+		t.Fatal("expected bootstrap executor goroutine to exit before return")
+	}
+}
+
 func TestExecuteStreamWithAuthManager_EmptyClosedStream(t *testing.T) {
 	executor := &bootstrapStreamExecutor{stream: func(_ context.Context, _ int) (*coreexecutor.StreamResult, error) {
 		chunks := make(chan coreexecutor.StreamChunk)

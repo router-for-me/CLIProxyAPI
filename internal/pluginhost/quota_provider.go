@@ -24,6 +24,14 @@ func (h *Host) RegisterPluginForTest(id string, plugin pluginapi.Plugin) {
 	}
 	records := append(h.activeRecords(), record)
 	h.mu.Lock()
+	h.loaded[id] = &loadedPlugin{
+		id:         id,
+		name:       plugin.Metadata.Name,
+		path:       record.path,
+		version:    record.version,
+		plugin:     plugin,
+		registered: true,
+	}
 	h.rebuildActivePluginMapsLocked(records)
 	h.snapshot.Store(&Snapshot{enabled: true, records: records, quotaSupportedProviders: make(map[string][]string)})
 	h.mu.Unlock()
@@ -113,41 +121,69 @@ func (h *Host) HasQuotaProviderForPlugin(pluginID string) bool {
 	return h.quotaProviderRecordByPlugin(pluginID) != nil
 }
 
-// QuotaSupportedProvidersSet returns a point-in-time set of all provider keys supported by active quota providers.
-// This allows callers (e.g. ListAuthFiles) to discover all quota-capable providers with zero per-credential RPCs.
-func (h *Host) QuotaSupportedProvidersSet(ctx context.Context) map[string]struct{} {
+// QuotaProviderPluginIDs returns a point-in-time map from normalized provider keys to the ID of the
+// quota plugin that quotaProviderRecord would select for that provider, preserving its two-pass precedence.
+// This allows callers (e.g. ListAuthFiles) to resolve quota plugins with zero per-credential RPCs.
+func (h *Host) QuotaProviderPluginIDs(ctx context.Context) map[string]string {
 	if h == nil {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	snap := h.Snapshot()
 	if snap == nil {
 		return nil
 	}
 	records := h.activeRecordsFromSnapshot(snap)
-	out := make(map[string]struct{})
+	// Keep candidates in selection order until probing finishes, because DescribeQuota may fuse a plugin.
+	candidates := make(map[string][]string)
+	addCandidate := func(provider, pluginID string) {
+		if provider != "" {
+			candidates[provider] = append(candidates[provider], pluginID)
+		}
+	}
+	quotaRecords := make([]capabilityRecord, 0, len(records))
+	// First pass: QuotaProvider.Identifier(), plugin ID, or AuthProvider.Identifier().
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
-			return out
+			break
 		}
 		quotaProvider := record.plugin.Capabilities.QuotaProvider
 		if quotaProvider == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		if identifier, okID := h.callQuotaIdentifier(record.id, quotaProvider); okID && identifier != "" {
-			out[identifier] = struct{}{}
+		quotaRecords = append(quotaRecords, record)
+		if identifier, okID := h.callQuotaIdentifier(record.id, quotaProvider); okID {
+			addCandidate(identifier, record.id)
 		}
-		if normID := normalizeProviderID(record.id); normID != "" {
-			out[normID] = struct{}{}
-		}
-		if record.plugin.Capabilities.AuthProvider != nil {
-			if authID, okAuth := h.callAuthProviderIdentifier(record.id, record.plugin.Capabilities.AuthProvider); okAuth && authID != "" {
-				out[authID] = struct{}{}
+		addCandidate(normalizeProviderID(record.id), record.id)
+		if hasRecordAuthProvider(record) {
+			if authIDs, okAuth := h.callRecordAuthProviderIdentifiers(record); okAuth {
+				for _, authID := range authIDs {
+					addCandidate(authID, record.id)
+				}
 			}
 		}
-		supported := snap.cachedQuotaSupportedProviders(ctx, h, record, quotaProvider)
-		for _, p := range supported {
-			if clean := normalizeProviderID(p); clean != "" {
-				out[clean] = struct{}{}
+	}
+	// Second pass: SupportedProviders declared by DescribeQuota.
+	for _, record := range quotaRecords {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		if h.isPluginFused(record.id) {
+			continue
+		}
+		for _, p := range snap.cachedQuotaSupportedProviders(ctx, h, record, record.plugin.Capabilities.QuotaProvider) {
+			addCandidate(normalizeProviderID(p), record.id)
+		}
+	}
+	out := make(map[string]string, len(candidates))
+	for provider, pluginIDs := range candidates {
+		for _, pluginID := range pluginIDs {
+			if !h.isPluginFused(pluginID) {
+				out[provider] = pluginID
+				break
 			}
 		}
 	}
@@ -185,10 +221,14 @@ func (h *Host) quotaProviderRecord(ctx context.Context, provider string) *capabi
 			r := record
 			return &r
 		}
-		if record.plugin.Capabilities.AuthProvider != nil {
-			if authID, okAuth := h.callAuthProviderIdentifier(record.id, record.plugin.Capabilities.AuthProvider); okAuth && authID == provider {
-				r := record
-				return &r
+		if hasRecordAuthProvider(record) {
+			if authIDs, okAuth := h.callRecordAuthProviderIdentifiers(record); okAuth {
+				for _, authID := range authIDs {
+					if authID == provider {
+						r := record
+						return &r
+					}
+				}
 			}
 		}
 	}

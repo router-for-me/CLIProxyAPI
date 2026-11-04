@@ -18,6 +18,7 @@ import (
 
 type mockQuotaProvider struct {
 	identifier string
+	supported  []string
 	fetchFn    func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error)
 	resetFn    func(context.Context, pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error)
 }
@@ -27,8 +28,12 @@ func (m *mockQuotaProvider) Identifier() string {
 }
 
 func (m *mockQuotaProvider) DescribeQuota(ctx context.Context, req pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+	supported := m.supported
+	if supported == nil {
+		supported = []string{m.identifier}
+	}
 	return pluginapi.QuotaDescribeResponse{
-		SupportedProviders: []string{m.identifier},
+		SupportedProviders: supported,
 		DisplayName:        "Mock Quota " + m.identifier,
 		SupportsReset:      true,
 	}, nil
@@ -371,6 +376,9 @@ func TestAuthFilesList_IncludesQuotaSupport(t *testing.T) {
 			if qp, ok := f["quota_provider"].(string); !ok || qp != "opencode-go" {
 				t.Fatalf("expected quota_provider: opencode-go, got %#v", f["quota_provider"])
 			}
+			if _, ok := f["quota_plugin_id"]; ok {
+				t.Fatal("v0 auth files should not expose quota_plugin_id")
+			}
 		case "custom-auth-list":
 			foundProbe = true
 			if supports, ok := f["supports_quota"].(bool); !ok || !supports {
@@ -388,6 +396,94 @@ func TestAuthFilesList_IncludesQuotaSupport(t *testing.T) {
 	}
 	if !foundPlugin || !foundProbe || !foundNormal {
 		t.Fatalf("did not find all auth entries: plugin=%v probe=%v normal=%v", foundPlugin, foundProbe, foundNormal)
+	}
+}
+
+func TestAuthFilesListV8_QuotaPluginIDAndNoQuotaProbe(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auths := []*coreauth.Auth{
+		{ID: "foo-auth", FileName: "foo.json", Provider: "foo"},
+		{ID: "bar-auth", FileName: "bar.json", Provider: "bar"},
+		{
+			ID:       "probe-auth",
+			FileName: "probe.json",
+			Provider: "custom",
+			Metadata: map[string]any{"quota_probe": map[string]any{"url": "https://api.example.com/quota"}},
+		},
+	}
+	for _, auth := range auths {
+		auth.Attributes = map[string]string{"runtime_only": "true"}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("failed to register auth %s: %v", auth.ID, errRegister)
+		}
+	}
+
+	host := pluginhost.New()
+	// "a-multi-quota" sorts first, but a first-pass identifier match must still win for "foo".
+	host.RegisterPluginForTest("a-multi-quota", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			QuotaProvider: &mockQuotaProvider{identifier: "multi-quota", supported: []string{"foo", "bar"}},
+		},
+	})
+	host.RegisterPluginForTest("z-foo-quota", pluginapi.Plugin{
+		Capabilities: pluginapi.Capabilities{
+			QuotaProvider: &mockQuotaProvider{identifier: "foo"},
+		},
+	})
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h.SetPluginHost(host)
+
+	listFiles := func(v8 bool) map[string]map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil)
+		if v8 {
+			ctx.Set(ConfigV8ContextKey, true)
+		}
+		h.ListAuthFiles(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Files []map[string]any `json:"files"`
+		}
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &resp); errUnmarshal != nil {
+			t.Fatalf("failed to unmarshal files: %v", errUnmarshal)
+		}
+		out := make(map[string]map[string]any, len(resp.Files))
+		for _, f := range resp.Files {
+			id, _ := f["id"].(string)
+			out[id] = f
+		}
+		return out
+	}
+
+	v8Files := listFiles(true)
+	if got := v8Files["foo-auth"]["quota_plugin_id"]; got != "z-foo-quota" {
+		t.Fatalf("foo quota_plugin_id = %#v, want z-foo-quota", got)
+	}
+	if got := v8Files["bar-auth"]["quota_plugin_id"]; got != "a-multi-quota" {
+		t.Fatalf("bar quota_plugin_id = %#v, want a-multi-quota", got)
+	}
+	probeV8 := v8Files["probe-auth"]
+	if probeV8 == nil {
+		t.Fatal("probe auth missing from v8 list")
+	}
+	if _, ok := probeV8["supports_quota"]; ok {
+		t.Fatalf("v8 probe auth should not advertise supports_quota, got %#v", probeV8["supports_quota"])
+	}
+	if _, ok := probeV8["quota_probe"]; ok {
+		t.Fatal("v8 probe auth should not expose quota_probe")
+	}
+
+	v0Probe := listFiles(false)["probe-auth"]
+	if supports, ok := v0Probe["supports_quota"].(bool); !ok || !supports {
+		t.Fatalf("v0 probe auth should keep supports_quota: true, got %#v", v0Probe["supports_quota"])
+	}
+	if v0Probe["quota_probe"] == nil {
+		t.Fatal("v0 probe auth should keep quota_probe")
 	}
 }
 

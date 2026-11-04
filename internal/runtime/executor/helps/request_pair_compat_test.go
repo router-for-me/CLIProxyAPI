@@ -45,14 +45,11 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 	if sdktranslator.HasRequestTransformer(from, to) {
 		t.Fatalf("request transformer %s -> %s is already registered", from, to)
 	}
-	if sdktranslator.HasPluginHooks() {
-		t.Fatal("plugin hooks are installed and disable translation reuse")
-	}
 
 	const model = "compat-count-model"
 	var calls int
 	var wantStream bool
-	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) []byte {
+	sdktranslator.Register(from, to, func(gotModel string, rawJSON []byte, stream bool) ([]byte, error) {
 		if gotModel != model {
 			t.Errorf("model = %q, want %q", gotModel, model)
 		}
@@ -60,7 +57,7 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 			t.Errorf("stream = %v, want %v", stream, wantStream)
 		}
 		calls++
-		return append([]byte(nil), rawJSON...)
+		return append([]byte(nil), rawJSON...), nil
 	}, sdktranslator.ResponseTransform{})
 	t.Cleanup(func() { sdktranslator.Unregister(from, to) })
 
@@ -103,13 +100,35 @@ func TestTranslateRequestPairWithAPIKeyModelCompatibilityCountsTranslations(t *t
 	}
 }
 
-func TestCompatibilityRequestPairPreservesHooks(t *testing.T) {
+func TestCompatibilityRequestPairInvokesPluginOncePerInput(t *testing.T) {
 	hooks := &pairRequestPluginHooks{}
 	sdktranslator.SetPluginHooks(hooks)
 	t.Cleanup(func() { sdktranslator.SetPluginHooks(nil) })
-	request := []byte(`{"model":"test","input":"hello"}`)
-	base, work := TranslateRequestPairWithAPIKeyModelCompatibility(context.Background(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test", request, request, true, true)
-	if hooks.calls != 2 || bytes.Equal(base, work) {
-		t.Fatalf("stateful plugin calls must remain independent, calls=%d", hooks.calls)
+	payload := []byte(`{"model":"test","input":"hello"}`)
+	for _, stream := range []bool{false, true} {
+		for _, compat := range []bool{false, true} {
+			for _, distinct := range []bool{false, true} {
+				hooks.calls = 0
+				request := payload
+				wantCalls := int64(1)
+				if distinct {
+					request = []byte(`{"model":"test","input":"changed"}`)
+					wantCalls = 2
+				}
+				base, work := TranslateRequestPairWithAPIKeyModelCompatibility(context.Background(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test", payload, request, stream, compat)
+				if hooks.calls != wantCalls {
+					t.Fatalf("stream=%v compat=%v distinct=%v: plugin calls = %d, want %d", stream, compat, distinct, hooks.calls, wantCalls)
+				}
+				if bytes.Equal(base, work) == distinct {
+					t.Fatal("plugin results do not match input identity")
+				}
+				baselineBefore := bytes.Clone(base)
+				inputBefore := bytes.Clone(request)
+				work[0] = 'X'
+				if !bytes.Equal(base, baselineBefore) || !bytes.Equal(request, inputBefore) {
+					t.Fatal("working buffer aliases the baseline or input")
+				}
+			}
+		}
 	}
 }

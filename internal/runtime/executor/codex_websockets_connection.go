@@ -1,15 +1,19 @@
 package executor
 
 import (
+	"compress/flate"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -18,7 +22,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/sjson"
 	"golang.org/x/net/proxy"
 )
 
@@ -41,9 +44,14 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	}
 	closer := newWebsocketConnectionCloser(conn)
 	if conn != nil {
-		// Avoid gorilla/websocket flate tail validation issues on some upstreams/Go versions.
-		// Negotiating permessage-deflate is fine; we just don't compress outbound messages.
-		conn.EnableWriteCompression(false)
+		enabled := e.cfg == nil || e.cfg.Codex.WebsocketCompressionEnabled()
+		conn.EnableWriteCompression(enabled)
+		if enabled {
+			// DefaultCompression avoids the fast flate tail path; configuration remains an escape hatch.
+			if errSetCompressionLevel := conn.SetCompressionLevel(flate.DefaultCompression); errSetCompressionLevel != nil {
+				log.Errorf("set Codex websocket compression level: %v", errSetCompressionLevel)
+			}
+		}
 	}
 	return conn, closer, resp, err
 }
@@ -123,6 +131,42 @@ func mapCodexWebsocketReadError(err error) error {
 	return err
 }
 
+// codexWebsocketTurnTransportError turns a transport loss (EOF, reset, close 1006) into
+// the turn error that keeps the downstream websocket open. Status, policy and other
+// close codes are returned unchanged and keep ending the downstream socket.
+func codexWebsocketTurnTransportError(err error) error {
+	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
+		return err
+	}
+	var status interface{ StatusCode() int }
+	if errors.As(err, &status) && status.StatusCode() != 0 {
+		return err
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code != websocket.CloseAbnormalClosure {
+			return err
+		}
+	} else if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+		!errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) &&
+		!errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.ECONNABORTED) &&
+		!errors.Is(err, syscall.EPIPE) {
+		return err
+	}
+	return &cliproxyexecutor.UpstreamWebsocketTurnError{Cause: err}
+}
+
+// codexWebsocketTurnEventID lets a lost turn's error carry the create's event_id.
+func codexWebsocketTurnEventID(err error, payload []byte) error {
+	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
+	if !errors.As(err, &turnErr) || turnErr.EventID != "" {
+		return err
+	}
+	withID := *turnErr
+	withID.EventID = strings.Clone(ojson.GetBytesNoCopy(payload, "event_id").String())
+	return &withID
+}
+
 func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) []byte {
 	if !util.IsCodexResponsesLiteRequest(body, headers) {
 		return body
@@ -131,16 +175,23 @@ func normalizeCodexWebsocketParallelToolCalls(body []byte, headers http.Header) 
 	return body
 }
 
+func normalizeCodexWebsocketParallelToolCallsDoc(doc *ojson.Doc, headers http.Header) bool {
+	if !isCodexResponsesLiteRequestDoc(doc, headers) {
+		return false
+	}
+	return helps.SetBoolIfDifferentDoc(doc, "parallel_tool_calls", false)
+}
+
 func buildCodexWebsocketRequestBody(body []byte) []byte {
+	return frameCodexWebsocketRequestBody(helps.SanitizeCodexInputItemIDs(body))
+}
+
+// Framing must not normalize the configured business payload.
+func frameCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
 	}
-
-	// Match codex-rs websocket v2 semantics: every request is `response.create`.
-	// Incremental follow-up turns continue on the same websocket using
-	// `previous_response_id` + incremental `input`, not `response.append`.
-	body = helps.SanitizeCodexInputItemIDs(body)
-	wsReqBody, errSet := sjson.SetBytes(body, "type", "response.create")
+	wsReqBody, errSet := ojson.SetBytes(body, "type", "response.create")
 	if errSet == nil && len(wsReqBody) > 0 {
 		return wsReqBody
 	}

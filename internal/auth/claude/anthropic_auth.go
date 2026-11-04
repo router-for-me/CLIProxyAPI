@@ -120,7 +120,11 @@ func isClaudeRefreshRetryable(err error) bool {
 	if errors.As(err, &httpErr) {
 		return httpErr.Retryable()
 	}
-	return true
+	// A transport or response-decoding error is ambiguous: Anthropic may have
+	// consumed the single-use refresh token even though the response was lost.
+	// Retrying the same token can turn a transient network fault into
+	// invalid_grant. Only explicit retryable HTTP responses are safe to replay.
+	return false
 }
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.

@@ -2,10 +2,12 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -448,4 +450,105 @@ func (f fileStoreMultiAuthParserFunc) ParseAuth(context.Context, pluginapi.AuthP
 
 func (f fileStoreMultiAuthParserFunc) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*cliproxyauth.Auth, bool, error) {
 	return f(ctx, req)
+}
+
+func TestFileTokenStoreSaveReadModifyWritePreservesSIWC(t *testing.T) {
+	baseDir := t.TempDir()
+	fileName := "codex-siwc.json"
+	path := filepath.Join(baseDir, fileName)
+	onDisk := []byte(`{"type":"codex","access_token":"outer-disk","refresh_token":"outer-ref-disk","use_siwc":true,"siwc":{"access_token":"siwc-disk","refresh_token":"siwc-ref-disk","client_id":"oaiapp_disk","device_id":"e61bbe28-07ef-466d-8e5d-a344f94ab305"}}`)
+	if errWrite := os.WriteFile(path, onDisk, 0o600); errWrite != nil {
+		t.Fatalf("write initial file: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+
+	// Save an Auth whose in-memory Metadata only updated outer tokens and forgot siwc/use_siwc
+	authOuter := &cliproxyauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  "outer-new",
+			"refresh_token": "outer-ref-new",
+		},
+	}
+	var original map[string]any
+	if errUnmarshal := json.Unmarshal(onDisk, &original); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	authOuter.CodexRefreshPatch = codex.NewCredentialRefreshPatch(original, authOuter.Metadata, true, false)
+	if _, errSave := store.Save(context.Background(), authOuter); errSave != nil {
+		t.Fatalf("Save outer error: %v", errSave)
+	}
+	if authOuter.Metadata["use_siwc"] != true {
+		t.Fatalf("in-memory Metadata should be synced with disk use_siwc, got %v", authOuter.Metadata["use_siwc"])
+	}
+	siwcMem, ok := authOuter.Metadata["siwc"].(map[string]any)
+	if !ok || siwcMem["access_token"] != "siwc-disk" || siwcMem["client_id"] != "oaiapp_disk" {
+		t.Fatalf("in-memory Metadata should be synced with disk siwc, got %#v", authOuter.Metadata["siwc"])
+	}
+
+	// Now save an Auth that updates only siwc.access_token and siwc.refresh_token
+	authSIWC := &cliproxyauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type": "codex",
+			"siwc": map[string]any{
+				"access_token":  "siwc-new",
+				"refresh_token": "siwc-ref-new",
+			},
+		},
+	}
+	authSIWC.CodexRefreshPatch = codex.NewCredentialRefreshPatch(authOuter.Metadata, authSIWC.Metadata, false, true)
+	if _, errSave := store.Save(context.Background(), authSIWC); errSave != nil {
+		t.Fatalf("Save siwc error: %v", errSave)
+	}
+	if authSIWC.Metadata["access_token"] != "outer-new" || authSIWC.Metadata["use_siwc"] != true {
+		t.Fatalf("outer or use_siwc lost on disk/memory: %#v", authSIWC.Metadata)
+	}
+	siwcFinal, ok := authSIWC.Metadata["siwc"].(map[string]any)
+	if !ok || siwcFinal["access_token"] != "siwc-new" || siwcFinal["client_id"] != "oaiapp_disk" || siwcFinal["device_id"] != "e61bbe28-07ef-466d-8e5d-a344f94ab305" {
+		t.Fatalf("siwcFinal unexpected: %#v", siwcFinal)
+	}
+}
+
+func TestFileTokenStoreSaveAllowsDeletingNonCredentialMetadata(t *testing.T) {
+	baseDir := t.TempDir()
+	fileName := "codex-proxy.json"
+	path := filepath.Join(baseDir, fileName)
+	onDisk := []byte(`{"type":"codex","access_token":"outer-1","proxy_url":"http://old-proxy:8080","use_siwc":true,"siwc":{"access_token":"siwc-1","refresh_token":"siwc-ref-1","client_id":"oaiapp_1"}}`)
+	if errWrite := os.WriteFile(path, onDisk, 0o600); errWrite != nil {
+		t.Fatalf("write initial file: %v", errWrite)
+	}
+
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+
+	// Operator clears proxy_url from Metadata and saves
+	auth := &cliproxyauth.Auth{
+		ID:       fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "outer-1",
+			"use_siwc":     true,
+			"siwc": map[string]any{
+				"access_token":  "siwc-1",
+				"refresh_token": "siwc-ref-1",
+				"client_id":     "oaiapp_1",
+			},
+		},
+	}
+	if _, errSave := store.Save(context.Background(), auth); errSave != nil {
+		t.Fatalf("Save error: %v", errSave)
+	}
+	if _, exists := auth.Metadata["proxy_url"]; exists {
+		t.Fatalf("deleted proxy_url was resurrected in memory: %v", auth.Metadata["proxy_url"])
+	}
 }

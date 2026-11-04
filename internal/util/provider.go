@@ -283,7 +283,9 @@ func shouldMaskQueryParam(key string) bool {
 		return false
 	}
 	key = strings.TrimSuffix(key, "[]")
-	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+	// The management API deletes a client API key by ?value=<key>, so a plain
+	// "value" parameter can carry a full secret into the request log.
+	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {

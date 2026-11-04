@@ -33,7 +33,8 @@ const (
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
 type CodexAuth struct {
-	httpClient *http.Client
+	httpClient        *http.Client
+	siwcAgentNameHint string
 }
 
 var codexRefreshGroup singleflight.Group
@@ -49,15 +50,18 @@ func NewCodexAuth(cfg *config.Config) *CodexAuth {
 func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	effectiveProxyURL := strings.TrimSpace(proxyURL)
 	var sdkCfg config.SDKConfig
+	agentNameHint := SIWCAgentNameHint
 	if cfg != nil {
 		sdkCfg = cfg.SDKConfig
 		if effectiveProxyURL == "" {
 			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
 		}
+		agentNameHint = cfg.Codex.EffectiveSignInWithChatGPTIdentifier()
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
 	return &CodexAuth{
-		httpClient: util.SetProxy(&sdkCfg, &http.Client{}),
+		httpClient:        util.SetProxy(&sdkCfg, &http.Client{}),
+		siwcAgentNameHint: agentNameHint,
 	}
 }
 
@@ -344,7 +348,22 @@ func isNonRetryableRefreshErr(err error) bool {
 		return false
 	}
 	raw := strings.ToLower(err.Error())
-	return strings.Contains(raw, "refresh_token_reused")
+	for _, token := range []string{
+		"refresh_token_reused",
+		"refresh_token_expired",
+		"refresh_token_invalidated",
+		"token_revoked",
+		"invalid_grant",
+		"invalid_client",
+		"status 401",
+		"401 unauthorized",
+		"request failed (401)",
+	} {
+		if strings.Contains(raw, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

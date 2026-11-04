@@ -5,11 +5,11 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"math"
 	"net/http"
@@ -92,6 +92,7 @@ type DevinPrompt struct {
 	ToolCallID         string // For source=4 (tool result)
 	OriginalToolCallID string // Retained when downgraded from source=4 to source=1
 	IsOrphanedTool     bool   // Explicit flag marking downgraded tool results
+	DroppedPart        string // Type of a user media part Devin cannot send; never put on the wire
 	Thinking           string
 	Signature          []byte
 	SignatureType      string
@@ -1223,15 +1224,16 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
-	Status        string          `json:"status,omitempty"`
-	FramesCount   int             `json:"frames_count"`
-	Content       string          `json:"content,omitempty"`
-	Thinking      string          `json:"thinking,omitempty"`
-	Signature     string          `json:"signature,omitempty"`
-	SignatureType string          `json:"signature_type,omitempty"`
-	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
-	Usage         *DevinUsage     `json:"usage,omitempty"`
-	UnknownFields []int           `json:"unknown_fields,omitempty"`
+	Status                string                      `json:"status,omitempty"`
+	FramesCount           int                         `json:"frames_count"`
+	Content               string                      `json:"content,omitempty"`
+	Thinking              string                      `json:"thinking,omitempty"`
+	Signature             string                      `json:"signature,omitempty"`
+	SignatureType         string                      `json:"signature_type,omitempty"`
+	ToolCalls             []DevinToolCall             `json:"tool_calls,omitempty"`
+	Usage                 *DevinUsage                 `json:"usage,omitempty"`
+	UnknownFields         []int                       `json:"unknown_fields,omitempty"`
+	ApplyPatchDiagnostics *DevinApplyPatchDiagnostics `json:"-"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate

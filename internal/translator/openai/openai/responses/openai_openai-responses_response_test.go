@@ -6,10 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
+func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, ojson.Result) {
 	t.Helper()
 
 	lines := strings.Split(string(chunk), "\n")
@@ -19,10 +20,10 @@ func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 
 	event := strings.TrimSpace(strings.TrimPrefix(lines[0], "event:"))
 	dataLine := strings.TrimSpace(strings.TrimPrefix(lines[1], "data:"))
-	if !gjson.Valid(dataLine) {
+	if !ojson.Valid(dataLine) {
 		t.Fatalf("invalid SSE data JSON: %q", dataLine)
 	}
-	return event, gjson.Parse(dataLine)
+	return event, ojson.Parse(dataLine)
 }
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedWaitsForDone(t *testing.T) {
@@ -97,9 +98,9 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 		t.Run(tt.name, func(t *testing.T) {
 			completedCount := 0
 			completedInputIndex := -1
-			var createdData gjson.Result
-			var inProgressData gjson.Result
-			var completedData gjson.Result
+			var createdData ojson.Result
+			var inProgressData ojson.Result
+			var completedData ojson.Result
 
 			// Reuse converter state across input lines to simulate one streaming response.
 			var param any
@@ -186,10 +187,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinalizesOpenMess
 		t.Run(tt.name, func(t *testing.T) {
 			var param any
 			var events []string
-			var textDone gjson.Result
-			var partDone gjson.Result
-			var itemDone gjson.Result
-			var completed gjson.Result
+			var textDone ojson.Result
+			var partDone ojson.Result
+			var itemDone ojson.Result
+			var completed ojson.Result
 
 			for _, line := range []string{tt.chunk, `data: [DONE]`} {
 				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
@@ -264,7 +265,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCalls
 	addedNames := map[string]string{}
 	doneArgs := map[string]string{}
 	doneNames := map[string]string{}
-	outputItems := map[string]gjson.Result{}
+	outputItems := map[string]ojson.Result{}
 
 	for _, chunk := range out {
 		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -305,10 +306,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCalls
 		t.Fatalf("unexpected added name for call_glob: %q", addedNames["call_glob"])
 	}
 
-	if !gjson.Valid(doneArgs["call_read"]) {
+	if !ojson.Valid(doneArgs["call_read"]) {
 		t.Fatalf("invalid JSON args for call_read: %q", doneArgs["call_read"])
 	}
-	if !gjson.Valid(doneArgs["call_glob"]) {
+	if !ojson.Valid(doneArgs["call_glob"]) {
 		t.Fatalf("invalid JSON args for call_glob: %q", doneArgs["call_glob"])
 	}
 	if strings.Contains(doneArgs["call_read"], "}{") {
@@ -325,13 +326,13 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCalls
 		t.Fatalf("unexpected done name for call_glob: %q", doneNames["call_glob"])
 	}
 
-	if got := gjson.Get(doneArgs["call_read"], "filePath").String(); got != `C:\repo` {
+	if got := ojson.Get(doneArgs["call_read"], "filePath").String(); got != `C:\repo` {
 		t.Fatalf("unexpected filePath for call_read: %q", got)
 	}
-	if got := gjson.Get(doneArgs["call_glob"], "path").String(); got != `C:\repo` {
+	if got := ojson.Get(doneArgs["call_glob"], "path").String(); got != `C:\repo` {
 		t.Fatalf("unexpected path for call_glob: %q", got)
 	}
-	if got := gjson.Get(doneArgs["call_glob"], "pattern").String(); got != "*.{yml,yaml}" {
+	if got := ojson.Get(doneArgs["call_glob"], "pattern").String(); got != "*.{yml,yaml}" {
 		t.Fatalf("unexpected pattern for call_glob: %q", got)
 	}
 
@@ -413,10 +414,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCa
 		t.Fatalf("expected distinct output indexes for different choices, both got %d", added["call_choice0"].outputIndex)
 	}
 
-	if !gjson.Valid(done["call_choice0"].arguments) {
+	if !ojson.Valid(done["call_choice0"].arguments) {
 		t.Fatalf("invalid JSON args for call_choice0: %q", done["call_choice0"].arguments)
 	}
-	if !gjson.Valid(done["call_choice1"].arguments) {
+	if !ojson.Valid(done["call_choice1"].arguments) {
 		t.Fatalf("invalid JSON args for call_choice1: %q", done["call_choice1"].arguments)
 	}
 	if done["call_choice0"].outputIndex == done["call_choice1"].outputIndex {
@@ -486,7 +487,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CompletedOmitsTop
 	request := []byte(`{"model":"gpt-5.4"}`)
 
 	var param any
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, line := range in {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
 			ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -518,7 +519,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallCompleted
 	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
 
 	var param any
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, line := range in {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
 			ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -598,7 +599,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTop
 	raw := []byte(`{"id":"chatcmpl_output_text","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ping"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", request, request, raw, nil)
-	data := gjson.ParseBytes(resp)
+	data := util.ParseGJSONBytesNoCopy(resp)
 
 	if data.Get("output_text").Exists() {
 		t.Fatalf("output_text should be omitted to match native Responses output: %s", resp)
@@ -626,9 +627,9 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresNamespace
 	}
 
 	var param any
-	var added gjson.Result
-	var done gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var done ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -649,7 +650,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresNamespace
 
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 	}{
 		{"added", added},
 		{"done", done},
@@ -689,7 +690,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	raw := []byte(`{"id":"chatcmpl_namespace_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_ns","type":"function","function":{"name":"mcp__test_mcp__add_numbers","arguments":"{\"a\":3,\"b\":5}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
-	data := gjson.ParseBytes(resp)
+	data := util.ParseGJSONBytesNoCopy(resp)
 
 	if got := data.Get("output.0.name").String(); got != "add_numbers" {
 		t.Fatalf("non-stream output name = %q, want add_numbers; response=%s", got, resp)
@@ -719,9 +720,9 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresCappedNam
 	}
 
 	var param any
-	var added gjson.Result
-	var done gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var done ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -742,7 +743,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresCappedNam
 
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 	}{
 		{"added", added},
 		{"done", done},
@@ -783,7 +784,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	raw := []byte(`{"id":"chatcmpl_capped_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_capped","type":"function","function":{"name":"` + chatName + `","arguments":"{\"cmd\":\"run\"}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
-	data := gjson.ParseBytes(resp)
+	data := util.ParseGJSONBytesNoCopy(resp)
 
 	if got := data.Get("output.0.name").String(); got != "_execute_document_command" {
 		t.Fatalf("non-stream output name = %q, want _execute_document_command; response=%s", got, resp)
@@ -806,10 +807,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 	}
 
 	var param any
-	var added gjson.Result
-	var inputDone gjson.Result
-	var itemDone gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var inputDone ojson.Result
+	var itemDone ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -834,7 +835,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 		path  string
 	}{
 		{"added", added, "item"},
@@ -870,9 +871,9 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameAnd
 	}
 
 	var param any
-	var added gjson.Result
-	var done gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var done ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -890,7 +891,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameAnd
 	wantCallID := "call_chatcmpl_custom_missing_fields_0_0"
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 		path  string
 	}{
 		{"added", added, "item"},
@@ -939,10 +940,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallIDMayArri
 		t.Run(tt.name, func(t *testing.T) {
 			var param any
 			var events []string
-			var added gjson.Result
-			var argsDelta gjson.Result
-			var argsDone gjson.Result
-			var itemDone gjson.Result
+			var added ojson.Result
+			var argsDelta ojson.Result
+			var argsDone ojson.Result
+			var itemDone ojson.Result
 			for _, line := range append(tt.chunks, `data: [DONE]`) {
 				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(line), &param) {
 					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -1002,9 +1003,9 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 	}
 
 	var param any
-	var added gjson.Result
-	var done gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var done ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -1021,7 +1022,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 		path  string
 	}{
 		{"added", added, "item"},
@@ -1052,7 +1053,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	raw := []byte(`{"id":"chatcmpl_additional_namespace_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_send","type":"function","function":{"name":"collaboration__send_message","arguments":"{\"target\":\"worker\",\"message\":\"ping\"}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
-	data := gjson.ParseBytes(resp)
+	data := util.ParseGJSONBytesNoCopy(resp)
 	if got := data.Get("output.0.name").String(); got != "send_message" {
 		t.Fatalf("non-stream output name = %q, want send_message; response=%s", got, resp)
 	}
@@ -1080,10 +1081,10 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 	}
 
 	var param any
-	var added gjson.Result
-	var inputDone gjson.Result
-	var done gjson.Result
-	var completed gjson.Result
+	var added ojson.Result
+	var inputDone ojson.Result
+	var done ojson.Result
+	var completed ojson.Result
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", originalRequest, nil, []byte(line), &param) {
 			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
@@ -1104,7 +1105,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 
 	for _, tc := range []struct {
 		label string
-		got   gjson.Result
+		got   ojson.Result
 		path  string
 	}{
 		{"added", added, "item"},
@@ -1150,7 +1151,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"functions__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
-	data := gjson.ParseBytes(resp)
+	data := util.ParseGJSONBytesNoCopy(resp)
 	if got := data.Get("output.0.type").String(); got != "custom_tool_call" {
 		t.Fatalf("output type = %q, want custom_tool_call; response=%s", got, resp)
 	}
@@ -1328,7 +1329,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonConte
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonLength(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl_len","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"truncated text"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
 	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
-	data := gjson.ParseBytes(out)
+	data := util.ParseGJSONBytesNoCopy(out)
 	if got := data.Get("status").String(); got != "incomplete" {
 		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
 	}
@@ -1343,7 +1344,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishRe
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonContentFilter(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl_filter","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"blocked text"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
 	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
-	data := gjson.ParseBytes(out)
+	data := util.ParseGJSONBytesNoCopy(out)
 	if got := data.Get("status").String(); got != "incomplete" {
 		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
 	}
@@ -1408,11 +1409,11 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Reasonin
 				reqBytes = []byte(tt.requestJSON)
 			}
 			out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "o3-mini", reqBytes, reqBytes, []byte(tt.rawJSON), nil)
-			data := gjson.ParseBytes(out)
+			data := util.ParseGJSONBytesNoCopy(out)
 
-			var reasoningItem gjson.Result
+			var reasoningItem ojson.Result
 			found := false
-			data.Get("output").ForEach(func(_, item gjson.Result) bool {
+			data.Get("output").ForEach(func(_, item ojson.Result) bool {
 				if item.Get("type").String() == "reasoning" {
 					found = true
 					reasoningItem = item
@@ -1463,7 +1464,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_EmptyToolCallsArr
 	var completedCount int
 	var lastReasoningSummaryText string
 	var lastMessageContentText string
-	var completedData gjson.Result
+	var completedData ojson.Result
 
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "codebuddy-hy4", request, request, []byte(line), &param) {
@@ -1537,7 +1538,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ChunkWithContentA
 	var lastReasoningSummaryText string
 	var lastMessageContentText string
 	var eventOrder []string
-	var completedData gjson.Result
+	var completedData ojson.Result
 	var addedItemIDs []string
 
 	for _, line := range chunks {
@@ -1632,7 +1633,7 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_SingleChunkWithBo
 
 	var param any
 	var eventOrder []string
-	var completedData gjson.Result
+	var completedData ojson.Result
 
 	for _, line := range chunks {
 		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
@@ -1667,5 +1668,487 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_SingleChunkWithBo
 	}
 	if got := completedData.Get("response.output.1.content.0.text").String(); got != "Answer" {
 		t.Fatalf("unexpected completed message: got %q", got)
+	}
+}
+
+func applyPatchChatStart(index int, id, name string) []byte {
+	return []byte(fmt.Sprintf(`data: {"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":%d,"id":%q,"type":"function","function":{"name":%q,"arguments":""}}]}}]}`, index, id, name))
+}
+func applyPatchChatFragment(index int, fragment string) []byte {
+	return []byte(fmt.Sprintf(`data: {"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":%d,"function":{"arguments":%q}}]}}]}`, index, fragment))
+}
+func applyPatchChatEnd() [][]byte {
+	return [][]byte{[]byte(`data: {"id":"r1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`), []byte(`data: [DONE]`)}
+}
+func applyPatchChatEvents(t *testing.T, chunks [][]byte) []ojson.Result {
+	t.Helper()
+	var events []ojson.Result
+	for _, chunk := range chunks {
+		_, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		events = append(events, data)
+	}
+	return events
+}
+
+const applyPatchChatRequest = `{"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`
+
+func TestApplyPatchChatPreviewBeforeDone(t *testing.T) {
+	request := []byte(applyPatchChatRequest)
+	var param any
+	feed := func(chunk []byte) []ojson.Result {
+		return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+	}
+	feed(applyPatchChatStart(0, "c1", "apply_patch"))
+	preview := feed(applyPatchChatFragment(0, `{"input":"*** Begin Patch\n*** Add File: a.txt\n+hello\n`))
+	if len(preview) != 1 || preview[0].Get("type").String() != "response.custom_tool_call_input.delta" || preview[0].Get("delta").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n" {
+		t.Fatalf("missing real decoded preview: %v", preview)
+	}
+	if preview[0].Get("call_id").String() != "c1" || preview[0].Get("item_id").String() != "ctc_c1" {
+		t.Fatalf("preview identity: %s", preview[0].Raw)
+	}
+	var events []ojson.Result
+	events = append(events, preview...)
+	events = append(events, feed(applyPatchChatFragment(0, `*** End Patch"}`))...)
+	for _, chunk := range applyPatchChatEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	want := "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch"
+	var deltas strings.Builder
+	seenDone, seenItem, seenCompleted := false, false, false
+	lastSequence := 0
+	for _, event := range events {
+		if sequence := int(event.Get("sequence_number").Int()); sequence <= lastSequence {
+			t.Fatalf("non-monotonic sequence: %s", event.Raw)
+		} else {
+			lastSequence = sequence
+		}
+		switch event.Get("type").String() {
+		case "response.custom_tool_call_input.delta":
+			deltas.WriteString(event.Get("delta").String())
+		case "response.custom_tool_call_input.done":
+			seenDone = true
+			if deltas.String() != want || event.Get("input").String() != want || event.Get("call_id").String() != "c1" {
+				t.Fatalf("input.done mismatch: %s", event.Raw)
+			}
+		case "response.output_item.done":
+			seenItem = true
+			if !seenDone || event.Get("item.input").String() != want {
+				t.Fatalf("item.done mismatch: %s", event.Raw)
+			}
+		case "response.completed":
+			seenCompleted = true
+			if !seenItem || event.Get("response.output.0.input").String() != want {
+				t.Fatalf("completed mismatch: %s", event.Raw)
+			}
+		}
+	}
+	if !seenDone || !seenItem || !seenCompleted {
+		t.Fatalf("missing terminal events: %v", events)
+	}
+}
+
+func TestApplyPatchChatLateIdentityAndInterleavedCalls(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []ojson.Result {
+		return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+	}
+	feed(applyPatchChatStart(0, "", ""))
+	for _, event := range feed(applyPatchChatFragment(0, `{"input":"first\n`)) {
+		if strings.Contains(event.Get("type").String(), "arguments.delta") || event.Get("type").String() == "response.custom_tool_call_input.delta" {
+			t.Fatalf("emitted before identity: %s", event.Raw)
+		}
+	}
+	var events []ojson.Result
+	events = append(events, feed(applyPatchChatStart(0, "c1", "apply_patch"))...)
+	events = append(events, feed(applyPatchChatStart(1, "c2", "apply_patch"))...)
+	events = append(events, feed(applyPatchChatFragment(1, `{"input":"second`))...)
+	events = append(events, feed(applyPatchChatFragment(0, `tail"}`))...)
+	events = append(events, feed(applyPatchChatFragment(1, ` tail"}`))...)
+	for _, chunk := range applyPatchChatEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	inputs := map[string]string{}
+	indices := map[string]int64{}
+	done := map[string]string{}
+	for _, event := range events {
+		switch event.Get("type").String() {
+		case "response.custom_tool_call_input.delta":
+			id := event.Get("call_id").String()
+			inputs[id] += event.Get("delta").String()
+			indices[id] = event.Get("output_index").Int()
+		case "response.custom_tool_call_input.done":
+			done[event.Get("call_id").String()] = event.Get("input").String()
+		case "response.failed":
+			t.Fatalf("interleaved calls failed: %s", event.Raw)
+		}
+	}
+	if inputs["c1"] != "first\ntail" || inputs["c2"] != "second tail" || done["c1"] != inputs["c1"] || done["c2"] != inputs["c2"] || indices["c1"] == indices["c2"] {
+		t.Fatalf("mixed calls: inputs=%v done=%v indices=%v", inputs, done, indices)
+	}
+}
+
+func TestApplyPatchChatInvalidArgumentsFailOnce(t *testing.T) {
+	for _, arguments := range []string{`plain patch`, `{}`, `{"input":42}`, `{"input":"x","extra":1}`, `{"input":"x","input":"y"}`, `{"input":"x"} {}`, `{"input":"unfinished`, `{"input":"bad\q"}`, `{"input":"\ud800"}`} {
+		t.Run(arguments, func(t *testing.T) {
+			var param any
+			var events []ojson.Result
+			feed := func(chunk []byte) {
+				events = append(events, applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))...)
+			}
+			feed(applyPatchChatStart(0, "c1", "apply_patch"))
+			feed(applyPatchChatFragment(0, arguments))
+			for _, chunk := range applyPatchChatEnd() {
+				feed(chunk)
+			}
+			for _, chunk := range applyPatchChatEnd() {
+				feed(chunk)
+			}
+			failureCount := 0
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.failed":
+					failureCount++
+					if event.Get("response.error.code").String() != "invalid_tool_arguments" {
+						t.Fatalf("wrong failure: %s", event.Raw)
+					}
+				case "response.completed", "response.incomplete", "response.custom_tool_call_input.done", "response.output_item.done":
+					t.Fatalf("invalid arguments succeeded: %s", event.Raw)
+				}
+			}
+			state, ok := param.(interface{ ToolInputError() error })
+			if failureCount != 1 || !ok || state.ToolInputError() == nil {
+				t.Fatalf("missing retained failure: count=%d state=%T", failureCount, param)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatWinnerAndNamespace(t *testing.T) {
+	for _, tc := range []struct{ name, request, upstream, wantType, wantName, namespace string }{
+		{"function", `{"tools":[{"type":"function","name":"apply_patch"}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"function wins", `{"tools":[{"type":"function","name":"apply_patch"}],"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"custom wins", `{"tools":[{"type":"custom","name":"apply_patch"}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"apply_patch"}]}]}`, "apply_patch", "custom_tool_call", "apply_patch", ""},
+		{"namespace", `{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "editor__apply_patch", "custom_tool_call", "apply_patch", "editor"},
+		{"flat collision", `{"tools":[{"type":"function","name":"editor__apply_patch"},{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, "editor__apply_patch", "function_call", "editor__apply_patch", ""},
+		{"same source custom first", `{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"apply_patch"}]}`, "apply_patch", "custom_tool_call", "apply_patch", ""},
+		{"same source function first", `{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}`, "apply_patch", "function_call", "apply_patch", ""},
+		{"namespace before flat", `{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]},{"type":"function","name":"editor__apply_patch"}]}`, "editor__apply_patch", "custom_tool_call", "apply_patch", "editor"},
+		{"other custom", `{"tools":[{"type":"custom","name":"edit"}]}`, "edit", "custom_tool_call", "edit", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			request := []byte(tc.request)
+			feed := func(chunk []byte) []ojson.Result {
+				return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", request, nil, chunk, &param))
+			}
+			feed(applyPatchChatStart(0, "c1", tc.upstream))
+			args := `{"input":"x"}`
+			if tc.wantType == "function_call" || tc.name == "other custom" {
+				args = `{"not_input":42}`
+			}
+			events := feed(applyPatchChatFragment(0, args))
+			for _, chunk := range applyPatchChatEnd() {
+				events = append(events, feed(chunk)...)
+			}
+			var item ojson.Result
+			for _, event := range events {
+				if event.Get("type").String() == "response.completed" {
+					item = event.Get("response.output.0")
+				}
+			}
+			if item.Get("type").String() != tc.wantType || item.Get("name").String() != tc.wantName || item.Get("namespace").String() != tc.namespace {
+				t.Fatalf("wrong winning identity: %s", item.Raw)
+			}
+			if tc.wantType == "function_call" && item.Get("arguments").String() != args {
+				t.Fatalf("ordinary function was unwrapped: %s", item.Raw)
+			}
+			if tc.name == "other custom" && item.Get("input").String() != args {
+				t.Fatalf("other custom changed: %s", item.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatNonStreamStrictInput(t *testing.T) {
+	for _, tc := range []struct {
+		arguments, want string
+		invalid         bool
+	}{
+		{`{"input":"*** Begin Patch\n*** End Patch"}`, "*** Begin Patch\n*** End Patch", false},
+		{`{"input":12}`, "", true}, {`{"input":"truncated`, "", true}, {`{"input":"x","extra":true}`, "", true}, {`{"input":"\ud800"}`, "", true},
+	} {
+		t.Run(tc.arguments, func(t *testing.T) {
+			var param any
+			raw := []byte(fmt.Sprintf(`{"id":"r1","choices":[{"index":0,"message":{"tool_calls":[{"id":"c1","function":{"name":"apply_patch","arguments":%q}}]},"finish_reason":"tool_calls"}]}`, tc.arguments))
+			result := util.ParseGJSONBytesNoCopy(ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "test", []byte(applyPatchChatRequest), nil, raw, &param))
+			if tc.invalid {
+				state, ok := param.(interface{ ToolInputError() error })
+				if result.Get("status").String() != "failed" || result.Get("error.code").String() != "invalid_tool_arguments" || !ok || state.ToolInputError() == nil {
+					t.Fatalf("invalid non-stream input succeeded: %s state=%T", result.Raw, param)
+				}
+			} else if result.Get("output.0.input").String() != tc.want {
+				t.Fatalf("non-stream input mismatch: %s", result.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatTerminalValidatesTruncatedCall(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []ojson.Result {
+		return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+	}
+	feed(applyPatchChatStart(0, "c1", "apply_patch"))
+	feed(applyPatchChatFragment(0, `{"input":"unfinished`))
+	chunks := applyPatchChatEnd()
+	events := feed(chunks[len(chunks)-1])
+	if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+		t.Fatalf("truncated terminal did not fail: %v", events)
+	}
+}
+
+func TestApplyPatchChatUnicodeFragments(t *testing.T) {
+	arguments := `{"input":"line\n\u4f60\u597d \ud83d\ude00 \" \\ \u96ea"}`
+	for split := 1; split < len(arguments); split++ {
+		var param any
+		feed := func(chunk []byte) []ojson.Result {
+			return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+		}
+		feed(applyPatchChatStart(0, "c1", "apply_patch"))
+		events := feed(applyPatchChatFragment(0, arguments[:split]))
+		events = append(events, feed(applyPatchChatFragment(0, arguments[split:]))...)
+		for _, chunk := range applyPatchChatEnd() {
+			events = append(events, feed(chunk)...)
+		}
+		var input strings.Builder
+		for _, event := range events {
+			if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+				input.WriteString(event.Get("delta").String())
+			}
+		}
+		if input.String() != "line\n你好 😀 \" \\ 雪" {
+			t.Fatalf("split %d: input = %q", split, input.String())
+		}
+	}
+}
+
+func TestApplyPatchChatIdentityFieldsArriveSeparately(t *testing.T) {
+	for _, tc := range []struct{ id, name string }{{"c1", ""}, {"", "apply_patch"}} {
+		var param any
+		feed := func(chunk []byte) []ojson.Result {
+			return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+		}
+		feed(applyPatchChatStart(0, tc.id, tc.name))
+		events := feed(applyPatchChatFragment(0, `{"input":"preview`))
+		if len(events) != 0 {
+			t.Fatalf("preview without complete identity: %v", events)
+		}
+		events = feed(applyPatchChatStart(0, "c1", "apply_patch"))
+		found := false
+		for _, event := range events {
+			if event.Get("type").String() == "response.custom_tool_call_input.delta" {
+				found = event.Get("delta").String() == "preview" && event.Get("call_id").String() == "c1"
+			}
+		}
+		if !found {
+			t.Fatalf("buffer not released after identity: %v", events)
+		}
+	}
+}
+
+func TestApplyPatchChatConflictingIdentityFails(t *testing.T) {
+	for _, tc := range []struct{ id, name string }{{"other", "apply_patch"}, {"c1", "other"}} {
+		var param any
+		feed := func(chunk []byte) []ojson.Result {
+			return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+		}
+		feed(applyPatchChatStart(0, "c1", "apply_patch"))
+		feed(applyPatchChatFragment(0, `{"input":"preview`))
+		events := feed(applyPatchChatStart(0, tc.id, tc.name))
+		for _, chunk := range applyPatchChatEnd() {
+			events = append(events, feed(chunk)...)
+		}
+		if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+			t.Fatalf("conflicting identity did not fail once: %v", events)
+		}
+	}
+}
+
+func TestApplyPatchChatNonStreamOriginalDeclarationWins(t *testing.T) {
+	original := []byte(`{"tools":[{"type":"function","name":"apply_patch"}]}`)
+	var param any
+	raw := []byte(`{"id":"r1","choices":[{"index":0,"message":{"tool_calls":[{"id":"c1","function":{"name":"apply_patch","arguments":"{\"not_input\":42}"}}]},"finish_reason":"tool_calls"}]}`)
+	result := util.ParseGJSONBytesNoCopy(ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "test", original, []byte(applyPatchChatRequest), raw, &param))
+	if result.Get("output.0.type").String() != "function_call" || result.Get("output.0.arguments").String() != `{"not_input":42}` {
+		t.Fatalf("converted declaration overrode original: %s", result.Raw)
+	}
+}
+
+func TestApplyPatchChatPendingIdentityConflictFails(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []ojson.Result {
+		return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+	}
+	feed(applyPatchChatStart(0, "c1", ""))
+	feed(applyPatchChatFragment(0, `{"input":"x"}`))
+	events := feed(applyPatchChatStart(0, "c2", "apply_patch"))
+	if len(events) != 1 || events[0].Get("type").String() != "response.failed" {
+		t.Fatalf("pending ID silently replaced: %v", events)
+	}
+}
+
+func TestApplyPatchChatMissingIDSynthesizedAtTerminal(t *testing.T) {
+	var param any
+	feed := func(chunk []byte) []ojson.Result {
+		return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+	}
+	feed(applyPatchChatStart(0, "", "apply_patch"))
+	feed(applyPatchChatFragment(0, `{"input":"x"}`))
+	var events []ojson.Result
+	for _, chunk := range applyPatchChatEnd() {
+		events = append(events, feed(chunk)...)
+	}
+	var completed ojson.Result
+	for _, event := range events {
+		if event.Get("type").String() == "response.completed" {
+			completed = event
+		}
+	}
+	item := completed.Get("response.output.0")
+	if item.Get("type").String() != "custom_tool_call" || item.Get("input").String() != "x" || item.Get("call_id").String() == "" {
+		t.Fatalf("missing ID lost patch: %s", completed.Raw)
+	}
+}
+
+func TestApplyPatchChatDeferredIdentityConflict(t *testing.T) {
+	for _, tc := range []struct {
+		name, request, resolvedID, resolvedName, wantType string
+		invalid                                           bool
+	}{
+		{"return to first ID", applyPatchChatRequest, "c1", "apply_patch", "", true},
+		{"keep second ID", applyPatchChatRequest, "c2", "apply_patch", "", true},
+		{"omit final ID", applyPatchChatRequest, "", "apply_patch", "", true},
+		{"infer name at terminal", applyPatchChatRequest, "c1", "", "", true},
+		{"ordinary function", `{"tools":[{"type":"function","name":"apply_patch"}]}`, "c1", "apply_patch", "function_call", false},
+		{"function winner", `{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}`, "c1", "apply_patch", "function_call", false},
+		{"other custom", `{"tools":[{"type":"custom","name":"edit"}]}`, "c1", "edit", "custom_tool_call", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			feed := func(chunk []byte) []ojson.Result {
+				return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(tc.request), nil, chunk, &param))
+			}
+			feed(applyPatchChatStart(0, "c1", ""))
+			pending := feed([]byte(`data: {"id":"r1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c2","function":{"name":"","arguments":"{\"input\":\"x\"}"}}]}}]}`))
+			if len(pending) != 0 {
+				t.Fatalf("unclassified call emitted events: %v", pending)
+			}
+			events := feed(applyPatchChatStart(0, tc.resolvedID, tc.resolvedName))
+			for _, chunk := range applyPatchChatEnd() {
+				events = append(events, feed(chunk)...)
+			}
+			failures, completions := 0, 0
+			var item ojson.Result
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.failed":
+					failures++
+					if !tc.invalid || event.Get("response.error.code").String() != "invalid_tool_arguments" {
+						t.Fatalf("unexpected failure: %s", event.Raw)
+					}
+				case "response.completed":
+					completions++
+					item = event.Get("response.output.0")
+				case "response.incomplete", "response.custom_tool_call_input.done", "response.output_item.done":
+					if tc.invalid {
+						t.Fatalf("conflicting pending identity succeeded: %s", event.Raw)
+					}
+				}
+			}
+			state := param.(interface{ ToolInputError() error })
+			if tc.invalid {
+				if failures != 1 || completions != 0 || state.ToolInputError() == nil {
+					t.Fatalf("lost pending conflict: failures=%d completions=%d error=%v", failures, completions, state.ToolInputError())
+				}
+			} else if completions != 1 || state.ToolInputError() != nil || item.Get("type").String() != tc.wantType || item.Get("call_id").String() != "c1" {
+				t.Fatalf("unrelated tool changed: %s error=%v", item.Raw, state.ToolInputError())
+			} else if tc.wantType == "function_call" && item.Get("arguments").String() != `{"input":"x"}` {
+				t.Fatalf("ordinary arguments changed: %s", item.Raw)
+			} else if tc.wantType == "custom_tool_call" && item.Get("input").String() != "x" {
+				t.Fatalf("other custom input changed: %s", item.Raw)
+			}
+		})
+	}
+}
+
+func TestApplyPatchChatSuccessfulTerminalSealsState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		late []byte
+	}{
+		{"duplicate DONE", []byte(`data: [DONE]`)},
+		{"post-terminal fragment", applyPatchChatFragment(0, `{"input":"late"}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			feed := func(chunk []byte) []ojson.Result {
+				return applyPatchChatEvents(t, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "test", []byte(applyPatchChatRequest), nil, chunk, &param))
+			}
+			feed(applyPatchChatStart(0, "c1", "apply_patch"))
+			feed(applyPatchChatFragment(0, `{"input":"x"}`))
+			end := applyPatchChatEnd()
+			for _, event := range feed(end[0]) {
+				if event.Get("type").String() == "response.completed" {
+					t.Fatalf("finish_reason prematurely sealed response: %s", event.Raw)
+				}
+			}
+			feed([]byte(`data: {"id":"r1","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`))
+			events := feed(end[1])
+			if len(events) != 1 || events[0].Get("type").String() != "response.completed" || events[0].Get("response.output.0.input").String() != "x" || events[0].Get("response.usage.total_tokens").Int() != 15 {
+				t.Fatalf("missing successful completion or late usage: %v", events)
+			}
+			for _, chunk := range [][]byte{tc.late, end[1]} {
+				if late := feed(chunk); len(late) != 0 {
+					t.Fatalf("sealed response emitted more events: %v", late)
+				}
+			}
+			if errToolInputError := param.(interface{ ToolInputError() error }).ToolInputError(); errToolInputError != nil {
+				t.Fatalf("successful terminal became a failure: %v", errToolInputError)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_MapsCompletionTokensDetailsReasoningTokens(t *testing.T) {
+	request := []byte(`{"model":"mercury-3"}`)
+	for _, tc := range []struct {
+		name      string
+		usageJSON string
+		want      int64
+	}{
+		{
+			name:      "completion_tokens_details.reasoning_tokens",
+			usageJSON: `{"prompt_tokens":9,"completion_tokens":99,"total_tokens":108,"completion_tokens_details":{"reasoning_tokens":60}}`,
+			want:      60,
+		},
+		{
+			name:      "output_tokens_details.reasoning_tokens",
+			usageJSON: `{"prompt_tokens":9,"completion_tokens":99,"total_tokens":108,"output_tokens_details":{"reasoning_tokens":45}}`,
+			want:      45,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{"id":"chatcmpl_reasoning","object":"chat.completion","created":1773896263,"model":"mercury-3","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":` + tc.usageJSON + `}`)
+			resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "mercury-3", request, request, raw, nil)
+			data := util.ParseGJSONBytesNoCopy(resp)
+
+			reasoning := data.Get("usage.output_tokens_details.reasoning_tokens")
+			if !reasoning.Exists() {
+				t.Fatalf("expected usage.output_tokens_details.reasoning_tokens to exist, got usage=%s", data.Get("usage").Raw)
+			}
+			if got := reasoning.Int(); got != tc.want {
+				t.Fatalf("usage.output_tokens_details.reasoning_tokens = %d, want %d; usage=%s", got, tc.want, data.Get("usage").Raw)
+			}
+		})
 	}
 }

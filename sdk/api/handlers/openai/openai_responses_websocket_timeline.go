@@ -6,14 +6,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	requestlogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 type websocketTimelineAppender interface {
@@ -26,6 +27,7 @@ type responsesWebsocketPinnedAuthState struct {
 }
 
 type websocketTimelineLog struct {
+	mu      sync.Mutex
 	enabled bool
 	source  *requestlogging.FileBodySource
 	builder *strings.Builder
@@ -73,6 +75,12 @@ func (l *websocketTimelineLog) BeginRequest() {
 	if l == nil || !l.enabled || l.source == nil {
 		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.beginRequestLocked()
+}
+
+func (l *websocketTimelineLog) beginRequestLocked() {
 	l.closeCurrentPart()
 	part, errCreate := l.source.CreatePart("request")
 	if errCreate != nil {
@@ -87,13 +95,15 @@ func (l *websocketTimelineLog) Append(eventType string, payload []byte, timestam
 	if l == nil || !l.enabled {
 		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	data := formatWebsocketTimelineEvent(eventType, payload, timestamp)
 	if len(data) == 0 {
 		return
 	}
 	if l.source != nil {
 		if l.currentPart == nil {
-			l.BeginRequest()
+			l.beginRequestLocked()
 		}
 		if l.currentPart == nil {
 			return
@@ -114,6 +124,8 @@ func (l *websocketTimelineLog) SetContext(c *gin.Context) {
 	if l == nil || !l.enabled {
 		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.closeCurrentPart()
 	if l.source != nil {
 		if l.source.HasPayload() {
@@ -133,6 +145,8 @@ func (l *websocketTimelineLog) String() string {
 	if l == nil || !l.enabled {
 		return ""
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.closeCurrentPart()
 	if l.source != nil {
 		data, errRead := l.source.Bytes()
@@ -200,7 +214,7 @@ func appendWebsocketEvent(builder *strings.Builder, eventType string, payload []
 }
 
 func websocketPayloadEventType(payload []byte) string {
-	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	eventType := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String())
 	if eventType == "" {
 		return "-"
 	}
@@ -241,9 +255,9 @@ func (e *responsesWebsocketPayloadError) StatusCode() int {
 }
 
 func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.ErrorMessage {
-	status := int(gjson.GetBytes(payload, "status").Int())
+	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
 	if status <= 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
+		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
 	}
 	if status <= 0 {
 		status = http.StatusInternalServerError

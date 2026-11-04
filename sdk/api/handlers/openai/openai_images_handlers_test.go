@@ -11,15 +11,19 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func performImagesEndpointRequest(t *testing.T, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
@@ -45,12 +49,12 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
 
-	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
+	message := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String()
 	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
-	if errorType := gjson.GetBytes(resp.Body.Bytes(), "error.type").String(); errorType != "invalid_request_error" {
+	if errorType := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.type").String(); errorType != "invalid_request_error" {
 		t.Fatalf("error type = %q, want invalid_request_error", errorType)
 	}
 }
@@ -118,22 +122,22 @@ func TestBuildXAIImagesGenerationsRequest(t *testing.T) {
 
 	req := buildXAIImagesGenerationsRequest(rawJSON, "xai/grok-imagine-image-quality", "url")
 
-	if got := gjson.GetBytes(req, "model").String(); got != "grok-imagine-image-quality" {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != "grok-imagine-image-quality" {
 		t.Fatalf("model = %q, want grok-imagine-image-quality", got)
 	}
-	if got := gjson.GetBytes(req, "prompt").String(); got != "abstract art" {
+	if got := ojson.GetBytesNoCopy(req, "prompt").String(); got != "abstract art" {
 		t.Fatalf("prompt = %q, want abstract art", got)
 	}
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "16:9" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "16:9" {
 		t.Fatalf("aspect_ratio = %q, want 16:9", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "2k" {
 		t.Fatalf("resolution = %q, want 2k", got)
 	}
-	if got := gjson.GetBytes(req, "response_format").String(); got != "url" {
+	if got := ojson.GetBytesNoCopy(req, "response_format").String(); got != "url" {
 		t.Fatalf("response_format = %q, want url", got)
 	}
-	if got := gjson.GetBytes(req, "n").Int(); got != 2 {
+	if got := ojson.GetBytesNoCopy(req, "n").Int(); got != 2 {
 		t.Fatalf("n = %d, want 2", got)
 	}
 }
@@ -181,7 +185,7 @@ func TestBuildXAIImagesGenerationsRequestPreservesQuality(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := buildXAIImagesGenerationsRequest([]byte(tc.rawJSON), "grok-imagine-image-2.0", "b64_json")
-			q := gjson.GetBytes(req, "quality")
+			q := ojson.GetBytesNoCopy(req, "quality")
 			if tc.hasQuality {
 				if !q.Exists() || q.String() != tc.wantQuality {
 					t.Fatalf("quality = %q (exists=%v), want %q; req = %s", q.String(), q.Exists(), tc.wantQuality, string(req))
@@ -200,10 +204,10 @@ func TestBuildXAIImagesGenerationsRequestNineByTwenty(t *testing.T) {
 
 	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
 
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "9:20" {
 		t.Fatalf("aspect_ratio = %q, want 9:20", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "2k" {
 		t.Fatalf("resolution = %q, want 2k", got)
 	}
 }
@@ -213,10 +217,10 @@ func TestBuildXAIImagesGenerationsRequestNineByTwentyFromSize(t *testing.T) {
 
 	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
 
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "9:20" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "9:20" {
 		t.Fatalf("aspect_ratio from size = %q, want 9:20", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "2k" {
 		t.Fatalf("resolution = %q, want 2k", got)
 	}
 }
@@ -226,10 +230,10 @@ func TestBuildXAIImagesGenerationsRequestTwentyByNine(t *testing.T) {
 
 	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
 
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "20:9" {
 		t.Fatalf("aspect_ratio = %q, want 20:9", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "2k" {
 		t.Fatalf("resolution = %q, want 2k", got)
 	}
 }
@@ -239,10 +243,10 @@ func TestBuildXAIImagesGenerationsRequestTwentyByNineFromSize(t *testing.T) {
 
 	req := buildXAIImagesGenerationsRequest(rawJSON, "grok-imagine-image-quality", "b64_json")
 
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "20:9" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "20:9" {
 		t.Fatalf("aspect_ratio from size = %q, want 20:9", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "2k" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "2k" {
 		t.Fatalf("resolution = %q, want 2k", got)
 	}
 }
@@ -268,22 +272,22 @@ func TestXAIImagesAspectRatioNineByTwenty(t *testing.T) {
 func TestBuildXAIImagesEditRequest(t *testing.T) {
 	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"data:image/png;base64,AA==", "https://example.com/image.png"}, "b64_json", "3:2", "1k", "medium", 0)
 
-	if got := gjson.GetBytes(req, "model").String(); got != "grok-imagine-image" {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != "grok-imagine-image" {
 		t.Fatalf("model = %q, want grok-imagine-image", got)
 	}
-	if got := gjson.GetBytes(req, "quality").String(); got != "medium" {
+	if got := ojson.GetBytesNoCopy(req, "quality").String(); got != "medium" {
 		t.Fatalf("quality = %q, want medium", got)
 	}
-	if got := gjson.GetBytes(req, "images.0.type").String(); got != "image_url" {
+	if got := ojson.GetBytesNoCopy(req, "images.0.type").String(); got != "image_url" {
 		t.Fatalf("images.0.type = %q, want image_url", got)
 	}
-	if got := gjson.GetBytes(req, "images.0.url").String(); got != "data:image/png;base64,AA==" {
+	if got := ojson.GetBytesNoCopy(req, "images.0.url").String(); got != "data:image/png;base64,AA==" {
 		t.Fatalf("images.0.url = %q", got)
 	}
-	if got := gjson.GetBytes(req, "images.1.url").String(); got != "https://example.com/image.png" {
+	if got := ojson.GetBytesNoCopy(req, "images.1.url").String(); got != "https://example.com/image.png" {
 		t.Fatalf("images.1.url = %q", got)
 	}
-	if gjson.GetBytes(req, "image").Exists() {
+	if ojson.GetBytesNoCopy(req, "image").Exists() {
 		t.Fatalf("multiple image edits must use images array: %s", string(req))
 	}
 }
@@ -291,16 +295,16 @@ func TestBuildXAIImagesEditRequest(t *testing.T) {
 func TestBuildXAIImagesEditRequestSingleImage(t *testing.T) {
 	req := buildXAIImagesEditRequest("grok-imagine-image", "edit it", []string{"https://example.com/image.png"}, "url", "", "", "", 0)
 
-	if got := gjson.GetBytes(req, "image.type").String(); got != "image_url" {
+	if got := ojson.GetBytesNoCopy(req, "image.type").String(); got != "image_url" {
 		t.Fatalf("image.type = %q, want image_url", got)
 	}
-	if got := gjson.GetBytes(req, "image.url").String(); got != "https://example.com/image.png" {
+	if got := ojson.GetBytesNoCopy(req, "image.url").String(); got != "https://example.com/image.png" {
 		t.Fatalf("image.url = %q", got)
 	}
-	if gjson.GetBytes(req, "quality").Exists() {
+	if ojson.GetBytesNoCopy(req, "quality").Exists() {
 		t.Fatalf("empty quality should be omitted: %s", string(req))
 	}
-	if gjson.GetBytes(req, "images").Exists() {
+	if ojson.GetBytesNoCopy(req, "images").Exists() {
 		t.Fatalf("single image edit must use image object: %s", string(req))
 	}
 }
@@ -329,10 +333,10 @@ func TestXAIImagesEditOptionsFromJSONPreservesQuality(t *testing.T) {
 func TestBuildOpenAICompatImagesJSONRequestPreservesStreamForStreaming(t *testing.T) {
 	req := buildOpenAICompatImagesJSONRequest([]byte(`{"model":"compat-image","prompt":"draw","stream":false}`), "upstream-image", true)
 
-	if got := gjson.GetBytes(req, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(req))
 	}
-	if !gjson.GetBytes(req, "stream").Bool() {
+	if !ojson.GetBytesNoCopy(req, "stream").Bool() {
 		t.Fatalf("stream flag missing: %s", string(req))
 	}
 }
@@ -340,10 +344,10 @@ func TestBuildOpenAICompatImagesJSONRequestPreservesStreamForStreaming(t *testin
 func TestBuildOpenAICompatImagesJSONRequestDropsStreamForNonStreaming(t *testing.T) {
 	req := buildOpenAICompatImagesJSONRequest([]byte(`{"model":"compat-image","prompt":"draw","stream":true}`), "upstream-image", false)
 
-	if got := gjson.GetBytes(req, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(req))
 	}
-	if gjson.GetBytes(req, "stream").Exists() {
+	if ojson.GetBytesNoCopy(req, "stream").Exists() {
 		t.Fatalf("stream flag should be removed from non-streaming request: %s", string(req))
 	}
 }
@@ -428,16 +432,16 @@ func TestBuildImagesAPIResponseFromXAI(t *testing.T) {
 		t.Fatalf("buildImagesAPIResponseFromXAI() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "created").Int(); got != 123 {
+	if got := ojson.GetBytesNoCopy(out, "created").Int(); got != 123 {
 		t.Fatalf("created = %d, want 123", got)
 	}
-	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "AA==" {
+	if got := ojson.GetBytesNoCopy(out, "data.0.b64_json").String(); got != "AA==" {
 		t.Fatalf("data.0.b64_json = %q, want AA==", got)
 	}
-	if got := gjson.GetBytes(out, "data.0.revised_prompt").String(); got != "refined" {
+	if got := ojson.GetBytesNoCopy(out, "data.0.revised_prompt").String(); got != "refined" {
 		t.Fatalf("data.0.revised_prompt = %q, want refined", got)
 	}
-	if !gjson.GetBytes(out, "usage").Exists() {
+	if !ojson.GetBytesNoCopy(out, "usage").Exists() {
 		t.Fatalf("usage missing: %s", string(out))
 	}
 }
@@ -668,4 +672,624 @@ func TestSSEFrameAccumulatorKeepsMultipleFramesDistinct(t *testing.T) {
 	if string(frames[0]) != first || string(frames[1]) != second {
 		t.Fatalf("frames were overwritten during buffer compaction: %q", frames)
 	}
+}
+
+type xaiImagesCaptureCall struct {
+	authID         string
+	reqModel       string
+	requestedModel string
+	payloadModel   string
+}
+
+type xaiImagesCaptureExecutor struct {
+	mu    sync.Mutex
+	calls []xaiImagesCaptureCall
+}
+
+func (e *xaiImagesCaptureExecutor) Identifier() string { return "xai" }
+
+func (e *xaiImagesCaptureExecutor) Execute(_ context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	requestedModel := ""
+	if opts.Metadata != nil {
+		if v, ok := opts.Metadata[coreexecutor.RequestedModelMetadataKey].(string); ok {
+			requestedModel = v
+		}
+	}
+	e.mu.Lock()
+	e.calls = append(e.calls, xaiImagesCaptureCall{
+		authID:         authID,
+		reqModel:       req.Model,
+		requestedModel: requestedModel,
+		payloadModel:   strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "model").String()),
+	})
+	e.mu.Unlock()
+	return coreexecutor.Response{
+		Payload: []byte(`{"created":123,"data":[{"b64_json":"aW1hZ2U=","revised_prompt":"ok","mime_type":"image/png"}]}`),
+	}, nil
+}
+
+func (e *xaiImagesCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "ExecuteStream not implemented"}
+}
+
+func (e *xaiImagesCaptureExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *xaiImagesCaptureExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *xaiImagesCaptureExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented"}
+}
+
+func (e *xaiImagesCaptureExecutor) Calls() []xaiImagesCaptureCall {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]xaiImagesCaptureCall, len(e.calls))
+	copy(out, e.calls)
+	return out
+}
+
+func newXAIImagesRoutingTestHandler(t *testing.T, forceModelPrefix bool, authID string, prefix string, modelIDs []string) (*OpenAIAPIHandler, *xaiImagesCaptureExecutor) {
+	t.Helper()
+
+	executor := &xaiImagesCaptureExecutor{}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:       authID,
+		Provider: "xai",
+		Prefix:   prefix,
+		Status:   coreauth.StatusActive,
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register: %v", errRegister)
+	}
+
+	models := make([]*registry.ModelInfo, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		models = append(models, &registry.ModelInfo{
+			ID:      id,
+			Object:  "model",
+			OwnedBy: "xai",
+			Type:    "xai",
+		})
+	}
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(auth.ID, auth.Provider, models)
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{ForceModelPrefix: forceModelPrefix}, manager)
+	return NewOpenAIAPIHandler(base), executor
+}
+
+func TestXAIImagesRoutesWithPrefixedModelWhenForceModelPrefixEnabled(t *testing.T) {
+	handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-prefixed-auth", "xai", []string{
+		"xai/" + defaultXAIImagesModel,
+		"xai/" + xaiImagesQualityModel,
+		"xai/" + xaiImages20Model,
+	})
+
+	t.Run("generations non-stream", func(t *testing.T) {
+		before := len(executor.Calls())
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"a red square","response_format":"b64_json"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.b64_json").String(); got != "aW1hZ2U=" {
+			t.Fatalf("data.0.b64_json = %q, want aW1hZ2U=", got)
+		}
+		calls := executor.Calls()
+		if len(calls) != before+1 {
+			t.Fatalf("executor calls = %d, want %d", len(calls), before+1)
+		}
+		last := calls[len(calls)-1]
+		if last.authID != "xai-prefixed-auth" {
+			t.Fatalf("authID = %q, want xai-prefixed-auth", last.authID)
+		}
+		if last.requestedModel != "xai/grok-imagine-image-2.0" {
+			t.Fatalf("requestedModel = %q, want xai/grok-imagine-image-2.0", last.requestedModel)
+		}
+		if last.reqModel != xaiImages20Model {
+			t.Fatalf("req.Model = %q, want %s", last.reqModel, xaiImages20Model)
+		}
+		if last.payloadModel != xaiImages20Model {
+			t.Fatalf("payload model = %q, want %s", last.payloadModel, xaiImages20Model)
+		}
+	})
+
+	t.Run("generations stream", func(t *testing.T) {
+		before := len(executor.Calls())
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"a red square","response_format":"b64_json","stream":true}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), `"type":"image_generation.completed"`) {
+			t.Fatalf("stream body = %q, want image_generation.completed event", resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != before+1 {
+			t.Fatalf("executor calls = %d, want %d", len(calls), before+1)
+		}
+		last := calls[len(calls)-1]
+		if last.requestedModel != "xai/grok-imagine-image-2.0" || last.payloadModel != xaiImages20Model {
+			t.Fatalf("call = %+v, want requestedModel=xai/grok-imagine-image-2.0 payloadModel=%s", last, xaiImages20Model)
+		}
+	})
+
+	t.Run("edits JSON", func(t *testing.T) {
+		before := len(executor.Calls())
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"edit this","images":[{"image_url":"data:image/png;base64,AA=="}]}`)
+		resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != before+1 {
+			t.Fatalf("executor calls = %d, want %d", len(calls), before+1)
+		}
+		last := calls[len(calls)-1]
+		if last.requestedModel != "xai/grok-imagine-image-2.0" || last.payloadModel != xaiImages20Model {
+			t.Fatalf("call = %+v, want requestedModel=xai/grok-imagine-image-2.0 payloadModel=%s", last, xaiImages20Model)
+		}
+	})
+
+	t.Run("edits multipart", func(t *testing.T) {
+		before := len(executor.Calls())
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if err := writer.WriteField("model", "xai/grok-imagine-image-2.0"); err != nil {
+			t.Fatalf("write model field: %v", err)
+		}
+		if err := writer.WriteField("prompt", "edit this"); err != nil {
+			t.Fatalf("write prompt field: %v", err)
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", multipart.FileContentDisposition("image", "image.png"))
+		header.Set("Content-Type", "image/png")
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			t.Fatalf("create image part: %v", err)
+		}
+		if _, err := part.Write([]byte("png-bytes")); err != nil {
+			t.Fatalf("write image part: %v", err)
+		}
+		if errClose := writer.Close(); errClose != nil {
+			t.Fatalf("close multipart writer: %v", errClose)
+		}
+
+		resp := performImagesEndpointRequest(t, imagesEditsPath, writer.FormDataContentType(), &body, handler.ImagesEdits)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != before+1 {
+			t.Fatalf("executor calls = %d, want %d", len(calls), before+1)
+		}
+		last := calls[len(calls)-1]
+		if last.requestedModel != "xai/grok-imagine-image-2.0" || last.payloadModel != xaiImages20Model {
+			t.Fatalf("call = %+v, want requestedModel=xai/grok-imagine-image-2.0 payloadModel=%s", last, xaiImages20Model)
+		}
+	})
+
+	t.Run("case-insensitive prefixed model routes and strips prefix for upstream", func(t *testing.T) {
+		before := len(executor.Calls())
+		body := strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != before+1 {
+			t.Fatalf("executor calls = %d, want %d", len(calls), before+1)
+		}
+		last := calls[len(calls)-1]
+		if last.reqModel != xaiImages20Model || last.payloadModel != xaiImages20Model {
+			t.Fatalf("call = %+v, want reqModel=%s payloadModel=%s", last, xaiImages20Model, xaiImages20Model)
+		}
+	})
+
+	t.Run("unprefixed model rejected when force-model-prefix is enabled", func(t *testing.T) {
+		before := len(executor.Calls())
+		body := strings.NewReader(`{"model":"grok-imagine-image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String(); got != "unknown provider for model grok-imagine-image-2.0" {
+			t.Fatalf("error.message = %q, want %q", got, "unknown provider for model grok-imagine-image-2.0")
+		}
+		if len(executor.Calls()) != before {
+			t.Fatalf("expected no executor call for unprefixed model")
+		}
+	})
+}
+
+func TestXAIImagesSupportsBuiltInPrefixFallbackAndCustomCredentialPrefix(t *testing.T) {
+	t.Run("built-in prefix falls back to unprefixed registered model when force-model-prefix is disabled", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, false, "xai-unprefixed-auth", "", []string{
+			defaultXAIImagesModel,
+			xaiImagesQualityModel,
+			xaiImages20Model,
+		})
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != 1 {
+			t.Fatalf("executor calls = %d, want 1", len(calls))
+		}
+		if calls[0].payloadModel != xaiImages20Model {
+			t.Fatalf("payload model = %q, want %s", calls[0].payloadModel, xaiImages20Model)
+		}
+	})
+
+	t.Run("custom xai credential prefix routes when force-model-prefix is enabled", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-custom-prefix-auth", "my-xai", []string{
+			"my-xai/" + xaiImages20Model,
+		})
+		body := strings.NewReader(`{"model":"my-xai/grok-imagine-image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		calls := executor.Calls()
+		if len(calls) != 1 {
+			t.Fatalf("executor calls = %d, want 1", len(calls))
+		}
+		if calls[0].authID != "xai-custom-prefix-auth" || calls[0].requestedModel != "my-xai/grok-imagine-image-2.0" || calls[0].payloadModel != xaiImages20Model {
+			t.Fatalf("call = %+v, want authID=xai-custom-prefix-auth requestedModel=my-xai/grok-imagine-image-2.0 payloadModel=%s", calls[0], xaiImages20Model)
+		}
+	})
+
+	t.Run("built-in vendor aliases fall back to unprefixed registered model when force-model-prefix is enabled", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-unprefixed-force-auth", "", []string{
+			defaultXAIImagesModel,
+			xaiImagesQualityModel,
+			xaiImages20Model,
+		})
+		for _, aliasModel := range []string{
+			"xai/grok-imagine-image-2.0",
+			"x-ai/grok-imagine-image-2.0",
+			"grok/grok-imagine-image-2.0",
+		} {
+			before := len(executor.Calls())
+			body := strings.NewReader(`{"model":"` + aliasModel + `","prompt":"a red square"}`)
+			resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d: %s", aliasModel, resp.Code, http.StatusOK, resp.Body.String())
+			}
+			calls := executor.Calls()
+			if len(calls) != before+1 {
+				t.Fatalf("%s executor calls = %d, want %d", aliasModel, len(calls), before+1)
+			}
+			last := calls[len(calls)-1]
+			if last.authID != "xai-unprefixed-force-auth" || last.requestedModel != xaiImages20Model || last.reqModel != xaiImages20Model || last.payloadModel != xaiImages20Model {
+				t.Fatalf("%s call = %+v, want authID=xai-unprefixed-force-auth requestedModel=%s reqModel=%s payloadModel=%s", aliasModel, last, xaiImages20Model, xaiImages20Model, xaiImages20Model)
+			}
+		}
+	})
+
+	t.Run("built-in vendor alias rejected when force-model-prefix is enabled and only custom-prefixed credential exists", func(t *testing.T) {
+		handler, executor := newXAIImagesRoutingTestHandler(t, true, "xai-custom-prefix-only-auth", "my-xai", []string{
+			"my-xai/" + xaiImages20Model,
+		})
+		body := strings.NewReader(`{"model":"xai/grok-imagine-image-2.0","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String(); got != "unknown provider for model xai/grok-imagine-image-2.0" {
+			t.Fatalf("error.message = %q, want %q", got, "unknown provider for model xai/grok-imagine-image-2.0")
+		}
+		if len(executor.Calls()) != 0 {
+			t.Fatalf("expected no executor call, got %d", len(executor.Calls()))
+		}
+	})
+}
+
+func TestXAIImagesPayloadDefaultAndOverrideRules(t *testing.T) {
+	var (
+		mu                sync.Mutex
+		gotRequests       [][]byte
+		forceBase64Output bool
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		gotRequests = append(gotRequests, body)
+		forceB64 := forceBase64Output
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if !forceB64 && ojson.GetBytesNoCopy(body, "response_format").String() == "url" {
+			_, _ = w.Write([]byte(`{"created":123,"data":[{"url":"https://img.x.ai/generated.png","revised_prompt":"ok"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"created":123,"data":[{"b64_json":"aW1hZ2U=","revised_prompt":"ok","mime_type":"image/png"}]}`))
+	}))
+	defer server.Close()
+
+	newHandlerWithConfig := func(t *testing.T, authID string, cfg *internalconfig.Config) *OpenAIAPIHandler {
+		t.Helper()
+		manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+		manager.RegisterExecutor(runtimeexecutor.NewXAIExecutor(cfg))
+		auth := &coreauth.Auth{
+			ID:       authID,
+			Provider: "xai",
+			Status:   coreauth.StatusActive,
+			Attributes: map[string]string{
+				"base_url":  server.URL,
+				"auth_kind": "oauth",
+			},
+			Metadata: map[string]any{"access_token": "xai-token"},
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("manager.Register: %v", errRegister)
+		}
+		modelRegistry := registry.GetGlobalRegistry()
+		modelRegistry.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+			{ID: defaultXAIImagesModel, Object: "model", OwnedBy: "xai", Type: "xai"},
+			{ID: xaiImagesQualityModel, Object: "model", OwnedBy: "xai", Type: "xai"},
+			{ID: xaiImages20Model, Object: "model", OwnedBy: "xai", Type: "xai"},
+		})
+		manager.RefreshSchedulerEntry(auth.ID)
+		t.Cleanup(func() {
+			modelRegistry.UnregisterClient(auth.ID)
+		})
+		base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
+		return NewOpenAIAPIHandler(base)
+	}
+
+	defaultURLCfg := &internalconfig.Config{
+		Payload: internalconfig.PayloadConfig{
+			Default: []internalconfig.PayloadRule{{
+				Models: []internalconfig.PayloadModelRule{{Name: "grok-imagine-*"}},
+				Params: map[string]any{
+					"response_format": "url",
+					"aspect_ratio":    "16:9",
+					"resolution":      "2k",
+				},
+			}},
+		},
+	}
+	handler := newHandlerWithConfig(t, "xai-payload-default-auth", defaultURLCfg)
+
+	t.Run("generations applies payload default response_format url when omitted by client", func(t *testing.T) {
+		body := strings.NewReader(`{"model":"grok-imagine-image","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "url" {
+			t.Fatalf("upstream response_format = %q, want url; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "aspect_ratio").String(); got != "16:9" {
+			t.Fatalf("upstream aspect_ratio = %q, want 16:9; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "resolution").String(); got != "2k" {
+			t.Fatalf("upstream resolution = %q, want 2k; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").String(); got != "https://img.x.ai/generated.png" {
+			t.Fatalf("data.0.url = %q, want https://img.x.ai/generated.png; resp=%s", got, resp.Body.String())
+		}
+		if ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.b64_json").Exists() {
+			t.Fatalf("unexpected data.0.b64_json in response: %s", resp.Body.String())
+		}
+	})
+
+	t.Run("generations preserves explicit client response_format and size under payload default", func(t *testing.T) {
+		body := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"a blue circle","response_format":"b64_json","size":"1024x1024"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "b64_json" {
+			t.Fatalf("upstream response_format = %q, want b64_json; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "aspect_ratio").String(); got != "1:1" {
+			t.Fatalf("upstream aspect_ratio = %q, want 1:1; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "resolution").String(); got != "2k" {
+			t.Fatalf("upstream resolution = %q, want 2k; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.b64_json").String(); got != "aW1hZ2U=" {
+			t.Fatalf("data.0.b64_json = %q, want aW1hZ2U=; resp=%s", got, resp.Body.String())
+		}
+
+		explicitAllBody := strings.NewReader(`{"model":"grok-imagine-image-quality","prompt":"a blue circle","response_format":"b64_json","aspect_ratio":"4:3","resolution":"1k"}`)
+		explicitAllResp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", explicitAllBody, handler.ImagesGenerations)
+		if explicitAllResp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", explicitAllResp.Code, http.StatusOK, explicitAllResp.Body.String())
+		}
+		mu.Lock()
+		explicitLastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(explicitLastReq, "response_format").String(); got != "b64_json" {
+			t.Fatalf("upstream response_format = %q, want b64_json; body=%s", got, explicitLastReq)
+		}
+		if got := ojson.GetBytesNoCopy(explicitLastReq, "aspect_ratio").String(); got != "4:3" {
+			t.Fatalf("upstream aspect_ratio = %q, want 4:3; body=%s", got, explicitLastReq)
+		}
+		if got := ojson.GetBytesNoCopy(explicitLastReq, "resolution").String(); got != "1k" {
+			t.Fatalf("upstream resolution = %q, want 1k; body=%s", got, explicitLastReq)
+		}
+	})
+
+	t.Run("generations stream applies payload default response_format url", func(t *testing.T) {
+		mu.Lock()
+		forceBase64Output = true
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			forceBase64Output = false
+			mu.Unlock()
+		}()
+
+		body := strings.NewReader(`{"model":"grok-imagine-image-2.0","prompt":"a green triangle","stream":true}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "url" {
+			t.Fatalf("upstream response_format = %q, want url; body=%s", got, lastReq)
+		}
+		if !strings.Contains(resp.Body.String(), `"url":"data:image/png;base64,aW1hZ2U="`) {
+			t.Fatalf("stream response missing data url formatted from finalized response_format: %s", resp.Body.String())
+		}
+	})
+
+	t.Run("edits JSON applies payload default response_format url", func(t *testing.T) {
+		body := strings.NewReader(`{"model":"grok-imagine-image","prompt":"edit this","images":[{"image_url":"https://example.com/in.png"}]}`)
+		resp := performImagesEndpointRequest(t, imagesEditsPath, "application/json", body, handler.ImagesEdits)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "url" {
+			t.Fatalf("upstream response_format = %q, want url; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "aspect_ratio").String(); got != "16:9" {
+			t.Fatalf("upstream aspect_ratio = %q, want 16:9; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "resolution").String(); got != "2k" {
+			t.Fatalf("upstream resolution = %q, want 2k; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").String(); got != "https://img.x.ai/generated.png" {
+			t.Fatalf("data.0.url = %q, want https://img.x.ai/generated.png; resp=%s", got, resp.Body.String())
+		}
+	})
+
+	t.Run("edits multipart applies payload default response_format url", func(t *testing.T) {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		if errWrite := writer.WriteField("model", "grok-imagine-image"); errWrite != nil {
+			t.Fatalf("write model field: %v", errWrite)
+		}
+		if errWrite := writer.WriteField("prompt", "edit this"); errWrite != nil {
+			t.Fatalf("write prompt field: %v", errWrite)
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", multipart.FileContentDisposition("image", "image.png"))
+		header.Set("Content-Type", "image/png")
+		part, errCreate := writer.CreatePart(header)
+		if errCreate != nil {
+			t.Fatalf("create image part: %v", errCreate)
+		}
+		if _, errWrite := part.Write([]byte("png-bytes")); errWrite != nil {
+			t.Fatalf("write image part: %v", errWrite)
+		}
+		if errClose := writer.Close(); errClose != nil {
+			t.Fatalf("close multipart writer: %v", errClose)
+		}
+
+		resp := performImagesEndpointRequest(t, imagesEditsPath, writer.FormDataContentType(), &body, handler.ImagesEdits)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "url" {
+			t.Fatalf("upstream response_format = %q, want url; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "aspect_ratio").String(); got != "16:9" {
+			t.Fatalf("upstream aspect_ratio = %q, want 16:9; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "resolution").String(); got != "2k" {
+			t.Fatalf("upstream resolution = %q, want 2k; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").String(); got != "https://img.x.ai/generated.png" {
+			t.Fatalf("data.0.url = %q, want https://img.x.ai/generated.png; resp=%s", got, resp.Body.String())
+		}
+	})
+
+	t.Run("generations response formatting uses finalized response_format when upstream returns b64_json", func(t *testing.T) {
+		mu.Lock()
+		forceBase64Output = true
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			forceBase64Output = false
+			mu.Unlock()
+		}()
+
+		body := strings.NewReader(`{"model":"grok-imagine-image","prompt":"a red square"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").String(); got != "data:image/png;base64,aW1hZ2U=" {
+			t.Fatalf("data.0.url = %q, want data:image/png;base64,aW1hZ2U=; resp=%s", got, resp.Body.String())
+		}
+	})
+
+	t.Run("generations override to b64_json overrides client url for both upstream and downstream response", func(t *testing.T) {
+		overrideB64Cfg := &internalconfig.Config{
+			Payload: internalconfig.PayloadConfig{
+				Override: []internalconfig.PayloadRule{{
+					Models: []internalconfig.PayloadModelRule{{Name: "grok-imagine-*"}},
+					Params: map[string]any{
+						"response_format": "b64_json",
+						"aspect_ratio":    "9:16",
+						"resolution":      "2k",
+					},
+				}},
+			},
+		}
+		overrideHandler := newHandlerWithConfig(t, "xai-payload-override-auth", overrideB64Cfg)
+
+		body := strings.NewReader(`{"model":"grok-imagine-image","prompt":"a red square","response_format":"url","aspect_ratio":"1:1","resolution":"1k"}`)
+		resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, overrideHandler.ImagesGenerations)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+		}
+		mu.Lock()
+		lastReq := gotRequests[len(gotRequests)-1]
+		mu.Unlock()
+		if got := ojson.GetBytesNoCopy(lastReq, "response_format").String(); got != "b64_json" {
+			t.Fatalf("upstream response_format = %q, want b64_json; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "aspect_ratio").String(); got != "9:16" {
+			t.Fatalf("upstream aspect_ratio = %q, want 9:16; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(lastReq, "resolution").String(); got != "2k" {
+			t.Fatalf("upstream resolution = %q, want 2k; body=%s", got, lastReq)
+		}
+		if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.b64_json").String(); got != "aW1hZ2U=" {
+			t.Fatalf("data.0.b64_json = %q, want aW1hZ2U=; resp=%s", got, resp.Body.String())
+		}
+		if ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").Exists() {
+			t.Fatalf("unexpected data.0.url in response: %s", resp.Body.String())
+		}
+	})
 }

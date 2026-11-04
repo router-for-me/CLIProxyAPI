@@ -137,8 +137,10 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
 	}
 	providerSet, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if _, ok := providerSet[providerKey]; !ok {
-		return false
+	if !homeRuntime || len(providerSet) > 0 {
+		if _, ok := providerSet[providerKey]; !ok {
+			return false
+		}
 	}
 	if !responsesWebsocketAuthAvailableForModel(auth, modelKey, time.Now()) {
 		return false

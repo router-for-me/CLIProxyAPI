@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	devinauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -23,7 +24,6 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -433,7 +433,7 @@ func TestConsumeDevinFramesToInteractions(t *testing.T) {
 		t.Errorf("FramesCount = %d, want 3", respLog.FramesCount)
 	}
 
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	if root.Get("status").String() != "completed" {
 		t.Errorf("status = %q, want completed", root.Get("status").String())
 	}
@@ -825,7 +825,7 @@ func TestConsumeDevinFramesToInteractions_MultiToolCallsNoPanic(t *testing.T) {
 		t.Fatal("expected non-nil respLog")
 	}
 
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	steps := root.Get("steps").Array()
 	if len(steps) != 2 {
 		t.Fatalf("expected 2 function_call steps, got %d", len(steps))
@@ -886,7 +886,7 @@ func TestStreamDevinFrames_InterleavedThinkingAndContent(t *testing.T) {
 		)
 	}()
 
-	var events []gjson.Result
+	var events []ojson.Result
 	for chunk := range out {
 		if chunk.Err != nil {
 			t.Fatalf("unexpected chunk error: %v", chunk.Err)
@@ -895,7 +895,7 @@ func TestStreamDevinFrames_InterleavedThinkingAndContent(t *testing.T) {
 		if strings.HasPrefix(raw, "data: ") && !strings.Contains(raw, "[DONE]") {
 			data := strings.TrimPrefix(raw, "data: ")
 			data = strings.TrimSpace(data)
-			events = append(events, gjson.Parse(data))
+			events = append(events, ojson.Parse(data))
 		}
 	}
 
@@ -1003,14 +1003,14 @@ func TestStreamDevinFrames_SequentialToolCallsSameIndexDifferentID(t *testing.T)
 		chunks = append(chunks, chunk)
 	}
 
-	var events []gjson.Result
+	var events []ojson.Result
 	for _, chunk := range chunks {
 		lines := strings.Split(string(chunk.Payload), "\n")
 		for _, line := range lines {
 			if strings.HasPrefix(line, "data: ") {
 				data := strings.TrimPrefix(line, "data: ")
 				if strings.TrimSpace(data) != "[DONE]" {
-					events = append(events, gjson.Parse(data))
+					events = append(events, ojson.Parse(data))
 				}
 			}
 		}
@@ -1102,7 +1102,7 @@ func TestConsumeDevinFramesToInteractions_SequentialToolCallsSameIndexDifferentI
 		t.Errorf("tool call 1 = %+v, want bash_1/bash", respLog.ToolCalls[1])
 	}
 
-	steps := gjson.GetBytes(interactionsJSON, "steps").Array()
+	steps := ojson.GetBytes(interactionsJSON, "steps").Array()
 	if len(steps) != 2 {
 		t.Fatalf("expected 2 steps in interactions JSON, got %d", len(steps))
 	}
@@ -1298,7 +1298,7 @@ func TestStreamDevinFrames_StopReasonMaxTokens(t *testing.T) {
 		)
 	}()
 
-	var completedEvent gjson.Result
+	var completedEvent ojson.Result
 	for chunk := range out {
 		if chunk.Err != nil {
 			t.Fatalf("unexpected chunk error: %v", chunk.Err)
@@ -1307,7 +1307,7 @@ func TestStreamDevinFrames_StopReasonMaxTokens(t *testing.T) {
 		if strings.HasPrefix(raw, "data: ") && !strings.Contains(raw, "[DONE]") {
 			data := strings.TrimPrefix(raw, "data: ")
 			data = strings.TrimSpace(data)
-			parsed := gjson.Parse(data)
+			parsed := ojson.Parse(data)
 			if parsed.Get("event_type").String() == "interaction.completed" {
 				completedEvent = parsed
 			}
@@ -1342,7 +1342,7 @@ func TestConsumeDevinFramesToInteractions_StopReasonMaxTokens(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	parsed := gjson.ParseBytes(out)
+	parsed := ojson.ParseBytes(out)
 	if got := parsed.Get("status").String(); got != "incomplete" {
 		t.Fatalf("status = %q, want incomplete. Output: %s", got, string(out))
 	}
@@ -1383,7 +1383,7 @@ func TestStreamDevinFrames_StopReasonContentFilter(t *testing.T) {
 		)
 	}()
 
-	var completedEvent gjson.Result
+	var completedEvent ojson.Result
 	for chunk := range out {
 		if chunk.Err != nil {
 			t.Fatalf("unexpected chunk error: %v", chunk.Err)
@@ -1392,7 +1392,7 @@ func TestStreamDevinFrames_StopReasonContentFilter(t *testing.T) {
 		if strings.HasPrefix(raw, "data: ") && !strings.Contains(raw, "[DONE]") {
 			data := strings.TrimPrefix(raw, "data: ")
 			data = strings.TrimSpace(data)
-			parsed := gjson.Parse(data)
+			parsed := ojson.Parse(data)
 			if parsed.Get("event_type").String() == "interaction.completed" {
 				completedEvent = parsed
 			}
@@ -1427,7 +1427,7 @@ func TestConsumeDevinFramesToInteractions_StopReasonContentFilter(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	parsed := gjson.ParseBytes(out)
+	parsed := ojson.ParseBytes(out)
 	if got := parsed.Get("status").String(); got != "incomplete" {
 		t.Fatalf("status = %q, want incomplete. Output: %s", got, string(out))
 	}
@@ -1750,7 +1750,7 @@ func TestStreamDevinFrames_LateThinkingSignaturesToClaudeStreaming(t *testing.T)
 						if data == "" || data == "[DONE]" {
 							continue
 						}
-						parsed := gjson.Parse(data)
+						parsed := ojson.Parse(data)
 						eventType := parsed.Get("type").String()
 						switch eventType {
 						case "content_block_start":
@@ -1953,7 +1953,7 @@ func TestStreamDevinFrames_LateThinkingSignatures_TrailerErrorClosesBlocks(t *te
 						if data == "" || data == "[DONE]" {
 							continue
 						}
-						parsed := gjson.Parse(data)
+						parsed := ojson.Parse(data)
 						eventType := parsed.Get("type").String()
 						if eventType == "content_block_start" {
 							idx := int(parsed.Get("index").Int())
@@ -2151,6 +2151,56 @@ func TestDevinExecutor_ResponsesToolsFilterAndObfuscate(t *testing.T) {
 	}
 	if !strings.Contains(logBodyStr, "to a existing") {
 		t.Fatalf("upstream log body should contain 'to a existing': %s", logBodyStr)
+	}
+}
+
+func TestDevinExecutor_PrepareDevinHTTPRequest_ObfuscatesCodeModeExecDescription(t *testing.T) {
+	responsesPayload := []byte(`{
+		"model": "devin/claude-opus-5-5",
+		"tools": [
+			{
+				"type": "custom",
+				"name": "exec",
+				"description": "Run JavaScript code to orchestrate/compose tool calls\n### exec_command\nRuns a command in a PTY, returning output or a session ID for ongoing interaction.\n### write_stdin\nWrites characters to an existing unified exec session and returns recent output.\n"
+			}
+		],
+		"input": "Reply with exactly: OK"
+	}`)
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "test-session-token",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "devin/claude-opus-5-5",
+		Payload: responsesPayload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: responsesPayload,
+	}
+
+	httpReq, _, logBody, errPrep := exec.prepareDevinHTTPRequest(context.Background(), auth, req, opts)
+	if errPrep != nil {
+		t.Fatalf("prepareDevinHTTPRequest failed: %v", errPrep)
+	}
+	bodyBytes, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	flag, wireBytes, errUnwrap := helps.ReadConnectFrame(bytes.NewReader(bodyBytes))
+	if errUnwrap != nil || flag != 0 {
+		t.Fatalf("unwrap connect frame: flag=%d err=%v", flag, errUnwrap)
+	}
+	for label, raw := range map[string]string{"wire": string(wireBytes), "log": string(logBody)} {
+		if strings.Contains(raw, "a session ID") || strings.Contains(raw, "to an existing unified") {
+			t.Fatalf("%s still contains unsanitized exec_command/write_stdin phrase: %s", label, raw)
+		}
+		if !strings.Contains(raw, "an session ID") || !strings.Contains(raw, "to a existing unified") {
+			t.Fatalf("%s missing obfuscated exec_command/write_stdin phrase: %s", label, raw)
+		}
 	}
 }
 
@@ -2381,7 +2431,7 @@ func TestDevinExecutor_ClaudeToolResultEndToEnd(t *testing.T) {
 	}`)
 
 	// Real conversion from Claude request to Interactions format
-	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
+	interactionsJSON, _ := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, true)
 
 	systemPrompt, prompts, tools, temp, maxTokens, sessionID, cascadeID, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
 
@@ -2715,7 +2765,7 @@ func TestDevinExecutor_ClaudeToolResultMixedBusinessJSONEndToEnd(t *testing.T) {
 		]
 	}`)
 
-	interactionsJSON := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
+	interactionsJSON, _ := interactionsclaude.ConvertClaudeRequestToInteractions("devin/swe-2", claudeReq, false)
 	_, prompts, _, _, _, _, _, _, _ := parseInteractionsPayload(interactionsJSON, claudeReq)
 
 	if len(prompts) != 2 {
@@ -2919,7 +2969,7 @@ func TestRegressionIssue5910_CustomToolCallInvalidJSONStr(t *testing.T) {
 		t.Errorf("expected Arguments %q from invalid_json_str, got %q", "ls -la", respLog.ToolCalls[0].Arguments)
 	}
 
-	steps := gjson.GetBytes(interactionsJSON, "steps").Array()
+	steps := ojson.GetBytes(interactionsJSON, "steps").Array()
 	if len(steps) != 1 {
 		t.Fatalf("expected 1 step in interactions JSON, got %d", len(steps))
 	}
@@ -2964,8 +3014,8 @@ func TestRegressionIssue5910_CustomToolCallInvalidJSONStr(t *testing.T) {
 		for _, line := range lines {
 			if strings.HasPrefix(line, "data: ") {
 				data := strings.TrimPrefix(line, "data: ")
-				if gjson.Get(data, "event_type").String() == "step.delta" && gjson.Get(data, "delta.type").String() == "arguments_delta" {
-					streamArgs.WriteString(gjson.Get(data, "delta.arguments").String())
+				if ojson.Get(data, "event_type").String() == "step.delta" && ojson.Get(data, "delta.type").String() == "arguments_delta" {
+					streamArgs.WriteString(ojson.Get(data, "delta.arguments").String())
 				}
 			}
 		}
@@ -3048,14 +3098,14 @@ func TestRegressionIssue5910_StreamInterleavedToolCallsByCallID(t *testing.T) {
 		chunks = append(chunks, chunk)
 	}
 
-	var events []gjson.Result
+	var events []ojson.Result
 	for _, chunk := range chunks {
 		lines := strings.Split(string(chunk.Payload), "\n")
 		for _, line := range lines {
 			if strings.HasPrefix(line, "data: ") {
 				data := strings.TrimPrefix(line, "data: ")
 				if strings.TrimSpace(data) != "[DONE]" {
-					events = append(events, gjson.Parse(data))
+					events = append(events, ojson.Parse(data))
 				}
 			}
 		}
@@ -3145,7 +3195,7 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 		t.Errorf("respLog.Usage.CacheWriteTokens = %d, want 14361", respLog.Usage.CacheWriteTokens)
 	}
 
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	if root.Get("usage.total_input_tokens").Int() != 53 {
 		t.Errorf("usage.total_input_tokens = %d, want 53", root.Get("usage.total_input_tokens").Int())
 	}
@@ -3194,7 +3244,7 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 		for _, line := range lines {
 			if strings.HasPrefix(line, "data: ") {
 				data := []byte(strings.TrimPrefix(line, "data: "))
-				if gjson.GetBytes(data, "event_type").String() == "interaction.completed" {
+				if ojson.GetBytes(data, "event_type").String() == "interaction.completed" {
 					completedEvent = data
 				}
 			}
@@ -3204,7 +3254,7 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if len(completedEvent) == 0 {
 		t.Fatal("expected interaction.completed event in stream")
 	}
-	cRoot := gjson.ParseBytes(completedEvent)
+	cRoot := ojson.ParseBytes(completedEvent)
 	if cRoot.Get("interaction.usage.cache_write_tokens").Int() != 14361 {
 		t.Errorf("interaction.usage.cache_write_tokens = %d, want 14361", cRoot.Get("interaction.usage.cache_write_tokens").Int())
 	}
@@ -3800,7 +3850,8 @@ func TestDevinExecutor_WarnsWhenUpstreamServesUnexpectedModel(t *testing.T) {
 
 	exec := NewDevinExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
-		ID:         "devin-auth-unexpected",
+		// Isolate this run from the process-wide model warning throttle.
+		ID:         "devin-auth-unexpected-" + uuid.NewString(),
 		Provider:   "devin",
 		Attributes: map[string]string{"api_key": "test-key"},
 	}
@@ -3907,7 +3958,7 @@ func TestRegressionIssue5951_DevinToolActivityOrderedBeforeAssistantMessage(t *t
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.done" {
 					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
 				}
@@ -3936,9 +3987,9 @@ func TestRegressionIssue5951_DevinToolActivityOrderedBeforeAssistantMessage(t *t
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.completed" {
-					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+					ev.Get("response.output").ForEach(func(_, item ojson.Result) bool {
 						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
 						return true
 					})
@@ -3966,9 +4017,9 @@ func TestRegressionIssue5951_DevinToolActivityOrderedBeforeAssistantMessage(t *t
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	var stepTypes []string
-	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+	root.Get("steps").ForEach(func(_, step ojson.Result) bool {
 		stepTypes = append(stepTypes, step.Get("type").String())
 		return true
 	})
@@ -4065,7 +4116,7 @@ func TestRegressionIssue5951_InterleavedToolArgumentsAndText(t *testing.T) {
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.added" && ev.Get("item.type").String() == "function_call" {
 					callCount++
 				}
@@ -4107,7 +4158,7 @@ func TestRegressionIssue5951_InterleavedToolArgumentsAndText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	steps := root.Get("steps").Array()
 	if len(steps) != 2 {
 		t.Fatalf("steps count = %d, want 2 [function_call, model_output]. Steps: %s", len(steps), string(interactionsJSON))
@@ -4180,12 +4231,12 @@ func TestRegressionIssue5951_SameFrameToolAndContent(t *testing.T) {
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.done" {
 					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
 				}
 				if ev.Get("type").String() == "response.completed" {
-					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+					ev.Get("response.output").ForEach(func(_, item ojson.Result) bool {
 						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
 						return true
 					})
@@ -4221,9 +4272,9 @@ func TestRegressionIssue5951_SameFrameToolAndContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	var stepTypes []string
-	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+	root.Get("steps").ForEach(func(_, step ojson.Result) bool {
 		stepTypes = append(stepTypes, step.Get("type").String())
 		return true
 	})
@@ -4307,12 +4358,12 @@ func TestRegressionIssue5951_PreToolExplanationAndPostToolAnswer(t *testing.T) {
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.done" {
 					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
 				}
 				if ev.Get("type").String() == "response.completed" {
-					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+					ev.Get("response.output").ForEach(func(_, item ojson.Result) bool {
 						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
 						return true
 					})
@@ -4350,9 +4401,9 @@ func TestRegressionIssue5951_PreToolExplanationAndPostToolAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	var stepTypes []string
-	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+	root.Get("steps").ForEach(func(_, step ojson.Result) bool {
 		stepTypes = append(stepTypes, step.Get("type").String())
 		return true
 	})
@@ -4450,12 +4501,12 @@ func TestRegressionIssue5951_MultiStageToolAndIntermediateExplanation(t *testing
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.done" {
 					doneItemTypes = append(doneItemTypes, ev.Get("item.type").String())
 				}
 				if ev.Get("type").String() == "response.completed" {
-					ev.Get("response.output").ForEach(func(_, item gjson.Result) bool {
+					ev.Get("response.output").ForEach(func(_, item ojson.Result) bool {
 						completedOutputTypes = append(completedOutputTypes, item.Get("type").String())
 						return true
 					})
@@ -4494,9 +4545,9 @@ func TestRegressionIssue5951_MultiStageToolAndIntermediateExplanation(t *testing
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	var stepTypes []string
-	root.Get("steps").ForEach(func(_, step gjson.Result) bool {
+	root.Get("steps").ForEach(func(_, step ojson.Result) bool {
 		stepTypes = append(stepTypes, step.Get("type").String())
 		return true
 	})
@@ -4607,7 +4658,7 @@ func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.
 				if strings.TrimSpace(data) == "[DONE]" {
 					continue
 				}
-				ev := gjson.Parse(data)
+				ev := ojson.Parse(data)
 				if ev.Get("type").String() == "response.output_item.added" && ev.Get("item.type").String() == "function_call" {
 					callCount++
 				}
@@ -4653,7 +4704,7 @@ func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.
 	if err != nil {
 		t.Fatalf("consumeDevinFramesToInteractions failed: %v", err)
 	}
-	root := gjson.ParseBytes(interactionsJSON)
+	root := ojson.ParseBytes(interactionsJSON)
 	steps := root.Get("steps").Array()
 	if len(steps) != 3 {
 		t.Fatalf("steps count = %d, want 3 [call_1, call_2, text]. Steps: %s", len(steps), string(interactionsJSON))
@@ -4670,4 +4721,306 @@ func TestRegressionIssue5951_InterleavedToolsWithTextAndContinuation(t *testing.
 	if steps[2].Get("content.0.text").String() != "Working on step 1... All done." {
 		t.Fatalf("step[2] text = %q, want 'Working on step 1... All done.'", steps[2].Get("content.0.text").String())
 	}
+}
+
+func TestStreamDevinFrames_ImmediateTrailerError_NoInitialPayloadBeforeError(t *testing.T) {
+	var buf bytes.Buffer
+	// Immediate Connect trailer error with code 7 (PERMISSION_DENIED)
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{"error":{"code":"permission_denied","message":"Unable to process request due to an MCP configuration issue."}}`)))
+
+	e := &DevinExecutor{}
+	out := make(chan cliproxyexecutor.StreamChunk, 10)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		OriginalRequest: []byte(`{"model":"devin/kimi-k3","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	go func() {
+		defer close(out)
+		e.streamDevinFrames(
+			context.Background(),
+			&buf,
+			cliproxyexecutor.Request{Model: "devin/kimi-k3", Payload: opts.OriginalRequest},
+			opts,
+			"kimi-k3",
+			sdktranslator.FormatOpenAI,
+			nil,
+			out,
+		)
+	}()
+
+	firstChunk, ok := <-out
+	if !ok {
+		t.Fatalf("expected at least one chunk")
+	}
+	if firstChunk.Err == nil {
+		t.Fatalf("expected first chunk to have Err, but got Payload: %s", string(firstChunk.Payload))
+	}
+	type statusError interface {
+		StatusCode() int
+	}
+	if se, ok := firstChunk.Err.(statusError); !ok || se.StatusCode() != 403 {
+		t.Fatalf("expected status code 403, got error: %v", firstChunk.Err)
+	}
+}
+
+func TestStreamDevinFrames_MidStreamTrailerError_EmitsTranslatedFailedEventBeforeStreamError(t *testing.T) {
+	var buf bytes.Buffer
+	// Frame 1: text content
+	var f1 []byte
+	f1 = protowire.AppendTag(f1, 3, protowire.BytesType)
+	f1 = protowire.AppendString(f1, "partial answer")
+	buf.Write(helps.WrapConnectEnvelope(f1))
+
+	// Connect trailer with error code 7 (PERMISSION_DENIED)
+	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{"error":{"code":"permission_denied","message":"devin upstream error (permission_denied): MCP configuration issue"}}`)))
+
+	e := &DevinExecutor{}
+	out := make(chan cliproxyexecutor.StreamChunk, 20)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: []byte(`{"model":"devin/kimi-k3","stream":true}`),
+	}
+
+	go func() {
+		defer close(out)
+		e.streamDevinFrames(
+			context.Background(),
+			&buf,
+			cliproxyexecutor.Request{Model: "devin/kimi-k3", Payload: opts.OriginalRequest},
+			opts,
+			"kimi-k3",
+			sdktranslator.FormatOpenAIResponse,
+			nil,
+			out,
+		)
+	}()
+
+	var payloads [][]byte
+	var sawErrorChunk bool
+	var failedEventIdx = -1
+	var errorChunkIdx = -1
+	idx := 0
+	for chunk := range out {
+		if chunk.Err != nil {
+			sawErrorChunk = true
+			errorChunkIdx = idx
+			idx++
+			continue
+		}
+		if strings.Contains(string(chunk.Payload), "response.failed") {
+			failedEventIdx = idx
+		}
+		payloads = append(payloads, chunk.Payload)
+		idx++
+	}
+
+	if !sawErrorChunk {
+		t.Fatalf("expected stream error chunk")
+	}
+	if failedEventIdx == -1 {
+		t.Fatalf("expected translated response.failed SSE event, but none found")
+	}
+	if failedEventIdx >= errorChunkIdx {
+		t.Fatalf("expected response.failed (idx %d) to be emitted before error chunk (idx %d)", failedEventIdx, errorChunkIdx)
+	}
+
+	allPayload := string(bytes.Join(payloads, []byte("\n")))
+	if !strings.Contains(allPayload, "permission_denied") {
+		t.Fatalf("expected error message in stream payloads, got:\n%s", allPayload)
+	}
+}
+
+func TestDevinApplyPatchExecutorReuse(t *testing.T) {
+	wireField := func(data []byte, target protowire.Number) []byte {
+		for len(data) > 0 {
+			number, kind, n := protowire.ConsumeTag(data)
+			if n < 0 {
+				return nil
+			}
+			data = data[n:]
+			if kind == protowire.BytesType {
+				value, m := protowire.ConsumeBytes(data)
+				if m < 0 {
+					return nil
+				}
+				if number == target {
+					return value
+				}
+				data = data[m:]
+			} else {
+				m := protowire.ConsumeFieldValue(number, kind, data)
+				if m < 0 {
+					return nil
+				}
+				data = data[m:]
+			}
+		}
+		return nil
+	}
+	args := `{"input":"  *** Begin Patch\n*** End Patch\n "}`
+	var frames bytes.Buffer
+	for i, fragment := range []string{args[:22], args[22:]} {
+		var tool []byte
+		tool = protowire.AppendTag(tool, 1, protowire.BytesType)
+		tool = protowire.AppendString(tool, "call_patch")
+		if i == 0 {
+			tool = protowire.AppendTag(tool, 2, protowire.BytesType)
+			tool = protowire.AppendString(tool, "functions__apply_patch")
+		}
+		tool = protowire.AppendTag(tool, 3, protowire.BytesType)
+		tool = protowire.AppendString(tool, fragment)
+		var frame []byte
+		frame = protowire.AppendTag(frame, 6, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, tool)
+		frames.Write(helps.WrapConnectEnvelope(frame))
+	}
+	frames.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+	requests := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errReadAll := io.ReadAll(r.Body)
+		if errReadAll != nil {
+			t.Error(errReadAll)
+			w.WriteHeader(500)
+			return
+		}
+		requests <- body
+		w.Header().Set("Content-Type", "application/connect+proto")
+		_, _ = w.Write(frames.Bytes())
+	}))
+	defer server.Close()
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{ID: "devin-patch", Provider: "devin", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{Model: "devin/swe-2", Payload: []byte(executorPatchRequest)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+	assertWire := func(body []byte) {
+		if len(body) < 5 {
+			t.Fatal("missing envelope")
+		}
+		tool := wireField(body[5:], 10)
+		name, desc, params := wireField(tool, 1), wireField(tool, 2), wireField(tool, 3)
+		if string(name) != "functions__apply_patch" || !strings.Contains(string(desc), "*** Begin Patch") || !strings.Contains(string(desc), "@@") || !strings.Contains(string(desc), "start: patch") || ojson.GetBytes(params, "properties.input.type").String() != "string" || !ojson.GetBytes(params, "additionalProperties").Exists() || ojson.GetBytes(params, "additionalProperties").Bool() {
+			t.Fatalf("wire contract: name=%s desc=%s params=%s", name, desc, params)
+		}
+	}
+	response, errExecute := exec.Execute(context.Background(), auth, req, opts)
+	if errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchOutput(t, response.Payload)
+	stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatal(errExecuteStream)
+	}
+	assertWire(<-requests)
+	assertExecutorPatchStream(t, stream.Chunks)
+}
+
+func TestRegressionIssue6505_DevinClaudeStreamingNoFullInputEstimate(t *testing.T) {
+	runTest := func(t *testing.T, promptTokens, cacheWriteTokens int64) {
+		// Frame with Usage Field 7:
+		// Field 2: prompt tokens
+		// Field 3: completion tokens = 4
+		// Field 4: cache_write_tokens
+		// Field 5: cached tokens = 50000
+		var f7Bytes []byte
+		f7Bytes = protowire.AppendTag(f7Bytes, 2, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, uint64(promptTokens))
+		f7Bytes = protowire.AppendTag(f7Bytes, 3, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 4)
+		if cacheWriteTokens > 0 {
+			f7Bytes = protowire.AppendTag(f7Bytes, 4, protowire.VarintType)
+			f7Bytes = protowire.AppendVarint(f7Bytes, uint64(cacheWriteTokens))
+		}
+		f7Bytes = protowire.AppendTag(f7Bytes, 5, protowire.VarintType)
+		f7Bytes = protowire.AppendVarint(f7Bytes, 50000)
+
+		var frame []byte
+		frame = protowire.AppendTag(frame, 7, protowire.BytesType)
+		frame = protowire.AppendBytes(frame, f7Bytes)
+
+		var buf bytes.Buffer
+		buf.Write(helps.WrapConnectEnvelope(frame))
+		buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+
+		exec := NewDevinExecutor(&config.Config{})
+		out := make(chan cliproxyexecutor.StreamChunk, 50)
+		originalPayload := []byte(`{"model":"devin/claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"hello cache test prompt with enough words to produce non-zero tokens"}]}`)
+		opts := cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FormatClaude,
+			OriginalRequest: originalPayload,
+		}
+
+		go func() {
+			defer close(out)
+			exec.streamDevinFrames(
+				context.Background(),
+				&buf,
+				cliproxyexecutor.Request{Model: "devin/claude-opus-5-5", Payload: originalPayload},
+				opts,
+				"claude-opus-5-5",
+				sdktranslator.FormatClaude,
+				nil,
+				out,
+			)
+		}()
+
+		var messageStartEvent []byte
+		var messageDeltaEvent []byte
+		for chunk := range out {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected chunk error: %v", chunk.Err)
+			}
+			lines := strings.Split(string(chunk.Payload), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "data: ") {
+					data := []byte(strings.TrimPrefix(line, "data: "))
+					eventType := ojson.GetBytes(data, "type").String()
+					if eventType == "message_start" {
+						messageStartEvent = data
+					} else if eventType == "message_delta" {
+						messageDeltaEvent = data
+					}
+				}
+			}
+		}
+
+		if len(messageStartEvent) == 0 {
+			t.Fatal("expected message_start event in Claude stream")
+		}
+		startRoot := ojson.ParseBytes(messageStartEvent)
+		inputTokensNode := startRoot.Get("message.usage.input_tokens")
+		if !inputTokensNode.Exists() || inputTokensNode.Int() != 0 {
+			t.Fatalf("message_start message.usage.input_tokens = %v (exists=%v), want 0 (must not seed full-input estimate)", inputTokensNode.Value(), inputTokensNode.Exists())
+		}
+
+		if len(messageDeltaEvent) == 0 {
+			t.Fatal("expected message_delta event in Claude stream")
+		}
+		deltaRoot := ojson.ParseBytes(messageDeltaEvent)
+		deltaInputNode := deltaRoot.Get("usage.input_tokens")
+		if !deltaInputNode.Exists() || deltaInputNode.Int() != promptTokens {
+			t.Errorf("message_delta usage.input_tokens = %v (exists=%v), want %d", deltaInputNode.Value(), deltaInputNode.Exists(), promptTokens)
+		}
+		if cachedTokens := deltaRoot.Get("usage.cache_read_input_tokens").Int(); cachedTokens != 50000 {
+			t.Errorf("message_delta usage.cache_read_input_tokens = %d, want 50000", cachedTokens)
+		}
+		if cacheWriteTokens > 0 {
+			if gotWrite := deltaRoot.Get("usage.cache_creation_input_tokens").Int(); gotWrite != cacheWriteTokens {
+				t.Errorf("message_delta usage.cache_creation_input_tokens = %d, want %d", gotWrite, cacheWriteTokens)
+			}
+		}
+		if outputTokens := deltaRoot.Get("usage.output_tokens").Int(); outputTokens != 4 {
+			t.Errorf("message_delta usage.output_tokens = %d, want 4", outputTokens)
+		}
+	}
+
+	t.Run("fully cached prompt (input_tokens 0)", func(t *testing.T) {
+		runTest(t, 0, 7)
+	})
+	t.Run("partially cached prompt (input_tokens positive)", func(t *testing.T) {
+		runTest(t, 10, 0)
+	})
 }

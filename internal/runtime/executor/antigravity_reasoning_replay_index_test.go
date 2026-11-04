@@ -7,10 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // antigravityReplayItemContextHashForTest stamps an item with the production
@@ -21,12 +20,12 @@ func antigravityReplayItemContextHashForTest(item, payload []byte, contentIndex 
 }
 
 func legacyAntigravityReasoningReplayItemsFromRequest(payload []byte) [][]byte {
-	contents := gjson.GetBytes(payload, "request.contents")
+	contents := ojson.GetBytes(payload, "request.contents")
 	if !contents.IsArray() {
 		return nil
 	}
 	items := make([][]byte, 0)
-	contents.ForEach(func(contentKey, content gjson.Result) bool {
+	contents.ForEach(func(contentKey, content ojson.Result) bool {
 		if !strings.EqualFold(strings.TrimSpace(content.Get("role").String()), "model") {
 			return true
 		}
@@ -68,7 +67,7 @@ func legacyAntigravityReasoningReplayItemsFromRequest(payload []byte) [][]byte {
 				continue
 			}
 			item := buildAntigravityThoughtSignatureItem(contentIndex, targetPartIndex, signature, kind, fingerprint)
-			item, _ = sjson.SetBytes(item, "targetOccurrence", antigravityReplayPartOccurrence(partArray, targetPartIndex, kind, fingerprint))
+			item, _ = ojson.SetBytes(item, "targetOccurrence", antigravityReplayPartOccurrence(partArray, targetPartIndex, kind, fingerprint))
 			items = append(items, legacyAntigravitySetReplayItemContextHash(item, payload, contentIndex))
 		}
 		return true
@@ -79,12 +78,12 @@ func legacyAntigravityReasoningReplayItemsFromRequest(payload []byte) [][]byte {
 func legacyFilterAntigravityReasoningReplayItemsForRequestWithSchemas(payload []byte, items [][]byte, toolSchemas map[string]any) [][]byte {
 	filtered := make([][]byte, 0, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := ojson.ParseBytes(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "function_call_part":
 			signature := strings.TrimSpace(itemResult.Get("thoughtSignature").String())
 			if contentIndex, partIndex, foundCall := legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload, itemResult, toolSchemas); foundCall {
-				part := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d", contentIndex, partIndex))
+				part := ojson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d", contentIndex, partIndex))
 				currentID := strings.TrimSpace(part.Get("functionCall.id").String())
 				nativeID := strings.TrimSpace(itemResult.Get("call_id").String())
 				needsNativeRestore := currentID != nativeID || !bytes.Equal(
@@ -109,7 +108,7 @@ func legacyFilterAntigravityReasoningReplayItemsForRequestWithSchemas(payload []
 			}
 			contextMatches := legacyAntigravityReplayItemContextMatches(payload, itemResult, responseIndex)
 			if !contextMatches && responseIndex > 0 {
-				previousRole := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseIndex-1)).String()
+				previousRole := ojson.GetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseIndex-1)).String()
 				contextMatches = strings.EqualFold(strings.TrimSpace(previousRole), "model") && legacyAntigravityReplayItemContextMatches(payload, itemResult, responseIndex-1)
 			}
 			if !contextMatches {
@@ -250,14 +249,14 @@ func TestFilterAntigravityReasoningReplayItemsWithIndexMatchesLegacy(t *testing.
 		]}
 	}`)
 	items := legacyAntigravityReasoningReplayItemsFromRequest(payload)
-	withoutSignatures, errDelete := sjson.DeleteBytes(payload, "request.contents.1.parts.0.thoughtSignature")
-	if errDelete != nil {
+	withoutSignaturesDoc := ojson.NewDoc(payload)
+	if errDelete := withoutSignaturesDoc.Delete("request.contents.1.parts.0.thoughtSignature"); errDelete != nil {
 		t.Fatal(errDelete)
 	}
-	withoutSignatures, errDelete = sjson.DeleteBytes(withoutSignatures, "request.contents.1.parts.1.thoughtSignature")
-	if errDelete != nil {
+	if errDelete := withoutSignaturesDoc.Delete("request.contents.1.parts.1.thoughtSignature"); errDelete != nil {
 		t.Fatal(errDelete)
 	}
+	withoutSignatures := withoutSignaturesDoc.Bytes()
 
 	for _, test := range []struct {
 		name    string
@@ -301,19 +300,19 @@ func TestAntigravityReplayRequestIndexRandomizedDifferential(t *testing.T) {
 			var errSet error
 			switch randomSource.Intn(7) {
 			case 0:
-				payload, errSet = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thoughtSignature", callContentIndex))
+				payload, errSet = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thoughtSignature", callContentIndex))
 			case 1:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex), fmt.Sprintf("changed-%d", turn))
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex), fmt.Sprintf("changed-%d", turn))
 			case 2:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.args.turn", callContentIndex), turn+100)
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.args.turn", callContentIndex), turn+100)
 			case 3:
-				payload, errSet = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex))
+				payload, errSet = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex))
 			case 4:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionResponse.id", responseContentIndex), fmt.Sprintf("changed-%d", turn))
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionResponse.id", responseContentIndex), fmt.Sprintf("changed-%d", turn))
 			case 5:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseContentIndex), "user")
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseContentIndex), "user")
 			case 6:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex), "call-0")
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex), "call-0")
 			}
 			if errSet != nil {
 				t.Fatalf("case %d mutation failed: %v", caseIndex, errSet)
@@ -364,7 +363,7 @@ func TestAntigravityReasoningReplayAccumulatorUsesIndexedContextHash(t *testing.
 	if len(accumulator.items) != 1 {
 		t.Fatalf("items = %d, want 1", len(accumulator.items))
 	}
-	if got := gjson.GetBytes(accumulator.items[0], "contextHash").String(); got != wantContextHash {
+	if got := ojson.GetBytes(accumulator.items[0], "contextHash").String(); got != wantContextHash {
 		t.Fatalf("item context hash = %q, want %q", got, wantContextHash)
 	}
 }
@@ -422,7 +421,7 @@ func TestApplyAntigravityReasoningReplayItemsBatchPreservesSignatureMoveOrder(t 
 	const signature = "shared-native-signature-123456789"
 	items := make([][]byte, 0, 2)
 	for partIndex, text := range []string{"first", "second"} {
-		kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"` + text + `"}`))
+		kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"` + text + `"}`))
 		item := buildAntigravityThoughtSignatureItem(1, partIndex, signature, kind, fingerprint)
 		items = append(items, antigravityReplayItemContextHashForTest(item, payload, 1))
 	}
@@ -440,10 +439,10 @@ func TestApplyAntigravityReasoningReplayItemsBatchPreservesSignatureMoveOrder(t 
 	if gotChanged != wantChanged || !bytes.Equal(got, want) {
 		t.Fatalf("batch differs from sequential replay\n got: %s\nwant: %s", got, want)
 	}
-	if first := gjson.GetBytes(got, "request.contents.1.parts.0.thoughtSignature"); first.Exists() {
+	if first := ojson.GetBytes(got, "request.contents.1.parts.0.thoughtSignature"); first.Exists() {
 		t.Fatalf("signature remained on the first part: %s", got)
 	}
-	if second := gjson.GetBytes(got, "request.contents.1.parts.1.thoughtSignature").String(); second != signature {
+	if second := ojson.GetBytes(got, "request.contents.1.parts.1.thoughtSignature").String(); second != signature {
 		t.Fatalf("second signature = %q, want %q", second, signature)
 	}
 }
@@ -456,7 +455,7 @@ func TestApplyAntigravityReasoningReplayItemsBatchPreservesStickyChangedResult(t
 		partIndex int
 		text      string
 	}{{partIndex: 1, text: "second"}, {partIndex: 0, text: "first"}} {
-		kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"` + target.text + `"}`))
+		kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"` + target.text + `"}`))
 		item := buildAntigravityThoughtSignatureItem(1, target.partIndex, signature, kind, fingerprint)
 		items = append(items, antigravityReplayItemContextHashForTest(item, payload, 1))
 	}
@@ -502,10 +501,10 @@ func TestApplyAntigravityReasoningReplayItemsBatchesStableProvenanceIDs(t *testi
 		callContentIndex := 1 + turn*2
 		responseContentIndex := callContentIndex + 1
 		wantID := fmt.Sprintf("call-%d", turn)
-		if gotID := gjson.GetBytes(got, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex)).String(); gotID != wantID {
+		if gotID := ojson.GetBytes(got, fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", callContentIndex)).String(); gotID != wantID {
 			t.Fatalf("call %d ID = %q, want %q", turn, gotID, wantID)
 		}
-		if gotID := gjson.GetBytes(got, fmt.Sprintf("request.contents.%d.parts.0.functionResponse.id", responseContentIndex)).String(); gotID != wantID {
+		if gotID := ojson.GetBytes(got, fmt.Sprintf("request.contents.%d.parts.0.functionResponse.id", responseContentIndex)).String(); gotID != wantID {
 			t.Fatalf("response %d ID = %q, want %q", turn, gotID, wantID)
 		}
 	}
@@ -537,7 +536,7 @@ func TestApplyAntigravityReasoningReplayItemsSegmentsDuplicateStableProvenanceID
 	}
 	for _, contentIndex := range []int{1, 3} {
 		path := fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", contentIndex)
-		if gotID := gjson.GetBytes(got, path).String(); gotID != nativeID {
+		if gotID := ojson.GetBytes(got, path).String(); gotID != nativeID {
 			t.Fatalf("call at contents[%d] ID = %q, want %q", contentIndex, gotID, nativeID)
 		}
 	}
@@ -571,7 +570,7 @@ func TestApplyAntigravityReasoningReplayItemsFallsBackAfterIdentityChangesContex
 	if gotChanged != wantChanged || !bytes.Equal(got, want) {
 		t.Fatalf("fallback differs from sequential replay\n got: %s\nwant: %s", got, want)
 	}
-	if signature := gjson.GetBytes(got, "request.contents.3.parts.0.thoughtSignature"); signature.Exists() {
+	if signature := ojson.GetBytes(got, "request.contents.3.parts.0.thoughtSignature"); signature.Exists() {
 		t.Fatalf("stale-context signature was applied: %s", got)
 	}
 }
@@ -583,7 +582,7 @@ func TestApplyAntigravityReasoningReplayItemsSegmentsLateStructuralFallback(t *t
 	payload := syntheticAntigravityReplayBenchmarkPayloadWithoutSignatures(1<<10, turns)
 	lastCallPath := fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", 1+(turns-1)*2)
 	var errSet error
-	payload, errSet = sjson.SetBytes(payload, lastCallPath, "lookup-legacy-client-id")
+	payload, errSet = ojson.SetBytes(payload, lastCallPath, "lookup-legacy-client-id")
 	if errSet != nil {
 		t.Fatalf("set legacy call ID: %v", errSet)
 	}
@@ -600,7 +599,7 @@ func TestApplyAntigravityReasoningReplayItemsSegmentsLateStructuralFallback(t *t
 		t.Fatalf("segmented fallback differs from sequential replay\n got: %s\nwant: %s", got, want)
 	}
 	wantLastID := fmt.Sprintf("call-%d", turns-1)
-	if gotLastID := gjson.GetBytes(got, lastCallPath).String(); gotLastID != wantLastID {
+	if gotLastID := ojson.GetBytes(got, lastCallPath).String(); gotLastID != wantLastID {
 		t.Fatalf("last call ID = %q, want %q", gotLastID, wantLastID)
 	}
 }
@@ -762,7 +761,7 @@ func TestAntigravityReplayMergeRandomizedDifferential(t *testing.T) {
 	items := legacyAntigravityReasoningReplayItemsFromRequest(basePayload)
 	thoughtItems, callItems := 0, 0
 	for _, item := range items {
-		switch gjson.GetBytes(item, "type").String() {
+		switch ojson.GetBytes(item, "type").String() {
 		case "thought_signature":
 			thoughtItems++
 		case "function_call_part":
@@ -784,23 +783,23 @@ func TestAntigravityReplayMergeRandomizedDifferential(t *testing.T) {
 			var errSet error
 			switch randomSource.Intn(9) {
 			case 0:
-				payload, errSet = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", modelIndex, part))
+				payload, errSet = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", modelIndex, part))
 			case 1:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.args.turn", modelIndex), turn+50)
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.args.turn", modelIndex), turn+50)
 			case 2:
-				payload, errSet = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.id", modelIndex))
+				payload, errSet = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.id", modelIndex))
 			case 3:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.1.text", modelIndex), "drifted")
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.1.text", modelIndex), "drifted")
 			case 4:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseIndex), "model")
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.role", responseIndex), "model")
 			case 5:
-				payload, errSet = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d", modelIndex, part))
+				payload, errSet = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d", modelIndex, part))
 			case 6:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thought", modelIndex), false)
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thought", modelIndex), false)
 			case 7:
-				payload, errSet = sjson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.id", modelIndex), "call-0")
+				payload, errSet = ojson.SetBytes(payload, fmt.Sprintf("request.contents.%d.parts.2.functionCall.id", modelIndex), "call-0")
 			case 8:
-				payload, errSet = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "ANY")
+				payload, errSet = ojson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			}
 			if errSet != nil {
 				t.Fatalf("case %d mutation failed: %v", caseIndex, errSet)
@@ -871,7 +870,7 @@ func TestAntigravityReplayLegacyItemWithoutTargetHash(t *testing.T) {
 	// streamed signature-only part that no longer exists.
 	item := buildAntigravityThoughtSignatureItem(1, 7, signature, "", "")
 	item = antigravityReplayItemContextHashForTest(item, payload, 1)
-	if gjson.GetBytes(item, "targetHash").Exists() {
+	if ojson.GetBytes(item, "targetHash").Exists() {
 		t.Fatal("this test must exercise the no-targetHash path")
 	}
 
@@ -879,11 +878,11 @@ func TestAntigravityReplayLegacyItemWithoutTargetHash(t *testing.T) {
 	if !changed {
 		t.Fatalf("legacy positional item was not applied: %s", got)
 	}
-	if sig := gjson.GetBytes(got, "request.contents.1.parts.2.thoughtSignature").String(); sig != signature {
+	if sig := ojson.GetBytes(got, "request.contents.1.parts.2.thoughtSignature").String(); sig != signature {
 		t.Fatalf("signature must attach to the LAST semantic part, got parts.2=%q body=%s", sig, got)
 	}
 	for _, path := range []string{"request.contents.1.parts.0.thoughtSignature", "request.contents.1.parts.1.thoughtSignature"} {
-		if gjson.GetBytes(got, path).Exists() {
+		if ojson.GetBytes(got, path).Exists() {
 			t.Fatalf("signature leaked to %s: %s", path, got)
 		}
 	}
@@ -894,7 +893,7 @@ func TestAntigravityReplayLegacyItemWithoutTargetHash(t *testing.T) {
 	}
 
 	// Context drift must reject the positional guess entirely.
-	drifted, errSet := sjson.SetBytes(payload, "request.contents.0.parts.0.text", "different question")
+	drifted, errSet := ojson.SetBytes(payload, "request.contents.0.parts.0.text", "different question")
 	if errSet != nil {
 		t.Fatal(errSet)
 	}
@@ -917,7 +916,7 @@ func BenchmarkApplyAntigravityReasoningReplayItems(b *testing.B) {
 	payload := base
 	for turn := range turns {
 		var err error
-		payload, err = sjson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thoughtSignature", 1+turn*2))
+		payload, err = ojson.DeleteBytes(payload, fmt.Sprintf("request.contents.%d.parts.0.thoughtSignature", 1+turn*2))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -973,7 +972,7 @@ func BenchmarkApplyAntigravityReasoningReplayItemsLargeSegmentedFallback(b *test
 	payload := syntheticAntigravityReplayBenchmarkPayloadWithoutSignatures(inlineBytes, turns)
 	lastCallPath := fmt.Sprintf("request.contents.%d.parts.0.functionCall.id", 1+(turns-1)*2)
 	var errSet error
-	payload, errSet = sjson.SetBytes(payload, lastCallPath, "lookup-legacy-client-id")
+	payload, errSet = ojson.SetBytes(payload, lastCallPath, "lookup-legacy-client-id")
 	if errSet != nil {
 		b.Fatalf("set legacy call ID: %v", errSet)
 	}
@@ -1020,23 +1019,225 @@ func TestApplyAntigravityReasoningReplayItems_PreservesContextHashRejectionLoggi
 	}
 
 	detailCount := 0
-	suppressedCount := 0
 	for _, entry := range hook.AllEntries() {
 		if entry.Level != log.DebugLevel {
 			continue
 		}
-		if strings.Contains(entry.Message, "rejected by context hash") {
-			detailCount++
+		if strings.HasPrefix(entry.Message, "antigravity replay: suppressed repeated context-hash rejections") {
+			t.Fatalf("standalone suppressed summary log should no longer be emitted: %q", entry.Message)
 		}
-		if strings.Contains(entry.Message, "suppressed") && strings.Contains(entry.Message, "repeated context-hash rejections") {
-			suppressedCount++
+		if strings.Contains(entry.Message, "context hash rejected") {
+			detailCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=3, seq=2)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 merged rejection log, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_MultiPartContextHashRejectionLogging(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"read","args":{"path":"a.txt"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"read","response":{"result":"content"}}}]}
+	]}}`)
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(`{"type":"function_call_part","call_id":"call-2","name":"read","args":{"path":"a.txt"},"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`)
+
+	toolSchemas := map[string]any{
+		"exec": map[string]any{"type": "object"},
+		"read": map[string]any{"type": "object"},
+	}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload not to change")
+	}
+
+	execCount := 0
+	readCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, `first="exec"`) {
+			execCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected exec log %q, got %q", expected, entry.Message)
+			}
+		}
+		if strings.Contains(entry.Message, `first="read"`) {
+			readCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="read" at contents[3].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected read log %q, got %q", expected, entry.Message)
+			}
+		}
+	}
+
+	if execCount != 1 || readCount != 1 {
+		t.Fatalf("expected 1 exec log and 1 read log for different tools, got exec=%d read=%d", execCount, readCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SameToolMultiPartContextHashRejectionAggregates(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"exec","args":{"cmd":"pwd"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"exec","response":{"result":"/app"}}}]}
+	]}}`)
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(`{"type":"function_call_part","call_id":"call-2","name":"exec","args":{"cmd":"pwd"},"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`)
+
+	toolSchemas := map[string]any{"exec": map[string]any{"type": "object"}}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload not to change")
+	}
+
+	detailCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, "context hash rejected") {
+			detailCount++
+			expected := `antigravity replay: context hash rejected 2 parts (first="exec" at contents[1].parts[0], opaque_id=false, batch=2, seq=2)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
+			}
+		}
+	}
+
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 aggregated log for same tool across multiple parts, got %d", detailCount)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SameToolDifferentOpaqueIDTypesRemainSeparate(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	nativeID := "call-2"
+	name := "exec"
+	args := `{"cmd":"pwd"}`
+	opaqueID := util.GeminiClaudeToolUseID(nativeID, name, args)
+	payload := []byte(fmt.Sprintf(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":%q,"args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":%q,"response":{"result":"ok"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":%q,"name":%q,"args":%s}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":%q,"name":%q,"response":{"result":"/app"}}}]}
+	]}}`, name, name, opaqueID, name, args, opaqueID, name))
+
+	item1 := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	item2 := []byte(fmt.Sprintf(`{"type":"function_call_part","call_id":%q,"name":%q,"args":%s,"thoughtSignature":"sig-2","contextHash":"wrong-hash-2"}`, nativeID, name, args))
+
+	_, _ = applyAntigravityReasoningReplayItems(payload, [][]byte{item1, item2}, map[string]any{
+		"exec": map[string]any{"type": "object"},
+	})
+
+	entries := make([]string, 0, 2)
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.DebugLevel && strings.Contains(entry.Message, "context hash rejected") {
+			entries = append(entries, entry.Message)
+		}
+	}
+	expected := []string{
+		`antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`,
+		`antigravity replay: context hash rejected 1 part (first="exec" at contents[3].parts[0], opaque_id=true, batch=1, seq=0)`,
+	}
+	if len(entries) != len(expected) {
+		t.Fatalf("expected %d separate logs, got %d: %v", len(expected), len(entries), entries)
+	}
+	for index, got := range entries {
+		if got != expected[index] {
+			t.Fatalf("log[%d] = %q, want %q", index, got, expected[index])
+		}
+	}
+}
+
+func TestApplyAntigravityReasoningReplayItems_SingleContextHashRejectionLogs(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"exec","args":{"cmd":"ls"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"exec","response":{"result":"ok"}}}]}
+	]}}`)
+
+	item := []byte(`{"type":"function_call_part","call_id":"call-1","name":"exec","args":{"cmd":"ls"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+
+	toolSchemas := map[string]any{"exec": map[string]any{"type": "object"}}
+	_, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, toolSchemas)
+	if changed {
+		t.Fatal("expected payload to remain unchanged on rejection")
+	}
+
+	detailCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel {
+			continue
+		}
+		if strings.Contains(entry.Message, "context hash rejected") {
+			detailCount++
+			expected := `antigravity replay: context hash rejected 1 part (first="exec" at contents[1].parts[0], opaque_id=false, batch=1, seq=1)`
+			if entry.Message != expected {
+				t.Fatalf("expected log %q, got %q", expected, entry.Message)
+			}
 		}
 	}
 
 	if detailCount != 1 {
 		t.Fatalf("expected exactly 1 detailed rejection log, got %d", detailCount)
 	}
-	if suppressedCount != 1 {
-		t.Fatalf("expected exactly 1 suppressed summary log across rebuilds, got %d", suppressedCount)
+}
+
+func TestApplyAntigravityReasoningReplayItems_ContextHashRejectionSkipsBatchRetry(t *testing.T) {
+	hook := newSignatureDebugHook(t)
+
+	payload := []byte(`{"request":{"contents":[
+		{"role":"user","parts":[{"text":"first prompt"}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-ok","name":"exec","args":{"cmd":"pwd"}},"thoughtSignature":"sig-ok"}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-ok","name":"exec","response":{"result":"/app"}}}]},
+		{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"tool_call","args":{"id":"web_search"}}}]},
+		{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"tool_call","response":{"result":"ok"}}}]}
+	]}}`)
+
+	applied := []byte(`{"type":"function_call_part","call_id":"call-ok","name":"exec","args":{"cmd":"pwd"},"thoughtSignature":"sig-ok"}`)
+	rejected := []byte(`{"type":"function_call_part","call_id":"call-1","name":"tool_call","args":{"id":"web_search"},"thoughtSignature":"sig-1","contextHash":"wrong-hash-1"}`)
+	toolSchemas := map[string]any{
+		"exec":      map[string]any{"type": "object"},
+		"tool_call": map[string]any{"type": "object"},
+	}
+	_, _ = applyAntigravityReasoningReplayItems(payload, [][]byte{applied, rejected}, toolSchemas)
+
+	detailCount := 0
+	for _, entry := range hook.AllEntries() {
+		if entry.Level != log.DebugLevel || !strings.Contains(entry.Message, "context hash rejected") {
+			continue
+		}
+		detailCount++
+		expected := `antigravity replay: context hash rejected 1 part (first="tool_call" at contents[3].parts[0], opaque_id=false, batch=1, seq=1)`
+		if entry.Message != expected {
+			t.Fatalf("expected log %q, got %q", expected, entry.Message)
+		}
+	}
+	if detailCount != 1 {
+		t.Fatalf("expected exactly 1 rejection log, got %d", detailCount)
 	}
 }

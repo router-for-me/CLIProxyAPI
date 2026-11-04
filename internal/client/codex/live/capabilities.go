@@ -135,7 +135,7 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {
-		writeRealtimeError(c, http.StatusBadRequest, errRead.Error(), "invalid_request_error", "invalid_request")
+		writeRealtimeError(c, clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), errRead.Error(), "invalid_request_error", "invalid_request")
 		return
 	}
 	upstreamURL := h.realtimeHTTPBaseURL() + "/realtime/calls/" + url.PathEscape(callID) + "/hangup"

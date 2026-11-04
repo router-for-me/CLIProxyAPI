@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -21,8 +22,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -34,6 +33,7 @@ const (
 	defaultOpenAIVideosModel = "sora-2"
 	defaultXAIVideosModel    = "grok-imagine-video"
 	xaiVideos15Model         = "grok-imagine-video-1.5"
+	xaiVideos15LiteModel     = "grok-imagine-video-1.5-lite"
 	xaiVideos15PreviewAlias  = "grok-imagine-video-1.5-preview"
 	xaiVideosHandlerType     = "openai-video"
 	defaultVideosSeconds     = "4"
@@ -149,7 +149,7 @@ func videosModelBase(model string) string {
 func isXAIVideosModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15Model && baseModel != xaiVideos15PreviewAlias {
+	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15Model && baseModel != xaiVideos15LiteModel && baseModel != xaiVideos15PreviewAlias {
 		return false
 	}
 
@@ -203,6 +203,8 @@ func canonicalXAIVideosModel(model string) string {
 		return defaultXAIVideosModel
 	case xaiVideos15Model, xaiVideos15PreviewAlias:
 		return xaiVideos15Model
+	case xaiVideos15LiteModel:
+		return xaiVideos15LiteModel
 	}
 	return defaultXAIVideosModel
 }
@@ -216,6 +218,8 @@ func routingXAIVideosModel(model string) string {
 		return defaultXAIVideosModel
 	case xaiVideos15Model:
 		return xaiVideos15Model
+	case xaiVideos15LiteModel:
+		return xaiVideos15LiteModel
 	case xaiVideos15PreviewAlias:
 		return xaiVideos15PreviewAlias
 	}
@@ -255,26 +259,35 @@ func readXAIVideosNativeRequest(c *gin.Context) ([]byte, error) {
 }
 
 func videosCreateRequestFromForm(c *gin.Context) ([]byte, error) {
-	rawJSON := []byte(`{}`)
+	if strings.EqualFold(strings.TrimSpace(c.ContentType()), "multipart/form-data") {
+		if _, errForm := c.MultipartForm(); errForm != nil {
+			return nil, errForm
+		}
+	} else if c != nil && c.Request != nil {
+		if errForm := c.Request.ParseForm(); errForm != nil {
+			return nil, errForm
+		}
+	}
+	rawDoc := ojson.NewDoc([]byte(`{}`))
 	for _, field := range []string{"model", "prompt", "seconds", "size", "aspect_ratio", "resolution"} {
 		if value := strings.TrimSpace(c.PostForm(field)); value != "" {
-			rawJSON, _ = sjson.SetBytes(rawJSON, field, value)
+			_ = rawDoc.Set(field, value)
 		}
 	}
 	if value := strings.TrimSpace(firstPostForm(c, "input_reference[image_url]", "input_reference.image_url", "image_url")); value != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "input_reference.image_url", value)
+		_ = rawDoc.Set("input_reference.image_url", value)
 	}
 	if value := strings.TrimSpace(firstPostForm(c, "input_reference[file_id]", "input_reference.file_id", "file_id")); value != "" {
-		rawJSON, _ = sjson.SetBytes(rawJSON, "input_reference.file_id", value)
+		_ = rawDoc.Set("input_reference.file_id", value)
 	}
 	if refs := strings.TrimSpace(c.PostForm("reference_image_urls")); refs != "" {
 		for _, ref := range strings.Split(refs, ",") {
 			if ref = strings.TrimSpace(ref); ref != "" {
-				rawJSON, _ = sjson.SetBytes(rawJSON, "reference_image_urls.-1", ref)
+				_ = rawDoc.Set("reference_image_urls.-1", ref)
 			}
 		}
 	}
-	return rawJSON, nil
+	return rawDoc.Bytes(), nil
 }
 
 func firstPostForm(c *gin.Context, keys ...string) string {
@@ -287,11 +300,13 @@ func firstPostForm(c *gin.Context, keys ...string) string {
 }
 
 func (h *OpenAIAPIHandler) videoAuthBindingTTL() time.Duration {
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		raw := strings.TrimSpace(h.Cfg.VideoResultAuthCacheTTL)
-		if raw != "" {
-			if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
-				return ttl
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			raw := strings.TrimSpace(cfg.VideoResultAuthCacheTTL)
+			if raw != "" {
+				if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
+					return ttl
+				}
 			}
 		}
 	}
@@ -299,15 +314,15 @@ func (h *OpenAIAPIHandler) videoAuthBindingTTL() time.Duration {
 }
 
 func videoIDFromPayload(payload []byte) string {
-	videoID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String())
+	videoID := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "request_id").String())
 	if videoID == "" {
-		videoID = strings.TrimSpace(gjson.GetBytes(payload, "id").String())
+		videoID = strings.TrimSpace(ojson.GetBytesNoCopy(payload, "id").String())
 	}
-	return videoID
+	return strings.Clone(videoID)
 }
 
 func (h *OpenAIAPIHandler) bindVideoAuthIDFromPayload(payload []byte, authID string) {
-	h.bindVideoAuthIDAndModelFromPayload(payload, authID, strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
+	h.bindVideoAuthIDAndModelFromPayload(payload, authID, strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String())))
 }
 
 func (h *OpenAIAPIHandler) bindVideoAuthIDAndModelFromPayload(payload []byte, authID string, model string) {
@@ -339,24 +354,27 @@ func (h *OpenAIAPIHandler) modelWithVideoAuthBinding(videoID string, fallbackMod
 }
 
 func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideoCreateMetadata, error) {
-	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
+	var fieldsBuf [5]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "prompt", "seconds", "size", "aspect_ratio", "resolution")
+	prompt := strings.Clone(strings.TrimSpace(fields[0].String()))
 	if prompt == "" {
 		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("prompt is required")
 	}
 
-	seconds, duration, err := normalizeXAIVideosSeconds(gjson.GetBytes(rawJSON, "seconds").String())
+	seconds, duration, err := normalizeXAIVideosSeconds(fields[1].String())
 	if err != nil {
 		return nil, xaiVideoCreateMetadata{}, err
 	}
 
-	size, aspectRatio, resolution, err := xaiVideosSizeOptions(gjson.GetBytes(rawJSON, "size").String())
+	size, aspectRatio, resolution, err := xaiVideosSizeOptions(fields[2].String())
 	if err != nil {
 		return nil, xaiVideoCreateMetadata{}, err
 	}
-	if value := xaiVideosAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), ""); value != "" {
+	size = strings.Clone(size)
+	if value := xaiVideosAspectRatio(fields[3].String(), ""); value != "" {
 		aspectRatio = value
 	}
-	if value := xaiVideosResolution(gjson.GetBytes(rawJSON, "resolution").String(), ""); value != "" {
+	if value := xaiVideosResolution(fields[4].String(), ""); value != "" {
 		resolution = value
 	}
 
@@ -373,17 +391,17 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	}
 
 	videoModel := canonicalXAIVideosModel(model)
-	req := []byte(`{}`)
-	req, _ = sjson.SetBytes(req, "model", videoModel)
-	req, _ = sjson.SetBytes(req, "prompt", prompt)
-	req, _ = sjson.SetRawBytes(req, "duration", []byte(strconv.FormatInt(duration, 10)))
-	req, _ = sjson.SetBytes(req, "aspect_ratio", aspectRatio)
-	req, _ = sjson.SetBytes(req, "resolution", resolution)
+	reqDoc := ojson.NewDoc([]byte(`{}`))
+	_ = reqDoc.Set("model", videoModel)
+	_ = reqDoc.Set("prompt", prompt)
+	_ = reqDoc.SetRawBytes("duration", []byte(strconv.FormatInt(duration, 10)))
+	_ = reqDoc.Set("aspect_ratio", aspectRatio)
+	_ = reqDoc.Set("resolution", resolution)
 	if imageURL != "" {
-		req, _ = sjson.SetBytes(req, "image.url", imageURL)
+		_ = reqDoc.Set("image.url", imageURL)
 	}
 	for _, image := range referenceImages {
-		req, _ = sjson.SetBytes(req, "reference_images.-1.url", image)
+		_ = reqDoc.Set("reference_images.-1.url", image)
 	}
 
 	meta := xaiVideoCreateMetadata{
@@ -394,7 +412,7 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 		Size:         size,
 		CreatedAt:    time.Now().Unix(),
 	}
-	return req, meta, nil
+	return reqDoc.Bytes(), meta, nil
 }
 
 func normalizeXAIVideosSeconds(raw string) (string, int64, error) {
@@ -457,13 +475,15 @@ func xaiVideosResolution(raw string, fallback string) string {
 		return "480p"
 	case "720p":
 		return "720p"
+	case "1080p":
+		return "1080p"
 	default:
 		return fallback
 	}
 }
 
 func xaiVideosInputImageURL(rawJSON []byte) (string, error) {
-	inputRef := gjson.GetBytes(rawJSON, "input_reference")
+	inputRef := ojson.GetBytesNoCopy(rawJSON, "input_reference")
 	if inputRef.Exists() {
 		imageURL := strings.TrimSpace(inputRef.Get("image_url").String())
 		fileID := strings.TrimSpace(inputRef.Get("file_id").String())
@@ -478,9 +498,9 @@ func xaiVideosInputImageURL(rawJSON []byte) (string, error) {
 		}
 	}
 
-	image := gjson.GetBytes(rawJSON, "image")
+	image := ojson.GetBytesNoCopy(rawJSON, "image")
 	if image.Exists() {
-		if image.Type == gjson.String {
+		if image.Type == ojson.String {
 			return strings.TrimSpace(image.String()), nil
 		}
 		if value := strings.TrimSpace(image.Get("url").String()); value != "" {
@@ -491,7 +511,7 @@ func xaiVideosInputImageURL(rawJSON []byte) (string, error) {
 		}
 	}
 
-	return strings.TrimSpace(gjson.GetBytes(rawJSON, "image_url").String()), nil
+	return strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "image_url").String()), nil
 }
 
 func collectXAIVideoReferenceImages(rawJSON []byte) []string {
@@ -502,12 +522,12 @@ func collectXAIVideoReferenceImages(rawJSON []byte) []string {
 			out = append(out, value)
 		}
 	}
-	collectArray := func(result gjson.Result) {
+	collectArray := func(result ojson.Result) {
 		if !result.IsArray() {
 			return
 		}
-		result.ForEach(func(_, item gjson.Result) bool {
-			if item.Type == gjson.String {
+		result.ForEach(func(_, item ojson.Result) bool {
+			if item.Type == ojson.String {
 				appendRef(item.String())
 				return true
 			}
@@ -521,34 +541,34 @@ func collectXAIVideoReferenceImages(rawJSON []byte) []string {
 			return true
 		})
 	}
-	collectArray(gjson.GetBytes(rawJSON, "reference_images"))
-	collectArray(gjson.GetBytes(rawJSON, "reference_image_urls"))
+	collectArray(ojson.GetBytesNoCopy(rawJSON, "reference_images"))
+	collectArray(ojson.GetBytesNoCopy(rawJSON, "reference_image_urls"))
 	return out
 }
 
 func buildVideosCreateAPIResponseFromXAI(payload []byte, meta xaiVideoCreateMetadata) ([]byte, error) {
-	requestID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String())
+	requestID := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "request_id").String())
 	if requestID == "" {
-		requestID = strings.TrimSpace(gjson.GetBytes(payload, "id").String())
+		requestID = strings.TrimSpace(ojson.GetBytesNoCopy(payload, "id").String())
 	}
 	if requestID == "" {
 		return nil, fmt.Errorf("xAI video response did not include request_id")
 	}
 
-	out := []byte(`{"object":"video","progress":0,"status":"queued"}`)
-	out, _ = sjson.SetBytes(out, "id", requestID)
-	out, _ = sjson.SetBytes(out, "model", meta.Model)
-	out, _ = sjson.SetBytes(out, "prompt", meta.Prompt)
-	out, _ = sjson.SetBytes(out, "seconds", meta.Seconds)
-	out, _ = sjson.SetBytes(out, "size", meta.Size)
-	out, _ = sjson.SetBytes(out, "created_at", meta.CreatedAt)
-	if status := openAIVideoStatus(gjson.GetBytes(payload, "status").String()); status != "" {
-		out, _ = sjson.SetBytes(out, "status", status)
+	outDoc := ojson.NewDoc([]byte(`{"object":"video","progress":0,"status":"queued"}`))
+	_ = outDoc.Set("id", requestID)
+	_ = outDoc.Set("model", meta.Model)
+	_ = outDoc.Set("prompt", meta.Prompt)
+	_ = outDoc.Set("seconds", meta.Seconds)
+	_ = outDoc.Set("size", meta.Size)
+	_ = outDoc.Set("created_at", meta.CreatedAt)
+	if status := openAIVideoStatus(ojson.GetBytesNoCopy(payload, "status").String()); status != "" {
+		_ = outDoc.Set("status", status)
 	}
-	if progress := gjson.GetBytes(payload, "progress"); progress.Exists() {
-		out, _ = sjson.SetRawBytes(out, "progress", []byte(progress.Raw))
+	if progress := ojson.GetBytesNoCopy(payload, "progress"); progress.Exists() {
+		_ = outDoc.SetRawBytes("progress", []byte(progress.Raw))
 	}
-	return out, nil
+	return outDoc.Bytes(), nil
 }
 
 func buildVideosFailedAPIResponse(model string, code string, message string) []byte {
@@ -565,12 +585,12 @@ func buildVideosFailedAPIResponse(model string, code string, message string) []b
 		message = "Video generation failed"
 	}
 
-	out := []byte(`{"object":"video","status":"failed","progress":0}`)
-	out, _ = sjson.SetBytes(out, "id", "video_"+strings.ReplaceAll(uuid.NewString(), "-", ""))
-	out, _ = sjson.SetBytes(out, "model", model)
-	out, _ = sjson.SetBytes(out, "error.code", code)
-	out, _ = sjson.SetBytes(out, "error.message", message)
-	return out
+	outDoc := ojson.NewDoc([]byte(`{"object":"video","status":"failed","progress":0}`))
+	_ = outDoc.Set("id", "video_"+strings.ReplaceAll(uuid.NewString(), "-", ""))
+	_ = outDoc.Set("model", model)
+	_ = outDoc.Set("error.code", code)
+	_ = outDoc.Set("error.message", message)
+	return outDoc.Bytes()
 }
 
 func writeVideosFailedError(c *gin.Context, status int, model string, code string, message string) {
@@ -581,89 +601,87 @@ func writeVideosFailedError(c *gin.Context, status int, model string, code strin
 }
 
 func buildVideosRetrieveAPIResponseFromXAI(videoID string, payload []byte, fallbackModel string) ([]byte, error) {
-	out := []byte(`{"object":"video"}`)
-	out, _ = sjson.SetBytes(out, "id", videoID)
-	model := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+	outDoc := ojson.NewDoc([]byte(`{"object":"video"}`))
+	_ = outDoc.Set("id", videoID)
+	model := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String())
 	if model == "" {
 		model = responseVideosModel(fallbackModel)
 	}
-	out, _ = sjson.SetBytes(out, "model", model)
+	_ = outDoc.Set("model", model)
 
 	for _, field := range []string{"created_at", "completed_at", "expires_at", "prompt", "remixed_from_video_id", "size"} {
-		if value := gjson.GetBytes(payload, field); value.Exists() {
-			out, _ = sjson.SetRawBytes(out, field, []byte(value.Raw))
+		if value := ojson.GetBytesNoCopy(payload, field); value.Exists() {
+			_ = outDoc.SetRawBytes(field, []byte(value.Raw))
 		}
 	}
 
-	if status := openAIVideoStatus(gjson.GetBytes(payload, "status").String()); status != "" {
-		out, _ = sjson.SetBytes(out, "status", status)
+	if status := openAIVideoStatus(ojson.GetBytesNoCopy(payload, "status").String()); status != "" {
+		_ = outDoc.Set("status", status)
 	}
-	if progress := gjson.GetBytes(payload, "progress"); progress.Exists() {
-		out, _ = sjson.SetRawBytes(out, "progress", []byte(progress.Raw))
+	if progress := ojson.GetBytesNoCopy(payload, "progress"); progress.Exists() {
+		_ = outDoc.SetRawBytes("progress", []byte(progress.Raw))
 	}
-	if seconds := gjson.GetBytes(payload, "seconds"); seconds.Exists() {
-		out, _ = sjson.SetRawBytes(out, "seconds", []byte(seconds.Raw))
-	} else if duration := gjson.GetBytes(payload, "video.duration"); duration.Exists() {
-		out, _ = sjson.SetBytes(out, "seconds", duration.String())
+	if seconds := ojson.GetBytesNoCopy(payload, "seconds"); seconds.Exists() {
+		_ = outDoc.SetRawBytes("seconds", []byte(seconds.Raw))
+	} else if duration := ojson.GetBytesNoCopy(payload, "video.duration"); duration.Exists() {
+		_ = outDoc.Set("seconds", duration.String())
 	}
-	if videoURL := strings.TrimSpace(gjson.GetBytes(payload, "video.url").String()); videoURL != "" {
-		out, _ = sjson.SetBytes(out, "video_url", videoURL)
+	if videoURL := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "video.url").String()); videoURL != "" {
+		_ = outDoc.Set("video_url", videoURL)
 	}
-	out = setOpenAIVideoErrorFromXAI(out, payload)
-	return out, nil
+	setOpenAIVideoErrorFromXAIDoc(outDoc, payload)
+	return outDoc.Bytes(), nil
 }
 
-func setOpenAIVideoErrorFromXAI(out []byte, payload []byte) []byte {
-	if errPayload := gjson.GetBytes(payload, "error"); errPayload.Exists() {
-		out = markOpenAIVideoFailed(out)
-		if errPayload.Type == gjson.JSON && json.Valid([]byte(errPayload.Raw)) {
+func setOpenAIVideoErrorFromXAIDoc(outDoc *ojson.Doc, payload []byte) {
+	if errPayload := ojson.GetBytesNoCopy(payload, "error"); errPayload.Exists() {
+		markOpenAIVideoFailedDoc(outDoc)
+		if errPayload.Type == ojson.JSON && json.Valid([]byte(errPayload.Raw)) {
 			message := strings.TrimSpace(errPayload.Get("message").String())
 			if message != "" {
-				code := strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+				code := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "code").String())
 				if code == "" {
 					code = strings.TrimSpace(errPayload.Get("code").String())
 				}
 				if code == "" {
 					code = "video_generation_failed"
 				}
-				out, _ = sjson.SetBytes(out, "error.code", code)
-				out, _ = sjson.SetBytes(out, "error.message", message)
+				_ = outDoc.Set("error.code", code)
+				_ = outDoc.Set("error.message", message)
 			}
-			return out
+			return
 		}
 		message := strings.TrimSpace(errPayload.String())
 		if message != "" {
-			code := strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+			code := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "code").String())
 			if code == "" {
 				code = "video_generation_failed"
 			}
-			out, _ = sjson.SetBytes(out, "error.code", code)
-			out, _ = sjson.SetBytes(out, "error.message", message)
+			_ = outDoc.Set("error.code", code)
+			_ = outDoc.Set("error.message", message)
 		}
-		return out
+		return
 	}
 
-	code := strings.TrimSpace(gjson.GetBytes(payload, "code").String())
+	code := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "code").String())
 	if code != "" {
-		out = markOpenAIVideoFailed(out)
-		out, _ = sjson.SetBytes(out, "error.code", code)
-		out, _ = sjson.SetBytes(out, "error.message", code)
+		markOpenAIVideoFailedDoc(outDoc)
+		_ = outDoc.Set("error.code", code)
+		_ = outDoc.Set("error.message", code)
 	}
-	return out
 }
 
-func markOpenAIVideoFailed(out []byte) []byte {
-	if !gjson.GetBytes(out, "status").Exists() {
-		out, _ = sjson.SetBytes(out, "status", "failed")
+func markOpenAIVideoFailedDoc(outDoc *ojson.Doc) {
+	if !outDoc.Get("status").Exists() {
+		_ = outDoc.Set("status", "failed")
 	}
-	if !gjson.GetBytes(out, "progress").Exists() {
-		out, _ = sjson.SetRawBytes(out, "progress", []byte("0"))
+	if !outDoc.Get("progress").Exists() {
+		_ = outDoc.SetRawBytes("progress", []byte("0"))
 	}
-	return out
 }
 
 func xaiVideoContentURLFromPayload(payload []byte) (string, error) {
-	rawURL := strings.TrimSpace(gjson.GetBytes(payload, "video.url").String())
+	rawURL := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "video.url").String())
 	if rawURL == "" {
 		return "", fmt.Errorf("xAI video response did not include video.url")
 	}
@@ -692,11 +710,11 @@ func openAIVideoStatus(status string) string {
 func (h *OpenAIAPIHandler) VideosCreate(c *gin.Context) {
 	rawJSON, err := readVideosCreateRequest(c)
 	if err != nil {
-		writeVideosFailedError(c, http.StatusBadRequest, defaultXAIVideosModel, "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
+		writeVideosFailedError(c, clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), defaultXAIVideosModel, "invalid_request_error", fmt.Sprintf("Invalid request: %v", err))
 		return
 	}
 
-	videoModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	videoModel := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "model").String()))
 	if videoModel == "" {
 		videoModel = defaultXAIVideosModel
 	}
@@ -728,7 +746,7 @@ func (h *OpenAIAPIHandler) XAIVideosExtensions(c *gin.Context) {
 func (h *OpenAIAPIHandler) handleXAIVideosNativePost(c *gin.Context) {
 	rawJSON, err := readXAIVideosNativeRequest(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -737,7 +755,7 @@ func (h *OpenAIAPIHandler) handleXAIVideosNativePost(c *gin.Context) {
 		return
 	}
 
-	videoModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	videoModel := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "model").String()))
 	if videoModel == "" {
 		videoModel = defaultXAIVideosModel
 	}
@@ -746,7 +764,7 @@ func (h *OpenAIAPIHandler) handleXAIVideosNativePost(c *gin.Context) {
 	}
 
 	routingModel := routingXAIVideosModel(videoModel)
-	rawJSON, _ = sjson.SetBytes(rawJSON, "model", canonicalXAIVideosModel(videoModel))
+	rawJSON, _ = ojson.SetBytes(rawJSON, "model", canonicalXAIVideosModel(videoModel))
 	h.collectXAIVideosNative(c, rawJSON, routingModel, true)
 }
 
@@ -766,7 +784,7 @@ func (h *OpenAIAPIHandler) XAIVideosRetrieve(c *gin.Context) {
 	}
 
 	payload := []byte(`{}`)
-	payload, _ = sjson.SetBytes(payload, "request_id", requestID)
+	payload, _ = ojson.SetBytes(payload, "request_id", requestID)
 	h.collectXAIVideosNative(c, payload, defaultXAIVideosModel, false)
 }
 
@@ -783,7 +801,7 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 	}
 
 	payload := []byte(`{}`)
-	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
+	payload, _ = ojson.SetBytes(payload, "request_id", videoID)
 
 	c.Header("Content-Type", "application/json")
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -806,7 +824,7 @@ func (h *OpenAIAPIHandler) VideosRetrieve(c *gin.Context) {
 		return
 	}
 
-	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, defaultOpenAIVideosModel)
+	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, executionModel)
 	if err != nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
@@ -847,7 +865,7 @@ func (h *OpenAIAPIHandler) VideosContent(c *gin.Context) {
 	}
 
 	payload := []byte(`{}`)
-	payload, _ = sjson.SetBytes(payload, "request_id", videoID)
+	payload, _ = ojson.SetBytes(payload, "request_id", videoID)
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	selectedAuthID := ""
@@ -938,8 +956,10 @@ func (h *OpenAIAPIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
 		ctx = c.Request.Context()
 	}
 	var cfg *config.Config
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		cfg = &config.Config{SDKConfig: *h.Cfg}
+	if h != nil {
+		if sdkCfg := h.CurrentConfig(); sdkCfg != nil {
+			cfg = &config.Config{SDKConfig: *sdkCfg}
+		}
 	}
 	return helps.NewProxyAwareHTTPClient(ctx, cfg, h.videoContentDownloadAuth(c), 0)
 }

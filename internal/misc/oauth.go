@@ -26,6 +26,7 @@ func GenerateRandomState() (string, error) {
 type OAuthCallback struct {
 	Code             string
 	State            string
+	ClientID         string
 	Error            string
 	ErrorDescription string
 }
@@ -76,6 +77,7 @@ func ParseOAuthCallback(input string) (*OAuthCallback, error) {
 	query := parsedURL.Query()
 	code := strings.TrimSpace(query.Get("code"))
 	state := strings.TrimSpace(query.Get("state"))
+	clientID := strings.TrimSpace(query.Get("client_id"))
 	errCode := strings.TrimSpace(query.Get("error"))
 	errDesc := strings.TrimSpace(query.Get("error_description"))
 
@@ -86,6 +88,9 @@ func ParseOAuthCallback(input string) (*OAuthCallback, error) {
 			}
 			if state == "" {
 				state = strings.TrimSpace(fragQuery.Get("state"))
+			}
+			if clientID == "" {
+				clientID = strings.TrimSpace(fragQuery.Get("client_id"))
 			}
 			if errCode == "" {
 				errCode = strings.TrimSpace(fragQuery.Get("error"))
@@ -114,6 +119,7 @@ func ParseOAuthCallback(input string) (*OAuthCallback, error) {
 	return &OAuthCallback{
 		Code:             code,
 		State:            state,
+		ClientID:         clientID,
 		Error:            errCode,
 		ErrorDescription: errDesc,
 	}, nil

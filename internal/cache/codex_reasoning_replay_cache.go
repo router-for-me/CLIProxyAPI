@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -188,17 +188,17 @@ func AppendCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, s
 }
 
 func appendCodexReasoningReplayTurn(existing, turn [][]byte) [][]byte {
-	if len(existing) > 0 && strings.TrimSpace(gjson.GetBytes(existing[0], "type").String()) != CodexReasoningReplayTurnType {
+	if len(existing) > 0 && strings.TrimSpace(ojson.GetBytesNoCopy(existing[0], "type").String()) != CodexReasoningReplayTurnType {
 		existing = nil
 	}
 	turnID := ""
-	if len(turn) > 0 && strings.TrimSpace(gjson.GetBytes(turn[0], "type").String()) == CodexReasoningReplayTurnType {
-		turnID = strings.TrimSpace(gjson.GetBytes(turn[0], "id").String())
+	if len(turn) > 0 && strings.TrimSpace(ojson.GetBytesNoCopy(turn[0], "type").String()) == CodexReasoningReplayTurnType {
+		turnID = strings.TrimSpace(ojson.GetBytesNoCopy(turn[0], "id").String())
 	}
 	if turnID != "" {
 		for _, item := range existing {
-			if strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType &&
-				strings.TrimSpace(gjson.GetBytes(item, "id").String()) == turnID {
+			if strings.TrimSpace(ojson.GetBytesNoCopy(item, "type").String()) == CodexReasoningReplayTurnType &&
+				strings.TrimSpace(ojson.GetBytesNoCopy(item, "id").String()) == turnID {
 				return trimCodexReasoningReplayItems(cloneCodexReasoningReplayItems(existing))
 			}
 		}
@@ -215,7 +215,7 @@ func trimCodexReasoningReplayItems(items [][]byte) [][]byte {
 		totalBytes := 0
 		for index, item := range items {
 			totalBytes += len(item)
-			if index > 0 && strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType {
+			if index > 0 && strings.TrimSpace(ojson.GetBytesNoCopy(item, "type").String()) == CodexReasoningReplayTurnType {
 				turnStarts = append(turnStarts, index)
 			}
 		}
@@ -236,7 +236,7 @@ func GetCodexReasoningReplayItem(modelName, sessionKey string) ([]byte, bool) {
 		return nil, false
 	}
 	for _, item := range items {
-		if strings.TrimSpace(gjson.GetBytes(item, "type").String()) != CodexReasoningReplayTurnType {
+		if strings.TrimSpace(ojson.GetBytesNoCopy(item, "type").String()) != CodexReasoningReplayTurnType {
 			return item, true
 		}
 	}
@@ -357,7 +357,7 @@ func normalizeCodexReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 }
 
 func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
-	itemResult := gjson.ParseBytes(item)
+	itemResult := util.ParseGJSONBytesNoCopy(item)
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
 	case CodexReasoningReplayTurnType:
 		return normalizeCodexReasoningReplayTurn(itemResult)
@@ -372,64 +372,64 @@ func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
 	}
 }
 
-func normalizeCodexReasoningReplayTurn(itemResult gjson.Result) ([]byte, bool) {
+func normalizeCodexReasoningReplayTurn(itemResult ojson.Result) ([]byte, bool) {
 	turnID := strings.TrimSpace(itemResult.Get("id").String())
 	if turnID == "" {
 		return nil, false
 	}
-	normalized := []byte(`{"type":"` + CodexReasoningReplayTurnType + `"}`)
-	normalized, _ = sjson.SetBytes(normalized, "id", turnID)
+	doc := ojson.NewDocString(`{"type":"` + CodexReasoningReplayTurnType + `"}`)
+	_ = doc.Set("id", turnID)
 	if fingerprint := strings.TrimSpace(itemResult.Get("assistant_fingerprint").String()); fingerprint != "" {
-		normalized, _ = sjson.SetBytes(normalized, "assistant_fingerprint", fingerprint)
+		_ = doc.Set("assistant_fingerprint", fingerprint)
 	}
 	if fingerprint := strings.TrimSpace(itemResult.Get("request_fingerprint").String()); fingerprint != "" {
-		normalized, _ = sjson.SetBytes(normalized, "request_fingerprint", fingerprint)
+		_ = doc.Set("request_fingerprint", fingerprint)
 	}
 	callIDs := itemResult.Get("call_ids")
 	if callIDs.IsArray() {
 		for _, callIDResult := range callIDs.Array() {
 			if callID := strings.TrimSpace(callIDResult.String()); callID != "" {
-				normalized, _ = sjson.SetBytes(normalized, "call_ids.-1", callID)
+				_ = doc.Set("call_ids.-1", callID)
 			}
 		}
 	}
-	return normalized, true
+	return doc.Bytes(), true
 }
 
-func normalizeCodexReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte, bool) {
+func normalizeCodexReasoningReplayReasoningItem(itemResult ojson.Result) ([]byte, bool) {
 	encryptedContentResult := itemResult.Get("encrypted_content")
-	if encryptedContentResult.Type != gjson.String {
+	if encryptedContentResult.Type != ojson.String {
 		return nil, false
 	}
 	encryptedContent := encryptedContentResult.String()
 	if encryptedContent != strings.TrimSpace(encryptedContent) {
 		return nil, false
 	}
-	if _, err := signature.InspectGPTReasoningSignature(encryptedContent); err != nil {
+	if !signature.IsValidGPTReasoningSignature(encryptedContent) && !signature.IsValidMetaReasoningSignature(encryptedContent) {
 		return nil, false
 	}
 
 	normalized := []byte(`{"type":"reasoning","summary":[],"content":null}`)
-	normalized, _ = sjson.SetBytes(normalized, "encrypted_content", encryptedContent)
+	normalized, _ = ojson.SetBytes(normalized, "encrypted_content", encryptedContent)
 	return normalized, true
 }
 
-func normalizeCodexReasoningReplayFunctionCallItem(itemResult gjson.Result) ([]byte, bool) {
+func normalizeCodexReasoningReplayFunctionCallItem(itemResult ojson.Result) ([]byte, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	arguments := itemResult.Get("arguments")
-	if callID == "" || name == "" || arguments.Type != gjson.String {
+	if callID == "" || name == "" || arguments.Type != ojson.String {
 		return nil, false
 	}
 
-	normalized := []byte(`{"type":"function_call"}`)
-	normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
-	normalized, _ = sjson.SetBytes(normalized, "name", name)
-	normalized, _ = sjson.SetBytes(normalized, "arguments", arguments.String())
-	return normalized, true
+	doc := ojson.NewDocString(`{"type":"function_call"}`)
+	_ = doc.Set("call_id", callID)
+	_ = doc.Set("name", name)
+	_ = doc.Set("arguments", arguments.String())
+	return doc.Bytes(), true
 }
 
-func normalizeCodexReasoningReplayCustomToolCallItem(itemResult gjson.Result) ([]byte, bool) {
+func normalizeCodexReasoningReplayCustomToolCallItem(itemResult ojson.Result) ([]byte, bool) {
 	callID := strings.TrimSpace(itemResult.Get("call_id").String())
 	name := strings.TrimSpace(itemResult.Get("name").String())
 	input := itemResult.Get("input")
@@ -437,18 +437,18 @@ func normalizeCodexReasoningReplayCustomToolCallItem(itemResult gjson.Result) ([
 		return nil, false
 	}
 
-	normalized := []byte(`{"type":"custom_tool_call","status":"completed"}`)
+	doc := ojson.NewDocString(`{"type":"custom_tool_call","status":"completed"}`)
 	if status := strings.TrimSpace(itemResult.Get("status").String()); status != "" {
-		normalized, _ = sjson.SetBytes(normalized, "status", status)
+		_ = doc.Set("status", status)
 	}
-	normalized, _ = sjson.SetBytes(normalized, "call_id", callID)
-	normalized, _ = sjson.SetBytes(normalized, "name", name)
-	if input.Type == gjson.String {
-		normalized, _ = sjson.SetBytes(normalized, "input", input.String())
+	_ = doc.Set("call_id", callID)
+	_ = doc.Set("name", name)
+	if input.Type == ojson.String {
+		_ = doc.Set("input", input.String())
 	} else {
-		normalized, _ = sjson.SetRawBytes(normalized, "input", []byte(input.Raw))
+		_ = doc.SetRaw("input", input.Raw)
 	}
-	return normalized, true
+	return doc.Bytes(), true
 }
 
 func cloneCodexReasoningReplayItems(items [][]byte) [][]byte {

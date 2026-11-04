@@ -1,9 +1,12 @@
 package openai
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -12,17 +15,18 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -42,6 +46,17 @@ const (
 
 	codexLocalCompactionSummaryPrefix = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work. Here is the summary produced by the other language model, use the information in this summary to assist with your own analysis:"
 )
+
+var responsesWebsocketCompressionEnabled atomic.Bool
+
+func init() {
+	responsesWebsocketCompressionEnabled.Store(true)
+}
+
+// SetResponsesWebsocketCompressionEnabled controls compression for future upgrades.
+func SetResponsesWebsocketCompressionEnabled(enabled bool) {
+	responsesWebsocketCompressionEnabled.Store(enabled)
+}
 
 var responsesWebsocketUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
@@ -90,12 +105,15 @@ func websocketClosePayloadForUpstreamError(err error) (bool, []byte) {
 			StatusCode() int
 		}
 		var statusErr statusCoder
-		if !errors.As(err, &statusErr) || statusErr.StatusCode() != http.StatusRequestEntityTooLarge ||
-			gjson.Get(errText, "error.code").String() != "message_too_big" {
+		if !errors.As(err, &statusErr) || statusErr.StatusCode() != http.StatusRequestEntityTooLarge {
+			return false, nil
+		}
+		fields := ojson.GetMany(errText, "error.code", "error.message")
+		if fields[0].String() != "message_too_big" {
 			return false, nil
 		}
 		code = websocket.CloseMessageTooBig
-		reason = strings.TrimSpace(gjson.Get(errText, "error.message").String())
+		reason = strings.TrimSpace(fields[1].String())
 	}
 	if reason == "" {
 		reason = "message too big"
@@ -262,30 +280,114 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
 	return truncated.String()
 }
 
+func (h *OpenAIResponsesAPIHandler) authenticateResponsesWebsocketTurn(c *gin.Context, baseReq *http.Request, payload []byte, requestModelName string, updateRequestContext bool) (string, *interfaces.ErrorMessage) {
+	if h == nil || h.AccessManager == nil {
+		return "", nil
+	}
+	sourceReq := baseReq
+	if sourceReq == nil && c != nil {
+		sourceReq = c.Request
+	}
+	if sourceReq == nil {
+		return "", nil
+	}
+	authBody := payload
+	if requestModelName != "" && json.Valid(payload) && strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String()) == "" {
+		if updated, errSet := ojson.SetBytes(bytes.Clone(payload), "model", requestModelName); errSet == nil {
+			authBody = updated
+		}
+	}
+	req := sourceReq.Clone(sourceReq.Context())
+	req.Method = http.MethodPost
+	if req.Header != nil {
+		for key := range req.Header {
+			lower := strings.ToLower(key)
+			if lower == "upgrade" || lower == "connection" || lower == "content-length" || strings.HasPrefix(lower, "sec-websocket-") {
+				delete(req.Header, key)
+			}
+		}
+	}
+	req.Body = io.NopCloser(bytes.NewReader(authBody))
+	req.ContentLength = int64(len(authBody))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(authBody)), nil
+	}
+	result, authErr := h.AccessManager.Authenticate(req.Context(), req)
+	if authErr != nil {
+		msg := strings.TrimSpace(authErr.Message)
+		if msg == "" {
+			msg = authErr.Error()
+		}
+		return "", &interfaces.ErrorMessage{
+			StatusCode: authErr.HTTPStatusCode(),
+			Error:      errors.New(msg),
+		}
+	}
+	if result == nil {
+		return "", nil
+	}
+	if c != nil && updateRequestContext {
+		c.Set("userApiKey", result.Principal)
+		c.Set("accessProvider", result.Provider)
+		if len(result.Metadata) > 0 {
+			c.Set("accessMetadata", result.Metadata)
+		} else {
+			c.Set("accessMetadata", nil)
+		}
+		if c.Request != nil {
+			reqCtx := usage.WithAPIKey(c.Request.Context(), result.Principal)
+			reqCtx = usage.WithAccessProvider(reqCtx, result.Provider)
+			reqCtx = usage.WithIsNativeKey(reqCtx, usage.IsNativeAccessProvider(result.Provider))
+			c.Request = c.Request.WithContext(reqCtx)
+		}
+	}
+	return result.Principal, nil
+}
+
 // ResponsesWebsocket handles websocket requests for /v1/responses.
 // It accepts `response.create` and `response.append` requests and streams
-// response events back as JSON websocket text messages.
+// response events back as JSON websocket text messages. `response.interrupt`
+// is forwarded to the current Codex upstream socket without starting a new turn.
 func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
-	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
+	upgrader := responsesWebsocketUpgrader
+	upgrader.EnableCompression = responsesWebsocketCompressionEnabled.Load()
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
 	if err != nil {
 		return
 	}
-	var duplexInput <-chan cliproxyexecutor.WebsocketInput
-	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
-		socketCtx, cancelSocket := context.WithCancel(c.Request.Context())
-		defer cancelSocket()
-		c.Request = c.Request.WithContext(socketCtx)
-		duplexInput = readResponsesWebsocketInput(socketCtx, cancelSocket, conn)
-	}
 	writer := newResponsesWebsocketWriter(conn)
 	passthroughSessionID := uuid.NewString()
+	// After the upgrade, error-only HTTP logs cannot consume deferred bodies.
+	// Apply the policy before routing so plugin callbacks inherit it as well.
+	socketCtx, cancelSocket := context.WithCancelCause(logging.WithDeferredAPIRequestCaptureDisabled(c.Request.Context()))
+	defer cancelSocket(nil)
+	c.Request = c.Request.WithContext(socketCtx)
+	upgradeRequest := c.Request.Clone(socketCtx)
+	// The reader owns the client socket so an in-flight interrupt is not stuck
+	// behind the response currently being forwarded.
+	requestLogEnabled := false
+	codexResponseSteering := false
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			requestLogEnabled = cfg.RequestLog
+			codexResponseSteering = cfg.CodexResponseSteering
+		}
+	}
+	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
+	localInterrupt := newResponsesLocalInterrupt()
+	// Advanced on every upstream loss: input read under an older epoch predates the loss.
+	var inputEpoch atomic.Uint64
+	input, inputDone := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
+		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
+	}, localInterrupt, writer, wsTimelineLog, &inputEpoch)
+	var duplexInput <-chan cliproxyexecutor.WebsocketInput
+	if codexResponseSteering {
+		duplexInput = input
+	}
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
-
-	requestLogEnabled := h != nil && h.Cfg != nil && h.Cfg.RequestLog
-	wsTimelineLog := newWebsocketTimelineLog(requestLogEnabled, websocketTimelineSourceFromContext(c))
 
 	wsDone := make(chan struct{})
 	defer close(wsDone)
@@ -335,10 +437,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			h.AuthManager.CloseExecutionSession(passthroughSessionID)
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
-		wsTimelineLog.SetContext(c)
+		cancelSocket(nil)
 		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
 		}
+		// Finish control-frame diagnostics before snapshotting the timeline.
+		<-inputDone
+		wsTimelineLog.SetContext(c)
 	}()
 
 	var lastRequest []byte
@@ -406,19 +511,28 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	for {
 		var msgType int
 		var payload []byte
+		var msgEpoch uint64
 		var errReadMessage error
-		if duplexInput == nil {
-			msgType, payload, errReadMessage = conn.ReadMessage()
-		} else {
-			select {
-			case message, ok := <-duplexInput:
-				if !ok {
-					return
+		select {
+		case message, ok := <-input:
+			if !ok {
+				errReadMessage = context.Cause(socketCtx)
+			} else {
+				if message.Err == nil && message.Epoch < inputEpoch.Load() {
+					// Read before an upstream loss: never sent, the client resends.
+					if errWrite := writeResponsesWebsocketPreviousResponseNotFound(writer, wsTimelineLog, message.Payload); errWrite != nil {
+						wsTerminateErr = errWrite
+						return
+					}
+					continue
 				}
-				msgType, payload, errReadMessage = websocket.TextMessage, message.Payload, message.Err
-			case <-c.Request.Context().Done():
-				return
+				msgType, payload, msgEpoch, errReadMessage = websocket.TextMessage, message.Payload, message.Epoch, message.Err
 			}
+		case <-socketCtx.Done():
+			errReadMessage = context.Cause(socketCtx)
+		}
+		if errReadMessage != nil && errors.Is(errReadMessage, context.Canceled) {
+			return
 		}
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
@@ -442,13 +556,42 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		wsTimelineLog.BeginRequest()
 		wsTimelineLog.Append("request", payload, time.Now())
 
-		explicitRequestModelName := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
+		explicitRequestModelName := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String()))
 		requestModelName := explicitRequestModelName
 		if requestModelName == "" {
 			requestModelName = passthroughModelName
 		}
 		if requestModelName == "" {
-			requestModelName = strings.TrimSpace(gjson.GetBytes(lastRequest, "model").String())
+			requestModelName = strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(lastRequest, "model").String()))
+		}
+		if _, errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, payload, requestModelName, true); errAuth != nil {
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errAuth)
+			markAPIResponseTimestamp(c)
+			errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errAuth)
+			log.Infof(
+				"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+				passthroughSessionID,
+				websocket.TextMessage,
+				websocketPayloadEventType(errorPayload),
+				websocketPayloadPreview(errorPayload),
+			)
+			if errWrite != nil {
+				log.Warnf(
+					"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+					passthroughSessionID,
+					websocketPayloadEventType(errorPayload),
+					errWrite,
+				)
+				return
+			}
+			continue
+		}
+		if msgEpoch < inputEpoch.Load() {
+			if errWrite := writeResponsesWebsocketPreviousResponseNotFound(writer, wsTimelineLog, payload); errWrite != nil {
+				wsTerminateErr = errWrite
+				return
+			}
+			continue
 		}
 		executionParent := context.WithValue(c.Request.Context(), "gin", c)
 		executionParent, routeOverridesModelResolution := h.PrepareStreamModelRoute(
@@ -577,7 +720,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var requestJSON []byte
 		var updatedLastRequest []byte
 		var errMsg *interfaces.ErrorMessage
-		previousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
+		previousResponseID := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "previous_response_id").String())
 		isPrewarm := !useUpstreamWebsocketPassthrough && shouldHandleResponsesWebsocketPrewarmLocally(payload, false)
 		if pendingPrewarmID != "" && previousResponseID != "" {
 			if previousResponseID != pendingPrewarmID {
@@ -586,7 +729,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketPrewarmFollowup(payload, lastRequest)
 			}
 		} else if isPrewarm && previousResponseID == "" {
-			input := gjson.GetBytes(payload, "input")
+			input := ojson.GetBytesNoCopy(payload, "input")
 			if input.Exists() && !input.IsArray() {
 				errMsg = &interfaces.ErrorMessage{
 					StatusCode: http.StatusBadRequest,
@@ -594,10 +737,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			} else {
 				// Mid-connection self-contained prewarm without previous_response_id is a new transcript root.
-				requestJSON, updatedLastRequest, errMsg = normalizeResponseCreateRequest(normalizeResponseTranscriptReplacement(payload, lastRequest))
+				requestJSON, updatedLastRequest, errMsg = normalizeResponseCreateTranscriptReplacement(payload, lastRequest)
 			}
-		} else if pendingPrewarmID != "" && gjson.GetBytes(payload, "type").String() == wsRequestTypeCreate {
-			input := gjson.GetBytes(payload, "input")
+		} else if pendingPrewarmID != "" && ojson.GetBytesNoCopy(payload, "type").String() == wsRequestTypeCreate {
+			input := ojson.GetBytesNoCopy(payload, "input")
 			if input.Exists() && !input.IsArray() {
 				errMsg = &interfaces.ErrorMessage{
 					StatusCode: http.StatusBadRequest,
@@ -605,11 +748,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			} else {
 				// No parent reference means a self-contained replacement, not a delta.
-				requestJSON, updatedLastRequest, errMsg = normalizeResponseCreateRequest(normalizeResponseTranscriptReplacement(payload, lastRequest))
+				requestJSON, updatedLastRequest, errMsg = normalizeResponseCreateTranscriptReplacement(payload, lastRequest)
 			}
 		} else if nativeWebsocketPassthrough {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
-		} else if len(lastRequest) == 0 && strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" {
+		} else if len(lastRequest) == 0 && previousResponseID != "" {
 			errMsg = responsesWebsocketPreviousResponseNotFoundError()
 		} else {
 			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
@@ -645,14 +788,18 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 
-		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
-		requestJSON = h.prepareCodexOrphanDelegation(c, requestJSON)
+		reqDoc := ojson.NewDoc(requestJSON)
+		toolsChanged := h.prepareCodexMultiAgentV2ToolsDoc(c, reqDoc)
+		orphanChanged := h.prepareCodexOrphanDelegationDoc(c, reqDoc)
+		if isPrewarm {
+			_ = reqDoc.Delete("generate")
+		}
+		if len(requestJSON) > 0 && (toolsChanged || orphanChanged || isPrewarm) {
+			requestJSON = reqDoc.Bytes()
+		}
 
 		if isPrewarm {
-			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
-				requestJSON = updated
-			}
-			if updated, errDelete := sjson.DeleteBytes(updatedLastRequest, "generate"); errDelete == nil {
+			if updated, errDelete := ojson.DeleteBytes(updatedLastRequest, "generate"); errDelete == nil {
 				updatedLastRequest = updated
 			}
 			lastRequest = updatedLastRequest
@@ -672,15 +819,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var toolCacheTurn *responsesWebsocketToolCacheTurn
 		nextLastRequest := lastRequest
 		if nativeWebsocketPassthrough {
-			if modelName := strings.TrimSpace(gjson.GetBytes(requestJSON, "model").String()); modelName != "" {
-				passthroughModelName = modelName
+			if modelName := strings.TrimSpace(ojson.GetBytesNoCopy(requestJSON, "model").String()); modelName != "" {
+				passthroughModelName = strings.Clone(modelName)
 			}
 		} else {
 			requestJSON, toolCacheTurn = prepareResponsesWebsocketFallbackTurn(downstreamSessionKey, requestJSON)
 			nextLastRequest = requestJSON
 		}
 
-		modelName := gjson.GetBytes(requestJSON, "model").String()
+		modelName := strings.Clone(ojson.GetBytesNoCopy(requestJSON, "model").String())
 		lastAttemptedAuthID := pinnedAuthID
 		attemptedUpstreamMode := responsesWebsocketUpstreamModeUnknown
 		selectedAuthObserved := false
@@ -688,13 +835,29 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var preserveNativeOutput atomic.Bool
 		codexDuplexStream.Store(false)
 		pinnedAuthAttempted := false
+		turnStartEpoch := inputEpoch.Load()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+		cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
 		if duplexInput != nil {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
 			cliCtx = cliproxyexecutor.WithWebsocketAuthCheck(cliCtx, func(authID string) bool {
 				current, ok := sessionAuthByID(authID)
 				return ok && current != nil && !current.Disabled && current.Status != coreauth.StatusDisabled
+			})
+			boundPrincipal := usage.APIKeyFromContext(cliCtx)
+			cliCtx = cliproxyexecutor.WithWebsocketTurnAuthorizer(cliCtx, func(turnPayload []byte) ([]byte, error) {
+				principal, errAuth := h.authenticateResponsesWebsocketTurn(c, upgradeRequest, turnPayload, modelName, false)
+				if errAuth == nil && principal != "" && principal != boundPrincipal {
+					errAuth = &interfaces.ErrorMessage{
+						StatusCode: http.StatusUnauthorized,
+						Error:      errors.New("client credential changed during the websocket stream; reconnect"),
+					}
+				}
+				if errAuth == nil {
+					return nil, nil
+				}
+				return buildResponsesWebsocketErrorPayload(errAuth)
 			})
 		}
 		if nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket {
@@ -716,8 +879,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
-			steeringAllowed := h.Cfg == nil || !h.Cfg.OAuthOnlyFields["codex.response-steering"] || selectedAuth.AuthKind() != coreauth.AuthKindAPIKey
-			codexDuplexStream.Store(duplexInput != nil && steeringAllowed && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
+			codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 			preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 		})
 		executionAuthID := ""
@@ -738,7 +900,24 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		// A connection-scoped continuation cannot rotate credentials in place. Suppress
 		// credential errors and make the client replay the full turn on a new socket.
+		var lossWriteErr error
 		replayPinnedAuthFailure := func(errMsg *interfaces.ErrorMessage) bool {
+			if cliproxyexecutor.IsUpstreamWebsocketTurnError(errMsg.Error) {
+				// The upstream websocket was lost: tell the client, keep its socket open, and
+				// fence the input it sent before the loss. A refused continuation is not a loss.
+				var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
+				if errors.As(errMsg.Error, &turnErr) {
+					if (turnErr.FullContextRequired || turnErr.NotSent || !codexDuplexStream.Load()) &&
+						turnErr.EventID == "" && !turnErr.Idle && len(turnErr.Abandoned) == 0 {
+						turnErr.EventID = strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "event_id").String()))
+					}
+					if !turnErr.FullContextRequired && !turnErr.NotSent && inputEpoch.Load() == turnStartEpoch {
+						inputEpoch.Add(1)
+					}
+				}
+				lossWriteErr = writeResponsesWebsocketUpstreamLoss(writer, wsTimelineLog, errMsg)
+				return true
+			}
 			return nativeWebsocketPassthrough && requestRequiresCurrentUpstreamWebsocket && pinnedAuthAttempted &&
 				shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg)
 		}
@@ -756,6 +935,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				duplexStream:             codexDuplexStream.Load,
 				toolCacheTurn:            toolCacheTurn,
 				suppressError:            replayPinnedAuthFailure,
+				localInterrupt:           localInterrupt,
+				websocketOwned: func() bool {
+					return attemptedUpstreamMode == responsesWebsocketUpstreamModeWS
+				},
 			},
 		)
 		if errForward != nil {
@@ -770,6 +953,20 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			}
 			return
+		}
+		if forwardErrMsg != nil && cliproxyexecutor.IsUpstreamWebsocketTurnError(forwardErrMsg.Error) {
+			if lossWriteErr != nil {
+				wsTerminateErr = lossWriteErr
+				return
+			}
+			// Keep the credential: the next full create reconnects on it, never on another one.
+			if (attemptedUpstreamMode == responsesWebsocketUpstreamModeWS || upstreamMode == responsesWebsocketUpstreamModeWS) && lastAttemptedAuthID != "" {
+				upstreamMode = responsesWebsocketUpstreamModeWS
+				upstreamWebsocketAuthID = lastAttemptedAuthID
+				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				passthroughModelName = modelName
+			}
+			continue
 		}
 		if forwardErrMsg != nil {
 			if pinnedAuthAttempted && shouldReleaseResponsesWebsocketPinnedAuth(forwardErrMsg) {
@@ -807,7 +1004,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			upstreamWebsocketAuthID = ""
 			lastRequest = nextLastRequest
 			lastResponseOutput = completedOutput
-			if inputContainsFullTranscript(gjson.ParseBytes(completedOutput)) {
+			if inputContainsFullTranscript(util.ParseGJSONBytesNoCopy(completedOutput)) {
 				_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
 				if isPluginExecutorRoute {
 					observedCompaction = responsesWebsocketObservedCompactionState{
@@ -869,8 +1066,10 @@ func responsesWebsocketHTTPReplayRequiredError() error {
 }
 
 func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
-	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
-		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+	var fieldsBuf [2]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "previous_response_id", "type")
+	return strings.TrimSpace(fields[0].String()) != "" ||
+		strings.TrimSpace(fields[1].String()) == wsRequestTypeAppend
 }
 
 func responsesWebsocketNativePassthroughAllowed(upstreamMode string, useUpstreamWebsocket bool, pinnedAuthID string, upstreamAuthID string) bool {
@@ -906,4 +1105,43 @@ func responsesWebsocketPreviousResponseNotFoundError() *interfaces.ErrorMessage 
 			`{"error":{"message":"Previous response is not available on this websocket; resend the full conversation input without previous_response_id","type":"invalid_request_error","code":"previous_response_not_found","param":"previous_response_id"}}`,
 		),
 	}
+}
+
+// writeResponsesWebsocketUpstreamLoss reports a lost upstream websocket on the still-open client
+// socket: the turn, then every other operation that lost its outcome. An idle loss reports nothing.
+func writeResponsesWebsocketUpstreamLoss(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) error {
+	var turnErr *cliproxyexecutor.UpstreamWebsocketTurnError
+	if !errors.As(errMsg.Error, &turnErr) {
+		return nil
+	}
+	failures := []*interfaces.ErrorMessage{errMsg}
+	if turnErr.Idle {
+		failures = nil
+	}
+	for _, abandoned := range turnErr.Abandoned {
+		failures = append(failures, handlers.ExecutionErrorMessage(abandoned))
+	}
+	for _, failure := range failures {
+		if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, failure); errWrite != nil {
+			return errWrite
+		}
+	}
+	return nil
+}
+
+// writeResponsesWebsocketPreviousResponseNotFound answers a continuation whose upstream socket is gone.
+// A create read before the loss is answered as not sent instead.
+func writeResponsesWebsocketPreviousResponseNotFound(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, payload []byte) error {
+	errMsg := responsesWebsocketPreviousResponseNotFoundError()
+	if ojson.GetBytesNoCopy(payload, "type").String() == wsRequestTypeCreate && !responsesWebsocketRequestRequiresCurrentUpstream(payload) {
+		errMsg = handlers.ExecutionErrorMessage(&cliproxyexecutor.UpstreamWebsocketTurnError{NotSent: true})
+	}
+	errorPayload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
+	if errBuild != nil {
+		return errBuild
+	}
+	if eventID := ojson.GetBytesNoCopy(payload, "event_id").String(); eventID != "" {
+		errorPayload, _ = ojson.SetBytes(errorPayload, "error.event_id", eventID)
+	}
+	return writeResponsesWebsocketPayload(writer, wsTimelineLog, errorPayload, time.Now())
 }

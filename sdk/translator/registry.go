@@ -2,12 +2,12 @@ package translator
 
 import (
 	"context"
+	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Registry manages translation functions across schemas.
@@ -36,7 +36,7 @@ func (r *Registry) Register(from, to Format, request RequestTransform, response 
 	}
 	if request != nil {
 		r.requests[from][to] = func(_ context.Context, req RequestEnvelope) RequestEnvelope {
-			req.Body = request(req.Model, req.Body, req.Stream)
+			req.Body, req.Err = request(req.Model, req.Body, req.Stream)
 			return req
 		}
 	}
@@ -138,8 +138,8 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 		return req
 	}
 
-	if req.Model != "" && gjson.GetBytes(req.Body, "model").String() != req.Model {
-		if updated, err := sjson.SetBytes(req.Body, "model", req.Model); err != nil {
+	if req.Model != "" && ojson.GetBytesNoCopy(req.Body, "model").String() != req.Model {
+		if updated, err := ojson.SetBytes(req.Body, "model", req.Model); err != nil {
 			log.Warnf("translator: failed to normalize model in request fallback: %v", err)
 		} else {
 			req.Body = updated
@@ -169,14 +169,14 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 // configurationUpdates captures only Responses update items before and after a plugin
 // normalizer. A native cross-protocol translation removing updates is not a plugin edit.
 func configurationUpdates(body []byte) []string {
-	input := gjson.GetBytes(body, "input")
+	input := ojson.GetBytesNoCopy(body, "input")
 	if !input.IsArray() {
 		return nil
 	}
 	var updates []string
-	input.ForEach(func(_, item gjson.Result) bool {
+	input.ForEach(func(_, item ojson.Result) bool {
 		if item.Get("type").String() == "configuration_update" {
-			updates = append(updates, item.Raw)
+			updates = append(updates, strings.Clone(item.Raw))
 		}
 		return true
 	})
@@ -247,6 +247,19 @@ func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
 	return false
 }
 
+// HasTokenCountTransformer indicates whether a token count translator exists.
+func (r *Registry) HasTokenCountTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.responses[to]; ok {
+		if fn, isOk := byTarget[from]; isOk && fn.TokenCount != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	r.mu.RLock()
@@ -271,6 +284,10 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 		if translated, ok := hooks.TranslateResponse(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, true); ok {
 			outputs = [][]byte{translated}
 		}
+	}
+	// Retained tool failures are never recovered by raw fallback or plugin normalization.
+	if translationToolInputFailed(param) {
+		return outputs
 	}
 	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
@@ -304,10 +321,22 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 			body = translated
 		}
 	}
+	if translationToolInputFailed(param) || (fn.NonStream != nil && body == nil) {
+		return nil
+	}
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
 	return body
+}
+
+// translationToolInputFailed consumes only the optional, request-local error contract.
+func translationToolInputFailed(param *any) bool {
+	if param == nil {
+		return false
+	}
+	state, okState := (*param).(interface{ ToolInputError() error })
+	return okState && state.ToolInputError() != nil
 }
 
 // TranslateTokenCount applies the registered token count response translator.
@@ -404,6 +433,11 @@ func HasStreamResponseTransformer(from, to Format) bool {
 // HasNonStreamResponseTransformer inspects the default registry for a non-streaming response translator.
 func HasNonStreamResponseTransformer(from, to Format) bool {
 	return defaultRegistry.HasNonStreamResponseTransformer(from, to)
+}
+
+// HasTokenCountTransformer inspects the default registry.
+func HasTokenCountTransformer(from, to Format) bool {
+	return defaultRegistry.HasTokenCountTransformer(from, to)
 }
 
 // TranslateStream is a helper on the default registry.

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -19,7 +20,6 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 // Exercise both WebSocket endpoints with the real handler, manager and executor.
@@ -28,19 +28,19 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 	for _, tc := range []struct {
 		name                            string
 		enabled, initial, upstreamClose bool
-		oauthOnly                       bool
+		staleOAuthScope                 bool
 	}{
 		{"later_error_corrected_create", true, false, false, false},
 		{"initial_error_remains_terminal", true, true, false, false},
 		{"disabled_error_remains_terminal", false, false, false, false},
 		{"later_error_then_upstream_close", true, false, true, false},
-		{"v8_oauth_setting_does_not_enable_api_key_steering", true, false, false, true},
+		{"stale_oauth_scope_does_not_disable_shared_api_key_steering", true, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var connections, frames atomic.Int32
 			done := make(chan struct{})
 			rejection := []byte(`{"type":"error","status":400,"event_id":"rejected-create","error":{"type":"invalid_request_error","message":"Correct the request"}}`)
-			effectiveSteering := tc.enabled && !tc.oauthOnly
+			effectiveSteering := tc.enabled
 			recoverable := effectiveSteering && !tc.initial && !tc.upstreamClose
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer close(done)
@@ -78,7 +78,7 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 				}
 				if recoverable {
 					corrected := read()
-					if gjson.GetBytes(corrected, "instructions").String() != "CORRECTED" {
+					if ojson.GetBytesNoCopy(corrected, "instructions").String() != "CORRECTED" {
 						t.Errorf("corrected create missing: %s", corrected)
 					}
 					write([]byte(`{"type":"response.created","response":{"id":"corrected","output":[]}}`))
@@ -90,7 +90,7 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Codex.ResponseSteering = tc.enabled
 			cfg.CodexResponseSteering = tc.enabled
-			if tc.oauthOnly {
+			if tc.staleOAuthScope {
 				cfg.OAuthOnlyFields = map[string]bool{"codex.response-steering": true}
 			}
 			manager := coreauth.NewManager(nil, nil, nil)
@@ -133,12 +133,12 @@ func TestResponsesSteeringErrorRecoveryIntegration(t *testing.T) {
 					}
 					break
 				}
-				switch gjson.GetBytes(p, "type").String() {
+				switch ojson.GetBytesNoCopy(p, "type").String() {
 				case "response.completed":
-					if gjson.GetBytes(p, "response.id").String() == "first" {
+					if ojson.GetBytesNoCopy(p, "response.id").String() == "first" {
 						send("REJECTED")
 					} else {
-						completed = gjson.GetBytes(p, "response.output.0.content.0.text").String() == "RECOVERED"
+						completed = ojson.GetBytesNoCopy(p, "response.output.0.content.0.text").String() == "RECOVERED"
 						_ = c.Close()
 					}
 				case "error":
@@ -184,6 +184,8 @@ func TestResponsesWebsocketClosesOnIdleCodexDisconnect(t *testing.T) {
 		{"legacy_enabled_api_key", "codex: {response-steering: true}\n", false},
 		{"v8_enabled_api_key", "oauth: {providers: {codex: {response-steering: true}}}\n", false},
 		{"v8_enabled_oauth", "oauth: {providers: {codex: {response-steering: true}}}\n", true},
+		{"upstream_enabled_api_key", "upstream: {codex: {response-steering: true}}\n", false},
+		{"upstream_enabled_oauth", "upstream: {codex: {response-steering: true}}\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			closeUpstream := make(chan struct{})
@@ -273,7 +275,7 @@ func TestResponsesWebsocketClosesOnIdleCodexDisconnect(t *testing.T) {
 				if errRead != nil {
 					t.Fatalf("read response before upstream close: %v", errRead)
 				}
-				if gjson.GetBytes(payload, "type").String() == "response.completed" {
+				if ojson.GetBytesNoCopy(payload, "type").String() == "response.completed" {
 					break
 				}
 			}

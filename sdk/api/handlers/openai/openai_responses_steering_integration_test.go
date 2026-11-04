@@ -10,14 +10,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 // Exercise the actual downstream handler, auth manager and Codex executor.
@@ -51,7 +53,7 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 						t.Errorf("upstream write: %v", err)
 					}
 				}
-				if gjson.GetBytes(read(), "type").String() != "response.create" {
+				if ojson.GetBytesNoCopy(read(), "type").String() != "response.create" {
 					t.Error("missing initial create")
 				}
 				write(`{"type":"response.created","response":{"id":"r1"}}`)
@@ -73,7 +75,7 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 						return
 					}
 					b := read()
-					if gjson.GetBytes(b, "type").String() != "response.create" || gjson.GetBytes(b, "input.0.call_id").String() != "call1" {
+					if ojson.GetBytesNoCopy(b, "type").String() != "response.create" || ojson.GetBytesNoCopy(b, "input.0.call_id").String() != "call1" {
 						t.Errorf("required input lost: %s", b)
 					}
 				} else {
@@ -98,9 +100,22 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			}
 			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "steering-test-model"}})
 			defer registry.GetGlobalRegistry().UnregisterClient(authID)
-			h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager))
+			base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, manager)
+			base.SetModelRouterHost(&websocketLoggingRouter{
+				record: func(ctx context.Context, _ string, body []byte) {
+					// Model-router host HTTP calls share the duplex connection lifetime.
+					helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://router.invalid/route", Body: body})
+				},
+			})
+			h := NewOpenAIResponsesAPIHandler(base)
 			router := gin.New()
-			router.GET("/v1/responses", h.ResponsesWebsocket)
+			deferredCount := make(chan int, 1)
+			router.GET("/v1/responses", func(c *gin.Context) {
+				h.ResponsesWebsocket(c)
+				value, _ := c.Get(logging.DeferredAPIRequestContextKey)
+				requests, _ := value.([]logging.DeferredAPIRequest)
+				deferredCount <- len(requests)
+			})
 			downstream := httptest.NewServer(router)
 			defer downstream.Close()
 			c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(downstream.URL, "http")+"/v1/responses", nil)
@@ -121,13 +136,16 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			for {
 				_, b, err := c.ReadMessage()
 				if err != nil {
-					if !strings.HasPrefix(scenario, "disconnect_") {
-						t.Fatalf("early close: %v", err)
+					t.Fatalf("downstream read before expected terminal event: %v", err)
+				}
+				kind := ojson.GetBytesNoCopy(b, "type").String()
+				if kind == "error" {
+					if !strings.HasPrefix(scenario, "disconnect_") || ojson.GetBytesNoCopy(b, "error.code").String() != "upstream_websocket_lost" {
+						t.Fatalf("unexpected downstream error: %s", b)
 					}
 					break
 				}
-				kind := gjson.GetBytes(b, "type").String()
-				if kind == "response.created" && gjson.GetBytes(b, "response.id").String() == "r1" {
+				if kind == "response.created" && ojson.GetBytesNoCopy(b, "response.id").String() == "r1" {
 					send(control1)
 					send(control2)
 				}
@@ -140,8 +158,11 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 				if kind == "response.steer.pending" && scenario == "tool_pending" {
 					send([]byte(`{"type":"response.create","previous_response_id":"r1","input":[{"type":"function_call_output","call_id":"call1","output":"found"}]}`))
 				}
-				if kind == "response.completed" && gjson.GetBytes(b, "response.id").String() == "r2" {
-					completed = gjson.GetBytes(b, "response.output.0.content.0.text").String() == "STEER_OK"
+				if kind == "response.completed" && ojson.GetBytesNoCopy(b, "response.id").String() == "r2" {
+					if strings.HasPrefix(scenario, "disconnect_") {
+						t.Fatal("successor completed instead of reporting upstream disconnect")
+					}
+					completed = ojson.GetBytesNoCopy(b, "response.output.0.content.0.text").String() == "STEER_OK"
 					_ = c.Close()
 					break
 				}
@@ -162,6 +183,16 @@ func TestResponsesSteeringFullDuplexIntegration(t *testing.T) {
 			}
 			if connections.Load() != 1 {
 				t.Fatalf("unexpected reconnect/replay: %d", connections.Load())
+			}
+			// An upstream disconnect can leave the downstream ready for another turn.
+			_ = c.Close()
+			select {
+			case n := <-deferredCount:
+				if n != 0 {
+					t.Fatalf("duplex socket retained %d deferred upstream requests", n)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("duplex handler did not return")
 			}
 		})
 	}

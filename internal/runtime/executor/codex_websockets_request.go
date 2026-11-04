@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -15,7 +16,6 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
@@ -28,6 +28,19 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, nil
 	}
+	doc := ojson.NewDoc(rawJSON)
+	headers, changed, err := applyCodexPromptCacheHeadersWithContextDoc(ctx, from, req, doc, headerSets...)
+	if err != nil || !changed {
+		return rawJSON, headers, err
+	}
+	return doc.Bytes(), headers, nil
+}
+
+func applyCodexPromptCacheHeadersWithContextDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, doc *ojson.Doc, headerSets ...http.Header) (http.Header, bool, error) {
+	headers := http.Header{}
+	if doc == nil || doc.Len() == 0 {
+		return headers, false, nil
+	}
 
 	var requestHeaders http.Header
 	if len(headerSets) > 0 {
@@ -35,33 +48,34 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	}
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+		modelName := strings.TrimSpace(doc.Get("model").String())
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
 		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, requestHeaders)
 		if errCache != nil {
-			return nil, nil, errCache
+			return nil, false, errCache
 		}
 		if ok {
 			cache = cached
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
+		if promptCacheKey := ojson.GetBytesNoCopy(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
+			cache.ID = strings.Clone(promptCacheKey.String())
 		}
 	}
 	if cache.ID == "" {
 		cache.ID = helps.ProviderSessionUUID("codex", req.Metadata)
 	}
 
+	changed := false
 	if cache.ID != "" {
-		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
+		changed = helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
 		setHeaderCasePreserved(headers, "session_id", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
 	}
 
-	return rawJSON, headers, nil
+	return headers, changed, nil
 }
 
 func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config, nativeRequest bool, clientHeaders ...http.Header) http.Header {
@@ -79,6 +93,32 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = clientHeaders[0].Clone()
 	} else if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header.Clone()
+	}
+
+	if codexUseSIWCForRequest(ctx, auth, clientHeaders...) {
+		deleteHeaderCaseInsensitive(headers, "conversation_id")
+		ensureCodexWebsocketSessionHeader(headers, ginHeaders, "")
+		if sessionID := codexSessionHeaderValue(headers); sessionID != "" {
+			headers.Set("X-Client-Request-Id", sessionID)
+		} else {
+			misc.EnsureHeader(headers, ginHeaders, "X-Client-Request-Id", "")
+		}
+		headers.Set("User-Agent", codexSIWCUserAgent(cfg))
+		betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
+		if betaHeader == "" && ginHeaders != nil {
+			betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
+		}
+		if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
+			betaHeader = codexResponsesWebsocketBetaHeaderValue
+		}
+		headers.Set("OpenAI-Beta", betaHeader)
+		var attrs map[string]string
+		if auth != nil {
+			attrs = auth.Attributes
+		}
+		req := (&http.Request{Header: headers}).WithContext(ctx)
+		util.ApplyCustomHeadersFromAttrs(req, attrs, ginHeaders)
+		return headers
 	}
 
 	isAPIKey := codexAuthUsesAPIKey(auth)

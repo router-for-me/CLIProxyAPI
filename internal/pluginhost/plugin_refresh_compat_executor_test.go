@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -172,5 +173,37 @@ func TestPluginRefreshCompatExecutorNoOpForAPIKeyAuth(t *testing.T) {
 	}
 	if refreshed == nil || refreshed.Attributes["api_key"] != "sk-test" {
 		t.Fatalf("Refresh() auth = %#v, want unchanged api key auth", refreshed)
+	}
+}
+
+type patchCompatExecutor struct {
+	*stubCompatExecutor
+	supported bool
+}
+
+func (e *patchCompatExecutor) SupportsApplyPatch() bool { return e.supported }
+
+func TestPluginRefreshApplyPatchOptionalDelegation(t *testing.T) {
+	for _, tc := range []struct {
+		inner coreauth.ProviderExecutor
+		want  bool
+	}{
+		{&stubCompatExecutor{id: "codex"}, false},
+		{runtimeexecutor.NewOpenAICompatExecutor("arbitrary-plugin-name", &config.Config{}), true},
+		{&patchCompatExecutor{&stubCompatExecutor{id: "custom"}, true}, true},
+		{&patchCompatExecutor{&stubCompatExecutor{id: "custom"}, false}, false},
+	} {
+		wrapped := NewPluginRefreshCompatExecutor(tc.inner, nil, nil)
+		support, okSupport := wrapped.(coreauth.ApplyPatchSupport)
+		if !okSupport || support.SupportsApplyPatch() != tc.want {
+			t.Errorf("%T: capability mismatch", tc.inner)
+		}
+		scoped := wrapped.(coreauth.APIKeyConfigExecutor).ForAPIKey()
+		if scoped.(coreauth.ApplyPatchSupport).SupportsApplyPatch() != tc.want {
+			t.Fatal("ForAPIKey lost inner capability")
+		}
+	}
+	if (&pluginRefreshCompatExecutor{}).SupportsApplyPatch() {
+		t.Fatal("empty wrapper advertised support")
 	}
 }

@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // TestClaudeBillingFingerprintMultiTurnUsesFirstUserText verifies that in a multi-turn conversation,
@@ -282,7 +282,11 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	turn1Payload := fmt.Sprintf(`{
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
-		"messages": [{"role": "user", "content": "turn 1 user prompt"}],
+		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
+			{"role": "user", "content": "turn 1 user prompt"}
+		],
 		"max_tokens": 100
 	}`, systemPrompt)
 
@@ -290,6 +294,8 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
 			{"role": "user", "content": "turn 1 user prompt"},
 			{"role": "assistant", "content": "Understood."},
 			{"role": "user", "content": "turn 2 user prompt with new question"}
@@ -312,8 +318,8 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	body2 := capturedBodies[1]
 
 	// 1. Verify system[0] billing header version and buildHash match across turns
-	sys1 := gjson.GetBytes(body1, "system.0.text").String()
-	sys2 := gjson.GetBytes(body2, "system.0.text").String()
+	sys1 := ojson.GetBytes(body1, "system.0.text").String()
+	sys2 := ojson.GetBytes(body2, "system.0.text").String()
 	ver1 := extractTag(sys1, "cc_version=")
 	ver2 := extractTag(sys2, "cc_version=")
 	if ver1 != ver2 {
@@ -321,22 +327,22 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	}
 
 	// 2. Verify system[1] CLI identity block matches across turns
-	agent1 := gjson.GetBytes(body1, "system.1").Raw
-	agent2 := gjson.GetBytes(body2, "system.1").Raw
+	agent1 := ojson.GetBytes(body1, "system.1").Raw
+	agent2 := ojson.GetBytes(body2, "system.1").Raw
 	if agent1 != agent2 {
 		t.Fatalf("system.1 identity block differs across turns:\nTurn 1: %s\nTurn 2: %s", agent1, agent2)
 	}
 
 	// 3. Verify messages[0] (the first user message anchor) matches across turns
-	msg1User := gjson.GetBytes(body1, "messages.0").Raw
-	msg2User := gjson.GetBytes(body2, "messages.0").Raw
+	msg1User := ojson.GetBytes(body1, "messages.0").Raw
+	msg2User := ojson.GetBytes(body2, "messages.0").Raw
 	if msg1User != msg2User {
 		t.Fatalf("messages.0 differs across turns:\nTurn 1: %s\nTurn 2: %s", msg1User, msg2User)
 	}
 
 	// 4. Verify messages[1] (the relocated caller system instructions) matches across turns
-	msg1Sys := gjson.GetBytes(body1, "messages.1").Raw
-	msg2Sys := gjson.GetBytes(body2, "messages.1").Raw
+	msg1Sys := ojson.GetBytes(body1, "messages.1").Raw
+	msg2Sys := ojson.GetBytes(body2, "messages.1").Raw
 	if msg1Sys != msg2Sys {
 		t.Fatalf("messages.1 differs across turns:\nTurn 1: %s\nTurn 2: %s", msg1Sys, msg2Sys)
 	}
@@ -369,6 +375,8 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 		"model": "claude-opus-5",
 		"system": [{"type": "text", "text": %q, "cache_control": {"type": "ephemeral"}}],
 		"messages": [
+			{"role": "user", "content": "turn 0 user prompt"},
+			{"role": "assistant", "content": "Earlier response."},
 			{"role": "user", "content": "turn 1 user prompt"},
 			{"role": "assistant", "content": "Understood."},
 			{"role": "user", "content": "turn 2 user prompt with new question"},
@@ -392,7 +400,7 @@ func TestClaudeCloakedMultiTurnPrefixStability(t *testing.T) {
 	body3 := capturedBodies[3]
 	body3Repeat := capturedBodies[4]
 
-	sys3 := gjson.GetBytes(body3, "system.0.text").String()
+	sys3 := ojson.GetBytes(body3, "system.0.text").String()
 	ver3 := extractTag(sys3, "cc_version=")
 	if ver3 != ver1 {
 		t.Fatalf("turn 3 cc_version differs: turn1=%q turn3=%q", ver1, ver3)
@@ -626,7 +634,7 @@ func TestClaudeCloakedToolContinuationPreservesExplicitPromptID(t *testing.T) {
 		t.Fatalf("expected 2 captured bodies, got %d", len(capturedBodies))
 	}
 
-	sysTool := gjson.GetBytes(capturedBodies[1], "system.0.text").String()
+	sysTool := ojson.GetBytes(capturedBodies[1], "system.0.text").String()
 	promptTool := extractTag(sysTool, "cc_prompt_id=")
 	if promptTool != explicitUUID {
 		t.Fatalf("tool continuation lost explicit prompt ID: got %q, want %q", promptTool, explicitUUID)
@@ -710,8 +718,8 @@ func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *test
 		t.Fatalf("expected 2 captured bodies, got %d", len(capturedBodies))
 	}
 
-	sys1 := gjson.GetBytes(capturedBodies[0], "system.0.text").String()
-	sys2 := gjson.GetBytes(capturedBodies[1], "system.0.text").String()
+	sys1 := ojson.GetBytes(capturedBodies[0], "system.0.text").String()
+	sys2 := ojson.GetBytes(capturedBodies[1], "system.0.text").String()
 	p1 := extractTag(sys1, "cc_prompt_id=")
 	p2 := extractTag(sys2, "cc_prompt_id=")
 	if p1 == "" || p1 != p2 {
