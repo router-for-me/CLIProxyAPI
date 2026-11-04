@@ -749,6 +749,72 @@ func TestHandlerPluginExecutorSkipsOuterFailureWhenPluginCallsHostModelExecute(t
 	plugin.assertNoRecord(t)
 }
 
+func TestHandlerPluginExecutorRecordsTTFTNonStream(t *testing.T) {
+	targetPluginID := "custom-ttft-nonstream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-ttft-nonstream", plugin)
+
+	mockHost := &mockPluginUsageHost{
+		execFunc: func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+			time.Sleep(20 * time.Millisecond)
+			return coreexecutor.Response{Payload: []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)}, nil
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	if _, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", "gpt-4o", []byte(`{"model":"gpt-4o"}`), ""); errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+
+	record := plugin.waitRecord(t)
+	if record.TTFT <= 0 {
+		t.Errorf("record.TTFT = %v, want > 0", record.TTFT)
+	}
+}
+
+func TestHandlerPluginExecutorRecordsTTFTStream(t *testing.T) {
+	targetPluginID := "custom-ttft-stream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-ttft-stream", plugin)
+
+	chunks := make(chan coreexecutor.StreamChunk, 2)
+	go func() {
+		defer close(chunks)
+		time.Sleep(20 * time.Millisecond)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n")}
+		chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+	}()
+
+	mockHost := &mockPluginUsageHost{streamResult: &coreexecutor.StreamResult{Chunks: chunks}}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "gpt-4o", []byte(`{"model":"gpt-4o","stream":true}`), "")
+	for range dataChan {
+	}
+	for err := range errChan {
+		if err != nil {
+			t.Fatalf("stream error = %+v", err)
+		}
+	}
+
+	record := plugin.waitRecord(t)
+	if record.TTFT <= 0 {
+		t.Errorf("record.TTFT = %v, want > 0", record.TTFT)
+	}
+}
+
 type mockPluginUsageHost struct {
 	handlerDirectExecutorRouteHost
 	execResp     coreexecutor.Response
