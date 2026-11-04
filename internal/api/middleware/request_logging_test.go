@@ -957,7 +957,7 @@ func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
 	}
 }
 
-func TestResponseWriterLogOnErrorOnlyCapsSingleLargeWrite(t *testing.T) {
+func TestResponseWriterLogOnErrorOnlyZeroBufferUntilActionableError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -969,19 +969,29 @@ func TestResponseWriterLogOnErrorOnlyCapsSingleLargeWrite(t *testing.T) {
 		Method: http.MethodPost,
 	})
 	wrapper.logOnErrorOnly = true
+	wrapper.ginContext = c
 
+	// Normal 200 OK writes (even 4 MiB) must not allocate/buffer any bytes when request-log is disabled.
 	largePayload := bytes.Repeat([]byte("a"), 4<<20) // 4 MiB
 	if _, err := wrapper.Write(largePayload); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
-	if wrapper.body.Len() != maxDeferredErrorStreamBodyBytes {
-		t.Fatalf("wrapper.body.Len() = %d, want %d", wrapper.body.Len(), maxDeferredErrorStreamBodyBytes)
+	if wrapper.body.Len() != 0 {
+		t.Fatalf("wrapper.body.Len() for 200 OK = %d, want 0", wrapper.body.Len())
 	}
 
-	if _, err := wrapper.WriteString("extra"); err != nil {
+	// Once an actionable mid-stream error is recorded, subsequent error frame writes are buffered.
+	c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+		{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New("claude refusal (cyber): blocked"),
+		},
+	})
+	const errFrame = "event: error\ndata: {\"type\":\"error\"}\n\n"
+	if _, err := wrapper.WriteString(errFrame); err != nil {
 		t.Fatalf("WriteString failed: %v", err)
 	}
-	if wrapper.body.Len() != maxDeferredErrorStreamBodyBytes {
-		t.Fatalf("wrapper.body.Len() after WriteString = %d, want %d", wrapper.body.Len(), maxDeferredErrorStreamBodyBytes)
+	if got := wrapper.body.String(); got != errFrame {
+		t.Fatalf("wrapper.body.String() = %q, want %q", got, errFrame)
 	}
 }

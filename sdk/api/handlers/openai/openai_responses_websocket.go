@@ -201,30 +201,30 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	return true, errClose
 }
 
-func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error, wsTimelineLog ...websocketTimelineAppender) {
+func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error, wsTimelineLog ...websocketTimelineAppender) bool {
 	if w == nil || w.conn == nil {
-		return
+		return false
 	}
 	var timelineLog websocketTimelineAppender
 	if len(wsTimelineLog) > 0 {
 		timelineLog = wsTimelineLog[0]
 	}
 	if matched, _ := w.closeForUpstreamError(err); matched {
-		return
+		return true
 	}
 
 	errMsg := handlers.ExecutionErrorMessage(err)
 	if !shouldExposeResponsesUpstreamError(errMsg) {
-		if timelineLog != nil && errMsg != nil {
+		closed, _ := w.closeWithoutError()
+		if closed && timelineLog != nil && errMsg != nil {
 			appendWebsocketTimelineDisconnect(timelineLog, errMsg.Error, time.Now())
 		}
-		_, _ = w.closeWithoutError()
-		return
+		return closed
 	}
 	payload, errBuild := buildResponsesWebsocketErrorPayload(errMsg)
 	if errBuild != nil {
-		_, _ = w.closeWithoutError()
-		return
+		closed, _ := w.closeWithoutError()
+		return closed
 	}
 	wrote, errClose := w.closeWithPayload(payload)
 	if wrote {
@@ -240,6 +240,7 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error, wsTimel
 	if errClose != nil && !errors.Is(errClose, websocket.ErrCloseSent) {
 		log.Debugf("responses websocket: upstream disconnect close failed: %v", errClose)
 	}
+	return wrote
 }
 
 // isWebsocketConnectionClosedError reports whether the error only means the
@@ -400,7 +401,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientIP)
 
 	wsDone := make(chan struct{})
-	defer close(wsDone)
+	var disconnectWg sync.WaitGroup
+	var recordedDisconnectErr atomic.Pointer[interfaces.ErrorMessage]
 	var codexDuplexStream atomic.Bool
 
 	if h != nil && h.AuthManager != nil {
@@ -415,7 +417,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if subscriber, ok := exec.(upstreamDisconnectSubscriber); ok && subscriber != nil {
 				disconnectCh := subscriber.UpstreamDisconnectChan(passthroughSessionID)
 				if disconnectCh != nil {
+					disconnectWg.Add(1)
 					go func() {
+						defer disconnectWg.Done()
 						select {
 						case <-wsDone:
 							return
@@ -426,10 +430,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 								// OAuth-only steering still leaves API keys in normal mode.
 								return
 							}
-							if disconnectErr != nil {
-								h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), handlers.ExecutionErrorMessage(disconnectErr))
+							if writer.closeForUpstreamDisconnect(disconnectErr, wsTimelineLog) && disconnectErr != nil {
+								recordedDisconnectErr.CompareAndSwap(nil, handlers.ExecutionErrorMessage(disconnectErr))
 							}
-							writer.closeForUpstreamDisconnect(disconnectErr, wsTimelineLog)
 						}
 					}()
 				}
@@ -450,9 +453,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			h.AuthManager.CloseExecutionSession(passthroughSessionID)
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
+		close(wsDone)
 		cancelSocket(nil)
+		_, _ = writer.closeWithoutError()
 		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
 			log.Warnf("responses websocket: close connection error: %v", errClose)
+		}
+		disconnectWg.Wait()
+		if errMsg := recordedDisconnectErr.Load(); errMsg != nil {
+			h.LoggingAPIResponseError(c, errMsg)
 		}
 		// Finish control-frame diagnostics before snapshotting the timeline.
 		<-inputDone

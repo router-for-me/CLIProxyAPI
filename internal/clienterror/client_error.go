@@ -2,6 +2,7 @@
 package clienterror
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -160,7 +161,7 @@ const GeminiFilterBlockPolicyURL = "https://policies.google.com/terms/generative
 // Upstream injects this frame inside an HTTP 200 SSE stream with only candidates[0].content.parts[0].text
 // and without content.role, responseId, modelVersion, or usageMetadata.
 func GeminiFilterBlockMessage(payload []byte) (string, bool) {
-	if len(payload) == 0 || !ojson.ValidBytes(payload) {
+	if len(payload) == 0 || !bytes.Contains(payload, []byte(GeminiFilterBlockMessagePrefix)) || !ojson.ValidBytes(payload) {
 		return "", false
 	}
 	for _, path := range []string{"responseId", "response.responseId", "modelVersion", "response.modelVersion", "usageMetadata", "response.usageMetadata"} {
@@ -220,7 +221,7 @@ func isGeminiFilterBlockText(text string) bool {
 // message object or a streaming message_delta event) and returns the refusal explanation
 // when stop_details indicates a policy/cyber refusal block.
 func ClaudePolicyRefusalMessage(payload []byte) (string, bool) {
-	if len(payload) == 0 || !ojson.ValidBytes(payload) {
+	if len(payload) == 0 || !bytes.Contains(payload, []byte("stop_details")) || !ojson.ValidBytes(payload) {
 		return "", false
 	}
 	for _, prefix := range []string{"delta", ""} {

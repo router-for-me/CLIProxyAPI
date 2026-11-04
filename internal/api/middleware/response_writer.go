@@ -47,6 +47,7 @@ type ResponseWriterWrapper struct {
 	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
+	ginContext          *gin.Context               // ginContext holds the Gin request context for mid-stream error inspection.
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
@@ -119,7 +120,9 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		return n, err
 	}
 
-	w.bufferResponseBodyBytes(data)
+	if w.shouldBufferResponseBody() {
+		w.body.Write(data)
+	}
 
 	return n, err
 }
@@ -161,8 +164,6 @@ func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCod
 	}
 }
 
-const maxDeferredErrorStreamBodyBytes = 256 << 10 // 256 KiB
-
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
@@ -171,57 +172,12 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 		return false
 	}
 	status := w.effectiveStatusCode()
-	if status == clienterror.StatusClientClosedRequest {
-		return false
+	if status < http.StatusBadRequest {
+		if apiErrStatus := actionableAPIResponseErrorStatus(extractAPIResponseErrors(w.ginContext)); apiErrStatus >= http.StatusBadRequest {
+			status = apiErrStatus
+		}
 	}
-	if status >= http.StatusBadRequest {
-		return true
-	}
-	return w.body != nil && w.body.Len() < maxDeferredErrorStreamBodyBytes
-}
-
-func (w *ResponseWriterWrapper) bufferResponseBodyBytes(data []byte) {
-	if len(data) == 0 || w.body == nil || !w.shouldBufferResponseBody() {
-		return
-	}
-	if w.logger != nil && w.logger.IsEnabled() {
-		w.body.Write(data)
-		return
-	}
-	if w.effectiveStatusCode() >= http.StatusBadRequest {
-		w.body.Write(data)
-		return
-	}
-	remaining := maxDeferredErrorStreamBodyBytes - w.body.Len()
-	if remaining <= 0 {
-		return
-	}
-	if len(data) > remaining {
-		data = data[:remaining]
-	}
-	w.body.Write(data)
-}
-
-func (w *ResponseWriterWrapper) bufferResponseBodyString(data string) {
-	if len(data) == 0 || w.body == nil || !w.shouldBufferResponseBody() {
-		return
-	}
-	if w.logger != nil && w.logger.IsEnabled() {
-		w.body.WriteString(data)
-		return
-	}
-	if w.effectiveStatusCode() >= http.StatusBadRequest {
-		w.body.WriteString(data)
-		return
-	}
-	remaining := maxDeferredErrorStreamBodyBytes - w.body.Len()
-	if remaining <= 0 {
-		return
-	}
-	if len(data) > remaining {
-		data = data[:remaining]
-	}
-	w.body.WriteString(data)
+	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -247,7 +203,9 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		return n, err
 	}
 
-	w.bufferResponseBodyString(data)
+	if w.shouldBufferResponseBody() {
+		w.body.WriteString(data)
+	}
 	return n, err
 }
 
@@ -892,6 +850,18 @@ func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
 		}
 	}
 	return false
+}
+
+func extractAPIResponseErrors(c *gin.Context) []*interfaces.ErrorMessage {
+	if c == nil {
+		return nil
+	}
+	if apiResponseError, exists := c.Get("API_RESPONSE_ERROR"); exists {
+		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
+			return apiErrors
+		}
+	}
+	return nil
 }
 
 func actionableAPIResponseErrorStatus(apiErrors []*interfaces.ErrorMessage) int {
