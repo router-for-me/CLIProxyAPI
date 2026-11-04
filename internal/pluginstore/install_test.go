@@ -355,6 +355,47 @@ func TestInstallUsesLatestReleaseVersion(t *testing.T) {
 	}
 }
 
+func TestInstallValidatesReleaseBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.dylib": "library-data"})
+	archiveName := "sample-provider_0.2.0_darwin_arm64.zip"
+	checksum := sha256.Sum256(archiveData)
+	client := Client{HTTPClient: mapHTTPDoer{
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"tag_name": "v0.2.0",
+			"assets": [
+				{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+				{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+			]
+		}`),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+	rejected := errors.New("application rejected plugin")
+	var planned InstallResult
+	_, errInstall := client.Install(context.Background(), testPlugin(), InstallOptions{
+		PluginsDir: root,
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+		ValidateInstall: func(result InstallResult) error {
+			planned = result
+			return rejected
+		},
+	})
+	if !errors.Is(errInstall, rejected) {
+		t.Fatalf("Install() error = %v, want validation rejection", errInstall)
+	}
+	targetPath := filepath.Join(root, "darwin", "arm64", "sample-provider-v0.2.0.dylib")
+	if planned.ReleaseTag != "v0.2.0" || planned.InstallType != InstallTypeGitHubRelease || planned.Version != "0.2.0" || planned.Path != targetPath {
+		t.Fatalf("validated install = %#v, want the planned v0.2.0 release at %s", planned, targetPath)
+	}
+	if _, errStat := os.Stat(targetPath); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("rejected install left a plugin file: stat error = %v", errStat)
+	}
+}
+
 func TestDownloadAssetFallsBackToReleaseAssetAPIURLWhenBrowserDownloadURLEmpty(t *testing.T) {
 	apiURL := "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1"
 	client := Client{HTTPClient: mapHTTPDoer{
