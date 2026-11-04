@@ -179,6 +179,17 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 	return newCodexStatusErrWithCooling(codexTerminalFailureStatus(body), body, modelLevelCooling), body, true
 }
 
+// codexTerminalFailureErrWithHeaders is codexTerminalFailureErrWithCooling for
+// an event of an HTTP response: a usage limit reported in the stream takes its
+// exhausted window from the response's x-codex-* headers.
+func codexTerminalFailureErrWithHeaders(eventData []byte, headers http.Header, modelLevelCooling bool) (statusErr, []byte, bool) {
+	streamErr, body, ok := codexTerminalFailureErrWithCooling(eventData, modelLevelCooling)
+	if ok && streamErr.quotaExhausted {
+		streamErr.quotaWindowMinutes = helps.CodexExhaustedWindowMinutes(headers)
+	}
+	return streamErr, body, ok
+}
+
 func codexTerminalFailureStatus(body []byte) int {
 	for _, path := range []string{"error.status_code", "error.status"} {
 		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {

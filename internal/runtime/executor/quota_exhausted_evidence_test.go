@@ -70,6 +70,14 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			err, _ := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"},"headers":{"x-codex-primary-used-percent":"100","x-codex-primary-window-minutes":"300"}}`))
 			return err
 		}(), want: true, wantWindow: 300},
+		{name: "codex HTTP stream usage_limit_reached reads the response headers", err: func() error {
+			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`), codexHeaders("40"), false)
+			return err
+		}(), want: true, wantWindow: 300},
+		{name: "openai-compat stream QUOTA_EXHAUSTED frame", err: func() error {
+			err, _ := openAICompatStreamDataError([]byte(`{"status":429,`+googleQuotaExhaustedBody[1:]), "")
+			return err
+		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai insufficient_quota", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}`)), want: true},
 		{name: "openai rate_limit_exceeded", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"requests","code":"rate_limit_exceeded"}}`))},
 		{name: "openai insufficient_quota on a non-429", err: newOpenAICompatStatusError(http.StatusForbidden, nil, []byte(`{"error":{"type":"insufficient_quota"}}`))},

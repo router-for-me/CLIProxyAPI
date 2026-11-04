@@ -1188,7 +1188,9 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	err := statusErr{code: status, msg: string(payload)}
+	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, nil, payload)
+	return err, true
 }
 
 type statusErr struct {
@@ -1243,11 +1245,20 @@ func newOpenAICompatStatusError(status int, headers http.Header, body []byte) st
 		msg:        string(body),
 		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
 	}
-	err.quotaExhausted, err.quotaResetAfter = helps.GoogleQuotaExhaustion(status, headers, body, time.Now())
-	if status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body) {
-		err.quotaExhausted = true
-	}
+	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, headers, body)
 	return err
+}
+
+// openAICompatQuotaExhaustion reports explicit quota exhaustion in an
+// OpenAI-compatible error, whether it came as an HTTP error or as the error
+// frame of a stream: a Google QUOTA_EXHAUSTED with its reset, or an OpenAI
+// insufficient_quota.
+func openAICompatQuotaExhaustion(status int, headers http.Header, body []byte) (bool, *time.Duration) {
+	exhausted, resetAfter := helps.GoogleQuotaExhaustion(status, headers, body, time.Now())
+	if status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body) {
+		exhausted = true
+	}
+	return exhausted, resetAfter
 }
 
 // isOpenAIInsufficientQuotaError reports whether body is an OpenAI
