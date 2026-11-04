@@ -420,6 +420,16 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota.Signals = observation.Signals
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 		}
+		if before, after := quotaAccountIdentity(existing), quotaAccountIdentity(auth); before != "" && after != "" && before != after {
+			// The file now holds a different account, so the preserved passive
+			// snapshot describes the former account's quota.
+			auth.Quota.ClearObservationSignals()
+			for _, state := range auth.ModelStates {
+				if state != nil {
+					state.Quota.ClearObservationSignals()
+				}
+			}
+		}
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 			applyPreservedRenewalState(existing, auth, mode, now)

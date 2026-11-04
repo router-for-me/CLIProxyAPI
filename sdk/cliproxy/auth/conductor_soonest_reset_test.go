@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -257,5 +259,90 @@ func TestMarkResultKeepsNewerResetOverLateUnrelatedMerge(t *testing.T) {
 	reset, okReset := quotaWindowReset(auth)
 	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) || !auth.Quota.ObservedAt.Equal(t2) {
 		t.Fatalf("reset = %v (observed %v); want %v observed at %v", reset, auth.Quota.ObservedAt, want, t2)
+	}
+}
+
+func TestUpdateClearsQuotaObservationWhenAccountChanges(t *testing.T) {
+	resetAt := time.Now().Add(48 * time.Hour)
+	reload := func(manager *Manager, id, email string) *Auth {
+		t.Helper()
+		data := []byte(`{"type":"codex","email":"` + email + `"}`)
+		path := filepath.Join(t.TempDir(), id+".json")
+		if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
+			t.Fatalf("write auth file: %v", errWrite)
+		}
+		snapshot := &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"email": email}}
+		snapshot.BindFileSnapshot(path, data)
+		if _, errUpdate := manager.Update(context.Background(), snapshot); errUpdate != nil {
+			t.Fatalf("Update(%s) error = %v", id, errUpdate)
+		}
+		auth, ok := manager.GetByID(id)
+		if !ok || auth == nil {
+			t.Fatalf("GetByID(%s) failed", id)
+		}
+		return auth
+	}
+
+	for _, tc := range []struct {
+		name      string
+		newEmail  string
+		wantKnown bool
+	}{
+		{name: "same account keeps the snapshot", newEmail: "first@example.com", wantKnown: true},
+		{name: "different account drops the snapshot", newEmail: "second@example.com", wantKnown: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, &SoonestResetSelector{}, nil)
+			id := "soonest-reset-account-" + strconv.FormatBool(tc.wantKnown)
+			if _, errRegister := manager.Register(context.Background(), &Auth{
+				ID:       id,
+				Provider: "codex",
+				Status:   StatusActive,
+				Metadata: map[string]any{"email": "first@example.com"},
+				Quota:    codexWeeklySignals(resetAt),
+			}); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", id, errRegister)
+			}
+
+			auth := reload(manager, id, tc.newEmail)
+			if _, known := quotaWindowReset(auth); known != tc.wantKnown {
+				t.Fatalf("reset known after reload = %v, want %v; quota=%#v", known, tc.wantKnown, auth.Quota)
+			}
+		})
+	}
+}
+
+func TestMarkResultPrefersNewerRelativeResetOverRetainedAbsolute(t *testing.T) {
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	const id = "soonest-reset-sibling"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", id, errRegister)
+	}
+
+	t1 := time.Now().Add(-20 * time.Minute)
+	t2 := t1.Add(10 * time.Minute)
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	// The first frame describes the old window with both representations.
+	internallogging.SetResponseHeadersAt(ctx, http.Header{
+		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
+		"X-Codex-Primary-Reset-At":            []string{strconv.FormatInt(t1.Add(time.Hour).Unix(), 10)},
+		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
+	}, t1)
+	// After the rollover a quota frame updates only the relative value.
+	internallogging.MergeResponseHeadersAt(ctx, http.Header{
+		"X-Codex-Primary-Reset-After-Seconds": []string{strconv.Itoa(int((7 * 24 * time.Hour).Seconds()))},
+	}, t2)
+	manager.MarkResult(ctx, Result{AuthID: id, Provider: "codex", Success: true})
+
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil {
+		t.Fatalf("GetByID(%s) failed", id)
+	}
+	if _, stale := auth.Quota.Signals["X-Codex-Primary-Reset-At"]; stale {
+		t.Fatalf("superseded Reset-At kept: %#v", auth.Quota.Signals)
+	}
+	reset, okReset := quotaWindowReset(auth)
+	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) {
+		t.Fatalf("reset = %v, %v; want %v", reset, okReset, want)
 	}
 }

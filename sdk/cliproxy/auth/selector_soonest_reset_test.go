@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -191,6 +192,43 @@ func TestQuotaWindowResetAt(t *testing.T) {
 			}},
 			want: fiveHour,
 			ok:   true,
+		},
+		{
+			name:     "claude accepts an RFC3339 reset",
+			provider: "claude",
+			quota: QuotaState{Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-7d-Reset": weekly.UTC().Format(time.RFC3339),
+			}},
+			want: weekly,
+			ok:   true,
+		},
+		{
+			name:     "claude accepts an HTTP date reset",
+			provider: "claude",
+			quota: QuotaState{Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Reset": weekly.UTC().Format(http.TimeFormat),
+			}},
+			want: weekly,
+			ok:   true,
+		},
+		{
+			name:     "claude rejects the overage billing boundary",
+			provider: "claude",
+			quota: QuotaState{Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Representative-Claim": "overage",
+				"Anthropic-Ratelimit-Unified-Reset":                strconv.FormatInt(weekly.Unix(), 10),
+				"Anthropic-Ratelimit-Unified-Overage-Reset":        strconv.FormatInt(weekly.Unix(), 10),
+			}},
+		},
+		{
+			name:     "claude rejects a representative reset beyond the 7d window",
+			provider: "claude",
+			quota: QuotaState{
+				ObservedAt: now,
+				Signals: map[string]string{
+					"Anthropic-Ratelimit-Unified-Reset": strconv.FormatInt(now.Add(20*24*time.Hour).Unix(), 10),
+				},
+			},
 		},
 		{
 			name:     "past reset is ignored",

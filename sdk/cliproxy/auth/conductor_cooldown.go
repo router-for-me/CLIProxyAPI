@@ -1371,14 +1371,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			headerReceivedAt := func(name string) time.Time {
 				return internallogging.GetResponseHeaderReceivedAt(ctx, name)
 			}
-			observedAt := quotaResetReceivedAt(responseHeaders, headerReceivedAt)
+			currentHeaders := dropSupersededResetHeaders(responseHeaders, headerReceivedAt)
+			observedAt := quotaResetReceivedAt(currentHeaders, headerReceivedAt)
 			if observedAt.IsZero() {
 				observedAt = internallogging.GetResponseHeadersReceivedAt(ctx)
 			}
 			if observedAt.IsZero() || observedAt.After(now) {
 				observedAt = now
 			}
-			observedHeaders := rebaseRelativeQuotaHeaders(responseHeaders, observedAt, headerReceivedAt)
+			observedHeaders := rebaseRelativeQuotaHeaders(currentHeaders, observedAt, headerReceivedAt)
 			auth.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)
 			if modelState != nil {
 				modelState.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)

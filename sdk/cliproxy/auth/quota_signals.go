@@ -55,6 +55,23 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	return true
 }
 
+// quotaAccountIdentity identifies whose quota a passive snapshot describes:
+// the provider plus the account email and, when present, the upstream account
+// ID. It is empty when the auth carries no account identity.
+func quotaAccountIdentity(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	_, account := auth.AccountInfo()
+	if accountID, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+		account += "|" + strings.TrimSpace(accountID)
+	}
+	if account == "" {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(auth.Provider)) + "|" + account
+}
+
 // observeResponseHeadersIfNotOlder applies an observation unless the snapshot
 // already holds a newer one. Observations are stamped at header receipt, and
 // concurrent requests on one credential can finish out of order, so an older
@@ -64,6 +81,44 @@ func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers h
 		return false
 	}
 	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
+}
+
+// dropSupersededResetHeaders removes the older of a window's absolute
+// (-Reset-At) and relative (-Reset-After-Seconds) reset values when they were
+// received at different times. A websocket frame can update only one of them
+// while the holder keeps the other from an earlier frame, which may describe
+// the previous window. headers is not modified.
+func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) time.Time) http.Header {
+	if len(headers) == 0 || receivedAt == nil {
+		return headers
+	}
+	const relativeSuffix = "-reset-after-seconds"
+	result := headers
+	cloned := false
+	for key := range headers {
+		lower := strings.ToLower(key)
+		if !strings.HasSuffix(lower, relativeSuffix) {
+			continue
+		}
+		absoluteKey := http.CanonicalHeaderKey(key[:len(key)-len(relativeSuffix)] + "-Reset-At")
+		if _, ok := headers[absoluteKey]; !ok {
+			continue
+		}
+		relativeAt, absoluteAt := receivedAt(key), receivedAt(absoluteKey)
+		if relativeAt.Equal(absoluteAt) {
+			continue
+		}
+		if !cloned {
+			result = headers.Clone()
+			cloned = true
+		}
+		if relativeAt.After(absoluteAt) {
+			delete(result, absoluteKey)
+		} else {
+			delete(result, key)
+		}
+	}
+	return result
 }
 
 // quotaResetReceivedAt returns the newest receipt time among the reset headers

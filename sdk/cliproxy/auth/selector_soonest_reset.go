@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,13 +81,16 @@ func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth
 		if _, known := quotaWindowReset(candidate); known {
 			continue
 		}
-		if last, ok := s.probedAt[candidate.ID]; ok && now.Sub(last) < soonestResetProbeInterval {
+		// Key by account too, so an account swapped into the same auth ID is
+		// probed without waiting for the former account's interval.
+		key := candidate.ID + "\x00" + quotaAccountIdentity(candidate)
+		if last, ok := s.probedAt[key]; ok && now.Sub(last) < soonestResetProbeInterval {
 			continue
 		}
 		if s.probedAt == nil {
 			s.probedAt = make(map[string]time.Time)
 		}
-		s.probedAt[candidate.ID] = now
+		s.probedAt[key] = now
 		return candidate
 	}
 	return nil
@@ -140,18 +144,18 @@ func quotaWindowReset(auth *Auth) (time.Time, bool) {
 			}
 		}
 	case "claude":
-		for _, key := range []string{"Anthropic-Ratelimit-Unified-7d-Reset", "Anthropic-Ratelimit-Unified-Reset"} {
-			if parsed, ok := parseUnixSeconds(signals[key]); ok {
-				reset = parsed
-				break
-			}
+		if parsed, ok := parseResetTimestamp(signals["Anthropic-Ratelimit-Unified-7d-Reset"]); ok {
+			reset = parsed
+		} else if parsed, ok := parseResetTimestamp(signals["Anthropic-Ratelimit-Unified-Reset"]); ok &&
+			!claudeResetIsBillingBoundary(signals, parsed, auth.Quota.ObservedAt) {
+			reset = parsed
 		}
 	}
 	return reset, !reset.IsZero()
 }
 
 func codexWindowResetAt(signals map[string]string, prefix string, observedAt time.Time) (time.Time, bool) {
-	if reset, ok := parseUnixSeconds(signals[prefix+"Reset-At"]); ok {
+	if reset, ok := parseResetTimestamp(signals[prefix+"Reset-At"]); ok {
 		return reset, true
 	}
 	if observedAt.IsZero() {
@@ -164,11 +168,39 @@ func codexWindowResetAt(signals map[string]string, prefix string, observedAt tim
 	return observedAt.Add(time.Duration(after * float64(time.Second))), true
 }
 
-func parseUnixSeconds(raw string) (time.Time, bool) {
-	seconds, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil || seconds <= 0 {
+// claudeResetIsBillingBoundary reports whether a representative unified reset
+// is the monthly overage billing boundary rather than a quota-window reset:
+// either the representative claim is overage and the reset equals the
+// overage reset, or the reset lies beyond the longest (7d) quota window.
+func claudeResetIsBillingBoundary(signals map[string]string, reset, observedAt time.Time) bool {
+	claim := strings.ToLower(strings.TrimSpace(signals["Anthropic-Ratelimit-Unified-Representative-Claim"]))
+	if strings.Contains(claim, "overage") {
+		if overageReset, ok := parseResetTimestamp(signals["Anthropic-Ratelimit-Unified-Overage-Reset"]); ok && overageReset.Equal(reset) {
+			return true
+		}
+	}
+	return !observedAt.IsZero() && reset.Sub(observedAt) > 7*24*time.Hour+time.Hour
+}
+
+// parseResetTimestamp accepts the reset formats upstreams send: Unix seconds
+// (optionally fractional), RFC3339, or an HTTP date.
+func parseResetTimestamp(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return time.Time{}, false
 	}
-	whole := int64(seconds)
-	return time.Unix(whole, int64((seconds-float64(whole))*1e9)), true
+	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
+		if seconds <= 0 {
+			return time.Time{}, false
+		}
+		whole := int64(seconds)
+		return time.Unix(whole, int64((seconds-float64(whole))*1e9)), true
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		return parsed, true
+	}
+	if parsed, err := http.ParseTime(raw); err == nil {
+		return parsed, true
+	}
+	return time.Time{}, false
 }
