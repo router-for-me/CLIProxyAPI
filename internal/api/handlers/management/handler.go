@@ -245,7 +245,12 @@ func (h *Handler) validateConfigLocked(c *gin.Context, candidate *config.Config)
 	if h.configValidator == nil || !c.GetBool(ConfigV8ContextKey) {
 		return true
 	}
-	if err := h.configValidator(candidate.CloneForRuntime()); err != nil {
+	// Validate what the runtime publishes: Home mode overrides several local settings.
+	snapshot := candidate.CloneForRuntime()
+	if snapshot.Home.Enabled {
+		config.ForceHomeRuntimeConfig(snapshot)
+	}
+	if err := h.configValidator(snapshot); err != nil {
 		if candidate == h.cfg {
 			h.cfg = h.acceptedConfig.CloneForRuntime()
 		}

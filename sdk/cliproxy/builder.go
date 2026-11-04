@@ -9,6 +9,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v8/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -216,7 +217,7 @@ func (b *Builder) Build() (*Service, error) {
 		// Validate what Run will publish: Home mode rewrites several runtime controls.
 		snapshot := b.cfg.CloneForRuntime()
 		if snapshot.Home.Enabled {
-			forceHomeRuntimeConfig(snapshot)
+			internalconfig.ForceHomeRuntimeConfig(snapshot)
 		}
 		if errValidate := b.hooks.ValidateConfig(snapshot); errValidate != nil {
 			return nil, fmt.Errorf("cliproxy: validate application config: %w", errValidate)

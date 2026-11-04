@@ -29,3 +29,18 @@ func NormalizeHomePort(port int) int {
 	}
 	return port
 }
+
+// ForceHomeRuntimeConfig applies the runtime controls Home mode owns.
+func ForceHomeRuntimeConfig(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.APIKeys = nil
+	cfg.UsageStatisticsEnabled = true
+	cfg.DisableCooling = true
+	cfg.SaveCooldownStatus = false
+	cfg.WebsocketAuth = true
+	cfg.RemoteManagement.AllowRemote = false
+	cfg.RemoteManagement.DisableControlPanel = true
+	cfg.Plugins.StoreAuth = nil
+}

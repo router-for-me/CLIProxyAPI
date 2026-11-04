@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -61,7 +62,7 @@ func (s *Service) Run(ctx context.Context) error {
 	homeEnabled := cfg != nil && cfg.Home.Enabled
 	if homeEnabled {
 		s.cfgMu.Lock()
-		forceHomeRuntimeConfig(s.cfg)
+		internalconfig.ForceHomeRuntimeConfig(s.cfg)
 		cfg = s.cfg
 		s.cfgMu.Unlock()
 		redisqueue.SetUsageStatisticsEnabled(true)

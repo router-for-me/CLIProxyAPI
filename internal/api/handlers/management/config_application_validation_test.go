@@ -91,6 +91,38 @@ func TestApplicationValidationRejectsManagementWritesBeforePublishing(t *testing
 	}
 }
 
+func TestApplicationValidationSeesHomeRuntimeConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("host: 127.0.0.1\nport: 8317\napi-keys: [client]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Home.Enabled = true
+	h := NewHandler(cfg, path, nil)
+	// Home mode clears local API keys at runtime, so the application must not
+	// judge a save by the stale keys still on disk.
+	h.SetConfigValidator(func(next *config.Config) error {
+		if len(next.APIKeys) > 0 {
+			return errors.New("home runtime config must not carry local api keys")
+		}
+		return nil
+	})
+	router := gin.New()
+	router.PATCH("/v8/management/config", func(c *gin.Context) { c.Set(ConfigV8ContextKey, true) }, h.ConfigV8)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"server":{"port":8318}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Home-mode save validated against stale local config: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(h.cfg.APIKeys) != 1 {
+		t.Fatal("validation rewrote the handler config instead of a clone")
+	}
+}
+
 func TestApplicationValidationRejectsPluginDeleteBeforeRemovingArtifact(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	pluginsDir := writeManagementPluginFile(t, "sample")

@@ -355,17 +355,3 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 	}
 	s.runModelRegistrationTasks(registrationCtx, tasks)
 }
-
-func forceHomeRuntimeConfig(cfg *config.Config) {
-	if cfg == nil {
-		return
-	}
-	cfg.APIKeys = nil
-	cfg.UsageStatisticsEnabled = true
-	cfg.DisableCooling = true
-	cfg.SaveCooldownStatus = false
-	cfg.WebsocketAuth = true
-	cfg.RemoteManagement.AllowRemote = false
-	cfg.RemoteManagement.DisableControlPanel = true
-	cfg.Plugins.StoreAuth = nil
-}
