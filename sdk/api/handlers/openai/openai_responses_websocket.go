@@ -201,9 +201,13 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	return true, errClose
 }
 
-func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
+func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error, wsTimelineLog ...websocketTimelineAppender) {
 	if w == nil || w.conn == nil {
 		return
+	}
+	var timelineLog websocketTimelineAppender
+	if len(wsTimelineLog) > 0 {
+		timelineLog = wsTimelineLog[0]
 	}
 	if matched, _ := w.closeForUpstreamError(err); matched {
 		return
@@ -211,6 +215,9 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 
 	errMsg := handlers.ExecutionErrorMessage(err)
 	if !shouldExposeResponsesUpstreamError(errMsg) {
+		if timelineLog != nil && errMsg != nil {
+			appendWebsocketTimelineDisconnect(timelineLog, errMsg.Error, time.Now())
+		}
 		_, _ = w.closeWithoutError()
 		return
 	}
@@ -221,6 +228,9 @@ func (w *responsesWebsocketWriter) closeForUpstreamDisconnect(err error) {
 	}
 	wrote, errClose := w.closeWithPayload(payload)
 	if wrote {
+		if timelineLog != nil {
+			timelineLog.Append("response", payload, time.Now())
+		}
 		log.Infof(
 			"responses websocket: downstream_out disconnect_error event=%s payload=%s",
 			websocketPayloadEventType(payload),
@@ -416,7 +426,10 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 								// OAuth-only steering still leaves API keys in normal mode.
 								return
 							}
-							writer.closeForUpstreamDisconnect(disconnectErr)
+							if disconnectErr != nil {
+								h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), handlers.ExecutionErrorMessage(disconnectErr))
+							}
+							writer.closeForUpstreamDisconnect(disconnectErr, wsTimelineLog)
 						}
 					}()
 				}

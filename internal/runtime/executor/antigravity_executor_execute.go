@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -436,6 +437,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		payload := helps.JSONPayload(line)
 		if payload == nil {
 			continue
+		}
+		if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(payload); blocked {
+			filterErr := statusErr{code: http.StatusBadRequest, msg: filterMsg}
+			_ = httpResp.Body.Close()
+			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+			reporter.PublishFailure(ctx, filterErr)
+			return resp, filterErr
 		}
 		reporter.ObserveResponseModel(payload)
 		rawPayloads = append(rawPayloads, bytes.Clone(payload))

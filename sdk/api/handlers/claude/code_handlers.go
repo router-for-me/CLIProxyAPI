@@ -489,7 +489,8 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			if errMsg == nil {
 				return
 			}
-			if state.sawErrorEvent {
+			h.LoggingAPIResponseError(c, errMsg)
+			if state.sawErrorEvent || (state.sawMessageStop && clienterror.IsClaudePolicyRefusalError(errMsg.Error)) {
 				state.ensureSSEEventBoundary(c.Writer)
 				return
 			}

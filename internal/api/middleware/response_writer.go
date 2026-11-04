@@ -171,7 +171,14 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 		return false
 	}
 	status := w.effectiveStatusCode()
-	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
+	if status == clienterror.StatusClientClosedRequest {
+		return false
+	}
+	if status >= http.StatusBadRequest {
+		return true
+	}
+	const maxDeferredErrorStreamBodyBytes = 256 << 10 // 256 KiB
+	return w.body != nil && w.body.Len() < maxDeferredErrorStreamBodyBytes
 }
 
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
@@ -379,6 +386,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			slicesAPIResponseError = apiErrors
 		}
 	}
+	if finalStatusCode < http.StatusBadRequest {
+		if errStatus := actionableAPIResponseErrorStatus(slicesAPIResponseError); errStatus >= http.StatusBadRequest {
+			finalStatusCode = errStatus
+		}
+	}
 
 	hasAPIError := w.panicked || hasActionableError(c, finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
@@ -451,6 +463,14 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+		}
+		if finalStatusCode >= http.StatusBadRequest {
+			_ = w.streamWriter.WriteStatus(finalStatusCode, nil)
+		}
+		if errWriter, ok := w.streamWriter.(interface {
+			WriteAPIResponseErrors([]*interfaces.ErrorMessage) error
+		}); ok && len(slicesAPIResponseError) > 0 {
+			_ = errWriter.WriteAPIResponseErrors(slicesAPIResponseError)
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
@@ -831,6 +851,22 @@ func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
 		}
 	}
 	return false
+}
+
+func actionableAPIResponseErrorStatus(apiErrors []*interfaces.ErrorMessage) int {
+	for i := len(apiErrors) - 1; i >= 0; i-- {
+		errMsg := apiErrors[i]
+		if isClientCancellationErrorMessage(errMsg) {
+			continue
+		}
+		if errMsg.StatusCode >= http.StatusBadRequest && errMsg.StatusCode != clienterror.StatusClientClosedRequest {
+			return errMsg.StatusCode
+		}
+		if status := clienterror.HTTPStatusFromError(errMsg.Error); status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest {
+			return status
+		}
+	}
+	return 0
 }
 
 func isContextCanceled(c *gin.Context) bool {

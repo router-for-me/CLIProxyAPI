@@ -269,7 +269,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
 				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
-				if eventType == wsEventTypeError && !preserveErrorEvent {
+				if eventType == wsEventTypeError && preserveErrorEvent {
+					turnEnded = true
+					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
+						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					}
+				} else if eventType == wsEventTypeError && !preserveErrorEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)

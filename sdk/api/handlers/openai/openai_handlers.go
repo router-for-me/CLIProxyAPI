@@ -832,10 +832,17 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
 		ChunkError: func() *interfaces.ErrorMessage {
+			if terminalChunkErr != nil {
+				h.LoggingAPIResponseError(c, terminalChunkErr)
+			}
 			return terminalChunkErr
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil || terminalChunkErr != nil {
+			if errMsg == nil {
+				return
+			}
+			h.LoggingAPIResponseError(c, errMsg)
+			if terminalChunkErr != nil {
 				return
 			}
 			status := http.StatusInternalServerError

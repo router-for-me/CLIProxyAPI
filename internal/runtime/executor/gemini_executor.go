@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -413,6 +414,18 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: blockErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				filterErr := statusErr{code: http.StatusBadRequest, msg: filterMsg}
+				helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+				if !streamUsage.PublishFailure(ctx, reporter, filterErr) {
+					reporter.PublishFailure(ctx, filterErr)
+				}
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: filterErr}:
 				case <-ctx.Done():
 				}
 				return
