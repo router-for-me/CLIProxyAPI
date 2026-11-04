@@ -340,8 +340,13 @@ func (h *Host) InterceptResponseExcept(ctx context.Context, req pluginapi.Respon
 		nextReq := req
 		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
-		nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
-		nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		if responseInterceptorOmitsRequestBody(record) {
+			nextReq.OriginalRequest = nil
+			nextReq.RequestBody = nil
+		} else {
+			nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
+			nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		}
 		nextReq.Body = bytes.Clone(current.Body)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
 		if resp, ok := h.callResponseInterceptor(ctx, record, interceptor, nextReq); ok {
@@ -374,7 +379,8 @@ func (h *Host) InterceptStreamChunkExcept(ctx context.Context, req pluginapi.Str
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
 		// Schema v3+ omits request bodies on payload chunks to avoid re-sending multi-MB
 		// prompts across cgo/JSON for every frame. Legacy plugins still receive them.
-		if req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex && streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
+		if streamChunkInterceptorOmitsRequestBody(record) ||
+			req.ChunkIndex != pluginapi.StreamChunkHeaderInitIndex && streamChunkOmitsRequestBodies(record.plugin.SchemaVersion) {
 			nextReq.OriginalRequest = nil
 			nextReq.RequestBody = nil
 		} else {
@@ -467,6 +473,16 @@ func requestInterceptorOmitsBody(record capabilityRecord, beforeAuth bool) bool 
 		return false
 	}
 	return requestInterceptorWantsOmitBody(caps, beforeAuth)
+}
+
+func responseInterceptorOmitsRequestBody(record capabilityRecord) bool {
+	return record.plugin.SchemaVersion >= pluginabi.SchemaVersionResponseInterceptorOmitRequestBody &&
+		record.plugin.Capabilities.ResponseInterceptorOmitRequestBody
+}
+
+func streamChunkInterceptorOmitsRequestBody(record capabilityRecord) bool {
+	return record.plugin.SchemaVersion >= pluginabi.SchemaVersionResponseInterceptorOmitRequestBody &&
+		record.plugin.Capabilities.StreamChunkInterceptorOmitRequestBody
 }
 
 func streamChunkOmitsHistory(schemaVersion uint32) bool {

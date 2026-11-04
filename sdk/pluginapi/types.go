@@ -149,8 +149,16 @@ type Capabilities struct {
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
+	// ResponseInterceptorOmitRequestBody opts out of receiving ResponseInterceptRequest.OriginalRequest
+	// and ResponseInterceptRequest.RequestBody. It is honored only on schema version 7+; the host then
+	// skips cloning and Base64-encoding both request payloads for every intercepted response.
+	ResponseInterceptorOmitRequestBody bool
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// StreamChunkInterceptorOmitRequestBody opts out of receiving StreamChunkInterceptRequest.OriginalRequest
+	// and StreamChunkInterceptRequest.RequestBody on the header-init chunk as well; payload chunks
+	// already omit them from schema version 3. It is honored only on schema version 7+.
+	StreamChunkInterceptorOmitRequestBody bool
 	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.

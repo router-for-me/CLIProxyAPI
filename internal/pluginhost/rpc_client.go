@@ -208,9 +208,11 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	}
 	if resp.Capabilities.ResponseInterceptor {
 		plugin.Capabilities.ResponseInterceptor = adapter
+		plugin.Capabilities.ResponseInterceptorOmitRequestBody = resp.Capabilities.ResponseInterceptorOmitRequest
 	}
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
+		plugin.Capabilities.StreamChunkInterceptorOmitRequestBody = resp.Capabilities.StreamChunkInterceptorOmitRequest
 	}
 	if resp.Capabilities.WebSocketResponseObserver {
 		plugin.Capabilities.WebSocketResponseObserver = adapter

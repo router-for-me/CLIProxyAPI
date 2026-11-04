@@ -427,6 +427,99 @@ func TestRPCRequestInterceptorOmitsBodyOnTheWireForSchema7(t *testing.T) {
 	}
 }
 
+type recordingResponseInterceptor struct {
+	response []pluginapi.ResponseInterceptRequest
+	chunks   []pluginapi.StreamChunkInterceptRequest
+}
+
+func (r *recordingResponseInterceptor) InterceptResponse(_ context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+	r.response = append(r.response, req)
+	return pluginapi.ResponseInterceptResponse{}, nil
+}
+
+func (r *recordingResponseInterceptor) InterceptStreamChunk(_ context.Context, req pluginapi.StreamChunkInterceptRequest) (pluginapi.StreamChunkInterceptResponse, error) {
+	r.chunks = append(r.chunks, req)
+	return pluginapi.StreamChunkInterceptResponse{}, nil
+}
+
+func TestRPCCapabilitiesIncludeResponseInterceptorOmitRequestBody(t *testing.T) {
+	recorder := &recordingResponseInterceptor{}
+	caps := rpcCapabilitiesFromPlugin(pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+		ResponseInterceptor:                   recorder,
+		ResponseInterceptorOmitRequestBody:    true,
+		StreamChunkInterceptor:                recorder,
+		StreamChunkInterceptorOmitRequestBody: true,
+	}})
+	raw, errMarshal := json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	for _, key := range []string{"response_interceptor_omit_request_body", "response_stream_interceptor_omit_request_body"} {
+		if decoded[key] != true {
+			t.Fatalf("%s = %#v, want true", key, decoded[key])
+		}
+	}
+}
+
+func TestRPCResponseInterceptorsOmitRequestBodyOnTheWireForSchema7(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema uint32
+		omit   bool
+		want   int
+	}{
+		{name: "opted out", schema: pluginabi.SchemaVersionResponseInterceptorOmitRequestBody, omit: true, want: 0},
+		{name: "not opted out", schema: pluginabi.SchemaVersionResponseInterceptorOmitRequestBody, want: len("request")},
+		{name: "opted out below schema 7", schema: pluginabi.SchemaVersionResponseInterceptorOmitRequestBody - 1, omit: true, want: len("request")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &recordingResponseInterceptor{}
+			plugin := validTestPlugin("omit-response")
+			plugin.Capabilities.ResponseInterceptor = recorder
+			plugin.Capabilities.ResponseInterceptorOmitRequestBody = tc.omit
+			plugin.Capabilities.StreamChunkInterceptor = recorder
+			plugin.Capabilities.StreamChunkInterceptorOmitRequestBody = tc.omit
+			lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+			lookup.schemaVersion = tc.schema
+			registered, errRegister := registerRPCPlugin(context.Background(), nil, "omit-response", lookup, pluginabi.MethodPluginRegister, nil)
+			if errRegister != nil {
+				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+			}
+			host := newHostWithRecords(capabilityRecord{id: "omit-response", plugin: registered})
+
+			out := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+				RequestID: "req", OriginalRequest: []byte("request"), RequestBody: []byte("request"), Body: []byte("response"),
+			})
+			_ = host.InterceptStreamChunk(context.Background(), pluginapi.StreamChunkInterceptRequest{
+				RequestID: "req", ChunkIndex: pluginapi.StreamChunkHeaderInitIndex,
+				OriginalRequest: []byte("request"), RequestBody: []byte("request"), Body: []byte("chunk"),
+			})
+
+			if len(recorder.response) != 1 || len(recorder.chunks) != 1 {
+				t.Fatalf("calls = %d response, %d chunk; want 1 each", len(recorder.response), len(recorder.chunks))
+			}
+			got := recorder.response[0]
+			if len(got.OriginalRequest) != tc.want || len(got.RequestBody) != tc.want {
+				t.Fatalf("response request bodies = %d/%d bytes, want %d", len(got.OriginalRequest), len(got.RequestBody), tc.want)
+			}
+			if string(got.Body) != "response" || string(out.Body) != "response" {
+				t.Fatalf("response body = %q, delivered %q; want it untouched", got.Body, out.Body)
+			}
+			chunk := recorder.chunks[0]
+			if len(chunk.OriginalRequest) != tc.want || len(chunk.RequestBody) != tc.want {
+				t.Fatalf("header-init request bodies = %d/%d bytes, want %d", len(chunk.OriginalRequest), len(chunk.RequestBody), tc.want)
+			}
+			if string(chunk.Body) != "chunk" {
+				t.Fatalf("chunk body = %q, want chunk", chunk.Body)
+			}
+		})
+	}
+}
+
 type phaseRecordingInterceptor struct {
 	beforeGot   pluginapi.RequestInterceptRequest
 	afterGot    pluginapi.RequestInterceptRequest
