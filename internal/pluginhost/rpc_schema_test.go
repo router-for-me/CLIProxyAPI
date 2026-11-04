@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -454,13 +455,9 @@ func TestRPCCapabilitiesIncludeResponseInterceptorOmitRequestBody(t *testing.T) 
 	if errMarshal != nil {
 		t.Fatalf("Marshal() error = %v", errMarshal)
 	}
-	var decoded map[string]any
-	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
-		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
-	}
 	for _, key := range []string{"response_interceptor_omit_request_body", "response_stream_interceptor_omit_request_body"} {
-		if decoded[key] != true {
-			t.Fatalf("%s = %#v, want true", key, decoded[key])
+		if got := ojson.GetBytesNoCopy(raw, key); !got.Bool() {
+			t.Fatalf("%s = %s, want true", key, got.Raw)
 		}
 	}
 }
