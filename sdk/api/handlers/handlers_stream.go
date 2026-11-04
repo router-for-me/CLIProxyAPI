@@ -282,29 +282,65 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	originalRequestedModel := modelName
+	targets, conditions := h.modelFallbackPlan(modelName, execOptions)
+	if ctx != nil && !execOptions.InternalSource && execOptions.ForcedProvider == "" {
+		if plan, ok := ctx.Value(streamFallbackPlanKey{}).(streamFallbackPlan); ok && plan.model == modelName {
+			targets, conditions = plan.targets, plan.conditions
+		}
+	}
+	// Image/speech transports have their own early framing and are not part of
+	// the text-model fallback contract.
+	if allowImageModel || isModelExecutionSpeechProtocol(entryProtocol) {
+		targets = nil
+	}
+	if len(targets) == 0 {
+		dataChan, headers, errChan, _ := h.executeStreamModelAttempt(ctx, entryProtocol, exitProtocol, modelName, modelName, rawJSON, alt, allowImageModel, execOptions, false)
+		return dataChan, headers, errChan
+	}
+	var dataChan <-chan []byte
+	var headers http.Header
+	var errChan <-chan *interfaces.ErrorMessage
+	servedModel, failure := runModelFallbackPlan(ctx, modelName, targets, conditions, func(attemptModel string) *modelAttemptFailure {
+		var attemptFailure *modelAttemptFailure
+		dataChan, headers, errChan, attemptFailure = h.executeStreamModelAttempt(ctx, entryProtocol, exitProtocol, attemptModel, modelName, rawJSON, alt, allowImageModel, execOptions, true)
+		return attemptFailure
+	})
+	if failure != nil {
+		return nil, nil, closedStreamErrorChannel(failure.msg)
+	}
+	return dataChan, withModelFallbackHeader(headers, modelName, servedModel), errChan
+}
+
+// executeStreamModelAttempt runs one streaming execution of modelName on behalf of the
+// client-requested model. When returnFailures is true, every failure that happens before
+// the first byte is delivered is returned as a modelAttemptFailure instead of being
+// written to the error channel, so the model fallback driver can try another model.
+// Once a payload is ready for the client the stream is committed to this model.
+func (h *BaseAPIHandler) executeStreamModelAttempt(ctx context.Context, entryProtocol, exitProtocol, modelName, requestedModel string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions, returnFailures bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, *modelAttemptFailure) {
+	originalRequestedModel := requestedModel
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
-	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
+	// A prepared route belongs to the requested model, never to a fallback target.
+	routeDecision, preparedRoute := modelRouteDecision{}, false
+	if modelName == requestedModel {
+		routeDecision, preparedRoute = preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
+	}
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
+		return nil, nil, closedStreamErrorChannel(errMsg), terminalModelAttemptFailure(errMsg)
 	}
 	if routeDecision.ExecutorPluginID != "" {
-		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		dataChan, headers, errChan := h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		return dataChan, headers, errChan, nil
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	// modelName equals the requested model on the first attempt; fallback attempts
+	// resolve providers for their own target model.
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, modelName, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
+		return nil, nil, closedStreamErrorChannel(errMsg), unresolvedModelAttemptFailure(errMsg)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -351,29 +387,19 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- interceptErr
-		close(errChan)
-		return nil, nil, errChan
+		return nil, nil, closedStreamErrorChannel(interceptErr), terminalModelAttemptFailure(interceptErr)
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
+		errMsg := executionErrorMessage(enrichAuthSelectionError(err, providers, normalizedModel))
 		lifecycle.completeError(ctx, errMsg)
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
+		return nil, nil, closedStreamErrorChannel(errMsg), upstreamModelAttemptFailure(errMsg, err)
 	}
 	if streamResult == nil {
 		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("auth manager returned nil stream")}
 		lifecycle.completeError(ctx, errMsg)
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
+		return nil, nil, closedStreamErrorChannel(errMsg), terminalModelAttemptFailure(errMsg)
 	}
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
@@ -492,6 +518,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	var bootstrapHistoryChunks [][]byte
 	var bootstrapStreamErr error
 	var bootstrapErr *interfaces.ErrorMessage
+	// bootstrapUpstreamErr is the upstream error behind bootstrapErr. It stays nil for
+	// local failures (interceptors, SSE validation), which never trigger model fallback.
+	var bootstrapUpstreamErr error
 	readInitialStreamChunks := func() {
 		for {
 			chunk, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
@@ -549,6 +578,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
 			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			bootstrapUpstreamErr = bootstrapStreamErr
 			break
 		}
 		bootstrapRetries++
@@ -557,8 +587,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
+				bootstrapUpstreamErr = bootstrapStreamErr
 			} else {
 				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				bootstrapUpstreamErr = retryErr
 			}
 			break
 		}
@@ -583,6 +615,16 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			close(closed)
 			chunks = closed
 		}
+	}
+
+	// Nothing has been sent to the client yet, so the stream may still move to another model.
+	if returnFailures && bootstrapErr != nil && !streamCanceledBeforeRead {
+		lifecycle.completeError(ctx, bootstrapErr)
+		failure := terminalModelAttemptFailure(bootstrapErr)
+		if bootstrapUpstreamErr != nil {
+			failure = upstreamModelAttemptFailure(bootstrapErr, bootstrapUpstreamErr)
+		}
+		return nil, nil, closedStreamErrorChannel(bootstrapErr), failure
 	}
 
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
@@ -720,7 +762,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 		}
 	}()
-	return dataChan, upstreamHeaders, errChan
+	if modelName != originalRequestedModel {
+		executedReq, _ := executedRequest()
+		upstreamHeaders = withModelFallbackHeader(upstreamHeaders, originalRequestedModel, executedReq.Model)
+	}
+	return dataChan, upstreamHeaders, errChan, nil
+}
+
+func closedStreamErrorChannel(msg *interfaces.ErrorMessage) <-chan *interfaces.ErrorMessage {
+	errChan := make(chan *interfaces.ErrorMessage, 1)
+	errChan <- msg
+	close(errChan)
+	return errChan
 }
 
 type sseJSONValidationState struct {

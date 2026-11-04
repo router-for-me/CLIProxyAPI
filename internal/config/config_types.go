@@ -516,6 +516,10 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// ModelFallback configures declarative cross-model and cross-provider fallback chains.
+	// It is applied after all credentials of the requested model are exhausted.
+	ModelFallback ModelFallbackConfig `yaml:"model-fallback,omitempty" json:"model-fallback,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

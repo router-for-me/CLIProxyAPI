@@ -974,5 +974,8 @@ func ValidateV8Config(data []byte) error {
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
 	}
-	return cfg.Models.Validate()
+	if errValidate := cfg.Models.Validate(); errValidate != nil {
+		return errValidate
+	}
+	return cfg.Routing.ModelFallback.Validate()
 }

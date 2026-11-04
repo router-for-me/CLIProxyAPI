@@ -24,6 +24,14 @@ func (h *BaseAPIHandler) ExecuteStreamWithPreFTKeepAlive(
 	keepAliveC <-chan time.Time,
 	writeKeepAlive func() bool,
 ) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, bool) {
+	// Heartbeats commit the response, too. Buffer them until model selection is
+	// final for requests with a fallback chain. Pin the plan even when empty so a
+	// hot reload cannot enable fallback after the first heartbeat was written.
+	targets, conditions := h.modelFallbackPlan(modelName, modelExecutionOptions{})
+	cliCtx = context.WithValue(cliCtx, streamFallbackPlanKey{}, streamFallbackPlan{model: modelName, targets: targets, conditions: conditions})
+	if len(targets) > 0 {
+		keepAliveC = nil
+	}
 	if keepAliveC == nil {
 		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, handlerType, modelName, rawJSON, alt)
 		return dataChan, upstreamHeaders, errChan, true

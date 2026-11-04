@@ -190,7 +190,7 @@ routing:
   #   - "any" (default): any credential-attributed failure unbinds and rebinds on failover.
   #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
   #     request only while keeping the session bound to its original credential; quota and auth
-  #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  #     errors (429, 401/402, 404/model support, invalid_grant) rebind as normal.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
 
@@ -233,6 +233,34 @@ routing:
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
+
+  # Declarative cross-model and cross-provider fallback chains.
+  # When every credential of the requested model has failed (after the retry and cooldown
+  # rules above), the same request is retried with the next model of its chain.
+  # Streaming requests only switch before the first byte reaches the client.
+  # The client-requested model stays in request metadata and usage records (alias);
+  # usage is attributed to the model that actually served the request.
+  # Responses served by a fallback model carry an X-CPA-Fallback-Model header.
+  # Not applied while Home dispatch is enabled or when a route forces a provider.
+  # Pre-first-token heartbeats wait for bootstrap when a chain applies.
+  # Changes are hot reloaded for new requests; existing requests keep their chain.
+  # model-fallback:
+  #   enabled: false            # default: false
+  #   max-hops: 2               # fallback models tried per request (default 2, maximum 8)
+  #   # An explicit empty list matches nothing. Omitted default: [429, quota_exhausted, auth_unavailable, 529]
+  #   #   - HTTP statuses: 408, 429 and any 5xx code (request faults such as
+  #   #     400/401/403/404/413/422 are rejected)
+  #   #   - 5xx: every 5xx status
+  #   #   - quota_exhausted: 429, all-credentials cooldowns, and 402 responses with
+  #   #     provider quota markers (insufficient_quota, RESOURCE_EXHAUSTED, usage_limit...)
+  #   #   - auth_unavailable: no credential could be selected, or no provider serves the model
+  #   on: [429, quota_exhausted, auth_unavailable, 529]
+  #   # Requested model -> ordered fallback models. Keys match the full model name, then
+  #   # the name without a thinking suffix; a "(high)" suffix is carried to targets
+  #   # that do not set their own. Chains are not followed transitively.
+  #   chains:
+  #     gpt-6-astra: [claude-opus-5-5]
+  #     coder: [claude-opus-5-5, gpt-6.1-terra]
 
 # Shared request/response behavior.
 requests:
