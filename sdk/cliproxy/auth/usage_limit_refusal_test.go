@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -45,7 +47,7 @@ func registryRegister(t *testing.T, authID, provider, model string) {
 }
 
 func poolRefusal(m *Manager, now time.Time) *usageLimitRefusal {
-	return m.usageLimitRefusalForPool([]string{"codex"}, "gpt-5", authSelectionEligibility{}, "", now)
+	return m.usageLimitRefusalForPool([]string{"codex"}, "gpt-5", authSelectionEligibility{}, now)
 }
 
 func TestUsageLimitRefusalForPool(t *testing.T) {
@@ -235,7 +237,7 @@ func TestUsageLimitModeOpenAICompatAliasPool(t *testing.T) {
 		// One backend that can serve again keeps the retryable answer.
 		auth := m.auths["pool-auth-"+t.Name()]
 		delete(auth.ModelStates, m.stateModelForExecution(auth, "public", "backend-b", true))
-		if refusal := m.usageLimitRefusalForPool([]string{openAICompatPoolProviderKey}, "public", authSelectionEligibility{}, "", time.Now()); refusal != nil {
+		if refusal := m.usageLimitRefusalForPool([]string{openAICompatPoolProviderKey}, "public", authSelectionEligibility{}, time.Now()); refusal != nil {
 			t.Fatalf("%s: refusal = %+v with backend-b available", path, refusal)
 		}
 	}
@@ -324,6 +326,52 @@ func TestCanceledRequestKeepsQuotaResetOnlyInUsageLimitMode(t *testing.T) {
 		recorded := got.ModelStates["gpt-5"] != nil && got.ModelStates["gpt-5"].Quota.Exhausted
 		if recorded != (mode == "usage-limit") {
 			t.Fatalf("%s: quota exhaustion recorded = %t", mode, recorded)
+		}
+	}
+}
+
+// codexWeeklyRefusal is a Codex usage_limit_reached whose body resets_in_seconds
+// (the retry hint) is earlier than the reset of its exhausted weekly window.
+type codexWeeklyRefusal struct{ hint time.Duration }
+
+func (codexWeeklyRefusal) Error() string                   { return `{"error":{"type":"usage_limit_reached"}}` }
+func (codexWeeklyRefusal) StatusCode() int                 { return http.StatusTooManyRequests }
+func (e codexWeeklyRefusal) RetryAfter() *time.Duration    { return &e.hint }
+func (codexWeeklyRefusal) IsCredentialScoped() bool        { return true }
+func (codexWeeklyRefusal) IsQuotaExhausted() bool          { return true }
+func (codexWeeklyRefusal) QuotaLimitWindowMinutes() int64  { return 10080 }
+func (codexWeeklyRefusal) QuotaResetAfter() *time.Duration { d := 72 * time.Hour; return &d }
+
+// The usage-limit mode cools the credential until its exhausted window resets
+// and reports that reset; the default mode keeps the retry hint's cooldown.
+func TestUsageLimitModeUsesExhaustedWindowResetOverEarlierHint(t *testing.T) {
+	t.Cleanup(func() { SetQuotaCooldownResponseMode("") })
+	for _, mode := range []string{"retryable", "usage-limit"} {
+		for _, hint := range []time.Duration{time.Hour, 5 * time.Minute} {
+			t.Run(fmt.Sprintf("%s/hint=%v", mode, hint), func(t *testing.T) {
+				SetQuotaCooldownResponseMode(mode)
+				m := NewManager(nil, nil, nil)
+				m.RegisterExecutor(&openAICompatPoolExecutor{id: "codex", executeErrors: map[string]error{"gpt-5": codexWeeklyRefusal{hint: hint}}})
+				if _, err := m.Register(WithSkipPersist(context.Background()), &Auth{ID: "auth-weekly", Provider: "codex", Status: StatusActive}); err != nil {
+					t.Fatal(err)
+				}
+				registryRegister(t, "auth-weekly", "codex", "gpt-5")
+				_, err := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5"}, cliproxyexecutor.Options{})
+				got, _ := m.GetByID("auth-weekly")
+				cooldown := time.Until(got.NextRetryAfter)
+				resetAt, usageLimit := UsageLimitResetAt(err)
+				if mode == "retryable" {
+					if usageLimit || cooldown > hint || cooldown < hint-time.Minute {
+						t.Fatalf("usage limit = %t, cooldown = %v, want the retryable answer and the %v hint", usageLimit, cooldown, hint)
+					}
+					return
+				}
+				headers, _ := UsageLimitResponseHeaders(err)
+				if !usageLimit || cooldown < 72*time.Hour-time.Minute || time.Until(resetAt) < 72*time.Hour-time.Minute ||
+					headers.Get("X-Codex-Secondary-Reset-At") != strconv.FormatInt(resetAt.Unix(), 10) {
+					t.Fatalf("usage limit = %t (reset in %v, headers %v), cooldown = %v, want the weekly reset 72h away", usageLimit, time.Until(resetAt), headers, cooldown)
+				}
+			})
 		}
 	}
 }

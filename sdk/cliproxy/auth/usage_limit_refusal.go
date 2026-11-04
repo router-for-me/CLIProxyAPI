@@ -172,8 +172,10 @@ func quotaExhaustionCovers(quota QuotaState, deadline, now time.Time) bool {
 // there is none, any of them can still serve the request or is blocked for
 // another reason, or the first reset is usageLimitMinResetIn away or closer.
 // Only explicit quota-exhaustion evidence tied to the blocking deadline
-// counts: a long or repeated generic 429 stays retryable.
-func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eligibility authSelectionEligibility, pinnedAuthID string, now time.Time) *usageLimitRefusal {
+// counts: a long or repeated generic 429 stays retryable. A credential pin on
+// the request is ignored: while another credential can serve the model, the
+// client's next request without the pin can still succeed.
+func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eligibility authSelectionEligibility, now time.Time) *usageLimitRefusal {
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		if key := canonicalSchedulingProvider(provider); key != "" {
@@ -187,7 +189,7 @@ func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eli
 	requirePositiveWeight := selectorRequiresPositiveWeight(m.selector)
 	var refusal *usageLimitRefusal
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || (pinnedAuthID != "" && auth.ID != pinnedAuthID) || !eligibility.allows(auth) {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || !eligibility.allows(auth) {
 			continue
 		}
 		if requirePositiveWeight && authWeight(auth) <= 0 {
@@ -256,7 +258,7 @@ func (m *Manager) usageLimitResponseError(ctx context.Context, providers []strin
 		return nil
 	}
 	now := time.Now()
-	refusal := m.usageLimitRefusalForPool(providers, model, authSelectionEligibilityForRequest(ctx, opts), pinnedAuthIDFromMetadata(opts.Metadata), now)
+	refusal := m.usageLimitRefusalForPool(providers, model, authSelectionEligibilityForRequest(ctx, opts), now)
 	if refusal == nil {
 		return nil
 	}

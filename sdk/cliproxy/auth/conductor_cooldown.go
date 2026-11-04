@@ -908,9 +908,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
-	if result.RetryAfter == nil && result.QuotaResetAfter != nil && QuotaCooldownUsageLimitModeEnabled() {
-		// Only the usage-limit mode must know when quota returns; the default
-		// mode keeps the cooldown it always had for such errors.
+	if result.QuotaResetAfter != nil && QuotaCooldownUsageLimitModeEnabled() &&
+		(result.RetryAfter == nil || *result.QuotaResetAfter > *result.RetryAfter) {
+		// Only the usage-limit mode must know when quota returns, which can be
+		// later than the retry hint (a Codex weekly window); the default mode
+		// keeps the cooldown it always had for such errors.
 		result.RetryAfter = result.QuotaResetAfter
 	}
 	if ctx == nil {

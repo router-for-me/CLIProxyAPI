@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
@@ -99,6 +100,7 @@ var quotaSurfaces = []quotaSurface{
 
 type quotaHarness struct {
 	router   *gin.Engine
+	base     *handlers.BaseAPIHandler
 	executor *quotaFakeExecutor
 	model    string
 }
@@ -129,7 +131,7 @@ func newQuotaHarness(t *testing.T, mode string, refusals ...quotaRefusal) *quota
 	router.POST("/v1/responses", openai.NewOpenAIResponsesAPIHandler(base).Responses)
 	router.POST("/v1/chat/completions", openai.NewOpenAIAPIHandler(base).ChatCompletions)
 	router.POST("/v1/messages", claude.NewClaudeCodeAPIHandler(base).ClaudeMessages)
-	return &quotaHarness{router: router, executor: executor, model: model}
+	return &quotaHarness{router: router, base: base, executor: executor, model: model}
 }
 
 func (h *quotaHarness) do(surface quotaSurface, stream bool) *httptest.ResponseRecorder {
@@ -257,4 +259,39 @@ func TestQuotaCooldownResponseModeSwitchAppliesToExistingCooldowns(t *testing.T)
 	assertUsageLimitResponse(t, surface, h.do(surface, true))
 	coreauth.SetQuotaCooldownResponseMode("retryable")
 	assertRetryableResponse(t, h.do(surface, true), true)
+}
+
+// A request pinned to one credential, as a plugin's model call naming an auth
+// ID, gets the final usage limit only when every credential is out of quota:
+// while another credential can still serve the model, the pinned request keeps
+// the retryable answer.
+func TestQuotaCooldownUsageLimitModePinnedRequestJudgesWholePool(t *testing.T) {
+	h := newQuotaHarness(t, "usage-limit", codexUsageLimit(2*time.Hour), codexUsageLimit(2*time.Hour))
+	pinnedCall := func(authIndex int) *interfaces.ErrorMessage {
+		_, errMsg := h.base.ExecuteModel(context.Background(), handlers.ModelExecutionRequest{
+			EntryProtocol: "openai",
+			ExitProtocol:  "openai",
+			Model:         h.model,
+			Body:          []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, h.model)),
+			AuthID:        fmt.Sprintf("%s-auth-%d", h.model, authIndex),
+		})
+		if errMsg == nil || errMsg.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("pinned call to auth %d = %+v, want a 429", authIndex, errMsg)
+		}
+		return errMsg
+	}
+
+	if errMsg := pinnedCall(0); coreauth.IsUsageLimitReachedError(errMsg.Error) {
+		t.Fatalf("pinned call with another credential still serving = %v, want the retryable answer", errMsg.Error)
+	}
+	errMsg := pinnedCall(1)
+	if !coreauth.IsUsageLimitReachedError(errMsg.Error) {
+		t.Fatalf("pinned call with every credential out = %v, want the final usage limit", errMsg.Error)
+	}
+	if resetAt, _ := coreauth.UsageLimitResetAt(errMsg.Error); resetAt.Sub(time.Now()) < 119*time.Minute {
+		t.Fatalf("usage-limit reset = %v, want about two hours from now", resetAt)
+	}
+	if got := h.executor.calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want one per pinned call", got)
+	}
 }
