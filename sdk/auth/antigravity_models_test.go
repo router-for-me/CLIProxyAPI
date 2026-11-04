@@ -86,6 +86,23 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 			t.Fatal("expected false for invalid JSON")
 		}
 	})
+
+	t.Run("clones model IDs out of caller buffer", func(t *testing.T) {
+		buf := []byte(`{"models":{"gemini-3-flash":{}},"webSearchModelIds":["gemini-3-flash"]}`)
+		hints, ok := ParseAntigravityModelCapabilityHints(buf)
+		if !ok {
+			t.Fatal("expected ok to be true")
+		}
+		for i := range buf {
+			buf[i] = 'x'
+		}
+		if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+			t.Fatal("expected gemini-3-flash in ModelIDs after buffer mutation")
+		}
+		if _, exists := hints.WebSearchModelIDs["gemini-3-flash"]; !exists {
+			t.Fatal("expected gemini-3-flash in WebSearchModelIDs after buffer mutation")
+		}
+	})
 }
 
 func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
@@ -130,6 +147,11 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 	// Mismatched endpoint
 	if _, okMismatch := ParsePersistedAntigravityCapabilityHints(metadata, project, "https://other.com"); okMismatch {
 		t.Error("expected mismatch for different endpoint")
+	}
+
+	// Nil ModelIDs (unknown catalog) must not serialize as authoritative empty catalog
+	if gotNil := BuildPersistedAntigravityCapabilityHints(project, expectedEndpoint, AntigravityModelCapabilityHints{}); gotNil != nil {
+		t.Errorf("expected nil persisted hints for unknown catalog, got %v", gotNil)
 	}
 }
 

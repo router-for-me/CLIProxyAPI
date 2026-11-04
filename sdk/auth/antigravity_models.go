@@ -142,7 +142,7 @@ func NormalizeAntigravityModelID(modelID string) string {
 	if len(trimmed) > antigravityMaxModelIDBytes {
 		return ""
 	}
-	return trimmed
+	return strings.Clone(trimmed)
 }
 
 func sanitizeAntigravityPersistedEndpoint(endpoint string) string {
@@ -212,7 +212,11 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 }
 
 // BuildPersistedAntigravityCapabilityHints serializes capability hints for storage in auth metadata.
+// It returns nil when hints.ModelIDs is nil so unknown catalogs are never persisted as authoritative empty sets.
 func BuildPersistedAntigravityCapabilityHints(project, endpoint string, hints AntigravityModelCapabilityHints) map[string]any {
+	if hints.ModelIDs == nil {
+		return nil
+	}
 	modelIDs := make([]string, 0, len(hints.ModelIDs))
 	for id := range hints.ModelIDs {
 		if normalized := NormalizeAntigravityModelID(id); normalized != "" {
