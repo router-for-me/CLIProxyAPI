@@ -109,7 +109,10 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	// handleErr ends the turn on a terminal stream error (non-nil errMsg).
 	handleErr := func(errMsg *interfaces.ErrorMessage) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
 		h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-		if opts.suppressError != nil && opts.suppressError(errMsg) {
+		// A final usage limit is never suppressed for a replay close (1012):
+		// every credential is out of quota until a known reset, so a replay
+		// cannot succeed.
+		if !coreauth.IsUsageLimitReachedError(errMsg.Error) && opts.suppressError != nil && opts.suppressError(errMsg) {
 			cancel(errMsg.Error)
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 		}
@@ -389,12 +392,16 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // credential rotation or retry can make the request succeed. Credential, quota
 // and transport failures stay silent so the client simply reconnects and retries;
 // a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// implies a full context resend. A final usage limit is exposed too: every
+// credential is out of quota until a known reset, so a reconnect cannot succeed.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
 	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
+		return true
+	}
+	if coreauth.IsUsageLimitReachedError(errMsg.Error) {
 		return true
 	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)

@@ -25,6 +25,7 @@ import (
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
@@ -848,6 +849,12 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+			if coreauth.IsUsageLimitReachedError(errMsg.Error) {
+				// A final usage limit ends the stream cleanly, so clients that
+				// wait for the terminator stop instead of treating it as a
+				// dropped connection to retry.
+				_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+			}
 		},
 		CloseError: func() *interfaces.ErrorMessage {
 			if sawFinishReason {
