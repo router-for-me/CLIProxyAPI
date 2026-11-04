@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -123,5 +124,38 @@ func TestManagerSoonestResetRoutesByObservedResponseHeaders(t *testing.T) {
 	// The new observation moves a behind b.
 	if got := execute(); got != ids[1] {
 		t.Fatalf("third pick = %q, want %q (observed 7d reset loses to 5d)", got, ids[1])
+	}
+}
+
+func TestMarkResultAnchorsQuotaObservationAtHeaderReceipt(t *testing.T) {
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	manager.RegisterExecutor(&soonestResetExecutor{resets: map[string]time.Duration{}})
+	const id = "soonest-reset-anchor"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", id, errRegister)
+	}
+
+	// Headers arrive when the stream opens; the result is recorded after it drains.
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
+		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
+	})
+	receivedAt := internallogging.GetResponseHeadersReceivedAt(ctx)
+	for !time.Now().After(receivedAt) {
+		runtime.Gosched()
+	}
+	manager.MarkResult(ctx, Result{AuthID: id, Provider: "codex", Success: true})
+
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil {
+		t.Fatalf("GetByID(%s) failed", id)
+	}
+	if !auth.Quota.ObservedAt.Equal(receivedAt) {
+		t.Fatalf("ObservedAt = %v, want header receipt %v", auth.Quota.ObservedAt, receivedAt)
+	}
+	reset, okReset := quotaWindowResetAt(auth, receivedAt)
+	if !okReset || !reset.Equal(receivedAt.Add(time.Hour)) {
+		t.Fatalf("reset = %v, %v; want %v", reset, okReset, receivedAt.Add(time.Hour))
 	}
 }

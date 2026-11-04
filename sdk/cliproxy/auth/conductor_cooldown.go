@@ -1364,9 +1364,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+			// Anchor the snapshot at header receipt: streamed results are recorded
+			// only after the stream drains, and relative values such as
+			// Reset-After-Seconds are measured from when the headers arrived.
+			observedAt := internallogging.GetResponseHeadersReceivedAt(ctx)
+			if observedAt.IsZero() || observedAt.After(now) {
+				observedAt = now
+			}
+			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observedAt)
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observedAt)
 			}
 		}
 

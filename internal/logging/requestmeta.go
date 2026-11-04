@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
@@ -32,7 +33,14 @@ type responseStatusHolder struct {
 type responseHeadersHolder struct {
 	mu      sync.RWMutex
 	headers http.Header
+	// receivedAt is when headers were last set or merged. Streamed results are
+	// recorded only after the stream drains, so this is the moment the upstream
+	// values were current, not the moment the result was recorded.
+	receivedAt time.Time
 }
+
+// responseHeadersNow is replaced in tests.
+var responseHeadersNow = time.Now
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
 	if ctx == nil {
@@ -123,6 +131,7 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
+	holder.receivedAt = responseHeadersNow()
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
@@ -147,6 +156,7 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
 	}
+	holder.receivedAt = responseHeadersNow()
 }
 
 func GetResponseStatus(ctx context.Context) int {
@@ -171,6 +181,21 @@ func GetResponseHeaders(ctx context.Context) http.Header {
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
 	return cloneHTTPHeader(holder.headers)
+}
+
+// GetResponseHeadersReceivedAt returns when the response headers in ctx were
+// last set or merged, or the zero time when none were recorded.
+func GetResponseHeadersReceivedAt(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	if !ok || holder == nil {
+		return time.Time{}
+	}
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	return holder.receivedAt
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {
