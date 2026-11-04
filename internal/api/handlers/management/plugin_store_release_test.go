@@ -2,12 +2,15 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -461,5 +464,41 @@ func TestListPluginStoreUsesCachedUninstalledVersionWithoutRefresh(t *testing.T)
 	body := listPluginStoreForTest(t, h)
 	if body.Plugins[0].Version != "2.0.0" || len(httpClient.counts) != 1 {
 		t.Fatalf("plugins=%#v requests=%v", body.Plugins, httpClient.counts)
+	}
+}
+
+func TestPluginStoreTagInstallationStopsAfterValidation(t *testing.T) {
+	t.Parallel()
+	archiveData := makeManagementPluginStoreZip(t, "sample-provider"+managementPluginExtension(runtime.GOOS), "library-data")
+	archiveName := "sample-provider_1.0.0_" + runtime.GOOS + "_" + runtime.GOARCH + ".zip"
+	checksum := sha256.Sum256(archiveData)
+	repo := "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/tags/"
+	release := func(tag string) []byte {
+		return []byte(`{"tag_name": "` + tag + `", "assets": [
+			{"name": "` + archiveName + `", "browser_download_url": "https://downloads.example/` + archiveName + `"},
+			{"name": "checksums.txt", "browser_download_url": "https://downloads.example/checksums.txt"}
+		]}`)
+	}
+	client := pluginstore.Client{HTTPClient: fakePluginStoreHTTPClient{
+		repo + "1.0.0":  release("1.0.0"),
+		repo + "v1.0.0": release("v1.0.0"),
+		"https://downloads.example/" + archiveName: archiveData,
+		"https://downloads.example/checksums.txt":  []byte(hex.EncodeToString(checksum[:]) + "  " + archiveName + "\n"),
+	}}
+	// The handler's validator holds h.mu on success, so a retry with another tag
+	// would lock it again; a rejection would write a second response.
+	validations := 0
+	_, errInstall := installPluginStoreGitHubRelease(context.Background(), client, pluginstore.Plugin{
+		ID: "sample-provider", Name: "Sample", Description: "Test plugin", Author: "author-name",
+		Repository: "https://github.com/author-name/cliproxy-sample-provider-plugin",
+	}, "1.0.0", pluginstore.InstallOptions{
+		PluginsDir: t.TempDir(), GOOS: runtime.GOOS, GOARCH: runtime.GOARCH,
+		ValidateInstall: func(pluginstore.InstallResult) error {
+			validations++
+			return errPluginInstallRejected
+		},
+	})
+	if !errors.Is(errInstall, errPluginInstallRejected) || validations != 1 {
+		t.Fatalf("error=%v validations=%d, want one validation and no alternate tag", errInstall, validations)
 	}
 }

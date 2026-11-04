@@ -258,6 +258,8 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	var manifest pluginstore.Manifest
 	// Validation runs before any file is written and keeps h.mu held through the
 	// config save, so a rejected install leaves disk and handler state unchanged.
+	// ValidateInstall runs at most once and returns holding h.mu on success; every
+	// path after the install releases it.
 	installLocked := false
 	installOptions := pluginstore.InstallOptions{
 		PluginsDir:   pluginsDir,
@@ -424,13 +426,21 @@ func installPluginStoreGitHubRelease(ctx context.Context, client pluginstore.Cli
 	}
 	tags := pluginStoreReleaseTagCandidates(requestedVersion)
 	errs := make([]error, 0, len(tags))
+	// A tag that reached validation was the release; retrying would validate twice.
+	validated := false
+	if validate := options.ValidateInstall; validate != nil {
+		options.ValidateInstall = func(planned pluginstore.InstallResult) error {
+			validated = true
+			return validate(planned)
+		}
+	}
 	for _, tag := range tags {
 		result, errInstall := client.InstallVersion(ctx, plugin, tag, version, options)
 		if errInstall == nil {
 			return result, nil
 		}
 		var rateLimit *pluginstore.RateLimitError
-		if errors.As(errInstall, &rateLimit) || ctx.Err() != nil {
+		if validated || errors.As(errInstall, &rateLimit) || ctx.Err() != nil {
 			return pluginstore.InstallResult{}, errInstall
 		}
 		errs = append(errs, fmt.Errorf("%s: %w", tag, errInstall))
