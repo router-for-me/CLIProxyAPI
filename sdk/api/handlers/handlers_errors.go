@@ -144,6 +144,9 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			}
 		}
 	}
+	if msg != nil {
+		WriteUsageLimitHeaders(c.Writer.Header(), msg.Error)
+	}
 
 	errText := http.StatusText(status)
 	if msg != nil && msg.Error != nil {
@@ -179,6 +182,20 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	c.Status(status)
 	_, _ = c.Writer.Write(body)
+}
+
+// WriteUsageLimitHeaders applies the headers of a final usage-limit error after
+// any passthrough headers, so they win, and drops Retry-After, which would make
+// a client sleep through the window instead of stopping.
+func WriteUsageLimitHeaders(dst http.Header, err error) {
+	headers, ok := coreauth.UsageLimitResponseHeaders(err)
+	if !ok {
+		return
+	}
+	dst.Del("Retry-After")
+	for key, values := range headers {
+		dst[key] = values
+	}
 }
 
 func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {

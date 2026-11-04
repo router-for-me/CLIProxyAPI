@@ -521,6 +521,9 @@ type claudeErrorDetail struct {
 	Type    string              `json:"type"`
 	Message string              `json:"message"`
 	Details *claudeErrorDetails `json:"details,omitempty"`
+	// ResetsAt and Retryable are set only for a final usage limit.
+	ResetsAt  *int64 `json:"resets_at,omitempty"`
+	Retryable *bool  `json:"retryable,omitempty"`
 }
 
 type claudeErrorDetails struct {
@@ -556,6 +559,20 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 	}
 	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+	}
+	if msg == nil {
+		return response
+	}
+	if resetAt, ok := coreauth.UsageLimitResetAt(msg.Error); ok {
+		// A final usage limit, the way Anthropic clients read it: Claude Code
+		// shows the "(reset after <duration>)" suffix and some clients parse it
+		// to resume at the reset.
+		resetIn := max(time.Until(resetAt).Round(time.Second), time.Second)
+		resetsAt, retryable := resetAt.Unix(), false
+		response.Error.Type = "rate_limit_error"
+		response.Error.Message = fmt.Sprintf("%s (reset after %s)", response.Error.Message, resetIn)
+		response.Error.ResetsAt = &resetsAt
+		response.Error.Retryable = &retryable
 	}
 	return response
 }
@@ -612,6 +629,9 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 				c.Writer.Header().Add(key, value)
 			}
 		}
+	}
+	if msg != nil {
+		handlers.WriteUsageLimitHeaders(c.Writer.Header(), msg.Error)
 	}
 
 	body, err := json.Marshal(h.toClaudeError(msg))

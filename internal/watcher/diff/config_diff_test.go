@@ -809,3 +809,8 @@ func TestBuildConfigChangeDetails_APIKeyConnectionPool(t *testing.T) {
 	expectContains(t, changes, "codex[0].connection-pool.max-idle-conns-per-host: <unset> -> 4")
 	expectContains(t, changes, "  provider updated: compat (connection-pool updated)")
 }
+
+func TestBuildConfigChangeDetailsQuotaCooldownResponseMode(t *testing.T) {
+	details := BuildConfigChangeDetails(&config.Config{}, &config.Config{QuotaCooldownResponseMode: config.QuotaCooldownResponseModeUsageLimit})
+	expectContains(t, details, `quota-cooldown-response-mode: "" -> "usage-limit"`)
+}

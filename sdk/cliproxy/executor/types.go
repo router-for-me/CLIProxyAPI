@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"time"
 
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -319,4 +320,19 @@ type StreamTruncatedError interface {
 type TransientRateLimitError interface {
 	error
 	IsTransientRateLimit() bool
+}
+
+// QuotaExhaustedError identifies a 429 that the upstream explicitly marked as
+// quota exhaustion with a structured signal (for example Codex
+// usage_limit_reached, OpenAI insufficient_quota, Google QUOTA_EXHAUSTED or an
+// Anthropic unified 5h/7d rejection). Unclassified 429s stay ordinary rate
+// limits. QuotaLimitWindowMinutes is the length of the exhausted window, 0
+// when unknown. QuotaResetAfter is when the quota returns, for errors that
+// carry no retry hint of their own; auth managers use it as the cooldown
+// deadline only in the usage-limit response mode.
+type QuotaExhaustedError interface {
+	error
+	IsQuotaExhausted() bool
+	QuotaLimitWindowMinutes() int64
+	QuotaResetAfter() *time.Duration
 }

@@ -131,7 +131,7 @@ func TestParseClaudeRateLimitResetForError_Issue6720(t *testing.T) {
 			}
 			before := headers.Clone()
 
-			got := ParseClaudeRateLimitResetForError(headers, tt.body, now)
+			got, _ := ParseClaudeRateLimitResetForError(headers, tt.body, now)
 
 			if !reflect.DeepEqual(headers, before) {
 				t.Fatalf("headers mutated: %v -> %v", before, headers)

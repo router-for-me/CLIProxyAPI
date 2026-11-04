@@ -346,6 +346,11 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// Exhausted records that NextRecoverAt is a provider reset of a 429 the
+	// upstream explicitly marked as quota exhaustion; LimitWindowMinutes is the
+	// exhausted window length, 0 when unknown.
+	Exhausted          bool  `json:"exhausted,omitempty"`
+	LimitWindowMinutes int64 `json:"limit_window_minutes,omitempty"`
 	// ObservedAt is the time the current Signals snapshot was observed.
 	ObservedAt time.Time `json:"observed_at,omitempty"`
 	// Signals stores bounded, provider-specific quota watermark values observed

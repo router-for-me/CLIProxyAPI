@@ -39,6 +39,22 @@ func SetTransientErrorCooldownSeconds(seconds int) {
 	transientErrorCooldownSeconds.Store(int64(seconds))
 }
 
+var quotaCooldownUsageLimitMode atomic.Bool
+
+// SetQuotaCooldownResponseMode selects how an exhausted credential pool is
+// reported. "usage-limit" reports a final usage limit when every candidate
+// has explicit quota-exhaustion evidence and the earliest reset is more than
+// usageLimitMinResetIn away; any other value keeps the retryable 429.
+func SetQuotaCooldownResponseMode(mode string) {
+	quotaCooldownUsageLimitMode.Store(mode == internalconfig.QuotaCooldownResponseModeUsageLimit)
+}
+
+// QuotaCooldownUsageLimitModeEnabled reports whether the usage-limit response
+// mode is active.
+func QuotaCooldownUsageLimitModeEnabled() bool {
+	return quotaCooldownUsageLimitMode.Load()
+}
+
 // QuotaCooldownDisabledForAuth returns whether cooling is disabled for the auth under global settings.
 func QuotaCooldownDisabledForAuth(auth *Auth) bool {
 	return quotaCooldownDisabledForAuth(auth)
@@ -776,7 +792,9 @@ func cooldownQuotaEqual(a, b QuotaState) bool {
 	return a.Exceeded == b.Exceeded &&
 		a.Reason == b.Reason &&
 		a.BackoffLevel == b.BackoffLevel &&
-		a.NextRecoverAt.Equal(b.NextRecoverAt)
+		a.NextRecoverAt.Equal(b.NextRecoverAt) &&
+		a.Exhausted == b.Exhausted &&
+		a.LimitWindowMinutes == b.LimitWindowMinutes
 }
 
 func cooldownErrorEqual(a, b *Error) bool {
@@ -889,6 +907,11 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
+	}
+	if result.RetryAfter == nil && result.QuotaResetAfter != nil && QuotaCooldownUsageLimitModeEnabled() {
+		// Only the usage-limit mode must know when quota returns; the default
+		// mode keeps the cooldown it always had for such errors.
+		result.RetryAfter = result.QuotaResetAfter
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -1126,6 +1149,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									backoffLevel = auth.Quota.BackoffLevel
 								}
 							}
+							// Quota-exhaustion evidence always belongs to the failure
+							// that set the kept deadline.
+							var quotaExhausted, credentialExhausted bool
+							var quotaWindow, credentialWindow int64
 							if !disableCooling {
 								if result.RetryAfter != nil {
 									cooldown := *result.RetryAfter
@@ -1133,6 +1160,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										cooldown = minQuotaCooldownFloor
 									}
 									next = now.Add(cooldown).Round(0)
+									// A provider reset with explicit exhaustion is evidence;
+									// exponential backoff never is.
+									quotaExhausted, quotaWindow = result.QuotaExhausted, result.QuotaLimitWindowMinutes
 								} else {
 									quotaForFailure := state.Quota
 									if result.CredentialScope {
@@ -1146,8 +1176,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
+								credentialExhausted, credentialWindow = quotaExhausted, quotaWindow
 								if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(next) {
 									next = state.Quota.NextRecoverAt
+									quotaExhausted, quotaWindow = state.Quota.Exhausted, state.Quota.LimitWindowMinutes
 								}
 							}
 							state.NextRetryAfter = next
@@ -1157,6 +1189,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							})
+							state.Quota.Exhausted, state.Quota.LimitWindowMinutes = quotaExhausted, quotaWindow
 							// Non-credential own failures re-derive their independent layer
 							// below, so a stale shadow is dropped. A credential-scoped
 							// report must not erase an existing independent layer: it only
@@ -1213,8 +1246,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										otherState.Unavailable = true
 										otherState.Status = StatusError
 										otherQuotaNext := credentialNext
+										otherExhausted, otherWindow := credentialExhausted, credentialWindow
 										if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
 											otherQuotaNext = otherState.Quota.NextRecoverAt
+											otherExhausted, otherWindow = otherState.Quota.Exhausted, otherState.Quota.LimitWindowMinutes
 										}
 										otherRetryAfter := otherQuotaNext
 										// Propagation only extends a sibling's still-live
@@ -1229,19 +1264,23 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 											NextRecoverAt: otherQuotaNext,
 											BackoffLevel:  backoffLevel,
 										})
+										otherState.Quota.Exhausted, otherState.Quota.LimitWindowMinutes = otherExhausted, otherWindow
 									}
 								}
 								if !wasTerminalUnauthorized {
 									auth.Unavailable = true
 									authNext := credentialNext
+									authExhausted, authWindow := credentialExhausted, credentialWindow
 									if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" &&
 										auth.Quota.NextRecoverAt.After(authNext) {
 										authNext = auth.Quota.NextRecoverAt
+										authExhausted, authWindow = auth.Quota.Exhausted, auth.Quota.LimitWindowMinutes
 									}
 									auth.Quota.Exceeded = true
 									auth.Quota.Reason = "credential_quota"
 									auth.Quota.NextRecoverAt = authNext
 									auth.Quota.BackoffLevel = backoffLevel
+									auth.Quota.Exhausted, auth.Quota.LimitWindowMinutes = authExhausted, authWindow
 									auth.NextRetryAfter = authNext
 									// The reporting model is now part of the wrap too: mark it
 									// so a later credential report from another model cannot
@@ -1590,6 +1629,13 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.Quota.NextRecoverAt.After(merged.Quota.NextRecoverAt) {
 		merged.Quota.NextRecoverAt = source.Quota.NextRecoverAt
 	}
+	// Evidence follows the side whose recovery deadline the merge kept.
+	for _, side := range []*ModelState{target, source} {
+		if side.Quota.Exceeded && side.Quota.Exhausted && side.Quota.NextRecoverAt.Equal(merged.Quota.NextRecoverAt) {
+			merged.Quota.Exhausted, merged.Quota.LimitWindowMinutes = true, side.Quota.LimitWindowMinutes
+			break
+		}
+	}
 	if source.Quota.BackoffLevel > merged.Quota.BackoffLevel {
 		merged.Quota.BackoffLevel = source.Quota.BackoffLevel
 	}
@@ -1815,6 +1861,9 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		}
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
+		// The aggregate spans models with different causes; it never claims
+		// explicit exhaustion on their behalf.
+		auth.Quota.Exhausted, auth.Quota.LimitWindowMinutes = false, 0
 	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 		// Retain active auth-level quota cooldown
 	} else {
@@ -1822,6 +1871,7 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		auth.Quota.Reason = ""
 		auth.Quota.NextRecoverAt = time.Time{}
 		auth.Quota.BackoffLevel = 0
+		auth.Quota.Exhausted, auth.Quota.LimitWindowMinutes = false, 0
 	}
 }
 
@@ -1869,6 +1919,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.Quota.Reason = ""
 	auth.Quota.NextRecoverAt = time.Time{}
 	auth.Quota.BackoffLevel = 0
+	auth.Quota.Exhausted, auth.Quota.LimitWindowMinutes = false, 0
 	auth.LastError = nil
 	auth.NextRetryAfter = time.Time{}
 	auth.cooldownRecordedSeq = 0
@@ -2006,6 +2057,18 @@ func resultErrorFromError(err error) *Error {
 		}
 	}
 	return resultErr
+}
+
+// attachQuotaEvidence copies the quota-exhaustion evidence of a 429 the
+// upstream explicitly marked as quota exhaustion onto the result.
+func (r *Result) attachQuotaEvidence(err error) {
+	quotaErr, ok := errors.AsType[cliproxyexecutor.QuotaExhaustedError](err)
+	if !ok || !quotaErr.IsQuotaExhausted() || statusCodeFromError(err) != http.StatusTooManyRequests {
+		return
+	}
+	r.QuotaExhausted = true
+	r.QuotaLimitWindowMinutes = quotaErr.QuotaLimitWindowMinutes()
+	r.QuotaResetAfter = quotaErr.QuotaResetAfter()
 }
 
 // shouldSkipCredentialCooldown reports failures that must not mark auth/model cooling.

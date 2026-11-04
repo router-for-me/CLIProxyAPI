@@ -329,6 +329,13 @@ func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string
 }
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	return m.executionModelCandidatesWithAliasRotation(auth, routeModel, true)
+}
+
+// executionModelCandidatesWithAliasRotation with rotate false returns every
+// upstream model of a pool without advancing its rotation. It takes no
+// manager lock, so callers may hold m.mu.
+func (m *Manager) executionModelCandidatesWithAliasRotation(auth *Auth, routeModel string, rotate bool) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
@@ -345,7 +352,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 	}
 	if len(candidates) == 0 {
 		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
-			if len(pool) == 1 {
+			if len(pool) == 1 || !rotate {
 				candidates = pool
 			} else {
 				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))

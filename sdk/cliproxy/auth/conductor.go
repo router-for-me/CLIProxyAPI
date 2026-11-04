@@ -81,6 +81,13 @@ type Result struct {
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
 	CredentialScope bool
+	// Quota-exhaustion evidence of a 429 (see
+	// cliproxyexecutor.QuotaExhaustedError). With RetryAfter it is recorded on
+	// the cooldown it sets; QuotaResetAfter sets that cooldown only in the
+	// usage-limit response mode.
+	QuotaExhausted          bool
+	QuotaLimitWindowMinutes int64
+	QuotaResetAfter         *time.Duration
 	// Error describes the failure when Success is false.
 	Error *Error
 	// Options carries execution request options (headers, metadata, etc.) for result tracking.

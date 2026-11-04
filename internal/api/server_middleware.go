@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -43,6 +44,13 @@ var corsExposedResponseHeaders = []string{
 }
 
 var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
+
+// usageLimitCorsExposedResponseHeadersJoined adds, in the usage-limit quota
+// response mode only, the headers browser clients read to stop at a final
+// usage limit, which carries no Retry-After.
+var usageLimitCorsExposedResponseHeadersJoined = corsExposedResponseHeadersJoined +
+	", X-Should-Retry, X-Codex-Primary-Used-Percent, X-Codex-Primary-Window-Minutes, X-Codex-Primary-Reset-At" +
+	", X-Codex-Secondary-Used-Percent, X-Codex-Secondary-Window-Minutes, X-Codex-Secondary-Reset-At"
 
 // corsAllowedRequestHeaders lists the request headers browser clients may
 // send to the API. The Fetch standard treats Authorization as a CORS
@@ -433,7 +441,11 @@ func corsMiddleware() gin.HandlerFunc {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", corsAllowHeadersValue(c.Request))
-		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
+		exposed := corsExposedResponseHeadersJoined
+		if coreauth.QuotaCooldownUsageLimitModeEnabled() {
+			exposed = usageLimitCorsExposedResponseHeadersJoined
+		}
+		c.Header("Access-Control-Expose-Headers", exposed)
 
 		if c.Request.Method == "OPTIONS" {
 			closeUnconsumedRequestOnAbort(c)

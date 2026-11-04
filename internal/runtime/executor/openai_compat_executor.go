@@ -1198,6 +1198,10 @@ type statusErr struct {
 	credentialScoped   bool
 	streamTruncated    bool
 	transientRateLimit bool
+	// Quota-exhaustion evidence; see cliproxyexecutor.QuotaExhaustedError.
+	quotaExhausted     bool
+	quotaWindowMinutes int64
+	quotaResetAfter    *time.Duration
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1223,14 +1227,38 @@ func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 // that must not be recorded as credential quota exhaustion.
 func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
 
+// IsQuotaExhausted, QuotaLimitWindowMinutes and QuotaResetAfter implement
+// cliproxyexecutor.QuotaExhaustedError.
+func (e statusErr) IsQuotaExhausted() bool          { return e.quotaExhausted }
+func (e statusErr) QuotaLimitWindowMinutes() int64  { return e.quotaWindowMinutes }
+func (e statusErr) QuotaResetAfter() *time.Duration { return e.quotaResetAfter }
+
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
+// newOpenAICompatStatusError also reads Google's error shape, which Vertex
+// OpenAPI models answer with through this executor.
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
-	return statusErr{
+	err := statusErr{
 		code:       status,
 		msg:        string(body),
 		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
 	}
+	err.quotaExhausted, err.quotaResetAfter = helps.GoogleQuotaExhaustion(status, headers, body, time.Now())
+	if status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body) {
+		err.quotaExhausted = true
+	}
+	return err
+}
+
+// isOpenAIInsufficientQuotaError reports whether body is an OpenAI
+// insufficient_quota error: the account's quota is exhausted.
+func isOpenAIInsufficientQuotaError(body []byte) bool {
+	for _, path := range []string{"error.code", "error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytes(body, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	return false
 }
 
 // openAICompatRetryAfter preserves the provider's standard Retry-After signal.

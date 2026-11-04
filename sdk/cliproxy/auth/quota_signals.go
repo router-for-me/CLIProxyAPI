@@ -72,6 +72,9 @@ func cooldownFieldsOf(q QuotaState) QuotaState {
 		Reason:        q.Reason,
 		NextRecoverAt: q.NextRecoverAt,
 		BackoffLevel:  q.BackoffLevel,
+		// Quota-exhaustion evidence belongs to the cooldown deadline.
+		Exhausted:          q.Exhausted,
+		LimitWindowMinutes: q.LimitWindowMinutes,
 	}
 }
 
@@ -86,6 +89,8 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	dst.Exhausted = cooldown.Exhausted
+	dst.LimitWindowMinutes = cooldown.LimitWindowMinutes
 }
 
 // collectQuotaSignals builds the bounded snapshot for a single response.

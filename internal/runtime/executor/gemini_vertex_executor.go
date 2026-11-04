@@ -533,7 +533,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 		return resp, err
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
@@ -689,7 +689,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 		return resp, err
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
@@ -828,7 +828,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
@@ -1049,7 +1049,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
@@ -1261,7 +1261,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
@@ -1362,7 +1362,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, b)
 	}
 	data, errRead := io.ReadAll(httpResp.Body)
 	if errRead != nil {
@@ -1671,7 +1671,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, data)
 		return resp, err
 	}
 	reporter.ObserveResponseModel(data)
@@ -1794,7 +1794,7 @@ func (e *GeminiVertexExecutor) executeInteractionsStream(ctx context.Context, au
 			log.Errorf("vertex executor: close interactions error response body error: %v", errClose)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		return nil, newGoogleStatusErr(httpResp.StatusCode, httpResp.Header, data)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
