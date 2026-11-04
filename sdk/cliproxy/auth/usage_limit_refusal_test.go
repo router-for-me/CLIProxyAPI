@@ -310,3 +310,20 @@ func TestUsageLimitModeAppliesToSelectionUnavailable(t *testing.T) {
 		t.Fatalf("err = %v, want a usage limit", err)
 	}
 }
+
+// A request canceled as the upstream refused it keeps a quota reset reported
+// apart from the retry hint, in the usage-limit mode only.
+func TestCanceledRequestKeepsQuotaResetOnlyInUsageLimitMode(t *testing.T) {
+	t.Cleanup(func() { SetQuotaCooldownResponseMode("") })
+	for _, mode := range []string{"retryable", "usage-limit"} {
+		SetQuotaCooldownResponseMode(mode)
+		m := usageLimitManager(t, &Auth{ID: "auth-canceled-" + mode, Provider: "codex", Status: StatusActive})
+		auth, _ := m.GetByID("auth-canceled-" + mode)
+		m.recordCanceledUpstreamCooldown(context.Background(), auth, "codex", "gpt-5", "gpt-5", cliproxyexecutor.Options{}, quotaResetOnlyErr{}, false, 0)
+		got, _ := m.GetByID("auth-canceled-" + mode)
+		recorded := got.ModelStates["gpt-5"] != nil && got.ModelStates["gpt-5"].Quota.Exhausted
+		if recorded != (mode == "usage-limit") {
+			t.Fatalf("%s: quota exhaustion recorded = %t", mode, recorded)
+		}
+	}
+}

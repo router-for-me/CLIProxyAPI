@@ -129,18 +129,22 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 }
 
 // recordCanceledUpstreamCooldown keeps an upstream-confirmed cooldown (an error carrying
-// RetryAfter) when the request context was canceled while the executor was returning, for
-// example because the downstream connection was closed in response to the same upstream error.
-// Errors without RetryAfter, such as plain client cancellations, are not recorded.
+// RetryAfter, or in the usage-limit mode a quota reset) when the request context was canceled
+// while the executor was returning, for example because the downstream connection was closed in
+// response to the same upstream error. Errors without either, such as plain client
+// cancellations, are not recorded.
 func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, opts cliproxyexecutor.Options, err error, ephemeral bool, executionSeq uint64) {
-	retryAfter := retryAfterFromError(err)
-	if m == nil || auth == nil || retryAfter == nil {
+	if m == nil || auth == nil {
+		return
+	}
+	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfterFromError(err), AccessToken: authAccessTokenForRequest(ctx, auth, opts.Headers), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+	result.attachQuotaEvidence(err)
+	quotaReset := QuotaCooldownUsageLimitModeEnabled() && result.QuotaResetAfter != nil && *result.QuotaResetAfter > 0
+	if result.RetryAfter == nil && !quotaReset {
 		return
 	}
 	action, okAction := matchRequestScopedErrorAction(auth, err, m.runtimeConfigSnapshot())
-	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfter, AccessToken: authAccessTokenForRequest(ctx, auth, opts.Headers), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 	result.CredentialScope = isCredentialScopedError(err)
-	result.attachQuotaEvidence(err)
 	applyRequestScopedActionToResult(action, okAction, &result)
 	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
