@@ -604,7 +604,10 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			usageLimit := usageLimitRefusalFor(auths, func(candidate *Auth) string {
+				return m.selectionModelForAuth(candidate, routeModel)
+			}, now)
+			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr).withUsageLimit(usageLimit)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -714,7 +717,7 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause).withUsageLimit(cooldownErr.usageLimit)
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {
@@ -2009,7 +2012,7 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 	}
 	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, nil)
 	if errPick != nil {
-		return nil, unwrapExecutionBoundaryError(errPick)
+		return nil, withoutPinnedUsageLimit(unwrapExecutionBoundaryError(errPick), opts)
 	}
 	if m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
@@ -2031,7 +2034,7 @@ func (m *Manager) SelectAuthByKind(ctx context.Context, provider, model, require
 	selectionCtx := withRequiredAuthKind(ctx, requiredKind)
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)
 	if errPick != nil {
-		return nil, unwrapExecutionBoundaryError(errPick)
+		return nil, withoutPinnedUsageLimit(unwrapExecutionBoundaryError(errPick), opts)
 	}
 	if selected == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
@@ -2057,7 +2060,7 @@ func (m *Manager) SelectAuthWithCredentialPolicy(ctx context.Context, provider, 
 	selectionCtx := withCredentialPolicy(ctx, policy)
 	selected, _, errPick := m.pickNextLegacy(selectionCtx, provider, model, opts, nil)
 	if errPick != nil {
-		return nil, unwrapExecutionBoundaryError(errPick)
+		return nil, withoutPinnedUsageLimit(unwrapExecutionBoundaryError(errPick), opts)
 	}
 	if selected == nil || !credentialPolicyAllows(policy, selected) {
 		return nil, &Error{Code: "auth_not_found", Message: "selector returned no eligible auth"}

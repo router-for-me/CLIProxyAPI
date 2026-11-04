@@ -395,6 +395,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			auth.StatusMessage = reason
 		}
 		auth.LastError = cloneError(record.LastError)
+		restoreUsageLimitMark(&auth.Quota, quota)
 		return true
 	}
 
@@ -471,6 +472,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			state.credentialQuotaShadow = liveShadow
 		}
 	}
+	restoreUsageLimitMark(&state.Quota, quota)
 	auth.Generation++
 	auth.UpdatedAt = updatedAt
 	updateAggregatedAvailability(auth, now)
@@ -776,7 +778,9 @@ func cooldownQuotaEqual(a, b QuotaState) bool {
 	return a.Exceeded == b.Exceeded &&
 		a.Reason == b.Reason &&
 		a.BackoffLevel == b.BackoffLevel &&
-		a.NextRecoverAt.Equal(b.NextRecoverAt)
+		a.NextRecoverAt.Equal(b.NextRecoverAt) &&
+		a.UsageLimitResetAt.Equal(b.UsageLimitResetAt) &&
+		a.UsageLimitWindowMinutes == b.UsageLimitWindowMinutes
 }
 
 func cooldownErrorEqual(a, b *Error) bool {
@@ -1368,6 +1372,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if modelState != nil {
 				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			}
+		}
+		if !result.Success {
+			markCodexUsageLimit(auth, result.Model, result.Error, now)
 		}
 
 		_ = m.persistLocked(ctx, auth)

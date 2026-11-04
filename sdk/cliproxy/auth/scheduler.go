@@ -687,7 +687,14 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
+		var candidates []*Auth
+		for _, providerKey := range providers {
+			if providerState := s.providers[providerKey]; providerState != nil {
+				candidates = append(candidates, providerState.ensureModelLocked(canonicalModelKey(model), now).candidateAuthsLocked(predicate)...)
+			}
+		}
+		usageLimit := usageLimitRefusalFor(candidates, func(*Auth) string { return model }, now)
+		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr).withUsageLimit(usageLimit)
 	}
 	if unauthorizedCount == total {
 		terminalCause := latestAuthErr
@@ -1432,7 +1439,8 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+		usageLimit := usageLimitRefusalFor(m.candidateAuthsLocked(predicate), func(*Auth) string { return model }, now)
+		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr).withUsageLimit(usageLimit)
 	}
 	if unauthorizedCount == total {
 		terminalCause := authErr
@@ -1555,6 +1563,25 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+// candidateAuthsLocked returns the credentials availabilitySummaryLocked counts.
+func (m *modelScheduler) candidateAuthsLocked(predicate func(*scheduledAuth) bool) []*Auth {
+	if m == nil {
+		return nil
+	}
+	auths := make([]*Auth, 0, len(m.entries))
+	for _, entry := range m.entries {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if entry == nil {
+			auths = append(auths, nil)
+			continue
+		}
+		auths = append(auths, entry.auth)
+	}
+	return auths
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

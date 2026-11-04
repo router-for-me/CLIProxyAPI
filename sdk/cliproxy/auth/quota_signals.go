@@ -72,6 +72,10 @@ func cooldownFieldsOf(q QuotaState) QuotaState {
 		Reason:        q.Reason,
 		NextRecoverAt: q.NextRecoverAt,
 		BackoffLevel:  q.BackoffLevel,
+		// The usage-limit mark describes what set this cooldown, so it is
+		// persisted with it.
+		UsageLimitResetAt:       q.UsageLimitResetAt,
+		UsageLimitWindowMinutes: q.UsageLimitWindowMinutes,
 	}
 }
 
