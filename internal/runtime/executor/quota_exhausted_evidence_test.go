@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -77,8 +78,20 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}`), codexHeaders("40"), false)
 			return err
 		}(), want: true, wantWindow: 300, wantReset: time.Hour},
+		{name: "codex HTTP stream usage_limit_reached with the reset only in Retry-After", err: func() error {
+			err, _, _ := codexTerminalFailureErrWithHeaders([]byte(`{"type":"error","error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`), http.Header{"Retry-After": {"7200"}}, false)
+			return err
+		}(), want: true, wantReset: 2 * time.Hour},
+		{name: "openai-compat stream insufficient_quota frame with the reset in Retry-After", err: func() error {
+			err, _ := openAICompatStreamDataError([]byte(`{"error":{"type":"insufficient_quota","status":429}}`), "", http.Header{"Retry-After": {"7200"}})
+			return err
+		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai-compat stream QUOTA_EXHAUSTED frame", err: func() error {
-			err, _ := openAICompatStreamDataError([]byte(`{"status":429,`+googleQuotaExhaustedBody[1:]), "")
+			frame := ojson.NewDocString(googleQuotaExhaustedBody)
+			if errSet := frame.Set("status", http.StatusTooManyRequests); errSet != nil {
+				return errSet
+			}
+			err, _ := openAICompatStreamDataError(frame.Bytes(), "", nil)
 			return err
 		}(), want: true, wantReset: 2 * time.Hour},
 		{name: "openai insufficient_quota", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(`{"error":{"type":"insufficient_quota","code":"insufficient_quota"}}`)), want: true},

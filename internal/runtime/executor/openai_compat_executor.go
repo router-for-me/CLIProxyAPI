@@ -527,7 +527,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				return true
 			}
 			if !isDone {
-				if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName); isError {
+				if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName, httpResp.Header); isError {
 					publishStreamError(streamErr, true)
 					return true
 				}
@@ -1162,7 +1162,9 @@ func openAICompatChunkHasFinishReason(payload []byte) bool {
 	return false
 }
 
-func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, bool) {
+// headers are those of the HTTP response carrying the stream; they are read
+// only for the reset of a quota exhaustion.
+func openAICompatStreamDataError(payload []byte, eventName string, headers http.Header) (statusErr, bool) {
 	if len(payload) == 0 || !json.Valid(payload) {
 		return statusErr{}, false
 	}
@@ -1192,7 +1194,7 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 		status = http.StatusBadGateway
 	}
 	err := statusErr{code: status, msg: string(payload)}
-	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, nil, payload)
+	err.quotaExhausted, err.quotaResetAfter = openAICompatQuotaExhaustion(status, headers, payload)
 	return err, true
 }
 

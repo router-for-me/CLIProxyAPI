@@ -303,7 +303,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
 				}
-				streamErr = newAntigravityStatusErr(statusCode, nil, payload)
+				streamErr = newAntigravityStatusErr(statusCode, httpResp.Header, payload)
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {

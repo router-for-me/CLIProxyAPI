@@ -541,7 +541,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		helps.AppendAPIResponseChunk(ctx, e.cfg, resp.Body)
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return cliproxyexecutor.Response{}, statusErr{code: resp.Status, msg: string(resp.Body)}
+		return cliproxyexecutor.Response{}, newGoogleStatusErr(resp.Status, resp.Headers, resp.Body)
 	}
 	totalTokens := ojson.GetBytesNoCopy(resp.Body, "totalTokens").Int()
 	if totalTokens <= 0 {

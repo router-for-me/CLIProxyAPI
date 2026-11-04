@@ -92,9 +92,9 @@ type quotaSurface struct {
 }
 
 var quotaSurfaces = []quotaSurface{
-	{name: "responses", path: "/v1/responses", body: `{"model":%q,"input":"hi","stream":%t}`},
-	{name: "chat", path: "/v1/chat/completions", body: `{"model":%q,"messages":[{"role":"user","content":"hi"}],"stream":%t}`},
-	{name: "messages", path: "/v1/messages", claude: true, body: `{"model":%q,"max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stream":%t}`},
+	{name: "responses", path: "/v1/responses", body: `{"input":"hi"}`},
+	{name: "chat", path: "/v1/chat/completions", body: `{"messages":[{"role":"user","content":"hi"}]}`},
+	{name: "messages", path: "/v1/messages", claude: true, body: `{"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`},
 }
 
 type quotaHarness struct {
@@ -133,7 +133,13 @@ func newQuotaHarness(t *testing.T, mode string, refusals ...quotaRefusal) *quota
 }
 
 func (h *quotaHarness) do(surface quotaSurface, stream bool) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodPost, surface.path, strings.NewReader(fmt.Sprintf(surface.body, h.model, stream)))
+	body := ojson.NewDocString(surface.body)
+	for path, value := range map[string]any{"model": h.model, "stream": stream} {
+		if errSet := body.Set(path, value); errSet != nil {
+			panic(errSet)
+		}
+	}
+	request := httptest.NewRequest(http.MethodPost, surface.path, strings.NewReader(body.String()))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	h.router.ServeHTTP(recorder, request)

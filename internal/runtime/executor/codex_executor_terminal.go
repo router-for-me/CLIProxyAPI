@@ -181,11 +181,15 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 
 // codexTerminalFailureErrWithHeaders is codexTerminalFailureErrWithCooling for
 // an event of an HTTP response: a usage limit reported in the stream takes its
-// exhausted window from the response's x-codex-* headers.
+// exhausted window and reset from the response's x-codex-* headers, else its
+// reset from a positive Retry-After. The retry hint stays the event's.
 func codexTerminalFailureErrWithHeaders(eventData []byte, headers http.Header, modelLevelCooling bool) (statusErr, []byte, bool) {
 	streamErr, body, ok := codexTerminalFailureErrWithCooling(eventData, modelLevelCooling)
 	if ok && streamErr.quotaExhausted {
 		streamErr.quotaWindowMinutes, streamErr.quotaResetAfter = helps.CodexExhaustedWindow(headers)
+		if retryAfter := parseRetryAfterHeader(headers, time.Now()); streamErr.quotaResetAfter == nil && retryAfter != nil && *retryAfter > 0 {
+			streamErr.quotaResetAfter = retryAfter
+		}
 	}
 	return streamErr, body, ok
 }
