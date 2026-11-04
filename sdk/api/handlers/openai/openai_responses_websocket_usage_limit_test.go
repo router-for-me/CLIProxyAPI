@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -192,60 +191,6 @@ func TestResponsesWebsocketUsageLimit(t *testing.T) {
 			}
 			if tc.wantEvent {
 				assertWebsocketUsageLimitEvent(t, frames[0])
-			}
-		})
-	}
-}
-
-// A turn that would end in a replay close (1012) still gets the usage-limit
-// event; other errors keep the replay path.
-func TestForwardResponsesWebsocketUsageLimitPrecedesReplayClose(t *testing.T) {
-	manager, model := newUsageLimitWebsocketManager(t, websocketTurn{mode: "usage-limit", exhausted: true})
-	_, usageLimit := manager.Execute(context.Background(), []string{usageLimitWebsocketProvider}, coreexecutor.Request{Model: model}, coreexecutor.Options{})
-	if !coreauth.IsUsageLimitReachedError(usageLimit) {
-		t.Fatalf("setup: err = %v, want a usage limit", usageLimit)
-	}
-	for name, err := range map[string]error{"usage-limit": usageLimit, "retryable-cooldown": coreauth.NewModelCooldownError(model, "codex", 3*time.Hour)} {
-		t.Run(name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
-			suppressedCh := make(chan bool, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(w, r, nil)
-				if errUpgrade != nil {
-					suppressedCh <- false
-					return
-				}
-				defer func() { _ = conn.Close() }()
-				ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-				ctx.Request = r
-				errCh := make(chan *interfaces.ErrorMessage, 1)
-				errCh <- handlers.ExecutionErrorMessage(err)
-				suppressed := false
-				h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
-				_, _, _, _, _ = h.forwardResponsesWebsocket(ctx, newResponsesWebsocketWriter(conn), func(...interface{}) {}, make(chan []byte), errCh,
-					newInMemoryWebsocketTimelineLog(), "session-1", responsesWebsocketForwardOptions{suppressError: func(*interfaces.ErrorMessage) bool {
-						suppressed = true
-						return true
-					}})
-				suppressedCh <- suppressed
-			}))
-			defer server.Close()
-
-			conn, _, errDial := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
-			if errDial != nil {
-				t.Fatalf("dial websocket: %v", errDial)
-			}
-			defer func() { _ = conn.Close() }()
-			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			_, payload, errRead := conn.ReadMessage()
-			suppressed := <-suppressedCh
-			if name == "usage-limit" {
-				if errRead != nil || suppressed {
-					t.Fatalf("read err = %v, suppressed = %t; want the usage-limit event", errRead, suppressed)
-				}
-				assertWebsocketUsageLimitEvent(t, payload)
-			} else if errRead == nil || !suppressed {
-				t.Fatalf("frame = %s, suppressed = %t; want the replay path", payload, suppressed)
 			}
 		})
 	}

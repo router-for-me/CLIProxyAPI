@@ -695,9 +695,11 @@ type websocketAuthCaptureExecutor struct {
 type websocketPinnedFailoverExecutor struct {
 	mu         sync.Mutex
 	failStatus int
-	authIDs    []string
-	calls      map[string]int
-	payloads   map[string][][]byte
+	// failErr overrides the failStatus error when set.
+	failErr  error
+	authIDs  []string
+	calls    map[string]int
+	payloads map[string][][]byte
 }
 
 type websocketBootstrapFallbackExecutor struct {
@@ -1086,10 +1088,14 @@ func (e *websocketPinnedFailoverExecutor) ExecuteStream(_ context.Context, auth 
 
 	if authID == "auth-a" && call == 2 {
 		chunks := make(chan coreexecutor.StreamChunk, 1)
-		chunks <- coreexecutor.StreamChunk{Err: websocketPinnedFailoverStatusError{
+		var failErr error = websocketPinnedFailoverStatusError{
 			status: e.failStatus,
 			msg:    fmt.Sprintf(`{"error":{"message":"credential failed","status":%d}}`, e.failStatus),
-		}}
+		}
+		if e.failErr != nil {
+			failErr = e.failErr
+		}
+		chunks <- coreexecutor.StreamChunk{Err: failErr}
 		close(chunks)
 		return &coreexecutor.StreamResult{Chunks: chunks}, nil
 	}
@@ -6476,17 +6482,30 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 		name            string
 		status          int
 		backupWebsocket bool
+		// usageLimit runs in usage-limit mode with auth-a out of quota until
+		// a reset hours away, while auth-b can still serve.
+		usageLimit bool
+		// poolExhausted also puts auth-b out of quota before the
+		// continuation, so the replay gets the usage limit.
+		poolExhausted bool
 	}{
 		{name: "unauthorized to websocket", status: http.StatusUnauthorized, backupWebsocket: true},
 		{name: "unauthorized to http", status: http.StatusUnauthorized, backupWebsocket: false},
 		{name: "rate limit to websocket", status: http.StatusTooManyRequests, backupWebsocket: true},
 		{name: "rate limit to http", status: http.StatusTooManyRequests, backupWebsocket: false},
+		{name: "pinned usage limit to websocket", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true},
+		{name: "pinned usage limit with pool exhausted", status: http.StatusTooManyRequests, backupWebsocket: true, usageLimit: true, poolExhausted: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			modelName := fmt.Sprintf("credential-failure-%d-%t-model", tc.status, tc.backupWebsocket)
+			modelName := fmt.Sprintf("credential-failure-%d-%t-%t-model", tc.status, tc.backupWebsocket, tc.usageLimit)
 			selector := &orderedWebsocketSelector{order: []string{"auth-a", "auth-b"}}
 			executor := &websocketPinnedFailoverExecutor{failStatus: tc.status}
+			if tc.usageLimit {
+				coreauth.SetQuotaCooldownResponseMode("usage-limit")
+				t.Cleanup(func() { coreauth.SetQuotaCooldownResponseMode("") })
+				executor.failErr = websocketQuotaErr{exhausted: true}
+			}
 			manager := coreauth.NewManager(nil, selector, nil)
 			manager.RegisterExecutor(executor)
 
@@ -6539,6 +6558,15 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 				t.Fatalf("first websocket response = %s, err=%v", payload, errRead)
 			}
 
+			if tc.poolExhausted {
+				retry := 3 * time.Hour
+				manager.MarkResult(context.Background(), coreauth.Result{
+					AuthID: authB.ID, Provider: authB.Provider, Model: modelName,
+					Error:      &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: websocketQuotaErr{exhausted: true}.Error()},
+					RetryAfter: &retry, CredentialScope: true, QuotaExhausted: true, QuotaLimitWindowMinutes: 300,
+				})
+			}
+
 			secondRequest := `{"type":"response.create","previous_response_id":"resp-auth-a-1","input":[{"type":"message","id":"msg-2"}]}`
 			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(secondRequest)); errWrite != nil {
 				t.Fatalf("write second websocket message: %v", errWrite)
@@ -6561,7 +6589,18 @@ func TestResponsesWebsocketReplaysImmediatelyAfterPinnedAuthFailure(t *testing.T
 			if errWrite := replayConn.WriteMessage(websocket.TextMessage, []byte(fullReplay)); errWrite != nil {
 				t.Fatalf("write full replay: %v", errWrite)
 			}
-			if _, replayPayload, errReadReplay := replayConn.ReadMessage(); errReadReplay != nil || ojson.GetBytesNoCopy(replayPayload, "type").String() != wsEventTypeCompleted {
+			_, replayPayload, errReadReplay := replayConn.ReadMessage()
+			if tc.poolExhausted {
+				if errReadReplay != nil {
+					t.Fatalf("full replay read: %v", errReadReplay)
+				}
+				assertWebsocketUsageLimitEvent(t, replayPayload)
+				if got := executor.AuthIDs(); len(got) != 2 {
+					t.Fatalf("selected auth IDs after replay = %v, want no further upstream call", got)
+				}
+				return
+			}
+			if errReadReplay != nil || ojson.GetBytesNoCopy(replayPayload, "type").String() != wsEventTypeCompleted {
 				t.Fatalf("full replay response = %s, err=%v", replayPayload, errReadReplay)
 			}
 			if got := executor.AuthIDs(); len(got) != 3 || got[2] != "auth-b" {

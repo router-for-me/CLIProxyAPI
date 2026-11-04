@@ -109,10 +109,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	// handleErr ends the turn on a terminal stream error (non-nil errMsg).
 	handleErr := func(errMsg *interfaces.ErrorMessage) ([]byte, string, []string, *interfaces.ErrorMessage, error) {
 		h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-		// A final usage limit is never suppressed for a replay close (1012):
-		// every credential is out of quota until a known reset, so a replay
-		// cannot succeed.
-		if !coreauth.IsUsageLimitReachedError(errMsg.Error) && opts.suppressError != nil && opts.suppressError(errMsg) {
+		if opts.suppressError != nil && opts.suppressError(errMsg) {
 			cancel(errMsg.Error)
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 		}
