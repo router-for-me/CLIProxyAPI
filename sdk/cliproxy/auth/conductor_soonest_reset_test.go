@@ -193,3 +193,40 @@ func TestManagerSoonestResetLearnsEveryCredentialAfterRestart(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkResultRebasesRelativeResetAcrossPartialMerges(t *testing.T) {
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	manager.RegisterExecutor(&soonestResetExecutor{resets: map[string]time.Duration{}})
+	const id = "soonest-reset-merge"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", id, errRegister)
+	}
+
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"X-Codex-Primary-Window-Minutes":      []string{"10080"},
+		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
+	})
+	firstReceipt := internallogging.GetResponseHeadersReceivedAt(ctx)
+	waitPast := func(at time.Time) {
+		for !time.Now().After(at) {
+			runtime.Gosched()
+		}
+	}
+	waitPast(firstReceipt.Add(1200 * time.Millisecond))
+	// A later websocket quota frame merges only the usage percentage.
+	internallogging.MergeResponseHeaders(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"20"}})
+	manager.MarkResult(ctx, Result{AuthID: id, Provider: "codex", Success: true})
+
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil {
+		t.Fatalf("GetByID(%s) failed", id)
+	}
+	reset, okReset := quotaWindowReset(auth)
+	want := firstReceipt.Add(time.Hour)
+	// Rebased values are whole seconds, so allow half a second of rounding.
+	tolerance := 600 * time.Millisecond
+	if !okReset || reset.Sub(want) > tolerance || want.Sub(reset) > tolerance {
+		t.Fatalf("reset = %v, %v; want about %v (anchored at the first receipt)", reset, okReset, want)
+	}
+}

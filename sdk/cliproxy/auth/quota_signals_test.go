@@ -709,3 +709,33 @@ func TestObserveResponseHeadersIfNotOlderKeepsNewestSnapshot(t *testing.T) {
 		t.Fatalf("snapshot = %#v, want newest observation", quota)
 	}
 }
+
+func TestRebaseRelativeQuotaHeaders(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000600, 0)
+	headers := http.Header{
+		"X-Codex-Primary-Reset-After-Seconds":   []string{"3600"},
+		"X-Codex-Secondary-Reset-After-Seconds": []string{"120"},
+		"X-Codex-Primary-Used-Percent":          []string{"12"},
+	}
+	received := map[string]time.Time{
+		"X-Codex-Primary-Reset-After-Seconds":   observedAt.Add(-10 * time.Minute),
+		"X-Codex-Secondary-Reset-After-Seconds": observedAt.Add(-5 * time.Minute),
+		"X-Codex-Primary-Used-Percent":          observedAt,
+	}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(name string) time.Time { return received[name] })
+	if v := got.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3000" {
+		t.Fatalf("primary reset-after = %q, want 3000", v)
+	}
+	if v := got.Get("X-Codex-Secondary-Reset-After-Seconds"); v != "0" {
+		t.Fatalf("secondary reset-after = %q, want 0 (already elapsed)", v)
+	}
+	if v := got.Get("X-Codex-Primary-Used-Percent"); v != "12" {
+		t.Fatalf("used percent = %q, want 12", v)
+	}
+	if v := headers.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3600" {
+		t.Fatalf("input headers modified: %q", v)
+	}
+}

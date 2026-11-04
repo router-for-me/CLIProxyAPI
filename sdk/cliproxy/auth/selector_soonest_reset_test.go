@@ -274,3 +274,45 @@ func TestSoonestResetSelectorUsesPrevalidatedCandidates(t *testing.T) {
 		t.Fatal("selector context is not marked prevalidated")
 	}
 }
+
+func TestSoonestResetSelectorPick_ReprobesPartialSnapshots(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	partial := &Auth{ID: "b", Provider: "claude", Quota: QuotaState{
+		ObservedAt: now.Add(-time.Minute),
+		Signals:    map[string]string{"Anthropic-Ratelimit-Unified-Status": "allowed"},
+	}}
+	auths := []*Auth{
+		{ID: "a", Provider: "claude", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))},
+		partial,
+	}
+
+	got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() = %q, want partial snapshot b probed", got.ID)
+	}
+}
+
+func TestSoonestResetSelectorPick_DoesNotProbeAfterObservedReset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	auths := []*Auth{
+		{ID: "a", Provider: "codex", Quota: codexWeeklySignals(now.Add(-time.Hour))},
+		{ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() = %q, want b (a's window already reset; its new window starts on use)", got.ID)
+	}
+}

@@ -50,10 +50,18 @@ func TestResponseHeadersReceivedAtTracksSetAndMerge(t *testing.T) {
 		t.Fatalf("received at after set = %v, want %v", got, clock)
 	}
 
+	first := clock
 	clock = clock.Add(10 * time.Minute)
 	MergeResponseHeaders(ctx, http.Header{"X-Codex-Primary-Used-Percent": []string{"12"}})
 	if got := GetResponseHeadersReceivedAt(ctx); !got.Equal(clock) {
 		t.Fatalf("received at after merge = %v, want %v", got, clock)
+	}
+	// A partial merge keeps the receipt time of headers it did not carry.
+	if got := GetResponseHeaderReceivedAt(ctx, "x-codex-primary-reset-after-seconds"); !got.Equal(first) {
+		t.Fatalf("unmerged header received at = %v, want %v", got, first)
+	}
+	if got := GetResponseHeaderReceivedAt(ctx, "X-Codex-Primary-Used-Percent"); !got.Equal(clock) {
+		t.Fatalf("merged header received at = %v, want %v", got, clock)
 	}
 
 	if got := GetResponseHeadersReceivedAt(context.Background()); !got.IsZero() {

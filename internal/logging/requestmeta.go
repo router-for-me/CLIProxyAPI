@@ -33,10 +33,11 @@ type responseStatusHolder struct {
 type responseHeadersHolder struct {
 	mu      sync.RWMutex
 	headers http.Header
-	// receivedAt is when headers were last set or merged. Streamed results are
-	// recorded only after the stream drains, so this is the moment the upstream
-	// values were current, not the moment the result was recorded.
-	receivedAt time.Time
+	// receivedAt is when each header was last set or merged, keyed by canonical
+	// name. Streamed results are recorded only after the stream drains, and a
+	// later merge may carry only some headers, so each value keeps the moment
+	// it was current upstream.
+	receivedAt map[string]time.Time
 }
 
 // responseHeadersNow is replaced in tests.
@@ -131,7 +132,11 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneHTTPHeader(headers)
-	holder.receivedAt = responseHeadersNow()
+	now := responseHeadersNow()
+	holder.receivedAt = make(map[string]time.Time, len(holder.headers))
+	for key := range holder.headers {
+		holder.receivedAt[key] = now
+	}
 }
 
 // MergeResponseHeaders adds headers observed after the initial HTTP response,
@@ -149,14 +154,18 @@ func MergeResponseHeaders(ctx context.Context, headers http.Header) {
 	if holder.headers == nil {
 		holder.headers = make(http.Header, len(headers))
 	}
+	if holder.receivedAt == nil {
+		holder.receivedAt = make(map[string]time.Time, len(headers))
+	}
+	now := responseHeadersNow()
 	for key, values := range headers {
 		canonicalKey := http.CanonicalHeaderKey(key)
 		if canonicalKey == "" {
 			continue
 		}
 		holder.headers[canonicalKey] = append([]string(nil), values...)
+		holder.receivedAt[canonicalKey] = now
 	}
-	holder.receivedAt = responseHeadersNow()
 }
 
 func GetResponseStatus(ctx context.Context) int {
@@ -183,19 +192,42 @@ func GetResponseHeaders(ctx context.Context) http.Header {
 	return cloneHTTPHeader(holder.headers)
 }
 
-// GetResponseHeadersReceivedAt returns when the response headers in ctx were
-// last set or merged, or the zero time when none were recorded.
+// GetResponseHeadersReceivedAt returns when the newest response header in ctx
+// was set or merged, or the zero time when none were recorded.
 func GetResponseHeadersReceivedAt(ctx context.Context) time.Time {
-	if ctx == nil {
-		return time.Time{}
-	}
-	holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
-	if !ok || holder == nil {
+	holder := responseHeadersHolderFrom(ctx)
+	if holder == nil {
 		return time.Time{}
 	}
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
-	return holder.receivedAt
+	var latest time.Time
+	for _, receivedAt := range holder.receivedAt {
+		if receivedAt.After(latest) {
+			latest = receivedAt
+		}
+	}
+	return latest
+}
+
+// GetResponseHeaderReceivedAt returns when the named response header in ctx was
+// last set or merged, or the zero time when it was not recorded.
+func GetResponseHeaderReceivedAt(ctx context.Context, name string) time.Time {
+	holder := responseHeadersHolderFrom(ctx)
+	if holder == nil {
+		return time.Time{}
+	}
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	return holder.receivedAt[http.CanonicalHeaderKey(name)]
+}
+
+func responseHeadersHolderFrom(ctx context.Context) *responseHeadersHolder {
+	if ctx == nil {
+		return nil
+	}
+	holder, _ := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder)
+	return holder
 }
 
 func cloneHTTPHeader(src http.Header) http.Header {

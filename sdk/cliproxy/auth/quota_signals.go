@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -62,6 +64,39 @@ func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers h
 		return false
 	}
 	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
+}
+
+// rebaseRelativeQuotaHeaders rewrites relative reset values so they count from
+// observedAt. A websocket quota frame can merge only some headers, so a
+// Reset-After-Seconds value received earlier than observedAt would otherwise
+// be anchored at the later time and its reset would drift. receivedAt reports
+// when a header was received; headers is not modified.
+func rebaseRelativeQuotaHeaders(headers http.Header, observedAt time.Time, receivedAt func(string) time.Time) http.Header {
+	if len(headers) == 0 || receivedAt == nil {
+		return headers
+	}
+	rebased := headers
+	cloned := false
+	for key, values := range headers {
+		if len(values) == 0 || !strings.HasSuffix(strings.ToLower(key), "-reset-after-seconds") {
+			continue
+		}
+		received := receivedAt(key)
+		if received.IsZero() || !received.Before(observedAt) {
+			continue
+		}
+		seconds, errParse := strconv.ParseFloat(strings.TrimSpace(values[len(values)-1]), 64)
+		if errParse != nil {
+			continue
+		}
+		remaining := math.Max(0, seconds-observedAt.Sub(received).Seconds())
+		if !cloned {
+			rebased = headers.Clone()
+			cloned = true
+		}
+		rebased[key] = []string{strconv.FormatInt(int64(math.Round(remaining)), 10)}
+	}
+	return rebased
 }
 
 // ClearObservationSignals removes only passive observation data. It leaves

@@ -1371,9 +1371,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if observedAt.IsZero() || observedAt.After(now) {
 				observedAt = now
 			}
-			auth.Quota.observeResponseHeadersIfNotOlder(result.Provider, responseHeaders, observedAt)
+			observedHeaders := rebaseRelativeQuotaHeaders(responseHeaders, observedAt, func(name string) time.Time {
+				return internallogging.GetResponseHeaderReceivedAt(ctx, name)
+			})
+			auth.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)
 			if modelState != nil {
-				modelState.Quota.observeResponseHeadersIfNotOlder(result.Provider, responseHeaders, observedAt)
+				modelState.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)
 			}
 		}
 

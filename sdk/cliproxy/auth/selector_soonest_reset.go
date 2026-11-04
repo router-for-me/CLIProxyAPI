@@ -19,9 +19,9 @@ const soonestResetProbeInterval = time.Hour
 // the next reset is spent first. Reset times come from the passive quota
 // snapshot (Quota.Signals) recorded from upstream response headers.
 //
-// A credential of a provider that reports quota headers but has no snapshot
-// yet (for example after a restart) is picked once per probe interval so its
-// reset time is learned; otherwise the first observed credential would win
+// A credential of a provider that reports quota headers but has no parseable
+// reset yet (for example after a restart) is picked once per probe interval
+// so its reset time is learned; otherwise the first observed credential would win
 // every pick and the strategy would degrade to fill-first. Credentials whose
 // observed window has already reset come after credentials with a future
 // reset. Ties and unknowns keep fill-first order.
@@ -67,14 +67,17 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 	return picked, nil
 }
 
-// nextProbe returns the first unobserved credential that has not been probed
-// within soonestResetProbeInterval, and records the probe.
+// nextProbe returns the first credential without any parseable reset (no
+// snapshot yet, or one that carried only partial quota headers) that has not
+// been probed within soonestResetProbeInterval, and records the probe.
 func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, candidate := range available {
-		if candidate == nil || !ProviderSupportsQuotaObservation(candidate.Provider) ||
-			!candidate.Quota.ObservedAt.IsZero() || len(candidate.Quota.Signals) > 0 {
+		if candidate == nil || !ProviderSupportsQuotaObservation(candidate.Provider) {
+			continue
+		}
+		if _, known := quotaWindowReset(candidate); known {
 			continue
 		}
 		if last, ok := s.probedAt[candidate.ID]; ok && now.Sub(last) < soonestResetProbeInterval {
@@ -90,9 +93,19 @@ func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth
 }
 
 // quotaWindowResetAt reports the future reset time of the longest quota
-// window in the auth's passive quota snapshot. Codex reports a primary and an
-// optional secondary window; Claude reports unified 5h and 7d windows.
+// window in the auth's passive quota snapshot.
 func quotaWindowResetAt(auth *Auth, now time.Time) (time.Time, bool) {
+	reset, ok := quotaWindowReset(auth)
+	if !ok || !reset.After(now) {
+		return time.Time{}, false
+	}
+	return reset, true
+}
+
+// quotaWindowReset reports the reset time of the longest quota window in the
+// auth's passive quota snapshot, past or future. Codex reports a primary and
+// an optional secondary window; Claude reports unified 5h and 7d windows.
+func quotaWindowReset(auth *Auth) (time.Time, bool) {
 	if auth == nil || len(auth.Quota.Signals) == 0 {
 		return time.Time{}, false
 	}
@@ -119,10 +132,7 @@ func quotaWindowResetAt(auth *Auth, now time.Time) (time.Time, bool) {
 			}
 		}
 	}
-	if reset.IsZero() || !reset.After(now) {
-		return time.Time{}, false
-	}
-	return reset, true
+	return reset, !reset.IsZero()
 }
 
 func codexWindowResetAt(signals map[string]string, prefix string, observedAt time.Time) (time.Time, bool) {
