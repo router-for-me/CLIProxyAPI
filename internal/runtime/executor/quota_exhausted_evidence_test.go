@@ -17,6 +17,8 @@ import (
 
 const googleQuotaExhaustedBody = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"7200s"}]}}`
 
+const googleQuotaExhaustedNoDelayBody = `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exhausted","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`
+
 // quotaEvidenceOf returns the evidence an error reports: exhausted, window
 // minutes and the reset reported apart from the retry hint (0 when none).
 func quotaEvidenceOf(err error) (bool, int64, time.Duration) {
@@ -85,8 +87,9 @@ func TestStatusErrorsReportOnlyStructuredQuotaExhaustion(t *testing.T) {
 		{name: "vertex openapi QUOTA_EXHAUSTED", err: newOpenAICompatStatusError(http.StatusTooManyRequests, nil, []byte(googleQuotaExhaustedBody)), want: true, wantReset: 2 * time.Hour},
 		{name: "google QUOTA_EXHAUSTED", err: newGoogleStatusErr(http.StatusTooManyRequests, nil, []byte(googleQuotaExhaustedBody)), want: true, wantReset: 2 * time.Hour},
 		{name: "google long RATE_LIMIT_EXCEEDED", err: newGoogleStatusErr(http.StatusTooManyRequests, nil, googleRateLimit)},
-		{name: "antigravity QUOTA_EXHAUSTED", err: newAntigravityStatusErr(http.StatusTooManyRequests, []byte(googleQuotaExhaustedBody)), want: true},
-		{name: "antigravity quota keyword only", err: newAntigravityStatusErr(http.StatusTooManyRequests, []byte(`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 2h."}}`))},
+		{name: "antigravity QUOTA_EXHAUSTED", err: newAntigravityStatusErr(http.StatusTooManyRequests, nil, []byte(googleQuotaExhaustedBody)), want: true, wantReset: 2 * time.Hour},
+		{name: "antigravity QUOTA_EXHAUSTED reset only in Retry-After", err: newAntigravityStatusErr(http.StatusTooManyRequests, http.Header{"Retry-After": {"7200"}}, []byte(googleQuotaExhaustedNoDelayBody)), want: true, wantReset: 2 * time.Hour},
+		{name: "antigravity quota keyword only", err: newAntigravityStatusErr(http.StatusTooManyRequests, nil, []byte(`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 2h."}}`))},
 		{name: "claude unified 5h rejection", err: classifyClaudeUpstreamError(http.StatusTooManyRequests, claudeRejected(2*time.Hour, 0), claudeBody), want: true, wantWindow: 300},
 		{name: "claude fast unified 5h rejection", err: newClaudeFastDirectResponseError(&http.Response{StatusCode: http.StatusTooManyRequests, Header: claudeRejected(2*time.Hour, 0)}, claudeBody), want: true, wantWindow: 300},
 		{name: "claude fast ordinary 429", err: newClaudeFastDirectResponseError(&http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"30"}}}, claudeBody)},

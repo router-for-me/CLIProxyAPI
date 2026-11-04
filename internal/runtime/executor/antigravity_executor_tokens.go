@@ -155,5 +155,5 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		closeAntigravityAuthIdleTransports(auth)
 	}
-	return cliproxyexecutor.Response{}, newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+	return cliproxyexecutor.Response{}, newAntigravityStatusErr(httpResp.StatusCode, httpResp.Header, bodyBytes)
 }

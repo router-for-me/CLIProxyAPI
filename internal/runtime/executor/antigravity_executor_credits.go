@@ -355,13 +355,17 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+// newAntigravityStatusErr builds the error for an Antigravity upstream error.
+// headers are the HTTP response headers, nil for an error inside a stream; a
+// QUOTA_EXHAUSTED keeps its reset, from the body or a Retry-After header, as
+// the quota reset, while the retry hint stays the body's retry delay.
+func newAntigravityStatusErr(statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
-		err.quotaExhausted, _ = helps.GoogleQuotaExhaustion(statusCode, nil, body, time.Now())
+		err.quotaExhausted, err.quotaResetAfter = helps.GoogleQuotaExhaustion(statusCode, headers, body, time.Now())
 	}
 	return err
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
@@ -34,11 +35,17 @@ func TestAIStudioReportsGoogleQuotaExhaustion(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 	<-connected
 	go func() {
-		var request wsrelay.Message
-		if conn.ReadJSON(&request) != nil {
+		_, request, errRead := conn.ReadMessage()
+		if errRead != nil {
 			return
 		}
-		_ = conn.WriteJSON(wsrelay.Message{ID: request.ID, Type: wsrelay.MessageTypeHTTPResp, Payload: map[string]any{"status": http.StatusTooManyRequests, "body": googleQuotaExhaustedBody}})
+		response := ojson.NewDocString(`{}`)
+		for path, value := range map[string]any{"id": ojson.GetBytes(request, "id").String(), "type": wsrelay.MessageTypeHTTPResp, "payload.status": http.StatusTooManyRequests, "payload.body": googleQuotaExhaustedBody} {
+			if errSet := response.Set(path, value); errSet != nil {
+				return
+			}
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, response.Bytes())
 	}()
 	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
 	_, err := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
