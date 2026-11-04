@@ -205,3 +205,72 @@ func TestQuotaWindowResetAt(t *testing.T) {
 		})
 	}
 }
+
+func TestSoonestResetSelectorPick_ProbesUnobservedCredentials(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	known := &Auth{ID: "a", Provider: "codex", Quota: codexWeeklySignals(now.Add(6 * 24 * time.Hour))}
+	unobserved := &Auth{ID: "b", Provider: "codex"}
+	auths := []*Auth{known, unobserved}
+
+	pick := func() string {
+		t.Helper()
+		got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		return got.ID
+	}
+
+	if got := pick(); got != "b" {
+		t.Fatalf("first pick = %q, want unobserved b probed", got)
+	}
+	// b was probed but its response carried no quota headers: no repeat probe within the interval.
+	if got := pick(); got != "a" {
+		t.Fatalf("second pick = %q, want a", got)
+	}
+	now = now.Add(soonestResetProbeInterval)
+	if got := pick(); got != "b" {
+		t.Fatalf("pick after probe interval = %q, want b probed again", got)
+	}
+}
+
+func TestSoonestResetSelectorPick_DoesNotProbeProvidersWithoutQuotaHeaders(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	auths := []*Auth{
+		{ID: "a", Provider: "gemini"},
+		{ID: "b", Provider: "codex", Quota: codexWeeklySignals(now.Add(time.Hour))},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got.ID != "b" {
+		t.Fatalf("Pick() = %q, want b", got.ID)
+	}
+}
+
+func TestSoonestResetSelectorUsesPrevalidatedCandidates(t *testing.T) {
+	t.Parallel()
+
+	selector := &SoonestResetSelector{}
+	if !selectorUsesPrevalidatedCandidates(selector) {
+		t.Fatal("soonest-reset must use prevalidated candidates")
+	}
+	if isBuiltInSelector(selector) {
+		t.Fatal("soonest-reset must not take the scheduler fast path")
+	}
+	if got := selectionArgForSelector(selector, "route-alias"); got != "" {
+		t.Fatalf("selection model = %q, want empty (manager resolves upstream models)", got)
+	}
+	ctx := selectorContextForAvailableAuths(context.Background(), selector, "route-alias")
+	if validated, _ := ctx.Value(prevalidatedAuthCandidatesKey{}).(bool); !validated {
+		t.Fatal("selector context is not marked prevalidated")
+	}
+}

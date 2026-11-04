@@ -166,7 +166,8 @@ routing:
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # soonest-reset prefers the credential whose longest quota window (Codex weekly, Claude 7d)
   # resets soonest, so allowance that would expire unused is spent first. Reset times come from
-  # upstream response headers; credentials without one yet are used after those with one, in fill-first order.
+  # upstream response headers. A credential with no observation yet (e.g. after a restart) is sent one request
+  # per hour to learn its reset; credentials whose window already reset are used last, in fill-first order.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,

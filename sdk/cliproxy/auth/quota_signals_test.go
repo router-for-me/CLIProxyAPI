@@ -683,3 +683,29 @@ func TestObserveResponseHeadersKeepsPrimaryWhenTruncatingAdditional(t *testing.T
 		t.Fatalf("snapshot size = %d, want %d", len(quota.Signals), maxQuotaSignalHeaders)
 	}
 }
+
+func TestObserveResponseHeadersIfNotOlderKeepsNewestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	newer := time.Unix(1790000100, 0)
+	older := newer.Add(-time.Minute)
+	quota := QuotaState{
+		ObservedAt: newer,
+		Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "40"},
+	}
+
+	if quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"10"}}, older) {
+		t.Fatal("older observation replaced a newer snapshot")
+	}
+	if quota.ObservedAt != newer || quota.Signals["X-Codex-Primary-Used-Percent"] != "40" {
+		t.Fatalf("snapshot changed by older observation: %#v", quota)
+	}
+
+	latest := newer.Add(time.Minute)
+	if !quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"55"}}, latest) {
+		t.Fatal("newer observation was not applied")
+	}
+	if quota.ObservedAt != latest || quota.Signals["X-Codex-Primary-Used-Percent"] != "55" {
+		t.Fatalf("snapshot = %#v, want newest observation", quota)
+	}
+}

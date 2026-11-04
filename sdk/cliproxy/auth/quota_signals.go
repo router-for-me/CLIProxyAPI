@@ -53,6 +53,17 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	return true
 }
 
+// observeResponseHeadersIfNotOlder applies an observation unless the snapshot
+// already holds a newer one. Observations are stamped at header receipt, and
+// concurrent requests on one credential can finish out of order, so an older
+// stream that drains last must not replace a newer snapshot.
+func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers http.Header, observedAt time.Time) bool {
+	if q == nil || (!q.ObservedAt.IsZero() && observedAt.Before(q.ObservedAt)) {
+		return false
+	}
+	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
+}
+
 // ClearObservationSignals removes only passive observation data. It leaves
 // cooldown and scheduler state untouched.
 func (q *QuotaState) ClearObservationSignals() bool {

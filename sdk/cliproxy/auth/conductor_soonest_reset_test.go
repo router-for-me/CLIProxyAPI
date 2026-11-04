@@ -159,3 +159,37 @@ func TestMarkResultAnchorsQuotaObservationAtHeaderReceipt(t *testing.T) {
 		t.Fatalf("reset = %v, %v; want %v", reset, okReset, receivedAt.Add(time.Hour))
 	}
 }
+
+func TestManagerSoonestResetLearnsEveryCredentialAfterRestart(t *testing.T) {
+	executor := &soonestResetExecutor{resets: map[string]time.Duration{
+		"soonest-reset-fresh-a": 6 * 24 * time.Hour,
+		"soonest-reset-fresh-b": 3 * time.Hour,
+	}}
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	manager.RegisterExecutor(executor)
+
+	model := "gpt-soonest-reset-fresh"
+	for _, id := range []string{"soonest-reset-fresh-a", "soonest-reset-fresh-b"} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", id, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	var picks []string
+	for i := 0; i < 4; i++ {
+		ctx := internallogging.WithResponseHeadersHolder(context.Background())
+		if _, errExecute := manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		picks = append(picks, executor.last())
+	}
+	// Both credentials are probed once, then the sooner reset (b) wins.
+	want := []string{"soonest-reset-fresh-a", "soonest-reset-fresh-b", "soonest-reset-fresh-b", "soonest-reset-fresh-b"}
+	for i := range want {
+		if picks[i] != want[i] {
+			t.Fatalf("picks = %v, want %v", picks, want)
+		}
+	}
+}

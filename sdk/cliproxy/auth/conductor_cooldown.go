@@ -1371,9 +1371,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if observedAt.IsZero() || observedAt.After(now) {
 				observedAt = now
 			}
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observedAt)
+			auth.Quota.observeResponseHeadersIfNotOlder(result.Provider, responseHeaders, observedAt)
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observedAt)
+				modelState.Quota.observeResponseHeadersIfNotOlder(result.Provider, responseHeaders, observedAt)
 			}
 		}
 

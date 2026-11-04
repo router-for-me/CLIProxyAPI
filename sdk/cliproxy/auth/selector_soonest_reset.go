@@ -4,29 +4,39 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+// soonestResetProbeInterval bounds how often a credential without any quota
+// observation is sent a request to learn its reset time.
+const soonestResetProbeInterval = time.Hour
 
 // SoonestResetSelector selects the available credential whose longest quota
 // window resets soonest, so allowance that would otherwise expire unused at
 // the next reset is spent first. Reset times come from the passive quota
 // snapshot (Quota.Signals) recorded from upstream response headers.
 //
-// Credentials without an observed future reset (never used, or the observed
-// window has already reset) come after credentials with one. Ties and
-// unknowns keep fill-first order, so the strategy behaves like fill-first
-// until reset times have been observed.
+// A credential of a provider that reports quota headers but has no snapshot
+// yet (for example after a restart) is picked once per probe interval so its
+// reset time is learned; otherwise the first observed credential would win
+// every pick and the strategy would degrade to fill-first. Credentials whose
+// observed window has already reset come after credentials with a future
+// reset. Ties and unknowns keep fill-first order.
 type SoonestResetSelector struct {
 	nowFunc func() time.Time
+
+	mu       sync.Mutex
+	probedAt map[string]time.Time
 }
 
 // Pick selects the available auth with the soonest observed quota reset.
 func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	if s != nil && s.nowFunc != nil {
+	if s.nowFunc != nil {
 		now = s.nowFunc()
 	}
 	available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)
@@ -34,6 +44,10 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+
+	if probe := s.nextProbe(available, now); probe != nil {
+		return probe, nil
+	}
 
 	var picked *Auth
 	var pickedReset time.Time
@@ -51,6 +65,28 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		return available[0], nil
 	}
 	return picked, nil
+}
+
+// nextProbe returns the first unobserved credential that has not been probed
+// within soonestResetProbeInterval, and records the probe.
+func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, candidate := range available {
+		if candidate == nil || !ProviderSupportsQuotaObservation(candidate.Provider) ||
+			!candidate.Quota.ObservedAt.IsZero() || len(candidate.Quota.Signals) > 0 {
+			continue
+		}
+		if last, ok := s.probedAt[candidate.ID]; ok && now.Sub(last) < soonestResetProbeInterval {
+			continue
+		}
+		if s.probedAt == nil {
+			s.probedAt = make(map[string]time.Time)
+		}
+		s.probedAt[candidate.ID] = now
+		return candidate
+	}
+	return nil
 }
 
 // quotaWindowResetAt reports the future reset time of the longest quota
