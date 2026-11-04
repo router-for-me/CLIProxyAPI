@@ -152,12 +152,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 	}
 
-	sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		closeAntigravityAuthIdleTransports(auth)
-		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-			sErr.retryAfter = retryAfter
-		}
 	}
-	return cliproxyexecutor.Response{}, sErr
+	return cliproxyexecutor.Response{}, newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 }

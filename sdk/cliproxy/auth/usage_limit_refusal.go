@@ -181,7 +181,7 @@ func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eli
 	requirePositiveWeight := selectorRequiresPositiveWeight(m.selector)
 	var refusal *usageLimitRefusal
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || (pinnedAuthID != "" && auth.ID != pinnedAuthID) || !eligibility.allows(auth) {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || (pinnedAuthID != "" && auth.ID != pinnedAuthID) || !eligibility.allows(auth) {
 			continue
 		}
 		if requirePositiveWeight && authWeight(auth) <= 0 {

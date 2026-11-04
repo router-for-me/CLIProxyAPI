@@ -59,6 +59,7 @@ func TestUsageLimitRefusalForPool(t *testing.T) {
 		{name: "exactly five minutes stays retryable", auths: []*Auth{credentialQuotaAuth("a", true, now.Add(usageLimitMinResetIn), 300)}},
 		{name: "just over five minutes is a usage limit", auths: []*Auth{credentialQuotaAuth("a", true, now.Add(usageLimitMinResetIn+time.Second), 300)}, wantReset: now.Add(usageLimitMinResetIn + time.Second), window: 300},
 		{name: "earliest reset wins with its window", auths: []*Auth{credentialQuotaAuth("a", true, now.Add(72*time.Hour), 10080), credentialQuotaAuth("b", true, now.Add(2*time.Hour), 300)}, wantReset: now.Add(2 * time.Hour), window: 300},
+		{name: "status-disabled candidate is not eligible", auths: []*Auth{credentialQuotaAuth("a", true, now.Add(2*time.Hour), 300), {ID: "b", Provider: "codex", Status: StatusDisabled}}, wantReset: now.Add(2 * time.Hour), window: 300},
 		{name: "available candidate stays retryable", auths: []*Auth{credentialQuotaAuth("a", true, now.Add(2*time.Hour), 300), {ID: "b", Provider: "codex", Status: StatusActive}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

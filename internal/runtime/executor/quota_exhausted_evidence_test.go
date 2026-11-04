@@ -134,3 +134,23 @@ func TestGeminiAndVertexReportGoogleQuotaExhaustion(t *testing.T) {
 		}
 	}
 }
+
+// Antigravity token counting reports Google quota exhaustion like the other
+// request paths.
+func TestAntigravityCountTokensReportsQuotaExhaustion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, googleQuotaExhaustedBody)
+	}))
+	t.Cleanup(server.Close)
+	auth := &cliproxyauth.Auth{ID: "antigravity-count-quota", Provider: "antigravity", Attributes: map[string]string{"base_url": server.URL}, Metadata: map[string]any{
+		"access_token": "token", "project_id": "project-1", "expired": time.Now().Add(time.Hour).Format(time.RFC3339),
+	}}
+	_, err := task6Executor("antigravity").CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gemini-3.6-flash-high", Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if exhausted, _, _ := quotaEvidenceOf(err); !exhausted || err.Error() != googleQuotaExhaustedBody {
+		t.Fatalf("err = %T %v, want QUOTA_EXHAUSTED evidence with the error unchanged", err, err)
+	}
+}
