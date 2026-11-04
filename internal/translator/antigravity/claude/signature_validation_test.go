@@ -3,7 +3,7 @@ package claude
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestGeminiClaudeCarrierSignatureRoundTrip(t *testing.T) {
@@ -31,7 +31,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksPreservesMarkedNonEmptyThinkin
 	invalidPrevious := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"signed thought","signature":"` + standalone + `"},{"type":"thinking","thinking":"tool preface","signature":"` + nextFunction + `"},{"type":"tool_use","id":"tool-1","name":"run","input":{}},{"type":"thinking","thinking":"invalid backward","signature":"` + invalidPrevious + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 3 || content[0].Get("signature").String() != standalone || content[1].Get("signature").String() != nextFunction || content[2].Get("type").String() != "tool_use" {
 		t.Fatalf("marked non-empty thinking validation changed carriers: %s", out)
 	}
@@ -43,7 +43,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsMismatchedDirectionalThin
 	standaloneFunction := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierStandalone, geminiClaudeCarrierFunction)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"wrong next target","signature":"` + nextFunction + `"},{"type":"text","text":"visible"},{"type":"thinking","thinking":"wrong standalone target","signature":"` + standaloneFunction + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 1 || content[0].Get("type").String() != "text" {
 		t.Fatalf("mismatched directional thinking was preserved: %s", out)
 	}
@@ -53,8 +53,8 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsLegacyRawCarrierFromUserM
 	validSignature := testGeminiEPrefixSignature(t)
 	input := []byte(`{"messages":[{"role":"user","content":[{"type":"thinking","thinking":"","signature":"` + validSignature + `"},{"type":"text","text":"user text"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"` + validSignature + `"},{"type":"text","text":"assistant text"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	userContent := gjson.GetBytes(out, "messages.0.content").Array()
-	assistantContent := gjson.GetBytes(out, "messages.1.content").Array()
+	userContent := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
+	assistantContent := ojson.GetBytesNoCopy(out, "messages.1.content").Array()
 	if len(userContent) != 1 || userContent[0].Get("type").String() != "text" {
 		t.Fatalf("legacy raw carrier survived user message: %s", out)
 	}
@@ -68,7 +68,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocks(t *testing.T) {
 	validCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"text","text":"first"},{"type":"thinking","thinking":"","signature":"` + validSignature + `"},{"type":"thinking","thinking":"","signature":"` + validCarrier + `"},{"type":"thinking","thinking":"","signature":"cpa-gemini-carrier-v1:previous:text:invalid"},{"type":"thinking","thinking":"","signature":"invalid"},{"type":"text","text":"last"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 4 {
 		t.Fatalf("content count = %d, want 4; output=%s", len(content), out)
 	}
@@ -88,7 +88,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksPreservesUnsignedThoughtWithFo
 	validCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"let me think","signature":""},{"type":"text","text":"answer text"},{"type":"thinking","thinking":"","signature":"` + validCarrier + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content count = %d, want 3; output=%s", len(content), out)
 	}
@@ -108,7 +108,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksUnrelatedSegmentDoesNotPreserv
 	validCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"unrelated early thought","signature":""},{"type":"text","text":"text A"},{"type":"thinking","thinking":"second thought","signature":""},{"type":"text","text":"text B"},{"type":"thinking","thinking":"","signature":"` + validCarrier + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 4 {
 		t.Fatalf("content count = %d, want 4 (early thought dropped, second thought + text + carrier kept); output=%s", len(content), out)
 	}
@@ -129,7 +129,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksUnrelatedSegmentDoesNotPreserv
 func TestStripInvalidGeminiSignatureThinkingBlocksDropsUnsignedThinkingWithoutCarriers(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought 1","signature":""},{"type":"thinking","thinking":"thought 2","signature":""},{"type":"thinking","thinking":"thought 3","signature":""},{"type":"text","text":"visible answer"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 1 || content[0].Get("text").String() != "visible answer" {
 		t.Fatalf("unsigned thoughts without carrier were not stripped: %s", out)
 	}
@@ -143,7 +143,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsUnsignedThoughtWithMalfor
 	// Trailing next carrier does not bind backward to previous text/thinking
 	inputNext := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought text","signature":""},{"type":"text","text":"visible text"},{"type":"thinking","thinking":"","signature":"` + nextCarrier + `"}]}]}`)
 	outNext := StripInvalidGeminiSignatureThinkingBlocks(inputNext)
-	contentNext := gjson.GetBytes(outNext, "messages.0.content").Array()
+	contentNext := ojson.GetBytesNoCopy(outNext, "messages.0.content").Array()
 	if len(contentNext) != 1 || contentNext[0].Get("text").String() != "visible text" {
 		t.Fatalf("wrong direction trailing carrier preserved unsigned thought: %s", outNext)
 	}
@@ -151,7 +151,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDropsUnsignedThoughtWithMalfor
 	// Trailing malformed carrier does not preserve unsigned thought
 	inputMalformed := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought text","signature":""},{"type":"text","text":"visible text"},{"type":"thinking","thinking":"","signature":"` + malformedCarrier + `"}]}]}`)
 	outMalformed := StripInvalidGeminiSignatureThinkingBlocks(inputMalformed)
-	contentMalformed := gjson.GetBytes(outMalformed, "messages.0.content").Array()
+	contentMalformed := ojson.GetBytesNoCopy(outMalformed, "messages.0.content").Array()
 	if len(contentMalformed) != 1 || contentMalformed[0].Get("text").String() != "visible text" {
 		t.Fatalf("malformed trailing carrier preserved unsigned thought: %s", outMalformed)
 	}
@@ -162,7 +162,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksDroppedNonEmptyThinkingInvalid
 	functionCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierFunction)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"run","input":{}},{"type":"thinking","thinking":"intervening unsigned thought","signature":""},{"type":"thinking","thinking":"","signature":"` + functionCarrier + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 1 || content[0].Get("type").String() != "tool_use" {
 		t.Fatalf("dropped non-empty thinking did not invalidate following previous carrier: %s", out)
 	}
@@ -173,7 +173,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksInvalidMiddleThinkingDoesNotPr
 	validCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought A","signature":""},{"type":"thinking","thinking":"invalid boundary","signature":"invalid"},{"type":"thinking","thinking":"","signature":"` + validCarrier + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 0 {
 		t.Fatalf("invalid middle thinking propagated carrier; got: %s", out)
 	}
@@ -185,7 +185,7 @@ func TestStripInvalidGeminiSignatureThinkingBlocksInvalidPlacementMiddleThinking
 	validTrailingCarrier := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierText)
 	input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"thought A","signature":""},{"type":"thinking","thinking":"invalid middle thinking","signature":"` + invalidPlacementCarrier + `"},{"type":"text","text":"text answer"},{"type":"thinking","thinking":"","signature":"` + validTrailingCarrier + `"}]}]}`)
 	out := StripInvalidGeminiSignatureThinkingBlocks(input)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	if len(content) != 2 || content[0].Get("text").String() != "text answer" || content[1].Get("signature").String() != validTrailingCarrier {
 		t.Fatalf("invalid placement middle thinking propagated carrier; got: %s", out)
 	}

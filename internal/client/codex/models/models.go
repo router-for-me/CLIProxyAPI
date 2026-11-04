@@ -2,13 +2,14 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 type codexClientModelsPayload struct {
@@ -21,6 +22,10 @@ type ProvidersForModelFunc func(string) []string
 // WebSearchCapabilityForModelFunc returns explicit conservative capability
 // metadata for an exact public model ID. nil means unknown.
 type WebSearchCapabilityForModelFunc func(string) *bool
+
+// ToolSearchCapabilityForModelFunc reports whether every credential serving a
+// public model ID can receive Codex tool_search as Anthropic native tool search.
+type ToolSearchCapabilityForModelFunc func(id string) bool
 
 var (
 	codexClientModelTemplatesMu       sync.Mutex
@@ -65,15 +70,48 @@ func BuildResponseForClient(availableModels []map[string]any, providersForModel 
 // BuildResponseForClientWithCPACapabilities builds a client response while
 // allowing Home to supply capability metadata independent of the local registry.
 func BuildResponseForClientWithCPACapabilities(availableModels []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
+	return BuildResponseForClientWithToolCapabilities(availableModels, providersForModel, webSearchCapabilityForModel, nil, nil, optimizeMultiAgentV2, clientVersion)
+}
+
+// BuildResponseForClientWithToolCapabilities adds executor-backed tool support
+// independently of template metadata and legacy provider restrictions.
+func BuildResponseForClientWithToolCapabilities(availableModels []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, applyPatchCapabilityForModel ApplyPatchCapabilityForModelFunc, toolSearchCapabilityForModel ToolSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
+	return BuildResponseForClientWithSearchToolRoutes(availableModels, providersForModel, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion)
+}
+
+// BuildResponseForClientWithSearchToolRoutes lets Home supply routing evidence
+// for supports_search_tool without the other provider-dependent metadata.
+// A nil searchToolProvidersForModel uses providersForModel. A nil
+// toolSearchCapabilityForModel keeps Claude routes from advertising search.
+func BuildResponseForClientWithSearchToolRoutes(availableModels []map[string]any, providersForModel, searchToolProvidersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, applyPatchCapabilityForModel ApplyPatchCapabilityForModelFunc, toolSearchCapabilityForModel ToolSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) map[string]any {
 	return map[string]any{
-		"models": buildCodexClientModels(availableModels, providersForModel, webSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion),
+		"models": buildCodexClientModelsWithToolCapabilities(availableModels, providersForModel, searchToolProvidersForModel, webSearchCapabilityForModel, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, clientVersion),
 	}
 }
 
+// MarshalCompact serializes a Codex client catalog as a single JSON line.
+// HTML escaping is disabled so instruction text is not expanded into \u003c sequences.
+func MarshalCompact(payload any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if errEncode := encoder.Encode(payload); errEncode != nil {
+		return nil, errEncode
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 func buildCodexClientModels(models []map[string]any, providersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
-	templates, defaultTemplate, err := loadCodexClientModelTemplates()
-	if err != nil || defaultTemplate == nil {
+	return buildCodexClientModelsWithToolCapabilities(models, providersForModel, nil, webSearchCapabilityForModel, nil, nil, optimizeMultiAgentV2, clientVersion)
+}
+
+func buildCodexClientModelsWithToolCapabilities(models []map[string]any, providersForModel, searchToolProvidersForModel ProvidersForModelFunc, webSearchCapabilityForModel WebSearchCapabilityForModelFunc, applyPatchCapabilityForModel ApplyPatchCapabilityForModelFunc, toolSearchCapabilityForModel ToolSearchCapabilityForModelFunc, optimizeMultiAgentV2 bool, clientVersion string) []map[string]any {
+	templates, defaultTemplate, errLoadCodexClientModelTemplates := loadCodexClientModelTemplates()
+	if errLoadCodexClientModelTemplates != nil || defaultTemplate == nil {
 		return nil
+	}
+	if searchToolProvidersForModel == nil {
+		searchToolProvidersForModel = providersForModel
 	}
 
 	result := make([]map[string]any, 0, len(models))
@@ -98,13 +136,16 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
 				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 			}
-			applyCodexClientProviderCapabilities(entry, id, true, providersForModel)
+			applyCodexClientProviderCapabilities(entry, id, providersForModel)
+			applyCodexClientSearchToolSupport(entry, id, true, searchToolProvidersForModel, toolSearchCapabilityForModel)
 			applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 			sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 			applyCodexClientVisibilityOverride(entry, id)
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
 			}
+			applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
+			applyCodexClientApplyPatchCapability(entry, id, applyPatchCapabilityForModel)
 			result = append(result, entry)
 			continue
 		}
@@ -112,10 +153,12 @@ func buildCodexClientModels(models []map[string]any, providersForModel Providers
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
-		applyCodexClientProviderCapabilities(entry, id, false, providersForModel)
+		applyCodexClientSearchToolSupport(entry, id, false, searchToolProvidersForModel, toolSearchCapabilityForModel)
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
+		applyCodexClientApplyPatchCapability(entry, id, applyPatchCapabilityForModel)
 		result = append(result, entry)
 	}
 
@@ -206,7 +249,7 @@ func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[str
 				continue
 			}
 			templates[slug] = cloneCodexClientModelMap(model)
-			if slug == "gpt-5.5" {
+			if defaultTemplate == nil || slug == "gpt-5.5" {
 				defaultTemplate = cloneCodexClientModelMap(model)
 			}
 		}
@@ -241,6 +284,94 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientDevinDisplayName(entry map[string]any, id string, model map[string]any, providersForModel ProvidersForModelFunc) {
+	if !isCodexClientDevinModel(id, model, entry, providersForModel) {
+		return
+	}
+	displayName := stringModelValue(entry, "display_name")
+	if displayName == "" {
+		displayName = id
+	}
+	trimmed := strings.TrimSpace(displayName)
+	if strings.HasSuffix(trimmed, " (Devin)") {
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), " (devin)") {
+		entry["display_name"] = trimmed[:len(trimmed)-len(" (devin)")] + " (Devin)"
+		return
+	}
+	if strings.HasSuffix(strings.ToLower(trimmed), "(devin)") {
+		entry["display_name"] = strings.TrimSpace(trimmed[:len(trimmed)-len("(devin)")]) + " (Devin)"
+		return
+	}
+	entry["display_name"] = trimmed + " (Devin)"
+}
+
+func isCodexClientDevinModel(id string, model map[string]any, entry map[string]any, providersForModel ProvidersForModelFunc) bool {
+	idLower := strings.ToLower(strings.TrimSpace(id))
+	if strings.HasPrefix(idLower, "devin/") {
+		return true
+	}
+	if idx := strings.Index(idLower, "/"); idx != -1 {
+		rest := idLower[idx+1:]
+		if strings.HasPrefix(rest, "devin/") {
+			return true
+		}
+	}
+	if entry != nil {
+		slugLower := strings.ToLower(strings.TrimSpace(stringModelValue(entry, "slug")))
+		if strings.HasPrefix(slugLower, "devin/") {
+			return true
+		}
+		if idx := strings.Index(slugLower, "/"); idx != -1 {
+			rest := slugLower[idx+1:]
+			if strings.HasPrefix(rest, "devin/") {
+				return true
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(entry, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if model != nil {
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "type")), "devin") {
+			return true
+		}
+		if strings.EqualFold(strings.TrimSpace(stringModelValue(model, "owned_by")), "cognition") {
+			return true
+		}
+	}
+	if info := registry.LookupModelInfo(id); info != nil {
+		if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+			return true
+		}
+	} else if idx := strings.Index(id, "/"); idx != -1 {
+		base := strings.TrimSpace(id[idx+1:])
+		if info := registry.LookupModelInfo(base); info != nil {
+			if strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition") || strings.HasPrefix(strings.ToLower(info.ID), "devin/") {
+				return true
+			}
+		}
+	}
+	if providersForModel != nil {
+		providers := providersForModel(id)
+		if len(providers) == 0 && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			base := strings.TrimSpace(id[idx+1:])
+			providers = providersForModel(base)
+		}
+		for _, p := range providers {
+			if strings.EqualFold(strings.TrimSpace(p), "devin") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func applyCodexClientDescription(entry map[string]any, model map[string]any) {
@@ -427,74 +558,101 @@ func applyCPAWebSearchCapability(entry map[string]any, id string, capabilityForM
 	}
 }
 
-func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTemplate bool, providersForModel ProvidersForModelFunc) {
-	if !isTemplate {
-		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
-		return
-	}
+func applyCodexClientProviderCapabilities(entry map[string]any, id string, providersForModel ProvidersForModelFunc) {
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
-		entry["supports_search_tool"] = false
 		entry["prefer_websockets"] = false
-		delete(entry, "apply_patch_tool_type")
 		entry["service_tiers"] = []any{}
-		delete(entry, "upgrade")
-		delete(entry, "availability_nux")
-		return
+		nullCodexClientRequiredOptions(entry)
 	}
-	applyCodexClientSearchToolSupport(entry, id, isTemplate, providersForModel)
+}
+
+// nullCodexClientRequiredOptions clears capabilities that non-Codex models must not advertise.
+// Codex requires these keys to be present; omitting them rejects the entire catalog.
+func nullCodexClientRequiredOptions(entry map[string]any) {
+	entry["apply_patch_tool_type"] = nil
+	entry["tool_mode"] = "direct"
+	entry["use_responses_lite"] = false
+	entry["supports_reasoning_effort_updates"] = false
+	if _, exists := entry["supports_image_detail_original"]; exists {
+		entry["supports_image_detail_original"] = false
+	}
+	entry["upgrade"] = nil
+	entry["availability_nux"] = nil
+}
+
+const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+
+// useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
+// Both the legacy and canonical instruction fields must be present for catalog decoding.
+func useCompactCodexClientInstructions(entry map[string]any) {
+	entry["base_instructions"] = codexClientFallbackInstructions
+	entry["model_messages"] = map[string]any{
+		"instructions_template":  codexClientFallbackInstructions,
+		"instructions_variables": nil,
+		"approvals":              nil,
+		"collaboration_modes":    nil,
+		"auto_review":            nil,
+		"permissions":            nil,
+		"multi_agent":            nil,
+	}
 }
 
 func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
 	if providersForModel == nil {
 		return true
 	}
+	return allCodexClientProvidersAre(codexClientModelProviders(id, providersForModel), "codex")
+}
+
+// codexClientModelProviders resolves the providers serving a model, falling
+// back to the base ID for prefixed aliases.
+func codexClientModelProviders(id string, providersForModel ProvidersForModelFunc) []string {
 	providers := providersForModel(id)
 	if len(providers) == 0 && strings.Contains(id, "/") {
 		idx := strings.Index(id, "/")
 		base := strings.TrimSpace(id[idx+1:])
 		providers = providersForModel(base)
 	}
+	return providers
+}
+
+// allCodexClientProvidersAre reports whether providers is non-empty and every
+// entry is the named provider.
+func allCodexClientProvidersAre(providers []string, name string) bool {
 	if len(providers) == 0 {
 		return false
 	}
 	for _, provider := range providers {
-		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		if !strings.EqualFold(strings.TrimSpace(provider), name) {
 			return false
 		}
 	}
 	return true
 }
 
-func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc) {
+// applyCodexClientSearchToolSupport keeps supports_search_tool only when every
+// route serving the model can close Codex's client tool_search loop: pure Codex
+// template models, or pure Claude models whose every credential supports
+// Anthropic native tool search. Mixed and unknown routes fail closed.
+func applyCodexClientSearchToolSupport(entry map[string]any, id string, templateModel bool, providersForModel ProvidersForModelFunc, toolSearchCapabilityForModel ToolSearchCapabilityForModelFunc) {
 	supportsSearch, _ := entry["supports_search_tool"].(bool)
 	if !supportsSearch {
 		return
 	}
 
-	if !templateModel {
-		entry["supports_search_tool"] = false
-		return
-	}
-
 	if providersForModel == nil {
+		if !templateModel {
+			entry["supports_search_tool"] = false
+		}
 		return
 	}
 
-	providers := providersForModel(id)
-	if len(providers) == 0 && strings.Contains(id, "/") {
-		idx := strings.Index(id, "/")
-		base := strings.TrimSpace(id[idx+1:])
-		providers = providersForModel(base)
-	}
-	if len(providers) == 0 {
-		entry["supports_search_tool"] = false
+	providers := codexClientModelProviders(id, providersForModel)
+	if allCodexClientProvidersAre(providers, "claude") && toolSearchCapabilityForModel != nil && toolSearchCapabilityForModel(id) {
 		return
 	}
-	for _, provider := range providers {
-		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
-			entry["supports_search_tool"] = false
-			return
-		}
+	if !templateModel || !allCodexClientProvidersAre(providers, "codex") {
+		entry["supports_search_tool"] = false
 	}
 }
 
@@ -548,21 +706,20 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		entry["multi_agent_version"] = "v2"
 	}
 	entry["service_tiers"] = []any{}
-	delete(entry, "apply_patch_tool_type")
-	delete(entry, "upgrade")
-	delete(entry, "availability_nux")
+	nullCodexClientRequiredOptions(entry)
 
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow
 		entry["max_context_window"] = contextWindow
 	}
 
-	if baseInstructions := stringModelValue(model, "base_instructions"); baseInstructions != "" {
-		entry["base_instructions"] = baseInstructions
-	}
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
 	}
+	// Codex 0.156+ caps an explicit model_catalog_url body at 1MiB. Cloning the
+	// full template instructions onto every non-template model exceeds that limit
+	// and the client keeps its bundled catalog.
+	useCompactCodexClientInstructions(entry)
 }
 
 func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport {
@@ -588,13 +745,23 @@ func codexClientThinkingSupport(model map[string]any) *registry.ThinkingSupport 
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
+	if isCodexClientImageOrVideoModel(id) {
+		entry["visibility"] = "hide"
+	}
+}
+
+// isCodexClientImageOrVideoModel reports catalog IDs that are not chat models.
+// Speech IDs are included so the Codex client does not offer them as text models.
+func isCodexClientImageOrVideoModel(id string) bool {
 	target := strings.TrimSpace(id)
 	if idx := strings.Index(target, "/"); idx != -1 {
 		target = strings.TrimSpace(target[idx+1:])
 	}
 	switch target {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview":
-		entry["visibility"] = "hide"
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -608,7 +775,7 @@ func applyCodexClientInputModalitiesMetadata(entry map[string]any, modalities []
 	}
 	entry["input_modalities"] = codexModalities
 	if hasImageModality(codexModalities) {
-		entry["supports_image_detail_original"] = true
+		entry["supports_image_detail_original"] = false
 	} else {
 		delete(entry, "supports_image_detail_original")
 	}

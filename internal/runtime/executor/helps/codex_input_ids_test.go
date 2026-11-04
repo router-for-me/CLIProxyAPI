@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 var benchmarkSanitizeCodexInputItemIDsOutput []byte
@@ -18,14 +18,90 @@ func TestSanitizeCodexInputItemIDsBoundaries(t *testing.T) {
 
 	got := SanitizeCodexInputItemIDs(body)
 
-	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != id64 {
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != id64 {
 		t.Fatalf("64-character ID changed: %q", actual)
 	}
 	for _, path := range []string{"input.1.id", "input.2.id"} {
-		actual := gjson.GetBytes(got, path).String()
+		actual := ojson.GetBytes(got, path).String()
 		if len([]rune(actual)) != 64 {
 			t.Fatalf("%s length = %d, want 64: %q", path, len([]rune(actual)), actual)
 		}
+		if !isPortableToolCallID(actual) {
+			t.Fatalf("%s = %q, contains invalid Codex ID characters", path, actual)
+		}
+	}
+}
+
+func TestSanitizeCodexInputItemIDsSanitizesInvalidCharacters(t *testing.T) {
+	overlongPlusSlash := "msg_" + strings.Repeat("A", 30) + "+/" + strings.Repeat("A", 414)
+	overlongSlashPlus := "msg_" + strings.Repeat("A", 30) + "/+" + strings.Repeat("A", 414)
+	overlongUnprefixedPlusSlash := strings.Repeat("A", 30) + "+/" + strings.Repeat("A", 414)
+	overlongTailPlus := "msg_" + strings.Repeat("B", 100) + "+" + strings.Repeat("B", 100)
+	overlongTailSlash := "msg_" + strings.Repeat("B", 100) + "/" + strings.Repeat("B", 100)
+
+	body := []byte(`{"input":[` +
+		`{"type":"message","role":"assistant","id":"` + overlongPlusSlash + `","content":[{"type":"output_text","text":"Hello"}]},` +
+		`{"type":"message","role":"assistant","id":"` + overlongSlashPlus + `","content":[{"type":"output_text","text":"World"}]},` +
+		`{"type":"message","role":"assistant","id":"` + overlongUnprefixedPlusSlash + `","content":[{"type":"output_text","text":"Unprefixed"}]},` +
+		`{"type":"message","role":"assistant","id":"` + overlongTailPlus + `","content":[{"type":"output_text","text":"Tail plus"}]},` +
+		`{"type":"message","role":"assistant","id":"` + overlongTailSlash + `","content":[{"type":"output_text","text":"Tail slash"}]},` +
+		`{"type":"message","role":"assistant","id":"msg_short+id/with=chars","content":[{"type":"output_text","text":"Short"}]},` +
+		`{"type":"message","role":"assistant","id":"msg_short_id_with_chars","content":[{"type":"output_text","text":"Short existing"}]},` +
+		`{"type":"function_call","id":"call:0+1/2","call_id":"call-1","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","id":"fco:0+1/2","call_id":"call-1","output":"ok"},` +
+		`{"type":"tool_search_call","id":"ts_call+1/2","call_id":"call-2","execution":"client"}` +
+		`]}`)
+
+	first := SanitizeCodexInputItemIDs(body)
+	second := SanitizeCodexInputItemIDs(body)
+	normalizedAgain := SanitizeCodexInputItemIDs(first)
+
+	if string(first) != string(second) {
+		t.Fatalf("invalid character normalization is not deterministic: first=%s second=%s", first, second)
+	}
+	if string(first) != string(normalizedAgain) {
+		t.Fatalf("invalid character normalization is not idempotent: first=%s normalized_again=%s", first, normalizedAgain)
+	}
+
+	items := ojson.GetBytes(first, "input").Array()
+	if len(items) != 10 {
+		t.Fatalf("input length = %d, want 10", len(items))
+	}
+
+	seen := make(map[string]int, len(items))
+	expectedPrefixes := []string{"msg_", "msg_", "msg_", "msg_", "msg_", "msg_", "msg_", "fc_", "fco_", "tsc_"}
+	for idx, item := range items {
+		actual := item.Get("id").String()
+		if !isPortableToolCallID(actual) {
+			t.Fatalf("input.%d.id = %q, contains invalid Codex ID characters", idx, actual)
+		}
+		if len([]rune(actual)) > codexInputItemIDLimit {
+			t.Fatalf("input.%d.id length = %d, want at most %d: %q", idx, len([]rune(actual)), codexInputItemIDLimit, actual)
+		}
+		if !strings.HasPrefix(actual, expectedPrefixes[idx]) {
+			t.Fatalf("input.%d.id = %q, want prefix %q", idx, actual, expectedPrefixes[idx])
+		}
+		if prevIdx, exists := seen[actual]; exists {
+			t.Fatalf("input.%d.id collided with input.%d.id: %q", idx, prevIdx, actual)
+		}
+		seen[actual] = idx
+	}
+	if got := items[6].Get("id").String(); got != "msg_short_id_with_chars" {
+		t.Fatalf("existing valid ID changed: got %q, want msg_short_id_with_chars", got)
+	}
+
+	repeatedBody := []byte(`{"input":[` +
+		`{"type":"message","role":"assistant","id":"` + overlongPlusSlash + `"},` +
+		`{"type":"message","role":"assistant","id":"` + overlongPlusSlash + `"},` +
+		`{"type":"message","role":"assistant","id":"msg_short+repeat/id"},` +
+		`{"type":"message","role":"assistant","id":"msg_short+repeat/id"}` +
+		`]}`)
+	repeatedGot := SanitizeCodexInputItemIDs(repeatedBody)
+	if id0, id1 := ojson.GetBytes(repeatedGot, "input.0.id").String(), ojson.GetBytes(repeatedGot, "input.1.id").String(); id0 != id1 || !isPortableToolCallID(id0) {
+		t.Fatalf("repeated overlong invalid IDs did not map stably: %q vs %q", id0, id1)
+	}
+	if id2, id3 := ojson.GetBytes(repeatedGot, "input.2.id").String(), ojson.GetBytes(repeatedGot, "input.3.id").String(); id2 != id3 || id2 != "msg_short_repeat_id" {
+		t.Fatalf("repeated short invalid IDs = (%q, %q), want msg_short_repeat_id", id2, id3)
 	}
 }
 
@@ -40,13 +116,13 @@ func TestSanitizeCodexInputItemIDsNormalizesMessageIDs(t *testing.T) {
 	first := SanitizeCodexInputItemIDs(body)
 	second := SanitizeCodexInputItemIDs(body)
 
-	if got := gjson.GetBytes(first, "input.0.id").String(); got != "msg_"+invalidID {
+	if got := ojson.GetBytes(first, "input.0.id").String(); got != "msg_"+invalidID {
 		t.Fatalf("message ID = %q, want msg-prefixed ID", got)
 	}
-	if got := gjson.GetBytes(first, "input.1.id").String(); got != "msg-1" {
+	if got := ojson.GetBytes(first, "input.1.id").String(); got != "msg-1" {
 		t.Fatalf("valid message ID changed: %q", got)
 	}
-	if got := gjson.GetBytes(first, "input.2.id").String(); got != "fc_item_call" {
+	if got := ojson.GetBytes(first, "input.2.id").String(); got != "fc_item_call" {
 		t.Fatalf("function_call ID was not normalized: %q", got)
 	}
 	if string(first) != string(second) {
@@ -60,14 +136,19 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 		reasoningID          = "item_reasoning"
 		functionCallID       = "item_function_call"
 		functionCallOutputID = "item_function_call_output"
+		toolSearchCallID     = "item_tool_search_call"
+		legacyToolSearchID   = "ts_call_4000860"
 	)
 	body := []byte(`{"input":[` +
 		`{"type":"message","id":"` + messageID + `"},` +
 		`{"type":"reasoning","id":"` + reasoningID + `"},` +
 		`{"type":"function_call","id":"` + functionCallID + `","call_id":"call-1"},` +
 		`{"type":"function_call_output","id":"` + functionCallOutputID + `","call_id":"call-1"},` +
+		`{"type":"tool_search_call","id":"` + toolSearchCallID + `","call_id":"call-search-1","execution":"client"},` +
+		`{"type":"tool_search_call","id":"` + legacyToolSearchID + `","call_id":"call_4000860","execution":"client"},` +
 		`{"type":"reasoning","id":"rs-existing"},` +
 		`{"type":"function_call","id":"fc-existing","call_id":"call-2"},` +
+		`{"type":"tool_search_call","id":"tsc-existing","call_id":"call-search-2","execution":"client"},` +
 		`{"type":"message","id":"msg-existing"}` +
 		`]}`)
 
@@ -77,14 +158,17 @@ func TestSanitizeCodexInputItemIDsNormalizesResponseItemIDs(t *testing.T) {
 		"rs_" + reasoningID,
 		"fc_" + functionCallID,
 		functionCallOutputID,
+		"tsc_" + toolSearchCallID,
+		"tsc_call_4000860",
 		"rs-existing",
 		"fc-existing",
+		"tsc-existing",
 		"msg-existing",
 	}
 
 	for index, expected := range want {
 		path := fmt.Sprintf("input.%d.id", index)
-		if actual := gjson.GetBytes(got, path).String(); actual != expected {
+		if actual := ojson.GetBytes(got, path).String(); actual != expected {
 			t.Fatalf("%s = %q, want %q; payload=%s", path, actual, expected, got)
 		}
 	}
@@ -105,6 +189,7 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 		{name: "function call", itemType: "function_call", prefix: "fc_"},
 		{name: "custom tool call", itemType: "custom_tool_call", prefix: "ctc_"},
 		{name: "custom tool call output", itemType: "custom_tool_call_output", prefix: "ctco_"},
+		{name: "tool search call", itemType: "tool_search_call", prefix: "tsc_"},
 	} {
 		for _, idCase := range []struct {
 			name      string
@@ -129,8 +214,8 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 					second := SanitizeCodexInputItemIDs(body)
 					normalizedAgain := SanitizeCodexInputItemIDs(first)
 					ids := [2]string{
-						gjson.GetBytes(first, "input.0.id").String(),
-						gjson.GetBytes(first, "input.1.id").String(),
+						ojson.GetBytes(first, "input.0.id").String(),
+						ojson.GetBytes(first, "input.1.id").String(),
 					}
 
 					if ids[0] == ids[1] {
@@ -159,12 +244,68 @@ func TestSanitizeCodexInputItemIDsAvoidsNormalizationCollisions(t *testing.T) {
 	}
 }
 
+func TestSanitizeCodexInputItemIDsNormalizesLegacyToolSearchCallIDs(t *testing.T) {
+	original := []byte(`{"input":[` +
+		`{"type":"reasoning","id":"rs_signed","encrypted_content":"gAAAA-opaque-signature","summary":[]},` +
+		`{"type":"tool_search_call","id":"ts_call_4000860","call_id":"call_4000860","execution":"client","status":"completed","arguments":{"query":"agents"}},` +
+		`{"type":"tool_search_output","id":"tso_call_4000860","call_id":"call_4000860","execution":"client","status":"completed","tools":[]}` +
+		`]}`)
+	snapshot := string(original)
+
+	got := SanitizeCodexInputItemIDs(original)
+
+	if string(original) != snapshot {
+		t.Fatalf("SanitizeCodexInputItemIDs mutated caller slice: got %s, want %s", original, snapshot)
+	}
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != "rs_signed" {
+		t.Fatalf("reasoning id = %q, want rs_signed", actual)
+	}
+	if actual := ojson.GetBytes(got, "input.0.encrypted_content").String(); actual != "gAAAA-opaque-signature" {
+		t.Fatalf("encrypted_content = %q, want gAAAA-opaque-signature", actual)
+	}
+	if actual := ojson.GetBytes(got, "input.1.id").String(); actual != "tsc_call_4000860" {
+		t.Fatalf("tool_search_call id = %q, want tsc_call_4000860", actual)
+	}
+	if actual := ojson.GetBytes(got, "input.1.call_id").String(); actual != "call_4000860" {
+		t.Fatalf("tool_search_call call_id = %q, want call_4000860", actual)
+	}
+	if actual := ojson.GetBytes(got, "input.2.call_id").String(); actual != "call_4000860" {
+		t.Fatalf("tool_search_output call_id = %q, want call_4000860", actual)
+	}
+
+	overlongBase := strings.Repeat("x", codexInputItemIDLimit)
+	for _, ids := range [][2]string{
+		{"ts_call_4000860", "tsc_call_4000860"},
+		{"tsc_call_4000860", "ts_call_4000860"},
+		{"ts_call_4000860", "call_4000860"},
+		{"call_4000860", "ts_call_4000860"},
+		{"ts_" + overlongBase, overlongBase},
+		{overlongBase, "ts_" + overlongBase},
+	} {
+		collisionBody := []byte(fmt.Sprintf(`{"input":[{"type":"tool_search_call","id":%q},{"type":"tool_search_call","id":%q}]}`, ids[0], ids[1]))
+		first := SanitizeCodexInputItemIDs(collisionBody)
+		second := SanitizeCodexInputItemIDs(collisionBody)
+		again := SanitizeCodexInputItemIDs(first)
+		id0 := ojson.GetBytes(first, "input.0.id").String()
+		id1 := ojson.GetBytes(first, "input.1.id").String()
+		if id0 == id1 {
+			t.Fatalf("distinct tool_search_call IDs %v collided: %q; payload=%s", ids, id0, first)
+		}
+		if !strings.HasPrefix(id0, "tsc_") || !strings.HasPrefix(id1, "tsc_") {
+			t.Fatalf("normalized IDs must start with tsc_: got (%q, %q)", id0, id1)
+		}
+		if string(first) != string(second) || string(first) != string(again) {
+			t.Fatalf("legacy collision normalization must be deterministic and idempotent: first=%s second=%s again=%s", first, second, again)
+		}
+	}
+}
+
 func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallIDs(t *testing.T) {
 	const invalidID = "item_44e13caebc1ddf25f1337cbe"
 	body := []byte(`{"input":[{"type":"custom_tool_call","id":"` + invalidID + `","call_id":"call-1","name":"lookup","input":"{}"}]}`)
 
 	got := SanitizeCodexInputItemIDs(body)
-	if actual := gjson.GetBytes(got, "input.0.id").String(); actual != "ctc_"+invalidID {
+	if actual := ojson.GetBytes(got, "input.0.id").String(); actual != "ctc_"+invalidID {
 		t.Fatalf("custom_tool_call ID = %q, want ctc-prefixed ID", actual)
 	}
 }
@@ -183,10 +324,10 @@ func TestSanitizeCodexInputItemIDsNormalizesCustomToolCallOutputIDs(t *testing.T
 	second := SanitizeCodexInputItemIDs(body)
 	normalizedAgain := SanitizeCodexInputItemIDs(first)
 
-	if actual := gjson.GetBytes(first, "input.0.id").String(); actual != "ctco_"+invalidID {
+	if actual := ojson.GetBytes(first, "input.0.id").String(); actual != "ctco_"+invalidID {
 		t.Fatalf("custom_tool_call_output ID = %q, want ctco-prefixed ID", actual)
 	}
-	if actual := gjson.GetBytes(first, "input.1.id").String(); actual != validID {
+	if actual := ojson.GetBytes(first, "input.1.id").String(); actual != validID {
 		t.Fatalf("valid custom_tool_call_output ID changed: %q", actual)
 	}
 	if string(first) != string(second) {
@@ -209,7 +350,7 @@ func TestSanitizeCodexInputItemIDsDropsOverlongEncryptedReasoningItem(t *testing
 		`]}`)
 
 	got := SanitizeCodexInputItemIDs(body)
-	input := gjson.GetBytes(got, "input").Array()
+	input := ojson.GetBytes(got, "input").Array()
 
 	if len(input) != 3 {
 		t.Fatalf("input length = %d, want 3: %s", len(input), got)
@@ -239,7 +380,7 @@ func TestSanitizeCodexInputItemIDsShortensOverlongReasoningWithoutEncryptedConte
 			body := []byte(`{"input":[{"type":"reasoning","id":"` + longReasoningID + `"` + testCase.encryptedContent + `,"summary":[]}]}`)
 
 			got := SanitizeCodexInputItemIDs(body)
-			input := gjson.GetBytes(got, "input").Array()
+			input := ojson.GetBytes(got, "input").Array()
 			if len(input) != 1 {
 				t.Fatalf("input length = %d, want 1: %s", len(input), got)
 			}
@@ -259,17 +400,17 @@ func TestSanitizeCodexInputItemIDsAvoidsExistingIDCollision(t *testing.T) {
 	first := SanitizeCodexInputItemIDs(body)
 	second := SanitizeCodexInputItemIDs(body)
 
-	shortened := gjson.GetBytes(first, "input.0.id").String()
+	shortened := ojson.GetBytes(first, "input.0.id").String()
 	if shortened == collidingValidID {
 		t.Fatalf("shortened ID collided with an existing valid ID: %q", shortened)
 	}
 	if len([]rune(shortened)) > 64 {
 		t.Fatalf("shortened ID length = %d, want at most 64", len([]rune(shortened)))
 	}
-	if actual := gjson.GetBytes(first, "input.1.id").String(); actual != collidingValidID {
+	if actual := ojson.GetBytes(first, "input.1.id").String(); actual != collidingValidID {
 		t.Fatalf("existing valid ID changed: %q", actual)
 	}
-	if actual := gjson.GetBytes(second, "input.0.id").String(); actual != shortened {
+	if actual := ojson.GetBytes(second, "input.0.id").String(); actual != shortened {
 		t.Fatalf("collision resolution is not deterministic: first=%q second=%q", shortened, actual)
 	}
 }

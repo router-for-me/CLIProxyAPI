@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpfetch"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -143,7 +143,11 @@ func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
 	if item, ok := matchingResolvedAuthConfig(c.ResolvedAuth, apiURL, RequestKindArtifact); ok {
 		return resolvedAuthConfigured(item)
 	}
-	return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
+	if _, ok := matchingAuthConfig(c.Auth, apiURL, RequestKindArtifact); ok {
+		return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
+	}
+	_, authenticated, errAuth := c.authHeaders(apiURL, RequestKindArtifact)
+	return errAuth == nil && authenticated
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {

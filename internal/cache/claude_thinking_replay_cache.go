@@ -10,10 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -321,7 +322,7 @@ func marshalClaudeThinkingReplayHomeValue(generation string, deleted bool, conte
 }
 
 func decodeClaudeThinkingReplayHomeValue(raw []byte) ([][]byte, string, bool, bool) {
-	if len(raw) == 0 || len(raw) > claudeThinkingReplayCacheMaxSerializedBytes || !gjson.ValidBytes(raw) {
+	if len(raw) == 0 || len(raw) > claudeThinkingReplayCacheMaxSerializedBytes || !ojson.ValidBytes(raw) {
 		return nil, "", false, false
 	}
 	var value claudeThinkingReplayHomeValue
@@ -411,10 +412,10 @@ func claudeThinkingReplayKVKey(modelFamily, sessionKey string) string {
 }
 
 func validClaudeThinkingReplayContent(content []byte) bool {
-	if len(content) == 0 || len(content) > ClaudeThinkingReplayCacheMaxBytesPerSession || !gjson.ValidBytes(content) {
+	if len(content) == 0 || len(content) > ClaudeThinkingReplayCacheMaxBytesPerSession || !ojson.ValidBytes(content) {
 		return false
 	}
-	root := gjson.ParseBytes(content)
+	root := util.ParseGJSONBytesNoCopy(content)
 	return root.IsArray() && len(root.Array()) > 0 && len(root.Array()) <= ClaudeThinkingReplayCacheMaxBlocksPerTurn
 }
 

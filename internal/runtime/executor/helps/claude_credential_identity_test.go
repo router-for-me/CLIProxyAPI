@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type fakeClaudeCredentialDevicePoolKV struct {
@@ -146,20 +146,20 @@ func TestApplyClaudeCredentialMetadataUsesCredentialDeviceAndPreservesExtras(t *
 	if errApply != nil {
 		t.Fatalf("ApplyClaudeCredentialMetadata() error = %v", errApply)
 	}
-	userID := gjson.GetBytes(updated, "metadata.user_id").String()
-	if got := gjson.Get(userID, "device_id").String(); got != selectedDevice {
+	userID := ojson.GetBytes(updated, "metadata.user_id").String()
+	if got := ojson.Get(userID, "device_id").String(); got != selectedDevice {
 		t.Fatalf("device_id = %q, want selected %q", got, selectedDevice)
 	}
-	if got := gjson.Get(userID, "account_uuid").String(); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+	if got := ojson.Get(userID, "account_uuid").String(); got != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
 		t.Fatalf("account_uuid = %q, want credential account", got)
 	}
-	if got := gjson.Get(userID, "session_id").String(); got != sessionID {
+	if got := ojson.Get(userID, "session_id").String(); got != sessionID {
 		t.Fatalf("session_id = %q, want %q", got, sessionID)
 	}
-	if got := gjson.Get(userID, "parent_session_id").String(); got != "parent-1" {
+	if got := ojson.Get(userID, "parent_session_id").String(); got != "parent-1" {
 		t.Fatalf("parent_session_id = %q, want preserved", got)
 	}
-	if !gjson.Get(userID, "extra").Bool() {
+	if !ojson.Get(userID, "extra").Bool() {
 		t.Fatal("extra metadata was not preserved")
 	}
 	wantPrefix := `{"device_id":"` + selectedDevice + `","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"` + sessionID + `"`
@@ -211,6 +211,18 @@ func TestApplyClaudeCredentialMetadataRejectsDuplicateIdentityContainers(t *test
 			if !errors.As(errApply, &statusErr) || statusErr.StatusCode() != http.StatusBadRequest {
 				t.Fatalf("ApplyClaudeCredentialMetadata() error = %T %v, want HTTP 400", errApply, errApply)
 			}
+
+			doc := ojson.NewDoc([]byte(test.body))
+			_, errApplyDoc := ApplyClaudeCredentialMetadataDoc(doc, auth, sessionID)
+			if errApplyDoc == nil {
+				t.Fatal("ApplyClaudeCredentialMetadataDoc() error = nil, want duplicate-key rejection")
+			}
+			if !errors.As(errApplyDoc, &requestErr) || requestErr == nil || !requestErr.IsRequestScoped() {
+				t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %T %v, want request-scoped", errApplyDoc, errApplyDoc)
+			}
+			if !errors.As(errApplyDoc, &statusErr) || statusErr.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %T %v, want HTTP 400", errApplyDoc, errApplyDoc)
+			}
 		})
 	}
 }
@@ -233,4 +245,95 @@ func TestApplyClaudeCredentialMetadataRequiresAccountUUID(t *testing.T) {
 	if errors.As(errApply, &requestErr) && requestErr != nil && requestErr.IsRequestScoped() {
 		t.Fatalf("missing credential identity error = %T %v, want credential-scoped", errApply, errApply)
 	}
+}
+
+func TestApplyClaudeCredentialMetadataDocMutatesInPlace(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"account_uuid": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		},
+	}}
+	doc := ojson.NewDoc([]byte(`{"model":"claude-sonnet-4-5","messages":[]}`))
+	deviceID, errApply := ApplyClaudeCredentialMetadataDoc(doc, auth, "11111111-2222-4333-8444-555555555555")
+	if errApply != nil {
+		t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %v", errApply)
+	}
+	if deviceID == "" {
+		t.Fatal("expected non-empty deviceID")
+	}
+	out := doc.Bytes()
+	if got := ojson.GetBytesNoCopy(out, "model").String(); got != "claude-sonnet-4-5" {
+		t.Fatalf("model = %q, want claude-sonnet-4-5", got)
+	}
+	if !strings.Contains(ojson.GetBytesNoCopy(out, "metadata.user_id").String(), "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee") {
+		t.Fatalf("metadata.user_id missing account_uuid: %s", out)
+	}
+
+	t.Run("empty base doc after SetRaw succeeds", func(t *testing.T) {
+		emptyDoc := ojson.NewDoc(nil)
+		if errSet := emptyDoc.SetRaw("messages", "[]"); errSet != nil {
+			t.Fatalf("SetRaw(messages): %v", errSet)
+		}
+		if _, errApply := ApplyClaudeCredentialMetadataDoc(emptyDoc, auth, "11111111-2222-4333-8444-555555555555"); errApply != nil {
+			t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %v", errApply)
+		}
+		emptyOut := emptyDoc.Bytes()
+		if !strings.Contains(ojson.GetBytesNoCopy(emptyOut, "metadata.user_id").String(), "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee") {
+			t.Fatalf("metadata.user_id missing account_uuid: %s", emptyOut)
+		}
+	})
+
+	t.Run("deleted duplicate metadata on split tree succeeds", func(t *testing.T) {
+		dedupDoc := ojson.NewDoc([]byte(`{"metadata":{"user_id":"{\"extra\":\"a\"}"},"metadata":{"user_id":"{\"extra\":\"b\"}"}}`))
+		if errSet := dedupDoc.Set("model", "claude-3"); errSet != nil {
+			t.Fatalf("Set(model): %v", errSet)
+		}
+		if errDel := dedupDoc.Delete("metadata"); errDel != nil {
+			t.Fatalf("Delete(metadata): %v", errDel)
+		}
+		if _, errApply := ApplyClaudeCredentialMetadataDoc(dedupDoc, auth, "11111111-2222-4333-8444-555555555555"); errApply != nil {
+			t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %v", errApply)
+		}
+		dedupOut := dedupDoc.Bytes()
+		userID := ojson.GetBytesNoCopy(dedupOut, "metadata.user_id").String()
+		if got := ojson.Get(userID, "extra").String(); got != "b" {
+			t.Fatalf("metadata.user_id extra = %q, want b (from remaining metadata): %s", got, dedupOut)
+		}
+	})
+
+	t.Run("remaining duplicate metadata on split tree fails", func(t *testing.T) {
+		dupDoc := ojson.NewDoc([]byte(`{"metadata":{"user_id":"a"},"metadata":{"user_id":"b"}}`))
+		if errSet := dupDoc.Set("model", "claude-3"); errSet != nil {
+			t.Fatalf("Set(model): %v", errSet)
+		}
+		_, errApply := ApplyClaudeCredentialMetadataDoc(dupDoc, auth, "11111111-2222-4333-8444-555555555555")
+		if errApply == nil {
+			t.Fatal("ApplyClaudeCredentialMetadataDoc() error = nil, want duplicate metadata rejection")
+		}
+		var requestErr cliproxyexecutor.RequestScopedError
+		if !errors.As(errApply, &requestErr) || requestErr == nil || !requestErr.IsRequestScoped() {
+			t.Fatalf("ApplyClaudeCredentialMetadataDoc() error = %T %v, want request-scoped", errApply, errApply)
+		}
+	})
+
+	t.Run("truncated tail values on split tree return request error without panic", func(t *testing.T) {
+		truncatedBodies := []string{
+			"{\"model\":\"claude\",\"metadata\":{},\"bad\":\"\\",
+			"{\"model\":\"claude\",\"metadata\":{},\"bad\":{\"x\":\"\\",
+			"{\"model\":\"claude\",\"metadata\":{},\"bad\":[1,2",
+		}
+		for _, body := range truncatedBodies {
+			truncDoc := ojson.NewDoc([]byte(body))
+			_ = truncDoc.Set("model", "claude-3")
+			_, errApply := ApplyClaudeCredentialMetadataDoc(truncDoc, auth, "11111111-2222-4333-8444-555555555555")
+			if errApply == nil {
+				t.Fatalf("ApplyClaudeCredentialMetadataDoc(%q) error = nil, want invalid JSON rejection", body)
+			}
+			var requestErr cliproxyexecutor.RequestScopedError
+			if !errors.As(errApply, &requestErr) || requestErr == nil || !requestErr.IsRequestScoped() {
+				t.Fatalf("ApplyClaudeCredentialMetadataDoc(%q) error = %T %v, want request-scoped", body, errApply, errApply)
+			}
+		}
+	})
 }

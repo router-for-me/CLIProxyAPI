@@ -15,7 +15,7 @@ import (
 	"time"
 
 	tls "github.com/refraction-networking/utls"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 type claudeTestDialer struct {

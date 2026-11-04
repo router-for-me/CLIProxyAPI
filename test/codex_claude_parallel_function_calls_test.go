@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestCodexToClaudeParallelFunctionCallsHaveValidLifecycle(t *testing.T) {
@@ -50,7 +50,7 @@ func TestCodexToClaudeParallelFunctionCallsHaveValidLifecycle(t *testing.T) {
 				if !strings.HasPrefix(line, "data: ") {
 					continue
 				}
-				event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				event := ojson.Parse(strings.TrimPrefix(line, "data: "))
 				if messageState == 2 {
 					t.Fatalf("event emitted after message_stop: %s", event.Raw)
 				}

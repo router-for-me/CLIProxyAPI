@@ -160,6 +160,21 @@ func TestHasUnsupportedUnicodePropertyEscape(t *testing.T) {
 			want:    false,
 		},
 		{
+			name:    "Octal NUL escape rejected by strict validators",
+			pattern: `^[^\0]*$`,
+			want:    true,
+		},
+		{
+			name:    "Hex NUL escape is the accepted spelling",
+			pattern: `^[^\x00]*$`,
+			want:    false,
+		},
+		{
+			name:    "Escaped backslash before zero is literal and safe",
+			pattern: `^\\0$`,
+			want:    false,
+		},
+		{
 			name:    "Trailing single backslash",
 			pattern: `abc\`,
 			want:    false,
