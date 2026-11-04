@@ -74,6 +74,13 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Expired entries no longer block a probe; dropping them keeps the map
+	// bounded by the credentials probed within the last interval.
+	for key, last := range s.probedAt {
+		if now.Sub(last) >= soonestResetProbeInterval {
+			delete(s.probedAt, key)
+		}
+	}
 	for _, candidate := range available {
 		if candidate == nil || !providerReportsQuotaReset(candidate.Provider) {
 			continue

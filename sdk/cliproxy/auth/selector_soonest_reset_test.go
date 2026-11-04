@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -370,5 +371,42 @@ func TestSoonestResetSelectorPick_DoesNotProbeAfterObservedReset(t *testing.T) {
 	}
 	if got.ID != "b" {
 		t.Fatalf("Pick() = %q, want b (a's window already reset; its new window starts on use)", got.ID)
+	}
+}
+
+func TestSoonestResetSelectorProbeStateHoldsNoSecretsAndExpires(t *testing.T) {
+	t.Parallel()
+
+	const secret = "sk-live-secret-value"
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	keyed := &Auth{ID: "a", Provider: "claude", Attributes: map[string]string{AttributeAPIKey: secret}}
+	if identity := quotaAccountIdentity(keyed); identity == "" || strings.Contains(identity, secret) {
+		t.Fatalf("identity = %q, want a non-empty digest without the key", identity)
+	}
+
+	if _, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, []*Auth{keyed}); err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	selector.mu.Lock()
+	for key := range selector.probedAt {
+		if strings.Contains(key, secret) {
+			t.Fatalf("probe state retains the API key: %q", key)
+		}
+	}
+	if len(selector.probedAt) != 1 {
+		t.Fatalf("probe entries = %d, want 1", len(selector.probedAt))
+	}
+	selector.mu.Unlock()
+
+	// After the interval the entry is pruned on the next pick, even for a credential no longer present.
+	now = now.Add(soonestResetProbeInterval)
+	if _, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, []*Auth{{ID: "b"}}); err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	selector.mu.Lock()
+	defer selector.mu.Unlock()
+	if len(selector.probedAt) != 0 {
+		t.Fatalf("expired probe entries kept: %v", selector.probedAt)
 	}
 }

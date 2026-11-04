@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"net/http"
 	"sort"
@@ -56,8 +58,10 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 }
 
 // quotaAccountIdentity identifies whose quota a passive snapshot describes:
-// the provider plus the account email and, when present, the upstream account
-// ID. It is empty when the auth carries no account identity.
+// a digest of the provider plus the account email and, when present, the
+// upstream account ID. API-key credentials identify by their key, so only the
+// digest is returned and the secret is never retained. It is empty when the
+// auth carries no account identity.
 func quotaAccountIdentity(auth *Auth) string {
 	if auth == nil {
 		return ""
@@ -69,7 +73,8 @@ func quotaAccountIdentity(auth *Auth) string {
 	if account == "" {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(auth.Provider)) + "|" + account
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(auth.Provider)) + "|" + account))
+	return hex.EncodeToString(sum[:16])
 }
 
 // observeResponseHeadersIfNotOlder applies an observation unless the snapshot
