@@ -57,6 +57,10 @@ require (
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/rogpeppe/go-internal v1.15.0 // indirect
+	github.com/tidwall/gjson v1.18.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.0 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
