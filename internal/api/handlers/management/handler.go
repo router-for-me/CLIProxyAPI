@@ -68,6 +68,19 @@ type Handler struct {
 	pluginLoginSaveMu       sync.Mutex
 }
 
+type forcedConfigReloadKey struct{}
+
+// WithForcedConfigReload marks a reload that must apply even when the config file is unchanged.
+func WithForcedConfigReload(ctx context.Context) context.Context {
+	return context.WithValue(ctx, forcedConfigReloadKey{}, true)
+}
+
+// ForcedConfigReload reports whether ctx was marked by WithForcedConfigReload.
+func ForcedConfigReload(ctx context.Context) bool {
+	forced, _ := ctx.Value(forcedConfigReloadKey{}).(bool)
+	return forced
+}
+
 type configReloadSnapshot struct {
 	cfg        *config.Config
 	generation uint64

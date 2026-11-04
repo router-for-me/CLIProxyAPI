@@ -317,8 +317,8 @@ func (b *Builder) Build() (*Service, error) {
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
 		api.WithPluginHost(pluginHost),
 		api.WithConfigValidator(b.hooks.ValidateConfig),
-		api.WithConfigReloadHook(func(_ context.Context, _ *config.Config) {
-			service.reloadConfigFromWatcher()
+		api.WithConfigReloadHook(func(ctx context.Context, _ *config.Config) {
+			service.reloadConfigAfterManagementSave(ctx)
 		}),
 	)
 	return service, nil

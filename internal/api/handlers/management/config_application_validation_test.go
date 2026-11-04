@@ -276,7 +276,11 @@ func TestPluginDeleteRejectedAfterUnloadReappliesCurrentConfig(t *testing.T) {
 		pluginHost:     host,
 	}
 	reloaded := make(chan *config.Config, 1)
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) { reloaded <- cfg })
+	forced := make(chan bool, 1)
+	h.SetConfigReloadHook(func(ctx context.Context, cfg *config.Config) {
+		forced <- ForcedConfigReload(ctx)
+		reloaded <- cfg
+	})
 	// A save applied while the plugin unloads makes the deletion invalid.
 	validations := 0
 	h.SetConfigValidator(func(*config.Config) error {
@@ -305,5 +309,40 @@ func TestPluginDeleteRejectedAfterUnloadReappliesCurrentConfig(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("rejected delete left the plugin unloaded without reapplying the current config")
+	}
+	// The concurrent save may already be applied, so an unchanged file must still reapply.
+	if !<-forced {
+		t.Fatal("reapply after unload was not forced, so an unchanged config file skips it")
+	}
+}
+
+func TestPluginDeleteAfterUnloadForcesConfigReload(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	pluginsDir := writeManagementPluginFile(t, "sample")
+	host := pluginhost.New()
+	host.RegisterPluginForTest("sample", pluginapi.Plugin{Metadata: pluginapi.Metadata{Name: "sample"}})
+	// Unconfigured plugin: deleting only its file leaves the config file unchanged.
+	h := &Handler{
+		cfg:            &config.Config{Plugins: config.PluginsConfig{Dir: pluginsDir}},
+		configFilePath: filepath.Join(t.TempDir(), "config.yaml"),
+		pluginHost:     host,
+	}
+	forced := make(chan bool, 1)
+	h.SetConfigReloadHook(func(ctx context.Context, _ *config.Config) { forced <- ForcedConfigReload(ctx) })
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: "sample"}}
+	c.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/plugins/sample", nil)
+	h.DeletePlugin(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	select {
+	case ok := <-forced:
+		if !ok {
+			t.Fatal("reload after unload was not forced, so the SDK keeps the unloaded plugin's runtime state")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not reload the config after unloading")
 	}
 }

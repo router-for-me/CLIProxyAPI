@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -291,6 +292,15 @@ func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Co
 		return true
 	}
 	return s.server.UpdateClientsContext(ctx, cfg)
+}
+
+// reloadConfigAfterManagementSave reloads config from disk after a management write.
+func (s *Service) reloadConfigAfterManagementSave(ctx context.Context) {
+	if management.ForcedConfigReload(ctx) {
+		s.currentWatcher().ReloadConfig()
+		return
+	}
+	s.reloadConfigFromWatcher()
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {

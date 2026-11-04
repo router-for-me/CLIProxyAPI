@@ -404,6 +404,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		}
 	}
 
+	reloadCtx := c.Request.Context()
+	if unloaded {
+		// The unload changed runtime state the config file does not record.
+		reloadCtx = WithForcedConfigReload(reloadCtx)
+	}
 	beforePluginDeleteCommit()
 	// Resolve and validate again under h.mu, held through removal and save, so a
 	// concurrent save cannot change the config this deletion acts on.
@@ -417,7 +422,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		// The unload cannot be undone here, so reapply the config that stays in effect.
 		cfgSnapshot := h.reloadSnapshotConfigLocked()
 		h.mu.Unlock()
-		h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+		h.reloadConfigAfterManagementSaveAsync(reloadCtx, cfgSnapshot)
 		return
 	}
 	fileDeleted := false
@@ -449,7 +454,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	cfgSnapshot := h.reloadSnapshotConfigLocked()
 	h.mu.Unlock()
 
-	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), cfgSnapshot)
+	h.reloadConfigAfterManagementSaveAsync(reloadCtx, cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{
 		"status":             "deleted",
 		"id":                 htmlsanitize.String(id),
