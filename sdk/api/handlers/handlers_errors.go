@@ -201,24 +201,22 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
-	if err == nil || ctx == nil {
+	if h == nil || err == nil || ctx == nil {
 		return
 	}
-	if cfg := h.CurrentConfig(); cfg != nil || h.Cfg != nil {
-		ginContext, ok := ctx.(*gin.Context)
-		if !ok || ginContext == nil {
-			ginContext, ok = ctx.Value("gin").(*gin.Context)
-		}
-		if ok && ginContext != nil {
-			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
-					slicesAPIResponseError = append(slicesAPIResponseError, err)
-					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
-				}
-			} else {
-				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
+	ginContext, ok := ctx.(*gin.Context)
+	if !ok || ginContext == nil {
+		ginContext, ok = ctx.Value("gin").(*gin.Context)
+	}
+	if ok && ginContext != nil {
+		if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
+			if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
+				slicesAPIResponseError = append(slicesAPIResponseError, err)
+				ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
 			}
+		} else {
+			// Create new response data entry
+			ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
 		}
 	}
 }

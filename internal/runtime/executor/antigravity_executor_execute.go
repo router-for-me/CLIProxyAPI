@@ -426,6 +426,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	}
 	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayRequestPayload)
 	var rawPayloads [][]byte
+	var pendingFilterPayload []byte
+	var pendingFilterMsg string
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(nil, streamScannerBuffer)
 	for scanner.Scan() {
@@ -438,12 +440,16 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if payload == nil {
 			continue
 		}
+		if len(pendingFilterPayload) > 0 {
+			reporter.ObserveResponseModel(pendingFilterPayload)
+			rawPayloads = append(rawPayloads, pendingFilterPayload)
+			pendingFilterPayload = nil
+			pendingFilterMsg = ""
+		}
 		if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(payload); blocked {
-			filterErr := statusErr{code: http.StatusBadRequest, msg: filterMsg}
-			_ = httpResp.Body.Close()
-			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
-			reporter.PublishFailure(ctx, filterErr)
-			return resp, filterErr
+			pendingFilterPayload = bytes.Clone(payload)
+			pendingFilterMsg = filterMsg
+			continue
 		}
 		reporter.ObserveResponseModel(payload)
 		rawPayloads = append(rawPayloads, bytes.Clone(payload))
@@ -456,6 +462,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
 		reporter.PublishFailure(ctx, scanErr)
 		return resp, scanErr
+	}
+	if pendingFilterMsg != "" {
+		filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+		helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
+		reporter.PublishFailure(ctx, filterErr)
+		return resp, filterErr
 	}
 	if replayAccumulator != nil {
 		replayAccumulator.Commit(ctx)

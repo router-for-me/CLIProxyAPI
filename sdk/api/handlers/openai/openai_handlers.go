@@ -820,20 +820,26 @@ func chunkHasFinishReason(chunk []byte) bool {
 
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialHasFinishReason bool) {
 	sawFinishReason := initialHasFinishReason
+	loggedTerminalErr := false
 	var terminalChunkErr *interfaces.ErrorMessage
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if termErr := chunkTerminalError(chunk); termErr != nil {
 				terminalChunkErr = termErr
 				sawFinishReason = true
+				if !loggedTerminalErr {
+					h.LoggingAPIResponseError(c, termErr)
+					loggedTerminalErr = true
+				}
 			} else if !sawFinishReason && chunkHasFinishReason(chunk) {
 				sawFinishReason = true
 			}
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 		},
 		ChunkError: func() *interfaces.ErrorMessage {
-			if terminalChunkErr != nil {
+			if terminalChunkErr != nil && !loggedTerminalErr {
 				h.LoggingAPIResponseError(c, terminalChunkErr)
+				loggedTerminalErr = true
 			}
 			return terminalChunkErr
 		},
@@ -841,7 +847,10 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			if errMsg == nil {
 				return
 			}
-			h.LoggingAPIResponseError(c, errMsg)
+			if !loggedTerminalErr {
+				h.LoggingAPIResponseError(c, errMsg)
+				loggedTerminalErr = true
+			}
 			if terminalChunkErr != nil {
 				return
 			}

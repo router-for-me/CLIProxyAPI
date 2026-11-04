@@ -169,8 +169,12 @@ func GeminiFilterBlockMessage(payload []byte) (string, bool) {
 			return "", false
 		}
 	}
-	for _, prefix := range []string{"candidates.0", "response.candidates.0"} {
-		candidate := ojson.GetBytesNoCopy(payload, prefix)
+	for _, cPath := range []string{"candidates", "response.candidates"} {
+		candidates := ojson.GetBytesNoCopy(payload, cPath)
+		if !candidates.Exists() || candidates.Get("1").Exists() {
+			continue
+		}
+		candidate := candidates.Get("0")
 		if !candidate.Exists() {
 			continue
 		}
@@ -180,7 +184,18 @@ func GeminiFilterBlockMessage(payload []byte) (string, bool) {
 		if finishReason := strings.TrimSpace(candidate.Get("finishReason").String()); finishReason != "" {
 			return "", false
 		}
-		text := strings.TrimSpace(candidate.Get("content.parts.0.text").String())
+		if candidate.Get("index").Exists() || candidate.Get("safetyRatings").Exists() || candidate.Get("citationMetadata").Exists() {
+			return "", false
+		}
+		parts := candidate.Get("content.parts")
+		if !parts.Exists() || parts.Get("1").Exists() {
+			return "", false
+		}
+		part := parts.Get("0")
+		if part.Get("thought").Exists() || part.Get("thoughtSignature").Exists() || part.Get("functionCall").Exists() {
+			return "", false
+		}
+		text := strings.TrimSpace(part.Get("text").String())
 		if isGeminiFilterBlockText(text) {
 			return text, true
 		}
