@@ -203,35 +203,38 @@ func (poolQuotaErr) QuotaResetAfter() *time.Duration { return nil }
 func TestUsageLimitModeOpenAICompatAliasPool(t *testing.T) {
 	SetQuotaCooldownResponseMode("usage-limit")
 	t.Cleanup(func() { SetQuotaCooldownResponseMode("") })
-	for _, stream := range []bool{false, true} {
+	for _, path := range []string{"execute", "stream", "count"} {
 		failed := map[string]error{"backend-a": poolQuotaErr{}, "backend-b": poolQuotaErr{}}
-		executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: failed, streamFirstErrors: failed}
+		executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: failed, streamFirstErrors: failed, countErrors: failed}
 		m := newOpenAICompatPoolTestManager(t, "public", []internalconfig.OpenAICompatibilityModel{
 			{Name: "backend-a", Alias: "public"},
 			{Name: "backend-b", Alias: "public"},
 		}, executor)
 		for request := 0; request < 2; request++ {
 			var err error
-			req, opts := cliproxyexecutor.Request{Model: "public"}, cliproxyexecutor.Options{Stream: stream}
-			if stream {
+			req, opts := cliproxyexecutor.Request{Model: "public"}, cliproxyexecutor.Options{Stream: path == "stream"}
+			switch path {
+			case "stream":
 				var result *cliproxyexecutor.StreamResult
 				if result, err = m.ExecuteStream(context.Background(), []string{openAICompatPoolProviderKey}, req, opts); err == nil {
 					for chunk := range result.Chunks {
 						err = chunk.Err
 					}
 				}
-			} else {
+			case "count":
+				_, err = m.ExecuteCount(context.Background(), []string{openAICompatPoolProviderKey}, req, opts)
+			default:
 				_, err = m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, req, opts)
 			}
 			if resetAt, ok := UsageLimitResetAt(err); !ok || time.Until(resetAt) < 2*time.Hour-time.Minute {
-				t.Fatalf("stream=%t request %d: err = %v, want a usage limit", stream, request, err)
+				t.Fatalf("%s request %d: err = %v, want a usage limit", path, request, err)
 			}
 		}
 		// One backend that can serve again keeps the retryable answer.
 		auth := m.auths["pool-auth-"+t.Name()]
 		delete(auth.ModelStates, m.stateModelForExecution(auth, "public", "backend-b", true))
 		if refusal := m.usageLimitRefusalForPool([]string{openAICompatPoolProviderKey}, "public", authSelectionEligibility{}, "", time.Now()); refusal != nil {
-			t.Fatalf("stream=%t: refusal = %+v with backend-b available", stream, refusal)
+			t.Fatalf("%s: refusal = %+v with backend-b available", path, refusal)
 		}
 	}
 }
@@ -248,5 +251,46 @@ func TestQuotaEvidenceFollowsKeptDeadline(t *testing.T) {
 	}
 	if refusal := poolRefusal(m, time.Now()); refusal != nil {
 		t.Fatalf("refusal = %+v, want none for a generic cooldown", refusal)
+	}
+}
+
+// A later 429 without a reset hint keeps the live deadline, and so keeps the
+// evidence of the exhaustion that set it.
+func TestQuotaEvidenceSurvivesReusedDeadline(t *testing.T) {
+	for _, credentialScope := range []bool{false, true} {
+		m := usageLimitManager(t, &Auth{ID: "auth-reused", Provider: "codex", Status: StatusActive})
+		reset := 2 * time.Hour
+		for _, result := range []Result{{RetryAfter: &reset, QuotaExhausted: true, QuotaLimitWindowMinutes: 300}, {}} {
+			result.AuthID, result.Provider, result.Model, result.CredentialScope = "auth-reused", "codex", "gpt-5", credentialScope
+			result.Error = &Error{Message: "limited", HTTPStatus: http.StatusTooManyRequests}
+			m.MarkResult(context.Background(), result)
+		}
+		if refusal := poolRefusal(m, time.Now()); refusal == nil || refusal.windowMinutes != 300 {
+			t.Fatalf("credential scope %t: refusal = %+v, want the usage limit kept", credentialScope, refusal)
+		}
+	}
+}
+
+// Weighted round-robin never picks a zero-weight credential, so it does not
+// keep the pool retryable; other selectors can still pick it.
+func TestUsageLimitRefusalSkipsZeroWeightUnderWeightedSelection(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		selector Selector
+		want     bool
+	}{
+		{name: "weighted", selector: &WeightedRoundRobinSelector{}, want: true},
+		{name: "session affinity over weighted", selector: NewSessionAffinitySelector(&WeightedRoundRobinSelector{}), want: true},
+		{name: "round robin", selector: &RoundRobinSelector{}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zero := &Auth{ID: "zero-weight", Provider: "codex", Status: StatusActive, Attributes: map[string]string{AttributeWeight: "0"}}
+			m := usageLimitManager(t, credentialQuotaAuth("exhausted", true, now.Add(2*time.Hour), 300), zero)
+			m.SetSelector(tc.selector)
+			if refusal := poolRefusal(m, now); (refusal != nil) != tc.want {
+				t.Fatalf("refusal = %+v, want usage limit %t", refusal, tc.want)
+			}
+		})
 	}
 }

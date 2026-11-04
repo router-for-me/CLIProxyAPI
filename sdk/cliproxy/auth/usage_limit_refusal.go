@@ -178,9 +178,14 @@ func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eli
 	hasModel := strings.TrimSpace(model) != ""
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	requirePositiveWeight := selectorRequiresPositiveWeight(m.selector)
 	var refusal *usageLimitRefusal
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || (pinnedAuthID != "" && auth.ID != pinnedAuthID) || !eligibility.allows(auth) {
+			continue
+		}
+		if requirePositiveWeight && authWeight(auth) <= 0 {
+			// Weighted selection never picks it, so it cannot serve the request.
 			continue
 		}
 		providerKey := executorKeyFromAuth(auth)
@@ -213,6 +218,17 @@ func (m *Manager) usageLimitRefusalForPool(providers []string, model string, eli
 		return nil
 	}
 	return refusal
+}
+
+// selectorRequiresPositiveWeight reports whether selector, directly or as a
+// session-affinity fallback, is weighted round-robin, which never picks a
+// credential whose weight is zero.
+func selectorRequiresPositiveWeight(selector Selector) bool {
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		selector = affinity.fallback
+	}
+	_, weighted := selector.(*WeightedRoundRobinSelector)
+	return weighted
 }
 
 // usageLimitResponseError applies the usage-limit response mode to the final

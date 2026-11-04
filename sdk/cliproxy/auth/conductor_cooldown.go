@@ -1174,6 +1174,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										}
 									}
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
+									if quotaForFailure.NextRecoverAt.After(now) {
+										// The live deadline is kept, and with it its evidence.
+										quotaExhausted, quotaWindow = quotaForFailure.Exhausted, quotaForFailure.LimitWindowMinutes
+									}
 								}
 								credentialNext = next
 								credentialExhausted, credentialWindow = quotaExhausted, quotaWindow

@@ -233,7 +233,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			}
 		}
 		lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
-		return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(lastErr)
+		lastErr = unwrapExecutionBoundaryError(lastErr)
+		if usageLimitErr := m.usageLimitResponseError(ctx, normalized, retryModel, opts, lastErr); usageLimitErr != nil {
+			return cliproxyexecutor.Response{}, usageLimitErr
+		}
+		return cliproxyexecutor.Response{}, lastErr
 	}
 	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 }
