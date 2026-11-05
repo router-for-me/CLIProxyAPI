@@ -932,6 +932,7 @@ upstream:
 #       prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #       base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #       support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
+#       support-cache-control: false # optional: add Anthropic-style cache_control breakpoints to chat-completions requests (e.g. OpenRouter caches Claude only when asked); keeps a Claude client's ttl "1h"
 #       disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns

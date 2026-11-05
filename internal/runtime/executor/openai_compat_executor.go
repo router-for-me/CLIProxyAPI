@@ -175,6 +175,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return resp, err
 		}
+		applyOpenAICompatCacheControlDoc(compat, from, req, opts, doc)
 	}
 	if opts.Alt == "responses/compact" {
 		_ = doc.Delete("stream")
@@ -416,6 +417,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return nil, err
 		}
+		applyOpenAICompatCacheControlDoc(compat, from, req, opts, doc)
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics

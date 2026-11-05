@@ -1082,6 +1082,11 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+	// SupportCacheControl adds Anthropic-style cache_control breakpoints to chat-completions requests that carry
+	// none, for upstreams that accept them (e.g. OpenRouter, which caches Claude only when asked). The client's
+	// requested lifetime (ttl "1h" in a Claude-format request) is kept.
+	SupportCacheControl bool `yaml:"support-cache-control,omitempty" json:"support-cache-control,omitempty"`
+
 	// DisableCooling overrides the global cooling policy for this provider when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
