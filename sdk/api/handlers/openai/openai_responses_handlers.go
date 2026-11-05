@@ -345,14 +345,72 @@ func responsesSSEPayloadErrorMessage(payload []byte) *interfaces.ErrorMessage {
 	status := http.StatusBadGateway
 	var candidatesBuf [6]ojson.Result
 	candidates := ojson.GetManyBytesNoCopy(candidatesBuf[:0], payload, "status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code")
+	foundStatus := false
 	for _, res := range candidates {
 		candidate := int(res.Int())
 		if candidate >= http.StatusBadRequest && candidate <= 599 {
 			status = candidate
+			foundStatus = true
 			break
 		}
 	}
-	return sanitizeResponsesStreamErrorMessage(&interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", payload)})
+	if !foundStatus {
+		status = responsesSSEPayloadErrorStatus(payload)
+	}
+	errPayload := responsesAnnotateImageGenerationComplexityPayload(payload)
+	return sanitizeResponsesStreamErrorMessage(&interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errPayload)})
+}
+
+func responsesAnnotateImageGenerationComplexityPayload(payload []byte) []byte {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
+		return payload
+	}
+	for _, basePath := range []string{"error", "response.error"} {
+		errObj := ojson.GetBytesNoCopy(payload, basePath)
+		if !errObj.IsObject() {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(errObj.Get("type").String()), "image_generation_user_error") {
+			continue
+		}
+		msg := strings.TrimSpace(errObj.Get("message").String())
+		param := strings.ToLower(strings.TrimSpace(errObj.Get("param").String()))
+		if (param == "complexity" || strings.Contains(strings.ToLower(msg), "complexity")) && !strings.Contains(msg, "/v1/images/generations") {
+			doc := ojson.NewDoc(payload)
+			_ = doc.Set(basePath+".message", msg+` (Set tool_choice to {"type":"image_generation"}, use a compatible Responses model such as gpt-5.4-mini, or call /v1/images/generations directly.)`)
+			return doc.Bytes()
+		}
+	}
+	return payload
+}
+
+func responsesSSEPayloadErrorStatus(payload []byte) int {
+	var fieldsBuf [4]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error.type", "response.error.type", "error.code", "response.error.code")
+	errorType := strings.ToLower(strings.TrimSpace(fields[0].String()))
+	if errorType == "" {
+		errorType = strings.ToLower(strings.TrimSpace(fields[1].String()))
+	}
+	errorCode := strings.ToLower(strings.TrimSpace(fields[2].String()))
+	if errorCode == "" {
+		errorCode = strings.ToLower(strings.TrimSpace(fields[3].String()))
+	}
+	switch {
+	case errorCode == "cyber_policy":
+		return http.StatusBadRequest
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
+	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
+		return http.StatusUnauthorized
+	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
+		return http.StatusForbidden
+	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
+		return http.StatusBadRequest
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
