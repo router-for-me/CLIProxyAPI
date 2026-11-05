@@ -1342,7 +1342,337 @@ func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
 	if ojson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
 		t.Fatalf("first chunk = %s", payloads[0])
 	}
-	if ojson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
+	if ojson.Get(payloads[1], "choices.0.delta.content").String() != "" || ojson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
 		t.Fatalf("second chunk = %s", payloads[1])
 	}
+}
+
+func TestOpenAICompatExecutor_ResponsesCompactionTriggerAndReplay_Issue7248(t *testing.T) {
+	var seenPaths []string
+	var seenBodies [][]byte
+	var returnIncomplete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read upstream body: %v", errRead)
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		seenPaths = append(seenPaths, r.URL.Path)
+		seenBodies = append(seenBodies, body)
+
+		if r.URL.Path == "/v1/responses/compact" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp_cmp_native","object":"response.compaction","status":"completed","output":[{"id":"cmp_native","type":"compaction","status":"completed","encrypted_content":"gAAAA_native"}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`)
+			return
+		}
+
+		if returnIncomplete {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"chatcmpl_inc","object":"chat.completion","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"thinking","content":"Partial truncated summary."},"finish_reason":"length"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}`)
+			return
+		}
+
+		if ojson.GetBytes(body, "stream").Bool() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w,
+				`data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Checking context..."},"finish_reason":null}]}`+"\n\n"+
+					`data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"COBALT-731"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`+"\n\n"+
+					"data: [DONE]\n\n",
+			)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl_sum","object":"chat.completion","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Summarizing session context.","content":"Summary retaining COBALT-731."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}}`)
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "cline-pass/deepseek-v4.1-flash", Protocol: "openai"}},
+				Params: map[string]any{
+					"max_tokens": 2048,
+				},
+			}},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test-cline-key",
+		},
+	}
+
+	triggerPayload := []byte(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": true,
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "exec_command",
+						"description": "Execute a shell command",
+						"parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+					}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "Remember our synthetic project marker COBALT-731 and reply with ACK."}]
+			},
+			{"type": "compaction_trigger"}
+		]
+	}`)
+
+	streamResult, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream(compaction_trigger) error = %v", errStream)
+	}
+
+	var streamBuf bytes.Buffer
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamBuf.Write(chunk.Payload)
+	}
+
+	completed := claudeCompactionCompletedResponse(t, streamBuf.String())
+	outputItems := completed.Get("response.output").Array()
+	if len(outputItems) != 1 || outputItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in stream response, got: %s", completed.Raw)
+	}
+	capsule := outputItems[0].Get("encrypted_content").String()
+	if !strings.HasPrefix(capsule, "cpa-ag-compact-v1:") {
+		t.Fatalf("expected CPA compaction capsule prefix, got %q", capsule)
+	}
+	if gotCached := completed.Get("response.usage.input_tokens_details.cached_tokens").Int(); gotCached != 4 {
+		t.Fatalf("cached_tokens = %d, want 4", gotCached)
+	}
+	if gotReasoning := completed.Get("response.usage.output_tokens_details.reasoning_tokens").Int(); gotReasoning != 2 {
+		t.Fatalf("reasoning_tokens = %d, want 2", gotReasoning)
+	}
+	firstSeen := seenBodies[0]
+	if ojson.GetBytes(firstSeen, "stream").Bool() {
+		t.Fatalf("expected non-stream summary request upstream, got: %s", firstSeen)
+	}
+	if ojson.GetBytes(firstSeen, "tools").Exists() {
+		t.Fatalf("expected tools (including additional_tools) to be stripped from summary request, got: %s", firstSeen)
+	}
+
+	nonStreamResp, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errExec != nil {
+		t.Fatalf("Execute(compaction_trigger) error = %v", errExec)
+	}
+	nonStreamItems := ojson.GetBytes(nonStreamResp.Payload, "output").Array()
+	if len(nonStreamItems) != 1 || nonStreamItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in non-stream response, got: %s", nonStreamResp.Payload)
+	}
+
+	replayPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": true,
+		"input": [
+			{"type": "compaction", "encrypted_content": "foreign-opaque-token"},
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What is the project marker?"}]}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+
+	contStream, errCont := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: replayPayload,
+	})
+	if errCont != nil {
+		t.Fatalf("ExecuteStream(replay) error = %v", errCont)
+	}
+	for chunk := range contStream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("continuation stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	lastSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(lastSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected expanded summary in continuation upstream request, got: %s", lastSeen)
+	}
+	if bytes.Contains(lastSeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("expected foreign compaction item to be dropped, got: %s", lastSeen)
+	}
+
+	if _, errNonStreamReplay := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: replayPayload,
+	}); errNonStreamReplay != nil {
+		t.Fatalf("Execute(replay) error = %v", errNonStreamReplay)
+	}
+	nonStreamReplaySeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(nonStreamReplaySeen, []byte("Summary retaining COBALT-731.")) || bytes.Contains(nonStreamReplaySeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("unexpected non-stream replay upstream body: %s", nonStreamReplaySeen)
+	}
+
+	if _, errCountTokens := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: replayPayload,
+	}); errCountTokens != nil {
+		t.Fatalf("CountTokens(replay) error = %v", errCountTokens)
+	}
+
+	strippedTriggerPayload := []byte(`{"model":"cline-pass/deepseek-v4.1-flash","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember our synthetic project marker COBALT-731 and reply with ACK."}]}]}`)
+	origOnlyResp, errOrigOnly := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: strippedTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errOrigOnly != nil {
+		t.Fatalf("Execute(OriginalRequest-only trigger) error = %v", errOrigOnly)
+	}
+	if got := ojson.GetBytes(origOnlyResp.Payload, "output.0.type").String(); got != "compaction" {
+		t.Fatalf("OriginalRequest-only trigger output[0].type = %q, want compaction", got)
+	}
+
+	corruptedPayload := []byte(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "encrypted_content": "cpa-ag-compact-v1:not-valid"},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+		]
+	}`)
+	_, errCorrupt := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: corruptedPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: corruptedPayload,
+	})
+	if errCorrupt == nil {
+		t.Fatal("expected error for corrupted compaction capsule, got nil")
+	}
+	assertStatusErr(t, errCorrupt, http.StatusBadRequest)
+
+	secondTriggerPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Second phase work."}]},
+			{"type": "compaction_trigger"}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+	secondResp, errSecond := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: secondTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: secondTriggerPayload,
+	})
+	if errSecond != nil {
+		t.Fatalf("Execute(second compaction_trigger) error = %v", errSecond)
+	}
+	if got := len(ojson.GetBytes(secondResp.Payload, "output").Array()); got != 1 {
+		t.Fatalf("second compaction output len = %d, want 1", got)
+	}
+	secondSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(secondSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected first capsule summary in second compaction request, got: %s", secondSeen)
+	}
+	if got := ojson.GetBytes(secondSeen, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want payload rule 2048; body=%s", got, secondSeen)
+	}
+
+	compactPassthroughPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"input": [
+			{"type": "compaction", "encrypted_content": "foreign-native-token"},
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Compact again."}]}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+	if _, errCompactEndpoint := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: compactPassthroughPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+	}); errCompactEndpoint != nil {
+		t.Fatalf("Execute(responses/compact) error = %v", errCompactEndpoint)
+	}
+	compactSeen := seenBodies[len(seenBodies)-1]
+	if seenPaths[len(seenPaths)-1] != "/v1/responses/compact" {
+		t.Fatalf("responses/compact path = %q, want /v1/responses/compact", seenPaths[len(seenPaths)-1])
+	}
+	if !bytes.Contains(compactSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected CPA capsule expanded on /responses/compact passthrough, got: %s", compactSeen)
+	}
+	if !bytes.Contains(compactSeen, []byte("foreign-native-token")) {
+		t.Fatalf("expected foreign compaction item preserved on /responses/compact passthrough, got: %s", compactSeen)
+	}
+
+	returnIncomplete = true
+	_, errIncExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncExec == nil {
+		t.Fatal("expected Execute(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncExec, http.StatusBadGateway)
+
+	_, errIncStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncStream == nil {
+		t.Fatal("expected ExecuteStream(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncStream, http.StatusBadGateway)
 }

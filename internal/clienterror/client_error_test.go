@@ -102,6 +102,52 @@ func TestHTTPStatusFromError(t *testing.T) {
 	}
 }
 
+func TestGeminiFilterBlockMessage(t *testing.T) {
+	filterFrame := []byte(`{"response": {"candidates": [{"content": {"parts": [{"text": "This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`)
+	msg, blocked := GeminiFilterBlockMessage(filterFrame)
+	if !blocked || msg == "" {
+		t.Fatalf("GeminiFilterBlockMessage(filterFrame) = (%q, %v), want non-empty true", msg, blocked)
+	}
+
+	normalModelFrame := []byte(`{"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "This request was blocked by Gemini's filters. You can read more at https://policies.google.com/terms/generative-ai/use-policy."}]}}], "usageMetadata": {"promptTokenCount": 10}, "modelVersion": "gemini-4-argon-b", "responseId": "resp-1"}}`)
+	if gotMsg, gotBlocked := GeminiFilterBlockMessage(normalModelFrame); gotBlocked {
+		t.Fatalf("GeminiFilterBlockMessage(normalModelFrame) = (%q, true), want false when role/metadata present", gotMsg)
+	}
+
+	renamedUsageFrame := []byte(`{"response": {"candidates": [{"content": {"parts": [{"text": "This request was blocked by Gemini's filters. You can read more at https://policies.google.com/terms/generative-ai/use-policy."}]}}], "cpaUsageMetadata": {"promptTokenCount": 10}}}`)
+	if gotMsg, gotBlocked := GeminiFilterBlockMessage(renamedUsageFrame); gotBlocked {
+		t.Fatalf("GeminiFilterBlockMessage(renamedUsageFrame) = (%q, true), want false when cpaUsageMetadata present", gotMsg)
+	}
+}
+
+func TestClaudePolicyRefusalMessage(t *testing.T) {
+	deltaFrame := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback."},"container":null},"usage":{"input_tokens":4,"output_tokens":0}}`)
+	msg, blocked := ClaudePolicyRefusalMessage(deltaFrame)
+	if !blocked || msg == "" {
+		t.Fatalf("ClaudePolicyRefusalMessage(deltaFrame) = (%q, %v), want non-empty true", msg, blocked)
+	}
+	if !IsRequestFault(http.StatusBadGateway, errors.New(msg)) {
+		t.Fatalf("IsRequestFault() = false for %q, want true", msg)
+	}
+
+	plainRefusalWithoutDetails := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":2}}`)
+	if gotMsg, gotBlocked := ClaudePolicyRefusalMessage(plainRefusalWithoutDetails); gotBlocked {
+		t.Fatalf("ClaudePolicyRefusalMessage(plainRefusalWithoutDetails) = (%q, true), want false when stop_details absent", gotMsg)
+	}
+
+	sparseRefusal := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}`)
+	sparseMsg, sparseBlocked := ClaudePolicyRefusalMessage(sparseRefusal)
+	if !sparseBlocked || sparseMsg == "" {
+		t.Fatalf("ClaudePolicyRefusalMessage(sparseRefusal) = (%q, %v), want non-empty true", sparseMsg, sparseBlocked)
+	}
+	if !IsClaudePolicyRefusalError(errors.New(sparseMsg)) {
+		t.Fatalf("IsClaudePolicyRefusalError(%q) = false, want true", sparseMsg)
+	}
+	if !IsRequestFault(http.StatusBadGateway, errors.New(sparseMsg)) {
+		t.Fatalf("IsRequestFault() = false for sparse refusal %q, want true", sparseMsg)
+	}
+}
+
 type statusAndUnwrapError struct {
 	status int
 	body   string
@@ -164,6 +210,12 @@ func TestIsRequestFault(t *testing.T) {
 			name:   "cyber policy behind bad gateway",
 			status: http.StatusBadGateway,
 			err:    errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+			want:   true,
+		},
+		{
+			name:   "gemini filter block frame message",
+			status: http.StatusBadGateway,
+			err:    errors.New("This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."),
 			want:   true,
 		},
 		{
