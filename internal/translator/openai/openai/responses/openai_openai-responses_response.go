@@ -369,6 +369,10 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, nextSeq func() int) [
 				}
 				continue
 			}
+			if st.ToolIndex.isToolSearch(name) {
+				outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: toolSearchCallItem(callID, args, toolStatus)})
+				continue
+			}
 			if st.FuncItemCustom[key] {
 				itemDoc := ojson.NewDocString(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				_ = itemDoc.Set("id", fmt.Sprintf("ctc_%s", callID))
@@ -552,6 +556,12 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			_ = oDoc.Set("output_index", outputIndex)
 			_ = oDoc.SetRawBytes("item", shellCallPlaceholder(callID))
 			out = append(out, emitRespEvent("response.output_item.added", oDoc.Bytes()))
+		} else if st.ToolIndex.isToolSearch(name) {
+			oDoc := ojson.NewDocString(`{"type":"response.output_item.added"}`)
+			_ = oDoc.Set("sequence_number", nextSeq())
+			_ = oDoc.Set("output_index", outputIndex)
+			_ = oDoc.SetRawBytes("item", toolSearchCallPlaceholder(callID))
+			out = append(out, emitRespEvent("response.output_item.added", oDoc.Bytes()))
 		} else if isCustomTool {
 			if st.ToolIndex.isApplyPatch(name) {
 				d := st.ToolIndex.byChat[name]
@@ -579,7 +589,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.FuncItemAdded[key] = true
 	}
 	emitPendingFunctionArgs := func(key string) {
-		if !st.FuncItemAdded[key] || st.ToolInputError() != nil || st.ToolIndex.isShell(st.FuncNames[key]) {
+		if !st.FuncItemAdded[key] || st.ToolInputError() != nil || st.ToolIndex.isShell(st.FuncNames[key]) || st.ToolIndex.isToolSearch(st.FuncNames[key]) {
 			return
 		}
 		argsBuf := st.FuncArgsBuf[key]
@@ -797,11 +807,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 			outputIndex := st.FuncOutputIx[key]
 			toolStatus := "completed"
-			args := "{}"
+			rawArgs := ""
 			if hasArgs {
-				args = b.String()
-			} else if isIncomplete || !isExplicitToolFinish {
-				args = ""
+				rawArgs = b.String()
+			}
+			args := rawArgs
+			if !hasArgs && !isIncomplete && isExplicitToolFinish {
+				args = "{}"
 			}
 			if isIncomplete {
 				toolStatus = "incomplete"
@@ -817,6 +829,16 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 				_ = eventDoc.Set("sequence_number", nextSeq())
 				_ = eventDoc.Set("output_index", outputIndex)
 				_ = eventDoc.SetRawBytes("item", item)
+				out = append(out, emitRespEvent("response.output_item.done", eventDoc.Bytes()))
+				st.FuncItemDone[key] = true
+				st.FuncArgsDone[key] = true
+				continue
+			}
+			if st.ToolIndex.isToolSearch(name) {
+				eventDoc := ojson.NewDocString(`{"type":"response.output_item.done"}`)
+				_ = eventDoc.Set("sequence_number", nextSeq())
+				_ = eventDoc.Set("output_index", outputIndex)
+				_ = eventDoc.SetRawBytes("item", toolSearchCallItem(callID, rawArgs, toolStatus))
 				out = append(out, emitRespEvent("response.output_item.done", eventDoc.Bytes()))
 				st.FuncItemDone[key] = true
 				st.FuncArgsDone[key] = true
@@ -1173,6 +1195,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 								return false
 							}
 							outputItems = append(outputItems, item)
+							return true
+						}
+						if toolIndex.isToolSearch(name) {
+							outputItems = append(outputItems, toolSearchCallItem(callID, args, toolStatus))
 							return true
 						}
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
