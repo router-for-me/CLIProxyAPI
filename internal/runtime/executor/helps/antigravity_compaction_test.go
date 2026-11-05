@@ -70,6 +70,7 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 		"tool_choice": "auto",
 		"previous_response_id": "resp-old",
 		"input": [
+			{"type": "additional_tools", "tools": [{"type": "function", "name": "exec_command"}]},
 			{"type": "message", "role": "user", "content": "hi"},
 			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]},
 			{"type": "compaction_trigger"}
@@ -102,6 +103,9 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	for _, item := range input {
 		if item.Get("type").String() == "compaction_trigger" {
 			t.Fatal("compaction_trigger must be removed from summary payload")
+		}
+		if item.Get("type").String() == "additional_tools" {
+			t.Fatal("additional_tools must be removed from summary payload")
 		}
 	}
 

@@ -8,6 +8,42 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
+func TestConvertOpenAIRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"max_completion_tokens", `{"max_completion_tokens":2048}`, "2048"},
+		{"max_output_tokens fallback", `{"max_output_tokens":4096}`, "4096"},
+		{"completion limit takes precedence", `{"max_completion_tokens":1024,"max_tokens":2048,"max_output_tokens":4096}`, "1024"},
+		{"max_tokens takes precedence over output limit", `{"max_tokens":1024,"max_output_tokens":2048}`, "1024"},
+		{"invalid completion limit skipped", `{"max_completion_tokens":"1024","max_tokens":2048}`, "2048"},
+		{"null completion limit skipped", `{"max_completion_tokens":null,"max_tokens":2048}`, "2048"},
+		{"invalid legacy limits skipped", `{"max_completion_tokens":false,"max_tokens":{},"max_output_tokens":4096}`, "4096"},
+		{"zero takes precedence", `{"max_completion_tokens":0,"max_tokens":2048}`, "0"},
+		{"non-numeric limits ignored", `{"max_completion_tokens":"1024","max_tokens":null,"max_output_tokens":true}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+			for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+				if ojson.GetBytesNoCopy(out, path).Exists() {
+					t.Fatalf("%s should not be forwarded; output=%s", path, out)
+				}
+			}
+		})
+	}
+}
+
 // Basic tool-call: system + user + assistant(tool_calls, no content) + tool result.
 // Expects developer msg + user msg + function_call + function_call_output.
 // No empty assistant message should appear between user and function_call.

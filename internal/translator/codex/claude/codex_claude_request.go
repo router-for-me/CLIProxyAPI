@@ -72,6 +72,13 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	toolNameMap := buildReverseMapFromClaudeOriginalToShortFromResult(rootResult, mayHaveToolAddition)
 	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, rawJSON)
 	_ = templateDoc.Set("model", modelName)
+	maxOutputTokens := rootResult.Get("max_tokens")
+	if !maxOutputTokens.Exists() {
+		maxOutputTokens = rootResult.Get("max_output_tokens")
+	}
+	if maxOutputTokens.Type == ojson.Number {
+		_ = templateDoc.Set("max_output_tokens", maxOutputTokens.Int())
+	}
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 	toolsResult := rootResult.Get("tools")
 	var declaredToolsByName map[string]ojson.Result

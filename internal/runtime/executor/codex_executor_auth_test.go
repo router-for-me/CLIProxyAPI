@@ -746,7 +746,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if got := gotHeaders.Get("User-Agent"); got != codexSIWCUserAgent(&customCfg) {
 		t.Fatalf("custom User-Agent = %q, want %q", got, codexSIWCUserAgent(&customCfg))
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -781,7 +784,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotBody["service_tier"] != "priority" {
 		t.Fatalf("expected user payload rule to set service_tier=priority after SIWC body cleanup, got %v", gotBody["service_tier"])
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -905,7 +911,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
@@ -928,7 +937,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket stream frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
@@ -991,17 +1003,19 @@ func TestCodexExecutorUseSIWCFailsClosedWhenMissingSIWCToken(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T) {
+func TestCodexExecutorUseSIWCImageRequestsBypassSIWCAndUseDirectImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotHeaders http.Header
-	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotHeaders = r.Header.Clone()
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &gotBody)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_img\",\"created_at\":1700000000,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\",\"output_format\":\"png\"}]}}\n\n"))
+		if r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"aGVsbG8=\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1700000000,"data":[{"b64_json":"aGVsbG8="}],"usage":{"total_tokens":10}}`))
 	}))
 	defer srv.Close()
 
@@ -1010,13 +1024,15 @@ func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T)
 		ID:       "codex-siwc-img",
 		Provider: "codex",
 		Attributes: map[string]string{
-			"base_url": srv.URL + "/v1",
+			"base_url": srv.URL,
 		},
 		Metadata: map[string]any{
-			"type":     "codex",
-			"use_siwc": true,
+			"type":         "codex",
+			"access_token": "outer-img-token",
+			"account_id":   "acct-img-1",
+			"use_siwc":     true,
 			"siwc": map[string]any{
-				"access_token": "siwc-img-token",
+				"access_token": "siwc-img-token-must-not-be-used",
 				"client_id":    "oaiapp_img",
 			},
 		},
@@ -1024,47 +1040,71 @@ func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T)
 
 	imgOpts := cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"User-Agent": []string{"Python-urllib/3.14"}},
 		Metadata:     map[string]any{"request_path": "/v1/images/generations"},
 	}
-	// Even with gpt-image-1.5 (which normally uses direct /images/generations), use_siwc=true must route via /v1/responses SSE
+	// Image requests must never use SIWC even for non-Codex client User-Agents; they must use the outer token and direct /images/generations endpoint.
 	_, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat"}`),
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat"}`),
 	}, imgOpts)
 	if errExec != nil {
 		t.Fatalf("Execute image with use_siwc error: %v", errExec)
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("image request path = %q, want /v1/responses", gotPath)
+	if gotPath != "/images/generations" {
+		t.Fatalf("image request path = %q, want /images/generations", gotPath)
 	}
-	if gotHeaders.Get("Authorization") != "Bearer siwc-img-token" {
-		t.Fatalf("Authorization = %q, want Bearer siwc-img-token", gotHeaders.Get("Authorization"))
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
 	}
-	if _, hasInst := gotBody["instructions"]; hasInst {
-		t.Fatalf("empty instructions should be stripped on SIWC image request: %#v", gotBody)
+	if gotHeaders.Get("Chatgpt-Account-Id") != "acct-img-1" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-img-1", gotHeaders.Get("Chatgpt-Account-Id"))
 	}
 
 	sr, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat","stream":true}`),
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat","stream":true}`),
 	}, imgOpts)
 	if errStream != nil {
 		t.Fatalf("ExecuteStream image with use_siwc error: %v", errStream)
 	}
 	for range sr.Chunks {
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("image stream request path = %q, want /v1/responses", gotPath)
+	if gotPath != "/images/generations" {
+		t.Fatalf("image stream request path = %q, want /images/generations", gotPath)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("stream Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
 	}
 
-	// Missing SIWC token must fail closed on image requests too
-	authNoSIWCToken := auth.Clone()
-	delete(authNoSIWCToken.Metadata, "siwc")
-	if _, errMissing := executor.Execute(context.Background(), authNoSIWCToken, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat"}`),
+	// /v1/images/edits with non-Codex UA must also bypass SIWC and hit /images/edits with outer token.
+	editOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"User-Agent": []string{"Python-urllib/3.14"}, "Content-Type": []string{"application/json"}},
+		Metadata:     map[string]any{"request_path": "/v1/images/edits"},
+	}
+	_, errEdit := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"edit cat","images":[{"image_url":"https://example.com/cat.png"}]}`),
+	}, editOpts)
+	if errEdit != nil {
+		t.Fatalf("Execute image edit with use_siwc error: %v", errEdit)
+	}
+	if gotPath != "/images/edits" {
+		t.Fatalf("image edit request path = %q, want /images/edits", gotPath)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("edit Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
+	}
+
+	// Missing outer token must fail closed on image requests even if SIWC token is present
+	authNoOuterToken := auth.Clone()
+	delete(authNoOuterToken.Metadata, "access_token")
+	if _, errMissing := executor.Execute(context.Background(), authNoOuterToken, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat"}`),
 	}, imgOpts); errMissing == nil {
-		t.Fatal("expected image Execute to fail when use_siwc=true and siwc token is missing")
+		t.Fatal("expected image Execute to fail when outer access_token is missing")
 	}
 }
 
