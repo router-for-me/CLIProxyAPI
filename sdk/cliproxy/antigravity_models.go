@@ -1,16 +1,11 @@
 package cliproxy
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"math/rand/v2"
-	"net/http"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,29 +13,28 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
 const (
-	antigravityModelBaseURLDaily     = "https://daily-cloudcode-pa.googleapis.com"
-	antigravityModelsPath            = "/v1internal:fetchAvailableModels"
-	antigravityPersistedHintsMetaKey = "antigravity_capability_hints"
+	antigravityModelBaseURLDaily     = sdkauth.AntigravityModelBaseURLDaily
+	antigravityModelsPath            = sdkauth.AntigravityModelsPath
+	antigravityPersistedHintsMetaKey = sdkauth.AntigravityPersistedHintsMetaKey
 	antigravityCapabilityCacheTTL    = registry.ModelsRefreshInterval
 	antigravityCapabilityRetryBase   = time.Minute
 	antigravityCapabilityRetryMax    = 30 * time.Minute
 	antigravityRefreshScanInterval   = time.Minute
 )
 
-type antigravityProbeStatus int
+type antigravityProbeStatus = sdkauth.AntigravityProbeStatus
 
 const (
-	antigravityProbeStatusSuccess antigravityProbeStatus = iota
-	antigravityProbeStatusAuthError
-	antigravityProbeStatusTransientError
+	antigravityProbeStatusSuccess        = sdkauth.AntigravityProbeStatusSuccess
+	antigravityProbeStatusAuthError      = sdkauth.AntigravityProbeStatusAuthError
+	antigravityProbeStatusTransientError = sdkauth.AntigravityProbeStatusTransientError
 )
 
 type antigravityCapabilityCacheEntry struct {
@@ -86,11 +80,6 @@ var (
 	antigravityProbeSequence    atomic.Uint64
 	antigravityProbeSlots       = make(chan struct{}, modelRegistrationMaxWorkersPerCategory)
 )
-
-type antigravityFetchAvailableModelsResponse struct {
-	WebSearchModelIDs []string                   `json:"webSearchModelIds"`
-	Models            map[string]json.RawMessage `json:"models"`
-}
 
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
@@ -227,112 +216,21 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 }
 
 func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hints antigravityModelCapabilityHints) map[string]any {
-	modelIDs := make([]string, 0, len(hints.ModelIDs))
-	for id := range hints.ModelIDs {
-		if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
-			modelIDs = append(modelIDs, normalized)
-		}
-	}
-	slices.Sort(modelIDs)
-	modelItems := make([]any, len(modelIDs))
-	for i, id := range modelIDs {
-		modelItems[i] = id
-	}
-	value := map[string]any{
-		"model_ids": modelItems,
-	}
-	if project = strings.TrimSpace(project); project != "" {
-		value["project_id"] = project
-	}
-	if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
-		value["endpoint"] = endpoint
-	}
-	if len(hints.WebSearchModelIDs) > 0 {
-		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
-		for id := range hints.WebSearchModelIDs {
-			if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
-				webSearchIDs = append(webSearchIDs, normalized)
-			}
-		}
-		slices.Sort(webSearchIDs)
-		if len(webSearchIDs) > 0 {
-			webSearchItems := make([]any, len(webSearchIDs))
-			for i, id := range webSearchIDs {
-				webSearchItems[i] = id
-			}
-			value["web_search_model_ids"] = webSearchItems
-		}
-	}
-	return value
+	return sdkauth.BuildPersistedAntigravityCapabilityHints(project, endpoint, sdkauth.AntigravityModelCapabilityHints{
+		ModelIDs:          hints.ModelIDs,
+		WebSearchModelIDs: hints.WebSearchModelIDs,
+	})
 }
 
 func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedProject, expectedEndpoint string) (antigravityModelCapabilityHints, bool) {
-	if metadata == nil {
-		return antigravityModelCapabilityHints{}, false
-	}
-	raw, ok := metadata[antigravityPersistedHintsMetaKey]
-	if !ok || raw == nil {
-		return antigravityModelCapabilityHints{}, false
-	}
-	rawMap, ok := raw.(map[string]any)
+	hints, ok := sdkauth.ParsePersistedAntigravityCapabilityHints(metadata, expectedProject, expectedEndpoint)
 	if !ok {
 		return antigravityModelCapabilityHints{}, false
-	}
-	persistedProject, _ := rawMap["project_id"].(string)
-	persistedEndpoint, _ := rawMap["endpoint"].(string)
-	if strings.TrimSpace(persistedProject) != strings.TrimSpace(expectedProject) {
-		return antigravityModelCapabilityHints{}, false
-	}
-	if strings.TrimRight(strings.TrimSpace(persistedEndpoint), "/") != strings.TrimRight(strings.TrimSpace(expectedEndpoint), "/") {
-		return antigravityModelCapabilityHints{}, false
-	}
-	rawModels, hasModels := rawMap["model_ids"]
-	if !hasModels || rawModels == nil {
-		return antigravityModelCapabilityHints{}, false
-	}
-	modelIDs, ok := parsePersistedAntigravityModelSet(rawModels)
-	if !ok {
-		return antigravityModelCapabilityHints{}, false
-	}
-	webSearchModels := make(map[string]struct{})
-	if rawWebSearch, hasWebSearch := rawMap["web_search_model_ids"]; hasWebSearch && rawWebSearch != nil {
-		parsedWebSearch, okWebSearch := parsePersistedAntigravityModelSet(rawWebSearch)
-		if !okWebSearch {
-			return antigravityModelCapabilityHints{}, false
-		}
-		webSearchModels = parsedWebSearch
 	}
 	return antigravityModelCapabilityHints{
-		ModelIDs:          modelIDs,
-		WebSearchModelIDs: webSearchModels,
+		ModelIDs:          hints.ModelIDs,
+		WebSearchModelIDs: hints.WebSearchModelIDs,
 	}, true
-}
-
-func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {
-	switch items := raw.(type) {
-	case []any:
-		set := make(map[string]struct{}, len(items))
-		for _, item := range items {
-			s, ok := item.(string)
-			if !ok {
-				return nil, false
-			}
-			if normalized := normalizeAntigravityFetchedModelID(s); normalized != "" {
-				set[normalized] = struct{}{}
-			}
-		}
-		return set, true
-	case []string:
-		set := make(map[string]struct{}, len(items))
-		for _, s := range items {
-			if normalized := normalizeAntigravityFetchedModelID(s); normalized != "" {
-				set[normalized] = struct{}{}
-			}
-		}
-		return set, true
-	default:
-		return nil, false
-	}
 }
 
 func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Context, auth *coreauth.Auth) antigravityModelCapabilityHints {
@@ -458,57 +356,21 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 }
 
 func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth, baseURLs []string, proxyURL, accessToken, userAgent string) (antigravityModelCapabilityHints, antigravityProbeStatus) {
-	if len(baseURLs) == 0 {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
+	project := ""
+	if auth != nil && auth.Metadata != nil {
+		project, _ = auth.Metadata["project_id"].(string)
 	}
-	client := &http.Client{}
-	transport, _, errProxy := proxyutil.BuildHTTPTransport(proxyURL)
-	if errProxy != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	if transport != nil {
-		client.Transport = transport
-		defer transport.CloseIdleConnections()
-	}
-	project, _ := auth.Metadata["project_id"].(string)
-	body, errMarshal := json.Marshal(map[string]string{"project": project})
-	if errMarshal != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	// Default to daily and use only the first explicitly configured endpoint.
-	// Racing catalogs from different endpoints can grant incompatible entitlements.
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURLs[0], "/")+antigravityModelsPath, bytes.NewReader(body))
-	if errReq != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", userAgent)
-	resp, errDo := client.Do(req)
-	if errDo != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	defer func() {
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Debug("antigravity model fetch: response close failed")
-		}
-	}()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusAuthError
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	const maxCatalogBytes = 8 << 20
-	data, errRead := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes+1))
-	if errRead != nil || len(data) > maxCatalogBytes {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	hints, ok := parseAntigravityModelCapabilityHints(data)
-	if !ok {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	return hints, antigravityProbeStatusSuccess
+	hints, status := sdkauth.FetchAntigravityAvailableModels(ctx, sdkauth.AntigravityModelProbeRequest{
+		BaseURLs:    baseURLs,
+		ProxyURL:    proxyURL,
+		AccessToken: accessToken,
+		ProjectID:   project,
+		UserAgent:   userAgent,
+	})
+	return antigravityModelCapabilityHints{
+		ModelIDs:          hints.ModelIDs,
+		WebSearchModelIDs: hints.WebSearchModelIDs,
+	}, status
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
@@ -569,27 +431,14 @@ func resolveAntigravityModelBaseURL(auth *coreauth.Auth) string {
 }
 
 func parseAntigravityModelCapabilityHints(body []byte) (antigravityModelCapabilityHints, bool) {
-	var parsed antigravityFetchAvailableModelsResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	hints, ok := sdkauth.ParseAntigravityModelCapabilityHints(body)
+	if !ok {
 		return antigravityModelCapabilityHints{}, false
 	}
-	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs))
-	for _, modelID := range parsed.WebSearchModelIDs {
-		modelID = normalizeAntigravityFetchedModelID(modelID)
-		if modelID != "" {
-			webSearchModels[modelID] = struct{}{}
-		}
-	}
-	var modelIDs map[string]struct{}
-	if parsed.Models != nil {
-		modelIDs = make(map[string]struct{}, len(parsed.Models))
-		for id := range parsed.Models {
-			if normalized := normalizeAntigravityFetchedModelID(id); normalized != "" {
-				modelIDs[normalized] = struct{}{}
-			}
-		}
-	}
-	return antigravityModelCapabilityHints{WebSearchModelIDs: webSearchModels, ModelIDs: modelIDs}, true
+	return antigravityModelCapabilityHints{
+		ModelIDs:          hints.ModelIDs,
+		WebSearchModelIDs: hints.WebSearchModelIDs,
+	}, true
 }
 
 func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
@@ -610,7 +459,7 @@ func applyAntigravityFetchedModelCapabilities(models []*ModelInfo, hints antigra
 }
 
 func normalizeAntigravityFetchedModelID(modelID string) string {
-	return strings.ToLower(strings.TrimSpace(modelID))
+	return sdkauth.NormalizeAntigravityModelID(modelID)
 }
 
 // WaitAntigravityProbes waits for any in-flight asynchronous Antigravity capability probes to complete.

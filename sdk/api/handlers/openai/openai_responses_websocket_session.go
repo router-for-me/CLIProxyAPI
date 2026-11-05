@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -85,6 +86,13 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 		available = append(available, auth)
 	}
 	return available, modelKey
+}
+
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketHasAlternativeReplayTarget(ctx context.Context, modelName string, rawJSON []byte, failedAuthID string) bool {
+	if h == nil || h.BaseAPIHandler == nil || h.AuthManager == nil {
+		return false
+	}
+	return h.HasAlternativeExecutionTarget(ctx, h.HandlerType(), modelName, rawJSON, failedAuthID)
 }
 
 func (h *OpenAIResponsesAPIHandler) responsesWebsocketUsesCodexWebsocketPassthrough(modelName string) bool {
@@ -208,32 +216,5 @@ func responsesWebsocketAuthSupportsCompactionReplay(auth *coreauth.Auth) bool {
 }
 
 func responsesWebsocketAuthAvailableForModel(auth *coreauth.Auth, modelName string, now time.Time) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
-		return false
-	}
-	if modelName != "" && len(auth.ModelStates) > 0 {
-		state, ok := auth.ModelStates[modelName]
-		if (!ok || state == nil) && modelName != "" {
-			baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
-			if baseModel != "" && baseModel != modelName {
-				state, ok = auth.ModelStates[baseModel]
-			}
-		}
-		if ok && state != nil {
-			if state.Status == coreauth.StatusDisabled {
-				return false
-			}
-			if state.Unavailable && !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
-				return false
-			}
-			return true
-		}
-	}
-	if auth.Unavailable && !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
-		return false
-	}
-	return true
+	return coreauth.IsAuthAvailableForModel(auth, modelName, now)
 }

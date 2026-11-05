@@ -111,7 +111,7 @@ func (l *FileRequestLogger) logRequestWithSources(url, method string, requestHea
 
 	// Generate filename with request ID
 	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
+	if (force && !l.enabled) || (statusCode >= 400 && statusCode != 499) {
 		filename = l.generateErrorFilename(url, requestID)
 	}
 
