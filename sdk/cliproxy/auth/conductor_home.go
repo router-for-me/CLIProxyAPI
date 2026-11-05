@@ -435,19 +435,30 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 }
 
 func homeDispatchHeaders(ctx context.Context, headers http.Header) http.Header {
-	apiKey, ok := homeQueryCredentialFromContext(ctx)
-	if !ok {
-		return headers
+	var out http.Header
+	ensureCloned := func() {
+		if out != nil {
+			return
+		}
+		out = headers.Clone()
+		if out == nil {
+			out = http.Header{}
+		}
 	}
-	out := headers.Clone()
-	if out == nil {
-		out = http.Header{}
+	if IsCodexClientRequest(ctx, headers) && !IsCodexClientUserAgent(headerValueFromHTTPHeader(headers, "User-Agent")) {
+		ensureCloned()
+		out.Set("User-Agent", "codex_cli_rs")
 	}
-	if out.Get("Authorization") != "" || out.Get("X-Goog-Api-Key") != "" || out.Get("X-Api-Key") != "" {
+	if apiKey, ok := homeQueryCredentialFromContext(ctx); ok {
+		ensureCloned()
+		if out.Get("Authorization") == "" && out.Get("X-Goog-Api-Key") == "" && out.Get("X-Api-Key") == "" {
+			out.Set("X-Goog-Api-Key", apiKey)
+		}
+	}
+	if out != nil {
 		return out
 	}
-	out.Set("X-Goog-Api-Key", apiKey)
-	return out
+	return headers
 }
 
 func homeQueryCredentialFromContext(ctx context.Context) (string, bool) {
