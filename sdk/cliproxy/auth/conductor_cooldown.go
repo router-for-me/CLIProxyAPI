@@ -1374,12 +1374,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if state := existingModelState(auth, modelKey); state != nil {
 				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = staleSuccessRetryAt, staleSuccessRetrySeq
 			}
-		} else if result.Success && modelKey != "" && result.ExecutionSeq > 0 {
+		} else if result.Success && modelKey != "" {
 			// A success dispatched after the reset was recorded clears it, even where
-			// a newer ordinary cooldown keeps the rest of the state above. The
+			// a newer ordinary cooldown or a credential quota keeps the rest of the
+			// state above. An unknown sequence (zero, direct MarkResult callers) is
+			// exempt from the ordering guard and counts as newer, as for a 429. The
 			// watermark stays, so a 429 dispatched earlier cannot bring it back.
-			if state := existingModelState(auth, modelKey); state != nil && result.ExecutionSeq > state.coolingDisabledRetrySeq &&
-				!state.coolingDisabledRetryAt.IsZero() {
+			if state := existingModelState(auth, modelKey); state != nil && !state.coolingDisabledRetryAt.IsZero() &&
+				(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq) {
 				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = time.Time{}, m.currentExecutionSeq()
 			}
 		}
