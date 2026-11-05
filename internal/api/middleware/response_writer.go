@@ -466,10 +466,8 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		if finalStatusCode >= http.StatusBadRequest {
 			_ = w.streamWriter.WriteStatus(finalStatusCode, nil)
 		}
-		if errWriter, ok := w.streamWriter.(interface {
-			WriteAPIResponseErrors([]*interfaces.ErrorMessage) error
-		}); ok && len(slicesAPIResponseError) > 0 {
-			_ = errWriter.WriteAPIResponseErrors(slicesAPIResponseError)
+		if len(slicesAPIResponseError) > 0 {
+			_ = w.streamWriter.WriteAPIResponseErrors(slicesAPIResponseError)
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil

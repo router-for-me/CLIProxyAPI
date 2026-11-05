@@ -395,6 +395,10 @@ func (w *NoOpStreamingLogWriter) WriteAPIWebsocketTimeline(_ []byte) error {
 	return nil
 }
 
+func (w *NoOpStreamingLogWriter) WriteAPIResponseErrors(_ []*interfaces.ErrorMessage) error {
+	return nil
+}
+
 func (w *NoOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
 
 // Close is a no-op implementation that does nothing and always returns nil.

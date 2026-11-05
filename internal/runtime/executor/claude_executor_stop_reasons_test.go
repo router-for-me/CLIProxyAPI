@@ -215,3 +215,74 @@ func TestClaudeExecutorExecuteReturnsBadRequestOnPolicyRefusal(t *testing.T) {
 		t.Fatalf("expected HTTP 400 status error, got %v", errExecute)
 	}
 }
+
+func TestClaudeExecutorStreamSparseStopDetailsPreservesMessageStop(t *testing.T) {
+	sseBody := strings.Join([]string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_sparse","type":"message","model":"claude-sonnet-5-5","role":"assistant","content":[],"usage":{"input_tokens":4,"output_tokens":0}}}`,
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}`,
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+	}, "\n\n") + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name           string
+		sourceFormat   sdktranslator.Format
+		responseFormat sdktranslator.Format
+		payload        string
+		wantStopMarker string
+	}{
+		{
+			name:           "passthrough_claude",
+			sourceFormat:   sdktranslator.FormatClaude,
+			responseFormat: sdktranslator.FormatClaude,
+			payload:        `{"model":"claude-sonnet-5-5","stream":true,"messages":[{"role":"user","content":"test"}]}`,
+			wantStopMarker: "message_stop",
+		},
+		{
+			name:           "translated_openai",
+			sourceFormat:   sdktranslator.FormatOpenAI,
+			responseFormat: sdktranslator.FormatOpenAI,
+			payload:        `{"model":"claude-sonnet-5-5","stream":true,"messages":[{"role":"user","content":"test"}]}`,
+			wantStopMarker: "content_filter",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{ID: "sparse-refusal-" + tc.name, Attributes: map[string]string{"api_key": "sk-ant-test", "base_url": server.URL}}
+			result, errStream := NewClaudeExecutor(&config.Config{}).ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-sonnet-5-5",
+				Payload: []byte(tc.payload),
+			}, cliproxyexecutor.Options{
+				SourceFormat:    tc.sourceFormat,
+				ResponseFormat:  tc.responseFormat,
+				Stream:          true,
+				OriginalRequest: []byte(tc.payload),
+			})
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+
+			var output strings.Builder
+			var streamErr error
+			for chunk := range result.Chunks {
+				if len(chunk.Payload) > 0 {
+					output.Write(chunk.Payload)
+				}
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if !strings.Contains(output.String(), tc.wantStopMarker) {
+				t.Fatalf("expected %q in stream output before refusal error, got: %s", tc.wantStopMarker, output.String())
+			}
+			var statusCoder interface{ StatusCode() int }
+			if !errors.As(streamErr, &statusCoder) || statusCoder == nil || statusCoder.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("expected HTTP 400 refusal error, got %v", streamErr)
+			}
+		})
+	}
+}

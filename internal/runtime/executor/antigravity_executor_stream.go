@@ -275,10 +275,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Capture accounting before the client-facing filter renames usage.
 			streamUsage.ObserveAntigravityStream(line)
 
-			// Filter usage metadata for all models
-			// Only retain usage statistics in the terminal chunk
-			line = helps.FilterSSEUsageMetadata(line)
-
 			payload := helps.JSONPayload(line)
 			if len(pendingJSON) > 0 {
 				trimmedLine := bytes.TrimSpace(line)
@@ -316,6 +312,12 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				return
 			}
 			processPayload := func(p []byte) bool {
+				// Filter usage metadata for all models after block classification
+				// so only the terminal chunk retains client-visible usage statistics.
+				p = helps.JSONPayload(helps.FilterSSEUsageMetadata(append([]byte("data: "), p...)))
+				if len(p) == 0 {
+					return true
+				}
 				reporter.ObserveResponseModel(p)
 
 				p = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, p)

@@ -113,6 +113,11 @@ func TestGeminiFilterBlockMessage(t *testing.T) {
 	if gotMsg, gotBlocked := GeminiFilterBlockMessage(normalModelFrame); gotBlocked {
 		t.Fatalf("GeminiFilterBlockMessage(normalModelFrame) = (%q, true), want false when role/metadata present", gotMsg)
 	}
+
+	renamedUsageFrame := []byte(`{"response": {"candidates": [{"content": {"parts": [{"text": "This request was blocked by Gemini's filters. You can read more at https://policies.google.com/terms/generative-ai/use-policy."}]}}], "cpaUsageMetadata": {"promptTokenCount": 10}}}`)
+	if gotMsg, gotBlocked := GeminiFilterBlockMessage(renamedUsageFrame); gotBlocked {
+		t.Fatalf("GeminiFilterBlockMessage(renamedUsageFrame) = (%q, true), want false when cpaUsageMetadata present", gotMsg)
+	}
 }
 
 func TestClaudePolicyRefusalMessage(t *testing.T) {
@@ -128,6 +133,18 @@ func TestClaudePolicyRefusalMessage(t *testing.T) {
 	plainRefusalWithoutDetails := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":2}}`)
 	if gotMsg, gotBlocked := ClaudePolicyRefusalMessage(plainRefusalWithoutDetails); gotBlocked {
 		t.Fatalf("ClaudePolicyRefusalMessage(plainRefusalWithoutDetails) = (%q, true), want false when stop_details absent", gotMsg)
+	}
+
+	sparseRefusal := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}`)
+	sparseMsg, sparseBlocked := ClaudePolicyRefusalMessage(sparseRefusal)
+	if !sparseBlocked || sparseMsg == "" {
+		t.Fatalf("ClaudePolicyRefusalMessage(sparseRefusal) = (%q, %v), want non-empty true", sparseMsg, sparseBlocked)
+	}
+	if !IsClaudePolicyRefusalError(errors.New(sparseMsg)) {
+		t.Fatalf("IsClaudePolicyRefusalError(%q) = false, want true", sparseMsg)
+	}
+	if !IsRequestFault(http.StatusBadGateway, errors.New(sparseMsg)) {
+		t.Fatalf("IsRequestFault() = false for sparse refusal %q, want true", sparseMsg)
 	}
 }
 
