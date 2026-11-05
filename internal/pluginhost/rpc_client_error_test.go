@@ -102,6 +102,84 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	}
 }
 
+func TestPluginErrorWithoutHTTPStatusUsesDefaultStatusWithRetryAfter(t *testing.T) {
+	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:              "upstream_error",
+			Message:           "try later",
+			RetryAfterSeconds: 3600,
+		},
+	})
+	if errDecode == nil {
+		t.Fatal("decodeEnvelopeResult returned nil error")
+	}
+	statusError, ok := errDecode.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusInternalServerError {
+		t.Fatalf("StatusCode() = %v, want %d", statusError, http.StatusInternalServerError)
+	}
+	retryAfter, ok := errDecode.(interface{ RetryAfter() *time.Duration })
+	if !ok || retryAfter.RetryAfter() == nil || *retryAfter.RetryAfter() != time.Hour {
+		t.Fatalf("RetryAfter() = %#v, want 1h", retryAfter)
+	}
+
+	const (
+		provider = "plugin-provider-default-status-retry-after"
+		model    = "test-model-default-status-retry-after"
+		authID   = "auth-default-status-retry-after-1"
+	)
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-default-status-retry-after"})
+	host := newHostWithRecords(executorRecord)
+	exec := &fakeExecutor{
+		identifier: provider,
+		execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{}, errDecode
+		},
+	}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+	adapter.provider = provider
+
+	authMgr := coreauth.NewManager(nil, nil, nil)
+	authMgr.RegisterExecutor(adapter)
+	auth := &coreauth.Auth{
+		ID:         authID,
+		Provider:   provider,
+		Status:     coreauth.StatusActive,
+		FileName:   "auth-default-status-retry-after-1.json",
+		Attributes: map[string]string{"type": "api_key"},
+	}
+	if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register auth: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	before := time.Now()
+	_, errExec := authMgr.Execute(context.Background(), []string{provider}, coreexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"test-model-default-status-retry-after"}`),
+	}, coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	})
+	if errExec == nil {
+		t.Fatal("authMgr.Execute returned nil error")
+	}
+	updated, okAuth := authMgr.GetByID(authID)
+	if !okAuth || updated == nil {
+		t.Fatalf("GetByID(%q) missing", authID)
+	}
+	state := updated.ModelStates[model]
+	if state == nil || !state.NextRetryAfter.After(before.Add(3500*time.Second)) {
+		t.Fatalf("model NextRetryAfter = %v, want at least %v (1h retry hint)", state, before.Add(3500*time.Second))
+	}
+}
+
 func TestPluginErrorRetryAfterDoesNotOverflow(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 	_, errDecode := decodeEnvelopeResult[rpcEmptyResponse](pluginabi.Envelope{
@@ -396,5 +474,19 @@ func TestStreamCallbacksKeepPlainErrorStrings(t *testing.T) {
 	chunk := <-chunks
 	if chunk.Err == nil || chunk.Err.Error() != "boom" {
 		t.Fatalf("plain stream error = %v, want boom", chunk.Err)
+	}
+}
+
+func TestStreamCallbackStructuredErrorDefaultsHTTPStatus(t *testing.T) {
+	host := New()
+	streamID, chunks, cleanup := host.streams.open(context.Background())
+	t.Cleanup(cleanup)
+	if _, err := host.callHostStreamClose([]byte(`{"stream_id":"` + streamID + `","error_detail":{"message":"try later","retry_after_seconds":3600}}`)); err != nil {
+		t.Fatalf("stream close callback error = %v", err)
+	}
+	chunk := <-chunks
+	statusError, ok := chunk.Err.(interface{ StatusCode() int })
+	if !ok || statusError.StatusCode() != http.StatusInternalServerError {
+		t.Fatalf("stream StatusCode() = %v, want %d", statusError, http.StatusInternalServerError)
 	}
 }

@@ -77,7 +77,7 @@ func rpcStreamError(message string, detail *pluginabi.Error) error {
 		return rpcError{
 			Code:              strings.TrimSpace(detail.Code),
 			message:           text,
-			statusCode:        detail.HTTPStatus,
+			statusCode:        pluginErrorStatus(detail.HTTPStatus),
 			retryAfterSeconds: detail.RetryAfterSeconds,
 		}
 	}
