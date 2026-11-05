@@ -561,6 +561,17 @@ type RoutingConfig struct {
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityOverrides optionally changes the fallback strategy and binding
+	// precedence for individual providers. Ignored when session affinity is off.
+	SessionAffinityOverrides map[string]SessionAffinityOverride `yaml:"session-affinity-overrides,omitempty" json:"session-affinity-overrides,omitempty"`
+}
+
+// SessionAffinityOverride preserves session affinity by default. Priority precedence
+// restricts bindings to the highest currently eligible credential priority tier.
+type SessionAffinityOverride struct {
+	Strategy   string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	Precedence string `yaml:"precedence,omitempty" json:"precedence,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

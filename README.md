@@ -169,6 +169,8 @@ Modern Ant Design-based management console for CLIProxyAPI v8+, combining CPAMC-
 
 ## SDK Docs
 
+- [Provider-specific session affinity and priority](docs/session-affinity-priority.md)
+
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)

@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -61,6 +62,7 @@ type routingRuntimeState struct {
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
+	sessionAffinityOverrides string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -95,26 +97,62 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && strings.EqualFold(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn), coreauth.SessionAffinityRebindOnQuota) {
 		state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
 	}
+	if state.sessionAffinity {
+		if policies, err := cfg.Routing.NormalizedSessionAffinityOverrides(); err == nil && len(policies) > 0 {
+			for provider, policy := range policies {
+				if policy.Strategy == "" {
+					policy.Strategy = state.strategy
+				}
+				if policy.Strategy == state.strategy && policy.Precedence == "session" {
+					delete(policies, provider)
+				} else {
+					policies[provider] = policy
+				}
+			}
+			// encoding/json sorts map keys, keeping equality stable across map order.
+			if len(policies) > 0 {
+				encoded, _ := json.Marshal(policies)
+				state.sessionAffinityOverrides = string(encoded)
+			}
+		}
+	}
 	return state
 }
 
-func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
-	var selector coreauth.Selector
-	switch state.strategy {
+func newFallbackSelector(strategy string) coreauth.Selector {
+	switch strategy {
 	case "weighted-round-robin":
-		selector = &coreauth.WeightedRoundRobinSelector{}
+		return &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
-		selector = &coreauth.FillFirstSelector{}
+		return &coreauth.FillFirstSelector{}
 	default:
-		selector = &coreauth.RoundRobinSelector{}
+		return &coreauth.RoundRobinSelector{}
 	}
+}
+
+func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+	selector := newFallbackSelector(state.strategy)
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
+		var policies map[string]config.SessionAffinityOverride
+		_ = json.Unmarshal([]byte(state.sessionAffinityOverrides), &policies)
+		overrides := make(map[string]coreauth.SessionAffinityProviderOverride, len(policies))
+		for provider, policy := range policies {
+			strategy := policy.Strategy
+			if strategy == "" {
+				strategy = state.strategy
+			}
+			overrides[provider] = coreauth.SessionAffinityProviderOverride{
+				Fallback:           newFallbackSelector(strategy),
+				PriorityPrecedence: policy.Precedence == "priority",
+			}
+		}
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
-			Fallback:         selector,
-			TTL:              state.sessionAffinityTTL,
-			SubagentAffinity: &subagents,
-			RebindOn:         state.sessionAffinityRebindOn,
+			Fallback:          selector,
+			ProviderOverrides: overrides,
+			TTL:               state.sessionAffinityTTL,
+			SubagentAffinity:  &subagents,
+			RebindOn:          state.sessionAffinityRebindOn,
 		})
 	}
 	return selector
@@ -145,6 +183,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		s.cfgMu.RUnlock()
 	}
 	if newCfg == nil {
+		return configCommit{}
+	}
+	if _, errValidate := newCfg.Routing.NormalizedSessionAffinityOverrides(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected invalid session affinity overrides")
 		return configCommit{}
 	}
 	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
