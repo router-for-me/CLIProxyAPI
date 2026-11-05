@@ -489,6 +489,8 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 		"gpt-image-2.5",
 		"gpt-image-2.5-flare",
 		"gpt-image-2.5-sunburst",
+		"gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
 		"codex/gpt-image-2.5",
 		"codex/gpt-image-2.5-flare",
 		"codex/gpt-image-2.5-sunburst",

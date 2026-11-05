@@ -50,7 +50,7 @@ func assertUnsupportedImagesModelResponse(t *testing.T, resp *httptest.ResponseR
 	}
 
 	message := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String()
-	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
+	expectedMessage := "Model " + model + " is not supported on " + imagesGenerationsPath + " or " + imagesEditsPath + ". Use " + gptImage15Model + ", " + defaultImagesToolModel + ", " + gptImage25FlareModel + ", " + gptImage25SunburstModel + ", " + gptImage25Model + ", " + gptImage26FlareModel + ", " + gptImage26SunburstModel + ", " + defaultXAIImagesModel + ", " + xaiImagesQualityModel + ", " + xaiImages20Model + ", or a configured openai-compatibility image model."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
 	}
@@ -68,6 +68,8 @@ func TestImagesModelValidationAllowsGPTImageAndXAIModels(t *testing.T) {
 		"gpt-image-2.5-flare",
 		"codex/gpt-image-2.5-flare",
 		"gpt-image-2.5-sunburst",
+		"gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
 		"codex/gpt-image-2.5-sunburst",
 		"gpt-image-2.5",
 		"codex/gpt-image-2.5",
