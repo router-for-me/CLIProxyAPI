@@ -13,6 +13,9 @@ import (
 // soonestResetTestNow precedes every reset in the production Claude snapshot below.
 var soonestResetTestNow = time.Unix(1793400000, 0)
 
+// soonestResetTestKey is the rotation key tests pass to pick directly.
+const soonestResetTestKey = "claude:soonest-reset-test"
+
 func soonestResetEpoch(t time.Time) string {
 	return strconv.FormatInt(t.Unix(), 10)
 }
@@ -56,7 +59,7 @@ func soonestResetOrder(selector *SoonestResetSelector, auths []*Auth, now time.T
 	remaining := append([]*Auth(nil), auths...)
 	order := make([]string, 0, len(auths))
 	for len(remaining) > 0 {
-		picked := selector.pick(remaining, now)
+		picked := selector.pick(soonestResetTestKey, remaining, now)
 		order = append(order, picked.ID)
 		for i, candidate := range remaining {
 			if candidate == picked {
@@ -222,14 +225,15 @@ func TestPickSoonestResetAuth_Order(t *testing.T) {
 			want: []string{"c", "d", "b", "a"},
 		},
 		{
-			name: "equal ranks keep incoming order",
+			name: "equal ranks take turns from the last pick",
 			auths: []*Auth{
-				weekly("z", in(24*time.Hour), nil),
-				{ID: "y", Provider: "claude"},
-				weekly("x", in(24*time.Hour), nil),
-				{ID: "w", Provider: "claude"},
+				{ID: "a", Provider: "claude"},
+				weekly("b", in(24*time.Hour), nil),
+				{ID: "c", Provider: "claude"},
+				weekly("d", in(24*time.Hour), nil),
 			},
-			want: []string{"z", "x", "y", "w"},
+			// After d, the tied unknown credentials resume past it, wrapping to a.
+			want: []string{"b", "d", "a", "c"},
 		},
 		{
 			name: "overage status rejected alone is not exhausted",
@@ -266,7 +270,8 @@ func TestPickSoonestResetAuth_Order(t *testing.T) {
 				}),
 				{ID: "e-api-key", Provider: "openai-compatibility"},
 			},
-			want: []string{"d-codex", "b-codex", "c-claude", "a-gemini", "e-api-key"},
+			// The unknown ones tie and resume after c-claude, the last pick.
+			want: []string{"d-codex", "b-codex", "c-claude", "e-api-key", "a-gemini"},
 		},
 		{
 			name: "providers without quota windows are unknown",
@@ -294,7 +299,7 @@ func TestPickSoonestResetAuth_Order(t *testing.T) {
 		want  []string
 	}{
 		{
-			name:  "unprobed unknown credentials come first in incoming order",
+			name:  "unprobed unknown credentials come first, in ID order",
 			fresh: true,
 			auths: []*Auth{
 				weekly("a", in(24*time.Hour), nil),
@@ -696,14 +701,14 @@ func TestSoonestResetSelectorPick(t *testing.T) {
 			want: []string{"b", "b"},
 		},
 		{
-			name:     "unknown credentials are probed once each in ID order, then fill first",
+			name:     "unknown credentials are probed once each in ID order, then take turns",
 			provider: "claude",
 			auths: []*Auth{
 				{ID: "c", Provider: "claude"},
 				{ID: "a", Provider: "claude"},
 				{ID: "b", Provider: "claude"},
 			},
-			want: []string{"a", "b", "c", "a", "a"},
+			want: []string{"a", "b", "c", "a", "b"},
 		},
 		{
 			name:     "higher priority tier wins over an earlier reset in a lower tier",

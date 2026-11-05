@@ -619,18 +619,15 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model)
+	key := rotationKey(provider, model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.lastPicked == nil {
-		s.lastPicked = make(map[string]string)
-	}
 	limit := s.maxKeys
 	if limit <= 0 {
-		limit = 4096
+		limit = defaultRotationKeys
 	}
 
-	s.ensureRotationKey(key, limit)
+	s.lastPicked = ensureRotationKey(s.lastPicked, key, limit)
 	picked := available[successorIndex(available, s.lastPicked[key])]
 	s.lastPicked[key] = picked.ID
 	return picked, nil
@@ -651,12 +648,25 @@ func successorIndex(available []*Auth, lastID string) int {
 	return index
 }
 
-// ensureRotationKey ensures the rotation map has capacity for the given key.
-// Must be called with s.mu held.
-func (s *RoundRobinSelector) ensureRotationKey(key string, limit int) {
-	if _, ok := s.lastPicked[key]; !ok && len(s.lastPicked) >= limit {
-		s.lastPicked = make(map[string]string)
+// defaultRotationKeys bounds a rotation map when no other bound is configured.
+const defaultRotationKeys = 4096
+
+// rotationKey scopes a rotation to a provider and model.
+func rotationKey(provider, model string) string {
+	return provider + ":" + canonicalModelKey(model)
+}
+
+// ensureRotationKey returns a rotation map (key to the ID picked last) with room for key:
+// lastPicked itself, a new map when it is nil, or a fresh one once it holds limit other
+// keys. The caller must hold the lock guarding lastPicked.
+func ensureRotationKey(lastPicked map[string]string, key string, limit int) map[string]string {
+	if lastPicked == nil {
+		return make(map[string]string)
 	}
+	if _, ok := lastPicked[key]; !ok && len(lastPicked) >= limit {
+		return make(map[string]string)
+	}
+	return lastPicked
 }
 
 func positiveWeightAuths(auths []*Auth) []*Auth {

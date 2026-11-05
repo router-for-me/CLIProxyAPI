@@ -27,7 +27,7 @@ func soonestResetClaude(id string, observed time.Time, weekly time.Duration, fiv
 func soonestResetPicks(selector *SoonestResetSelector, now time.Time, n int, auths ...*Auth) []string {
 	picks := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		picks = append(picks, selector.pick(auths, now).ID)
+		picks = append(picks, selector.pick(soonestResetTestKey, auths, now).ID)
 	}
 	return picks
 }
@@ -81,7 +81,7 @@ func TestSoonestResetSelector_AnswersWithoutResetDoNotReArmProbe(t *testing.T) {
 			seen := wall.Add(time.Duration(i) * time.Second)
 			a = soonestResetAuth("a", "claude", seen, map[string]string{"Anthropic-Ratelimit-Unified-5h-Status": "allowed"})
 		}
-		picks = append(picks, selector.pick([]*Auth{a, b}, wall.Add(time.Duration(i)*time.Second)).ID)
+		picks = append(picks, selector.pick(soonestResetTestKey, []*Auth{a, b}, wall.Add(time.Duration(i)*time.Second)).ID)
 	}
 	assertSoonestResetPicks(t, "no re-arm", picks, "a", "b", "b", "b", "b")
 }
@@ -133,7 +133,7 @@ func TestSoonestResetSelector_ZeroRelativeResetsDoNotReArmProbe(t *testing.T) {
 			a = soonestResetAuth("a", "codex", seen, zero)
 			now = seen.Add(time.Second)
 		}
-		picks = append(picks, selector.pick([]*Auth{a, b}, now).ID)
+		picks = append(picks, selector.pick(soonestResetTestKey, []*Auth{a, b}, now).ID)
 	}
 	assertSoonestResetPicks(t, "zero delays", picks, "a", "b", "b", "b")
 }
@@ -339,7 +339,8 @@ func TestSoonestResetProbed(t *testing.T) {
 	}
 }
 
-// Concurrent picks over fresh credentials reserve exactly one probe per credential.
+// Concurrent picks over fresh credentials reserve exactly one probe per credential. The
+// known credential takes the rest, so a second probe of any fresh one would show.
 func TestSoonestResetSelectorPick_ConcurrentProbesOncePerCredential(t *testing.T) {
 	t.Parallel()
 
@@ -348,6 +349,7 @@ func TestSoonestResetSelectorPick_ConcurrentProbesOncePerCredential(t *testing.T
 		{ID: "a", Provider: "claude"},
 		{ID: "b", Provider: "claude"},
 		{ID: "c", Provider: "codex"},
+		soonestResetClaude("d", time.Now(), 2*soonestResetDay, "allowed"),
 	}
 	const goroutines = 50
 	var mu sync.Mutex
@@ -376,9 +378,10 @@ func TestSoonestResetSelectorPick_ConcurrentProbesOncePerCredential(t *testing.T
 	for err := range errCh {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	// Each credential got its one probe; once all were spent, the rest fill first.
-	if counts["a"] != goroutines-2 || counts["b"] != 1 || counts["c"] != 1 {
-		t.Fatalf("pick counts = %v, want a=%d b=1 c=1", counts, goroutines-2)
+	// Each fresh credential got its one probe; once all were spent, the known one takes
+	// the rest.
+	if counts["a"] != 1 || counts["b"] != 1 || counts["c"] != 1 || counts["d"] != goroutines-3 {
+		t.Fatalf("pick counts = %v, want a=1 b=1 c=1 d=%d", counts, goroutines-3)
 	}
 	selector.mu.Lock()
 	defer selector.mu.Unlock()
@@ -414,7 +417,7 @@ func TestSoonestResetSelector_ProbeRecordIsBounded(t *testing.T) {
 
 	selector := &SoonestResetSelector{}
 	for i := 0; i < maxSoonestResetProbeEntries+10; i++ {
-		selector.pick([]*Auth{{ID: "auth-" + strconv.Itoa(i), Provider: "claude"}}, soonestResetTestNow)
+		selector.pick(soonestResetTestKey, []*Auth{{ID: "auth-" + strconv.Itoa(i), Provider: "claude"}}, soonestResetTestNow)
 	}
 	selector.mu.Lock()
 	defer selector.mu.Unlock()
@@ -433,7 +436,7 @@ func TestSoonestResetSelector_FullProbeRecordStopsNewProbes(t *testing.T) {
 	selector := &SoonestResetSelector{}
 	id := func(i int) string { return "auth-" + strconv.Itoa(i) }
 	for i := 0; i < maxSoonestResetProbeEntries; i++ {
-		selector.pick([]*Auth{{ID: id(i), Provider: "claude"}}, wall)
+		selector.pick(soonestResetTestKey, []*Auth{{ID: id(i), Provider: "claude"}}, wall)
 	}
 	records := func() (int, bool) {
 		selector.mu.Lock()
@@ -463,4 +466,56 @@ func TestSoonestResetSelector_FullProbeRecordStopsNewProbes(t *testing.T) {
 	if size, recordedFresh := records(); size != maxSoonestResetProbeEntries || !recordedFresh {
 		t.Fatalf("probe records = %d (fresh recorded = %v), want %d with fresh", size, recordedFresh, maxSoonestResetProbeEntries)
 	}
+}
+
+// soonestResetPickSequence makes n successive Pick calls over auths and returns the IDs.
+func soonestResetPickSequence(t *testing.T, selector *SoonestResetSelector, n int, auths ...*Auth) []string {
+	t.Helper()
+	picks := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		picked, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		picks = append(picks, picked.ID)
+	}
+	return picks
+}
+
+// After a restart nothing is observed: every credential gets its one probe, and while the
+// answers are in flight every credential ranks probed with an unknown reset. A burst of new
+// sessions in that window must spread across them instead of piling onto the first by ID.
+func TestSoonestResetSelectorPick_RestartBurstRotatesTiedCredentials(t *testing.T) {
+	t.Parallel()
+
+	selector := &SoonestResetSelector{}
+	auths := []*Auth{
+		{ID: "a", Provider: "claude"},
+		{ID: "b", Provider: "claude"},
+		{ID: "c", Provider: "claude"},
+		{ID: "d", Provider: "claude"},
+	}
+	assertSoonestResetPicks(t, "one probe each", soonestResetPickSequence(t, selector, 4, auths...), "a", "b", "c", "d")
+	selector.mu.Lock()
+	probes := len(selector.probes)
+	selector.mu.Unlock()
+	if probes != 4 {
+		t.Fatalf("probe records = %d, want 4", probes)
+	}
+	assertSoonestResetPicks(t, "no answer yet: take turns", soonestResetPickSequence(t, selector, 6, auths...), "a", "b", "c", "d", "a", "b")
+}
+
+// Credentials whose weekly windows reset at the same time take turns; a strictly earlier
+// reset always wins.
+func TestSoonestResetSelectorPick_EqualKnownResetsTakeTurns(t *testing.T) {
+	t.Parallel()
+
+	observed := time.Now().Add(-time.Minute)
+	sameA := soonestResetClaude("a", observed, 2*soonestResetDay, "allowed")
+	sameB := soonestResetClaude("b", observed, 2*soonestResetDay, "allowed")
+	assertSoonestResetPicks(t, "equal resets alternate", soonestResetPickSequence(t, &SoonestResetSelector{}, 4, sameA, sameB), "a", "b", "a", "b")
+
+	sameC := soonestResetClaude("c", observed, 2*soonestResetDay, "allowed")
+	earlier := soonestResetClaude("b", observed, soonestResetDay, "allowed")
+	assertSoonestResetPicks(t, "earlier reset always wins", soonestResetPickSequence(t, &SoonestResetSelector{}, 4, sameA, earlier, sameC), "b", "b", "b", "b")
 }

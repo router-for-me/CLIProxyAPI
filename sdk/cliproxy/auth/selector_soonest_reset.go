@@ -30,13 +30,17 @@ import (
 //  4. Credentials whose probe taught nothing (still no weekly reset) come after them.
 //
 // The probe is reserved when the probing pick is made, so concurrent picks probe each
-// credential once, and it is spent whatever the answer. Equal ranks keep the incoming
-// order, which is the order FillFirstSelector picks from.
+// credential once, and it is spent whatever the answer. Equal ranks take turns per provider
+// and model, like RoundRobinSelector: after a restart every credential is tied while its
+// probe is in flight, and a burst of new sessions must not all land on the first one.
 //
-// The strategy name, signal reading and probe rules follow cliproxy-rs. Unlike cliproxy-rs,
-// equal ranks are not rotated.
+// The strategy name, signal reading, probe rules and rotation of equal ranks follow
+// cliproxy-rs.
 type SoonestResetSelector struct {
 	mu sync.Mutex
+	// lastPicked records, per rotation key (provider and model), the ID picked last, so
+	// equally ranked credentials take turns. It is bounded like RoundRobinSelector's.
+	lastPicked map[string]string
 	// probes records, per credential ID, that its probe for an unknown weekly reset was
 	// spent, with the weekly-window rollover last probed for, per window.
 	probes map[string]map[quotaWindowID]time.Time
@@ -58,10 +62,11 @@ func (s *SoonestResetSelector) Pick(ctx context.Context, provider, model string,
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	return s.pick(available, now), nil
+	return s.pick(rotationKey(provider, model), available, now), nil
 }
 
-// InvalidateAuth forgets the probe record of a removed credential.
+// InvalidateAuth forgets the probe record of a removed credential. The rotation needs no
+// cleanup: it resumes after the ID picked last whether or not that credential remains.
 func (s *SoonestResetSelector) InvalidateAuth(authID string) {
 	if s == nil {
 		return
@@ -71,10 +76,12 @@ func (s *SoonestResetSelector) InvalidateAuth(authID string) {
 	s.mu.Unlock()
 }
 
-// pick returns the candidate with the lowest soonest-reset rank at now, reserving its probe
-// when the pick is one. Ties keep the first candidate in slice order.
-func (s *SoonestResetSelector) pick(auths []*Auth, now time.Time) *Auth {
-	// Snapshots are read before taking the lock; only the probe record is shared state.
+// pick returns a candidate with the lowest soonest-reset rank at now, reserving its probe
+// when the pick is one. Equally ranked candidates take turns under key: the first one
+// ordered after the ID picked last, wrapping around. Candidates arrive sorted by ID.
+func (s *SoonestResetSelector) pick(key string, auths []*Auth, now time.Time) *Auth {
+	// Snapshots are read before taking the lock; only the probe record and the rotation
+	// are shared state.
 	windows := make([]quotaWindows, len(auths))
 	for i, candidate := range auths {
 		if candidate != nil {
@@ -85,8 +92,8 @@ func (s *SoonestResetSelector) pick(auths []*Auth, now time.Time) *Auth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	full := len(s.probes) >= maxSoonestResetProbeEntries
-	picked := -1
-	var pickedRank soonestResetRank
+	ranks := make([]soonestResetRank, len(auths))
+	best := -1
 	for i, candidate := range auths {
 		if candidate == nil {
 			continue
@@ -94,16 +101,26 @@ func (s *SoonestResetSelector) pick(auths []*Auth, now time.Time) *Auth {
 		record, hasRecord := s.probes[candidate.ID]
 		// A full record cannot take a new credential, so one without a record is not probed.
 		probed := soonestResetProbed(record, hasRecord, windows[i].rolledOver) || (!hasRecord && full)
-		rank := windows[i].rank(probed)
-		if picked < 0 || rank.less(pickedRank) {
-			picked = i
-			pickedRank = rank
+		ranks[i] = windows[i].rank(probed)
+		if best < 0 || ranks[i].less(ranks[best]) {
+			best = i
 		}
 	}
-	if picked < 0 {
+	if best < 0 {
 		return nil
 	}
-	if pickedRank.class == soonestResetClassProbe {
+	tied := make([]*Auth, 0, len(auths))
+	tiedIndex := make([]int, 0, len(auths))
+	for i, candidate := range auths {
+		if candidate != nil && !ranks[best].less(ranks[i]) {
+			tied = append(tied, candidate)
+			tiedIndex = append(tiedIndex, i)
+		}
+	}
+	s.lastPicked = ensureRotationKey(s.lastPicked, key, defaultRotationKeys)
+	picked := tiedIndex[successorIndex(tied, s.lastPicked[key])]
+	s.lastPicked[key] = auths[picked].ID
+	if ranks[picked].class == soonestResetClassProbe {
 		s.reserveProbeLocked(auths[picked].ID, windows[picked].rolledOver)
 	}
 	return auths[picked]

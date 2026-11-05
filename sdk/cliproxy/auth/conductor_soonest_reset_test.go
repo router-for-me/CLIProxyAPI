@@ -243,27 +243,40 @@ func TestManagerUseSchedulerFastPathBySelector(t *testing.T) {
 }
 
 // TestManagerSoonestResetConcurrentBurstProbesOncePerCredential sends a burst of new
-// requests to fresh credentials: each credential gets exactly one probe, and the rest of
-// the burst goes by the normal order.
+// requests to fresh credentials and one with a known weekly reset: each fresh credential
+// gets exactly one probe, and the rest of the burst goes to the known one.
 func TestManagerSoonestResetConcurrentBurstProbesOncePerCredential(t *testing.T) {
 	ctx := context.Background()
 	model := "claude-soonest-reset-burst"
 	manager := NewManager(nil, &SoonestResetSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
+	ids := []string{"soonest-reset-burst-a", "soonest-reset-burst-b", "soonest-reset-burst-c", "soonest-reset-burst-d"}
+	known := ids[3]
+	knownHeaders := soonestResetClaudeHeaders(time.Now().Add(48*time.Hour), "allowed")
 	var mu sync.Mutex
 	counts := make(map[string]int)
-	manager.RegisterExecutor(&mockCustomErrorExecutor{identifier: "claude", executeFn: func(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-		// No quota headers: every probe teaches nothing, so no credential becomes known.
+	manager.RegisterExecutor(&mockCustomErrorExecutor{identifier: "claude", executeFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+		// Fresh credentials answer without quota headers, so their probes teach nothing;
+		// the known one keeps reporting its weekly reset.
 		mu.Lock()
 		counts[auth.ID]++
 		mu.Unlock()
+		if auth.ID == known {
+			internallogging.SetResponseHeaders(ctx, knownHeaders.Clone())
+		}
 		return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
 	}})
-	ids := []string{"soonest-reset-burst-a", "soonest-reset-burst-b", "soonest-reset-burst-c"}
 	for _, id := range ids {
 		registry.GetGlobalRegistry().RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
-		if _, errRegister := manager.Register(ctx, &Auth{ID: id, Provider: "claude", Status: StatusActive}); errRegister != nil {
+		auth := &Auth{ID: id, Provider: "claude", Status: StatusActive}
+		if id == known {
+			auth.Quota = QuotaState{ObservedAt: time.Now(), Signals: map[string]string{}}
+			for name, values := range knownHeaders {
+				auth.Quota.Signals[name] = values[0]
+			}
+		}
+		if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
 			t.Fatalf("Register(%s) error = %v", id, errRegister)
 		}
 	}
@@ -288,7 +301,7 @@ func TestManagerSoonestResetConcurrentBurstProbesOncePerCredential(t *testing.T)
 	for errExecute := range errCh {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if counts[ids[0]] != requests-2 || counts[ids[1]] != 1 || counts[ids[2]] != 1 {
-		t.Fatalf("upstream requests per credential = %v, want %s=%d and one probe each for the others", counts, ids[0], requests-2)
+	if counts[ids[0]] != 1 || counts[ids[1]] != 1 || counts[ids[2]] != 1 || counts[known] != requests-3 {
+		t.Fatalf("upstream requests per credential = %v, want one probe each for the fresh ones and %s=%d", counts, known, requests-3)
 	}
 }

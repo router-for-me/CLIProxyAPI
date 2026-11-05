@@ -224,11 +224,12 @@ func testSoonestResetSurvivesAuthFileRewrite(t *testing.T, affinity, removeAndAd
 	}
 	if removeAndAdd {
 		// A removed credential is new to the manager: its observation and probe are gone,
-		// so each re-added credential is probed once, then routing recovers.
+		// so each re-added credential is probed once, then routing recovers. The two probes
+		// tie and take turns from b, the last pick, so c goes first.
 		if !after.Quota.ObservedAt.IsZero() {
 			t.Fatalf("re-added auth b kept a quota observation: %+v", after.Quota)
 		}
-		assertCalls("re-added credentials are probed once each", send(4), "token-b-2", "token-c-2", "token-b-2", "token-b-2")
+		assertCalls("re-added credentials are probed once each", send(4), "token-c-2", "token-b-2", "token-b-2", "token-b-2")
 		return
 	}
 	if !after.Quota.ObservedAt.Equal(before.Quota.ObservedAt) || after.Quota.Signals["Anthropic-Ratelimit-Unified-7d-Reset"] != wantReset {
