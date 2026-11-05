@@ -47,6 +47,7 @@ type ResponseWriterWrapper struct {
 	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
+	ginContext          *gin.Context               // ginContext holds the Gin request context for mid-stream error inspection.
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
@@ -171,6 +172,11 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 		return false
 	}
 	status := w.effectiveStatusCode()
+	if status < http.StatusBadRequest {
+		if apiErrStatus := actionableAPIResponseErrorStatus(extractAPIResponseErrors(w.ginContext)); apiErrStatus >= http.StatusBadRequest {
+			status = apiErrStatus
+		}
+	}
 	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
 }
 
@@ -379,6 +385,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			slicesAPIResponseError = apiErrors
 		}
 	}
+	if finalStatusCode < http.StatusBadRequest {
+		if errStatus := actionableAPIResponseErrorStatus(slicesAPIResponseError); errStatus >= http.StatusBadRequest {
+			finalStatusCode = errStatus
+		}
+	}
 
 	hasAPIError := w.panicked || hasActionableError(c, finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
@@ -451,6 +462,12 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+		}
+		if finalStatusCode >= http.StatusBadRequest {
+			_ = w.streamWriter.WriteStatus(finalStatusCode, nil)
+		}
+		if len(slicesAPIResponseError) > 0 {
+			_ = w.streamWriter.WriteAPIResponseErrors(slicesAPIResponseError)
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
@@ -831,6 +848,34 @@ func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
 		}
 	}
 	return false
+}
+
+func extractAPIResponseErrors(c *gin.Context) []*interfaces.ErrorMessage {
+	if c == nil {
+		return nil
+	}
+	if apiResponseError, exists := c.Get("API_RESPONSE_ERROR"); exists {
+		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
+			return apiErrors
+		}
+	}
+	return nil
+}
+
+func actionableAPIResponseErrorStatus(apiErrors []*interfaces.ErrorMessage) int {
+	for i := len(apiErrors) - 1; i >= 0; i-- {
+		errMsg := apiErrors[i]
+		if isClientCancellationErrorMessage(errMsg) {
+			continue
+		}
+		if errMsg.StatusCode >= http.StatusBadRequest && errMsg.StatusCode != clienterror.StatusClientClosedRequest {
+			return errMsg.StatusCode
+		}
+		if status := clienterror.HTTPStatusFromError(errMsg.Error); status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest {
+			return status
+		}
+	}
+	return 0
 }
 
 func isContextCanceled(c *gin.Context) bool {
