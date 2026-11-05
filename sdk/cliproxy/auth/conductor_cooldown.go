@@ -1601,12 +1601,17 @@ func normalizeModelStates(auth *Auth) bool {
 	return changed
 }
 
+// coolingDisabledResetStamps numbers cooling-disabled reset writes; see
+// ModelState.coolingDisabledRetryStamp. Stamps only order writes, so one counter
+// serves every manager.
+var coolingDisabledResetStamps atomic.Uint64
+
 // writeCoolingDisabledReset sets state's cooling-disabled reset (zero clears it)
 // under the current execution watermark and a fresh write stamp.
 func (m *Manager) writeCoolingDisabledReset(state *ModelState, until time.Time) {
 	state.coolingDisabledRetryAt = until
 	state.coolingDisabledRetrySeq = m.currentExecutionSeq()
-	state.coolingDisabledRetryStamp = m.coolingDisabledResetStamp.Add(1)
+	state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
 }
 
 // coolingDisabledResetWrittenLater reports whether source's cooling-disabled reset
@@ -1732,6 +1737,12 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.cooldownRecordedSeq = 0
 	// Clear the cooling-disabled reset but keep its watermark: a 429 dispatched
 	// before the reset was cleared or replaced must not reinstall a stale hint.
+	// Clearing a live reset is a write, stamped so a merge orders it against the
+	// other side's reset; dropping an expired one carries no new hint and keeps
+	// its stamp.
+	if state.coolingDisabledRetryAt.After(now) {
+		state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+	}
 	state.coolingDisabledRetryAt = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false

@@ -3269,6 +3269,49 @@ func TestMergeModelStateKeepsResetWrittenLastWhenWatermarksTie(t *testing.T) {
 	}
 }
 
+// A state reset that clears a live reset (a refresh, or a quota or unauthorized
+// release) is a write too: merging it with a reset written before the clear keeps
+// the clear, in either direction. Dropping an already expired reset carries no new
+// hint and never wins over a live reset written after it.
+func TestMergeModelStateOrdersResetClearedByStateReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id = "auth-merge-state-reset-clear"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	mark := func(model string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+	state := func(model string) *ModelState {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.auths[id].ModelStates[model].Clone()
+	}
+	merge := func(name string, a, b *ModelState, want time.Time) {
+		t.Helper()
+		for direction, pair := range map[string][2]*ModelState{"a into b": {b, a}, "b into a": {a, b}} {
+			if merged := mergeModelState(pair[0].Clone(), pair[1].Clone()); !merged.coolingDisabledRetryAt.Equal(want) {
+				t.Errorf("%s (%s): merged reset = %v, want %v", name, direction, merged.coolingDisabledRetryAt, want)
+			}
+		}
+	}
+
+	mark("cleared-later", 2*time.Hour)
+	mark("live-earlier", time.Hour)
+	clearedLater := state("cleared-later")
+	resetModelState(clearedLater, time.Now())
+	merge("live reset cleared after the other was written", clearedLater, state("live-earlier"), time.Time{})
+
+	mark("expired", time.Hour)
+	mark("live-after", time.Hour)
+	expired := state("expired")
+	expired.coolingDisabledRetryAt = time.Now().Add(-time.Minute)
+	resetModelState(expired, time.Now())
+	liveAfter := state("live-after")
+	merge("expired reset dropped after a live one was written", expired, liveAfter, liveAfter.coolingDisabledRetryAt)
+}
+
 // Merging keeps the reset recorded last with its own deadline, not the longest
 // deadline beside the highest watermark.
 func TestMergeModelStatePairsResetWithItsWatermark(t *testing.T) {
