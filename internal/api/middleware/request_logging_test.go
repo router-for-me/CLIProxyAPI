@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -540,6 +542,63 @@ func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
 		}
 	})
 
+	t.Run("mid-stream 400 API_RESPONSE_ERROR writes error log with Status 400 in both modes", func(t *testing.T) {
+		for _, requestLogEnabled := range []bool{false, true} {
+			logsDir := t.TempDir()
+			logger := logging.NewFileRequestLogger(requestLogEnabled, logsDir, "", 10)
+			cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: requestLogEnabled}}
+
+			router := gin.New()
+			router.Use(RequestLoggingMiddleware(logger))
+			router.POST("/v1beta/models/gemini-4-argon-high:streamGenerateContent", func(c *gin.Context) {
+				c.Header("Content-Type", "text/event-stream")
+				executorCtx := context.WithValue(context.Background(), "gin", c)
+				helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+					URL:    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+					Method: http.MethodPost,
+					Body:   []byte(`{"model":"gemini-4-argon-high"}`),
+				})
+				c.Writer.WriteHeader(http.StatusOK)
+				_, _ = c.Writer.Write([]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"thinking\"}]}}]}\n\n"))
+				c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+					{
+						StatusCode: http.StatusBadRequest,
+						Error:      errors.New("This request was blocked by Gemini's filters. You can read more about our policies here (https://policies.google.com/terms/generative-ai/use-policy)."),
+					},
+				})
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon-high:streamGenerateContent?alt=sse", strings.NewReader(`{"contents":[]}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			router.ServeHTTP(resp, req)
+
+			entries, errRead := os.ReadDir(logsDir)
+			if errRead != nil {
+				t.Fatalf("read logs dir: %v", errRead)
+			}
+			var errorLogPath string
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+					errorLogPath = filepath.Join(logsDir, entry.Name())
+				}
+			}
+			if errorLogPath == "" {
+				t.Fatalf("requestLog=%v: expected error-*.log file, got entries=%v", requestLogEnabled, entries)
+			}
+			content, errReadFile := os.ReadFile(errorLogPath)
+			if errReadFile != nil {
+				t.Fatalf("read error log: %v", errReadFile)
+			}
+			if !bytes.Contains(content, []byte("=== API ERROR RESPONSE ===\nHTTP Status: 400")) {
+				t.Fatalf("requestLog=%v: missing API ERROR RESPONSE 400 in log:\n%s", requestLogEnabled, string(content))
+			}
+			if !bytes.Contains(content, []byte("=== RESPONSE ===\nStatus: 400\n")) {
+				t.Fatalf("requestLog=%v: expected RESPONSE Status: 400 in log:\n%s", requestLogEnabled, string(content))
+			}
+		}
+	})
+
 	t.Run("499 status logs standard request when request-log is true", func(t *testing.T) {
 		logsDir := t.TempDir()
 		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
@@ -895,5 +954,44 @@ func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
 	got := decodeCapturedRequestBodyForLogWithLimit(raw, "zstd", 1<<20)
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("an oversized window must leave the raw bytes, got %q", got)
+	}
+}
+
+func TestResponseWriterLogOnErrorOnlyZeroBufferUntilActionableError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+
+	logger := logging.NewFileRequestLogger(false, t.TempDir(), "", 10)
+	wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+		URL:    "/v1/messages",
+		Method: http.MethodPost,
+	})
+	wrapper.logOnErrorOnly = true
+	wrapper.ginContext = c
+
+	// Normal 200 OK writes (even 4 MiB) must not allocate/buffer any bytes when request-log is disabled.
+	largePayload := bytes.Repeat([]byte("a"), 4<<20) // 4 MiB
+	if _, err := wrapper.Write(largePayload); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if wrapper.body.Len() != 0 {
+		t.Fatalf("wrapper.body.Len() for 200 OK = %d, want 0", wrapper.body.Len())
+	}
+
+	// Once an actionable mid-stream error is recorded, subsequent error frame writes are buffered.
+	c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+		{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New("claude refusal (cyber): blocked"),
+		},
+	})
+	const errFrame = "event: error\ndata: {\"type\":\"error\"}\n\n"
+	if _, err := wrapper.WriteString(errFrame); err != nil {
+		t.Fatalf("WriteString failed: %v", err)
+	}
+	if got := wrapper.body.String(); got != errFrame {
+		t.Fatalf("wrapper.body.String() = %q, want %q", got, errFrame)
 	}
 }
