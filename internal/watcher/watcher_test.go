@@ -523,6 +523,30 @@ func TestHandleEventConfigRemoveRetriesWatchLostToSecondReplace(t *testing.T) {
 	waitForReloadedPort(t, reloadedPorts, 8000)
 }
 
+// A rename whose replacement lands after the bounded re-arm checks still schedules
+// the reload a rename always did, so the new file is applied once it exists. A bare
+// Remove with no file schedules nothing.
+func TestHandleEventConfigRenameStillReloadsWhenRearmFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	w := &Watcher{configPath: configPath, authDir: filepath.Join(tmpDir, "auth")}
+	t.Cleanup(w.stopConfigReloadTimer)
+	scheduled := func() bool {
+		w.configReloadMu.Lock()
+		defer w.configReloadMu.Unlock()
+		return w.configReloadTimer != nil
+	}
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+	if scheduled() {
+		t.Fatal("a Remove of a config that is still absent scheduled a reload")
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Rename})
+	if !scheduled() {
+		t.Fatal("a Rename whose replacement is not there yet did not schedule a reload")
+	}
+}
+
 func TestStartFailsWhenConfigMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")

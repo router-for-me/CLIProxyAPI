@@ -76,8 +76,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	isConfigEvent := isConfigPath && event.Op&configOps != 0
 	// Replacing the config by rename (atomic saves, many editors) drops the watch on
 	// the old file; inotify then reports Remove and nothing more. Watch the new file.
+	// A rename still schedules its reload when no file is there yet, so a
+	// replacement that lands before the debounce fires is applied.
 	if isConfigPath && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-		isConfigEvent = w.rearmConfigWatch()
+		isConfigEvent = w.rearmConfigWatch() || isConfigEvent
 	}
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
