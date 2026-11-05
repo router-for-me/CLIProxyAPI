@@ -402,6 +402,11 @@ type ModelState struct {
 	// below coolingDisabledRetrySeq). Runtime only.
 	coolingDisabledRetryAt  time.Time `json:"-"`
 	coolingDisabledRetrySeq uint64    `json:"-"`
+	// coolingDisabledRetryStamp orders the writes of the reset above (recorded,
+	// replaced or cleared) across all states, so merging two states keeps the one
+	// written last even when their watermarks tie, as they do for direct
+	// MarkResult callers. Zero means no reset was ever written. Runtime only.
+	coolingDisabledRetryStamp uint64 `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop

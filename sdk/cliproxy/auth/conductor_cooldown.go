@@ -970,11 +970,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		// A success dispatched before a cooling-disabled 429 was recorded proves
 		// nothing about its reset; keep the reset across the state reset below.
 		var staleSuccessRetryAt time.Time
-		var staleSuccessRetrySeq uint64
+		var staleSuccessRetrySeq, staleSuccessRetryStamp uint64
 		if result.Success && modelKey != "" && result.ExecutionSeq > 0 {
 			if existing := existingModelState(auth, modelKey); existing != nil && existing.coolingDisabledRetryAt.After(now) &&
 				result.ExecutionSeq <= existing.coolingDisabledRetrySeq {
-				staleSuccessRetryAt, staleSuccessRetrySeq = existing.coolingDisabledRetryAt, existing.coolingDisabledRetrySeq
+				staleSuccessRetryAt, staleSuccessRetrySeq, staleSuccessRetryStamp = existing.coolingDisabledRetryAt, existing.coolingDisabledRetrySeq, existing.coolingDisabledRetryStamp
 			}
 		}
 
@@ -1080,12 +1080,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						if *result.RetryAfter > 0 {
 							until := now.Add(*result.RetryAfter)
 							if newer || (until.After(state.coolingDisabledRetryAt) && (!stale || state.coolingDisabledRetryAt.After(now))) {
-								state.coolingDisabledRetryAt = until
-								state.coolingDisabledRetrySeq = m.currentExecutionSeq()
+								m.writeCoolingDisabledReset(state, until)
 							}
 						} else if newer {
-							state.coolingDisabledRetryAt = time.Time{}
-							state.coolingDisabledRetrySeq = m.currentExecutionSeq()
+							m.writeCoolingDisabledReset(state, time.Time{})
 						}
 					}
 					if isModelSupportResultError(result.Error) {
@@ -1372,7 +1370,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		if !staleSuccessRetryAt.IsZero() {
 			if state := existingModelState(auth, modelKey); state != nil {
-				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = staleSuccessRetryAt, staleSuccessRetrySeq
+				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq, state.coolingDisabledRetryStamp = staleSuccessRetryAt, staleSuccessRetrySeq, staleSuccessRetryStamp
 			}
 		} else if result.Success && modelKey != "" {
 			// A success dispatched after the reset was recorded clears it, even where
@@ -1382,7 +1380,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			// watermark stays, so a 429 dispatched earlier cannot bring it back.
 			if state := existingModelState(auth, modelKey); state != nil && !state.coolingDisabledRetryAt.IsZero() &&
 				(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq) {
-				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq = time.Time{}, m.currentExecutionSeq()
+				m.writeCoolingDisabledReset(state, time.Time{})
 			}
 		}
 
@@ -1603,6 +1601,31 @@ func normalizeModelStates(auth *Auth) bool {
 	return changed
 }
 
+// writeCoolingDisabledReset sets state's cooling-disabled reset (zero clears it)
+// under the current execution watermark and a fresh write stamp.
+func (m *Manager) writeCoolingDisabledReset(state *ModelState, until time.Time) {
+	state.coolingDisabledRetryAt = until
+	state.coolingDisabledRetrySeq = m.currentExecutionSeq()
+	state.coolingDisabledRetryStamp = m.coolingDisabledResetStamp.Add(1)
+}
+
+// coolingDisabledResetWrittenLater reports whether source's cooling-disabled reset
+// was written after target's. Write stamps decide, even when the watermarks tie
+// (direct MarkResult callers all write under the same one); a side that never
+// wrote a reset (stamp zero) loses to one that did. Without stamps on either side
+// the higher watermark wins, and on a tie the later deadline, so a merge never
+// drops a live reset it cannot order.
+func coolingDisabledResetWrittenLater(source, target *ModelState) bool {
+	switch {
+	case source.coolingDisabledRetryStamp != 0 && target.coolingDisabledRetryStamp != 0:
+		return source.coolingDisabledRetryStamp > target.coolingDisabledRetryStamp
+	case source.coolingDisabledRetryStamp != 0 || target.coolingDisabledRetryStamp != 0:
+		return source.coolingDisabledRetryStamp != 0
+	}
+	return source.coolingDisabledRetrySeq > target.coolingDisabledRetrySeq ||
+		(source.coolingDisabledRetrySeq == target.coolingDisabledRetrySeq && source.coolingDisabledRetryAt.After(target.coolingDisabledRetryAt))
+}
+
 func mergeModelState(target, source *ModelState) *ModelState {
 	if target == nil {
 		return source
@@ -1653,14 +1676,14 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.cooldownRecordedSeq > merged.cooldownRecordedSeq {
 		merged.cooldownRecordedSeq = source.cooldownRecordedSeq
 	}
-	// Keep the cooling-disabled reset recorded last (the higher watermark), with
-	// its own deadline: pairing an older, longer deadline with a newer watermark
-	// would revive a hint the upstream has since replaced or cleared. On a tie
-	// the later deadline wins, so an alias migration cannot drop a live reset.
-	merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq = target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq
-	if source.coolingDisabledRetrySeq > target.coolingDisabledRetrySeq ||
-		(source.coolingDisabledRetrySeq == target.coolingDisabledRetrySeq && source.coolingDisabledRetryAt.After(target.coolingDisabledRetryAt)) {
-		merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq = source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq
+	// Keep the cooling-disabled reset written last, with its own deadline and
+	// watermark: pairing an older, longer deadline with a newer watermark would
+	// revive a hint the upstream has since replaced or cleared.
+	merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, merged.coolingDisabledRetryStamp =
+		target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq, target.coolingDisabledRetryStamp
+	if coolingDisabledResetWrittenLater(source, target) {
+		merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, merged.coolingDisabledRetryStamp =
+			source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq, source.coolingDisabledRetryStamp
 	}
 	if merged.StatusMessage == "" {
 		merged.StatusMessage = fallback.StatusMessage
