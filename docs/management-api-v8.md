@@ -90,6 +90,8 @@ retain the corresponding business operation's fields.
 | `/config/upstream/<provider>` | GET, PUT, PATCH, DELETE | Manage shared provider settings. |
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
+| `/quotas/ollama/connections` | GET | List configured Ollama Cloud connections without credentials. |
+| `/quotas/ollama` | GET | Read account-wide Ollama Cloud usage and credit balances. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
@@ -117,6 +119,54 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+## Ollama Cloud quota
+
+These routes require the normal management authentication and remote-access
+rules. They are available only in builds containing the Ollama quota integration;
+the pinned v8.0.50 image does not gain them by updating the management UI.
+
+`GET /quotas/ollama/connections` returns
+`{"connections":[{"connection_id":"ollama-<opaque-id>","display_name":"Cloud"}]}`.
+Only enabled OpenAI-compatible groups targeting `https://ollama.com/v1` (or
+`/v1/`, optionally port 443), with a usable configured API key, are included.
+Local Ollama and other compatible providers are excluded. No credentials are
+returned. Names must be unambiguous (case-insensitively).
+
+`GET /quotas/ollama?provider_id=ollama-<opaque-id>&range=7d&scope=self` reads the
+selected configured credential. Discovery lists each usable key separately;
+keys are not assumed to belong to the same account. IDs change when credentials
+are replaced and never contain plaintext keys. `range` accepts `24h`, `7d`
+(default), or `30d`; only `self`
+scope is exposed. Team eligibility cannot currently be established, so team
+scope is rejected. Connections with keys belonging to different accounts should
+be configured as separate groups. Multiple connections may share one account:
+their balances must never be summed as independent account balances.
+
+The response contains `provider`, `connection_id`, `display_name`, `range`,
+`scope`, `fetched_at` (UTC), `source`, and typed `usage` and `balance` sections.
+One failed section is omitted and accompanied by `usage_error` or `balance_error`;
+both failing returns a gateway error. An upstream 401 never becomes a management
+401. Errors use fixed messages rather than upstream text. Requests only target
+the fixed official HTTPS origin and never follow redirects. Response bodies are
+bounded to 1 MiB. Fully successful responses are cached for 120 seconds, isolated by
+credential, connection, range, and scope, with concurrent requests deduplicated.
+Partial responses are not cached, so a failed section can recover on refresh.
+Rate-limit waits are enforced per credential across ranges. A maximum of four
+connection fetches run concurrently. The selected key's proxy overrides the
+global configured proxy; absent both, connections are direct (not environment
+proxy driven). No inference-stream deadlines are added.
+
+Amounts ending in `_usd` are USD, not cents. Modern included balances report
+remaining `balance_usd`, full-period `allowance_usd`, and the actual `period`.
+Legacy accounts may instead report explicit session/weekly percentages and reset
+timestamps; those must not be inferred for modern accounts. Purchased balances
+are remaining unexpired credits. Usage windows include the current partial UTC
+hour/day and are not billing-cycle-to-date totals. Input tokens already include
+cached input tokens. Account-wide usage includes traffic outside this proxy.
+
+No production deployment or real-account acceptance test is implied by the
+mocked test suite. Validate against a dedicated test account before deployment.
 
 ## OAuth
 
