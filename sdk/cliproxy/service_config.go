@@ -57,6 +57,7 @@ type configCommit struct {
 
 type routingRuntimeState struct {
 	strategy                 string
+	claudeQuotaSnapshot      string
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
@@ -73,6 +74,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if cfg == nil {
 		return state
 	}
+	state.claudeQuotaSnapshot = strings.TrimSpace(cfg.Routing.ClaudeQuotaSnapshot)
 
 	switch strings.ToLower(strings.TrimSpace(cfg.Routing.Strategy)) {
 	case "weighted-round-robin", "weightedroundrobin", "wrr":
@@ -116,6 +118,9 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 			SubagentAffinity: &subagents,
 			RebindOn:         state.sessionAffinityRebindOn,
 		})
+	}
+	if state.claudeQuotaSnapshot != "" {
+		selector = &coreauth.ClaudeQuotaSelector{SnapshotPath: state.claudeQuotaSnapshot, Fallback: selector}
 	}
 	return selector
 }

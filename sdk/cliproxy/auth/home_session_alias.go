@@ -267,7 +267,7 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 		m.selectorMu.Lock()
 		selector := m.selector
 		m.selectorMu.Unlock()
-		if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil && affinity.matcher != nil {
+		if affinity, ok := sessionAffinitySelector(selector); ok && affinity != nil && affinity.matcher != nil {
 			provider := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey)
 			if provider == "" {
 				provider = providerFromSourceFormat(opts.SourceFormat)

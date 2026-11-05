@@ -1,0 +1,16 @@
+{
+  "five_hour": { "utilization": 12, "resets_at": "2026-11-03T07:00:00Z" },
+  "seven_day": { "utilization": 34, "resets_at": "2026-11-07T07:00:00Z" },
+  "limits": [
+    {
+      "utilization": 100,
+      "resets_at": "2026-11-07T07:00:00Z",
+      "scope": { "model": { "id": "claude-fable-5", "display_name": "Claude Fable 5" } }
+    },
+    {
+      "utilization": 100,
+      "resets_at": "2026-11-07T07:00:00Z",
+      "scope": { "model": { "id": "claude-opus-4-7", "display_name": "Claude Opus 4.7" } }
+    }
+  ]
+}

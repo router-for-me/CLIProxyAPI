@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -109,6 +110,14 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 		if errMarshal != nil {
 			return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"authentication_error","code":"upstream_authentication_required","retryable":false}}`, message))
 		}
+		return payload
+	}
+
+	var quota *coreauth.ClaudeQuotaError
+	if errors.As(err, &quota) && quota != nil {
+		payload, _ := json.Marshal(struct {
+			Error *coreauth.ClaudeQuotaError `json:"error"`
+		}{quota})
 		return payload
 	}
 

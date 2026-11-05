@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep CLIProxyAPI Claude quota observations fresh
+
+[Timer]
+OnStartupSec=5s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=cliproxy-claude-quota.service
+
+[Install]
+WantedBy=timers.target

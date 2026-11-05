@@ -181,6 +181,39 @@ func TestManagementV8IndependentContract(t *testing.T) {
 	}
 }
 
+func TestManagementV8CachedClaudeQuotaAccess(testContext *testing.T) {
+	for _, test := range []struct {
+		name       string
+		enabled    bool
+		authorized bool
+		want       int
+	}{
+		{name: "protected", enabled: true, want: http.StatusUnauthorized},
+		{name: "authorized cache request", enabled: true, authorized: true, want: http.StatusBadRequest},
+		{name: "management disabled", authorized: true, want: http.StatusNotFound},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			configuration := &config.Config{}
+			configuration.RemoteManagement.SecretKey = "synthetic-configured-key"
+			handler := management.NewHandler(configuration, "", nil)
+			handler.SetLocalPassword("synthetic-password")
+			server := &Server{cfg: configuration, engine: gin.New(), mgmt: handler}
+			server.managementRoutesEnabled.Store(test.enabled)
+			server.registerManagementRoutes()
+			request := httptest.NewRequest(http.MethodGet, "/v8/management/quotas/claude", nil)
+			request.RemoteAddr = "127.0.0.1:1234"
+			if test.authorized {
+				request.Header.Set("Authorization", "Bearer synthetic-password")
+			}
+			recorder := httptest.NewRecorder()
+			server.engine.ServeHTTP(recorder, request)
+			if recorder.Code != test.want {
+				testContext.Fatalf("status=%d want=%d body=%s", recorder.Code, test.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
