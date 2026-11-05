@@ -116,6 +116,8 @@ type Detail struct {
 	VideoInputTokens         *int64
 	FileInputTokens          *int64
 	CachedTextTokens         *int64
+	CachedImageTokens        *int64
+	CachedAudioTokens        *int64
 	TextOutputTokens         *int64
 	ImageOutputTokens        *int64
 	AudioOutputTokens        *int64

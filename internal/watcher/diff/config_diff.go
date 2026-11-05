@@ -37,6 +37,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if strings.TrimSpace(oldCfg.Pprof.Addr) != strings.TrimSpace(newCfg.Pprof.Addr) {
 		changes = append(changes, fmt.Sprintf("pprof.addr: %s -> %s", strings.TrimSpace(oldCfg.Pprof.Addr), strings.TrimSpace(newCfg.Pprof.Addr)))
 	}
+	if oldCfg.KVStore.Disabled != newCfg.KVStore.Disabled {
+		changes = append(changes, fmt.Sprintf("kv-store.disabled: %t -> %t", oldCfg.KVStore.Disabled, newCfg.KVStore.Disabled))
+	}
+	if oldCfg.EffectiveKVStorePath() != newCfg.EffectiveKVStorePath() {
+		changes = append(changes, fmt.Sprintf("kv-store.path: %s -> %s", oldCfg.EffectiveKVStorePath(), newCfg.EffectiveKVStorePath()))
+	}
 	if oldCfg.LoggingToFile != newCfg.LoggingToFile {
 		changes = append(changes, fmt.Sprintf("logging-to-file: %t -> %t", oldCfg.LoggingToFile, newCfg.LoggingToFile))
 	}

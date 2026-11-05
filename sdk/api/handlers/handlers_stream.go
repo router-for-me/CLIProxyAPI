@@ -23,6 +23,56 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, false)
 }
 
+// HasAlternativeExecutionTarget reports whether an alternative credential other
+// than excludedAuthID can serve a replayed request for modelName.
+func (h *BaseAPIHandler) HasAlternativeExecutionTarget(ctx context.Context, handlerType, modelName string, rawJSON []byte, excludedAuthID string) bool {
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	originalRequestedModel := modelName
+	execOptions := modelExecutionOptions{
+		AllowSpeechModel: isModelExecutionSpeechProtocol(handlerType),
+	}
+	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, "")
+	if !preparedRoute {
+		routeDecision = h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, execOptions)
+	}
+	if routeDecision.ExecutorPluginID != "" {
+		return false
+	}
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	if errMsg != nil {
+		return false
+	}
+	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
+	reqMeta := requestExecutionMetadata(ctx)
+	delete(reqMeta, coreexecutor.PinnedAuthMetadataKey)
+	delete(reqMeta, coreexecutor.ExecutionSessionMetadataKey)
+	delete(reqMeta, coreexecutor.SelectedAuthCallbackMetadataKey)
+	delete(reqMeta, coreexecutor.FinalizedResponseFormatCallbackMetadataKey)
+	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
+	addModelExecutionSourceMetadata(reqMeta, false)
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
+	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
+	originalRequest := rawJSON
+	if ctxOriginal := originalRequestFromContext(ctx); len(ctxOriginal) > 0 {
+		originalRequest = ctxOriginal
+	}
+	responseProtocol := modelExecutionResponseProtocol(handlerType, handlerType)
+	opts := coreexecutor.Options{
+		Stream:          true,
+		OriginalRequest: originalRequest,
+		SourceFormat:    sdktranslator.FromString(handlerType),
+		ResponseFormat:  sdktranslator.FromString(responseProtocol),
+		Headers:         modelExecutionHeaders(ctx, nil),
+		Query:           modelExecutionQuery(ctx, nil),
+		Metadata:        reqMeta,
+	}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, rawJSON, opts.Metadata)
+	return h.AuthManager.HasAlternativeTargetForModel(ctx, providers, normalizedModel, opts, excludedAuthID)
+}
+
 // ExecuteImageStreamWithAuthManager executes a streaming OpenAI-compatible image endpoint request.
 func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	return h.executeStreamWithAuthManager(ctx, handlerType, modelName, rawJSON, alt, true)
@@ -67,6 +117,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
+		reporter.StartResponseTTFT()
 	}
 	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
 	if errStream != nil {
@@ -206,6 +257,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			if len(chunk.Payload) == 0 {
 				continue
 			}
+			observePluginExecutorStreamTTFT(responseProtocol, reporter, chunk.Payload)
 			observePluginExecutorStreamUsage(responseProtocol, chunk.Payload, &streamUsage)
 			payload := cloneBytes(chunk.Payload)
 			if streamInterceptorsActive {
