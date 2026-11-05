@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -138,11 +140,21 @@ func TestEnsureImageGenerationTool_ResponsesLiteHeaderDoesNotInjectTool(t *testi
 }
 
 func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
+	body := []byte(`{"model":"gpt-5.4","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
+	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil)
 
 	if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)
+	}
+
+	for _, liteModel := range []string{"gpt-6-astra", "gpt-5.6-sol"} {
+		liteBody := []byte(`{"model":"` + liteModel + `","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
+		liteHeaders := make(http.Header)
+		liteHeaders.Set(codexResponsesLiteHeader, "false")
+		liteResult := ensureImageGenerationTool(liteBody, liteModel, nil, liteHeaders)
+		if ojson.GetBytes(liteResult, "tools").Exists() {
+			t.Fatalf("for %s: expected no auto-injected tools even when responses-lite is explicitly false, got %s", liteModel, liteResult)
+		}
 	}
 }
 
@@ -284,5 +296,875 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 	}
 	if ojson.GetBytes(result, "tools").Exists() {
 		t.Fatalf("expected no tools for free codex auth, got %s", ojson.GetBytes(result, "tools").Raw)
+	}
+}
+
+func TestEnsureImageGenerationTool_ResponsesLiteModelsDoNotInjectToolByDefault(t *testing.T) {
+	for _, model := range []string{
+		"gpt-6-astra",
+		"gpt-6-sol",
+		"gpt-6.1-sol",
+		"gpt-6.1-terra",
+		"gpt-6-luna",
+		"gpt-6-chat-thinking",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
+		"gpt-reserve",
+		"codex-auto-review",
+		"codex/gpt-6-astra(medium)",
+		"codex/gpt-5.6-sol(high)",
+	} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","input":"hello"}`)
+			result := ensureImageGenerationTool(body, model, nil, nil)
+			if ojson.GetBytes(result, "tools").Exists() {
+				t.Fatalf("expected no auto-injected tools for %s, got %s", model, result)
+			}
+		})
+	}
+
+	for _, nonLiteModel := range []string{"gpt-5.5", "gpt-5.4"} {
+		t.Run("non-lite/"+nonLiteModel, func(t *testing.T) {
+			body := []byte(`{"model":"` + nonLiteModel + `","input":"hello"}`)
+			result := ensureImageGenerationTool(body, nonLiteModel, nil, nil)
+			if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
+				t.Fatalf("for %s: tools.0.type = %q, want image_generation; body=%s", nonLiteModel, got, result)
+			}
+		})
+	}
+}
+
+func TestCodexExecutorHostedImageGenerationAllowedToolsModeAutoVsRequired(t *testing.T) {
+	t.Run("optional or excluded image_generation tool preserves requested chat model", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body string
+		}{
+			{
+				name: "tool_choice_omitted",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]}`,
+			},
+			{
+				name: "tool_choice_auto",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":"auto"}`,
+			},
+			{
+				name: "tool_choice_none",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":"none"}`,
+			},
+			{
+				name: "allowed_tools_mode_auto",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":{"type":"allowed_tools","mode":"auto","tools":[{"type":"image_generation"}]}}`,
+			},
+			{
+				name: "allowed_tools_excluding_image_generation",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png","complexity":"high"},{"type":"function","name":"lookup"}],"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"lookup"}]}}`,
+			},
+			{
+				name: "additional_tools_with_tool_choice_auto",
+				body: `{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":[{"type":"additional_tools","tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}],"tool_choice":"auto"}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				doc := ojson.NewDoc([]byte(tc.body))
+				normalizeCodexImageGenerationToolsDoc(doc)
+				gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra")
+				if errModel != nil {
+					t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+				}
+				if gotModel != "gpt-6-astra" || doc.Get("model").String() != "gpt-6-astra" {
+					t.Fatalf("model = %q (doc=%q), want gpt-6-astra", gotModel, doc.Get("model").String())
+				}
+				if doc.Get("tools.0.complexity").Exists() || doc.Get("input.0.tools.0.complexity").Exists() {
+					t.Fatalf("complexity should still be stripped: %s", doc.Bytes())
+				}
+			})
+		}
+	})
+
+	t.Run("forced hosted image_generation tool rewrites to image base model", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body func(model string) string
+		}{
+			{
+				name: "required",
+				body: func(model string) string {
+					return `{"model":"` + model + `","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":"required"}`
+				},
+			},
+			{
+				name: "explicit_image_generation",
+				body: func(model string) string {
+					return `{"model":"` + model + `","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`
+				},
+			},
+			{
+				name: "allowed_tools_required",
+				body: func(model string) string {
+					return `{"model":"` + model + `","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"image_generation"}]}}`
+				},
+			},
+			{
+				name: "additional_tools_explicit_image_generation",
+				body: func(model string) string {
+					return `{"model":"` + model + `","reasoning":{"effort":"medium"},"input":[{"type":"additional_tools","tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tool_choice":{"type":"image_generation"}}`
+				},
+			},
+			{
+				name: "additional_tools_required",
+				body: func(model string) string {
+					return `{"model":"` + model + `","reasoning":{"effort":"medium"},"input":[{"type":"additional_tools","tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tool_choice":"required"}`
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for _, model := range []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-reserve"} {
+					doc := ojson.NewDoc([]byte(tc.body(model)))
+					normalizeCodexImageGenerationToolsDoc(doc)
+					gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, model)
+					if errModel != nil {
+						t.Fatalf("for %s (%s): applyCodexHostedImageGenerationModelDoc() error = %v", model, tc.name, errModel)
+					}
+					if gotModel != codexOpenAIImagesMainModel || doc.Get("model").String() != codexOpenAIImagesMainModel {
+						t.Fatalf("for %s (%s): model = %q (doc=%q), want %q", model, tc.name, gotModel, doc.Get("model").String(), codexOpenAIImagesMainModel)
+					}
+					if doc.Get("input.0.tools.0.complexity").Exists() {
+						t.Fatalf("for %s (%s): input.0.tools.0.complexity should be stripped: %s", model, tc.name, doc.Bytes())
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("protocol or header gated payload filter does not bypass forced image_generation routing", func(t *testing.T) {
+		cfg := &config.Config{
+			Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: []config.PayloadModelRule{{Name: "gpt-6-astra"}},
+						Params: map[string]any{"reasoning.effort": "high"},
+					},
+				},
+				Filter: []config.PayloadFilterRule{
+					{
+						Models: []config.PayloadModelRule{{Name: "gpt-6-astra", Protocol: "claude"}},
+						Params: []string{"tools"},
+					},
+				},
+			},
+		}
+		doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+		gotModel, errModel := applyCodexHostedImageGenerationModelDoc(cfg, doc, "gpt-6-astra", "gpt-6-astra")
+		if errModel != nil {
+			t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+		}
+		if gotModel != codexOpenAIImagesMainModel || doc.Get("model").String() != codexOpenAIImagesMainModel {
+			t.Fatalf("model = %q (doc=%q), want %q when filter is gated to another protocol", gotModel, doc.Get("model").String(), codexOpenAIImagesMainModel)
+		}
+	})
+
+	t.Run("incompatible configured GPTImage2BaseModel falls back to default", func(t *testing.T) {
+		for _, configured := range []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-reserve"} {
+			cfg := &config.Config{
+				SDKConfig: config.SDKConfig{
+					GPTImage2BaseModel: configured,
+				},
+			}
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			gotModel, errModel := applyCodexHostedImageGenerationModelDoc(cfg, doc, "gpt-6-astra")
+			if errModel != nil {
+				t.Fatalf("configured %q: applyCodexHostedImageGenerationModelDoc() error = %v", configured, errModel)
+			}
+			if gotModel != codexOpenAIImagesMainModel || doc.Get("model").String() != codexOpenAIImagesMainModel {
+				t.Fatalf("configured %q: model = %q (doc=%q), want %q", configured, gotModel, doc.Get("model").String(), codexOpenAIImagesMainModel)
+			}
+		}
+	})
+
+	t.Run("rerouted base model validates top-level and configuration_update reasoning effort through central thinking pipeline", func(t *testing.T) {
+		t.Run("top_level_max", func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"max"},"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra")
+			if errModel != nil {
+				t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+			}
+			if gotModel != codexOpenAIImagesMainModel {
+				t.Fatalf("gotModel = %q, want %q", gotModel, codexOpenAIImagesMainModel)
+			}
+			if gotEffort := doc.Get("reasoning.effort").String(); gotEffort != "xhigh" {
+				t.Fatalf("reasoning.effort = %q, want xhigh after central thinking clamp for %s", gotEffort, codexOpenAIImagesMainModel)
+			}
+		})
+
+		t.Run("configuration_update_only_max", func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","input":[{"type":"configuration_update","reasoning":{"effort":"max"}},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra")
+			if errModel != nil {
+				t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+			}
+			if gotModel != codexOpenAIImagesMainModel {
+				t.Fatalf("gotModel = %q, want %q", gotModel, codexOpenAIImagesMainModel)
+			}
+			if gotEffort := doc.Get("reasoning.effort").String(); gotEffort != "xhigh" {
+				t.Fatalf("reasoning.effort = %q, want xhigh from configuration_update clamp; body=%s", gotEffort, doc.Bytes())
+			}
+			if gotFirstType := doc.Get("input.0.type").String(); gotFirstType == "configuration_update" {
+				t.Fatalf("expected configuration_update to be stripped for %s, got body=%s", codexOpenAIImagesMainModel, doc.Bytes())
+			}
+		})
+
+		t.Run("top_level_and_configuration_update_override", func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"low"},"input":[{"type":"configuration_update","reasoning":{"effort":"max"}},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra")
+			if errModel != nil {
+				t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+			}
+			if gotModel != codexOpenAIImagesMainModel {
+				t.Fatalf("gotModel = %q, want %q", gotModel, codexOpenAIImagesMainModel)
+			}
+			if gotEffort := doc.Get("reasoning.effort").String(); gotEffort != "xhigh" {
+				t.Fatalf("reasoning.effort = %q, want xhigh from last configuration_update overriding top-level low; body=%s", gotEffort, doc.Bytes())
+			}
+			if gotFirstType := doc.Get("input.0.type").String(); gotFirstType == "configuration_update" {
+				t.Fatalf("expected configuration_update to be stripped for %s, got body=%s", codexOpenAIImagesMainModel, doc.Bytes())
+			}
+		})
+
+		t.Run("suffix_overrides_configuration_update", func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"max"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			gotModel, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra", "gpt-6-astra(max)")
+			if errModel != nil {
+				t.Fatalf("applyCodexHostedImageGenerationModelDoc() error = %v", errModel)
+			}
+			if gotModel != codexOpenAIImagesMainModel {
+				t.Fatalf("gotModel = %q, want %q", gotModel, codexOpenAIImagesMainModel)
+			}
+			if gotEffort := doc.Get("reasoning.effort").String(); gotEffort != "xhigh" {
+				t.Fatalf("reasoning.effort = %q, want xhigh from suffix overriding configuration_update; body=%s", gotEffort, doc.Bytes())
+			}
+			if gotFirstType := doc.Get("input.0.type").String(); gotFirstType == "configuration_update" {
+				t.Fatalf("expected configuration_update to be stripped for %s, got body=%s", codexOpenAIImagesMainModel, doc.Bytes())
+			}
+		})
+
+		t.Run("invalid_configuration_update_effort_returns_error", func(t *testing.T) {
+			doc := ojson.NewDoc([]byte(`{"model":"gpt-6-astra","input":[{"type":"configuration_update","reasoning":{"effort":"bogus"}},{"type":"message","role":"user","content":[{"type":"input_text","text":"draw a cat"}]}],"tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`))
+			if _, errModel := applyCodexHostedImageGenerationModelDoc(&config.Config{}, doc, "gpt-6-astra"); errModel == nil {
+				t.Fatal("expected error for invalid configuration_update reasoning effort, got nil")
+			}
+		})
+	})
+}
+
+func TestCodexExecutorHostedImageGenerationSIWCAndAPIKeyPreserveUpstreamModelAndParams(t *testing.T) {
+	for _, credKind := range []string{"api_key", "siwc"} {
+		for _, transport := range []string{"http", "websocket"} {
+			for _, stream := range []bool{false, true} {
+				streamLabel := "false"
+				if stream {
+					streamLabel = "true"
+				}
+				t.Run(credKind+"/"+transport+"/stream="+streamLabel, func(t *testing.T) {
+					capturedBody := make(chan []byte, 1)
+					completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_siwc_apikey_7270","object":"response","status":"completed","model":"gpt-6-astra","output":[],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`)
+
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if transport == "websocket" {
+							upgrader := websocket.Upgrader{}
+							conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+							if errUpgrade != nil {
+								t.Errorf("upgrade websocket: %v", errUpgrade)
+								return
+							}
+							defer func() {
+								_ = conn.Close()
+							}()
+							_, msg, errRead := conn.ReadMessage()
+							if errRead != nil {
+								t.Errorf("read websocket message: %v", errRead)
+								return
+							}
+							capturedBody <- msg
+							if errWrite := conn.WriteMessage(websocket.TextMessage, completedEvent); errWrite != nil {
+								t.Errorf("write websocket message: %v", errWrite)
+							}
+							return
+						}
+						body, errRead := io.ReadAll(r.Body)
+						if errRead != nil {
+							t.Errorf("read http body: %v", errRead)
+							return
+						}
+						capturedBody <- body
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write(append(append([]byte("data: "), completedEvent...), '\n', '\n'))
+					}))
+					defer server.Close()
+
+					cfg := &config.Config{}
+					var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+					if transport == "websocket" {
+						exec = NewCodexWebsocketsExecutor(cfg)
+					}
+					auth := &cliproxyauth.Auth{
+						ID:       t.Name(),
+						Provider: "codex",
+						Attributes: map[string]string{
+							"base_url":  server.URL,
+							"plan_type": "pro",
+						},
+					}
+					if credKind == "api_key" {
+						auth.Attributes["api_key"] = "sk-custom-key"
+					} else {
+						auth.Metadata = map[string]any{
+							"access_token": "outer-token",
+							"account_id":   "acct-1",
+							"use_siwc":     true,
+							"siwc": map[string]any{
+								"access_token": "siwc-token",
+								"base_url":     server.URL,
+							},
+						}
+					}
+
+					payload := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":"画一只小猫咪。","stream":true,"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":{"type":"image_generation"}}`)
+					req := cliproxyexecutor.Request{
+						Model:   "gpt-6-astra",
+						Payload: payload,
+					}
+					opts := cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatOpenAIResponse,
+						Stream:       stream,
+						Headers:      http.Header{"User-Agent": []string{"curl/8.7.1"}},
+					}
+					if stream {
+						res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+						if errStream != nil {
+							t.Fatalf("ExecuteStream() error = %v", errStream)
+						}
+						for chunk := range res.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("stream chunk error = %v", chunk.Err)
+							}
+						}
+					} else {
+						if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+							t.Fatalf("Execute() error = %v", errExec)
+						}
+					}
+
+					gotBody := <-capturedBody
+					if gotModel := ojson.GetBytes(gotBody, "model").String(); gotModel != "gpt-6-astra" {
+						t.Fatalf("%s upstream model = %q, want gpt-6-astra; body=%s", credKind, gotModel, gotBody)
+					}
+					if gotComplexity := ojson.GetBytes(gotBody, "tools.0.complexity").String(); gotComplexity != "high" {
+						t.Fatalf("%s tools.0.complexity = %q, want high; body=%s", credKind, gotComplexity, gotBody)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodexExecutorHostedImageGenerationPassthroughPreservesModelAndToolParams(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		for _, stream := range []bool{false, true} {
+			streamLabel := "false"
+			if stream {
+				streamLabel = "true"
+			}
+			t.Run(transport+"/stream="+streamLabel, func(t *testing.T) {
+				capturedBody := make(chan []byte, 1)
+				capturedHint := make(chan string, 1)
+				completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_passthrough_7270","object":"response","status":"completed","model":"gpt-6-astra","output":[],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedHint <- r.Header.Get(codexRoutingHintHeader)
+					if transport == "websocket" {
+						upgrader := websocket.Upgrader{}
+						conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+						if errUpgrade != nil {
+							t.Errorf("upgrade websocket: %v", errUpgrade)
+							return
+						}
+						defer func() {
+							_ = conn.Close()
+						}()
+						_, msg, errRead := conn.ReadMessage()
+						if errRead != nil {
+							t.Errorf("read websocket message: %v", errRead)
+							return
+						}
+						capturedBody <- msg
+						if errWrite := conn.WriteMessage(websocket.TextMessage, completedEvent); errWrite != nil {
+							t.Errorf("write websocket message: %v", errWrite)
+						}
+						return
+					}
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read http body: %v", errRead)
+						return
+					}
+					capturedBody <- body
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write(append(append([]byte("data: "), completedEvent...), '\n', '\n'))
+				}))
+				defer server.Close()
+
+				cfg := &config.Config{
+					SDKConfig: config.SDKConfig{
+						DisableImageGeneration: config.DisableImageGenerationPassthrough,
+					},
+				}
+				var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+				if transport == "websocket" {
+					exec = NewCodexWebsocketsExecutor(cfg)
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name(),
+					Provider: "codex",
+					Attributes: map[string]string{
+						"base_url":  server.URL,
+						"plan_type": "pro",
+					},
+					Metadata: map[string]any{
+						"access_token": "test-token",
+						"account_id":   "acct-1",
+					},
+				}
+				payload := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"max"},"input":"画一只小猫咪。","stream":true,"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":{"type":"image_generation"}}`)
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-6-astra",
+					Payload: payload,
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:       stream,
+				}
+				if stream {
+					res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream() error = %v", errStream)
+					}
+					for chunk := range res.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error = %v", chunk.Err)
+						}
+					}
+				} else {
+					if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+						t.Fatalf("Execute() error = %v", errExec)
+					}
+				}
+
+				gotBody := <-capturedBody
+				gotHint := <-capturedHint
+				if gotModel := ojson.GetBytes(gotBody, "model").String(); gotModel != "gpt-6-astra" {
+					t.Fatalf("passthrough upstream model = %q, want gpt-6-astra; body=%s", gotModel, gotBody)
+				}
+				if gotHint != "model=gpt-6-astra" {
+					t.Fatalf("passthrough X-Codex-Routing-Hint = %q, want model=gpt-6-astra", gotHint)
+				}
+				if gotComplexity := ojson.GetBytes(gotBody, "tools.0.complexity").String(); gotComplexity != "high" {
+					t.Fatalf("passthrough tools.0.complexity = %q, want high; body=%s", gotComplexity, gotBody)
+				}
+				if gotEffort := ojson.GetBytes(gotBody, "reasoning.effort").String(); gotEffort != "max" {
+					t.Fatalf("passthrough reasoning.effort = %q, want max; body=%s", gotEffort, gotBody)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexExecutorHostedImageGenerationWithGPT6AstraRoutesCompatibleBaseModelAndStripsComplexity(t *testing.T) {
+	variants := []struct {
+		name           string
+		inputJSON      string
+		toolsJSON      string
+		toolChoiceJSON string
+	}{
+		{
+			name:           "baseline",
+			inputJSON:      `"画一只小猫咪。"`,
+			toolsJSON:      `,"tools":[{"type":"image_generation","output_format":"png"}]`,
+			toolChoiceJSON: `,"tool_choice":{"type":"image_generation"}`,
+		},
+		{
+			name:           "complexity-high",
+			inputJSON:      `"画一只小猫咪。"`,
+			toolsJSON:      `,"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]`,
+			toolChoiceJSON: `,"tool_choice":{"type":"image_generation"}`,
+		},
+		{
+			name:           "model-flare-complexity-medium",
+			inputJSON:      `"画一只小猫咪。"`,
+			toolsJSON:      `,"tools":[{"type":"image_generation","output_format":"png","model":"gpt-image-2.6-flare","complexity":"medium"}]`,
+			toolChoiceJSON: `,"tool_choice":{"type":"image_generation"}`,
+		},
+		{
+			name:           "additional-tools-forced",
+			inputJSON:      `[{"type":"additional_tools","tools":[{"type":"image_generation","output_format":"png","complexity":"high"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"画一只小猫咪。"}]}]`,
+			toolsJSON:      ``,
+			toolChoiceJSON: `,"tool_choice":{"type":"image_generation"}`,
+		},
+	}
+
+	for _, variant := range variants {
+		for _, transport := range []string{"http", "websocket"} {
+			for _, stream := range []bool{false, true} {
+				streamLabel := "false"
+				if stream {
+					streamLabel = "true"
+				}
+				t.Run(variant.name+"/"+transport+"/stream="+streamLabel, func(t *testing.T) {
+					capturedBody := make(chan []byte, 1)
+					capturedHint := make(chan string, 1)
+					completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_img_7270","object":"response","status":"completed","model":"gpt-5.4-mini","output":[{"id":"ig_1","type":"image_generation_call","status":"completed","output_format":"png","result":"AA=="}],"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`)
+
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						capturedHint <- r.Header.Get(codexRoutingHintHeader)
+						if transport == "websocket" {
+							upgrader := websocket.Upgrader{}
+							conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+							if errUpgrade != nil {
+								t.Errorf("upgrade websocket: %v", errUpgrade)
+								return
+							}
+							defer func() {
+								_ = conn.Close()
+							}()
+							_, msg, errRead := conn.ReadMessage()
+							if errRead != nil {
+								t.Errorf("read websocket message: %v", errRead)
+								return
+							}
+							capturedBody <- msg
+							if errWrite := conn.WriteMessage(websocket.TextMessage, completedEvent); errWrite != nil {
+								t.Errorf("write websocket message: %v", errWrite)
+							}
+							return
+						}
+						body, errRead := io.ReadAll(r.Body)
+						if errRead != nil {
+							t.Errorf("read http body: %v", errRead)
+							return
+						}
+						capturedBody <- body
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write(append(append([]byte("data: "), completedEvent...), '\n', '\n'))
+					}))
+					defer server.Close()
+
+					cfg := &config.Config{
+						Payload: config.PayloadConfig{
+							Override: []config.PayloadRule{
+								{
+									Models: []config.PayloadModelRule{{Name: "gpt-6-astra"}},
+									Params: map[string]any{"tools.0.quality": "high"},
+								},
+							},
+						},
+					}
+					var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+					if transport == "websocket" {
+						exec = NewCodexWebsocketsExecutor(cfg)
+					}
+					auth := &cliproxyauth.Auth{
+						ID:       t.Name(),
+						Provider: "codex",
+						Attributes: map[string]string{
+							"base_url":  server.URL,
+							"plan_type": "pro",
+						},
+						Metadata: map[string]any{
+							"access_token": "test-token",
+							"account_id":   "acct-1",
+						},
+					}
+					payload := []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":` + variant.inputJSON + `,"stream":true` + variant.toolsJSON + variant.toolChoiceJSON + `}`)
+					req := cliproxyexecutor.Request{
+						Model:   "gpt-6-astra",
+						Payload: payload,
+					}
+					opts := cliproxyexecutor.Options{
+						SourceFormat: sdktranslator.FormatOpenAIResponse,
+						Stream:       stream,
+					}
+					if stream {
+						res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+						if errStream != nil {
+							t.Fatalf("ExecuteStream() error = %v", errStream)
+						}
+						for chunk := range res.Chunks {
+							if chunk.Err != nil {
+								t.Fatalf("stream chunk error = %v", chunk.Err)
+							}
+						}
+					} else {
+						if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+							t.Fatalf("Execute() error = %v", errExec)
+						}
+					}
+
+					gotBody := <-capturedBody
+					gotHint := <-capturedHint
+					if gotModel := ojson.GetBytes(gotBody, "model").String(); gotModel != codexOpenAIImagesMainModel {
+						t.Fatalf("upstream model = %q, want %q; body=%s", gotModel, codexOpenAIImagesMainModel, gotBody)
+					}
+					if gotHint != "model="+codexOpenAIImagesMainModel {
+						t.Fatalf("X-Codex-Routing-Hint = %q, want %q", gotHint, "model="+codexOpenAIImagesMainModel)
+					}
+					if ojson.GetBytes(gotBody, "tools.0.complexity").Exists() || ojson.GetBytes(gotBody, "input.0.tools.0.complexity").Exists() {
+						t.Fatalf("complexity should be stripped; body=%s", gotBody)
+					}
+					if variant.toolsJSON != "" {
+						if gotType := ojson.GetBytes(gotBody, "tools.0.type").String(); gotType != "image_generation" {
+							t.Fatalf("tools.0.type = %q, want image_generation; body=%s", gotType, gotBody)
+						}
+						if gotQuality := ojson.GetBytes(gotBody, "tools.0.quality").String(); gotQuality != "high" {
+							t.Fatalf("tools.0.quality = %q, want high from payload override; body=%s", gotQuality, gotBody)
+						}
+					} else if gotType := ojson.GetBytes(gotBody, "input.0.tools.0.type").String(); gotType != "image_generation" {
+						t.Fatalf("input.0.tools.0.type = %q, want image_generation; body=%s", gotType, gotBody)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodexExecutorOptionalImageGenerationPreservesChatModelAndGuidesOnAutoTrigger(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		for _, stream := range []bool{false, true} {
+			streamLabel := "false"
+			if stream {
+				streamLabel = "true"
+			}
+			t.Run("normal_chat_with_optional_tool/"+transport+"/stream="+streamLabel, func(t *testing.T) {
+				capturedBody := make(chan []byte, 1)
+				capturedHint := make(chan string, 1)
+				completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_chat_7270","object":"response","status":"completed","model":"gpt-6-astra","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Hello!"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedHint <- r.Header.Get(codexRoutingHintHeader)
+					if transport == "websocket" {
+						upgrader := websocket.Upgrader{}
+						conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+						if errUpgrade != nil {
+							t.Errorf("upgrade websocket: %v", errUpgrade)
+							return
+						}
+						defer func() {
+							_ = conn.Close()
+						}()
+						_, msg, errRead := conn.ReadMessage()
+						if errRead != nil {
+							t.Errorf("read websocket message: %v", errRead)
+							return
+						}
+						capturedBody <- msg
+						if errWrite := conn.WriteMessage(websocket.TextMessage, completedEvent); errWrite != nil {
+							t.Errorf("write websocket message: %v", errWrite)
+						}
+						return
+					}
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read http body: %v", errRead)
+						return
+					}
+					capturedBody <- body
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write(append(append([]byte("data: "), completedEvent...), '\n', '\n'))
+				}))
+				defer server.Close()
+
+				cfg := &config.Config{}
+				var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+				if transport == "websocket" {
+					exec = NewCodexWebsocketsExecutor(cfg)
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name(),
+					Provider: "codex",
+					Attributes: map[string]string{
+						"base_url":  server.URL,
+						"plan_type": "pro",
+					},
+					Metadata: map[string]any{
+						"access_token": "test-token",
+						"account_id":   "acct-1",
+					},
+				}
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-6-astra",
+					Payload: []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":"Hello","stream":true,"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":"auto"}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:       stream,
+				}
+				if stream {
+					res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream() error = %v", errStream)
+					}
+					for chunk := range res.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error = %v", chunk.Err)
+						}
+					}
+				} else {
+					if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+						t.Fatalf("Execute() error = %v", errExec)
+					}
+				}
+
+				gotBody := <-capturedBody
+				gotHint := <-capturedHint
+				if gotModel := ojson.GetBytes(gotBody, "model").String(); gotModel != "gpt-6-astra" {
+					t.Fatalf("upstream model = %q, want gpt-6-astra; body=%s", gotModel, gotBody)
+				}
+				if gotHint != "model=gpt-6-astra" {
+					t.Fatalf("X-Codex-Routing-Hint = %q, want model=gpt-6-astra", gotHint)
+				}
+				if ojson.GetBytes(gotBody, "tools.0.complexity").Exists() {
+					t.Fatalf("tools.0.complexity should be stripped; body=%s", gotBody)
+				}
+			})
+
+			t.Run("override_and_header_gated_filter/"+transport+"/stream="+streamLabel, func(t *testing.T) {
+				capturedBody := make(chan []byte, 1)
+				completedEvent := []byte(`{"type":"response.completed","response":{"id":"resp_filter_7270","object":"response","status":"completed","model":"gpt-5.4-mini","output":[{"id":"ig_1","type":"image_generation_call","status":"completed","output_format":"png","result":"AA=="}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}`)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if transport == "websocket" {
+						upgrader := websocket.Upgrader{}
+						conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+						if errUpgrade != nil {
+							t.Errorf("upgrade websocket: %v", errUpgrade)
+							return
+						}
+						defer func() {
+							_ = conn.Close()
+						}()
+						_, msg, errRead := conn.ReadMessage()
+						if errRead != nil {
+							t.Errorf("read websocket message: %v", errRead)
+							return
+						}
+						capturedBody <- msg
+						if errWrite := conn.WriteMessage(websocket.TextMessage, completedEvent); errWrite != nil {
+							t.Errorf("write websocket message: %v", errWrite)
+						}
+						return
+					}
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read http body: %v", errRead)
+						return
+					}
+					capturedBody <- body
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = w.Write(append(append([]byte("data: "), completedEvent...), '\n', '\n'))
+				}))
+				defer server.Close()
+
+				cfg := &config.Config{
+					Payload: config.PayloadConfig{
+						Override: []config.PayloadRule{
+							{
+								Models: []config.PayloadModelRule{{Name: "gpt-6-astra"}},
+								Params: map[string]any{"reasoning.effort": "high"},
+							},
+						},
+						Filter: []config.PayloadFilterRule{
+							{
+								Models: []config.PayloadModelRule{{
+									Name:    "gpt-6-astra",
+									Headers: map[string]string{"X-Drop-Image-Tool": "true"},
+								}},
+								Params: []string{"tools"},
+							},
+						},
+					},
+				}
+				var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+				if transport == "websocket" {
+					exec = NewCodexWebsocketsExecutor(cfg)
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name(),
+					Provider: "codex",
+					Attributes: map[string]string{
+						"base_url":  server.URL,
+						"plan_type": "pro",
+					},
+					Metadata: map[string]any{
+						"access_token": "test-token",
+						"account_id":   "acct-1",
+					},
+				}
+				req := cliproxyexecutor.Request{
+					Model:   "gpt-6-astra",
+					Payload: []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":"画一只小猫咪。","stream":true,"tools":[{"type":"image_generation","output_format":"png","complexity":"high"}],"tool_choice":{"type":"image_generation"}}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:       stream,
+					Headers:      http.Header{"X-Drop-Image-Tool": []string{"false"}},
+				}
+				if stream {
+					res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream() error = %v", errStream)
+					}
+					for chunk := range res.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error = %v", chunk.Err)
+						}
+					}
+				} else {
+					if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+						t.Fatalf("Execute() error = %v", errExec)
+					}
+				}
+
+				gotBody := <-capturedBody
+				if gotModel := ojson.GetBytes(gotBody, "model").String(); gotModel != codexOpenAIImagesMainModel {
+					t.Fatalf("upstream model = %q, want %q when header-gated filter does not match; body=%s", gotModel, codexOpenAIImagesMainModel, gotBody)
+				}
+				if gotEffort := ojson.GetBytes(gotBody, "reasoning.effort").String(); gotEffort != "high" {
+					t.Fatalf("reasoning.effort = %q, want high from payload override; body=%s", gotEffort, gotBody)
+				}
+				if gotType := ojson.GetBytes(gotBody, "tools.0.type").String(); gotType != "image_generation" {
+					t.Fatalf("tools.0.type = %q, want image_generation; body=%s", gotType, gotBody)
+				}
+				if ojson.GetBytes(gotBody, "tools.0.complexity").Exists() {
+					t.Fatalf("tools.0.complexity should be stripped; body=%s", gotBody)
+				}
+			})
+		}
+	}
+}
+
+func TestCodexTerminalFailureStatus_ImageGenerationUserErrorMapsToBadRequest(t *testing.T) {
+	failedEvent := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}}`)
+	errTerminal, _, ok := codexTerminalFailureErrWithCooling(failedEvent, false)
+	if !ok {
+		t.Fatal("expected terminal error for response.failed")
+	}
+	if !strings.Contains(errTerminal.Error(), "Complexity 'medium' is not supported for this image model.") {
+		t.Fatalf("unexpected error message: %v", errTerminal)
+	}
+	if !strings.Contains(errTerminal.Error(), "/v1/images/generations") || !strings.Contains(errTerminal.Error(), "gpt-5.4-mini") {
+		t.Fatalf("expected remediation guidance in error message, got: %v", errTerminal)
+	}
+	if got := errTerminal.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("StatusCode() = %d, want %d (%s)", got, http.StatusBadRequest, errTerminal.Error())
 	}
 }

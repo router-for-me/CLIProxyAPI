@@ -199,7 +199,7 @@ func codexTerminalFailureStatus(body []byte) int {
 		return http.StatusForbidden
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
-	case errorType == "invalid_request_error", errorType == "bad_request_error":
+	case errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
 		return http.StatusBadRequest
 	default:
 		return http.StatusBadGateway
@@ -267,6 +267,13 @@ func codexTerminalErrorBody(eventData []byte, path string) []byte {
 	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
 		if errorType := strings.TrimSpace(doc.Get("error.type").String()); errorType != "" {
 			_ = doc.Set("error.message", errorType)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(doc.Get("error.type").String()), "image_generation_user_error") {
+		msg := strings.TrimSpace(doc.Get("error.message").String())
+		param := strings.ToLower(strings.TrimSpace(doc.Get("error.param").String()))
+		if (param == "complexity" || strings.Contains(strings.ToLower(msg), "complexity")) && !strings.Contains(msg, "/v1/images/generations") {
+			_ = doc.Set("error.message", msg+` (Set tool_choice to {"type":"image_generation"}, use a compatible Responses model such as gpt-5.4-mini, or call /v1/images/generations directly.)`)
 		}
 	}
 	return doc.Bytes()
