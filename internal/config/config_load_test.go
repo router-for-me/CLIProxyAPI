@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -264,6 +265,13 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 		// still holds the plaintext.
 		"anchored legacy beside plaintext v8": anchoredLegacy + "current-plaintext-secret\n",
 		"anchored legacy beside hashed v8":    anchoredLegacy + "'" + uploadTestBcrypt(t) + "'\n",
+		// The hashed write-back keeps the secret entry's comments, so one repeating the
+		// plaintext still holds it.
+		"line comment":        "management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
+		"key comment":         "management:\n  # " + uploadTestPlaintextSecret + "\n  secret-key: " + uploadTestPlaintextSecret + "\n",
+		"legacy line comment": "remote-management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
+		// A tagged scalar holds the plaintext it decodes to.
+		"binary copy": "password: !!binary dXBsb2FkLXBsYWludGV4dC1zZWNyZXQ=\nmanagement:\n  secret-key: " + uploadTestPlaintextSecret + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeUploadTestConfig(t, content)
@@ -279,6 +287,33 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 			}
 		})
 	}
+}
+
+// Only the secret entry's own comments are checked: a short secret that appears in an
+// unrelated comment does not block seeding, and a !!binary bcrypt hash needs no rewrite.
+func TestPrepareConfigFileForUploadAcceptsUnrelatedCommentsAndTaggedHash(t *testing.T) {
+	hashed := uploadTestBcrypt(t)
+	t.Run("short secret in an unrelated comment", func(t *testing.T) {
+		path := writeUploadTestConfig(t, "# password-env: STORE_PASSWORD\nproxy-url: '' # no password here\nmanagement:\n  secret-key: password\n")
+		if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
+			t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+		}
+		saved := readUploadTestConfig(t, path)
+		secret, _ := uploadTestSecret(t, saved, "management")
+		if errCompare := bcrypt.CompareHashAndPassword([]byte(secret), []byte("password")); errCompare != nil {
+			t.Fatalf("management.secret-key %q is not the bcrypt hash of the secret:\n%s", secret, saved)
+		}
+	})
+	t.Run("binary bcrypt hash", func(t *testing.T) {
+		content := "management:\n  secret-key: !!binary " + base64.StdEncoding.EncodeToString([]byte(hashed)) + "\n"
+		path := writeUploadTestConfig(t, content)
+		if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
+			t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+		}
+		if saved := readUploadTestConfig(t, path); saved != content {
+			t.Fatalf("hashed config rewritten to %q, want it untouched", saved)
+		}
+	})
 }
 
 // The plaintext a hashed write-back leaves at an anchor is found by value once the
