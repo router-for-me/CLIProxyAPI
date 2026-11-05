@@ -1776,6 +1776,95 @@ func TestGeminiExecutorPromptFeedbackBlockWithoutCandidatesReturnsError(t *testi
 			t.Fatalf("geminiPromptBlockErrorMessage(wrapped) = (%q, %v), wantSAFETY blocked true", msg, blocked)
 		}
 	})
+
+	t.Run("mid_stream_gemini_filter_block_returns_400_request_fault", func(t *testing.T) {
+		thoughtFrame := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":10,"totalTokenCount":110},"modelVersion":"gemini-4-argon-b","responseId":"resp-1"}}`
+		filterFrame := `{"response":{"candidates":[{"content":{"parts":[{"text":"This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + thoughtFrame + "\n\ndata: " + filterFrame + "\n\n"))
+		}))
+		defer server.Close()
+
+		exec := NewGeminiExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID:       t.Name(),
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":  "test-key",
+				"base_url": server.URL,
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   "gemini-4-argon-high",
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+		}
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		var streamErr error
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				streamErr = chunk.Err
+			}
+		}
+		if streamErr == nil {
+			t.Fatal("ExecuteStream() chunk.Err = nil, want 400 filter block error")
+		}
+		streamStatus, okStatus := streamErr.(interface{ StatusCode() int })
+		if !okStatus || streamStatus.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 400", streamErr, streamErr)
+		}
+	})
+
+	t.Run("mid_stream_quoted_filter_notice_followed_by_completion_succeeds", func(t *testing.T) {
+		filterFrame := `{"response":{"candidates":[{"content":{"parts":[{"text":"This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`
+		finalFrame := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" (quoted above)"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"totalTokenCount":17},"modelVersion":"gemini-4-argon-b","responseId":"resp-2"}}`
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + filterFrame + "\n\ndata: " + finalFrame + "\n\n"))
+		}))
+		defer server.Close()
+
+		exec := NewGeminiExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID:       t.Name(),
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":  "test-key",
+				"base_url": server.URL,
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   "gemini-4-argon-high",
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"quote notice"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+		}
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		var payloadCount int
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected stream error: %v", chunk.Err)
+			}
+			if len(chunk.Payload) > 0 {
+				payloadCount++
+			}
+		}
+		if payloadCount < 2 {
+			t.Fatalf("expected both quoted chunk and completion chunk, got %d", payloadCount)
+		}
+	})
 }
 
 func TestGeminiAndVertexOpenAIStreamTruncationReturnsError(t *testing.T) {

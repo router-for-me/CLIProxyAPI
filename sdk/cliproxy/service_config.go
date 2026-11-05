@@ -205,6 +205,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
+	if s.kvStoreManaged.Load() {
+		s.applyKVStoreConfig(cfg)
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
@@ -353,4 +356,5 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
+	cfg.KVStore.Disabled = true
 }
