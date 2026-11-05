@@ -6,6 +6,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -158,8 +159,12 @@ func observeClaudeSSEEvent(rawEvent []byte, messageID *string, completed *bool, 
 		return
 	}
 	observeClaudeStreamJSONPayload(joined, true, messageID, completed)
-	if streamErr != nil && *streamErr == nil && util.ParseGJSONBytesNoCopy(joined).Get("type").String() == "error" {
-		*streamErr = statusErr{code: 502, msg: string(joined)}
+	if streamErr != nil && *streamErr == nil {
+		if util.ParseGJSONBytesNoCopy(joined).Get("type").String() == "error" {
+			*streamErr = statusErr{code: 502, msg: string(joined)}
+		} else if refusalMsg, blocked := clienterror.ClaudePolicyRefusalMessage(joined); blocked {
+			*streamErr = statusErr{code: 400, msg: refusalMsg}
+		}
 	}
 }
 
