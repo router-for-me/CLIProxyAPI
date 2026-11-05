@@ -86,14 +86,14 @@ func prepareConfigForUpload(data []byte) ([]byte, error) {
 	if errLayout != nil {
 		return nil, errLayout
 	}
-	if plaintexts := plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey); len(plaintexts) > 0 {
+	if plaintexts := PlaintextManagementSecrets(data); len(plaintexts) > 0 {
 		var doc yaml.Node
 		if errParse := yaml.Unmarshal(cleaned, &doc); errParse != nil {
 			return nil, fmt.Errorf("failed to parse prepared config: %w", errParse)
 		}
 		for _, plaintext := range plaintexts {
-			if yamlScalarExists(&doc, plaintext) {
-				return nil, errors.New("plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value")
+			if yamlScalarExists(&doc, plaintext) || (len(doc.Content) > 0 && secretEntryCommentHolds(doc.Content[0], plaintext)) {
+				return nil, errors.New("plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor, as another setting's value or in a comment")
 			}
 		}
 	}
@@ -111,7 +111,7 @@ func plaintextManagementSecrets(data []byte, effective string) []string {
 		root := expandConfigAliases(doc.Content[0])
 		for _, path := range []string{"remote-management.secret-key", "management.secret-key"} {
 			if node := yamlPath(root, path); node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() != "!!null" {
-				candidates = append(candidates, node.Value)
+				candidates = append(candidates, yamlScalarText(node))
 			}
 		}
 	}
@@ -125,11 +125,12 @@ func plaintextManagementSecrets(data []byte, effective string) []string {
 }
 
 // yamlScalarExists reports whether node or any value below it is a non-null scalar equal
-// to value. Mapping keys only name settings and are skipped, as are alias nodes, whose
-// anchors are visited where they are defined.
+// to value, by its raw spelling or by the value a tag decodes it to. Mapping keys only
+// name settings and are skipped, as are alias nodes, whose anchors are visited where
+// they are defined.
 func yamlScalarExists(node *yaml.Node, value string) bool {
 	if node.Kind == yaml.ScalarNode {
-		return node.ShortTag() != "!!null" && node.Value == value
+		return node.ShortTag() != "!!null" && (node.Value == value || yamlScalarText(node) == value)
 	}
 	first, step := 0, 1
 	if node.Kind == yaml.MappingNode {
@@ -141,6 +142,33 @@ func yamlScalarExists(node *yaml.Node, value string) bool {
 		}
 	}
 	return false
+}
+
+// secretEntryCommentHolds reports whether a comment on a management secret entry (the
+// secret-key key or its value, in either section) holds value. The hashed write-back
+// rewrites that value in place and keeps those comments, so `secret-key: s3cret # s3cret`
+// would still carry the plaintext. Comments elsewhere are left alone: a short secret
+// would match unrelated words in them.
+func secretEntryCommentHolds(root *yaml.Node, value string) bool {
+	for _, section := range []string{"management", "remote-management"} {
+		for _, mapping := range yamlKeyValues(root, section, map[*yaml.Node]bool{}) {
+			if mapping.Kind != yaml.MappingNode {
+				continue
+			}
+			for i := 0; i+1 < len(mapping.Content); i += 2 {
+				key, val := mapping.Content[i], mapping.Content[i+1]
+				if yamlScalarText(resolveYAMLAlias(key)) == "secret-key" && (yamlCommentHolds(key, value) || yamlCommentHolds(val, value)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// yamlCommentHolds reports whether a comment attached to node contains value.
+func yamlCommentHolds(node *yaml.Node, value string) bool {
+	return strings.Contains(node.HeadComment, value) || strings.Contains(node.LineComment, value) || strings.Contains(node.FootComment, value)
 }
 
 // managementSecretKeyPath returns the management secret key path used by data: the v8
@@ -225,7 +253,12 @@ func managementSecretNodes(root *yaml.Node) []*yaml.Node {
 // empty value, an explicit YAML null (`null`, `~`, which decodes as empty) or a
 // bcrypt hash. A quoted 'null' is a string and holds plaintext.
 func emptyOrHashedSecret(secret *yaml.Node) bool {
-	return secret.Kind == yaml.ScalarNode && (secret.ShortTag() == "!!null" || secret.Value == "" || looksLikeBcrypt(secret.Value))
+	if secret.Kind != yaml.ScalarNode {
+		return false
+	}
+	// A tagged value (`!!binary <base64 of the hash>`) is classified as it decodes.
+	text := yamlScalarText(secret)
+	return secret.ShortTag() == "!!null" || text == "" || looksLikeBcrypt(text)
 }
 
 // PlaintextManagementSecrets returns the plaintext management secrets config YAML
@@ -279,7 +312,7 @@ func HoldsAnyScalarValue(data []byte, values []string) bool {
 // repeats the plaintext (`secret-key: s3cret # s3cret`) still holds it. A tagged
 // scalar matches by its raw spelling and by the value it decodes to.
 func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
-	if strings.Contains(node.HeadComment, value) || strings.Contains(node.LineComment, value) || strings.Contains(node.FootComment, value) {
+	if yamlCommentHolds(node, value) {
 		return true
 	}
 	if node.Kind == yaml.ScalarNode {

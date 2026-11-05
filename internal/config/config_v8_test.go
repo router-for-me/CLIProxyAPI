@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gopkg.in/yaml.v3"
@@ -905,6 +906,9 @@ func TestHasPlaintextSecretKey(t *testing.T) {
 		{"!!binary bWFuYWdlbWVudA==: {secret-key: plain-secret}\n", true},
 		{"management: {!!str secret-key: plain-secret}\n", true},
 		{"remote-management: {!!binary c2VjcmV0LWtleQ==: '" + hashed + "'}\n", false},
+		// A tagged value is classified as it decodes: a !!binary bcrypt hash is hashed.
+		{"management: {secret-key: !!binary " + base64.StdEncoding.EncodeToString([]byte(hashed)) + "}\n", false},
+		{"management: {secret-key: !!binary cGxhaW4tc2VjcmV0}\n", true},
 	} {
 		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
 			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)
