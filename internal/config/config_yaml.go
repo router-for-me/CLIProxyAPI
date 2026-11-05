@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -37,14 +38,21 @@ func WriteConfigFile(path string, data []byte) error {
 		return err
 	}
 	if _, errWrite := f.Write(data); errWrite != nil {
-		_ = f.Close()
-		return errWrite
+		return joinConfigCloseError(errWrite, f)
 	}
 	if errSync := f.Sync(); errSync != nil {
-		_ = f.Close()
-		return errSync
+		return joinConfigCloseError(errSync, f)
 	}
 	return f.Close()
+}
+
+// joinConfigCloseError closes f after a failed write and keeps a close failure
+// beside err, so an uncertain file state is not hidden.
+func joinConfigCloseError(err error, f *os.File) error {
+	if errClose := f.Close(); errClose != nil {
+		return errors.Join(err, fmt.Errorf("close config file: %w", errClose))
+	}
+	return err
 }
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
