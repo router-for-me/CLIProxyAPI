@@ -107,6 +107,15 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		return normalized, bytes.Clone(normalized), nil
 	}
 
+	// A response.create that resends the previous request's whole input is a
+	// self-contained replay (for example a client re-sending its last request to
+	// keep the prompt cache warm, or retrying it), not an incremental append.
+	// Merging it would send the conversation to the upstream twice.
+	if inputReplaysPreviousRequest(rawJSON, nextInput, lastRequest) {
+		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		return normalized, bytes.Clone(normalized), nil
+	}
+
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
 	// Do not expand it into a full input transcript; upstream expects the incremental payload.
 	if allowIncrementalInputWithPreviousResponseID {
@@ -207,6 +216,45 @@ func shouldReplaceWebsocketTranscript(rawJSON []byte, nextInput ojson.Result) bo
 	}
 
 	return false
+}
+
+// inputReplaysPreviousRequest reports whether a response.create without
+// previous_response_id starts with every input item of the previous request, in
+// order. Incremental clients send only the new items, so a full prefix match
+// means the client sent its whole transcript again.
+func inputReplaysPreviousRequest(rawJSON []byte, nextInput ojson.Result, lastRequest []byte) bool {
+	var fieldsBuf [2]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "type", "previous_response_id")
+	if strings.TrimSpace(fields[0].String()) != wsRequestTypeCreate || strings.TrimSpace(fields[1].String()) != "" {
+		return false
+	}
+	previousInput := ojson.GetBytesNoCopy(lastRequest, "input")
+	if !previousInput.IsArray() || !nextInput.IsArray() {
+		return false
+	}
+	previousItems := previousInput.Array()
+	nextItems := nextInput.Array()
+	if len(previousItems) == 0 || len(nextItems) < len(previousItems) {
+		return false
+	}
+	for i, previousItem := range previousItems {
+		if !sameJSONValue(previousItem.Raw, nextItems[i].Raw) {
+			return false
+		}
+	}
+	return true
+}
+
+// sameJSONValue compares two raw JSON values ignoring insignificant whitespace.
+func sameJSONValue(a, b string) bool {
+	if a == b {
+		return true
+	}
+	var compactA, compactB bytes.Buffer
+	if json.Compact(&compactA, []byte(a)) != nil || json.Compact(&compactB, []byte(b)) != nil {
+		return false
+	}
+	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
 func inputHasCodexLocalCompactionSummary(input ojson.Result) bool {
