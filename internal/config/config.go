@@ -66,6 +66,9 @@ type Config struct {
 	// Discovery configures local network mDNS / DNS-SD service advertising.
 	Discovery DiscoveryConfig `yaml:"discovery" json:"discovery"`
 
+	// KVStore configures the local bbolt key-value store.
+	KVStore KVStoreConfig `yaml:"kv-store" json:"kv-store"`
+
 	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
 

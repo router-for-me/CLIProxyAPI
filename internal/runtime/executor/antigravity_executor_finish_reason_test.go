@@ -346,3 +346,25 @@ func TestAntigravityAssemblyReplacesOnlyContentParts(t *testing.T) {
 		})
 	}
 }
+
+func TestAntigravityStreamPreservesQuotedFilterNoticeWithUsageMetadata(t *testing.T) {
+	quotedNotice := "This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"response":{"candidates":[{"content":{"parts":[{"text":"`+quotedNotice+`"}]}}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":40,"totalTokenCount":52}}}`+"\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	chunks := collectAntigravityStream(t, server.URL, sdktranslator.FormatGemini, sdktranslator.FormatGemini,
+		`{"contents":[{"role":"user","parts":[{"text":"explain the filter message"}]}]}`)
+	var joined bytes.Buffer
+	for _, chunk := range chunks {
+		joined.Write(chunk)
+	}
+	if !bytes.Contains(joined.Bytes(), []byte(quotedNotice)) {
+		t.Fatalf("expected quoted filter notice in stream output, got %s", joined.String())
+	}
+}
