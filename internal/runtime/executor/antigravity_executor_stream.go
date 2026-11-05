@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -261,6 +262,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			streamUsage.Publish(ctx, reporter)
 			reporter.EnsurePublished(ctx)
 		}()
+		var pendingFilterPayload []byte
+		var pendingFilterMsg string
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -271,10 +274,6 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 
 			// Capture accounting before the client-facing filter renames usage.
 			streamUsage.ObserveAntigravityStream(line)
-
-			// Filter usage metadata for all models
-			// Only retain usage statistics in the terminal chunk
-			line = helps.FilterSSEUsageMetadata(line)
 
 			payload := helps.JSONPayload(line)
 			if len(pendingJSON) > 0 {
@@ -312,70 +311,100 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				}
 				return
 			}
-			reporter.ObserveResponseModel(payload)
+			processPayload := func(p []byte) bool {
+				// Filter usage metadata for all models after block classification
+				// so only the terminal chunk retains client-visible usage statistics.
+				p = helps.JSONPayload(helps.FilterSSEUsageMetadata(append([]byte("data: "), p...)))
+				if len(p) == 0 {
+					return true
+				}
+				reporter.ObserveResponseModel(p)
 
-			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(payload), &param, claudeInputTokens)
-			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			var isTerminalChunk bool
-			if finishReason := ojson.GetBytesNoCopy(payload, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-				isTerminalChunk = true
-			} else if finishReason := ojson.GetBytesNoCopy(payload, "response.candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-				isTerminalChunk = true
-			} else if replayAccumulator != nil && replayAccumulator.terminal {
-				isTerminalChunk = true
-			}
-			if !isTerminalChunk {
-				for _, chunk := range chunks {
-					for _, cLine := range bytes.Split(chunk, []byte("\n")) {
-						trimmed := bytes.TrimSpace(cLine)
-						if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
-							isTerminalChunk = true
-							break
-						}
-						cPayload := helps.JSONPayload(cLine)
-						if len(cPayload) == 0 {
-							continue
-						}
-						cType := ojson.GetBytesNoCopy(cPayload, "type").String()
-						if cType == "response.completed" || cType == "message_stop" {
-							isTerminalChunk = true
-							break
-						}
-						if finishReason := ojson.GetBytesNoCopy(cPayload, "choices.0.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
-							isTerminalChunk = true
-							break
-						}
-					}
-					if isTerminalChunk {
-						break
-					}
+				p = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, p)
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(p), &param, claudeInputTokens)
+				helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+				var isTerminalChunk bool
+				if finishReason := ojson.GetBytesNoCopy(p, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+					isTerminalChunk = true
+				} else if finishReason := ojson.GetBytesNoCopy(p, "response.candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+					isTerminalChunk = true
+				} else if replayAccumulator != nil && replayAccumulator.terminal {
+					isTerminalChunk = true
 				}
-			}
-			if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && responseFormat == sdktranslator.FormatOpenAIResponse {
-				// Wait for the translated completion, not the first finishReason:
-				// split usage/signature frames may still extend the replay ledger.
-				for _, chunk := range chunks {
-					for _, line := range bytes.Split(chunk, []byte("\n")) {
-						if ojson.GetBytesNoCopy(helps.JSONPayload(line), "type").String() == "response.completed" {
-							commitReplay()
+				if !isTerminalChunk {
+					for _, chunk := range chunks {
+						for _, cLine := range bytes.Split(chunk, []byte("\n")) {
+							trimmed := bytes.TrimSpace(cLine)
+							if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
+								isTerminalChunk = true
+								break
+							}
+							cPayload := helps.JSONPayload(cLine)
+							if len(cPayload) == 0 {
+								continue
+							}
+							cType := ojson.GetBytesNoCopy(cPayload, "type").String()
+							if cType == "response.completed" || cType == "message_stop" {
+								isTerminalChunk = true
+								break
+							}
+							if finishReason := ojson.GetBytesNoCopy(cPayload, "choices.0.finish_reason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+								isTerminalChunk = true
+								break
+							}
+						}
+						if isTerminalChunk {
+							break
 						}
 					}
 				}
+				if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && responseFormat == sdktranslator.FormatOpenAIResponse {
+					for _, chunk := range chunks {
+						for _, line := range bytes.Split(chunk, []byte("\n")) {
+							if ojson.GetBytesNoCopy(helps.JSONPayload(line), "type").String() == "response.completed" {
+								commitReplay()
+							}
+						}
+					}
+				}
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						return false
+					}
+				}
+				if isTerminalChunk {
+					terminalDelivered = true
+				}
+				return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			}
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
+			if len(pendingFilterPayload) > 0 {
+				flushed := pendingFilterPayload
+				pendingFilterPayload = nil
+				pendingFilterMsg = ""
+				if !processPayload(flushed) {
 					return
 				}
 			}
-			if isTerminalChunk {
-				terminalDelivered = true
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(payload); blocked {
+				pendingFilterPayload = bytes.Clone(payload)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+			if !processPayload(payload) {
 				return
 			}
+		}
+		if pendingFilterMsg != "" && scanner.Err() == nil && !terminalDelivered {
+			streamErr = statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			stopDeliverySupport()
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+			return
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return

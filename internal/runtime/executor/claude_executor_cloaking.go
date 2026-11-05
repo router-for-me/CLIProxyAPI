@@ -1995,6 +1995,13 @@ func claudeSessionDatePinRetention(cfg *config.Config) time.Duration {
 	return cfg.Claude.SessionDatePinRetention()
 }
 
+func claudeSessionDatePinEnabled(cfg *config.Config) bool {
+	if helps.IsClaudeSessionDatePinKVActive() {
+		return true
+	}
+	return claudeSessionDatePinRetention(cfg) > 0
+}
+
 // claudeCallerCurrentDateReminderDate returns the date of the first valid
 // caller-supplied currentDate reminder in the first user message.
 func claudeCallerCurrentDateReminderDate(payload []byte) string {
@@ -2092,10 +2099,13 @@ func resolveClaudeSessionPinnedDate(
 ) string {
 	retention := claudeSessionDatePinRetention(cfg)
 	candidate := claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
-	if retention <= 0 {
+	if !claudeSessionDatePinEnabled(cfg) {
 		return helps.PinClaudeSessionDate(continuityKey, sessionID, candidate, retention)
 	}
 	if existing := helps.LookupClaudeSessionDatePin(sessionID, retention); existing != "" {
+		if helps.IsClaudeSessionDatePinKVActive() {
+			return existing
+		}
 		// Re-pin the anchored date so the sliding retention refreshes
 		// without ever changing the established prefix.
 		return helps.PinClaudeSessionDate(continuityKey, sessionID, existing, retention)
@@ -2115,10 +2125,13 @@ func resolveClaudeSessionPinnedDateDoc(
 ) string {
 	retention := claudeSessionDatePinRetention(cfg)
 	candidate := claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
-	if retention <= 0 {
+	if !claudeSessionDatePinEnabled(cfg) {
 		return helps.PinClaudeSessionDate(continuityKey, sessionID, candidate, retention)
 	}
 	if existing := helps.LookupClaudeSessionDatePin(sessionID, retention); existing != "" {
+		if helps.IsClaudeSessionDatePinKVActive() {
+			return existing
+		}
 		return helps.PinClaudeSessionDate(continuityKey, sessionID, existing, retention)
 	}
 	if callerDate := claudeCallerCurrentDateReminderDateDoc(doc); callerDate != "" {
@@ -2596,7 +2609,7 @@ func applyCloakingInternalDoc(
 	if pinnedDate == "" {
 		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
 	}
-	if !isProbeOrHelper && claudeSessionDatePinRetention(cfg) > 0 {
+	if !isProbeOrHelper && claudeSessionDatePinEnabled(cfg) {
 		// Strip a string-form caller reminder before the pipeline turns the
 		// content into blocks, so user text is never dropped with it.
 		stripFirstUserClaudeCodeCurrentDateReminderDoc(doc)
