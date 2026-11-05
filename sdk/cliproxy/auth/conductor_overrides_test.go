@@ -3192,6 +3192,36 @@ func TestManager_MarkResult_DisableCooling_FreshSuccessClearsResetUnderRetainedC
 	}
 }
 
+// A success with an unknown sequence (zero, direct MarkResult callers) is exempt
+// from the ordering guard, as a 429 is: it clears the reset even while a live
+// credential-wide quota keeps the rest of the state.
+func TestManager_MarkResult_DisableCooling_UnknownSeqSuccessClearsResetUnderCredentialQuota(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-unknown-seq-success-quota", "test-model-unknown-seq-success-quota"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	quotaUntil := time.Now().Add(time.Minute)
+	m.mu.Lock()
+	m.auths[id].Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: quotaUntil}
+	m.mu.Unlock()
+
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, Success: true})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auth := m.auths[id]
+	if auth.Quota.Reason != "credential_quota" || !auth.Quota.NextRecoverAt.Equal(quotaUntil) {
+		t.Fatalf("quota = %+v, want the credential quota kept", auth.Quota)
+	}
+	if got := coolingDisabledRetryAt(auth, model); !got.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by the unknown-sequence success", got)
+	}
+}
+
 // Merging keeps the reset recorded last with its own deadline, not the longest
 // deadline beside the highest watermark.
 func TestMergeModelStatePairsResetWithItsWatermark(t *testing.T) {
