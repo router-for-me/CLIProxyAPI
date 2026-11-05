@@ -3222,6 +3222,53 @@ func TestManager_MarkResult_DisableCooling_UnknownSeqSuccessClearsResetUnderCred
 	}
 }
 
+// Direct MarkResult callers write every reset under the same watermark. Merging
+// two such states (an alias change) keeps the reset written last, so a newer short
+// hint or explicit zero is not overridden by an older, longer one, in either merge
+// direction. A state that never held a reset does not drop a live one.
+func TestMergeModelStateKeepsResetWrittenLastWhenWatermarksTie(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id = "auth-merge-tied-watermarks"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	mark := func(model string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+	state := func(model string) *ModelState {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.auths[id].ModelStates[model].Clone()
+	}
+
+	mark("old-long", 2*time.Hour)
+	mark("new-short", time.Minute)
+	mark("new-cleared", time.Hour)
+	mark("new-cleared", 0)
+	oldLong, newShort, newCleared := state("old-long"), state("new-short"), state("new-cleared")
+	if oldLong.coolingDisabledRetrySeq != newShort.coolingDisabledRetrySeq || oldLong.coolingDisabledRetrySeq != newCleared.coolingDisabledRetrySeq {
+		t.Fatalf("watermarks %d/%d/%d, want them tied", oldLong.coolingDisabledRetrySeq, newShort.coolingDisabledRetrySeq, newCleared.coolingDisabledRetrySeq)
+	}
+
+	for name, tc := range map[string]struct {
+		target, source *ModelState
+		want           time.Time
+	}{
+		"newer short into older long": {oldLong, newShort, newShort.coolingDisabledRetryAt},
+		"older long into newer short": {newShort, oldLong, newShort.coolingDisabledRetryAt},
+		"newer zero into older long":  {oldLong, newCleared, time.Time{}},
+		"older long into newer zero":  {newCleared, oldLong, time.Time{}},
+		"never-reset into live":       {oldLong, &ModelState{}, oldLong.coolingDisabledRetryAt},
+		"live into never-reset":       {&ModelState{}, oldLong, oldLong.coolingDisabledRetryAt},
+	} {
+		merged := mergeModelState(tc.target.Clone(), tc.source.Clone())
+		if !merged.coolingDisabledRetryAt.Equal(tc.want) {
+			t.Errorf("%s: merged reset = %v, want %v", name, merged.coolingDisabledRetryAt, tc.want)
+		}
+	}
+}
+
 // Merging keeps the reset recorded last with its own deadline, not the longest
 // deadline beside the highest watermark.
 func TestMergeModelStatePairsResetWithItsWatermark(t *testing.T) {
