@@ -936,12 +936,31 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 		if resolved := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking()); resolved.Thinking != nil {
 			info.Thinking = resolved.Thinking
 		}
-		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil && staticInfo.NativeCapabilities != nil {
-			info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil {
+			if staticInfo.NativeCapabilities != nil {
+				info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+			}
+			inheritStaticModelLimits(info, staticInfo)
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+// inheritStaticModelLimits fills the context window and output limit a configured
+// model leaves unset from the catalog entry of its upstream model. Without them,
+// clients such as the Codex model list fall back to template defaults. Values
+// set in the configuration (max-context-length) win.
+func inheritStaticModelLimits(info, staticInfo *ModelInfo) {
+	if info == nil || staticInfo == nil {
+		return
+	}
+	if info.ContextLength <= 0 && staticInfo.ContextLength > 0 {
+		info.ContextLength = staticInfo.ContextLength
+	}
+	if info.MaxCompletionTokens <= 0 && staticInfo.MaxCompletionTokens > 0 {
+		info.MaxCompletionTokens = staticInfo.MaxCompletionTokens
+	}
 }
 
 func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
