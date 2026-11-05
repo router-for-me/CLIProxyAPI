@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategySoonestReset       schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -57,6 +58,8 @@ type providerScheduler struct {
 	providerKey string
 	auths       map[string]*scheduledAuthMeta
 	modelShards map[string]*modelScheduler
+	// soonestResetProbes records soonest-reset probe picks across this provider's shards.
+	soonestResetProbes soonestResetProbes
 }
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
@@ -68,10 +71,14 @@ type scheduledAuthMeta struct {
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
 	registryEpoch     uint64
+	// soonestReset is the parsed quota snapshot used by the soonest-reset strategy.
+	soonestReset soonestResetFacts
 }
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
+	// provider is the owning provider scheduler, whose auth metadata is always the freshest.
+	provider        *providerScheduler
 	modelKey        string
 	entries         map[string]*scheduledAuth
 	priorityOrder   []int
@@ -170,6 +177,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 		return schedulerStrategyFillFirst
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
+	case *SoonestResetSelector:
+		return schedulerStrategySoonestReset
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -423,6 +432,9 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 	}
 	predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
+		if strategy == schedulerStrategySoonestReset && soonestResetProbeAllowed(ctx) {
+			shard.recordSoonestResetProbeLocked(picked, time.Now())
+		}
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -484,6 +496,9 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
 		predicate := scheduledAuthPredicate(eligibility, tried, pinnedAuthID, strategy == schedulerStrategyWeightedRoundRobin)
 		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
+			if strategy == schedulerStrategySoonestReset && soonestResetProbeAllowed(ctx) {
+				shard.recordSoonestResetProbeLocked(picked, time.Now())
+			}
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -527,6 +542,40 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 			if picked != nil {
 				return picked, providerKey, nil
 			}
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+
+	if strategy == schedulerStrategySoonestReset {
+		// Rank across every provider, like the legacy selector, which sees all candidates.
+		var best *scheduledAuth
+		var bestShard *modelScheduler
+		var bestRank soonestResetRank
+		for _, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			bucket := shard.readyByPriority[bestPriority]
+			if bucket == nil {
+				continue
+			}
+			for _, entry := range bucket.all.flat {
+				if entry == nil || entry.auth == nil || entry.meta == nil || !predicate(entry) {
+					continue
+				}
+				rank := shard.soonestResetRankLocked(entry, now)
+				if best == nil || soonestResetPrefers(rank, entry.auth.ID, bestRank, best.auth.ID) {
+					best = entry
+					bestShard = shard
+					bestRank = rank
+				}
+			}
+		}
+		if best != nil {
+			if soonestResetProbeAllowed(ctx) {
+				bestShard.recordSoonestResetProbeLocked(best.auth, now)
+			}
+			return best.auth, best.meta.providerKey, nil
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
@@ -840,6 +889,9 @@ func (s *authScheduler) upsertAuthRebuildLocked(auth *Auth, existingMetas map[st
 	providerState := s.ensureProviderLocked(providerKey)
 	regEpoch := registry.GetGlobalRegistry().ClientRegistrationEpoch(authID)
 	meta := buildScheduledAuthMetaWithModelSet(authToSchedule, supportedModelSetForAuth(authToSchedule.ID), regEpoch)
+	if previous := existingMetas[authID]; previous != nil {
+		meta.soonestReset = meta.soonestReset.carry(previous.soonestReset)
+	}
 	s.authProviders[authID] = providerKey
 	providerState.upsertAuthForModelsLocked(meta, nil, true, now)
 }
@@ -1059,6 +1111,7 @@ func buildScheduledAuthMetaWithModelSet(auth *Auth, modelSet map[string]struct{}
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: modelSet,
 		registryEpoch:     regEpoch,
+		soonestReset:      soonestResetFactsFor(auth),
 	}
 }
 
@@ -1095,6 +1148,9 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 func (p *providerScheduler) upsertAuthForModelsLocked(meta *scheduledAuthMeta, targetModels []string, credentialScoped bool, now time.Time) {
 	if p == nil || meta == nil || meta.auth == nil {
 		return
+	}
+	if previous := p.auths[meta.auth.ID]; previous != nil && previous != meta {
+		meta.soonestReset = meta.soonestReset.carry(previous.soonestReset)
 	}
 	p.auths[meta.auth.ID] = meta
 	if credentialScoped || len(targetModels) == 0 {
@@ -1172,6 +1228,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		return shard
 	}
 	shard := &modelScheduler{
+		provider:        p,
 		modelKey:        modelKey,
 		entries:         make(map[string]*scheduledAuth),
 		readyByPriority: make(map[int]*readyBucket),
@@ -1384,6 +1441,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		picked = view.pickFirst(predicate)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
+	case schedulerStrategySoonestReset:
+		picked = m.pickSoonestResetLocked(view, predicate, time.Now())
 	default:
 		picked = view.pickRoundRobin(predicate)
 	}
@@ -1683,6 +1742,84 @@ func scheduledSuccessorIndex(entries []*scheduledAuth, lastID string) int {
 		return 0
 	}
 	return index
+}
+
+// soonestResetFacts returns the soonest-reset facts recorded for ids; ids the scheduler does
+// not track are omitted.
+func (s *authScheduler) soonestResetFacts(ids []string) map[string]soonestResetFacts {
+	if s == nil || len(ids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	facts := make(map[string]soonestResetFacts, len(ids))
+	for _, id := range ids {
+		providerState := s.providers[s.authProviders[id]]
+		if providerState == nil {
+			continue
+		}
+		if meta := providerState.auths[id]; meta != nil {
+			facts[id] = meta.soonestReset
+		}
+	}
+	return facts
+}
+
+// pickSoonestResetLocked returns the ready entry in view whose weekly usage window resets
+// soonest. Ranks are computed at pick time because quota snapshots change on every result
+// without reordering the view; the view is ID-sorted, so equal ranks resolve to the lowest
+// ID. Callers record probe picks with recordSoonestResetProbeLocked.
+func (m *modelScheduler) pickSoonestResetLocked(view *readyView, predicate func(*scheduledAuth) bool, now time.Time) *scheduledAuth {
+	var best *scheduledAuth
+	var bestRank soonestResetRank
+	for _, entry := range view.flat {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		rank := m.soonestResetRankLocked(entry, now)
+		if best == nil || rank.less(bestRank) {
+			best = entry
+			bestRank = rank
+		}
+	}
+	return best
+}
+
+// soonestResetRankLocked ranks entry from the freshest snapshot of its auth. Targeted result
+// updates refresh only the result's model shards, so other shards can hold an older entry,
+// while the provider-level metadata is replaced on every update.
+func (m *modelScheduler) soonestResetRankLocked(entry *scheduledAuth, now time.Time) soonestResetRank {
+	meta := entry.meta
+	var probes soonestResetProbes
+	if m != nil && m.provider != nil {
+		if fresh := m.provider.auths[entry.auth.ID]; fresh != nil {
+			meta = fresh
+		}
+		probes = m.provider.soonestResetProbes
+	}
+	var facts soonestResetFacts
+	if meta != nil {
+		facts = meta.soonestReset
+	} else {
+		facts = soonestResetFactsFor(entry.auth)
+	}
+	return facts.rank(now, probes.pending(entry.auth.ID, now))
+}
+
+// recordSoonestResetProbeLocked notes the pick of auth as a soonest-reset probe when it ranks
+// as one, so concurrent picks skip it while its response is pending.
+func (m *modelScheduler) recordSoonestResetProbeLocked(auth *Auth, now time.Time) {
+	if m == nil || m.provider == nil || auth == nil {
+		return
+	}
+	entry := m.entries[auth.ID]
+	if entry == nil || entry.auth == nil || m.soonestResetRankLocked(entry, now).class != soonestResetClassProbe {
+		return
+	}
+	m.provider.soonestResetProbes.record(auth.ID, now)
 }
 
 // pickWeighted returns the next ready entry using smooth weighted round-robin.
