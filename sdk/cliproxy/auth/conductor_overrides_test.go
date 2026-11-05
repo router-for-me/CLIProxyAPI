@@ -3112,6 +3112,63 @@ func TestManager_ReconcileRegistryModelStates_KeepsClearedResetWatermark(t *test
 	}
 }
 
+// Alias migration must also carry a state whose only content is a cleared reset
+// write: a clear written after the target's reset replaces it, and one written
+// before leaves it live.
+func TestManager_ReconcileRegistryModelStates_MigratesClearedResetWrite(t *testing.T) {
+	const (
+		provider    = "antigravity"
+		routeModel  = "[ant]gemini-3.7-flash-high"
+		targetModel = "gemini-3.7-flash-high"
+	)
+	for name, tc := range map[string]struct {
+		clearStamp uint64
+		wantLive   bool
+	}{
+		"clear written after the target's reset":  {clearStamp: 5, wantLive: false},
+		"clear written before the target's reset": {clearStamp: 2, wantLive: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(&noForkAliasTestExecutor{id: provider})
+			manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+				provider: {{Name: targetModel, Alias: routeModel, Fork: false}},
+			})
+			auth := &Auth{ID: "auth-migrate-cleared-reset", Provider: provider, Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+			live := time.Now().Add(time.Hour)
+			manager.mu.Lock()
+			manager.auths[auth.ID].ModelStates = map[string]*ModelState{
+				routeModel:  {Status: StatusActive, coolingDisabledRetrySeq: 1, coolingDisabledRetryStamp: tc.clearStamp},
+				targetModel: {Status: StatusActive, coolingDisabledRetryAt: live, coolingDisabledRetrySeq: 1, coolingDisabledRetryStamp: 3},
+			}
+			manager.mu.Unlock()
+
+			manager.ReconcileRegistryModelStates(context.Background(), auth.ID)
+
+			manager.mu.RLock()
+			defer manager.mu.RUnlock()
+			states := manager.auths[auth.ID].ModelStates
+			if _, legacy := states[routeModel]; legacy {
+				t.Fatalf("legacy ModelStates[%q] was not migrated", routeModel)
+			}
+			want := time.Time{}
+			if tc.wantLive {
+				want = live
+			}
+			if target := states[targetModel]; target == nil || !target.coolingDisabledRetryAt.Equal(want) {
+				t.Fatalf("ModelStates[%q] = %+v, want reset %v", targetModel, target, want)
+			}
+		})
+	}
+}
+
 // Alias migration in reconciliation must carry a state whose only content is a
 // live cooling-disabled reset (left by a stale success after the 429).
 func TestManager_ReconcileRegistryModelStates_MigratesCleanStateWithLiveReset(t *testing.T) {
