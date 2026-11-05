@@ -287,9 +287,11 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 						}
 						for _, aliasKey := range aliasKeys {
 							if state, hasAliasState := candidateAuth.ModelStates[aliasKey]; hasAliasState {
-								// A state that holds only a live cooling-disabled reset looks
-								// clean, but the reset is the only record of the Retry-After.
-								if state != nil && (!modelStateIsClean(state) || isModelStateActiveCooldown(state, now) || state.coolingDisabledRetryAt.After(now)) {
+								// A state that holds only a cooling-disabled reset write looks
+								// clean, but the write is the only record of the Retry-After: a
+								// live reset, or a newer clear that must replace an older reset
+								// on the target.
+								if state != nil && (!modelStateIsClean(state) || isModelStateActiveCooldown(state, now) || state.coolingDisabledRetryAt.After(now) || state.coolingDisabledRetryStamp != 0) {
 									if existingTarget, exists := candidateAuth.ModelStates[targetKey]; exists && existingTarget != nil {
 										candidateAuth.ModelStates[targetKey] = mergeModelState(existingTarget, state)
 									} else {
