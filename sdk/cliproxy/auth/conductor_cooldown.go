@@ -2711,8 +2711,12 @@ func isRequestScopedResultError(err *Error) bool {
 	return isRequestInvalidError(err)
 }
 
-func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
-	if err == nil || statusCodeFromError(err) != http.StatusNotFound {
+func isCountTokensEndpointUnsupportedError(err error, requestedModel string) bool {
+	if err == nil {
+		return false
+	}
+	statusCode := statusCodeFromError(err)
+	if statusCode != http.StatusNotFound && statusCode != http.StatusNotImplemented {
 		return false
 	}
 	baseModel := thinking.ParseSuffix(requestedModel).ModelName

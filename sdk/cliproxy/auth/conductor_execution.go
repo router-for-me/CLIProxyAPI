@@ -892,11 +892,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.runtimeConfigSnapshot())
 				applyRequestScopedActionToResult(action, okAction, &result)
-				// Some Anthropic-compatible upstreams do not implement the
-				// count_tokens route and return a generic endpoint 404. Record
-				// the failure for hooks and metrics without suspending a model
-				// that remains usable through the messages endpoint.
-				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
+				// Some upstreams do not implement the count_tokens route and return
+				// a generic endpoint 404 or 501. Record the failure for hooks and
+				// metrics without suspending a model that remains usable through the
+				// messages endpoint.
+				if isCountTokensEndpointUnsupportedError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					if isCredentialScopedError(errExec) {
