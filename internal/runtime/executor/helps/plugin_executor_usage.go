@@ -103,16 +103,28 @@ func ObservePluginExecutorStreamTTFT(protocol string, reporter *UsageReporter, p
 		return
 	}
 	reporter.RecordFirstPacket()
+	var observe func(*UsageReporter, []byte)
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
-		ObserveClaudeTokenEvent(reporter, payload)
-	case "gemini", "antigravity", "interactions", "interactions-response":
-		ObserveGeminiTokenEvent(reporter, payload)
+		observe = ObserveClaudeTokenEvent
+	case "gemini", "antigravity":
+		observe = ObserveGeminiTokenEvent
+	case "interactions", "interactions-response":
+		observe = ObserveInteractionsTokenEvent
 	case "codex", "openai-response":
-		ObserveResponsesTokenEvent(reporter, payload)
+		observe = ObserveResponsesTokenEvent
 	default:
-		ObserveChatTokenEvent(reporter, payload)
+		observe = ObserveChatTokenEvent
 	}
+	// A chunk can hold whole SSE frames ("event: x\ndata: {...}") or several
+	// frames at once. Look at each data line on its own, so the classifiers,
+	// which only strip a leading "data:", see the JSON.
+	IterateStreamLines(payload, func(line []byte) {
+		if reporter.IsTTFTSet() || bytes.HasPrefix(line, []byte("event:")) {
+			return
+		}
+		observe(reporter, line)
+	})
 }
 
 func parseClaudePayloadUsage(payload []byte) usage.Detail {
