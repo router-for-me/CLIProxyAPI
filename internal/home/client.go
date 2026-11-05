@@ -23,6 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
@@ -97,7 +98,7 @@ var (
 	ErrPluginSyncUnsupported = errors.New("home plugin sync is unsupported")
 	ErrDispatchFenced        = errors.New("home auth dispatch is fenced")
 	// ErrCompareAndSwapUnsupported reports that this Home predates the CAS command.
-	ErrCompareAndSwapUnsupported = errors.New("home compare-and-swap is unsupported")
+	ErrCompareAndSwapUnsupported = kvstore.ErrCompareAndSwapUnsupported
 )
 
 // isHomeCommandUnsupported reports whether Home rejected a command it does not
@@ -155,12 +156,7 @@ type PluginTask struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-type KVSetOptions struct {
-	EX time.Duration
-	PX time.Duration
-	NX bool
-	XX bool
-}
+type KVSetOptions = kvstore.KVSetOptions
 
 type subscriptionCloser interface {
 	Close() error
@@ -1042,41 +1038,11 @@ func (c *Client) GetModels(ctx context.Context, headers http.Header, query url.V
 }
 
 func buildKVSetArgs(key string, value []byte, opts KVSetOptions) ([]any, error) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return nil, fmt.Errorf("home kv: key is empty")
-	}
-	if opts.EX > 0 && opts.PX > 0 {
-		return nil, fmt.Errorf("home kv: EX and PX are mutually exclusive")
-	}
-	if opts.EX < 0 || opts.PX < 0 {
-		return nil, fmt.Errorf("home kv: ttl must not be negative")
-	}
-	if opts.NX && opts.XX {
-		return nil, fmt.Errorf("home kv: NX and XX are mutually exclusive")
-	}
-
-	args := []any{key, append([]byte(nil), value...)}
-	if opts.EX > 0 {
-		args = append(args, "EX", durationCeil(opts.EX, time.Second))
-	}
-	if opts.PX > 0 {
-		args = append(args, "PX", durationCeil(opts.PX, time.Millisecond))
-	}
-	if opts.NX {
-		args = append(args, "NX")
-	}
-	if opts.XX {
-		args = append(args, "XX")
-	}
-	return args, nil
+	return kvstore.BuildSetArgs(key, value, opts)
 }
 
 func durationCeil(value time.Duration, unit time.Duration) int64 {
-	if value <= 0 || unit <= 0 {
-		return 0
-	}
-	return int64((value + unit - 1) / unit)
+	return kvstore.DurationCeil(value, unit)
 }
 
 func (c *Client) KVGet(ctx context.Context, key string) ([]byte, bool, error) {

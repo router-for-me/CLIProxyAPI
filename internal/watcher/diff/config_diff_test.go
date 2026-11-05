@@ -809,3 +809,33 @@ func TestBuildConfigChangeDetails_APIKeyConnectionPool(t *testing.T) {
 	expectContains(t, changes, "codex[0].connection-pool.max-idle-conns-per-host: <unset> -> 4")
 	expectContains(t, changes, "  provider updated: compat (connection-pool updated)")
 }
+
+func TestBuildConfigChangeDetails_KVStore(t *testing.T) {
+	oldCfg := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: false,
+			Path:     "",
+		},
+	}
+	newCfg := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: true,
+			Path:     " ./data/kv.db ",
+		},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "kv-store.disabled: false -> true")
+	expectContains(t, changes, "kv-store.path: "+oldCfg.EffectiveKVStorePath()+" -> ./data/kv.db")
+	samePathTrimmed := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: true,
+			Path:     "./data/kv.db",
+		},
+	}
+	if unchanged := BuildConfigChangeDetails(newCfg, samePathTrimmed); len(unchanged) != 0 {
+		t.Fatalf("whitespace-only path difference produced changes: %v", unchanged)
+	}
+}
