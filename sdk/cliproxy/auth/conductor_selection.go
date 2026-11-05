@@ -2313,7 +2313,7 @@ func (m *Manager) HasAlternativeTargetForModel(ctx context.Context, providers []
 	if len(candidates) == 0 {
 		return false
 	}
-	available, _, errAvailable := m.availableAuthsForSelector(m.selector, candidates, "mixed", model, time.Now(), false)
+	available, _, errAvailable := m.availableAuthsForSelector(ctx, m.selector, candidates, "mixed", model, time.Now(), false, opts.Headers)
 	return errAvailable == nil && len(available) > 0
 }
 
