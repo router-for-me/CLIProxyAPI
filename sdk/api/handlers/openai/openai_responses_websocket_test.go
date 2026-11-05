@@ -5218,8 +5218,8 @@ func TestNormalizeSubsequentRequestFullReplayReplacesTranscript(t *testing.T) {
 		wantLen int
 	}{
 		{name: "identical replay", raw: `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"hello"}]}`, wantLen: 1},
-		{name: "replay with different whitespace", raw: `{"type":"response.create","input":[ { "type" : "message", "role":"user", "content":"hello" } ]}`, wantLen: 1},
-		{name: "replay followed by a new item", raw: `{"type":"response.create","input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"user","content":"more"}]}`, wantLen: 2},
+		{name: "replay with different whitespace", raw: `{"type":"response.create","model":"test-model","input":[ { "type" : "message", "role":"user", "content":"hello" } ]}`, wantLen: 1},
+		{name: "replay followed by a new item", raw: `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"user","content":"more"}]}`, wantLen: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			normalized, next, errMsg := normalizeResponsesWebsocketRequest([]byte(tc.raw), lastRequest, lastResponseOutput)
@@ -5259,7 +5259,12 @@ func TestNormalizeSubsequentRequestPartialOverlapStillMerges(t *testing.T) {
 		// Only the first previous item repeats: an incremental append, not a replay.
 		{name: "prefix shorter than previous input", raw: `{"type":"response.create","input":[{"type":"message","role":"user","content":"first"}]}`},
 		// response.append is always incremental.
-		{name: "append with the same items", raw: `{"type":"response.append","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+		{name: "append with the same items", raw: `{"type":"response.append","model":"test-model","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+		// A bare incremental create (no model) that repeats the previous id-less
+		// items is a new turn, not a replay: the prior response must be kept.
+		{name: "bare incremental create repeating the same items", raw: `{"type":"response.create","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+		// A different model is not a replay of the previous request.
+		{name: "same items for a different model", raw: `{"type":"response.create","model":"other-model","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			normalized, _, errMsg := normalizeResponsesWebsocketRequest([]byte(tc.raw), lastRequest, lastResponseOutput)
