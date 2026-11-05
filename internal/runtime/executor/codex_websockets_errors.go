@@ -53,6 +53,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		msg:                string(out),
 		credentialScoped:   isUsageLimit && !modelLevelCooling,
 		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
+		quotaExhausted:     isUsageLimit && status == http.StatusTooManyRequests,
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit
 	// immediate-retry contract, then the generic Retry-After header.

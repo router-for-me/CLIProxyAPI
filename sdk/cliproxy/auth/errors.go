@@ -47,6 +47,16 @@ const ErrorCodeTransientRateLimit = "transient_rate_limit"
 
 const transientRateLimitErrorCode = ErrorCodeTransientRateLimit
 
+// ErrorCodeQuotaExhausted marks a 429 the upstream explicitly identified as
+// quota exhaustion with a structured code (see
+// cliproxyexecutor.QuotaExhaustedError). The public status stays 429. A pool
+// cooldown is reported as a final usage limit only when every candidate
+// credential is cooling down after such a failure; unclassified 429s keep
+// their retry guidance.
+const ErrorCodeQuotaExhausted = "quota_exhausted"
+
+const quotaExhaustedErrorCode = ErrorCodeQuotaExhausted
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

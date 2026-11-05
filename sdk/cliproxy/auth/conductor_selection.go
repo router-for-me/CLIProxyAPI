@@ -573,6 +573,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
+	quotaExhaustedCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
@@ -585,6 +586,9 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		}
 		if reason == blockReasonCooldown {
 			cooldownCount++
+			if hasQuotaExhaustionEvidence(candidate, checkModel, now) {
+				quotaExhaustedCount++
+			}
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
@@ -608,7 +612,11 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			// A pool is a final usage limit only when every candidate carries
+			// explicit quota-exhaustion evidence; a mixed or unclassified pool
+			// keeps its retry guidance (issue #6646).
+			quotaExhausted := quotaExhaustedCount == len(auths)
+			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr, quotaExhausted)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -718,7 +726,7 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause, cooldownErr.quotaExhausted)
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {

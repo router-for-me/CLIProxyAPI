@@ -1276,6 +1276,7 @@ type statusErr struct {
 	credentialScoped   bool
 	streamTruncated    bool
 	transientRateLimit bool
+	quotaExhausted     bool
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1301,14 +1302,31 @@ func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 // that must not be recorded as credential quota exhaustion.
 func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
 
+// IsQuotaExhausted marks a 429 that the upstream explicitly identified as
+// quota exhaustion with a structured code.
+func (e statusErr) IsQuotaExhausted() bool { return e.quotaExhausted }
+
 const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:           status,
+		msg:            string(body),
+		retryAfter:     openAICompatRetryAfter(status, headers, body, time.Now()),
+		quotaExhausted: status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body),
 	}
+}
+
+// isOpenAIInsufficientQuotaError reports whether body is an OpenAI
+// insufficient_quota error: the account's billing quota is exhausted, which a
+// retry does not fix.
+func isOpenAIInsufficientQuotaError(body []byte) bool {
+	for _, path := range []string{"error.code", "error.type"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	return false
 }
 
 // openAICompatRetryAfter preserves the provider's standard Retry-After signal.

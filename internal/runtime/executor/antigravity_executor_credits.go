@@ -355,15 +355,36 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
+// antigravityHasExplicitQuotaExhaustedReason reports whether body is a
+// RESOURCE_EXHAUSTED error whose google.rpc.ErrorInfo reason is QUOTA_EXHAUSTED.
+// Keyword matches and long RATE_LIMIT_EXCEEDED delays are not explicit quota
+// exhaustion evidence.
+func antigravityHasExplicitQuotaExhaustedReason(body []byte) bool {
+	if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(body, "error.status").String()), "RESOURCE_EXHAUSTED") {
+		return false
+	}
+	for _, detail := range gjson.GetBytes(body, "error.details").Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(detail.Get("reason").String()), "QUOTA_EXHAUSTED") {
+			return true
+		}
+	}
+	return false
+}
+
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+		err.quotaExhausted = antigravityHasExplicitQuotaExhaustedReason(body)
 	}
 	return err
 }
+
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return

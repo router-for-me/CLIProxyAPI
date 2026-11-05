@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -84,33 +85,71 @@ const (
 type modelCooldownError struct {
 	model    string
 	resetIn  time.Duration
+	resetAt  time.Time
 	provider string
 	cause    error
+	// quotaExhausted records that every candidate credential is cooling down
+	// after an upstream 429 explicitly marked as quota exhaustion. Duration
+	// alone never sets it: a long generic rate limit stays retryable.
+	quotaExhausted bool
+}
+
+// QuotaExhaustedCooldownThreshold separates short cooldowns, which clients should
+// retry after Retry-After, from quota exhaustion that will not clear within a
+// reasonable client retry budget. A quota-exhausted cooldown strictly longer
+// than this is reported as a usage limit that OpenAI and Anthropic API clients
+// do not retry.
+const QuotaExhaustedCooldownThreshold = 5 * time.Minute
+
+// IsUsageLimitReachedError reports whether err is a model cooldown in which every
+// candidate credential has explicit upstream quota-exhaustion evidence and the
+// earliest recovery is more than QuotaExhaustedCooldownThreshold away.
+func IsUsageLimitReachedError(err error) bool {
+	var cooldown *modelCooldownError
+	return errors.As(err, &cooldown) && cooldown.IsUsageLimitReached()
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
+// It is always reported as a retryable rate limit with Retry-After.
 func NewModelCooldownError(model, provider string, resetIn time.Duration) error {
-	return newModelCooldownErrorWithCause(model, provider, resetIn, nil)
+	return newModelCooldownErrorWithCause(model, provider, resetIn, nil, false)
 }
 
-func newModelCooldownError(model, provider string, resetIn time.Duration) *modelCooldownError {
-	return newModelCooldownErrorWithCause(model, provider, resetIn, nil)
+// NewQuotaExhaustedModelCooldownError creates a model-level cooldown in which
+// every candidate credential has explicit upstream quota-exhaustion evidence.
+// When resetIn exceeds QuotaExhaustedCooldownThreshold it is reported as a final
+// usage limit without Retry-After.
+func NewQuotaExhaustedModelCooldownError(model, provider string, resetIn time.Duration) error {
+	return newModelCooldownErrorWithCause(model, provider, resetIn, nil, true)
 }
 
-func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duration, cause error) *modelCooldownError {
+func newModelCooldownError(model, provider string, resetIn time.Duration, quotaExhausted bool) *modelCooldownError {
+	return newModelCooldownErrorWithCause(model, provider, resetIn, nil, quotaExhausted)
+}
+
+func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duration, cause error, quotaExhausted bool) *modelCooldownError {
 	if resetIn < 0 {
 		resetIn = 0
 	}
 	return &modelCooldownError{
-		model:    model,
-		provider: provider,
-		resetIn:  resetIn,
-		cause:    cause,
+		model:          model,
+		provider:       provider,
+		resetIn:        resetIn,
+		resetAt:        time.Now().Add(resetIn),
+		cause:          cause,
+		quotaExhausted: quotaExhausted,
 	}
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
 	return true
+}
+
+// IsUsageLimitReached reports whether every candidate credential is out of
+// quota, per explicit upstream evidence, for longer than clients should keep
+// retrying.
+func (e *modelCooldownError) IsUsageLimitReached() bool {
+	return e != nil && e.quotaExhausted && e.resetIn > QuotaExhaustedCooldownThreshold
 }
 
 func (e *modelCooldownError) Unwrap() error {
@@ -120,31 +159,59 @@ func (e *modelCooldownError) Unwrap() error {
 	return e.cause
 }
 
-func (e *modelCooldownError) Error() string {
-	modelName := e.model
-	if modelName == "" {
-		modelName = "requested model"
+func (e *modelCooldownError) resetSeconds() int {
+	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
+	if resetSeconds < 0 {
+		return 0
 	}
-	message := fmt.Sprintf("All credentials for model %s are cooling down", modelName)
+	return resetSeconds
+}
+
+func (e *modelCooldownError) displayDuration() time.Duration {
+	if e.resetIn > 0 && e.resetIn < time.Second {
+		return time.Second
+	}
+	return e.resetIn.Round(time.Second)
+}
+
+func (e *modelCooldownError) modelName() string {
+	if e.model == "" {
+		return "requested model"
+	}
+	return e.model
+}
+
+func (e *modelCooldownError) quotaMessage() string {
+	message := fmt.Sprintf("Usage limit reached: all credentials for model %s have exhausted their quota", e.modelName())
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
+	return fmt.Sprintf("%s. Try again in %s.", message, e.displayDuration().String())
+}
+
+func (e *modelCooldownError) Error() string {
+	usageLimitReached := e.IsUsageLimitReached()
+	message := fmt.Sprintf("All credentials for model %s are cooling down", e.modelName())
+	if e.provider != "" {
+		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	displayDuration := e.resetIn
-	if displayDuration > 0 && displayDuration < time.Second {
-		displayDuration = time.Second
-	} else {
-		displayDuration = displayDuration.Round(time.Second)
+	if usageLimitReached {
+		message = e.quotaMessage()
 	}
 	errorBody := map[string]any{
 		"code":          "model_cooldown",
 		"message":       message,
 		"model":         e.model,
-		"reset_time":    displayDuration.String(),
-		"reset_seconds": resetSeconds,
+		"reset_time":    e.displayDuration().String(),
+		"reset_seconds": e.resetSeconds(),
+	}
+	if usageLimitReached {
+		// OpenAI API clients classify a 429 by error.type: usage_limit_reached is
+		// final and resets_at tells the user when to come back. The code stays
+		// model_cooldown so existing consumers keep matching on it.
+		errorBody["type"] = "usage_limit_reached"
+		errorBody["resets_at"] = e.resetAt.Unix()
+		errorBody["retryable"] = false
 	}
 	if e.provider != "" {
 		errorBody["provider"] = e.provider
@@ -159,7 +226,7 @@ func (e *modelCooldownError) Error() string {
 	payload := map[string]any{"error": errorBody}
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":"%s"}}`, message)
+		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":%q}}`, message)
 	}
 	return string(data)
 }
@@ -354,11 +421,15 @@ func (e *modelCooldownError) StatusCode() int {
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
+	if e.IsUsageLimitReached() {
+		// A long, explicitly quota-exhausted cooldown carries no Retry-After:
+		// clients that honor it would sleep through the whole window.
+		// X-Should-Retry is honored by the official OpenAI and Anthropic SDKs
+		// ahead of the status code.
+		headers.Set("X-Should-Retry", "false")
+		return headers
 	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	headers.Set("Retry-After", strconv.Itoa(e.resetSeconds()))
 	return headers
 }
 
@@ -545,7 +616,14 @@ func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*A
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+			quotaExhausted := true
+			for _, candidate := range auths {
+				if !hasQuotaExhaustionEvidence(candidate, model, now) {
+					quotaExhausted = false
+					break
+				}
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn, quotaExhausted)
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
@@ -923,6 +1001,48 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 		return false, blockReasonNone, time.Time{}
 	}
 	return true, blockReasonOther, time.Time{}
+}
+
+// hasQuotaExhaustionEvidence reports whether the cooldown that blocks auth for
+// model is backed by a live, explicit upstream quota-exhaustion signal
+// (QuotaState.Exhausted) whose recovery time covers the effective blocking
+// deadline. It mirrors isAuthBlockedForModel: an auth-level credential quota
+// decides alone; otherwise every blocking state of the model must carry the
+// evidence. Unclassified rate limits, transient capacity rejections, any
+// longer NextRetryAfter without evidence and every other block report false.
+func hasQuotaExhaustionEvidence(auth *Auth, model string, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		return auth.Quota.Exhausted
+	}
+	if model == "" || len(auth.ModelStates) == 0 {
+		_, _, deadline := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+		return quotaExhaustionCovers(auth.Quota, deadline, now)
+	}
+	modelKey := canonicalModelKey(model)
+	evidenced := false
+	for stateModel, state := range auth.ModelStates {
+		if state == nil || canonicalModelKey(stateModel) != modelKey {
+			continue
+		}
+		blocked, _, deadline := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+		if !blocked {
+			continue
+		}
+		if !quotaExhaustionCovers(state.Quota, deadline, now) {
+			return false
+		}
+		evidenced = true
+	}
+	return evidenced
+}
+
+// quotaExhaustionCovers reports whether quota holds live exhaustion evidence
+// that lasts at least until deadline.
+func quotaExhaustionCovers(quota QuotaState, deadline, now time.Time) bool {
+	return quota.Exceeded && quota.Exhausted && quota.NextRecoverAt.After(now) && !quota.NextRecoverAt.Before(deadline)
 }
 
 // SessionAffinitySelector wraps another selector with session-sticky behavior.

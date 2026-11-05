@@ -342,7 +342,13 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
+	err := statusErr{
+		code:               errCode,
+		msg:                string(body),
+		credentialScoped:   credentialScoped,
+		transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests,
+		quotaExhausted:     isUsageLimit,
+	}
 	// A usage_limit_reached body reset describes quota recovery and wins over
 	// the generic Retry-After header. Every other 429 honours the upstream
 	// header so per-turn admission limits cool until their real deadline.
