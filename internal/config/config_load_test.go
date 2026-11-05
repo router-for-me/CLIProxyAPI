@@ -385,4 +385,25 @@ func TestHoldsAnyScalarValueFindsPlaintextInComments(t *testing.T) {
 	if HoldsAnyScalarValue([]byte("management:\n  secret-key: x # other\n"), secrets) {
 		t.Error("HoldsAnyScalarValue() = true for an unrelated comment")
 	}
+	// Any comment that holds the plaintext as a word holds it, wherever it sits:
+	// the write-back keeps them all.
+	const hashedSecret = "management:\n  secret-key: '$2a$10$hash'\n"
+	for _, data := range []string{
+		"# hunter2x note\nproxy-url: ''\n" + hashedSecret,
+		"proxy-url: '' # key=hunter2x\n" + hashedSecret,
+		"# Management settings\nmanagement: # (hunter2x)\n  secret-key: '$2a$10$hash'\n",
+		"management: {secret-key: '$2a$10$hash'} # hunter2x\n",
+	} {
+		if !HoldsAnyScalarValue([]byte(data), []string{"hunter2x"}) {
+			t.Errorf("HoldsAnyScalarValue(%q) = false, want the comment's plaintext found", data)
+		}
+	}
+	// A short secret inside ordinary words is not the secret: matching it would hold
+	// every later mirror back.
+	if data := "# Management API settings\nproxy-url: '' # mirrored data\n" + hashedSecret; HoldsAnyScalarValue([]byte(data), []string{"a"}) {
+		t.Errorf("HoldsAnyScalarValue(%q) = true for a short secret inside unrelated words", data)
+	}
+	if HoldsAnyScalarValue([]byte("# hunter2xyz and xhunter2x\n"+hashedSecret), []string{"hunter2x"}) {
+		t.Error("HoldsAnyScalarValue() = true for the plaintext as part of a longer word")
+	}
 }

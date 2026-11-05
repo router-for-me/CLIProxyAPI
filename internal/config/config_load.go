@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -147,9 +149,20 @@ func yamlScalarExists(node *yaml.Node, value string) bool {
 // secretEntryCommentHolds reports whether a comment on a management secret entry (the
 // secret-key key or its value, in either section) holds value. The hashed write-back
 // rewrites that value in place and keeps those comments, so `secret-key: s3cret # s3cret`
-// would still carry the plaintext. Comments elsewhere are left alone: a short secret
-// would match unrelated words in them.
+// would still carry the plaintext. A comment right after the section's last entry is
+// the section key's foot comment and counts too. Comments elsewhere are left alone: a
+// short secret would match unrelated words in them.
 func secretEntryCommentHolds(root *yaml.Node, value string) bool {
+	if root.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			switch yamlScalarText(resolveYAMLAlias(root.Content[i])) {
+			case "management", "remote-management":
+				if strings.Contains(root.Content[i].FootComment, value) {
+					return true
+				}
+			}
+		}
+	}
 	for _, section := range []string{"management", "remote-management"} {
 		for _, mapping := range yamlKeyValues(root, section, map[*yaml.Node]bool{}) {
 			if mapping.Kind != yaml.MappingNode {
@@ -289,7 +302,8 @@ func PlaintextManagementSecrets(data []byte) []string {
 // HoldsAnyScalarValue reports whether config YAML holds any of values as a scalar
 // anywhere, such as at a YAML anchor a hashed key no longer refers to. Mapping keys
 // count too: an anchor on a key (`&pw plaintext: x` with `secret-key: *pw`) leaves
-// the plaintext as that key. So do comments, which the write-back keeps. YAML that does not parse reports true, so unreadable
+// the plaintext as that key. So do comments, which the write-back keeps, when they
+// hold a value as a whole word. YAML that does not parse reports true, so unreadable
 // bytes never count as clean.
 func HoldsAnyScalarValue(data []byte, values []string) bool {
 	if len(values) == 0 {
@@ -308,11 +322,11 @@ func HoldsAnyScalarValue(data []byte, values []string) bool {
 }
 
 // yamlScalarOrKeyExists is yamlScalarExists with mapping keys and comments
-// included: the hashed write-back keeps a value's comments, so a comment that
-// repeats the plaintext (`secret-key: s3cret # s3cret`) still holds it. A tagged
+// included: the hashed write-back keeps every comment, so a comment that repeats
+// the plaintext as a word (`secret-key: s3cret # s3cret`) still holds it. A tagged
 // scalar matches by its raw spelling and by the value it decodes to.
 func yamlScalarOrKeyExists(node *yaml.Node, value string) bool {
-	if yamlCommentHolds(node, value) {
+	if yamlCommentHoldsWord(node, value) {
 		return true
 	}
 	if node.Kind == yaml.ScalarNode {
@@ -592,4 +606,45 @@ func loadConfigData(configFile string, data []byte, optional, persist bool) (*Co
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// yamlCommentHoldsWord reports whether a comment attached to node contains value as
+// a whole word, with no letter or digit right before or after it. Every comment
+// counts, since the write-back keeps them all; a short secret no longer matches
+// inside ordinary words ("a" in "Management"), while `key=s3cret` and
+// `# s3cret note` still do.
+func yamlCommentHoldsWord(node *yaml.Node, value string) bool {
+	for _, comment := range []string{node.HeadComment, node.LineComment, node.FootComment} {
+		if containsWord(comment, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsWord reports whether s contains word at a position with no letter or
+// digit adjacent to either end.
+func containsWord(s, word string) bool {
+	if word == "" {
+		return false
+	}
+	for start := 0; start <= len(s)-len(word); {
+		i := strings.Index(s[start:], word)
+		if i < 0 {
+			return false
+		}
+		i += start
+		before, _ := utf8.DecodeLastRuneInString(s[:i])
+		after, _ := utf8.DecodeRuneInString(s[i+len(word):])
+		if !isWordRune(before) && !isWordRune(after) {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+// isWordRune reports whether r is a letter or digit; a missing rune is not.
+func isWordRune(r rune) bool {
+	return r != utf8.RuneError && (unicode.IsLetter(r) || unicode.IsDigit(r))
 }

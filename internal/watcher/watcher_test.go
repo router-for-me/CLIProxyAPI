@@ -2267,6 +2267,8 @@ func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
 		"shadowed merge": "defaults: &d\n  secret-key: " + secret + "\nmanagement:\n  <<: *d\n  secret-key: active-other-secret\n",
 		// The write-back replaces the value but keeps its comment.
 		"line comment": "remote-management:\n  secret-key: " + secret + " # " + secret + "\n",
+		// It keeps comments anywhere else too.
+		"unrelated comment": "# rotated from " + secret + " last week\nproxy-url: '' # key=" + secret + "\nremote-management:\n  secret-key: " + secret + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			tmpDir := t.TempDir()
