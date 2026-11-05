@@ -2005,65 +2005,76 @@ func TestManager_MarkResult_RequestScopedNotFoundDoesNotCooldownAuth(t *testing.
 	}
 }
 
-func TestManager_ExecuteCount_GenericRouteNotFoundDoesNotSuspendModel(t *testing.T) {
-	previous := quotaCooldownDisabled.Load()
-	quotaCooldownDisabled.Store(false)
-	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
-
-	hook := &resultCaptureHook{}
-	m := NewManager(nil, nil, hook)
-	executor := &authFallbackExecutor{
-		id: "claude",
-		countTokenErrors: map[string]error{
-			"count-route-not-found-auth": &Error{
-				HTTPStatus: http.StatusNotFound,
-				Message:    "404 page not found",
-			},
-		},
-	}
-	m.RegisterExecutor(executor)
-
-	model := "count-route-not-found-model"
-	auth := &Auth{ID: "count-route-not-found-auth", Provider: "claude"}
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
-
-	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
+func TestManager_ExecuteCount_UnsupportedEndpointDoesNotSuspendModel(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		message    string
+	}{
+		{name: "not found", statusCode: http.StatusNotFound, message: "404 page not found"},
+		{name: "not implemented", statusCode: http.StatusNotImplemented, message: "count-tokens/http-request are not implemented yet"},
 	}
 
-	if _, errCount := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errCount == nil {
-		t.Fatal("expected count_tokens route 404 error")
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := quotaCooldownDisabled.Load()
+			quotaCooldownDisabled.Store(false)
+			t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
 
-	updated, ok := m.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatal("expected auth to remain registered")
-	}
-	if updated.Failed != 1 {
-		t.Fatalf("failed request count = %d, want 1", updated.Failed)
-	}
-	results := hook.Results()
-	if len(results) != 1 || results[0].Success || results[0].Error == nil || results[0].Error.HTTPStatus != http.StatusNotFound {
-		t.Fatalf("recorded results = %#v, want one failed 404", results)
-	}
-	if updated.Unavailable {
-		t.Fatal("expected route 404 to keep auth available")
-	}
-	if state := updated.ModelStates[model]; state != nil {
-		t.Fatalf("expected route 404 to avoid model cooldown state, got %#v", state)
-	}
-	if count := reg.GetModelCount(model); count != 1 {
-		t.Fatalf("available model count = %d, want 1", count)
-	}
+			hook := &resultCaptureHook{}
+			m := NewManager(nil, nil, hook)
+			authID := "count-route-unsupported-" + tc.name
+			model := "count-route-model-" + tc.name
+			executor := &authFallbackExecutor{
+				id: "claude",
+				countTokenErrors: map[string]error{
+					authID: &Error{HTTPStatus: tc.statusCode, Message: tc.message},
+				},
+			}
+			m.RegisterExecutor(executor)
 
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("execute after count_tokens route 404: %v", errExecute)
-	}
-	if string(resp.Payload) != auth.ID {
-		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), auth.ID)
+			auth := &Auth{ID: authID, Provider: "claude"}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			if _, errCount := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errCount == nil {
+				t.Fatal("expected count_tokens endpoint error")
+			}
+
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("expected auth to remain registered")
+			}
+			if updated.Failed != 1 {
+				t.Fatalf("failed request count = %d, want 1", updated.Failed)
+			}
+			results := hook.Results()
+			if len(results) != 1 || results[0].Success || results[0].Error == nil || results[0].Error.HTTPStatus != tc.statusCode {
+				t.Fatalf("recorded results = %#v, want one failed %d", results, tc.statusCode)
+			}
+			if updated.Unavailable {
+				t.Fatal("expected unsupported count_tokens endpoint to keep auth available")
+			}
+			if state := updated.ModelStates[model]; state != nil {
+				t.Fatalf("expected unsupported count_tokens endpoint to avoid model cooldown state, got %#v", state)
+			}
+			if count := reg.GetModelCount(model); count != 1 {
+				t.Fatalf("available model count = %d, want 1", count)
+			}
+
+			resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			if errExecute != nil {
+				t.Fatalf("execute after count_tokens endpoint error: %v", errExecute)
+			}
+			if string(resp.Payload) != auth.ID {
+				t.Fatalf("execute payload = %q, want %q", string(resp.Payload), auth.ID)
+			}
+		})
 	}
 }
 
@@ -2124,7 +2135,7 @@ func TestManager_ExecuteCount_ExplicitModelNotFoundSuspendsModel(t *testing.T) {
 	}
 }
 
-func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
+func TestIsCountTokensEndpointUnsupportedError(t *testing.T) {
 	tests := []struct {
 		name  string
 		err   error
@@ -2140,6 +2151,17 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 			name: "plain router 404",
 			err:  &Error{HTTPStatus: http.StatusNotFound, Message: "404 page not found"},
 			want: true,
+		},
+		{
+			name: "unsupported count_tokens capability 501",
+			err:  &Error{HTTPStatus: http.StatusNotImplemented, Message: "count-tokens/http-request are not implemented yet"},
+			want: true,
+		},
+		{
+			name:  "explicit model not found 501",
+			err:   &Error{HTTPStatus: http.StatusNotImplemented, Message: `{"error":{"type":"model_not_found","message":"model: claude-missing"}}`},
+			model: "claude-missing",
+			want:  false,
 		},
 		{
 			name: "wrapped router 404",
@@ -2285,8 +2307,8 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 			if model == "" {
 				model = "claude-missing"
 			}
-			if got := isCountTokensEndpointNotFoundError(tc.err, model); got != tc.want {
-				t.Fatalf("isCountTokensEndpointNotFoundError() = %v, want %v", got, tc.want)
+			if got := isCountTokensEndpointUnsupportedError(tc.err, model); got != tc.want {
+				t.Fatalf("isCountTokensEndpointUnsupportedError() = %v, want %v", got, tc.want)
 			}
 		})
 	}
