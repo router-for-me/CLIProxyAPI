@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -859,6 +860,8 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 	}
 	now := time.Now().Unix()
 	models := make([]*ModelInfo, 0, len(compat.Models))
+	openRouter := compatPointsAtOpenRouter(compat)
+	providerKey := util.OpenAICompatibleProviderKey(strings.ToLower(strings.TrimSpace(compat.Name)))
 	for i := range compat.Models {
 		model := compat.Models[i]
 		modelType := "openai-compatibility"
@@ -882,9 +885,25 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		info.Thinking = modelconfig.NormalizeThinkingSupport(thinkingSupport)
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
 		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
+		if openRouter && !model.Image {
+			// OpenRouter publishes each model's limits; configured values (max-context-length) still win.
+			if limits, ok := registry.LookupOpenRouterModelLimits(providerKey, strings.TrimSpace(model.Name)); ok {
+				if info.ContextLength <= 0 && limits.ContextLength > 0 {
+					info.ContextLength = limits.ContextLength
+				}
+				if info.MaxCompletionTokens <= 0 && limits.MaxCompletionTokens > 0 {
+					info.MaxCompletionTokens = limits.MaxCompletionTokens
+				}
+			}
+		}
 		models = append(models, info)
 	}
 	return models
+}
+
+// compatPointsAtOpenRouter reports whether the entry's base URL is OpenRouter.
+func compatPointsAtOpenRouter(compat *config.OpenAICompatibility) bool {
+	return compat != nil && util.IsOpenRouterURL(compat.BaseURL)
 }
 
 func normalizeCompatConfigModalities(raw []string) []string {
