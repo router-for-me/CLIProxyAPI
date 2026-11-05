@@ -10,6 +10,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
@@ -107,7 +108,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			selection.End("missing_execution_target")
 			return cliproxyexecutor.Response{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		if _, seen := tried[auth.ID]; seen {
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_auth"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
@@ -118,6 +118,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			return cliproxyexecutor.Response{}, repeatedHomeAuthError()
 		}
 		tried[auth.ID] = struct{}{}
+		if opts.SourceFormat == sdktranslator.FormatOpenAIDecisions && !authSelectionEligibilityForRequest(ctx, opts).allows(auth) {
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "auth_kind_mismatch"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			continue
+		}
+		m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		attempted[auth.ID] = struct{}{}
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, selection.Provider, routeModel)

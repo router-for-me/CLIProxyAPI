@@ -15,6 +15,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type schedulerTestExecutor struct {
@@ -3132,4 +3133,94 @@ func (e *callbackSchedulerTestExecutor) Refresh(ctx context.Context, auth *Auth)
 		return e.refresh(ctx, auth)
 	}
 	return auth, nil
+}
+
+func TestDecisionsSelectionExcludesOtherProviders(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+	manager.RegisterExecutor(schedulerTestExecutor{provider: "other"})
+	model := t.Name()
+	for _, credential := range []*Auth{
+		{ID: model + "-other", Provider: "other", Attributes: map[string]string{"priority": "100", "api_key": "other-key"}},
+		{ID: model + "-key", Provider: "codex", Attributes: map[string]string{"api_key": "openai-key"}},
+	} {
+		registerSchedulerModels(t, credential.Provider, model, credential.ID)
+		if _, err := manager.Register(t.Context(), credential); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected, _, _, err := manager.pickNextMixed(t.Context(), []string{"codex", "other"}, model, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIDecisions,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.ID != model+"-key" {
+		t.Fatalf("selected credential = %q, want Codex API key", selected.ID)
+	}
+}
+
+func TestDecisionsHomeExecutionFiltersCredentials(t *testing.T) {
+	for _, repeatOAuth := range []bool{false, true} {
+		t.Run(map[bool]string{false: "OAuth then key", true: "repeated OAuth"}[repeatOAuth], func(t *testing.T) {
+			oauth := Auth{ID: t.Name() + "-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "oauth-token"}}
+			second := Auth{ID: t.Name() + "-key", Provider: "codex", Attributes: map[string]string{"api_key": "openai-key"}}
+			if repeatOAuth {
+				second = oauth
+			}
+			dispatcher := &authKindHomeDispatcher{auths: []Auth{oauth, second}}
+			manager := NewManager(nil, nil, nil)
+			manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+			manager.SetRetryConfig(0, 0, 1)
+			executions := executionregistry.New()
+			manager.PublishHomeDispatch(dispatcher, executions, 1)
+			executor := &selectedCapabilityCaptureExecutor{provider: "codex"}
+			manager.RegisterExecutor(executor)
+			var selectedIDs []string
+			_, err := manager.Execute(t.Context(), []string{"home"}, cliproxyexecutor.Request{
+				Model: "gpt-6-luna", Payload: []byte(`{"model":"gpt-6-luna","input":"test","questions":[{"type":"predicate","instructions":"Test?"}]}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIDecisions,
+				Metadata:     map[string]any{cliproxyexecutor.SelectedAuthCallbackMetadataKey: func(id string) { selectedIDs = append(selectedIDs, id) }},
+			})
+			if repeatOAuth {
+				if err == nil || len(executor.requests) != 0 || len(selectedIDs) != 0 {
+					t.Fatalf("repeated OAuth = error %v, executions %d, selected %v", err, len(executor.requests), selectedIDs)
+				}
+			} else if err != nil || len(executor.requests) != 1 || len(selectedIDs) != 1 || selectedIDs[0] != second.ID {
+				t.Fatalf("mixed Home pool = error %v, executions %d, selected %v", err, len(executor.requests), selectedIDs)
+			}
+			if len(dispatcher.counts) != 2 {
+				t.Fatalf("Home dispatches = %v, want two selections", dispatcher.counts)
+			}
+			if errDrain := executions.Drain(t.Context()); errDrain != nil {
+				t.Fatal(errDrain)
+			}
+		})
+	}
+}
+
+func TestDecisionsHomeIgnoresIneligibleRetryOverrides(t *testing.T) {
+	dispatcher := &authKindHomeDispatcher{auths: []Auth{
+		{ID: t.Name() + "-oauth", Provider: "codex", Metadata: map[string]any{"access_token": "oauth-token", "request_retry": 5}},
+		{ID: t.Name() + "-key", Provider: "codex", Attributes: map[string]string{"api_key": "openai-key"}, Metadata: map[string]any{"request_retry": 0}},
+	}}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	executions := executionregistry.New()
+	manager.PublishHomeDispatch(dispatcher, executions, 1)
+	manager.RegisterExecutor(&selectedCapabilityCaptureExecutor{provider: "codex"})
+	retryLimit := -1
+	_, err := manager.executeHomeOnce(t.Context(), []string{"home"}, cliproxyexecutor.Request{Model: "gpt-6-luna"}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIDecisions,
+	}, false, 1, &retryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryLimit != 0 {
+		t.Fatalf("Home retry limit = %d, want eligible key's 0", retryLimit)
+	}
+	if errDrain := executions.Drain(t.Context()); errDrain != nil {
+		t.Fatal(errDrain)
+	}
 }

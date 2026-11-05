@@ -748,6 +748,16 @@ upstream:
 #           disable-codex-cloaking: false # optional: true disables cloaking; OAuth provider settings do not apply here
 #           alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #           websockets: false # optional: use the Codex upstream WebSocket transport
+#     # Native POST /v1/decisions uses only Codex API-key credentials, never OAuth.
+#     # It forwards to base-url + /decisions without Responses/Chat translation.
+#     # The normal alias, retry, cooldown, proxy, header and payload settings still apply.
+#     # Payload rules can use protocol/from-protocol: "openai-decisions".
+#     - name: openai-decisions
+#       base-url: "https://api.openai.com/v1"
+#       models: # Include gpt-6-luna when supplying an explicit model list.
+#         - name: "gpt-6-luna"
+#       keys:
+#         - api-key: "YOUR_OPENAI_API_KEY"
 #
 #   # Claude API keys
 #
