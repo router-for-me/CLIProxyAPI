@@ -109,14 +109,16 @@ plugins:
 当插件执行器（Executor）遇到上游调用失败（如因凭据无效返回 `401 Unauthorized`、因模型权限或配额限制返回 `403 Forbidden`，或因限流返回 `429 Too Many Requests`）时，应在错误信封中设置 HTTP 状态码：
 
 - 在 JSON RPC 错误信封中，设置 `error` 对象内的 `http_status` 字段（对应 `pluginabi.Error.HTTPStatus`）。
-- 若省略 `http_status` 或设置为 `0`，CPA 会默认将错误降级为 HTTP `500 Internal Server Error`（`server_error` / `internal_server_error`），导致客户端将其误判为网关故障并进行退避重试。
-- 显式设置 `http_status` 后，CPA 会将状态码正确映射为结构化的客户端错误响应：
+- 若省略 `http_status` 或设置为 `0`，执行器失败会默认使用 HTTP `500 Internal Server Error`。
+- 对于 OpenAI 兼容接口中的纯文本消息，CPA 会按状态码生成客户端错误响应：
   - `401` -> HTTP 401，`type: "authentication_error"`，`code: "invalid_api_key"`
   - `403` -> HTTP 403，`type: "permission_error"`，`code: "insufficient_quota"`
   - `429` -> HTTP 429，`type: "rate_limit_error"`，`code: "rate_limit_exceeded"`
   - `404` -> HTTP 404，`type: "invalid_request_error"`，`code: "model_not_found"`
   - `>=500` -> HTTP 5xx，`type: "server_error"`，`code: "internal_server_error"`
-- **注意**：非流式执行（`executor.execute`）和流式执行（`executor.execute_stream`）两处报错路径均需要设置 `http_status`，以保证异常分类行为一致。
+- 错误正文的处理方式取决于具体协议。结构化和流式处理器可能会转发、规整或脱敏消息，因此插件不应依赖错误正文逐字节不变。
+- 对于流式请求，插件应等到上游接受或拒绝初始请求后再从 `executor.execute_stream` 返回成功。返回成功后，异步的 `host.stream.emit` 和 `host.stream.close` 只能携带字符串错误，不能携带 HTTP 状态码；因此，即使尚未向客户端发送数据，后续错误也会使用 HTTP 500。响应头或数据块一旦到达客户端，HTTP 状态码在任何情况下都无法再更改。
+- `error.retryable` 当前只是描述信息，宿主不会用它决定是否重试执行器。
 - 原生动态库插件通过 C ABI 交换序列化的 JSON 缓冲区通信，因此状态码必须编码到序列化的 JSON 信封中（例如使用 `pluginabi.NewErrorEnvelope` 或自定义带 `http_status` 字段的信封结构体）。Go 语言原生的 error 对象无法跨越 C ABI 边界传递。
 
 Go 语言编写的插件可导入 `github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi` 并直接使用 `pluginabi.NewErrorEnvelope(code, message, httpStatus)`：
