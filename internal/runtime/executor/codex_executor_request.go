@@ -40,22 +40,15 @@ var dataTag = []byte("data:")
 // Responses API accepts. Smaller values are rejected with a 400.
 const codexMinMaxOutputTokens = 16
 
-// clampCodexMaxOutputTokens raises a too-small max_output_tokens to the Codex
-// minimum. Clients such as Claude Code probe with max_tokens 1, which the
+// clampCodexMaxOutputTokensDoc raises a too-small max_output_tokens to the
+// Codex minimum. Clients such as Claude Code probe with max_tokens 1, which the
 // request translators forward as max_output_tokens 1.
-func clampCodexMaxOutputTokens(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	doc := ojson.NewDoc(body)
+func clampCodexMaxOutputTokensDoc(doc *ojson.Doc) {
 	limit := doc.Get("max_output_tokens")
 	if limit.Type != ojson.Number || limit.Int() >= codexMinMaxOutputTokens {
-		return body
+		return
 	}
-	if errSet := doc.Set("max_output_tokens", codexMinMaxOutputTokens); errSet != nil {
-		return body
-	}
-	return doc.Bytes()
+	_ = doc.Set("max_output_tokens", codexMinMaxOutputTokens)
 }
 
 func translateCodexRequestPair(from, to sdktranslator.Format, model string, originalPayload, payload []byte, stream bool, preserveEmptyThinkingBlocks ...bool) ([]byte, []byte) {
@@ -75,10 +68,10 @@ func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from,
 	translate := func(raw []byte) ([]byte, bool, error) {
 		if isCompat && from == sdktranslator.FormatClaude && to == sdktranslator.FormatCodex {
 			body, err := helps.TranslateRequestReturningError(ctx, nil, nil, from, to, model, raw, stream, true)
-			return clampCodexMaxOutputTokens(body), false, err
+			return body, false, err
 		}
 		translated := sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{Format: from, Model: model, Stream: stream, Body: raw})
-		return clampCodexMaxOutputTokens(translated.Body), translated.ConfigurationUpdatesChanged, translated.Err
+		return translated.Body, translated.ConfigurationUpdatesChanged, translated.Err
 	}
 	if bytes.Equal(originalPayload, payload) {
 		body, changed, err := translate(payload)

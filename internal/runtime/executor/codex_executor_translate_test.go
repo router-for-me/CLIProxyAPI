@@ -59,13 +59,7 @@ func TestTranslateCodexRequestPairTranslatesDifferentPayloads(t *testing.T) {
 	}
 }
 
-func TestTranslateCodexRequestPairClampsSmallMaxOutputTokens(t *testing.T) {
-	from := sdktranslator.Format("codex-test-from-clamp")
-	to := sdktranslator.Format("codex-test-to-clamp")
-	sdktranslator.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
-		return append([]byte(nil), rawJSON...), nil
-	}, sdktranslator.ResponseTransform{})
-
+func TestClampCodexMaxOutputTokensDoc(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload string
@@ -81,18 +75,24 @@ func TestTranslateCodexRequestPairClampsSmallMaxOutputTokens(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, body := translateCodexRequestPair(from, to, "m", []byte(tt.payload), []byte(tt.payload), false)
-			if got := ojson.GetBytesNoCopy(body, "max_output_tokens").Raw; got != tt.want {
-				t.Fatalf("max_output_tokens = %q, want %q; body=%s", got, tt.want, body)
+			doc := ojson.NewDocString(tt.payload)
+			clampCodexMaxOutputTokensDoc(doc)
+			if got := doc.Get("max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; body=%s", got, tt.want, doc.Bytes())
 			}
 		})
 	}
 }
 
-func TestTranslateCodexRequestPairClaudeProbeMaxTokens(t *testing.T) {
+func TestClampCodexMaxOutputTokensDocClaudeProbe(t *testing.T) {
 	payload := []byte(`{"model":"gpt-5.6-sol","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}`)
 	_, body := translateCodexRequestPair(sdktranslator.FormatClaude, sdktranslator.FormatCodex, "gpt-5.6-sol", payload, bytes.Clone(payload), false)
-	if got := ojson.GetBytesNoCopy(body, "max_output_tokens").Raw; got != "16" {
-		t.Fatalf("max_output_tokens = %q, want 16; body=%s", got, body)
+	if got := ojson.GetBytesNoCopy(body, "max_output_tokens").Raw; got != "1" {
+		t.Fatalf("translated max_output_tokens = %q, want 1; body=%s", got, body)
+	}
+	doc := ojson.NewDoc(body)
+	clampCodexMaxOutputTokensDoc(doc)
+	if got := doc.Get("max_output_tokens").Raw; got != "16" {
+		t.Fatalf("max_output_tokens = %q, want 16; body=%s", got, doc.Bytes())
 	}
 }
