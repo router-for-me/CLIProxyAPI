@@ -1,0 +1,60 @@
+name: typesafe-triage
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      min_batch:
+        description: 'Minimum pending issues threshold to trigger triage'
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  triage-pr:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: typesafe-triage-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run PR Triage with TypeSafe Jev
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 .github/scripts/typesafe_triage.py pr ${{ github.event.pull_request.number }}
+
+  triage-issues:
+    if: github.event_name == 'issues' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: typesafe-triage-issues
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run Issue Batch Triage
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          MIN_BATCH="${{ github.event.inputs.min_batch || (github.event_name == 'workflow_dispatch' && '1' || '10') }}"
+          python3 .github/scripts/typesafe_triage.py issue-batch --min-batch "$MIN_BATCH"
