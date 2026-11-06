@@ -103,6 +103,11 @@ func GinLogrusLogger() gin.HandlerFunc {
 		}
 
 		entry := log.WithField("request_id", requestID)
+		if metadata, ok := c.Get("accessMetadata"); ok {
+			if values, ok := metadata.(map[string]string); ok && values["name"] != "" {
+				entry = entry.WithField("client", values["name"])
+			}
+		}
 
 		switch {
 		case statusCode >= http.StatusInternalServerError:
