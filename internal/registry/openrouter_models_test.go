@@ -54,12 +54,41 @@ func TestOpenRouterLookupReturnsACopyOfTheEfforts(t *testing.T) {
 	}
 }
 
+// testOpenRouterCatalog returns a catalog that may always fetch, with a settable clock and a channel that receives
+// once per completed refresh.
+func testOpenRouterCatalog(fetch func(context.Context) (map[string]OpenRouterModel, error)) (*openRouterCatalog, *time.Time, chan struct{}) {
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	refreshed := make(chan struct{}, 8)
+	catalog := &openRouterCatalog{
+		fetch:     fetch,
+		remote:    func() (context.Context, bool) { return context.Background(), true },
+		now:       func() time.Time { return now },
+		refreshed: func() { refreshed <- struct{}{} },
+	}
+	return catalog, &now, refreshed
+}
+
+func waitRefreshed(t *testing.T, refreshed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-refreshed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh did not complete")
+	}
+}
+
+func (c *openRouterCatalog) isFetching() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fetching
+}
+
 func TestOpenRouterCatalogFetchesInBackgroundAndNotifies(t *testing.T) {
-	fetched := make(chan struct{}, 4)
-	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModel, error) {
-		fetched <- struct{}{}
+	calls := 0
+	catalog, now, refreshed := testOpenRouterCatalog(func(context.Context) (map[string]OpenRouterModel, error) {
+		calls++
 		return map[string]OpenRouterModel{"anthropic/claude-haiku-5.5": {ContextLength: 1000000, MaxCompletionTokens: 128000}}, nil
-	}}
+	})
 	notified := make(chan []string, 1)
 	SetModelRefreshCallback(func(providers []string) { notified <- providers })
 	defer SetModelRefreshCallback(nil)
@@ -67,43 +96,77 @@ func TestOpenRouterCatalogFetchesInBackgroundAndNotifies(t *testing.T) {
 	if _, ok := catalog.lookup("openrouter", "anthropic/claude-haiku-5.5"); ok {
 		t.Fatal("first lookup must not block on the network")
 	}
-	select {
-	case <-fetched:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no background fetch")
-	}
+	waitRefreshed(t, refreshed)
 	select {
 	case providers := <-notified:
 		if len(providers) != 1 || providers[0] != "openrouter" {
 			t.Fatalf("notified %v, want [openrouter]", providers)
 		}
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("no refresh notification")
 	}
 	published, ok := catalog.lookup("openrouter", "Anthropic/Claude-Haiku-5.5")
 	if !ok || published.MaxCompletionTokens != 128000 {
 		t.Fatalf("lookup after fetch = %+v, %v", published, ok)
 	}
-	select {
-	case <-fetched:
-		t.Fatal("fresh catalog must not refetch")
-	case <-time.After(100 * time.Millisecond):
+	if catalog.isFetching() || calls != 1 {
+		t.Fatalf("a fresh catalog must not refetch (fetching=%v, calls=%d)", catalog.isFetching(), calls)
+	}
+
+	*now = now.Add(ModelsRefreshInterval + time.Second)
+	catalog.lookup("openrouter", "anthropic/claude-haiku-5.5")
+	waitRefreshed(t, refreshed)
+	if calls != 2 {
+		t.Fatalf("a stale catalog must refetch once, calls=%d", calls)
 	}
 }
 
 func TestOpenRouterCatalogBacksOffAfterFailure(t *testing.T) {
-	calls := make(chan struct{}, 4)
-	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModel, error) {
-		calls <- struct{}{}
+	calls := 0
+	catalog, now, refreshed := testOpenRouterCatalog(func(context.Context) (map[string]OpenRouterModel, error) {
+		calls++
 		return nil, errors.New("offline")
-	}}
+	})
 	catalog.lookup("openrouter", "x")
-	<-calls
-	time.Sleep(50 * time.Millisecond)
+	waitRefreshed(t, refreshed)
+
+	*now = now.Add(30 * time.Second)
 	catalog.lookup("openrouter", "x")
-	select {
-	case <-calls:
-		t.Fatal("retried immediately after a failure")
-	case <-time.After(100 * time.Millisecond):
+	if catalog.isFetching() || calls != 1 {
+		t.Fatalf("retried within the back-off (fetching=%v, calls=%d)", catalog.isFetching(), calls)
+	}
+
+	*now = now.Add(31 * time.Second)
+	catalog.lookup("openrouter", "x")
+	waitRefreshed(t, refreshed)
+	if calls != 2 {
+		t.Fatalf("no retry after the back-off, calls=%d", calls)
+	}
+}
+
+func TestOpenRouterCatalogHonorsLocalModelPolicy(t *testing.T) {
+	catalogRuntime.Lock()
+	oldLocal := catalogRuntime.local
+	catalogRuntime.local = true
+	catalogRuntime.Unlock()
+	defer func() {
+		catalogRuntime.Lock()
+		catalogRuntime.local = oldLocal
+		catalogRuntime.Unlock()
+	}()
+
+	calls := 0
+	catalog := &openRouterCatalog{
+		fetch: func(context.Context) (map[string]OpenRouterModel, error) {
+			calls++
+			return nil, nil
+		},
+		remote: remoteCatalogPolicy,
+	}
+	if _, ok := catalog.lookup("openrouter", "anthropic/claude-haiku-5.5"); ok {
+		t.Fatal("no model without a catalog")
+	}
+	if catalog.isFetching() || calls != 0 {
+		t.Fatalf("--local-model must not fetch OpenRouter's catalog (fetching=%v, calls=%d)", catalog.isFetching(), calls)
 	}
 }

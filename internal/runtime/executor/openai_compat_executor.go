@@ -175,7 +175,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return resp, err
 		}
-		applyOpenRouterCacheControlDoc(baseURL, from, req, opts, doc)
+		helps.ApplyOpenRouterCacheControlDoc(doc, baseURL, sourceFormatEqual(from, sdktranslator.FormatClaude), req.Payload, opts.OriginalRequest)
 	}
 	if opts.Alt == "responses/compact" {
 		_ = doc.Delete("stream")
@@ -199,7 +199,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
-	applyOpenRouterSessionHeader(httpReq, baseURL, e.provider, req, opts)
+	helps.ApplyOpenRouterSessionHeader(httpReq, baseURL, e.provider, opts.Headers, opts.Metadata, req.Metadata)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -418,7 +418,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		if err = e.applyPromptCacheKeyWithCompatDoc(ctx, auth, compat, from, baseModel, req, opts, doc); err != nil {
 			return nil, err
 		}
-		applyOpenRouterCacheControlDoc(baseURL, from, req, opts, doc)
+		helps.ApplyOpenRouterCacheControlDoc(doc, baseURL, sourceFormatEqual(from, sdktranslator.FormatClaude), req.Payload, opts.OriginalRequest)
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
@@ -443,7 +443,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
-	applyOpenRouterSessionHeader(httpReq, baseURL, e.provider, req, opts)
+	helps.ApplyOpenRouterSessionHeader(httpReq, baseURL, e.provider, opts.Headers, opts.Metadata, req.Metadata)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
