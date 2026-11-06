@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -14,41 +15,64 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// OpenRouter publishes every model's context window and completion limit at /api/v1/models. OpenAI-compatible
-// entries pointing at OpenRouter list models by hand, without limits, so clients fell back to template defaults.
-// The catalog is fetched in the background on first use and refreshed with the other catalogs' cadence; when it
-// changes, the OpenRouter entries' models are registered again.
+// OpenRouter publishes every model's context window, completion limit and accepted reasoning efforts at
+// /api/v1/models. OpenAI-compatible entries pointing at OpenRouter list models by hand, without them, so clients fell
+// back to template defaults. The catalog is fetched in the background on first use and refreshed with the other
+// catalogs' cadence; when it changes, the OpenRouter entries' models are registered again.
 
 var openRouterModelsURL = "https://openrouter.ai/api/v1/models"
 
 const maxOpenRouterModelsSize = 32 << 20
 
-// OpenRouterModelLimits are the published limits of one OpenRouter model.
-type OpenRouterModelLimits struct {
+// OpenRouterModel is what OpenRouter publishes about one model.
+type OpenRouterModel struct {
 	ContextLength       int
 	MaxCompletionTokens int
+	// ReasoningEfforts are the reasoning.effort values OpenRouter accepts for the model
+	// (reasoning.supported_efforts), lower-cased, e.g. "max", "xhigh", "high", "medium", "low", "none".
+	// Empty when OpenRouter doesn't publish them.
+	ReasoningEfforts []string
 }
 
 type openRouterCatalog struct {
 	mu         sync.Mutex
-	limits     map[string]OpenRouterModelLimits
+	models     map[string]OpenRouterModel
 	fetchedAt  time.Time
 	fetching   bool
 	failedAt   time.Time
 	interested map[string]struct{}
-	fetch      func(context.Context) (map[string]OpenRouterModelLimits, error)
+	fetch      func(context.Context) (map[string]OpenRouterModel, error)
 }
 
-var openRouterModels = &openRouterCatalog{fetch: fetchOpenRouterModelLimits}
+var openRouterModels = &openRouterCatalog{fetch: fetchOpenRouterModels}
 
-// LookupOpenRouterModelLimits returns OpenRouter's limits for modelID (e.g. "anthropic/claude-haiku-5.5"). The
+// LookupOpenRouterModel returns what OpenRouter publishes about modelID (e.g. "anthropic/claude-haiku-5.5"). The
 // first call, and calls after ModelsRefreshInterval, start a background fetch; providerKey's models are registered
 // again when the catalog changes. Returns false until the catalog is loaded or when the model isn't listed.
-func LookupOpenRouterModelLimits(providerKey, modelID string) (OpenRouterModelLimits, bool) {
+func LookupOpenRouterModel(providerKey, modelID string) (OpenRouterModel, bool) {
 	return openRouterModels.lookup(providerKey, modelID)
 }
 
-func (c *openRouterCatalog) lookup(providerKey, modelID string) (OpenRouterModelLimits, bool) {
+// SetOpenRouterModelsForTest installs a loaded OpenRouter catalog for tests and returns a function that restores the
+// previous one.
+func SetOpenRouterModelsForTest(models map[string]OpenRouterModel) func() {
+	c := openRouterModels
+	normalized := make(map[string]OpenRouterModel, len(models))
+	for id, model := range models {
+		normalized[strings.ToLower(strings.TrimSpace(id))] = model
+	}
+	c.mu.Lock()
+	oldModels, oldFetchedAt, oldFailedAt := c.models, c.fetchedAt, c.failedAt
+	c.models, c.fetchedAt, c.failedAt = normalized, time.Now(), time.Time{}
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		c.models, c.fetchedAt, c.failedAt = oldModels, oldFetchedAt, oldFailedAt
+		c.mu.Unlock()
+	}
+}
+
+func (c *openRouterCatalog) lookup(providerKey, modelID string) (OpenRouterModel, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if key := strings.ToLower(strings.TrimSpace(providerKey)); key != "" {
@@ -58,14 +82,17 @@ func (c *openRouterCatalog) lookup(providerKey, modelID string) (OpenRouterModel
 		c.interested[key] = struct{}{}
 	}
 	now := time.Now()
-	stale := c.limits == nil || now.Sub(c.fetchedAt) > ModelsRefreshInterval
+	stale := c.models == nil || now.Sub(c.fetchedAt) > ModelsRefreshInterval
 	retryAllowed := c.failedAt.IsZero() || now.Sub(c.failedAt) > time.Minute
 	if stale && !c.fetching && retryAllowed {
 		c.fetching = true
 		go c.refresh()
 	}
-	limits, ok := c.limits[strings.ToLower(strings.TrimSpace(modelID))]
-	return limits, ok
+	model, ok := c.models[strings.ToLower(strings.TrimSpace(modelID))]
+	if ok {
+		model.ReasoningEfforts = slices.Clone(model.ReasoningEfforts)
+	}
+	return model, ok
 }
 
 func (c *openRouterCatalog) refresh() {
@@ -83,8 +110,8 @@ func (c *openRouterCatalog) refresh() {
 		}
 		return
 	}
-	changed := !sameOpenRouterLimits(c.limits, fetched)
-	c.limits = fetched
+	changed := !sameOpenRouterModels(c.models, fetched)
+	c.models = fetched
 	c.fetchedAt = time.Now()
 	c.failedAt = time.Time{}
 	providers := make([]string, 0, len(c.interested))
@@ -99,19 +126,21 @@ func (c *openRouterCatalog) refresh() {
 	}
 }
 
-func sameOpenRouterLimits(a, b map[string]OpenRouterModelLimits) bool {
+func sameOpenRouterModels(a, b map[string]OpenRouterModel) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		w, ok := b[k]
+		if !ok || v.ContextLength != w.ContextLength || v.MaxCompletionTokens != w.MaxCompletionTokens ||
+			!slices.Equal(v.ReasoningEfforts, w.ReasoningEfforts) {
 			return false
 		}
 	}
 	return true
 }
 
-func fetchOpenRouterModelLimits(ctx context.Context) (map[string]OpenRouterModelLimits, error) {
+func fetchOpenRouterModels(ctx context.Context) (map[string]OpenRouterModel, error) {
 	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, openRouterModelsURL, nil)
 	if errRequest != nil {
 		return nil, errRequest
@@ -135,10 +164,10 @@ func fetchOpenRouterModelLimits(ctx context.Context) (map[string]OpenRouterModel
 	if len(data) > maxOpenRouterModelsSize {
 		return nil, fmt.Errorf("OpenRouter catalog exceeds size limit")
 	}
-	return parseOpenRouterModelLimits(data)
+	return parseOpenRouterModels(data)
 }
 
-func parseOpenRouterModelLimits(data []byte) (map[string]OpenRouterModelLimits, error) {
+func parseOpenRouterModels(data []byte) (map[string]OpenRouterModel, error) {
 	if !ojson.ValidBytes(data) {
 		return nil, fmt.Errorf("OpenRouter catalog is not valid JSON")
 	}
@@ -146,7 +175,7 @@ func parseOpenRouterModelLimits(data []byte) (map[string]OpenRouterModelLimits, 
 	if !models.IsArray() {
 		return nil, fmt.Errorf("OpenRouter catalog has no data array")
 	}
-	out := make(map[string]OpenRouterModelLimits)
+	out := make(map[string]OpenRouterModel)
 	for _, model := range models.Array() {
 		id := strings.ToLower(strings.TrimSpace(model.Get("id").String()))
 		if id == "" {
@@ -156,9 +185,20 @@ func parseOpenRouterModelLimits(data []byte) (map[string]OpenRouterModelLimits, 
 		if contextLength <= 0 {
 			contextLength = int(model.Get("top_provider.context_length").Int())
 		}
-		limits := OpenRouterModelLimits{ContextLength: contextLength, MaxCompletionTokens: int(model.Get("top_provider.max_completion_tokens").Int())}
-		if limits.ContextLength > 0 || limits.MaxCompletionTokens > 0 {
-			out[id] = limits
+		var efforts []string
+		for _, effort := range model.Get("reasoning.supported_efforts").Array() {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value != "" && !slices.Contains(efforts, value) {
+				efforts = append(efforts, value)
+			}
+		}
+		published := OpenRouterModel{
+			ContextLength:       contextLength,
+			MaxCompletionTokens: int(model.Get("top_provider.max_completion_tokens").Int()),
+			ReasoningEfforts:    efforts,
+		}
+		if published.ContextLength > 0 || published.MaxCompletionTokens > 0 || len(published.ReasoningEfforts) > 0 {
+			out[id] = published
 		}
 	}
 	return out, nil
