@@ -11,6 +11,7 @@ bin/*
 /logs
 conv/*
 temp/*
+.version
 refs/*
 plugins/*
 examples/plugin/bin/*
