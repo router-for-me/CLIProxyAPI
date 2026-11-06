@@ -950,16 +950,25 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 // inheritStaticModelLimits fills the context window and output limit a configured
 // model leaves unset from the catalog entry of its upstream model. Without them,
 // clients such as the Codex model list fall back to template defaults. Values
-// set in the configuration (max-context-length) win.
+// set in the configuration (max-context-length) win. Gemini catalog entries keep
+// their limits in InputTokenLimit and OutputTokenLimit instead.
 func inheritStaticModelLimits(info, staticInfo *ModelInfo) {
 	if info == nil || staticInfo == nil {
 		return
 	}
-	if info.ContextLength <= 0 && staticInfo.ContextLength > 0 {
-		info.ContextLength = staticInfo.ContextLength
+	contextLength := staticInfo.ContextLength
+	if contextLength <= 0 {
+		contextLength = staticInfo.InputTokenLimit
 	}
-	if info.MaxCompletionTokens <= 0 && staticInfo.MaxCompletionTokens > 0 {
-		info.MaxCompletionTokens = staticInfo.MaxCompletionTokens
+	maxCompletionTokens := staticInfo.MaxCompletionTokens
+	if maxCompletionTokens <= 0 {
+		maxCompletionTokens = staticInfo.OutputTokenLimit
+	}
+	if info.ContextLength <= 0 && contextLength > 0 {
+		info.ContextLength = contextLength
+	}
+	if info.MaxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+		info.MaxCompletionTokens = maxCompletionTokens
 	}
 }
 

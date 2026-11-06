@@ -72,3 +72,27 @@ func TestBuildConfigModelsUnknownUpstreamKeepsZeroLimits(t *testing.T) {
 		t.Fatalf("limits = %d/%d, want 0/0", got.ContextLength, got.MaxCompletionTokens)
 	}
 }
+
+func TestBuildConfigModelsInheritsGeminiTokenLimits(t *testing.T) {
+	for _, channel := range []string{"gemini", "vertex"} {
+		var upstream *ModelInfo
+		for _, model := range registry.GetStaticModelDefinitionsByChannel(channel) {
+			if model != nil && model.ContextLength <= 0 && model.MaxCompletionTokens <= 0 && model.InputTokenLimit > 0 && model.OutputTokenLimit > 0 {
+				upstream = model
+				break
+			}
+		}
+		if upstream == nil {
+			t.Fatalf("no static %s model with only inputTokenLimit/outputTokenLimit", channel)
+		}
+		var got []*ModelInfo
+		if channel == "gemini" {
+			got = buildGeminiConfigModels(&config.GeminiKey{Models: []config.GeminiModel{{Name: upstream.ID, Alias: "team-gemini"}}})
+		} else {
+			got = buildVertexCompatConfigModels(&config.VertexCompatKey{Models: []config.VertexCompatModel{{Name: upstream.ID, Alias: "team-gemini"}}})
+		}
+		if len(got) != 1 || got[0].ContextLength != upstream.InputTokenLimit || got[0].MaxCompletionTokens != upstream.OutputTokenLimit {
+			t.Fatalf("%s alias of %s: limits = %+v, want context %d and output %d", channel, upstream.ID, got, upstream.InputTokenLimit, upstream.OutputTokenLimit)
+		}
+	}
+}
