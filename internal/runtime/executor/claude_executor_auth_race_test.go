@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -126,5 +127,34 @@ func TestClaudeExecutorSharedCredentialMetadataMixedAccess(t *testing.T) {
 			}
 		}(i)
 	}
+	wg.Wait()
+}
+
+func TestClaudeSetupTokenCheckIsRaceFreeOnSharedCredential(t *testing.T) {
+	auth := newSharedClaudeOAuthAuth("claude-race-setup-token")
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		// Writers store into the same map under its lock.
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 100; j++ {
+				claudeauth.StoreMetadataString(&auth.Metadata, fmt.Sprintf("probe_%d_%d", i, j), "value")
+			}
+		}(i)
+		// isClaudeSetupToken runs while a request prepares a credential that has no account
+		// profile yet.
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 100; j++ {
+				_ = isClaudeSetupToken(auth, "sk-ant-oat-race-probe")
+			}
+		}()
+	}
+	close(start)
 	wg.Wait()
 }
