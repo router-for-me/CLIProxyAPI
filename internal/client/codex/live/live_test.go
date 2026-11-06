@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1311,5 +1312,268 @@ func TestSidebandURLShapes(t *testing.T) {
 		if got := callIDFromLocation(location); got != want {
 			t.Errorf("callIDFromLocation(%q) = %q, want %q", location, got, want)
 		}
+	}
+}
+
+func TestHandleSidebandRelaysUnknownCallUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamPaths := make(chan string, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		upstreamPaths <- request.URL.Path
+		messageType, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			return
+		}
+		_ = conn.WriteMessage(messageType, append([]byte("echo:"), payload...))
+	}))
+	defer upstreamServer.Close()
+
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "codex-token", "account_id": "codex-account"},
+	})
+
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+	router := gin.New()
+	router.GET("/v1/live/:call_id", handler.HandleSideband)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/rtc_external"
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if errDial != nil {
+		t.Fatalf("dial downstream sideband: %v", errDial)
+	}
+	defer func() { _ = client.Close() }()
+	if errWrite := client.WriteMessage(websocket.TextMessage, []byte("ping")); errWrite != nil {
+		t.Fatalf("write sideband message: %v", errWrite)
+	}
+	_, payload, errRead := client.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read sideband message: %v", errRead)
+	}
+	if got := string(payload); got != "echo:ping" {
+		t.Fatalf("sideband payload = %q, want echo:ping", got)
+	}
+	select {
+	case path := <-upstreamPaths:
+		if path != "/v1/live/rtc_external" {
+			t.Fatalf("upstream path = %q, want /v1/live/rtc_external", path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream sideband was not dialed")
+	}
+}
+
+func TestHandleSidebandRejectsUnknownCallWithClientSecret(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := NewHandler(auth.NewManager(nil, nil, nil), nil)
+	router := gin.New()
+	router.GET("/v1/realtime/calls/:call_id", func(c *gin.Context) {
+		c.Set(ClientSecretPrincipalContextKey, "sess_any")
+		c.Next()
+	}, handler.HandleSideband)
+	request := httptest.NewRequest(http.MethodGet, "/v1/realtime/calls/rtc_external", nil)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+	}
+}
+
+// newUnknownCallUpstream accepts sideband joins only for acceptToken and records the
+// Authorization header of every attempt.
+func newUnknownCallUpstream(t *testing.T, acceptToken string) (*httptest.Server, *[]string, *sync.Mutex) {
+	t.Helper()
+	var mu sync.Mutex
+	attempts := make([]string, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		authorization := request.Header.Get("Authorization")
+		mu.Lock()
+		attempts = append(attempts, authorization)
+		mu.Unlock()
+		if authorization != "Bearer "+acceptToken {
+			http.Error(writer, `{"error":"call not found"}`, http.StatusNotFound)
+			return
+		}
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		conn, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		messageType, payload, errRead := conn.ReadMessage()
+		if errRead != nil {
+			return
+		}
+		_ = conn.WriteMessage(messageType, append([]byte("echo:"), payload...))
+	}))
+	return server, &attempts, &mu
+}
+
+func newUnknownCallHandler(t *testing.T, upstreamURL string) (*Handler, *httptest.Server) {
+	t.Helper()
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	for _, credential := range []struct {
+		id       string
+		token    string
+		disabled bool
+	}{
+		{id: "codex-a", token: "token-a"},
+		{id: "codex-b", token: "token-b"},
+		{id: "codex-c", token: "token-c"},
+		{id: "codex-disabled", token: "token-disabled", disabled: true},
+	} {
+		status := auth.StatusActive
+		if credential.disabled {
+			status = auth.StatusDisabled
+		}
+		registerCredential(t, manager, &auth.Auth{
+			ID:       credential.id,
+			Provider: "codex",
+			Status:   status,
+			Disabled: credential.disabled,
+			Metadata: map[string]any{"access_token": credential.token, "account_id": "account-" + credential.id},
+		})
+	}
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamURL, "http") + "/v1"
+	router := gin.New()
+	router.GET("/v1/live/:call_id", handler.HandleSideband)
+	return handler, httptest.NewServer(router)
+}
+
+func dialUnknownCall(t *testing.T, downstreamURL string) {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(downstreamURL, "http") + "/v1/live/rtc_external"
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if errDial != nil {
+		t.Fatalf("dial downstream sideband: %v", errDial)
+	}
+	defer func() { _ = client.Close() }()
+	if errWrite := client.WriteMessage(websocket.TextMessage, []byte("ping")); errWrite != nil {
+		t.Fatalf("write sideband message: %v", errWrite)
+	}
+	_, payload, errRead := client.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read sideband message: %v", errRead)
+	}
+	if got := string(payload); got != "echo:ping" {
+		t.Fatalf("sideband payload = %q, want echo:ping", got)
+	}
+}
+
+func TestHandleSidebandUnknownCallTriesEachCredentialUntilAccepted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamServer, attempts, mu := newUnknownCallUpstream(t, "token-c")
+	defer upstreamServer.Close()
+	handler, downstreamServer := newUnknownCallHandler(t, upstreamServer.URL)
+	defer downstreamServer.Close()
+
+	dialUnknownCall(t, downstreamServer.URL)
+	mu.Lock()
+	first := append([]string(nil), (*attempts)...)
+	*attempts = (*attempts)[:0]
+	mu.Unlock()
+	want := []string{"Bearer token-a", "Bearer token-b", "Bearer token-c"}
+	if strings.Join(first, ",") != strings.Join(want, ",") {
+		t.Fatalf("first join attempts = %v, want %v", first, want)
+	}
+	if got := handler.lastUnknownCallAuth(); got != "codex-c" {
+		t.Fatalf("remembered credential = %q, want codex-c", got)
+	}
+
+	// The credential that joined last time is tried first on the next unknown call.
+	dialUnknownCall(t, downstreamServer.URL)
+	mu.Lock()
+	second := append([]string(nil), (*attempts)...)
+	mu.Unlock()
+	if len(second) != 1 || second[0] != "Bearer token-c" {
+		t.Fatalf("second join attempts = %v, want only Bearer token-c", second)
+	}
+}
+
+func TestHandleSidebandUnknownCallReturnsUpstreamStatusWhenAllRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamServer, attempts, mu := newUnknownCallUpstream(t, "no-such-token")
+	defer upstreamServer.Close()
+	_, downstreamServer := newUnknownCallHandler(t, upstreamServer.URL)
+	defer downstreamServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/rtc_external"
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if client != nil {
+		_ = client.Close()
+	}
+	if errDial == nil {
+		t.Fatal("dial succeeded, want handshake failure")
+	}
+	if response == nil || response.StatusCode != http.StatusNotFound {
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+		}
+		t.Fatalf("downstream status = %d, want %d", status, http.StatusNotFound)
+	}
+	if response.Body != nil {
+		_ = response.Body.Close()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*attempts) != 3 {
+		t.Fatalf("upstream attempts = %v, want the three enabled credentials", *attempts)
+	}
+	for _, attempt := range *attempts {
+		if attempt == "Bearer token-disabled" {
+			t.Fatal("disabled credential was used")
+		}
+	}
+}
+
+func TestHandleSidebandUnknownCallTriesHintedAccountFirst(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamServer, attempts, mu := newUnknownCallUpstream(t, "token-b")
+	defer upstreamServer.Close()
+	handler, downstreamServer := newUnknownCallHandler(t, upstreamServer.URL)
+	defer downstreamServer.Close()
+	// A stale preference must not outrank the account named by the client.
+	handler.rememberUnknownCallAuth("codex-c")
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/live/rtc_external"
+	headers := http.Header{codexAccountHintHeader: []string{"account-codex-b"}}
+	client, response, errDial := websocket.DefaultDialer.Dial(wsURL, headers)
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if errDial != nil {
+		t.Fatalf("dial downstream sideband: %v", errDial)
+	}
+	_ = client.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*attempts) != 1 || (*attempts)[0] != "Bearer token-b" {
+		t.Fatalf("upstream attempts = %v, want only Bearer token-b", *attempts)
 	}
 }
