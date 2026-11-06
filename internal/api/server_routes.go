@@ -940,6 +940,15 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		if entry.ownedBy != "" {
 			model["owned_by"] = entry.ownedBy
 		}
+		if entry.contextLength > 0 {
+			model["context_length"] = entry.contextLength
+		}
+		if entry.maxContextLength > 0 {
+			model["max_context_length"] = entry.maxContextLength
+		}
+		if entry.maxCompletionTokens > 0 {
+			model["max_completion_tokens"] = entry.maxCompletionTokens
+		}
 		filtered = append(filtered, model)
 	}
 	s.writeModelListResponse(c, "openai", gin.H{
@@ -1199,6 +1208,8 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 
 	indexByID := make(map[string]int)
 	out := make([]homeModelEntry, 0, 256)
+	effectiveCapByID := make(map[string]int)
+	hasMaxContextOverrideByID := make(map[string]bool)
 	hasModelRecords := false
 	for _, section := range sections {
 		models := bySection[section]
@@ -1237,6 +1248,14 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"))
 			thinking := homeModelThinkingSupport(model)
 
+			routeCap := maxContextLength
+			if routeCap <= 0 {
+				routeCap = contextLength
+			}
+			if maxContextLength > 0 {
+				hasMaxContextOverrideByID[id] = true
+			}
+
 			if index, ok := indexByID[id]; ok {
 				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
 				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
@@ -1251,17 +1270,36 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				}
 				if out[index].contextLength <= 0 && contextLength > 0 {
 					out[index].contextLength = contextLength
+				} else if out[index].contextLength > 0 && contextLength > 0 && contextLength < out[index].contextLength {
+					out[index].contextLength = contextLength
 				}
-				if out[index].maxContextLength <= 0 && maxContextLength > 0 {
-					out[index].maxContextLength = maxContextLength
+				if routeCap > 0 {
+					if prevCap, okCap := effectiveCapByID[id]; !okCap || prevCap <= 0 || routeCap < prevCap {
+						effectiveCapByID[id] = routeCap
+					}
+				}
+				if hasMaxContextOverrideByID[id] {
+					out[index].maxContextLength = effectiveCapByID[id]
+				} else {
+					out[index].maxContextLength = 0
 				}
 				if out[index].maxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+					out[index].maxCompletionTokens = maxCompletionTokens
+				} else if out[index].maxCompletionTokens > 0 && maxCompletionTokens > 0 && maxCompletionTokens < out[index].maxCompletionTokens {
 					out[index].maxCompletionTokens = maxCompletionTokens
 				}
 				if out[index].thinking == nil && thinking != nil {
 					out[index].thinking = thinking
 				}
 				continue
+			}
+
+			if routeCap > 0 {
+				effectiveCapByID[id] = routeCap
+			}
+			initialMaxContextLength := 0
+			if hasMaxContextOverrideByID[id] {
+				initialMaxContextLength = effectiveCapByID[id]
 			}
 
 			indexByID[id] = len(out)
@@ -1271,7 +1309,7 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				ownedBy:                ownedBy,
 				displayName:            displayName,
 				contextLength:          contextLength,
-				maxContextLength:       maxContextLength,
+				maxContextLength:       initialMaxContextLength,
 				maxCompletionTokens:    maxCompletionTokens,
 				thinking:               thinking,
 				providers:              appendUniqueHomeProvider(nil, provider),
