@@ -121,8 +121,9 @@ func TestCodexTerminalQuotaCoolsAccountAcrossModels(t *testing.T) {
 				t.Errorf("real Codex error is missing credential scope: %T %v", quotaErr, quotaErr)
 			}
 			high, _ := manager.GetByID(highID)
-			if high.Quota.Reason != "credential_quota" || high.Quota.NextRecoverAt.Before(before.Add(time.Hour)) {
-				t.Errorf("account cooldown missing scope or upstream reset: %+v", high.Quota)
+			recoverAt := high.Quota.NextRecoverAt
+			if high.Quota.Reason != "credential_quota" || recoverAt.Before(before.Add(4*time.Minute)) || recoverAt.After(before.Add(6*time.Minute)) {
+				t.Errorf("account cooldown missing scope or recheck deadline: %+v", high.Quota)
 			}
 			payload, errSibling := run(siblingModel)
 			if errSibling != nil || !strings.Contains(string(payload), "response.completed") {
@@ -261,7 +262,8 @@ func TestCodexModelLevelCoolingPreservesSiblingModel(t *testing.T) {
 			if high.Quota.Reason == "credential_quota" {
 				t.Errorf("model-level cooling must not set credential_quota reason on auth: %+v", high.Quota)
 			}
-			if high.Quota.Reason != "quota" || high.Quota.NextRecoverAt.Before(before.Add(time.Hour)) {
+			recoverAt := high.Quota.NextRecoverAt
+			if high.Quota.Reason != "quota" || recoverAt.Before(before.Add(4*time.Minute)) || recoverAt.After(before.Add(6*time.Minute)) {
 				t.Errorf("expected model-level quota cooldown on auth: %+v", high.Quota)
 			}
 			payload, errSibling := run(siblingModel)

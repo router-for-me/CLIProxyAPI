@@ -134,7 +134,8 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 					if state == nil || state.LastError == nil || state.LastError.HTTPStatus != status || !state.Unavailable {
 						t.Errorf("account failure not recorded: %+v", state)
 					}
-					if status == 429 && (current.Quota.Reason != "credential_quota" || current.Quota.NextRecoverAt.Before(before.Add(time.Hour))) {
+					recoverAt := current.Quota.NextRecoverAt
+					if status == 429 && (current.Quota.Reason != "credential_quota" || recoverAt.Before(before.Add(4*time.Minute)) || recoverAt.After(before.Add(6*time.Minute))) {
 						t.Errorf("quota scope or retry delay lost: %+v", current.Quota)
 					}
 					healthy, _ := manager.GetByID(good.ID)
