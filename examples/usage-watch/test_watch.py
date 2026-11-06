@@ -2,11 +2,14 @@ import importlib.util
 import io
 import os
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 
 
 spec = importlib.util.spec_from_file_location("watch", Path(__file__).with_name("watch.py"))
@@ -29,6 +32,51 @@ class WatchTests(unittest.TestCase):
         summary = watch.quota_summary(credential, "claude-sonnet-4-6", datetime(2026, 10, 16, 12, 1, tzinfo=timezone.utc))
         self.assertEqual(summary, "5h 27% left, observed 60s ago")
         self.assertEqual(watch.quota_summary({"provider": "claude"}, "claude-sonnet-4-6"), "quota unavailable")
+
+    def test_requested_alias_is_displayed_but_upstream_model_selects_quota(self):
+        record = {"provider": "codex", "model": "gpt-6.1-sol", "alias": "my-codex", "auth_index": "a1"}
+        credentials = [{"provider": "codex", "auth_index": "a1", "model_quotas": {
+            "gpt-6.1-sol": {"signals": {"X-Codex-Primary-Used-Percent": "25"}},
+        }}]
+        line = watch.format_record(record, credentials)
+        self.assertIn("codex | my-codex |", line)
+        self.assertIn("primary 75% left", line)
+
+    def test_management_key_is_not_sent_on_redirect(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.server.requests.append(dict(self.headers))
+                if self.server.redirect_to:
+                    self.send_response(302)
+                    self.send_header("Location", self.server.redirect_to)
+                    self.end_headers()
+                else:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"{}")
+
+            def log_message(self, *_args):
+                pass
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        source = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        target.requests, target.redirect_to = [], None
+        source.requests = []
+        source.redirect_to = f"http://127.0.0.1:{target.server_port}/stolen"
+        threads = [threading.Thread(target=server.serve_forever) for server in (target, source)]
+        try:
+            for thread in threads:
+                thread.start()
+            with self.assertRaises(HTTPError):
+                watch.get_json(f"http://127.0.0.1:{source.server_port}", "private-key", "/credentials")
+            self.assertEqual(len(source.requests), 1)
+            self.assertEqual(target.requests, [])
+        finally:
+            for server in (source, target):
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join()
 
     def test_account_change_is_per_provider(self):
         previous = {}
@@ -80,9 +128,10 @@ class WatchTests(unittest.TestCase):
             path = Path(directory) / "latest.json"
             with mock.patch.object(watch, "get_json", side_effect=[
                 {"files": credentials}, [record],
-            ]), mock.patch.dict(watch.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
+            ]) as get_json, mock.patch.dict(watch.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(watch.main(["--once", "--latest-file", str(path)]), 0)
+            self.assertEqual(get_json.call_args_list[1].kwargs, {"timeout": None})
             self.assertIn("account@example.com", path.read_text())
             self.assertNotIn("sk-secret-upstream-key", path.read_text())
 

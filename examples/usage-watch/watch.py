@@ -11,15 +11,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-def get_json(base_url, key, path):
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def get_json(base_url, key, path, timeout=10):
     request = Request(
         base_url.rstrip("/") + "/v8/management" + path,
         headers={"Authorization": "Bearer " + key},
     )
-    with urlopen(request, timeout=10) as response:
+    with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -104,12 +109,13 @@ def format_record(record, credentials):
     credential = credential_for_record(record, credentials)
     account = account_label(record, credential)
     model = record.get("model") or "unknown model"
+    displayed_model = record.get("alias") or model
     provider = record.get("provider") or "unknown provider"
     tokens = (record.get("tokens") or {}).get("total_tokens")
     token_text = f" | {tokens} tokens" if isinstance(tokens, int) else ""
     status = "failed" if record.get("failed") else "ok"
     quota = quota_summary(credential, model) if credential else "quota unavailable"
-    return f"{provider} | {model} | {account} | {status}{token_text} | {quota}"
+    return f"{provider} | {displayed_model} | {account} | {status}{token_text} | {quota}"
 
 
 def account_change(record, credentials, previous_by_provider):
@@ -202,7 +208,7 @@ def main(argv=None):
             if not isinstance(credentials, list) or any(not isinstance(item, dict) for item in credentials):
                 raise ValueError("invalid credential list")
             latest = read_latest(args.latest_file) if args.latest_file else None
-            records = get_json(args.base_url, key, "/observability/usage/queue?" + urlencode({"count": 100}))
+            records = get_json(args.base_url, key, "/observability/usage/queue?" + urlencode({"count": 100}), timeout=None)
             if records:
                 for record in records:
                     if args.provider and record.get("provider") != args.provider:
