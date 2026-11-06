@@ -168,3 +168,41 @@ func TestSessionCache_StopNilChannelNoPanic(t *testing.T) {
 	zeroCache := &SessionCache{}
 	zeroCache.Stop()
 }
+
+func TestSessionCache_RejectsWorkAfterStop(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(time.Minute)
+	cache.Set("session-a", "auth-a")
+	cache.Stop()
+
+	// Mutators are no-ops after Stop.
+	cache.Set("session-b", "auth-a")
+	cache.SetAliases("auth-a", "session-c")
+	if ok := cache.Touch("session-a", "auth-a"); ok {
+		t.Fatal("Touch() succeeded after Stop")
+	}
+	if ok := cache.CompareAndDelete("session-a", "auth-a"); ok {
+		t.Fatal("CompareAndDelete() succeeded after Stop")
+	}
+	cache.Invalidate("session-a")
+	cache.InvalidateAuth("auth-a")
+
+	// Accessors report nothing: Stop released the pre-existing binding and the
+	// post-Stop writes above must not have created new ones.
+	if _, ok := cache.Get("session-a"); ok {
+		t.Fatal("Get() returned a pre-Stop binding after Stop")
+	}
+	if _, ok := cache.Get("session-b"); ok {
+		t.Fatal("Get() returned a post-Stop binding")
+	}
+	if _, ok := cache.GetAndRefresh("session-a"); ok {
+		t.Fatal("GetAndRefresh() returned a binding after Stop")
+	}
+	if n := cache.Len(); n != 0 {
+		t.Fatalf("Len() after Stop = %d, want 0", n)
+	}
+
+	// Stop remains idempotent and the cleanup loop stays silent.
+	cache.Stop()
+}
