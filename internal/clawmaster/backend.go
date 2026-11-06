@@ -763,12 +763,28 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 		return nil, backendRefuse(backendRefusalUnavailable, "ordered inference selector is stopped")
 	}
 	s.initializeLocked()
+	availabilityModel := backendAvailabilityModel(model, opts)
+	// An unavailable subscription may be skipped before a portable request is sent.
+	// Preserve an error from an actual non-quota attempt instead of replaying it
+	// on another account, where a server-side tool could run a second time.
+	if switchable && backendAttemptFailed(ctx, "", availabilityModel) {
+		for _, id := range s.authIDs {
+			if _, failed := backendAttemptStatus(ctx, id, availabilityModel); failed {
+				return nil, s.boundUnavailableErrorLocked(ctx, id, availabilityModel)
+			}
+		}
+		if s.backupAuthID != "" {
+			if _, failed := backendAttemptStatus(ctx, s.backupAuthID, availabilityModel); failed {
+				return nil, s.boundUnavailableErrorLocked(ctx, s.backupAuthID, availabilityModel)
+			}
+		}
+		return nil, backendRefuse(backendRefusalUnavailable, "inference failed before this retry; not replaying the request on another account")
+	}
 	// A paid API credential is not subscription capacity: do not use it to
 	// bypass the ten-percent reserve or an ordinary provider/request failure.
-	if switchable && s.backupAuthID != "" && s.backupUsableLocked() && !backendAttemptFailed(ctx, "", backendAvailabilityModel(model, opts)) && s.subscriptionsExhaustedLocked() {
+	if switchable && s.backupAuthID != "" && s.backupUsableLocked() && s.subscriptionsExhaustedLocked() {
 		return s.pickBackupLocked(ctx, model, opts, auths, sessionID)
 	}
-	excludedAuthID := ""
 	if sessionID != "" {
 		boundID, boundFound, errBinding := s.sessionBindingLocked(sessionID, auths, opaque)
 		if errBinding != nil {
@@ -797,7 +813,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 			if boundID == s.backupAuthID && switchable {
 				// Return clean work to subscriptions as soon as capacity resets.
 				// Opaque API continuations still take the ordinary bound path below.
-				selected := s.preferredAuthLocked(auths, "")
+				selected := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, "")
 				if selected == nil {
 					return nil, s.quotaRefusalLocked("subscription capacity is unavailable; no quota handoff to the API-key backup is permitted")
 				}
@@ -808,58 +824,51 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 				return picked, err
 			}
 			if bound := backendSeriesAuthByID(auths, s.provider, boundID); bound != nil {
-				if !switchable || !s.shouldMoveCleanWorkLocked(boundID) {
-					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
-					if err == nil && picked != nil {
-						if inheritedParent && opaque {
-							return s.bindInheritedSessionLocked(ctx, sessionID, parentSessionID, picked)
-						}
-						return s.bindSessionLocked(ctx, sessionID, picked)
+				picked, err := s.pickAuthLocked(ctx, model, opts, bound)
+				if err == nil && picked != nil {
+					if inheritedParent && opaque {
+						return s.bindInheritedSessionLocked(ctx, sessionID, parentSessionID, picked)
 					}
-					// The core refused the bound subscription (a model cooldown, an attempt that failed in
-					// this request): say which subscription, which model and why, in front of its error.
-					if err != nil && backendGenericRefusal(err) {
-						explained := s.boundUnavailableErrorLocked(ctx, boundID, backendAvailabilityModel(model, opts)).(*backendRefusalError)
-						explained.cause = err
-						err = explained
+					return s.bindSessionLocked(ctx, sessionID, picked)
+				}
+				if switchable {
+					if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
+						return s.bindSessionLocked(ctx, sessionID, next)
 					}
-					return picked, err
 				}
-				available := backendSeriesAvailableAuths(ctx, s.provider, backendAvailabilityModel(model, opts), opts, auths)
-				selected := s.preferredAvailableAuthLocked(available, boundID)
-				if selected == nil {
-					picked, err := s.pickAuthLocked(ctx, model, opts, bound)
-					if err == nil && picked != nil {
-						return s.bindSessionLocked(ctx, sessionID, picked)
-					}
-					return picked, err
+				if err != nil && backendGenericRefusal(err) {
+					explained := s.boundUnavailableErrorLocked(ctx, boundID, availabilityModel).(*backendRefusalError)
+					explained.cause = err
+					err = explained
 				}
-				picked, err := s.pickAuthLocked(ctx, model, opts, selected)
-				if err != nil {
-					return nil, err
-				}
-				return s.bindSessionLocked(ctx, sessionID, picked)
-			} else {
-				if !switchable {
-					return nil, backendRefuse(backendRefusalInvalid, "the current Claude continuation account is unavailable; refusing to move opaque conversation state")
-				}
-				// Manager-side model cooldowns and request-scoped failures also
-				// remove an auth from this candidate slice. They must not rotate a
-				// subscription; only Anthropic's own rejection (a real 429) moves clean work.
-				if backendAttemptFailed(ctx, boundID, backendAvailabilityModel(model, opts)) || (!strings.HasPrefix(boundID, "missing:") && !s.quotaBlockedLocked(boundID)) {
-					return nil, s.boundUnavailableErrorLocked(ctx, boundID, backendAvailabilityModel(model, opts))
-				}
+				return picked, err
 			}
-			excludedAuthID = boundID
+			if !switchable {
+				return nil, backendRefuse(backendRefusalInvalid, "the current Claude continuation account is unavailable; refusing to move opaque conversation state")
+			}
+			// An auth omitted before dispatch may have a broken login or a model
+			// cooldown. Check the remaining subscription candidates.
+			if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
+				return s.bindSessionLocked(ctx, sessionID, next)
+			}
+			if s.quotaBlockedLocked(boundID) {
+				return nil, s.noSubscriptionRefusalLocked(ctx, boundID, availabilityModel)
+			}
+			return nil, s.boundUnavailableErrorLocked(ctx, boundID, availabilityModel)
 		}
 	}
-	if opaque && excludedAuthID == "" {
+	if opaque {
 		return nil, backendRefuse(backendRefusalInvalid, "the Claude continuation origin is unknown; start a self-contained session before switching subscriptions")
 	}
 
-	selected := s.preferredAuthLocked(auths, excludedAuthID)
+	var selected *coreauth.Auth
+	if switchable {
+		selected = s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, "")
+	} else {
+		selected = s.preferredAuthLocked(auths, "")
+	}
 	if selected == nil {
-		return nil, s.noSubscriptionRefusalLocked(ctx, excludedAuthID, backendAvailabilityModel(model, opts))
+		return nil, s.noSubscriptionRefusalLocked(ctx, "", availabilityModel)
 	}
 	picked, err := s.pickAuthLocked(ctx, model, opts, selected)
 	if err != nil {
@@ -871,14 +880,14 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 	return picked, nil
 }
 
-// boundUnavailableErrorLocked explains why a conversation stays on a subscription that cannot
-// take it right now. Only a used-up weekly quota moves a conversation; an upstream error on the
-// bound subscription (a model it does not serve, a 5xx) does not, so the person can act on it:
-// the subscription's own name, the model, the status, and what to do.
+// boundUnavailableErrorLocked explains why a request could not use its subscription.
+// An error from an actual non-quota attempt is relayed without replaying the request.
 func (s *backendSeriesSelector) boundUnavailableErrorLocked(ctx context.Context, boundID, model string) error {
 	name := boundID
 	if n := s.names[boundID]; n != "" {
 		name = n
+	} else if strings.HasPrefix(boundID, "missing:") {
+		name = "original account"
 	}
 	refusal := &backendRefusalError{kind: backendRefusalUnavailable, authID: boundID, model: model}
 	if status, failed := backendAttemptStatus(ctx, boundID, model); failed {
@@ -886,23 +895,23 @@ func (s *backendSeriesSelector) boundUnavailableErrorLocked(ctx context.Context,
 		switch {
 		case status == http.StatusNotFound && backendUpstreamErrorFrom(ctx).notFoundWithoutAnthropicError():
 			// Not "model not found": Anthropic names that. Retried once already (backendRetryNotFound).
-			refusal.reason = fmt.Sprintf("subscription %s answered HTTP 404 with no Anthropic error for model %s, twice; that is not a model it cannot serve, and the pool moves a conversation only for a used-up weekly quota. Retry, or switch model with /model", name, model)
+			refusal.reason = fmt.Sprintf("subscription %s answered HTTP 404 with no Anthropic error for model %s, twice; that is not a model it cannot serve, and the proxy does not replay this failed request on another account. Retry, or switch model with /model", name, model)
 		case status == http.StatusNotFound && !backendUpstreamErrorFrom(ctx).notFoundNamesModel(model):
 			// Anthropic's not_found_error, but about something in the request (a file, a container, a
 			// resource of another account), not the model. The session has Anthropic's own message.
 			refusal.kind = backendRefusalNotFound
-			refusal.reason = fmt.Sprintf("subscription %s: Anthropic answered 404 not_found_error for model %s about something in the request, not the model (the message is in the response and the server log); the pool moves a conversation only for a used-up weekly quota. Start a fresh session, or switch model with /model", name, model)
+			refusal.reason = fmt.Sprintf("subscription %s: Anthropic answered 404 not_found_error for model %s about something in the request, not the model (the message is in the response and the server log); the proxy does not replay this failed request on another account. Start a fresh session, or switch model with /model", name, model)
 		case status == http.StatusNotFound:
 			refusal.kind = backendRefusalNotFound
-			refusal.reason = fmt.Sprintf("subscription %s does not serve model %s (HTTP 404); the pool moves a conversation only for a used-up weekly quota, not for a model it cannot serve. Switch model with /model", name, model)
+			refusal.reason = fmt.Sprintf("subscription %s does not serve model %s (HTTP 404); the proxy does not replay this failed request on another account. Switch model with /model", name, model)
 		case status != 0:
-			refusal.reason = fmt.Sprintf("subscription %s answered HTTP %d for model %s; the pool moves a conversation only for a used-up weekly quota, not for an upstream error. Retry, or switch model with /model", name, status, model)
+			refusal.reason = fmt.Sprintf("subscription %s answered HTTP %d for model %s; the proxy does not replay this failed request on another account. Retry, or switch model with /model", name, status, model)
 		default:
-			refusal.reason = fmt.Sprintf("subscription %s failed this request for model %s; the pool moves a conversation only for a used-up weekly quota, not for an upstream error. Retry, or switch model with /model", name, model)
+			refusal.reason = fmt.Sprintf("subscription %s failed this request for model %s; the proxy does not replay this failed request on another account. Retry, or switch model with /model", name, model)
 		}
 		return refusal
 	}
-	refusal.reason = fmt.Sprintf("subscription %s is not available for model %s right now (cooling down after an upstream error, not out of weekly quota), so this conversation stays with it. Retry shortly, or switch model with /model", name, model)
+	refusal.reason = fmt.Sprintf("subscription %s is not available for model %s right now; the login may need reauthorization or the model may be cooling down, and the proxy could not safely use another subscription. Retry shortly, or start a fresh conversation if this one needs its original account", name, model)
 	return refusal
 }
 
@@ -1040,11 +1049,11 @@ func backendSeriesAuthByID(auths []*coreauth.Auth, provider, authID string) *cor
 	return nil
 }
 
-// shouldMoveCleanWorkLocked: a conversation moves only when Anthropic has rejected its subscription
-// (a real 429 still in force). The poll's weekly figure, reserve band or 100%, never moves one: moving
-// costs the conversation its prompt cache, and Anthropic serves past the polled figure.
-func (s *backendSeriesSelector) shouldMoveCleanWorkLocked(boundID string) bool {
-	return s.quotaBlockedLocked(boundID)
+// preferredUsableAuthLocked ranks only subscriptions eligible to receive this
+// request. The paid backup is never in the subscription ranking.
+func (s *backendSeriesSelector) preferredUsableAuthLocked(ctx context.Context, model string, opts coreexecutor.Options, auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
+	available := backendSeriesAvailableAuths(ctx, s.provider, model, opts, auths)
+	return s.preferredAvailableAuthLocked(available, excludedAuthID)
 }
 
 func backendSeriesAvailableAuths(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) []*coreauth.Auth {

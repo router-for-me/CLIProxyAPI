@@ -116,7 +116,7 @@ func (e *backendSeriesCapture) Execute(_ context.Context, auth *coreauth.Auth, r
 	return coreexecutor.Response{Payload: []byte(`{"type":"message","content":[{"type":"text","text":"ok"}]}`)}, nil
 }
 
-func TestBackendSeriesDoesNotFallThroughOnModelScopedRateLimit(t *testing.T) {
+func TestBackendSeriesSkipsModelCooldownOnNextRequestWithoutReplaying(t *testing.T) {
 	model := t.Name() + "-model"
 	otherModel := t.Name() + "-other-model"
 	first, second := t.Name()+"-first", t.Name()+"-second"
@@ -134,21 +134,23 @@ func TestBackendSeriesDoesNotFallThroughOnModelScopedRateLimit(t *testing.T) {
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	}
 	handler := newBackendHandler(t.Context(), BackendOptions{Provider: "claude", UseRequestModel: true}, handlers.NewBaseAPIHandlers(&config.SDKConfig{}, manager))
-	request := func(requestModel string) *httptest.ResponseRecorder {
+	request := func(requestModel, session string) *httptest.ResponseRecorder {
 		writer := httptest.NewRecorder()
-		handler.ServeHTTP(writer, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, requestModel))))
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, requestModel)))
+		req.Header.Set("X-Claude-Code-Session-Id", session)
+		handler.ServeHTTP(writer, req)
 		return writer
 	}
-	firstResponse := request(model)
-	secondResponse := request(model)
-	otherResponse := request(otherModel)
+	firstResponse := request(model, "cooling-model-conversation")
+	secondResponse := request(model, "cooling-model-conversation")
+	otherResponse := request(otherModel, "separate-conversation")
 
 	capture.mu.Lock()
 	defer capture.mu.Unlock()
-	if got := strings.Join(capture.calls, ","); got != first+","+first {
-		t.Fatalf("model-scoped rate limit fell through: calls=%v", capture.calls)
+	if got := strings.Join(capture.calls, ","); got != first+","+second+","+first {
+		t.Fatalf("calls=%v; want original attempt, next request on fallback, other model on original", capture.calls)
 	}
-	if got := strings.Join(capture.models, ","); got != model+","+otherModel {
+	if got := strings.Join(capture.models, ","); got != model+","+model+","+otherModel {
 		t.Fatalf("model cooldown used the selection marker instead of requested models: models=%v", capture.models)
 	}
 	selector.mu.Lock()
@@ -157,10 +159,11 @@ func TestBackendSeriesDoesNotFallThroughOnModelScopedRateLimit(t *testing.T) {
 	if quotaChanged {
 		t.Fatal("model-scoped rate limit changed weekly account quota")
 	}
-	for i, response := range []*httptest.ResponseRecorder{firstResponse, secondResponse} {
-		if response.Code == http.StatusOK || strings.Contains(response.Body.String(), "private model rate limit") {
-			t.Fatalf("model-limited response %d: status=%d body=%s", i+1, response.Code, response.Body.String())
-		}
+	if firstResponse.Code == http.StatusOK || strings.Contains(firstResponse.Body.String(), "private model rate limit") {
+		t.Fatalf("original rate-limited request: status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+	if secondResponse.Code != http.StatusOK {
+		t.Fatalf("next request did not use the healthy account: status=%d body=%s", secondResponse.Code, secondResponse.Body.String())
 	}
 	if otherResponse.Code != http.StatusOK {
 		t.Fatalf("other model did not remain on the active profile: status=%d body=%s", otherResponse.Code, otherResponse.Body.String())

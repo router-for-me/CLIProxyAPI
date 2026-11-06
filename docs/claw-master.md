@@ -252,9 +252,12 @@ band or calls exhausted, the log says so once per profile per band
 
 Quota state is refreshed from Anthropic's rate-limit response headers. A
 credential-scoped `429` temporarily blocks that account until its retry/reset deadline;
-it does not turn a five-hour rejection into exhausted weekly usage. Request-scoped,
-model-scoped, authentication, validation, and transport failures do not drain or rotate
-the account.
+it does not turn a five-hour rejection into exhausted weekly usage. When a login is
+unavailable or a model is already cooling down, a new request with self-contained
+history uses the next eligible subscription and keeps that binding for future turns.
+The proxy preserves state that belongs to the original account and does not replay an
+actual non-quota failure on another account. An unavailable login does not trigger the
+paid API backup.
 
 After startup, the usage API is polled about every 3 minutes (each round jittered 20% either
 way) for all subscription profiles, never the API-key backup. The profiles do not ask at once:
@@ -276,11 +279,11 @@ confirming the actual state. Polling never changes opaque continuation bindings 
 replays a stream. Backend shutdown cancels and joins usage requests before releasing
 profile locks. The separate OAuth refresh loop renews login tokens.
 
-A conversation moves only on Anthropic's rejection:
+A conversation keeps its account while that account can serve the request:
 
 - Whatever the poll says (ok, reserve or 100%), a session remains on its selected account.
-- After a credential-scoped `429` on its account, a self-contained request moves to the
-  best-ranked account Anthropic has not rejected.
+- After a credential-scoped `429`, or when the account is unavailable before dispatch, a
+  self-contained request moves to the best-ranked eligible subscription.
 - Opaque/account-bound continuations remain on their bound account; while Anthropic's
   rejection holds they get Anthropic's `429` back with the time it ends.
 - When Anthropic has rejected every account, the pool answers Anthropic's `429` with the
@@ -300,8 +303,8 @@ rather than all discarded history.
 
 The selector therefore inspects the request body itself; it does not depend on a
 version-specific "compaction happened" header. Ordinary text plus client-side
-`tool_use`/`tool_result` history is self-contained and can move once Anthropic rejects its
-account. A request stays on its current account when it contains known opaque or
+`tool_use`/`tool_result` history is self-contained and can move when its account cannot serve a
+new request. A request stays on its current account when it contains known opaque or
 provider-side state, including:
 
 - container or uploaded/file identifiers;

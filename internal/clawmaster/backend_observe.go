@@ -182,8 +182,8 @@ func (s *backendSeriesSelector) switchReasonLocked(fromID, toID string) string {
 	case s.backupAuthID != "" && fromID == s.backupAuthID:
 		return "subscription_capacity_returned"
 	case s.quotaBlockedLocked(fromID):
-		// Only Anthropic's rejection of a real request moves a conversation. When the poll agrees the
-		// week is used up, say so; otherwise it was another limit (the five-hour window, say).
+		// A confirmed quota rejection may move the conversation. When the poll agrees the week
+		// is used up, say so; otherwise it was another limit (the five-hour window, say).
 		if from := s.currentQuotaLocked(fromID); from.known && from.used >= 1 {
 			return "weekly_exhausted"
 		}
