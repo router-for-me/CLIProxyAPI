@@ -770,7 +770,32 @@ func websocketJSONPayloadsFromChunk(chunk []byte) [][]byte {
 	return payloads
 }
 
+// usageLimitCooldownErrorMessage hands Responses clients a pooled usage-limit
+// cooldown as usage_limit_reached, keeping the original error for headers and logs.
+func usageLimitCooldownErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg == nil || errMsg.Error == nil {
+		return errMsg
+	}
+	body, ok := coreauth.UsageLimitCooldownBody(errMsg.Error, time.Now())
+	if !ok {
+		return errMsg
+	}
+	rewritten := *errMsg
+	rewritten.Error = &usageLimitCooldownError{cause: errMsg.Error, body: body}
+	return &rewritten
+}
+
+type usageLimitCooldownError struct {
+	cause error
+	body  string
+}
+
+func (e *usageLimitCooldownError) Error() string { return e.body }
+
+func (e *usageLimitCooldownError) Unwrap() error { return e.cause }
+
 func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byte, error) {
+	errMsg = usageLimitCooldownErrorMessage(errMsg)
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
