@@ -37,6 +37,7 @@ func TestSIWCRefreshDefersDuringMaintenanceWakeThenRenews(t *testing.T) {
 				calls++
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"scope":"chatgpt.tokens.use.direct"}`))}, nil
 			})}}
+			auth.SetRefreshJournal(&memoryRefreshJournal{})
 			token, errRefresh := auth.RefreshSIWCTokensWithRetry(context.Background(), "sleep-refresh", "oaiapp_sleep", "", 3)
 			if token != nil || !errors.Is(errRefresh, context.Canceled) || calls != 0 || checks != 1 {
 				t.Fatalf("maintenance wake: token returned = %t, error = %v, requests = %d, checks = %d; want cancellation without token requests or retries", token != nil, errRefresh, calls, checks)

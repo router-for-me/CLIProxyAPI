@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,6 +37,7 @@ func TestSIWCTokenResponseValidatesScope(t *testing.T) {
 			auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 			})}}
+			auth.SetRefreshJournal(&memoryRefreshJournal{})
 			var err error
 			if tc.exchange {
 				_, err = auth.ExchangeSIWCCodeForTokens(context.Background(), "code", "oaiapp_scope", "", "", &PKCECodes{CodeVerifier: "verifier"})
@@ -44,6 +46,36 @@ func TestSIWCTokenResponseValidatesScope(t *testing.T) {
 			}
 			if (err != nil) != tc.wantError {
 				t.Fatalf("error = %v, wantError = %v", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestSIWCRefreshReceiptPreservesServerWindow(t *testing.T) {
+	for _, window := range []string{`"2026-11-07T13:07:09Z"`, `1794056829`, `null`} {
+		t.Run(window, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"access_token":"access","refresh_token":"rotated","expires_in":3600}`)
+			if errSet := doc.SetRaw("earliest_refresh_at", window); errSet != nil {
+				t.Fatal(errSet)
+			}
+			body := doc.String()
+			calls := 0
+			auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}}
+			auth.SetRefreshJournal(&memoryRefreshJournal{})
+			for attempt := 0; attempt < 2; attempt++ {
+				token, errRefresh := auth.RefreshSIWCTokens(context.Background(), "receipt-grant", "oaiapp_receipt", "")
+				if errRefresh != nil {
+					t.Fatal(errRefresh)
+				}
+				if !reflect.DeepEqual(token.EarliestRefreshAt, ojson.Parse(window).Value()) {
+					t.Fatalf("attempt %d: earliest_refresh_at = %v, want %s", attempt, token.EarliestRefreshAt, window)
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("receipt was not reused: requests = %d, want 1", calls)
 			}
 		})
 	}
