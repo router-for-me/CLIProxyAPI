@@ -990,9 +990,19 @@ func TestConvertCodexResponseToOpenAI_RestoresNormalizedToolNames(t *testing.T) 
 
 // Only the original winning custom patch declaration allows the JSON wrapper.
 func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
-	for _, toolType := range []string{"custom", "function"} {
-		t.Run(toolType, func(t *testing.T) {
-			request := []byte(`{"tools":[{"type":"` + toolType + `","name":"apply_patch"}]}`)
+	for _, tc := range []struct {
+		name  string
+		tools string
+		wrap  bool
+	}{
+		{"flat custom", `[{"type":"custom","name":"apply_patch"}]`, true},
+		{"nested custom", `[{"type":"custom","custom":{"name":"apply_patch"}}]`, true},
+		{"function", `[{"type":"function","name":"apply_patch"}]`, false},
+		{"custom before function", `[{"type":"custom","custom":{"name":"apply_patch"}},{"type":"function","function":{"name":"apply_patch"}}]`, false},
+		{"function before custom", `[{"type":"function","function":{"name":"apply_patch"}},{"type":"custom","custom":{"name":"apply_patch"}}]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := []byte(`{"tools":` + tc.tools + `}`)
 			var param any
 			var arguments strings.Builder
 			send := func(event string) {
@@ -1008,31 +1018,42 @@ func TestApplyPatchCustomChatCompletionsWrapper(t *testing.T) {
 			send(`{"type":"response.custom_tool_call_input.done","item_id":"a","output_index":0,"input":` + string(mustJSONMarshal(t, patch)) + `}`)
 			send(`{"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":` + string(mustJSONMarshal(t, patch)) + `}}`)
 			want := patch
-			if toolType == "custom" {
+			if tc.wrap {
 				want = `{"input":` + string(mustJSONMarshal(t, patch)) + `}`
 			}
 			if arguments.String() != want {
-				t.Fatalf("arguments=%q want=%q", arguments.String(), want)
+				t.Errorf("arguments=%q want=%q", arguments.String(), want)
 			}
 			var nonStream any
 			out := ConvertCodexResponseToOpenAINonStream(t.Context(), "model", request, request, []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","name":"apply_patch","call_id":"c","input":`+string(mustJSONMarshal(t, patch))+`}]}}`), &nonStream)
 			if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != want {
-				t.Fatalf("nonstream arguments=%q want=%q", got, want)
+				t.Errorf("nonstream arguments=%q want=%q", got, want)
+			}
+			if got := isOriginalCustomPatch(request, ojson.Parse(`{"type":"custom_tool_call","name":"apply_patch"}`)); got != tc.wrap {
+				t.Errorf("isOriginalCustomPatch=%v want=%v", got, tc.wrap)
 			}
 		})
 	}
 }
 
 func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
-	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	for _, added := range []bool{false, true} {
+	for _, tc := range []struct {
+		tools string
+		added bool
+	}{
+		{`[{"type":"custom","name":"apply_patch"}]`, false},
+		{`[{"type":"custom","name":"apply_patch"}]`, true},
+		{`[{"type":"custom","custom":{"name":"apply_patch"}}]`, false},
+		{`[{"type":"custom","custom":{"name":"apply_patch"}}]`, true},
+	} {
+		request := []byte(`{"tools":` + tc.tools + `}`)
 		var param any
-		if added {
+		if tc.added {
 			_ = ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":""}}`), &param)
 		}
 		out := ConvertCodexResponseToOpenAI(t.Context(), "m", request, request, []byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"a","call_id":"c","name":"apply_patch","input":"p"}}`), &param)
 		if len(out) != 1 || ojson.GetBytesNoCopy(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `{"input":"p"}` {
-			t.Fatalf("fallback: %s", out)
+			t.Errorf("tools=%s added=%v fallback: %s", tc.tools, tc.added, out)
 		}
 	}
 }
@@ -1040,14 +1061,25 @@ func TestApplyPatchCustomChatCompletionsDoneFallback(t *testing.T) {
 // This round trip requires the request converter to unwrap only a winning custom
 // patch's normalized function envelope, while explicit custom inputs remain raw.
 func TestApplyPatchChatCompletionNativeHistoryRoundTrip(t *testing.T) {
-	original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"p"}]}}`)
-	out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
-	message := ojson.GetBytesNoCopy(out, "choices.0.message")
-	followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
-	request, _ := ConvertOpenAIRequestToCodex("m", followup, true)
-	if got := ojson.GetBytesNoCopy(request, "input.0.input").String(); got != "p" {
-		t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
+	for _, tools := range []string{
+		`[{"type":"custom","name":"apply_patch"}]`,
+		`[{"type":"custom","custom":{"name":"apply_patch"}}]`,
+	} {
+		original := []byte(`{"messages":[{"role":"user","content":"patch"}],"tools":` + tools + `}`)
+		response := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"c","name":"apply_patch","input":"p"}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(t.Context(), "m", original, original, response, nil)
+		message := ojson.GetBytesNoCopy(out, "choices.0.message")
+		if got := message.Get("tool_calls.0.function.arguments").String(); got != `{"input":"p"}` {
+			t.Fatalf("tools=%s arguments=%q, want JSON input wrapper", tools, got)
+		}
+		followup := []byte(`{"messages":[` + message.Raw + `,{"role":"tool","tool_call_id":"c","content":"ok"}],"tools":` + tools + `}`)
+		request, errConvert := ConvertOpenAIRequestToCodex("m", followup, true)
+		if errConvert != nil {
+			t.Fatal(errConvert)
+		}
+		if got := ojson.GetBytesNoCopy(request, "input.0.input").String(); got != "p" {
+			t.Fatalf("normalized function history must restore raw patch before native Codex: got %q, request=%s", got, request)
+		}
 	}
 }
 
