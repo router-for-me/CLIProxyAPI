@@ -161,7 +161,13 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		effectiveLead := *lead
+		// Tokens that live shorter than the provider lead would otherwise be refreshed
+		// on every check, rotating the refresh token until upstream revokes it.
+		if lifetime := expiry.Sub(lastRefresh); !lastRefresh.IsZero() && lifetime > 0 && lifetime <= effectiveLead {
+			effectiveLead = lifetime / 2 // ponytail: half-life heuristic, make it per-provider if some upstream needs a different ratio
+		}
+		return time.Until(expiry) <= effectiveLead
 	}
 	if !lastRefresh.IsZero() {
 		return now.Sub(lastRefresh) >= *lead

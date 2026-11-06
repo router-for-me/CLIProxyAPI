@@ -1353,3 +1353,32 @@ func TestManager_RefreshAuth_PreservesConcurrentModelCooldown(t *testing.T) {
 		t.Fatalf("ModelStates[gemini-pro].StatusMessage = %q, want quota exceeded", ms.StatusMessage)
 	}
 }
+
+type fixedRefreshLeadRuntime struct{ lead time.Duration }
+
+func (r fixedRefreshLeadRuntime) RefreshLead() *time.Duration { return &r.lead }
+
+func TestManager_ShouldRefresh_ShortLivedTokenNotRefreshedEveryCheck(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	now := time.Now()
+	newAuth := func(lastRefresh, expiry time.Time) *Auth {
+		return &Auth{
+			ID:       "codex-short",
+			Provider: "codex",
+			Runtime:  fixedRefreshLeadRuntime{lead: 24 * time.Hour},
+			Metadata: map[string]any{
+				"last_refresh": lastRefresh.Format(time.RFC3339),
+				"expired":      expiry.Format(time.RFC3339),
+			},
+		}
+	}
+	if manager.shouldRefresh(newAuth(now, now.Add(time.Hour)), now) {
+		t.Fatal("freshly refreshed 1h token should not be refreshed again")
+	}
+	if !manager.shouldRefresh(newAuth(now.Add(-40*time.Minute), now.Add(20*time.Minute)), now) {
+		t.Fatal("1h token past half its lifetime should be refreshed")
+	}
+	if !manager.shouldRefresh(newAuth(now.Add(-9*24*time.Hour), now.Add(12*time.Hour)), now) {
+		t.Fatal("long-lived token within the provider lead should still be refreshed")
+	}
+}
