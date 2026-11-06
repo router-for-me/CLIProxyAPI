@@ -27,7 +27,10 @@ Claude observations older than three days, expired or exhausted windows, and
 credentials with an error status are not promoted. The companion does not send artificial model
 requests or repeatedly probe Claude's quota endpoint. If any active Codex
 account cannot be read or its routing data is incomplete, that pass keeps the
-previous Codex ordering.
+previous Codex ordering. A stalled Codex app-server request does not hold up
+other accounts; unfinished account work is collected on a later pass. The
+15-second collection window only limits how long one routing pass waits and
+does not cancel a provider request.
 
 CLIProxyAPIHome mode is unsupported: the server disables its management
 endpoints in that mode, so this companion cannot change Home's routing order.
@@ -39,8 +42,9 @@ every 15 minutes. It needs `codex` on `PATH`, local CLIProxyAPI at
 `127.0.0.1:8317`, the management key, and local OAuth credential files. Set
 `CLIPROXY_MANAGEMENT_KEY` to the key value, or create a private file containing
 it and pass `--management-key-file PATH`. The default file path is
-`~/.cli-proxy-api/management-key`; CLIProxyAPI does not create this file.
-Use `--auth-dir` and `--state-file` for other locations.
+`<auth-dir>/management-key` (normally `~/.cli-proxy-api/management-key`);
+CLIProxyAPI does not create this file. Use `--auth-dir` and `--state-file` for
+other locations.
 
 The existing Codex earned reset policy is separate from priority selection.
 Without `--priority-only`, it attempts redemption only when a credit expires
@@ -50,7 +54,8 @@ return `nothingToReset`; no credit is spent in that case. After confirmed
 redemption, the companion clears CLIProxyAPI's local cooldown. It records an
 idempotency key before each attempt and reuses it after an uncertain outcome.
 If cooldown clearing fails after a confirmed redemption, it records the
-pending operation and retries it on later runs. `--priority-only` never
+pending operation and retries it on later runs only after verifying that the
+credential still belongs to the redeemed account. `--priority-only` never
 redeems a credit; it can still finish a previously pending local cooldown clear.
 An error while checking or redeeming one Codex credential is logged and does
 not prevent later credentials from being checked in that pass.

@@ -9,9 +9,11 @@ import argparse
 import datetime as dt
 import email.utils
 import errno
+import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +27,55 @@ from pathlib import Path
 UTC = dt.timezone.utc
 URGENT_EXPIRY_HORIZON = dt.timedelta(hours=5)
 REDEEM_HORIZON = dt.timedelta(hours=24)
+ACCOUNT_COLLECTION_SECONDS = 15
+_inflight_jobs = {}
+_state_lock = threading.RLock()
+
+
+def isolated_account_jobs(kind, accounts, operation):
+    """Collect independent account work without waiting indefinitely for one RPC.
+
+    The collection deadline only bounds this routing pass. It does not cancel a
+    provider request; unfinished daemon workers are reused by the next pass.
+    """
+    jobs = {}
+    for identity, credential in accounts.items():
+        fingerprint = hashlib.sha256(json.dumps(
+            [credential.get("account_id"), credential.get("access_token")],
+            separators=(",", ":")).encode()).hexdigest()
+        job_key = (kind, identity, fingerprint)
+        job = _inflight_jobs.get(job_key)
+        if job is None:
+            job = {"done": threading.Event()}
+            _inflight_jobs[job_key] = job
+
+            def worker(current_job=job, current_credential=credential):
+                try:
+                    current_job["value"] = operation(current_credential)
+                except Exception as exc:
+                    current_job["error"] = exc
+                finally:
+                    current_job["done"].set()
+
+            threading.Thread(target=worker, daemon=True).start()
+        jobs[identity] = (job_key, job)
+
+    if kind == "redeem":
+        for job_key, job in _inflight_jobs.items():
+            if job_key[0] == kind and job_key[1] not in jobs:
+                jobs[job_key[1]] = (job_key, job)
+
+    deadline = time.monotonic() + ACCOUNT_COLLECTION_SECONDS
+    completed = {}
+    for identity, (job_key, job) in jobs.items():
+        job["done"].wait(max(0, deadline - time.monotonic()))
+        if job["done"].is_set():
+            completed[identity] = job
+            del _inflight_jobs[job_key]
+    for job_key, job in list(_inflight_jobs.items()):
+        if job["done"].is_set() and job_key not in (pair[0] for pair in jobs.values()):
+            del _inflight_jobs[job_key]
+    return completed
 
 
 def renewal_minute(timestamp):
@@ -60,7 +111,7 @@ def rpc(proc, inbox, method, request_id, params=None, timeout=None):
             return response.get("result", {})
 
 
-def app_server(credential, consume=None):
+def app_server(credential, consume=None, now=None):
     codex_home = tempfile.mkdtemp(prefix="cliproxy-reset-")
     try:
         env = os.environ.copy()
@@ -87,6 +138,9 @@ def app_server(credential, consume=None):
             }, timeout=20)
             result = rpc(proc, inbox, "account/rateLimits/read", 3)
             if consume is not None:
+                eligible = should_redeem(result, now or dt.datetime.now(UTC))
+                if eligible is None or eligible["id"] != consume["creditId"]:
+                    return result, None
                 outcome = rpc(proc, inbox, "account/rateLimitResetCredit/consume", 4, consume)
                 return result, outcome.get("outcome")
             return result, None
@@ -279,55 +333,72 @@ def save_state(state_path, state):
 
 def redemption_key(state_path, account_id, credit_id):
     """Reuse an attempt ID after a timeout, so retries cannot spend twice."""
-    state = load_state(state_path)
-    key = account_id + ":" + credit_id
-    if key not in state:
-        state[key] = str(uuid.uuid4())
-        save_state(state_path, state)
-    return state[key]
+    with _state_lock:
+        state = load_state(state_path)
+        key = account_id + ":" + credit_id
+        if key not in state:
+            state[key] = str(uuid.uuid4())
+            save_state(state_path, state)
+        return state[key]
 
 
 def clear_redemption_key(state_path, account_id, credit_id):
-    state = load_state(state_path)
-    if state.pop(account_id + ":" + credit_id, None) is None:
-        return
-    save_state(state_path, state)
-
-
-def queue_cooldown_reset(state_path, auth_index):
-    state = load_state(state_path)
-    pending = state.setdefault("pending_cooldowns", [])
-    if auth_index not in pending:
-        pending.append(auth_index)
+    with _state_lock:
+        state = load_state(state_path)
+        if state.pop(account_id + ":" + credit_id, None) is None:
+            return
         save_state(state_path, state)
+
+
+def queue_cooldown_reset(state_path, auth_index, account_id):
+    with _state_lock:
+        state = load_state(state_path)
+        pending = state.setdefault("pending_cooldowns", [])
+        item = {"auth_index": auth_index, "account_id": account_id}
+        if item not in pending:
+            pending.append(item)
+            save_state(state_path, state)
 
 
 def retry_cooldown_resets(state_path, key):
-    state = load_state(state_path)
-    pending = state.get("pending_cooldowns", [])
-    remaining = []
-    for auth_index in pending:
-        try:
-            response = management("POST", "/routing/cooldown/reset", key,
-                                  {"auth_index": auth_index})
-            if response.get("status") != "ok":
-                raise RuntimeError(f"unexpected response: {response}")
-        except Exception as exc:
-            print(f"{auth_index}: cooldown reset pending ({exc})", file=sys.stderr)
-            remaining.append(auth_index)
-    if remaining != pending:
-        if remaining:
-            state["pending_cooldowns"] = remaining
-        else:
-            state.pop("pending_cooldowns", None)
-        save_state(state_path, state)
+    with _state_lock:
+        state = load_state(state_path)
+        pending = state.get("pending_cooldowns", [])
+        remaining = []
+        for item in pending:
+            if not isinstance(item, dict) or not item.get("auth_index") or not item.get("account_id"):
+                print("Unverified legacy cooldown reset retained for manual review", file=sys.stderr)
+                remaining.append(item)
+                continue
+            auth_index = item["auth_index"]
+            try:
+                files = management("GET", "/credentials", key).get("files", [])
+                matches = [entry for entry in files if entry.get("auth_index") == auth_index]
+                if (len(matches) != 1 or
+                        (matches[0].get("id_token") or {}).get("chatgpt_account_id") != item["account_id"]):
+                    raise RuntimeError("credential account changed or cannot be verified")
+                response = management("POST", "/routing/cooldown/reset", key,
+                                      {"auth_index": auth_index})
+                if response.get("status") != "ok":
+                    raise RuntimeError(f"unexpected response: {response}")
+            except Exception as exc:
+                print(f"{auth_index}: cooldown reset pending ({exc})", file=sys.stderr)
+                remaining.append(item)
+        if remaining != pending:
+            if remaining:
+                state["pending_cooldowns"] = remaining
+            else:
+                state.pop("pending_cooldowns", None)
+            save_state(state_path, state)
 
 
 def read_management_key(args):
     key = os.environ.get("CLIPROXY_MANAGEMENT_KEY")
     if key:
         return key.strip()
-    key_file = getattr(args, "management_key_file", None) or getattr(args, "management_key", None)
+    key_file = (getattr(args, "management_key_file", None) or
+                getattr(args, "management_key", None) or
+                Path(args.auth_dir) / "management-key")
     return Path(key_file).read_text().strip()
 
 
@@ -375,7 +446,7 @@ def parse_reset_timestamp(raw):
 def parse_observed_timestamp(raw):
     if not isinstance(raw, str):
         raise TypeError("observed timestamp is not text")
-    value = raw.replace("Z", "+00:00")
+    value = re.sub(r"(\.\d{6})\d+(?=Z|[+-]\d\d:\d\d$)", r"\1", raw).replace("Z", "+00:00")
     try:
         return dt.datetime.fromisoformat(value)
     except ValueError:
@@ -408,7 +479,7 @@ def claude_window_rank(entry, now, window):
             used = float(signals[prefix + "Utilization"])
         except (KeyError, TypeError, ValueError):
             continue
-        if signals.get(prefix + "Status") not in (None, "allowed"):
+        if signals.get(prefix + "Status") not in (None, "allowed", "allowed_warning"):
             used = 1.0
         if (seen.tzinfo is not None and dt.timedelta(0) <= now - seen <= dt.timedelta(days=3)
                 and now.timestamp() < reset_at and 0 <= used <= 1):
@@ -487,8 +558,11 @@ def apply_claude_priorities(args, key, auths, now):
         if current != desired:
             print(f"{entry.get('name')}: priority {current} -> {desired}")
             if not args.dry_run:
-                management("PATCH", "/credentials/fields", key,
-                           {"name": identity, "priority": desired})
+                try:
+                    management("PATCH", "/credentials/fields", key,
+                               {"name": identity, "priority": desired})
+                except Exception as exc:
+                    print(f"{entry.get('name')}: priority update failed ({exc})", file=sys.stderr)
 
 
 def run_once(args, now=None):
@@ -502,6 +576,7 @@ def run_once(args, now=None):
                    for item in auths if item.get("type") == "codex"}
     observations = []
     skipped_siwc = set()
+    readable = {}
     for identity, entry in sorted(by_identity.items()):
         path = entry.get("path")
         quota_cooldown = quota_cooldown_entry(entry)
@@ -514,10 +589,21 @@ def run_once(args, now=None):
                 skipped_siwc.add(identity)
                 print(f"{entry.get('name')}: SIWC credential skipped", file=sys.stderr)
                 continue
-            result, _ = app_server(credential)
         except Exception as exc:
             print(f"{entry.get('name')}: unable to read limits ({exc})", file=sys.stderr)
             continue
+        readable[identity] = credential
+    completed = isolated_account_jobs("read", readable, app_server)
+    for identity, credential in readable.items():
+        entry = by_identity[identity]
+        job = completed.get(identity)
+        if job is None:
+            print(f"{entry.get('name')}: quota read still pending", file=sys.stderr)
+            continue
+        if "error" in job:
+            print(f"{entry.get('name')}: unable to read limits ({job['error']})", file=sys.stderr)
+            continue
+        result, _ = job["value"]
         credits = available_credits(result, now)
         weekly = weekly_window(result) or {}
         expiry = dt.datetime.fromtimestamp(credits[0]["expiresAt"], UTC).isoformat() if credits else "unknown"
@@ -546,44 +632,68 @@ def run_once(args, now=None):
     for identity, entry in by_identity.items():
         if entry.get("disabled") or identity in skipped_siwc or quota_cooldown_entry(entry):
             continue
+        if not args.priority_only and any(
+                observed_identity == identity and should_redeem(result, now) is not None
+                for observed_identity, _, result in observations):
+            # Keep its previous tier until a confirmed redemption can restore capacity.
+            continue
         desired = priorities.get(identity, 0)
         current = entry.get("priority") or 0
         if reprioritize and current != desired:
             print(f"{entry.get('name')}: priority {current} -> {desired}")
             if not args.dry_run:
-                management("PATCH", "/credentials/fields", key,
-                           {"name": identity, "priority": desired})
+                try:
+                    management("PATCH", "/credentials/fields", key,
+                               {"name": identity, "priority": desired})
+                except Exception as exc:
+                    print(f"{entry.get('name')}: priority update failed ({exc})", file=sys.stderr)
+    eligible = {}
     for identity, credential, result in observations:
         entry = by_identity[identity]
         if args.priority_only:
             continue
+        credit = should_redeem(result, now)
+        if credit is None:
+            continue
+        print(f"{entry.get('name')}: earned reset {credit['id']} eligible for expiry check")
+        if not args.dry_run:
+            eligible[identity] = credential
+
+    def redeem(credential):
+        account_id = credential["account_id"]
+        # Re-read before spending; the provider may have changed since ranking.
+        fresh, _ = app_server(credential)
+        credit = should_redeem(fresh, dt.datetime.now(UTC))
+        if credit is None:
+            return account_id, None, None
+        attempt = {
+            "idempotencyKey": redemption_key(args.state_file, account_id, credit["id"]),
+            "creditId": credit["id"],
+        }
+        _, outcome = app_server(credential, consume=attempt)
+        return account_id, credit["id"], outcome
+
+    for identity, job in isolated_account_jobs("redeem", eligible, redeem).items():
+        entry = by_identity.get(identity)
+        if entry is None:
+            continue
+        if "error" in job:
+            print(f"{entry.get('name')}: reset attempt failed ({job['error']})", file=sys.stderr)
+            continue
+        account_id, credit_id, outcome = job["value"]
+        if credit_id is None:
+            continue
+        print(f"{entry.get('name')}: reset outcome={outcome}")
         try:
-            credit = should_redeem(result, now)
-            if credit is None:
-                continue
-            print(f"{entry.get('name')}: earned reset {credit['id']} eligible for expiry check")
-            if args.dry_run:
-                continue
-            # Re-read before spending; the provider may have changed since ranking.
-            fresh, _ = app_server(credential)
-            credit = should_redeem(fresh, dt.datetime.now(UTC))
-            if credit is None:
-                continue
-            attempt = {
-                "idempotencyKey": redemption_key(args.state_file, credential["account_id"], credit["id"]),
-                "creditId": credit["id"],
-            }
-            _, outcome = app_server(credential, consume=attempt)
-            print(f"{entry.get('name')}: reset outcome={outcome}")
             if outcome in ("reset", "alreadyRedeemed"):
                 index = entry.get("auth_index")
                 if index:
-                    queue_cooldown_reset(args.state_file, index)
+                    queue_cooldown_reset(args.state_file, index, account_id)
                     retry_cooldown_resets(args.state_file, key)
             elif outcome in ("nothingToReset", "noCredit"):
-                clear_redemption_key(args.state_file, credential["account_id"], credit["id"])
+                clear_redemption_key(args.state_file, account_id, credit_id)
         except Exception as exc:
-            print(f"{entry.get('name')}: reset attempt failed ({exc})", file=sys.stderr)
+            print(f"{entry.get('name')}: cooldown update failed ({exc})", file=sys.stderr)
 
 
 def main():
@@ -592,7 +702,7 @@ def main():
     state_root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
     parser.add_argument("--auth-dir", default=str(auth_dir))
     parser.add_argument("--management-key-file", "--management-key",
-                        dest="management_key_file", default=str(auth_dir / "management-key"),
+                        dest="management_key_file",
                         help="File containing the management key (or set CLIPROXY_MANAGEMENT_KEY)")
     parser.add_argument("--state-file", default=str(state_root / "cliproxy-reset-router" / "state.json"))
     parser.add_argument("--claude-offers-file", default=str(state_root / "cliproxy-reset-router" / "claude-offers.json"))

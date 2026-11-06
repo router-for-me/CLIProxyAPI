@@ -2,6 +2,7 @@ import datetime as dt
 import importlib.util
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -173,28 +174,85 @@ class PolicyTests(unittest.TestCase):
              patch.object(router.shutil, "rmtree"), \
              patch.object(router, "rpc", side_effect=[{}, {}, self.limits(), {"outcome": "reset"}]) as rpc:
             _, outcome = router.app_server({"access_token": "test", "account_id": "test"},
-                                           consume={"creditId": "earned-1"})
+                                           consume={"creditId": "earned-1"}, now=self.now)
         self.assertEqual(outcome, "reset")
         self.assertEqual([call.args[2] for call in rpc.call_args_list],
                          ["initialize", "account/login/start", "account/rateLimits/read",
                           "account/rateLimitResetCredit/consume"])
 
+    def test_consume_session_rechecks_weekly_usage(self):
+        proc = MagicMock()
+        with patch.object(router.subprocess, "Popen", return_value=proc), \
+             patch.object(router.threading, "Thread"), \
+             patch.object(router.tempfile, "mkdtemp", return_value="temporary-home"), \
+             patch.object(router.shutil, "rmtree"), \
+             patch.object(router, "rpc", side_effect=[{}, {}, self.limits(used=20)]) as rpc:
+            _, outcome = router.app_server({"access_token": "test", "account_id": "test"},
+                                           consume={"creditId": "earned-1"}, now=self.now)
+        self.assertIsNone(outcome)
+        self.assertEqual([call.args[2] for call in rpc.call_args_list],
+                         ["initialize", "account/login/start", "account/rateLimits/read"])
+
+    def test_stalled_account_does_not_block_later_quota_read(self):
+        release = threading.Event()
+        reached = threading.Event()
+        def operation(credential):
+            if credential["account_id"] == "stalled":
+                release.wait(2)
+            else:
+                reached.set()
+            return credential["account_id"]
+        try:
+            with patch.object(router, "ACCOUNT_COLLECTION_SECONDS", 0.02):
+                result = router.isolated_account_jobs("read", {
+                    "a": {"account_id": "stalled", "access_token": "a"},
+                    "b": {"account_id": "ready", "access_token": "b"}}, operation)
+            self.assertTrue(reached.is_set())
+            self.assertNotIn("a", result)
+            self.assertEqual(result["b"]["value"], "ready")
+        finally:
+            release.set()
+
     def test_cooldown_clear_is_retried_after_transient_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             state_file = Path(directory) / "state.json"
-            router.queue_cooldown_reset(state_file, "index-1")
+            router.queue_cooldown_reset(state_file, "index-1", "account-1")
             with patch.object(router, "management", side_effect=RuntimeError("offline")):
                 router.retry_cooldown_resets(state_file, "unused")
-            self.assertEqual(router.load_state(state_file)["pending_cooldowns"], ["index-1"])
-            with patch.object(router, "management", return_value={"status": "ok"}) as send:
+            self.assertEqual(router.load_state(state_file)["pending_cooldowns"],
+                             [{"auth_index": "index-1", "account_id": "account-1"}])
+            def management(method, path, key, payload=None):
+                if method == "GET":
+                    return {"files": [{"auth_index": "index-1", "id_token":
+                                        {"chatgpt_account_id": "account-1"}}]}
+                return {"status": "ok"}
+            with patch.object(router, "management", side_effect=management) as send:
                 router.retry_cooldown_resets(state_file, "unused")
             self.assertNotIn("pending_cooldowns", router.load_state(state_file))
             self.assertEqual(send.call_args.args[:3],
                              ("POST", "/routing/cooldown/reset", "unused"))
 
+    def test_cooldown_clear_rejects_replaced_account(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "state.json"
+            router.queue_cooldown_reset(state_file, "index-1", "old-account")
+            with patch.object(router, "management", return_value={"files": [
+                {"auth_index": "index-1", "id_token":
+                 {"chatgpt_account_id": "new-account"}}]}) as send:
+                router.retry_cooldown_resets(state_file, "unused")
+            self.assertEqual([call.args[0] for call in send.call_args_list], ["GET"])
+            self.assertEqual(len(router.load_state(state_file)["pending_cooldowns"]), 1)
+
     def test_management_key_can_come_from_environment(self):
         with patch.dict(router.os.environ, {"CLIPROXY_MANAGEMENT_KEY": "test-key"}):
             self.assertEqual(router.read_management_key(SimpleNamespace()), "test-key")
+
+    def test_management_key_follows_auth_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "management-key").write_text("custom-key\n")
+            with patch.dict(router.os.environ, {}, clear=True):
+                self.assertEqual(router.read_management_key(SimpleNamespace(auth_dir=directory)),
+                                 "custom-key")
 
     def test_claude_date_only_offer_expires_after_its_calendar_day(self):
         self.assertTrue(router.claude_offer_active("2026-10-22", self.now))
@@ -263,6 +321,16 @@ class PolicyTests(unittest.TestCase):
                            "signals": {
                                "Anthropic-Ratelimit-Unified-7d-Reset": str(self.weekly_reset),
                                "Anthropic-Ratelimit-Unified-7d-Utilization": "0.45",
+                           }}}
+        self.assertEqual(router.claude_weekly_rank(entry, self.now),
+                         (self.weekly_reset, 0.45))
+
+    def test_claude_nanosecond_timestamp_and_allowed_warning(self):
+        entry = {"quota": {"observed_at": "2026-10-15T23:59:59.786031123Z",
+                           "signals": {
+                               "Anthropic-Ratelimit-Unified-7d-Reset": str(self.weekly_reset),
+                               "Anthropic-Ratelimit-Unified-7d-Utilization": "0.45",
+                               "Anthropic-Ratelimit-Unified-7d-Status": "allowed_warning",
                            }}}
         self.assertEqual(router.claude_weekly_rank(entry, self.now),
                          (self.weekly_reset, 0.45))
@@ -450,7 +518,8 @@ class PolicyTests(unittest.TestCase):
                 credential.write_text(json.dumps({"account_id": identity}))
                 entries.append({"id": identity, "name": credential.name, "path": str(credential),
                                 "type": "codex", "status": "active", "priority": 0,
-                                "auth_index": identity + "-index"})
+                                "auth_index": identity + "-index",
+                                "id_token": {"chatgpt_account_id": identity}})
             result = self.limits(used=95,
                                  expiry=int((now + dt.timedelta(hours=12)).timestamp()),
                                  reset=int((now + dt.timedelta(days=2)).timestamp()))
@@ -460,10 +529,12 @@ class PolicyTests(unittest.TestCase):
                                    dry_run=False, priority_only=False)
             def management(method, path, key, payload=None):
                 return {"files": entries} if method == "GET" else {"status": "ok"}
+            def app_server(credential, consume=None):
+                if consume is not None and credential["account_id"] == "first":
+                    raise RuntimeError("first consume failed")
+                return result, "reset" if consume is not None else None
             with patch.object(router, "management", side_effect=management), \
-                 patch.object(router, "app_server", side_effect=[
-                     (result, None), (result, None), (result, None),
-                     RuntimeError("first consume failed"), (result, None), (result, "reset")]) as read:
+                 patch.object(router, "app_server", side_effect=app_server) as read:
                 router.run_once(args, now)
             self.assertEqual(read.call_count, 6)
             self.assertIn("first:earned-1", router.load_state(args.state_file))
@@ -480,7 +551,8 @@ class PolicyTests(unittest.TestCase):
                      "type": "codex", "status": "error", "unavailable": True,
                      "next_retry_after": (now + dt.timedelta(hours=2)).isoformat(),
                      "cooldowns": [{"reason": "quota"}],
-                     "auth_index": "index-1", "priority": 5}
+                     "auth_index": "index-1", "priority": 5,
+                     "id_token": {"chatgpt_account_id": "test"}}
             result = self.limits(used=95,
                                  expiry=int((now + dt.timedelta(hours=12)).timestamp()),
                                  reset=int((now + dt.timedelta(days=2)).timestamp()))
@@ -499,7 +571,7 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(read.call_count, 3)
             self.assertIn("consume", read.call_args.kwargs)
             self.assertNotIn("pending_cooldowns", router.load_state(args.state_file))
-            self.assertEqual(methods, ["GET", "POST"])
+            self.assertEqual(methods, ["GET", "GET", "POST"])
 
 
 if __name__ == "__main__":
