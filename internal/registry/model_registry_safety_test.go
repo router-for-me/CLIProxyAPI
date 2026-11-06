@@ -1,9 +1,64 @@
 package registry
 
 import (
+	"maps"
 	"testing"
 	"time"
 )
+
+func TestModelRegistryHeaderOverridesAreIsolated(t *testing.T) {
+	for _, initial := range []struct {
+		name    string
+		headers map[string]string
+	}{
+		{name: "nil"},
+		{name: "empty", headers: map[string]string{}},
+		{name: "populated", headers: map[string]string{"user-agent": "original"}},
+	} {
+		for _, source := range []struct {
+			name string
+			get  func(*ModelRegistry, *ModelInfo) *ModelInfo
+		}{
+			{"registration input", func(_ *ModelRegistry, input *ModelInfo) *ModelInfo { return input }},
+			{"global lookup", func(r *ModelRegistry, _ *ModelInfo) *ModelInfo { return r.GetModelInfo("m1", "") }},
+			{"provider lookup", func(r *ModelRegistry, _ *ModelInfo) *ModelInfo { return r.GetModelInfo("m1", "openai") }},
+			{"available models", func(r *ModelRegistry, _ *ModelInfo) *ModelInfo { return r.GetAvailableModelInfos()[0] }},
+			{"provider models", func(r *ModelRegistry, _ *ModelInfo) *ModelInfo { return r.GetAvailableModelsByProvider("openai")[0] }},
+			{"client models", func(r *ModelRegistry, _ *ModelInfo) *ModelInfo { return r.GetModelsForClient("client-1")[0] }},
+		} {
+			t.Run(initial.name+"/"+source.name, func(t *testing.T) {
+				r := newTestModelRegistry()
+				input := &ModelInfo{ID: "m1", Config: &ModelConfig{OverrideHeader: maps.Clone(initial.headers)}}
+				r.RegisterClient("client-1", "openai", []*ModelInfo{input})
+
+				snapshot := source.get(r, input)
+				if snapshot == nil || snapshot.Config == nil {
+					t.Fatal("expected model with config")
+				}
+				if (snapshot.Config.OverrideHeader == nil) != (initial.headers == nil) {
+					t.Fatal("snapshot changed nil versus allocated header map")
+				}
+				if snapshot.Config.OverrideHeader == nil {
+					snapshot.Config.OverrideHeader = make(map[string]string)
+				}
+				snapshot.Config.OverrideHeader["user-agent"] = "local override"
+
+				for _, info := range []*ModelInfo{
+					r.GetModelInfo("m1", ""),
+					r.GetModelInfo("m1", "openai"),
+					r.GetModelsForClient("client-1")[0],
+				} {
+					if info == nil || info.Config == nil {
+						t.Fatal("expected registered model with config")
+					}
+					if !maps.Equal(info.Config.OverrideHeader, initial.headers) {
+						t.Fatalf("registered headers = %#v, want %#v after local mutation", info.Config.OverrideHeader, initial.headers)
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestGetModelInfoReturnsClone(t *testing.T) {
 	r := newTestModelRegistry()
