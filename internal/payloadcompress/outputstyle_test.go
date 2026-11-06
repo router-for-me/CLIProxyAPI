@@ -46,11 +46,28 @@ func TestOutputStyleIdempotent(t *testing.T) {
 	if string(once) != string(twice) {
 		t.Fatalf("style injection is not idempotent:\n1: %s\n2: %s", once, twice)
 	}
-	if stats.Style != "" {
-		t.Fatalf("second pass reported %q", stats.Style)
+	if stats.Style != "already" {
+		t.Fatalf("second pass reported %q, want already", stats.Style)
 	}
 	if got := strings.Count(string(once), outputStyleMarker); got != 1 {
 		t.Fatalf("marker count = %d", got)
+	}
+}
+
+func TestOutputStyleMarkerEchoedBackDoesNotDisableStyling(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"system","content":"be helpful"},` +
+		`{"role":"assistant","content":"quoted the marker: [CLIProxyAPI Output Styles]"},` +
+		`{"role":"user","content":"hi"}]}`)
+
+	out, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "chat" {
+		t.Fatalf("style = %q, want chat: echoed marker must not disable styling", stats.Style)
+	}
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(system, outputStyleMarker) {
+		t.Fatalf("style missing after echoed marker:\n%s", system)
 	}
 }
 

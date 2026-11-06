@@ -299,8 +299,11 @@ func applyOutputStyles(cfg Config, body []byte) ([]byte, string) {
 	if instruction == "" {
 		return body, ""
 	}
-	if bytes.Contains(body, []byte(outputStyleMarker)) {
-		return body, ""
+	// The idempotency guard consults the exact slots injection appends to, not
+	// the whole body: a marker echoed back in assistant text or tool output
+	// must not disable styling for the rest of the session.
+	if slotsStyled(body) {
+		return body, "already"
 	}
 	if reason := styleBypass(body); reason != "" {
 		return body, "skipped:" + reason
@@ -319,13 +322,27 @@ func applyOutputStyles(cfg Config, body []byte) ([]byte, string) {
 }
 
 // injectChatSystem appends to the first system/developer message of a chat body.
+// injectChatSystem appends to the first system/developer message of a chat body.
 func injectChatSystem(body []byte, instruction string) ([]byte, bool) {
-	items := gjson.Get(bodyString(body), "messages")
-	if !items.IsArray() {
+	path, existing := firstChatSystemPath(body)
+	if path == "" {
 		return nil, false
 	}
-	var found bool
-	var path string
+	out, err := sjson.SetBytes(body, path, existing+"\n\n"+instruction)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+// firstChatSystemPath locates the first system or developer message whose
+// content is a plain string. It returns the sjson path and its text.
+func firstChatSystemPath(body []byte) (string, string) {
+	items := gjson.Get(bodyString(body), "messages")
+	if !items.IsArray() {
+		return "", ""
+	}
+	var path, text string
 	items.ForEach(func(key, item gjson.Result) bool {
 		switch item.Get("role").String() {
 		case "system", "developer":
@@ -336,21 +353,45 @@ func injectChatSystem(body []byte, instruction string) ([]byte, bool) {
 			return true
 		}
 		path = "messages." + key.String() + ".content"
-		found = true
+		text = item.Get("content").String()
 		return false
 	})
-	if !found {
-		return nil, false
+	return path, text
+}
+
+// outputStyleTargets returns the exact texts style injection appends to: the
+// first chat system/developer string, the Anthropic system string or block
+// texts, and the Responses instructions string.
+func outputStyleTargets(body []byte) []string {
+	var targets []string
+	if _, text := firstChatSystemPath(body); text != "" {
+		targets = append(targets, text)
 	}
-	existing := gjson.Get(bodyString(body), path)
-	if existing.Type != gjson.String {
-		return nil, false
+	system := gjson.Get(bodyString(body), "system")
+	switch {
+	case system.Type == gjson.String:
+		targets = append(targets, system.String())
+	case system.IsArray():
+		for _, block := range system.Array() {
+			if block.Get("type").String() == "text" {
+				targets = append(targets, block.Get("text").String())
+			}
+		}
 	}
-	out, err := sjson.SetBytes(body, path, existing.String()+"\n\n"+instruction)
-	if err != nil {
-		return nil, false
+	if instructions := gjson.Get(bodyString(body), "instructions"); instructions.Type == gjson.String {
+		targets = append(targets, instructions.String())
 	}
-	return out, true
+	return targets
+}
+
+// slotsStyled reports whether any injection slot already carries the marker.
+func slotsStyled(body []byte) bool {
+	for _, slot := range outputStyleTargets(body) {
+		if strings.Contains(slot, outputStyleMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 // injectClaudeSystem appends to the Anthropic top-level system field.
