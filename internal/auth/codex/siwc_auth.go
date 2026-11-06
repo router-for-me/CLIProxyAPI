@@ -96,6 +96,27 @@ func (o *CodexAuth) GenerateSIWCAuthURL(state, nonce, deviceID, redirectURI stri
 	return fmt.Sprintf("%s?%s", SIWCAuthorizeURL, params.Encode()), nil
 }
 
+// GenerateSIWCReauthURL reuses the issued registration when replacing an unusable grant.
+func (o *CodexAuth) GenerateSIWCReauthURL(clientID, state, nonce, deviceID, redirectURI string, pkceCodes *PKCECodes) (string, error) {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" || clientID == SIWCDynamicClientID {
+		return "", fmt.Errorf("SIWC reauthorization requires the saved issued client ID")
+	}
+	rawURL, errGenerate := o.GenerateSIWCAuthURL(state, nonce, deviceID, redirectURI, pkceCodes)
+	if errGenerate != nil {
+		return "", errGenerate
+	}
+	parsed, errParse := url.Parse(rawURL)
+	if errParse != nil {
+		return "", fmt.Errorf("failed to parse SIWC authorization URL: %w", errParse)
+	}
+	query := parsed.Query()
+	query.Set("client_id", clientID)
+	query.Del("agent_name_hint")
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
 func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clientID, deviceID string, requireIDToken bool) (result *CodexSIWCTokenData, errResult error) {
 	stage := "request-create"
 	defer func() {

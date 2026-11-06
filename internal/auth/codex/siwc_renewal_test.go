@@ -62,3 +62,11 @@ func TestSIWCRefreshErrorRetainsRequestID(t *testing.T) {
 		t.Fatalf("upstream correlation details missing: %v", errRefresh)
 	}
 }
+
+func TestGenerateSIWCReauthURLRejectsUnissuedClient(t *testing.T) {
+	for _, clientID := range []string{"", " ", SIWCDynamicClientID} {
+		if _, errGenerate := (&CodexAuth{}).GenerateSIWCReauthURL(clientID, "state", "nonce", "e61bbe28-07ef-466d-8e5d-a344f94ab305", "", &PKCECodes{CodeChallenge: "challenge"}); errGenerate == nil {
+			t.Errorf("accepted an unissued client ID %q", clientID)
+		}
+	}
+}
