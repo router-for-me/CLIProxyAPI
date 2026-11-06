@@ -298,6 +298,9 @@ func (o *CodexAuth) RefreshSIWCTokens(ctx context.Context, refreshToken, clientI
 	result, errSF, _ := siwcRefreshGroup.Do(sfKey, func() (any, error) {
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
 		defer cancelRefresh()
+		if errReadiness := siwcRefreshReadiness(refreshCtx); errReadiness != nil {
+			return nil, errReadiness
+		}
 		form := url.Values{
 			"grant_type":    {"refresh_token"},
 			"client_id":     {clientID},
@@ -335,6 +338,9 @@ func (o *CodexAuth) RefreshSIWCTokensWithRetry(ctx context.Context, refreshToken
 		tokenData, errRefresh := o.RefreshSIWCTokens(ctx, refreshToken, clientID, deviceID)
 		if errRefresh == nil {
 			return tokenData, nil
+		}
+		if errors.Is(errRefresh, context.Canceled) {
+			return nil, errRefresh
 		}
 		if isNonRetryableRefreshErr(errRefresh) {
 			log.Warnf("SIWC token refresh attempt %d failed with non-retryable error: %v", attempt+1, errRefresh)
