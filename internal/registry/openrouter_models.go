@@ -18,7 +18,8 @@ import (
 // OpenRouter publishes every model's context window, completion limit and accepted reasoning efforts at
 // /api/v1/models. OpenAI-compatible entries pointing at OpenRouter list models by hand, without them, so clients fell
 // back to template defaults. The catalog is fetched in the background on first use and refreshed with the other
-// catalogs' cadence; when it changes, the OpenRouter entries' models are registered again.
+// catalogs' cadence; when it changes, the OpenRouter entries' models are registered again. Like the other remote
+// catalogs it is not fetched under --local-model or CLIProxyAPIHome, and the fetch lives as long as the service.
 
 var openRouterModelsURL = "https://openrouter.ai/api/v1/models"
 
@@ -42,9 +43,36 @@ type openRouterCatalog struct {
 	failedAt   time.Time
 	interested map[string]struct{}
 	fetch      func(context.Context) (map[string]OpenRouterModel, error)
+	// remote reports whether remote catalogs may be fetched and the context the fetch runs under.
+	remote func() (context.Context, bool)
+	// now is the clock; tests replace it.
+	now func() time.Time
+	// refreshed is called after every completed refresh; tests use it to wait for one.
+	refreshed func()
 }
 
-var openRouterModels = &openRouterCatalog{fetch: fetchOpenRouterModels}
+var openRouterModels = &openRouterCatalog{fetch: fetchOpenRouterModels, remote: remoteCatalogPolicy}
+
+// remoteCatalogPolicy follows the shared catalog policy: no remote fetch under --local-model or CLIProxyAPIHome, and
+// the fetch is bound to the service lifetime once it has started.
+func remoteCatalogPolicy() (context.Context, bool) {
+	catalogRuntime.Lock()
+	defer catalogRuntime.Unlock()
+	if catalogRuntime.local || catalogRuntime.home {
+		return nil, false
+	}
+	if catalogRuntime.ctx != nil {
+		return catalogRuntime.ctx, catalogRuntime.ctx.Err() == nil
+	}
+	return context.Background(), true
+}
+
+func (c *openRouterCatalog) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
 
 // LookupOpenRouterModel returns what OpenRouter publishes about modelID (e.g. "anthropic/claude-haiku-5.5"). The
 // first call, and calls after ModelsRefreshInterval, start a background fetch; providerKey's models are registered
@@ -63,7 +91,7 @@ func SetOpenRouterModelsForTest(models map[string]OpenRouterModel) func() {
 	}
 	c.mu.Lock()
 	oldModels, oldFetchedAt, oldFailedAt := c.models, c.fetchedAt, c.failedAt
-	c.models, c.fetchedAt, c.failedAt = normalized, time.Now(), time.Time{}
+	c.models, c.fetchedAt, c.failedAt = normalized, c.clock(), time.Time{}
 	c.mu.Unlock()
 	return func() {
 		c.mu.Lock()
@@ -81,12 +109,14 @@ func (c *openRouterCatalog) lookup(providerKey, modelID string) (OpenRouterModel
 		}
 		c.interested[key] = struct{}{}
 	}
-	now := time.Now()
+	now := c.clock()
 	stale := c.models == nil || now.Sub(c.fetchedAt) > ModelsRefreshInterval
 	retryAllowed := c.failedAt.IsZero() || now.Sub(c.failedAt) > time.Minute
-	if stale && !c.fetching && retryAllowed {
-		c.fetching = true
-		go c.refresh()
+	if stale && !c.fetching && retryAllowed && c.remote != nil {
+		if ctx, ok := c.remote(); ok {
+			c.fetching = true
+			go c.refresh(ctx)
+		}
 	}
 	model, ok := c.models[strings.ToLower(strings.TrimSpace(modelID))]
 	if ok {
@@ -95,24 +125,25 @@ func (c *openRouterCatalog) lookup(providerKey, modelID string) (OpenRouterModel
 	return model, ok
 }
 
-func (c *openRouterCatalog) refresh() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+func (c *openRouterCatalog) refresh(ctx context.Context) {
+	if c.refreshed != nil {
+		defer c.refreshed()
+	}
 	fetched, err := c.fetch(ctx)
 
 	c.mu.Lock()
 	c.fetching = false
 	if err != nil || len(fetched) == 0 {
-		c.failedAt = time.Now()
+		c.failedAt = c.clock()
 		c.mu.Unlock()
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			log.Debugf("registry: OpenRouter model catalog unavailable: %v", err)
 		}
 		return
 	}
 	changed := !sameOpenRouterModels(c.models, fetched)
 	c.models = fetched
-	c.fetchedAt = time.Now()
+	c.fetchedAt = c.clock()
 	c.failedAt = time.Time{}
 	providers := make([]string, 0, len(c.interested))
 	for key := range c.interested {
