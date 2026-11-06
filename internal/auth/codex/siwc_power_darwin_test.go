@@ -5,9 +5,17 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	ReadSIWCSystemState = func(context.Context) ([]byte, error) {
+		return []byte("Current System Capabilities are: CPU Graphics Audio Network\nCurrent Power State: 4\n"), nil
+	}
+	os.Exit(m.Run())
+}
 
 func TestSIWCRefreshDefersDuringMaintenanceWakeThenRenews(t *testing.T) {
 	for _, state := range []string{
@@ -16,11 +24,11 @@ func TestSIWCRefreshDefersDuringMaintenanceWakeThenRenews(t *testing.T) {
 		"Graphics Network",
 	} {
 		t.Run(strings.TrimSpace(state), func(t *testing.T) {
-			previous := siwcReadSystemState
-			t.Cleanup(func() { siwcReadSystemState = previous })
+			previous := ReadSIWCSystemState
+			t.Cleanup(func() { ReadSIWCSystemState = previous })
 			currentState := state
 			checks := 0
-			siwcReadSystemState = func(context.Context) ([]byte, error) {
+			ReadSIWCSystemState = func(context.Context) ([]byte, error) {
 				checks++
 				return []byte(currentState), nil
 			}
@@ -47,10 +55,10 @@ func TestSIWCRefreshDefersDuringMaintenanceWakeThenRenews(t *testing.T) {
 }
 
 func TestSIWCRefreshDoesNotConsumeGrantWhenPowerStateUnavailable(t *testing.T) {
-	previous := siwcReadSystemState
-	t.Cleanup(func() { siwcReadSystemState = previous })
+	previous := ReadSIWCSystemState
+	t.Cleanup(func() { ReadSIWCSystemState = previous })
 	errProbe := errors.New("power-state probe unavailable")
-	siwcReadSystemState = func(context.Context) ([]byte, error) { return nil, errProbe }
+	ReadSIWCSystemState = func(context.Context) ([]byte, error) { return nil, errProbe }
 	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("token request sent without a known power state")
 		return nil, nil
