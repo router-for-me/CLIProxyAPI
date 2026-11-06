@@ -2446,7 +2446,7 @@ func uncloakClaudeCodePayloadDoc(doc *ojson.Doc, confirmedClaudeCode bool) bool 
 }
 
 func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
-	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+	if auth != nil && helps.ClaudeAuthKind(auth) == cliproxyauth.AuthKindAPIKey {
 		cfg = cfg.ForAPIKey()
 	}
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
