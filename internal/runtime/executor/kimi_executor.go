@@ -460,6 +460,9 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiResponsesURL(auth)
+	if errNormalizeIncludes := helps.NormalizeKimiResponsesIncludesDoc(doc); errNormalizeIncludes != nil {
+		return resp, fmt.Errorf("kimi executor: failed to normalize responses include: %w", errNormalizeIncludes)
+	}
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
 	body := doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
@@ -591,6 +594,9 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiResponsesURL(auth)
+	if errNormalizeIncludes := helps.NormalizeKimiResponsesIncludesDoc(doc); errNormalizeIncludes != nil {
+		return nil, fmt.Errorf("kimi executor: failed to normalize responses include: %w", errNormalizeIncludes)
+	}
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
 	body := doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
