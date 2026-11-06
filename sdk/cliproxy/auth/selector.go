@@ -348,6 +348,9 @@ func SanitizeUpstreamErrorSummary(s string) string {
 }
 
 func (e *modelCooldownError) StatusCode() int {
+	if code := int(modelCooldownStatusCode.Load()); code >= 400 && code <= 599 {
+		return code
+	}
 	return http.StatusTooManyRequests
 }
 
