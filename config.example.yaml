@@ -129,6 +129,20 @@ access:
     - "your-api-key-1"
     - "your-api-key-2"
     - "your-api-key-3"
+  # Optional strict routing per authenticated client key (keys must also appear above).
+  # Every requested model uses model, except Claude Opus/Fable/Mythos, Sonnet, and Haiku
+  # requests use opus-model, sonnet-model, or haiku-model when set.
+  # Exhaustion fails on this provider; it never falls back to another provider.
+  # Policies take precedence over model-router plugins and registry aliases.
+  # Duplicate policies or missing provider/model fail closed. Not supported in Home mode.
+  # api-key-routes:
+  #   - api-key: "your-api-key-3"
+  #     name: "google-ai-pro" # optional non-secret log label
+  #     provider: "antigravity"
+  #     model: "gemini-3.8-flash-high"
+  #     opus-model: "gemini-4-argon-high"
+  #     sonnet-model: "gemini-3.8-flash-high"
+  #     haiku-model: "gemini-3-flash"
 
 # Optional credential concurrency and observation contracts.
 

@@ -99,6 +99,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyRoutes pins matching client keys to one provider and configured models.
+	// Keys must also be listed in APIKeys; routes never grant access themselves.
+	APIKeyRoutes []APIKeyRoute `yaml:"api-key-routes,omitempty" json:"api-key-routes,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -109,6 +113,20 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// APIKeyRoute is an unconditional routing policy for one authenticated client key.
+// All requested models map to Model, except Claude Opus/Fable/Mythos, Sonnet, and Haiku
+// requests when OpusModel, SonnetModel, or HaikuModel is set.
+// Provider is a strict single-provider selection, not a fallback preference.
+type APIKeyRoute struct {
+	Name        string `yaml:"name,omitempty" json:"name,omitempty"`
+	APIKey      string `yaml:"api-key" json:"api-key"`
+	Provider    string `yaml:"provider" json:"provider"`
+	Model       string `yaml:"model" json:"model"`
+	OpusModel   string `yaml:"opus-model,omitempty" json:"opus-model,omitempty"`
+	SonnetModel string `yaml:"sonnet-model,omitempty" json:"sonnet-model,omitempty"`
+	HaikuModel  string `yaml:"haiku-model,omitempty" json:"haiku-model,omitempty"`
 }
 
 // TLSHandshakeTimeout returns the configured upstream TLS handshake bound
