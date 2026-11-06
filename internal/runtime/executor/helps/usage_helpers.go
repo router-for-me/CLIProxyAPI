@@ -732,6 +732,8 @@ func failFromErrors(errs ...error) usage.Failure {
 		}
 		if truncatedErr, ok := errors.AsType[cliproxyexecutor.StreamTruncatedError](err); ok && truncatedErr != nil && truncatedErr.IsStreamTruncated() {
 			fail.Code = usage.FailureStreamTruncatedCode
+		} else if requestErr, ok := errors.AsType[cliproxyexecutor.RequestScopedError](err); ok && requestErr != nil && requestErr.IsRequestScoped() {
+			fail.Code = usage.FailureRequestScopedCode
 		}
 		return fail
 	}
