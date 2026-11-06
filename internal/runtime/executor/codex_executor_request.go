@@ -681,33 +681,11 @@ func normalizeCodexInstructionsDoc(doc *ojson.Doc, nativeRequest ...bool) bool {
 }
 
 func isCodexResponsesLiteRequestDoc(doc *ojson.Doc, headers http.Header) bool {
-	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
-		return true
-	}
-	if doc == nil {
-		return false
-	}
-	value := doc.Get("client_metadata.ws_request_header_x_openai_internal_codex_responses_lite")
-	return value.Type == ojson.True || (value.Type == ojson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true"))
-}
-
-func normalizeCodexModelSlug(model string) string {
-	slug := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-	if idx := strings.LastIndex(slug, "/"); idx >= 0 && idx < len(slug)-1 {
-		slug = strings.TrimSpace(slug[idx+1:])
-	}
-	return slug
+	return helps.CodexResponsesLiteRequestDoc(doc, headers)
 }
 
 func isCodexResponsesLiteModel(model string) bool {
-	slug := normalizeCodexModelSlug(model)
-	if slug == "" {
-		return false
-	}
-	if strings.HasPrefix(slug, "gpt-6") {
-		return true
-	}
-	return registry.CodexClientModelUsesResponsesLite(slug)
+	return helps.CodexModelUsesResponsesLite(model)
 }
 
 var imageGenToolJSON = []byte(`{"type":"image_generation","output_format":"png"}`)
@@ -863,21 +841,6 @@ func resolveCodexGPTImage2BaseModel(cfg *config.Config) string {
 	return model
 }
 
-var codexDefaultLegacyThinkingLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
-
-func codexFallbackModelInfoForThinking(model string) *registry.ModelInfo {
-	slug := normalizeCodexModelSlug(model)
-	levels := registry.CodexClientModelThinkingLevels(slug)
-	if len(levels) == 0 {
-		levels = append([]string(nil), codexDefaultLegacyThinkingLevels...)
-	}
-	return &registry.ModelInfo{
-		ID:       slug,
-		Type:     "openai",
-		Thinking: &registry.ThinkingSupport{Levels: levels},
-	}
-}
-
 // normalizeCodexImageGenerationToolsDoc strips parameters rejected by the
 // hosted image_generation tool on Codex /responses (which binds to
 // gpt-image-2-codex and rejects the complexity parameter).
@@ -913,137 +876,6 @@ func normalizeCodexImageGenerationToolsDoc(doc *ojson.Doc) bool {
 		}
 	}
 	return changed
-}
-
-func codexCollectDeclaredToolsDoc(doc *ojson.Doc) []ojson.Result {
-	if doc == nil {
-		return nil
-	}
-	var out []ojson.Result
-	if tools := doc.Get("tools"); tools.IsArray() {
-		out = append(out, tools.Array()...)
-	}
-	if input := doc.Get("input"); input.IsArray() {
-		for _, item := range input.Array() {
-			if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
-				continue
-			}
-			if extraTools := item.Get("tools"); extraTools.IsArray() {
-				out = append(out, extraTools.Array()...)
-			}
-		}
-	}
-	return out
-}
-
-func codexHasImageGenerationToolDoc(doc *ojson.Doc) bool {
-	for _, tool := range codexCollectDeclaredToolsDoc(doc) {
-		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
-			return true
-		}
-	}
-	return false
-}
-
-func codexRequestForcesImageGenerationDoc(doc *ojson.Doc) bool {
-	declaredTools := codexCollectDeclaredToolsDoc(doc)
-	hasImageGen := false
-	allImageGen := len(declaredTools) > 0
-	for _, tool := range declaredTools {
-		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
-			hasImageGen = true
-		} else {
-			allImageGen = false
-		}
-	}
-	if !hasImageGen {
-		return false
-	}
-	choice := doc.Get("tool_choice")
-	if !choice.Exists() {
-		return false
-	}
-	if choice.Type == ojson.String {
-		return strings.EqualFold(strings.TrimSpace(choice.String()), "required") && allImageGen
-	}
-	if !choice.IsObject() {
-		return false
-	}
-	switch strings.TrimSpace(choice.Get("type").String()) {
-	case "image_generation":
-		return true
-	case "allowed_tools":
-		if !strings.EqualFold(strings.TrimSpace(choice.Get("mode").String()), "required") {
-			return false
-		}
-		allowed := choice.Get("tools")
-		if !allowed.IsArray() || len(allowed.Array()) == 0 {
-			return false
-		}
-		for _, tool := range allowed.Array() {
-			if strings.TrimSpace(tool.Get("type").String()) != "image_generation" {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-func normalizeCodexHostedImageGenerationThinkingDoc(doc *ojson.Doc, imageBaseModel string, rawModel string) error {
-	if doc == nil || imageBaseModel == "" {
-		return nil
-	}
-	modelForThinking := imageBaseModel
-	effectiveEffort := strings.ToLower(strings.TrimSpace(thinking.ExtractTranslatedReasoningEffort(doc.Bytes(), "codex")))
-	if suffix := thinking.ParseSuffix(rawModel); suffix.HasSuffix {
-		rawSuffix := strings.TrimSpace(suffix.RawSuffix)
-		if rawSuffix != "" {
-			modelForThinking = imageBaseModel + "(" + rawSuffix + ")"
-			effectiveEffort = strings.ToLower(rawSuffix)
-		}
-	}
-	summaryCfg := thinking.ExtractSummaryConfigDoc(doc, "codex")
-	modelInfo := registry.LookupModelInfo(imageBaseModel, "codex")
-	if modelInfo == nil || modelInfo.Thinking == nil {
-		modelInfo = codexFallbackModelInfoForThinking(imageBaseModel)
-	}
-	errThinking := thinking.ApplyThinkingWithModelInfoAndSummaryDoc(doc, nil, modelForThinking, "openai-response", "codex", "codex", modelInfo, summaryCfg, true)
-	if errThinking == nil {
-		return nil
-	}
-	if effectiveEffort == "" {
-		return errThinking
-	}
-	if effectiveEffort == "ultra" {
-		effectiveEffort = string(thinking.LevelMax)
-	}
-	return thinking.ApplyThinkingWithFallbackModelInfoAndSummaryDoc(doc, nil, imageBaseModel+"("+effectiveEffort+")", codexOpenAIImageSourceFormat, "codex", "codex", modelInfo, summaryCfg)
-}
-
-// applyCodexHostedImageGenerationModelDoc rewrites forced hosted
-// image_generation turns on Responses-Lite / GPT-6 models to the configured
-// GPT-Image-2 base model (default "gpt-5.4-mini") because Codex /responses
-// binds hosted image_generation to gpt-image-2-codex, which rejects complexity
-// parameters emitted when those models drive the hosted tool.
-func applyCodexHostedImageGenerationModelDoc(cfg *config.Config, doc *ojson.Doc, baseModel string, rawModel ...string) (string, error) {
-	if doc == nil || !isCodexResponsesLiteModel(baseModel) || !codexRequestForcesImageGenerationDoc(doc) {
-		return baseModel, nil
-	}
-	if cfg != nil && cfg.DisableImageGeneration != config.DisableImageGenerationOff {
-		return baseModel, nil
-	}
-	sourceModel := baseModel
-	if len(rawModel) > 0 && strings.TrimSpace(rawModel[0]) != "" {
-		sourceModel = rawModel[0]
-	}
-	imageBaseModel := resolveCodexGPTImage2BaseModel(cfg)
-	helps.SetStringIfDifferentDoc(doc, "model", imageBaseModel)
-	if errThinking := normalizeCodexHostedImageGenerationThinkingDoc(doc, imageBaseModel, sourceModel); errThinking != nil {
-		return imageBaseModel, errThinking
-	}
-	return imageBaseModel, nil
 }
 
 func normalizeCodexParallelToolCalls(body []byte, headers http.Header) []byte {
