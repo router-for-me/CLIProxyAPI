@@ -1841,6 +1841,72 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
+// ProviderClientCount is the number of registered clients of one provider that serve a model.
+type ProviderClientCount struct {
+	Provider string `json:"provider"`
+	Clients  int    `json:"clients"`
+}
+
+// ModelProviderCounts lists the providers that serve one model ID.
+// OwnedBy comes from the most recently registered client, as in /v1/models.
+type ModelProviderCounts struct {
+	ID        string                `json:"id"`
+	OwnedBy   string                `json:"owned_by"`
+	Providers []ProviderClientCount `json:"providers"`
+}
+
+// GetModelProviderCounts returns every registered model with the providers that serve it.
+// Counts are registered clients per provider; a client that lists the same model ID several
+// times (an alias pool) counts once. Quota and suspension state are not subtracted.
+// Models are sorted by ID; providers by client count (descending), then name.
+// The result is a copy and holds no client identifiers.
+func (r *ModelRegistry) GetModelProviderCounts() []ModelProviderCounts {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	counts := make(map[string]map[string]int)
+	for clientID, modelIDs := range r.clientModels {
+		provider := r.clientProviders[clientID]
+		if provider == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(modelIDs))
+		for _, modelID := range modelIDs {
+			if _, dup := seen[modelID]; dup {
+				continue
+			}
+			seen[modelID] = struct{}{}
+			if counts[modelID] == nil {
+				counts[modelID] = make(map[string]int)
+			}
+			counts[modelID][provider]++
+		}
+	}
+
+	result := make([]ModelProviderCounts, 0, len(counts))
+	for modelID, byProvider := range counts {
+		providers := make([]ProviderClientCount, 0, len(byProvider))
+		for name, count := range byProvider {
+			providers = append(providers, ProviderClientCount{Provider: name, Clients: count})
+		}
+		sort.Slice(providers, func(i, j int) bool {
+			if providers[i].Clients == providers[j].Clients {
+				return providers[i].Provider < providers[j].Provider
+			}
+			return providers[i].Clients > providers[j].Clients
+		})
+		entry := ModelProviderCounts{ID: modelID, Providers: providers}
+		if registration := r.models[modelID]; registration != nil && registration.Info != nil {
+			entry.OwnedBy = registration.Info.OwnedBy
+		}
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+	return result
+}
+
 // GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
