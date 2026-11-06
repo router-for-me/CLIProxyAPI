@@ -2629,6 +2629,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 	}
 
 	if len(coolingSummaries) > 0 {
+		m.requestQuotaReconcile()
 		sort.Strings(coolingSummaries)
 		entry := logEntryWithRequestID(ctx)
 		providerText := strings.Join(providers, ",")
