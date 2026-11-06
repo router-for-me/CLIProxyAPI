@@ -320,6 +320,21 @@ func (m *Manager) filterExecutionModelsForRequest(ctx context.Context, auth *Aut
 		}
 		out = append(out, upstreamModel)
 	}
+	if pooled && len(out) > 1 && m.cooldownDisabledForAuth(auth) {
+		// Cooling-disabled pool members stay selectable, but one whose own 429
+		// announced a reset that has not passed is left out while another member
+		// is free, so the pool does not probe it again before its Retry-After.
+		var free []string
+		for _, upstreamModel := range out {
+			stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
+			if !coolingDisabledRetryAt(auth, stateModel).After(now) {
+				free = append(free, upstreamModel)
+			}
+		}
+		if len(free) > 0 {
+			out = free
+		}
+	}
 	return out
 }
 

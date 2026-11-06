@@ -967,6 +967,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
+		// A success dispatched before a cooling-disabled 429 was recorded proves
+		// nothing about its reset; keep the reset across the state reset below.
+		var staleSuccessRetryAt time.Time
+		var staleSuccessRetrySeq, staleSuccessRetryStamp uint64
+		if result.Success && modelKey != "" && result.ExecutionSeq > 0 {
+			if existing := existingModelState(auth, modelKey); existing != nil && existing.coolingDisabledRetryAt.After(now) &&
+				result.ExecutionSeq <= existing.coolingDisabledRetrySeq {
+				staleSuccessRetryAt, staleSuccessRetrySeq, staleSuccessRetryStamp = existing.coolingDisabledRetryAt, existing.coolingDisabledRetrySeq, existing.coolingDisabledRetryStamp
+			}
+		}
 
 		if result.Success {
 			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown {
@@ -999,7 +1009,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		} else {
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
-					disableCooling := m.cooldownDisabledForAuth(auth)
+					authCoolingDisabled := m.cooldownDisabledForAuth(auth)
+					disableCooling := authCoolingDisabled
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
 					}
@@ -1054,6 +1065,27 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					// A 429 from a call dispatched after the reset was recorded (above the
+					// watermark) is the upstream's newest word and replaces it, shorter or
+					// not; an explicit zero (Retry-After: 0) clears it. One dispatched
+					// before it, completing out of order, may only extend a live reset, so
+					// a stale result never shortens a newer hint or revives a cleared one.
+					// An unknown sequence (zero, direct MarkResult callers) is exempt from
+					// the ordering guard and counts as newer. A forced cooldown still
+					// updates the reset: retry scheduling waits on it for any
+					// cooling-disabled credential, so an obsolete one must not outlive it.
+					if authCoolingDisabled && statusCode == http.StatusTooManyRequests && result.RetryAfter != nil {
+						newer := result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq
+						stale := result.ExecutionSeq > 0 && !newer
+						if *result.RetryAfter > 0 {
+							until := now.Add(*result.RetryAfter)
+							if newer || (until.After(state.coolingDisabledRetryAt) && (!stale || state.coolingDisabledRetryAt.After(now))) {
+								m.writeCoolingDisabledReset(state, until)
+							}
+						} else if newer {
+							m.writeCoolingDisabledReset(state, time.Time{})
+						}
+					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -1336,6 +1368,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 			}
 		}
+		if !staleSuccessRetryAt.IsZero() {
+			if state := existingModelState(auth, modelKey); state != nil {
+				state.coolingDisabledRetryAt, state.coolingDisabledRetrySeq, state.coolingDisabledRetryStamp = staleSuccessRetryAt, staleSuccessRetrySeq, staleSuccessRetryStamp
+			}
+		} else if result.Success && modelKey != "" {
+			// A success dispatched after the reset was recorded clears it, even where
+			// a newer ordinary cooldown or a credential quota keeps the rest of the
+			// state above. An unknown sequence (zero, direct MarkResult callers) is
+			// exempt from the ordering guard and counts as newer, as for a 429. The
+			// watermark stays, so a 429 dispatched earlier cannot bring it back.
+			if state := existingModelState(auth, modelKey); state != nil && !state.coolingDisabledRetryAt.IsZero() &&
+				(result.ExecutionSeq == 0 || result.ExecutionSeq > state.coolingDisabledRetrySeq) {
+				m.writeCoolingDisabledReset(state, time.Time{})
+			}
+		}
 
 		if rejectsToken {
 			tokenToReject := result.AccessToken
@@ -1554,6 +1601,36 @@ func normalizeModelStates(auth *Auth) bool {
 	return changed
 }
 
+// coolingDisabledResetStamps numbers cooling-disabled reset writes; see
+// ModelState.coolingDisabledRetryStamp. Stamps only order writes, so one counter
+// serves every manager.
+var coolingDisabledResetStamps atomic.Uint64
+
+// writeCoolingDisabledReset sets state's cooling-disabled reset (zero clears it)
+// under the current execution watermark and a fresh write stamp.
+func (m *Manager) writeCoolingDisabledReset(state *ModelState, until time.Time) {
+	state.coolingDisabledRetryAt = until
+	state.coolingDisabledRetrySeq = m.currentExecutionSeq()
+	state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+}
+
+// coolingDisabledResetWrittenLater reports whether source's cooling-disabled reset
+// was written after target's. Write stamps decide, even when the watermarks tie
+// (direct MarkResult callers all write under the same one); a side that never
+// wrote a reset (stamp zero) loses to one that did. Without stamps on either side
+// the higher watermark wins, and on a tie the later deadline, so a merge never
+// drops a live reset it cannot order.
+func coolingDisabledResetWrittenLater(source, target *ModelState) bool {
+	switch {
+	case source.coolingDisabledRetryStamp != 0 && target.coolingDisabledRetryStamp != 0:
+		return source.coolingDisabledRetryStamp > target.coolingDisabledRetryStamp
+	case source.coolingDisabledRetryStamp != 0 || target.coolingDisabledRetryStamp != 0:
+		return source.coolingDisabledRetryStamp != 0
+	}
+	return source.coolingDisabledRetrySeq > target.coolingDisabledRetrySeq ||
+		(source.coolingDisabledRetrySeq == target.coolingDisabledRetrySeq && source.coolingDisabledRetryAt.After(target.coolingDisabledRetryAt))
+}
+
 func mergeModelState(target, source *ModelState) *ModelState {
 	if target == nil {
 		return source
@@ -1604,6 +1681,15 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.cooldownRecordedSeq > merged.cooldownRecordedSeq {
 		merged.cooldownRecordedSeq = source.cooldownRecordedSeq
 	}
+	// Keep the cooling-disabled reset written last, with its own deadline and
+	// watermark: pairing an older, longer deadline with a newer watermark would
+	// revive a hint the upstream has since replaced or cleared.
+	merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, merged.coolingDisabledRetryStamp =
+		target.coolingDisabledRetryAt, target.coolingDisabledRetrySeq, target.coolingDisabledRetryStamp
+	if coolingDisabledResetWrittenLater(source, target) {
+		merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, merged.coolingDisabledRetryStamp =
+			source.coolingDisabledRetryAt, source.coolingDisabledRetrySeq, source.coolingDisabledRetryStamp
+	}
 	if merged.StatusMessage == "" {
 		merged.StatusMessage = fallback.StatusMessage
 	}
@@ -1649,6 +1735,15 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.LastError = nil
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
+	// Clear the cooling-disabled reset but keep its watermark: a 429 dispatched
+	// before the reset was cleared or replaced must not reinstall a stale hint.
+	// Clearing a live reset is a write, stamped so a merge orders it against the
+	// other side's reset; dropping an expired one carries no new hint and keeps
+	// its stamp.
+	if state.coolingDisabledRetryAt.After(now) {
+		state.coolingDisabledRetryStamp = coolingDisabledResetStamps.Add(1)
+	}
+	state.coolingDisabledRetryAt = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now

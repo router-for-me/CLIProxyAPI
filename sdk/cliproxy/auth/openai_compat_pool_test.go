@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -871,5 +872,137 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolPreservesEarlierUpstreamError
 	}
 	if hasUpstreamExecutionAttempt(chunk.Err) {
 		t.Fatalf("stream error leaked internal upstream-attempt marker: %T/%v", chunk.Err, chunk.Err)
+	}
+}
+
+// A pooled alias records each member's 429 under its upstream model. When every
+// member announced a reset beyond max-retry-interval, the request must stop
+// instead of probing the whole pool again at once.
+func TestManagerExecute_DisableCooling_AliasPoolHonoursMemberResets(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-member-resets"
+	limited := &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour}
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{"up-a": limited, "up-b": limited}}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, executor)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("expected execute error")
+	}
+	if got := executor.ExecuteModels(); len(got) != 2 {
+		t.Fatalf("pool calls = %v, want each member once: both resets exceed max-retry-interval", got)
+	}
+}
+
+// When pool members announce different resets, a member whose reset is still live
+// is left out of the retry rounds while another member is free: here up-b's short
+// reset reopens the pool, but up-a's 2h reset keeps it from being probed again.
+func TestManagerExecute_DisableCooling_AliasPoolSkipsMemberWithLiveReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-live-member"
+	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{
+		"up-a": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+		"up-b": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 20 * time.Millisecond},
+	}}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, executor)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
+		t.Fatal("expected execute error")
+	}
+	got := executor.ExecuteModels()
+	sentToA := 0
+	for _, model := range got {
+		if model == "up-a" {
+			sentToA++
+		}
+	}
+	if sentToA != 1 || len(got) < 3 {
+		t.Fatalf("pool calls = %v, want up-a once (its 2h reset is live) and up-b retried", got)
+	}
+}
+
+// A pool member under an ordinary block is not used, so it must not count as
+// free: with up-a blocked and up-b on a live reset, the auth's reset is up-b's.
+func TestCoolingDisabledRetryAtForRouteLongerBlockDoesNotReopenPool(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-blocked-member"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, nil)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour)
+	m.mu.Lock()
+	var auth *Auth
+	for _, candidate := range m.auths {
+		auth = candidate
+	}
+	auth.ModelStates = map[string]*ModelState{
+		"up-a": {Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(3 * time.Hour)},
+		"up-b": {Status: StatusError, coolingDisabledRetryAt: reset},
+	}
+	got := m.coolingDisabledRetryAtForRoute(auth, alias, m.selectionModelForAuth(auth, alias), now)
+	m.mu.Unlock()
+	if !got.Equal(reset) {
+		t.Fatalf("reset = %v, want up-b's %v: up-a's longer block neither frees nor shortens the pool", got, reset)
+	}
+}
+
+// A pool member under an ordinary block that ends before another member's
+// reset is the one execution can use first; one under a block with no end is
+// left out, and a pool with only ordinary blocks is left to cooldown scheduling.
+func TestCoolingDisabledRetryAtForRouteCountsBlockedMemberReadyTime(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(true)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	alias := "pool-alias-member-ready-time"
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "up-a", Alias: alias},
+		{Name: "up-b", Alias: alias},
+	}, nil)
+	now := time.Now()
+	reset := now.Add(2 * time.Hour)
+	blockEnd := now.Add(5 * time.Second)
+	for _, tc := range []struct {
+		name string
+		upA  *ModelState
+		upB  *ModelState
+		want time.Time
+	}{
+		{"short block beats long reset", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, &ModelState{Status: StatusError, coolingDisabledRetryAt: reset}, blockEnd},
+		{"block with no end is left out", &ModelState{Status: StatusDisabled}, &ModelState{Status: StatusError, coolingDisabledRetryAt: reset}, reset},
+		{"reset and longer block on one member", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: now.Add(3 * time.Hour), coolingDisabledRetryAt: reset}, &ModelState{Status: StatusError, coolingDisabledRetryAt: now.Add(4 * time.Hour)}, now.Add(3 * time.Hour)},
+		{"only ordinary blocks", &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, &ModelState{Status: StatusError, Unavailable: true, NextRetryAfter: blockEnd}, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m.mu.Lock()
+			var auth *Auth
+			for _, candidate := range m.auths {
+				auth = candidate
+			}
+			auth.ModelStates = map[string]*ModelState{"up-a": tc.upA, "up-b": tc.upB}
+			got := m.coolingDisabledRetryAtForRoute(auth, alias, m.selectionModelForAuth(auth, alias), now)
+			m.mu.Unlock()
+			if !got.Equal(tc.want) {
+				t.Fatalf("ready = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
