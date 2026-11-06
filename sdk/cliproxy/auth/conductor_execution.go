@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -2282,7 +2283,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 
 	sessionID := fmt.Sprintf("verify-%s-%d", auth.ID, time.Now().UTC().UnixNano())
-	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":1,"store":false}`, verifyModel))
+	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`, verifyModel))
 	req := cliproxyexecutor.Request{
 		Model:   verifyModel,
 		Payload: payload,
@@ -2332,7 +2333,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 				updated, _ := m.GetByID(auth.ID)
 				return updated, errExec
 			}
-			if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
+			if (resp.Incomplete || !isCompletedExecutionPayload(resp.Payload)) && !verificationStoppedAtOutputBudget(resp.Payload) {
 				incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
 				updated, _ := m.GetByID(auth.ID)
 				return updated, incompleteErr
@@ -2383,6 +2384,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 
 	var sawCompleted bool
 	var sawIncomplete bool
+	var sawOutputBudget bool
 	var chunkErr error
 	if streamRes != nil && streamRes.Chunks != nil {
 		for chunk := range streamRes.Chunks {
@@ -2393,6 +2395,9 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 				sawIncomplete = true
 			}
 			if len(chunk.Payload) > 0 {
+				if verificationStoppedAtOutputBudget(chunk.Payload) {
+					sawOutputBudget = true
+				}
 				comp, incomp := streamPayloadCompletionFlags(chunk.Payload)
 				if comp {
 					sawCompleted = true
@@ -2426,7 +2431,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		updated, _ := m.GetByID(auth.ID)
 		return updated, chunkErr
 	}
-	if !sawCompleted || sawIncomplete {
+	if (!sawCompleted || sawIncomplete) && !sawOutputBudget {
 		incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
 		updated, _ := m.GetByID(auth.ID)
 		return updated, incompleteErr
@@ -2452,4 +2457,29 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
 	}
 	return updated, nil
+}
+
+// verificationStoppedAtOutputBudget reports whether a Responses payload ended only because it used up
+// max_output_tokens: the upstream accepted the credential and generated, which is all verification asks.
+// Reasoning models spend a small budget before any text, so a natural completion cannot be required.
+func verificationStoppedAtOutputBudget(payload []byte) bool {
+	// A non-streaming body is one JSON document that may span lines; only SSE is read line by line.
+	if trimmed := bytes.TrimSpace(payload); len(trimmed) > 0 && trimmed[0] == '{' {
+		return incompleteAtOutputBudget(trimmed)
+	}
+	for _, rawLine := range bytes.Split(payload, []byte("\n")) {
+		data := bytes.TrimSpace(bytes.TrimPrefix(bytes.TrimSpace(rawLine), []byte("data:")))
+		if len(data) >= 2 && data[0] == '{' && incompleteAtOutputBudget(data) {
+			return true
+		}
+	}
+	return false
+}
+
+func incompleteAtOutputBudget(data []byte) bool {
+	reason := ojson.GetBytesNoCopy(data, "response.incomplete_details.reason")
+	if !reason.Exists() {
+		reason = ojson.GetBytesNoCopy(data, "incomplete_details.reason")
+	}
+	return reason.String() == "max_output_tokens"
 }
