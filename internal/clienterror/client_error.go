@@ -123,6 +123,9 @@ func IsRequestFault(status int, err error) bool {
 	if err != nil && (IsItemNotPersisted(err.Error()) || IsGeminiFilterBlockError(err) || IsClaudePolicyRefusalError(err)) {
 		return true
 	}
+	if status == http.StatusForbidden && IsCloudflareSignatureBlock(err) {
+		return true
+	}
 	switch status {
 	case http.StatusBadRequest,
 		http.StatusConflict,
@@ -132,6 +135,18 @@ func IsRequestFault(status int, err error) bool {
 	default:
 		return false
 	}
+}
+
+// IsCloudflareSignatureBlock matches Cloudflare's plain-text "error code: 1010": the site
+// blocks the browser signature of the request, in practice the User-Agent the proxy
+// forwards from the client (for example Python-urllib or libwww-perl). The same request
+// fails on every credential of that upstream while other clients keep working, so it is
+// a request fault: cooling the model would block it for every client for 30 minutes.
+func IsCloudflareSignatureBlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "error code: 1010")
 }
 
 // IsItemNotPersisted matches the upstream 404 raised when a request references a
