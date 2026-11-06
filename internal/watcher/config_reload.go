@@ -5,7 +5,6 @@ package watcher
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"reflect"
 	"time"
 
@@ -56,7 +55,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 	w.configApplyMu.Lock()
 	defer w.configApplyMu.Unlock()
 
-	data, err := os.ReadFile(w.configPath)
+	data, err := config.ReadConfigFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
 		return
