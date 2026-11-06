@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -1259,6 +1260,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	m.mu.RLock()
 	auth := m.auths[id].Clone()
 	var exec ProviderExecutor
+	store := m.store
 	if auth != nil {
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
@@ -1267,6 +1269,19 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if resolver, okResolver := store.(interface {
+			RefreshJournalFor(*Auth) (codex.RefreshJournal, error)
+		}); okResolver {
+			journal, errJournal := resolver.RefreshJournalFor(auth)
+			if errJournal != nil {
+				return nil, fmt.Errorf("resolve credential refresh journal: %w", errJournal)
+			}
+			ctx = codex.WithRefreshJournal(ctx, journal)
+		} else if journal, okJournal := store.(codex.RefreshJournal); okJournal {
+			ctx = codex.WithRefreshJournal(ctx, journal)
+		}
 	}
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
@@ -1368,7 +1383,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
-	if err != nil && errors.Is(err, context.Canceled) {
+	if err != nil && errors.Is(err, context.Canceled) && !codex.IsRefreshOutcomeUnknown(err) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {

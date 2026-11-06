@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -44,13 +45,15 @@ type ObjectStoreConfig struct {
 // ObjectTokenStore persists configuration and authentication metadata using an S3-compatible object storage backend.
 // Files are mirrored to a local workspace so existing file-based flows continue to operate.
 type ObjectTokenStore struct {
-	client      *minio.Client
-	cfg         ObjectStoreConfig
-	spoolRoot   string
-	configPath  string
-	authDir     string
-	mu          misc.ContextMutex
-	putObjectFn func(ctx context.Context, key string, data []byte, contentType string) error
+	client            *minio.Client
+	cfg               ObjectStoreConfig
+	spoolRoot         string
+	configPath        string
+	authDir           string
+	mu                misc.ContextMutex
+	putObjectFn       func(ctx context.Context, key string, data []byte, contentType string) error
+	refreshProbeMu    sync.Mutex
+	refreshProbeReady bool
 }
 
 // NewObjectTokenStore initializes an object storage backed token store.

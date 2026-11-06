@@ -197,7 +197,12 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 		return "", false, fmt.Errorf("missing access_token and refresh_token")
 	}
 
+	journal, errJournal := store.RefreshJournalFor(auth)
+	if errJournal != nil {
+		return "", false, errJournal
+	}
 	svc := codexauth.NewCodexAuthWithProxyURL(nil, auth.ProxyURL)
+	svc.SetRefreshJournal(journal)
 	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if errRefresh != nil {
 		return "", false, errRefresh

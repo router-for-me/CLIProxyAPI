@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -144,7 +145,11 @@ func resolveCodexAuthDiskPath(cfg *config.Config, auth *cliproxyauth.Auth) (stri
 			return "", fmt.Errorf("codex executor: stat credential file %s: %w", candidate, errStat)
 		}
 		if !info.IsDir() {
-			return candidate, nil
+			canonical, errCanonical := filepath.EvalSymlinks(candidate)
+			if errCanonical != nil {
+				return "", fmt.Errorf("codex executor: resolve credential path: %w", errCanonical)
+			}
+			return filepath.Abs(canonical)
 		}
 	}
 	return "", nil
@@ -336,6 +341,15 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	svc := codexauth.NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)
+	if diskPath != "" && (cfg == nil || cfg.AuthDir == "") {
+		svc.SetRefreshJournal(&codexauth.FileRefreshJournal{Dir: filepath.Dir(diskPath)})
+	}
+	store := sdkauth.GetTokenStore()
+	if _, isFileStore := store.(*sdkauth.FileTokenStore); !isFileStore {
+		if journal, okJournal := store.(codexauth.RefreshJournal); okJournal {
+			svc.SetRefreshJournal(journal)
+		}
+	}
 
 	outerRefreshed := false
 	var outerErr error
