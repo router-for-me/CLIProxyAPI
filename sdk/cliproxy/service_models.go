@@ -886,14 +886,25 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		info.SupportedInputModalities = normalizeCompatConfigModalities(model.InputModalities)
 		info.SupportedOutputModalities = normalizeCompatConfigModalities(model.OutputModalities)
 		if openRouter && !model.Image {
-			// OpenRouter publishes each model's limits; configured values (max-context-length) still win.
-			if limits, ok := registry.LookupOpenRouterModelLimits(providerKey, strings.TrimSpace(model.Name)); ok {
-				if info.ContextLength <= 0 && limits.ContextLength > 0 {
-					info.ContextLength = limits.ContextLength
+			// OpenRouter publishes each model's limits and accepted reasoning efforts; configured values
+			// (max-context-length, thinking) still win.
+			if published, ok := registry.LookupOpenRouterModel(providerKey, strings.TrimSpace(model.Name)); ok {
+				if info.ContextLength <= 0 && published.ContextLength > 0 {
+					info.ContextLength = published.ContextLength
 				}
-				if info.MaxCompletionTokens <= 0 && limits.MaxCompletionTokens > 0 {
-					info.MaxCompletionTokens = limits.MaxCompletionTokens
+				if info.MaxCompletionTokens <= 0 && published.MaxCompletionTokens > 0 {
+					info.MaxCompletionTokens = published.MaxCompletionTokens
 				}
+				if model.Thinking == nil {
+					if support := modelconfig.OpenRouterThinkingSupport(published.ReasoningEfforts); support != nil {
+						info.Thinking = support
+					}
+				}
+			}
+			// OpenRouter model ids are "<vendor>/<model>": report the vendor as the owner, as for Vertex
+			// publisher/model names, so clients see who made the model rather than the entry's name.
+			if vendor := openRouterVendor(model.Name); vendor != "" {
+				info.OwnedBy = vendor
 			}
 		}
 		models = append(models, info)
@@ -904,6 +915,17 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 // compatPointsAtOpenRouter reports whether the entry's base URL is OpenRouter.
 func compatPointsAtOpenRouter(compat *config.OpenAICompatibility) bool {
 	return compat != nil && util.IsOpenRouterURL(compat.BaseURL)
+}
+
+// openRouterVendor returns the vendor part of an OpenRouter model id ("anthropic/claude-haiku-5.5" -> "anthropic",
+// "~openai/gpt-sol-latest" -> "openai"), or "" when the id has none.
+func openRouterVendor(modelName string) string {
+	vendor, rest, ok := strings.Cut(strings.TrimSpace(modelName), "/")
+	vendor = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(vendor), "~"))
+	if !ok || vendor == "" || strings.TrimSpace(rest) == "" {
+		return ""
+	}
+	return vendor
 }
 
 func normalizeCompatConfigModalities(raw []string) []string {

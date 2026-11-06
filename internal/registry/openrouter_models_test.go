@@ -3,38 +3,62 @@ package registry
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 )
 
-func TestParseOpenRouterModelLimits(t *testing.T) {
-	got, err := parseOpenRouterModelLimits([]byte(`{"data":[
-		{"id":"anthropic/claude-haiku-5.5","context_length":1000000,"top_provider":{"context_length":1000000,"max_completion_tokens":128000}},
+func TestParseOpenRouterModels(t *testing.T) {
+	got, err := parseOpenRouterModels([]byte(`{"data":[
+		{"id":"anthropic/claude-haiku-5.5","context_length":1000000,"top_provider":{"context_length":1000000,"max_completion_tokens":128000},
+		 "reasoning":{"mandatory":false,"supported_efforts":["max","XHigh","high","medium","low","none","high"],"default_effort":"medium"}},
 		{"id":"OpenAI/GPT-6.1-Sol","context_length":0,"top_provider":{"context_length":1050000,"max_completion_tokens":128000}},
-		{"id":"empty/model","context_length":0,"top_provider":{}},
+		{"id":"vendor/efforts-only","context_length":0,"top_provider":{},"reasoning":{"supported_efforts":["high","none"]}},
+		{"id":"empty/model","context_length":0,"top_provider":{},"reasoning":{"mandatory":true}},
 		{"context_length":5}]}`))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got["anthropic/claude-haiku-5.5"] != (OpenRouterModelLimits{ContextLength: 1000000, MaxCompletionTokens: 128000}) {
-		t.Errorf("haiku = %+v", got["anthropic/claude-haiku-5.5"])
+	haiku := got["anthropic/claude-haiku-5.5"]
+	if haiku.ContextLength != 1000000 || haiku.MaxCompletionTokens != 128000 ||
+		!slices.Equal(haiku.ReasoningEfforts, []string{"max", "xhigh", "high", "medium", "low", "none"}) {
+		t.Errorf("haiku = %+v (efforts lower-cased, duplicates dropped)", haiku)
 	}
-	if got["openai/gpt-6.1-sol"] != (OpenRouterModelLimits{ContextLength: 1050000, MaxCompletionTokens: 128000}) {
-		t.Errorf("gpt (top_provider fallback, lower-cased id) = %+v", got["openai/gpt-6.1-sol"])
+	sol := got["openai/gpt-6.1-sol"]
+	if sol.ContextLength != 1050000 || sol.MaxCompletionTokens != 128000 || len(sol.ReasoningEfforts) != 0 {
+		t.Errorf("gpt (top_provider fallback, lower-cased id, no efforts) = %+v", sol)
 	}
-	if _, ok := got["empty/model"]; ok || len(got) != 2 {
+	if only := got["vendor/efforts-only"]; !slices.Equal(only.ReasoningEfforts, []string{"high", "none"}) {
+		t.Errorf("a model with only published efforts must be kept: %+v", only)
+	}
+	if _, ok := got["empty/model"]; ok || len(got) != 3 {
 		t.Errorf("unexpected entries: %+v", got)
 	}
-	if _, err := parseOpenRouterModelLimits([]byte(`{"nope":1}`)); err == nil {
+	if _, err := parseOpenRouterModels([]byte(`{"nope":1}`)); err == nil {
 		t.Error("want an error without a data array")
+	}
+}
+
+func TestOpenRouterLookupReturnsACopyOfTheEfforts(t *testing.T) {
+	restore := SetOpenRouterModelsForTest(map[string]OpenRouterModel{
+		"Anthropic/Claude-Opus-5.5": {ReasoningEfforts: []string{"max", "high"}},
+	})
+	defer restore()
+	first, ok := LookupOpenRouterModel("openrouter", "anthropic/claude-opus-5.5")
+	if !ok {
+		t.Fatal("model not found")
+	}
+	first.ReasoningEfforts[0] = "changed"
+	if second, _ := LookupOpenRouterModel("openrouter", "anthropic/claude-opus-5.5"); second.ReasoningEfforts[0] != "max" {
+		t.Fatalf("a caller changed the catalog: %v", second.ReasoningEfforts)
 	}
 }
 
 func TestOpenRouterCatalogFetchesInBackgroundAndNotifies(t *testing.T) {
 	fetched := make(chan struct{}, 4)
-	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModelLimits, error) {
+	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModel, error) {
 		fetched <- struct{}{}
-		return map[string]OpenRouterModelLimits{"anthropic/claude-haiku-5.5": {ContextLength: 1000000, MaxCompletionTokens: 128000}}, nil
+		return map[string]OpenRouterModel{"anthropic/claude-haiku-5.5": {ContextLength: 1000000, MaxCompletionTokens: 128000}}, nil
 	}}
 	notified := make(chan []string, 1)
 	SetModelRefreshCallback(func(providers []string) { notified <- providers })
@@ -56,9 +80,9 @@ func TestOpenRouterCatalogFetchesInBackgroundAndNotifies(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no refresh notification")
 	}
-	limits, ok := catalog.lookup("openrouter", "Anthropic/Claude-Haiku-5.5")
-	if !ok || limits.MaxCompletionTokens != 128000 {
-		t.Fatalf("lookup after fetch = %+v, %v", limits, ok)
+	published, ok := catalog.lookup("openrouter", "Anthropic/Claude-Haiku-5.5")
+	if !ok || published.MaxCompletionTokens != 128000 {
+		t.Fatalf("lookup after fetch = %+v, %v", published, ok)
 	}
 	select {
 	case <-fetched:
@@ -69,7 +93,7 @@ func TestOpenRouterCatalogFetchesInBackgroundAndNotifies(t *testing.T) {
 
 func TestOpenRouterCatalogBacksOffAfterFailure(t *testing.T) {
 	calls := make(chan struct{}, 4)
-	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModelLimits, error) {
+	catalog := &openRouterCatalog{fetch: func(context.Context) (map[string]OpenRouterModel, error) {
 		calls <- struct{}{}
 		return nil, errors.New("offline")
 	}}
