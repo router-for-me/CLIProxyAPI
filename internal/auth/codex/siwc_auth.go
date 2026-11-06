@@ -3,18 +3,19 @@ package codex
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -95,14 +96,6 @@ func (o *CodexAuth) GenerateSIWCAuthURL(state, nonce, deviceID, redirectURI stri
 	return fmt.Sprintf("%s?%s", SIWCAuthorizeURL, params.Encode()), nil
 }
 
-type siwcTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	IDToken      string `json:"id_token"`
-	Scope        string `json:"scope"`
-	ExpiresIn    int    `json:"expires_in"`
-}
-
 func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clientID, deviceID string, requireIDToken bool) (result *CodexSIWCTokenData, errResult error) {
 	stage := "request-create"
 	defer func() {
@@ -139,53 +132,66 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	}
 	if resp.StatusCode != http.StatusOK {
 		stage = "response-status"
+		if requestID := strings.TrimSpace(resp.Header.Get("x-request-id")); requestID != "" {
+			return nil, fmt.Errorf("OpenAI OAuth token request failed (%d, request_id=%q): %s", resp.StatusCode, requestID, strings.TrimSpace(string(body)))
+		}
 		return nil, fmt.Errorf("OpenAI OAuth token request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	stage = "response-decode"
-	var tokenResp siwcTokenResponse
-	if errUnmarshal := json.Unmarshal(body, &tokenResp); errUnmarshal != nil {
-		return nil, fmt.Errorf("failed to parse SIWC token response: %w", errUnmarshal)
+	tokenResp := ojson.ParseBytes(body)
+	if !ojson.ValidBytes(body) || !tokenResp.IsObject() {
+		return nil, fmt.Errorf("failed to parse SIWC token response: expected a JSON object")
 	}
-	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+	accessToken := tokenResp.Get("access_token")
+	if accessToken.Type != ojson.String || strings.TrimSpace(accessToken.Str) == "" {
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid access_token")
 	}
-	if strings.TrimSpace(tokenResp.RefreshToken) == "" {
+	refreshToken := tokenResp.Get("refresh_token")
+	if refreshToken.Type != ojson.String || strings.TrimSpace(refreshToken.Str) == "" {
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid refresh_token")
 	}
-	if requireIDToken && strings.TrimSpace(tokenResp.IDToken) == "" {
+	idToken := tokenResp.Get("id_token")
+	if idToken.Type != ojson.Null && idToken.Type != ojson.String {
+		return nil, fmt.Errorf("OpenAI OAuth token response has invalid id_token")
+	}
+	if requireIDToken && strings.TrimSpace(idToken.Str) == "" {
 		return nil, fmt.Errorf("OpenAI OAuth token response did not contain an ID token")
 	}
-	if strings.TrimSpace(tokenResp.Scope) == "" {
+	scope := tokenResp.Get("scope")
+	// An omitted, unchanged scope on refresh must not discard a rotated refresh token.
+	if (requireIDToken || scope.Exists()) && (scope.Type != ojson.String || strings.TrimSpace(scope.Str) == "") {
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid scope")
 	}
-	if tokenResp.ExpiresIn <= 0 {
+	expiresIn, errExpiry := strconv.ParseInt(tokenResp.Get("expires_in").Raw, 10, 64)
+	if errExpiry != nil || expiresIn <= 0 {
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
 	}
 
-	scopes := strings.Fields(tokenResp.Scope)
-	if !slices.Contains(scopes, SIWCDirectTokenScope) {
+	scopes := strings.Fields(scope.Str)
+	if scope.Exists() && !slices.Contains(scopes, SIWCDirectTokenScope) {
 		return nil, fmt.Errorf("OpenAI OAuth grant did not include %s", SIWCDirectTokenScope)
 	}
 
 	now := time.Now()
-	rawTTL := time.Duration(tokenResp.ExpiresIn) * time.Second
+	rawTTL := time.Duration(expiresIn) * time.Second
 	ttl := rawTTL - SIWCExpiryMargin
 	if ttl <= 0 {
 		ttl = rawTTL
 	}
 
 	return &CodexSIWCTokenData{
-		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
-		IDToken:      tokenResp.IDToken,
-		ClientID:     strings.TrimSpace(clientID),
-		Scope:        strings.TrimSpace(tokenResp.Scope),
-		Scopes:       scopes,
-		Expire:       now.Add(ttl).Format(time.RFC3339),
-		ExpiresAt:    now.Add(rawTTL).Format(time.RFC3339),
-		LastRefresh:  now.Format(time.RFC3339),
-		DeviceID:     strings.TrimSpace(deviceID),
+		AccessToken:       accessToken.Str,
+		RefreshToken:      refreshToken.Str,
+		IDToken:           idToken.Str,
+		ClientID:          strings.TrimSpace(clientID),
+		Scope:             strings.TrimSpace(scope.Str),
+		Scopes:            scopes,
+		Expire:            now.Add(ttl).Format(time.RFC3339),
+		ExpiresAt:         now.Add(rawTTL).Format(time.RFC3339),
+		EarliestRefreshAt: tokenResp.Get("earliest_refresh_at").Value(),
+		LastRefresh:       now.Format(time.RFC3339),
+		DeviceID:          strings.TrimSpace(deviceID),
 	}, nil
 }
 
