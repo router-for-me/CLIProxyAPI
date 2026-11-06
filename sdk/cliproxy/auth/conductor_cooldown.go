@@ -901,6 +901,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	recordUpstreamResult(result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth
@@ -1457,6 +1458,8 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 	if m == nil || result.AuthID == "" {
 		return
 	}
+	// Home outcomes bypass MarkResult; count them here once for all execution paths.
+	recordUpstreamResult(result)
 	var snapshot *Auth
 	if auth != nil {
 		snapshot = auth.Clone()
@@ -1470,6 +1473,9 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	if result.AuthID == "" {
 		return
 	}
+	// Availability-neutral paths (e.g. Responses Compact, Claude count_tokens 404)
+	// bypass MarkResult but are still real upstream attempts.
+	recordUpstreamResult(result)
 
 	var authSnapshot *Auth
 	releaseMutation := m.lockAuthMutation(result.AuthID)
