@@ -1948,6 +1948,11 @@ func isRequestScopedError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A preserved terminal response belongs to this request unless the executor
+	// explicitly classifies the rejection as safe to retry on another credential.
+	if isRequestTerminatedError(err) && !isCredentialScopedError(err) {
+		return true
+	}
 	requestErr, ok := errors.AsType[cliproxyexecutor.RequestScopedError](err)
 	return ok && requestErr != nil && requestErr.IsRequestScoped()
 }
