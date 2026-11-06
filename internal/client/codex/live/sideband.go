@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,9 @@ import (
 const (
 	defaultSidebandAPIBaseURL = "wss://api.openai.com/v1"
 	sessionLifetime           = time.Hour
+	// codexAccountHintHeader names the ChatGPT account that created a call this proxy
+	// does not know, so the matching credential joins it first. It is never forwarded.
+	codexAccountHintHeader = "X-CLIProxy-Codex-Account-Id"
 )
 
 var (
@@ -325,14 +329,23 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		return
 	}
 	session, claim := h.sessions.claim(callID)
+	unknownCall := false
 	switch claim {
 	case sessionClaimBusy:
 		writeLiveError(c, http.StatusConflict, "Codex live session already joining")
 		return
 	case sessionClaimAcquired:
 	default:
-		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
-		return
+		// Client secrets are scoped to calls created through this proxy.
+		if _, hasClientSecret := c.Get(ClientSecretPrincipalContextKey); hasClientSecret {
+			writeLiveError(c, http.StatusNotFound, "Codex live session not found")
+			return
+		}
+		// Calls created outside this proxy (for example by Codex Desktop) or lost on
+		// restart are unknown here; relay them upstream, which owns call access.
+		unknownCall = true
+		session = liveSession{model: defaultLiveModel}
+		log.WithField("call_id", callID).Info("codex live sideband: relaying unknown call upstream")
 	}
 	if principal, hasClientSecret := c.Get(ClientSecretPrincipalContextKey); hasClientSecret {
 		principalValue, _ := principal.(string)
@@ -358,7 +371,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
-		coreexecutor.ExecutionSessionMetadataKey: session.callID,
+		coreexecutor.ExecutionSessionMetadataKey: callID,
 	})
 	if session.sessionID != "" {
 		meta := logging.GetClientRequestMetadata(ctx)
@@ -369,7 +382,28 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	var errSelect error
-	if session.homeSelection != nil {
+	// Only the account that created an unknown call can join it, so try each
+	// Codex OAuth credential in turn instead of a single scheduler pick.
+	relayUnknownCall := unknownCall && !h.authManager.HomeEnabled()
+	var unknownCallAuthIDs []string
+	nextUnknownCallAuth := func() *auth.Auth {
+		for len(unknownCallAuthIDs) > 0 {
+			authID := unknownCallAuthIDs[0]
+			unknownCallAuthIDs = unknownCallAuthIDs[1:]
+			if candidate := h.selectUnknownCallAuth(ctx, c, callID, authID); candidate != nil {
+				return candidate
+			}
+		}
+		return nil
+	}
+	if relayUnknownCall {
+		unknownCallAuthIDs = h.unknownCallAuthIDs(c)
+		selected = nextUnknownCallAuth()
+		if selected == nil {
+			writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
+			return
+		}
+	} else if session.homeSelection != nil {
 		if !session.homeSelection.Active() {
 			consumeSession = true
 			writeLiveError(c, http.StatusServiceUnavailable, "Codex live Home selection unavailable")
@@ -450,6 +484,38 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
+	for relayUnknownCall && errDial != nil {
+		next := nextUnknownCallAuth()
+		if next == nil {
+			break
+		}
+		attemptStatus := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
+		if handshakeResponse != nil {
+			if handshakeResponse.StatusCode > 0 {
+				attemptStatus = handshakeResponse.StatusCode
+			}
+			if handshakeResponse.Body != nil {
+				if errClose := handshakeResponse.Body.Close(); errClose != nil {
+					log.Errorf("codex live sideband: close handshake response body error: %v", errClose)
+				}
+			}
+		}
+		log.WithFields(log.Fields{
+			"call_id":    callID,
+			"auth_index": selected.EnsureIndex(),
+			"status":     attemptStatus,
+		}).Debug("codex live sideband: unknown call rejected credential, trying next")
+		selected = next
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+		upstream, handshakeResponse, errDial = dialUpstream(selected)
+	}
+	if errDial == nil && relayUnknownCall {
+		h.rememberUnknownCallAuth(selected.ID)
+		log.WithFields(log.Fields{
+			"call_id":    callID,
+			"auth_index": selected.EnsureIndex(),
+		}).Info("codex live sideband: unknown call joined")
+	}
 	if errDial != nil {
 		handshakeStatus := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
@@ -753,4 +819,72 @@ func newSidebandDialer(proxyURL string) *websocket.Dialer {
 		log.Errorf("codex live sideband: unsupported proxy scheme: %s", setting.URL.Scheme)
 	}
 	return dialer
+}
+
+// unknownCallAuthIDs orders the Codex OAuth credentials for joining a call this proxy
+// did not create: the account named by the client first, then the credential that
+// joined last time, then the rest.
+func (h *Handler) unknownCallAuthIDs(c *gin.Context) []string {
+	ids := make([]string, 0)
+	for _, current := range h.authManager.List() {
+		if current == nil || current.Disabled || current.AuthKind() != auth.AuthKindOAuth || !strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
+			continue
+		}
+		ids = append(ids, current.ID)
+	}
+	sort.Strings(ids)
+	requestedAccount := strings.TrimSpace(c.GetHeader(codexAccountHintHeader))
+	preferred := h.lastUnknownCallAuth()
+	rank := func(id string) int {
+		if requestedAccount != "" && accountIDForAuth(h.authManager, id) == requestedAccount {
+			return 0
+		}
+		if id == preferred {
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(ids, func(i, j int) bool {
+		return rank(ids[i]) < rank(ids[j])
+	})
+	return ids
+}
+
+// selectUnknownCallAuth selects one specific credential through the scheduler, or
+// returns nil when it is currently unavailable.
+func (h *Handler) selectUnknownCallAuth(ctx context.Context, c *gin.Context, callID, authID string) *auth.Auth {
+	selectionOpts := coreexecutor.Options{
+		Headers: liveSelectionHeaders(c),
+		Metadata: map[string]any{
+			coreexecutor.PinnedAuthMetadataKey:       authID,
+			coreexecutor.ExecutionSessionMetadataKey: callID,
+		},
+	}
+	selected, errSelect := h.authManager.SelectAuthByKind(ctx, "codex", "", auth.AuthKindOAuth, selectionOpts)
+	if errSelect != nil || selected == nil || selected.ID != authID {
+		log.WithError(errSelect).Debug("codex live sideband: skip unavailable credential for unknown call")
+		return nil
+	}
+	return selected
+}
+
+func accountIDForAuth(manager *auth.Manager, authID string) string {
+	current, ok := manager.GetByID(authID)
+	if !ok || current == nil {
+		return ""
+	}
+	accountID, _ := current.Metadata["account_id"].(string)
+	return strings.TrimSpace(accountID)
+}
+
+func (h *Handler) lastUnknownCallAuth() string {
+	h.unknownCallAuthMu.Lock()
+	defer h.unknownCallAuthMu.Unlock()
+	return h.unknownCallAuthID
+}
+
+func (h *Handler) rememberUnknownCallAuth(authID string) {
+	h.unknownCallAuthMu.Lock()
+	h.unknownCallAuthID = authID
+	h.unknownCallAuthMu.Unlock()
 }
