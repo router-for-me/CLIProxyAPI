@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -226,6 +227,99 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChanged_WriteDuringReloadIsNotSkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		data, err := yaml.Marshal(&config.Config{
+			Port:               port,
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal config: %v", err)
+		}
+		if err = os.WriteFile(configPath, data, 0o644); err != nil {
+			t.Fatalf("failed to write config: %v", err)
+		}
+	}
+
+	writeConfig(8080)
+
+	// A management save that lands while the first reload is applying its config
+	// must still be picked up by the next trigger instead of matching the hash.
+	var appliedPorts []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+	}
+	w.reloadCallback = func(cfg *config.Config) {
+		appliedPorts = append(appliedPorts, cfg.Port)
+		if len(appliedPorts) == 1 {
+			writeConfig(9090)
+		}
+	}
+
+	w.reloadConfigIfChanged()
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 || appliedPorts[1] != 9090 {
+		t.Fatalf("expected the write made during reload to be applied next, applied ports %v", appliedPorts)
+	}
+
+	w.reloadConfigIfChanged()
+	if len(appliedPorts) != 2 {
+		t.Fatalf("expected unchanged config to be skipped after catching up, applied ports %v", appliedPorts)
+	}
+}
+
+func TestReloadConfigIfChanged_LoadsTheBytesItHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := []byte("port: 8317\nremote-management:\n  secret-key: \"$2a$10$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuvwxyz01234\"\n")
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	// A management save truncates the file right after the watcher reads it, as
+	// os.Create/os.WriteFile do. Loading must use the bytes that were read, or the
+	// reload applies an empty config and drops the management secret.
+	original := readConfigFile
+	t.Cleanup(func() { readConfigFile = original })
+	readConfigFile = func(path string) ([]byte, error) {
+		data, err := original(path)
+		if err == nil {
+			if errTruncate := os.WriteFile(path, nil, 0o600); errTruncate != nil {
+				t.Fatalf("failed to truncate config: %v", errTruncate)
+			}
+		}
+		return data, err
+	}
+
+	var applied *config.Config
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		reloadCallback: func(cfg *config.Config) { applied = cfg },
+	}
+	w.reloadConfigIfChanged()
+
+	if applied == nil {
+		t.Fatal("expected the reload to apply the config that was read")
+	}
+	if applied.Port != 8317 || applied.RemoteManagement.SecretKey == "" {
+		t.Fatalf("applied config port=%d secret empty=%v, want the read config with its secret", applied.Port, applied.RemoteManagement.SecretKey == "")
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -258,6 +352,198 @@ func TestStartAndStopSuccess(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected one reload callback, got %d", got)
+	}
+}
+
+func TestConfigWatchSurvivesRenameReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\nauth-dir: "+authDir+"\n"), 0o644); err != nil {
+		t.Fatalf("failed to create config file: %v", err)
+	}
+
+	reloadedPorts := make(chan int, 64)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) {
+		if cfg != nil {
+			reloadedPorts <- cfg.Port
+		}
+	})
+	if err != nil {
+		t.Fatalf("failed to create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("expected Start to succeed: %v", err)
+	}
+	t.Cleanup(func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+
+	// Atomic saves replace the file by rename, which drops a watch on the old
+	// inode. Every replace, not just the first, must still reload.
+	for _, port := range []int{8001, 8002, 8003} {
+		tmp := filepath.Join(tmpDir, ".config.yaml.tmp")
+		if err = os.WriteFile(tmp, []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir)), 0o644); err != nil {
+			t.Fatalf("failed to write temp config: %v", err)
+		}
+		if err = os.Rename(tmp, configPath); err != nil {
+			t.Fatalf("failed to replace config: %v", err)
+		}
+		waitForReloadedPort(t, reloadedPorts, port)
+	}
+}
+
+// waitForReloadedPort consumes reload callbacks until one carries port. The
+// timeout only guards against a hang; ordering comes from the callbacks.
+func waitForReloadedPort(t *testing.T, reloadedPorts <-chan int, port int) {
+	t.Helper()
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	for {
+		select {
+		case got := <-reloadedPorts:
+			if got == port {
+				return
+			}
+		case <-hangGuard.C:
+			t.Fatalf("no reload with port %d after replacing the config", port)
+		}
+	}
+}
+
+func TestHandleEventConfigRemoveRearmsWatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	// inotify drops the watch when a rename replaces the file and reports Remove
+	// for it; the new file at the same path must be watched again and reloaded.
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched again, watch list %v", configPath, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A second replace can remove the config between the existence check and the
+// add. The add fails with ENOENT and nothing else would retry it, so the re-arm
+// must retry until the watch is in place.
+func TestHandleEventConfigRemoveRetriesWatchLostToSecondReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8000\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatalf("failed to create fsnotify watcher: %v", err)
+	}
+	t.Cleanup(func() {
+		if errClose := fsWatcher.Close(); errClose != nil {
+			t.Errorf("close fsnotify watcher: %v", errClose)
+		}
+	})
+	original := addConfigWatch
+	t.Cleanup(func() { addConfigWatch = original })
+	adds := 0
+	addConfigWatch = func(watcher *fsnotify.Watcher, path string) error {
+		adds++
+		if adds == 1 {
+			// The second save's rename lands here: the stat saw a file, the add does not.
+			return &os.PathError{Op: "inotify_add_watch", Path: path, Err: syscall.ENOENT}
+		}
+		return original(watcher, path)
+	}
+
+	reloadedPorts := make(chan int, 8)
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     configPath,
+		watcher:        fsWatcher,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(cfg *config.Config) { reloadedPorts <- cfg.Port },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+
+	watched := false
+	for _, path := range fsWatcher.WatchList() {
+		if path == configPath {
+			watched = true
+		}
+	}
+	if !watched {
+		t.Fatalf("expected %s to be watched after the retried add (adds=%d), watch list %v", configPath, adds, fsWatcher.WatchList())
+	}
+	waitForReloadedPort(t, reloadedPorts, 8000)
+}
+
+// A rename whose replacement lands after the bounded re-arm checks still schedules
+// the reload a rename always did, so the new file is applied once it exists. A bare
+// Remove with no file schedules nothing.
+func TestHandleEventConfigRenameStillReloadsWhenRearmFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	w := &Watcher{configPath: configPath, authDir: filepath.Join(tmpDir, "auth")}
+	t.Cleanup(w.stopConfigReloadTimer)
+	scheduled := func() bool {
+		w.configReloadMu.Lock()
+		defer w.configReloadMu.Unlock()
+		return w.configReloadTimer != nil
+	}
+
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Remove})
+	if scheduled() {
+		t.Fatal("a Remove of a config that is still absent scheduled a reload")
+	}
+	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Rename})
+	if !scheduled() {
+		t.Fatal("a Rename whose replacement is not there yet did not schedule a reload")
 	}
 }
 
@@ -751,11 +1037,11 @@ func TestSetAuthUpdateQueueNilResetsDispatch(t *testing.T) {
 
 func TestPersistAsyncEarlyReturns(t *testing.T) {
 	var nilWatcher *Watcher
-	nilWatcher.persistConfigAsync()
+	nilWatcher.persistConfigAsync(nil)
 	nilWatcher.persistAuthAsync("msg", "a")
 
 	w := &Watcher{}
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", "   ", "")
 }
 
@@ -777,7 +1063,7 @@ func (p *errorPersister) PersistAuthFiles(context.Context, string, ...string) er
 func TestPersistAsyncErrorPaths(t *testing.T) {
 	p := &errorPersister{}
 	w := &Watcher{storePersister: p}
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", "a")
 	time.Sleep(30 * time.Millisecond)
 	if atomic.LoadInt32(&p.configCalls) != 1 {
@@ -1711,7 +1997,7 @@ func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
 		storePersister: store,
 	}
 
-	w.persistConfigAsync()
+	w.persistConfigAsync(nil)
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
 	for range 2 {
@@ -1884,4 +2170,287 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+type recordingConfigPersister struct {
+	path     string
+	mirrored chan []byte
+}
+
+// PersistConfig honours the watcher's mirror fence after reading, as the stores do.
+func (p *recordingConfigPersister) PersistConfig(ctx context.Context) error {
+	data, err := os.ReadFile(p.path)
+	if err != nil {
+		return err
+	}
+	if !config.MirrorFenceHolds(ctx, data) {
+		return nil
+	}
+	p.mirrored <- data
+	return nil
+}
+
+func (p *recordingConfigPersister) PersistAuthFiles(context.Context, string, ...string) error {
+	return nil
+}
+
+// A reload that loaded a plaintext management secret hashes it into the file and
+// schedules a reload of that write, which mirrors it; remote stores (and git
+// history) never receive the plaintext, and the mirror does not depend on a file
+// event for the write-back.
+func TestReloadConfigMirrorsManagementSecretOnlyOnceHashed(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	data, errMarshal := yaml.Marshal(&config.Config{
+		AuthDir:            authDir,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		RemoteManagement:   config.RemoteManagement{SecretKey: "plain-secret"},
+	})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	runConfigPersist = func(persist func()) { persist() }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	// Run the scheduled reload here, unless it already fired. Once it is stopped,
+	// any mirror so far came from the plaintext reload.
+	w.configReloadMu.Lock()
+	scheduled := w.configReloadTimer
+	stopped := scheduled != nil && scheduled.Stop()
+	w.configReloadTimer = nil
+	w.configReloadMu.Unlock()
+	if stopped {
+		select {
+		case mirrored := <-persister.mirrored:
+			t.Fatalf("mirrored the config loaded with a plaintext secret: %q", mirrored)
+		default:
+		}
+		w.reloadConfigIfChanged()
+	}
+	// The reload of the write-back mirrors the hashed config; without a scheduled
+	// reload nothing mirrors. The timer only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case mirrored := <-persister.mirrored:
+		if strings.Contains(string(mirrored), "plain-secret") || config.HasPlaintextSecretKey(mirrored) {
+			t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+		}
+	case <-hangGuard.C:
+		t.Fatal("the hashed write-back was never reloaded and mirrored")
+	}
+}
+
+// Hashing replaces only the effective secret key, so when the secret comes through a
+// YAML anchor or merge key the source keeps the plaintext after the write-back, and
+// the hashed key alone no longer shows it. The reload of the write-back must not
+// mirror that file; once the plaintext is gone, the next reload mirrors.
+func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	for name, references := range map[string]string{
+		"scalar anchor":      "password: &password " + secret + "\nremote-management:\n  secret-key: *password\n",
+		"merge key":          "defaults: &management\n  secret-key: " + secret + "\nmanagement:\n  <<: *management\n  allow-remote: true\n",
+		"mapping-key anchor": "&password " + secret + ": value\nremote-management:\n  secret-key: *password\n",
+		// The write-back drops the merge, leaving the shadowed source a plain setting.
+		"shadowed merge": "defaults: &d\n  secret-key: " + secret + "\nmanagement:\n  <<: *d\n  secret-key: active-other-secret\n",
+		// The write-back replaces the value but keeps its comment.
+		"line comment": "remote-management:\n  secret-key: " + secret + " # " + secret + "\n",
+		// It keeps comments anywhere else too.
+		"unrelated comment": "# rotated from " + secret + " last week\nproxy-url: '' # key=" + secret + "\nremote-management:\n  secret-key: " + secret + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			authDir := filepath.Join(tmpDir, "auth")
+			if err := os.MkdirAll(authDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(tmpDir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(references+"auth-dir: "+authDir+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			original := runConfigPersist
+			t.Cleanup(func() { runConfigPersist = original })
+			runConfigPersist = func(persist func()) { persist() }
+			persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+			w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+			t.Cleanup(w.stopConfigReloadTimer)
+
+			// The first reload hashes the effective key into the file; the second
+			// reloads that write-back.
+			w.reloadConfigIfChanged()
+			w.stopConfigReloadTimer()
+			w.reloadConfigIfChanged()
+			w.stopConfigReloadTimer()
+			saved, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if config.HasPlaintextSecretKey(saved) || !strings.Contains(string(saved), secret) {
+				t.Fatalf("want the key hashed and the plaintext left at its source, got %q", saved)
+			}
+			select {
+			case mirrored := <-persister.mirrored:
+				t.Fatalf("mirrored a plaintext secret kept by a reference: %q", mirrored)
+			default:
+			}
+
+			// Removing the plaintext lets the next reload mirror.
+			cleaned := strings.ReplaceAll(string(saved), secret, "unrelated-value")
+			if err := os.WriteFile(configPath, []byte(cleaned), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w.reloadConfigIfChanged()
+			select {
+			case mirrored := <-persister.mirrored:
+				if strings.Contains(string(mirrored), secret) {
+					t.Fatalf("mirrored a plaintext secret: %q", mirrored)
+				}
+			default:
+				t.Fatal("the config was not mirrored once the plaintext was gone")
+			}
+		})
+	}
+}
+
+// A mirror queued by an earlier reload reads the file only when it runs. If a later
+// reload has meanwhile hashed an aliased plaintext secret, the file's secret key is
+// hashed while the anchor still holds the plaintext; the queued mirror must not
+// publish it.
+func TestQueuedConfigMirrorSkipsFileRewrittenByPlaintextReload(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	var queued []func()
+	runConfigPersist = func(persist func()) { queued = append(queued, persist) }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	if len(queued) != 1 {
+		t.Fatalf("queued mirrors after the clean reload = %d, want 1", len(queued))
+	}
+	aliased := "password: &password " + secret + "\nremote-management:\n  secret-key: *password\nauth-dir: " + authDir + "\n"
+	if err := os.WriteFile(configPath, []byte(aliased), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	saved, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if config.HasPlaintextSecretKey(saved) || !strings.Contains(string(saved), secret) {
+		t.Fatalf("want the key hashed and the plaintext left at its anchor, got %q", saved)
+	}
+
+	queued[0]()
+	select {
+	case mirrored := <-persister.mirrored:
+		t.Fatalf("a mirror queued before the plaintext reload published %q", mirrored)
+	default:
+	}
+}
+
+// A mirror mirrors only the bytes its reload validated. A save landing before the
+// queued mirror runs (here an invalid document) is left to the reload of that
+// save, which rejects it, instead of being uploaded unvalidated.
+func TestQueuedConfigMirrorSkipsUnvalidatedSave(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	var queued []func()
+	runConfigPersist = func(persist func()) { queued = append(queued, persist) }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	if len(queued) != 1 {
+		t.Fatalf("queued mirrors after the reload = %d, want 1", len(queued))
+	}
+	if err := os.WriteFile(configPath, []byte("port: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	queued[0]()
+	select {
+	case mirrored := <-persister.mirrored:
+		t.Fatalf("mirrored bytes no reload validated: %q", mirrored)
+	default:
+	}
+
+	// Unchanged bytes still mirror.
+	if err := os.WriteFile(configPath, []byte("port: 8318\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.reloadConfigIfChanged()
+	if len(queued) != 2 {
+		t.Fatalf("queued mirrors after the second reload = %d, want 2", len(queued))
+	}
+	queued[1]()
+	select {
+	case mirrored := <-persister.mirrored:
+		if !strings.Contains(string(mirrored), "port: 8318") {
+			t.Fatalf("mirrored %q, want the validated config", mirrored)
+		}
+	default:
+		t.Fatal("the validated config was not mirrored")
+	}
+}
+
+// An explicit YAML null secret loads as an empty one, with no write-back, so the
+// reload must mirror the config like any other; refusing it would leave the remote
+// copy stale for good.
+func TestReloadConfigMirrorsExplicitNullSecret(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("management:\n  secret-key: null\nauth-dir: "+authDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := runConfigPersist
+	t.Cleanup(func() { runConfigPersist = original })
+	runConfigPersist = func(persist func()) { persist() }
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	select {
+	case <-persister.mirrored:
+	default:
+		t.Fatal("a config with an explicit null secret was not mirrored")
+	}
 }

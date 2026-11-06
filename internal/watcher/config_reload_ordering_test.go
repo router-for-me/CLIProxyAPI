@@ -146,17 +146,17 @@ func TestReloadConfigIfChangedReloadsAfterWriteBetweenHashAndLoad_Issue6631(t *t
 		t.Fatal(errWrite)
 	}
 
-	originalLoad := loadConfigFileFunc
-	t.Cleanup(func() { loadConfigFileFunc = originalLoad })
+	originalLoad := loadConfigDataFunc
+	t.Cleanup(func() { loadConfigDataFunc = originalLoad })
 	var errSave error
 	loads := 0
-	loadConfigFileFunc = func(path string) (*config.Config, error) {
+	loadConfigDataFunc = func(path string, data []byte) (*config.Config, error) {
 		loads++
 		if loads == 1 {
 			// A management save lands after the change check read version 1.
 			errSave = writeIssue6631Config(configPath, authDir, 2)
 		}
-		return originalLoad(path)
+		return originalLoad(path, data)
 	}
 
 	var applied []int
@@ -170,13 +170,16 @@ func TestReloadConfigIfChangedReloadsAfterWriteBetweenHashAndLoad_Issue6631(t *t
 	if errSave != nil {
 		t.Fatal(errSave)
 	}
-	// A later save restores the bytes of version 1, which were never applied.
+	// The reload applied the version 1 bytes it checked; version 2 must still
+	// look changed to the next trigger.
+	w.ReloadConfigIfChanged()
+	// A later save restores the bytes of version 1, which must not be skipped.
 	if errWrite := writeIssue6631Config(configPath, authDir, 1); errWrite != nil {
 		t.Fatal(errWrite)
 	}
 	w.ReloadConfigIfChanged()
 
-	if want := []int{2, 1}; !reflect.DeepEqual(applied, want) {
+	if want := []int{1, 2, 1}; !reflect.DeepEqual(applied, want) {
 		t.Fatalf("applied request-retry values = %v, want %v", applied, want)
 	}
 }

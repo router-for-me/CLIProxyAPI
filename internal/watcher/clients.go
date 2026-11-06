@@ -3,6 +3,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -582,17 +583,27 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) 
 	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, metaAPIKeyCount, openAICompatCount
 }
 
-func (w *Watcher) persistConfigAsync() {
+// runConfigPersist runs a config mirror off the caller's goroutine; tests replace it.
+var runConfigPersist = func(persist func()) { go persist() }
+
+// persistConfigAsync mirrors config.yaml to the store. With validated, the bytes a
+// reload loaded and checked, the store mirrors only if the file still holds them:
+// it rereads the file when the mirror runs, and a save landing in between is left
+// to the reload of that save. nil mirrors whatever the store reads.
+func (w *Watcher) persistConfigAsync(validated []byte) {
 	if w == nil || w.storePersister == nil {
 		return
 	}
-	go func() {
+	runConfigPersist(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if validated != nil {
+			ctx = config.WithMirrorFence(ctx, func(data []byte) bool { return bytes.Equal(data, validated) })
+		}
 		if err := w.storePersister.PersistConfig(ctx); err != nil {
 			log.Errorf("failed to persist config change: %v", err)
 		}
-	}()
+	})
 }
 
 func (w *Watcher) persistAuthAsync(message string, paths ...string) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gopkg.in/yaml.v3"
@@ -737,6 +738,198 @@ func TestV8SecretHashUsesNewPath(t *testing.T) {
 	saved, _ := os.ReadFile(path)
 	if !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) || strings.Contains(string(saved), "test-secret") || strings.Contains(string(saved), "remote-management") {
 		t.Fatal("secret was not hashed at the v8 path")
+	}
+}
+
+// A hot reload hashes a plaintext secret into the file it parsed, so remote store
+// mirrors of the file never carry the plaintext.
+func TestLoadConfigDataHashesSecretIntoUnchangedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigData(path, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		t.Fatal("parsed secret was not hashed in memory")
+	}
+	saved, _ := os.ReadFile(path)
+	if strings.Contains(string(saved), "plain-secret") || HasPlaintextSecretKey(saved) {
+		t.Fatalf("plaintext secret left in the file: %q", saved)
+	}
+}
+
+// A hot reload can parse bytes that a newer save has already replaced. Hashing the
+// older plaintext secret into the file would destroy a rotated secret, so the
+// write-back must only touch the file that was actually parsed.
+func TestLoadConfigDataSkipsSecretWriteBackWhenFileChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	older := []byte("management: {secret-key: old-secret}\n")
+	newer := []byte("management: {secret-key: rotated-secret}\n")
+	if err := os.WriteFile(path, newer, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigData(path, older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+		t.Fatal("parsed secret was not hashed in memory")
+	}
+	saved, _ := os.ReadFile(path)
+	if !bytes.Equal(saved, newer) {
+		t.Fatalf("newer config was rewritten from older bytes: %q", saved)
+	}
+}
+
+// The check and the write of a hot-reload write-back run under the lock every
+// config save takes, so a save cannot land between them.
+func TestLoadConfigDataWriteBackHoldsConfigWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := beforeConfigWriteBack
+	t.Cleanup(func() { beforeConfigWriteBack = original })
+	checked := false
+	beforeConfigWriteBack = func() {
+		checked = true
+		if configWriteMu.TryLock() {
+			configWriteMu.Unlock()
+			t.Error("write-back runs without the config write lock")
+		}
+	}
+	if _, err := LoadConfigData(path, content); err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Fatal("write-back never ran")
+	}
+}
+
+// A whole-file write (the management PUT) takes the same lock as the checked
+// write-back, so it cannot land between the write-back's check and its write.
+func TestWriteConfigFileHoldsConfigWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := beforeConfigFileWrite
+	t.Cleanup(func() { beforeConfigFileWrite = original })
+	wrote := false
+	beforeConfigFileWrite = func() {
+		wrote = true
+		if configWriteMu.TryLock() {
+			configWriteMu.Unlock()
+			t.Error("WriteConfigFile writes without the config write lock")
+		}
+	}
+	data := []byte("port: 9999\n")
+	if err := WriteConfigFile(path, data); err != nil {
+		t.Fatal(err)
+	}
+	if !wrote {
+		t.Fatal("WriteConfigFile never wrote")
+	}
+	if saved, _ := os.ReadFile(path); !bytes.Equal(saved, data) {
+		t.Fatalf("saved = %q, want %q", saved, data)
+	}
+}
+
+// A write-back that cannot write (a read-only mount) leaves the plaintext in the
+// file, so remote stores keep their previous copy; that must not be silent.
+func TestLoadConfigDataWarnsWhenSecretWriteBackFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte("management: {secret-key: plain-secret}\n")
+	if err := os.WriteFile(path, content, 0400); err != nil {
+		t.Fatal(err)
+	}
+	if f, errOpen := os.OpenFile(path, os.O_WRONLY, 0); errOpen == nil {
+		if errClose := f.Close(); errClose != nil {
+			t.Fatalf("close writability probe: %v", errClose)
+		}
+		t.Skip("file stays writable (running as root)")
+	}
+	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(previousHooks) })
+	hook := logtest.NewGlobal()
+	if _, err := LoadConfigData(path, content); err != nil {
+		t.Fatalf("LoadConfigData() error = %v, want the config loaded", err)
+	}
+	warned := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "failed to write the hashed management secret back") {
+			warned = true
+			if strings.Contains(entry.Message, "plain-secret") {
+				t.Fatalf("warning leaks the secret: %q", entry.Message)
+			}
+		}
+	}
+	if !warned {
+		t.Fatal("no warning for a failed secret write-back")
+	}
+}
+
+func TestHasPlaintextSecretKey(t *testing.T) {
+	hashed, err := hashSecret("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		data string
+		want bool
+	}{
+		{"management: {secret-key: plain-secret}\n", true},
+		{"remote-management: {secret-key: plain-secret}\n", true},
+		{"management: {secret-key: '" + hashed + "'}\n", false},
+		{"port: 8317\n", false},
+		// The loader reads the empty v8 secret; the legacy plaintext would still leave.
+		{"management: {secret-key: ''}\nremote-management: {secret-key: plain-secret}\n", true},
+		{"remote-management: &rm {secret-key: plain-secret}\nmanagement: *rm\n", true},
+		{"remote-management: &rm {secret-key: '" + hashed + "'}\nmanagement: *rm\n", false},
+		// Hashing the merged secret's expanded copy leaves the anchor in plaintext.
+		{"defaults: &d {secret-key: plain-secret}\nmanagement: {<<: *d}\n", true},
+		{"defaults: &d {secret-key: plain-secret}\nmanagement: {<<: *d, secret-key: '" + hashed + "'}\n", true},
+		{"management: {secret-key: {value: plain-secret}}\n", true},
+		{"management: [secret-key: plain-secret\n", false},
+		// An explicit YAML null loads as an empty secret; a quoted 'null' is a string.
+		{"management: {secret-key: null}\n", false},
+		{"remote-management: {secret-key: ~}\n", false},
+		{"management: {secret-key: 'null'}\n", true},
+		// A key name given through an alias is the key the loader decodes.
+		{"key: &k secret-key\nmanagement:\n  *k : plain-secret\n", true},
+		{"key: &k secret-key\nremote-management:\n  *k : plain-secret\n", true},
+		{"key: &k secret-key\nmanagement:\n  *k : '" + hashed + "'\n", false},
+		// A tagged key name is matched as the loader decodes it.
+		{"remote-management: {!!binary c2VjcmV0LWtleQ==: plain-secret}\n", true},
+		{"!!binary bWFuYWdlbWVudA==: {secret-key: plain-secret}\n", true},
+		{"management: {!!str secret-key: plain-secret}\n", true},
+		{"remote-management: {!!binary c2VjcmV0LWtleQ==: '" + hashed + "'}\n", false},
+		// A tagged value is classified as it decodes: a !!binary bcrypt hash is hashed.
+		{"management: {secret-key: !!binary " + base64.StdEncoding.EncodeToString([]byte(hashed)) + "}\n", false},
+		{"management: {secret-key: !!binary cGxhaW4tc2VjcmV0}\n", true},
+	} {
+		if got := HasPlaintextSecretKey([]byte(tc.data)); got != tc.want {
+			t.Errorf("HasPlaintextSecretKey(%q) = %v, want %v", tc.data, got, tc.want)
+		}
+	}
+}
+
+func TestLoadConfigDataRecordsTheParsedBytesSourceHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("request-retry: 5\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A hot reload may parse bytes a newer save already replaced; management
+	// handlers compare SourceHash with the file to notice that.
+	parsed := []byte("request-retry: 3\n")
+	cfg, err := LoadConfigData(path, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SourceHash != ComputeSourceHash(parsed) {
+		t.Fatalf("SourceHash = %q, want the hash of the parsed bytes", cfg.SourceHash)
 	}
 }
 

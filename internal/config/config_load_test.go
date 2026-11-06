@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -264,6 +265,13 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 		// still holds the plaintext.
 		"anchored legacy beside plaintext v8": anchoredLegacy + "current-plaintext-secret\n",
 		"anchored legacy beside hashed v8":    anchoredLegacy + "'" + uploadTestBcrypt(t) + "'\n",
+		// The hashed write-back keeps the secret entry's comments, so one repeating the
+		// plaintext still holds it.
+		"line comment":        "management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
+		"key comment":         "management:\n  # " + uploadTestPlaintextSecret + "\n  secret-key: " + uploadTestPlaintextSecret + "\n",
+		"legacy line comment": "remote-management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
+		// A tagged scalar holds the plaintext it decodes to.
+		"binary copy": "password: !!binary dXBsb2FkLXBsYWludGV4dC1zZWNyZXQ=\nmanagement:\n  secret-key: " + uploadTestPlaintextSecret + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := writeUploadTestConfig(t, content)
@@ -278,5 +286,124 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 				t.Fatalf("refused config rewritten to %q, want it untouched", saved)
 			}
 		})
+	}
+}
+
+// Only the secret entry's own comments are checked: a short secret that appears in an
+// unrelated comment does not block seeding, and a !!binary bcrypt hash needs no rewrite.
+func TestPrepareConfigFileForUploadAcceptsUnrelatedCommentsAndTaggedHash(t *testing.T) {
+	hashed := uploadTestBcrypt(t)
+	t.Run("short secret in an unrelated comment", func(t *testing.T) {
+		path := writeUploadTestConfig(t, "# password-env: STORE_PASSWORD\nproxy-url: '' # no password here\nmanagement:\n  secret-key: password\n")
+		if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
+			t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+		}
+		saved := readUploadTestConfig(t, path)
+		secret, _ := uploadTestSecret(t, saved, "management")
+		if errCompare := bcrypt.CompareHashAndPassword([]byte(secret), []byte("password")); errCompare != nil {
+			t.Fatalf("management.secret-key %q is not the bcrypt hash of the secret:\n%s", secret, saved)
+		}
+	})
+	t.Run("binary bcrypt hash", func(t *testing.T) {
+		content := "management:\n  secret-key: !!binary " + base64.StdEncoding.EncodeToString([]byte(hashed)) + "\n"
+		path := writeUploadTestConfig(t, content)
+		if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
+			t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+		}
+		if saved := readUploadTestConfig(t, path); saved != content {
+			t.Fatalf("hashed config rewritten to %q, want it untouched", saved)
+		}
+	})
+}
+
+// The plaintext a hashed write-back leaves at an anchor is found by value once the
+// secret key no longer refers to it.
+func TestHoldsAnyScalarValueFindsPlaintextLeftByWriteBack(t *testing.T) {
+	const secret = "plain-anchored-secret"
+	before := []byte("password: &password " + secret + "\nmanagement:\n  secret-key: *password\n")
+	secrets := PlaintextManagementSecrets(before)
+	if len(secrets) == 0 || secrets[0] != secret {
+		t.Fatalf("PlaintextManagementSecrets() = %q, want %q first", secrets, secret)
+	}
+	after := []byte("password: " + secret + "\nmanagement:\n  secret-key: '" + uploadTestBcrypt(t) + "'\n")
+	if HasPlaintextSecretKey(after) {
+		t.Fatal("HasPlaintextSecretKey() = true for a hashed key")
+	}
+	if !HoldsAnyScalarValue(after, secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left at the anchor")
+	}
+	if HoldsAnyScalarValue([]byte("password: other\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() = true without the plaintext")
+	}
+	if !HoldsAnyScalarValue([]byte("&password "+secret+": value\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as an anchored mapping key")
+	}
+	// A tagged scalar counts as the value it decodes to.
+	if !HoldsAnyScalarValue([]byte("password: !!binary cGxhaW4tYW5jaG9yZWQtc2VjcmV0\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as a !!binary scalar")
+	}
+	if !HoldsAnyScalarValue([]byte("!!binary cGxhaW4tYW5jaG9yZWQtc2VjcmV0: value\nmanagement:\n  secret-key: x\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() missed the plaintext left as a !!binary mapping key")
+	}
+	if !HoldsAnyScalarValue([]byte("a: [unclosed\n"), secrets) {
+		t.Fatal("HoldsAnyScalarValue() = false for YAML that does not parse")
+	}
+	if HoldsAnyScalarValue([]byte("a: [unclosed\n"), nil) {
+		t.Fatal("HoldsAnyScalarValue() = true with no values to look for")
+	}
+}
+
+// A merged secret a direct key shadows is recorded too: hashing replaces only the
+// effective key, and the rewrite can leave the shadowed source as a plain setting.
+func TestPlaintextManagementSecretsRecordsShadowedMergeValue(t *testing.T) {
+	data := []byte("defaults: &d\n  secret-key: shadow-secret\nmanagement:\n  <<: *d\n  secret-key: active-secret\n")
+	secrets := PlaintextManagementSecrets(data)
+	for _, want := range []string{"active-secret", "shadow-secret"} {
+		found := false
+		for _, secret := range secrets {
+			found = found || secret == want
+		}
+		if !found {
+			t.Errorf("PlaintextManagementSecrets() = %q, missing %q", secrets, want)
+		}
+	}
+}
+
+// The hashed write-back keeps a value's comments, so a comment repeating the
+// plaintext still holds it.
+func TestHoldsAnyScalarValueFindsPlaintextInComments(t *testing.T) {
+	secrets := []string{"plain-secret"}
+	for _, data := range []string{
+		"management:\n  secret-key: '$2a$10$hash' # plain-secret\n",
+		"management:\n  # was plain-secret\n  secret-key: x\n",
+		"management:\n  secret-key: x\n# plain-secret\n",
+	} {
+		if !HoldsAnyScalarValue([]byte(data), secrets) {
+			t.Errorf("HoldsAnyScalarValue(%q) = false, want the comment's plaintext found", data)
+		}
+	}
+	if HoldsAnyScalarValue([]byte("management:\n  secret-key: x # other\n"), secrets) {
+		t.Error("HoldsAnyScalarValue() = true for an unrelated comment")
+	}
+	// Any comment that holds the plaintext as a word holds it, wherever it sits:
+	// the write-back keeps them all.
+	const hashedSecret = "management:\n  secret-key: '$2a$10$hash'\n"
+	for _, data := range []string{
+		"# hunter2x note\nproxy-url: ''\n" + hashedSecret,
+		"proxy-url: '' # key=hunter2x\n" + hashedSecret,
+		"# Management settings\nmanagement: # (hunter2x)\n  secret-key: '$2a$10$hash'\n",
+		"management: {secret-key: '$2a$10$hash'} # hunter2x\n",
+	} {
+		if !HoldsAnyScalarValue([]byte(data), []string{"hunter2x"}) {
+			t.Errorf("HoldsAnyScalarValue(%q) = false, want the comment's plaintext found", data)
+		}
+	}
+	// A short secret inside ordinary words is not the secret: matching it would hold
+	// every later mirror back.
+	if data := "# Management API settings\nproxy-url: '' # mirrored data\n" + hashedSecret; HoldsAnyScalarValue([]byte(data), []string{"a"}) {
+		t.Errorf("HoldsAnyScalarValue(%q) = true for a short secret inside unrelated words", data)
+	}
+	if HoldsAnyScalarValue([]byte("# hunter2xyz and xhunter2x\n"+hashedSecret), []string{"hunter2x"}) {
+		t.Error("HoldsAnyScalarValue() = true for the plaintext as part of a longer word")
 	}
 }
