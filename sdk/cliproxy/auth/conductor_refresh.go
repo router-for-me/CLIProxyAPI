@@ -1346,6 +1346,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.RegistrationEpoch == auth.RegistrationEpoch &&
 			current.CredentialVersion == auth.CredentialVersion &&
 			authHasUnchangedRejectedRefreshToken(current) {
+			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			current.Generation++
 			current.UpdatedAt = checkNow
 			current.Unavailable = true
@@ -1366,7 +1367,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			if current.RefreshError != nil && strings.TrimSpace(current.RefreshError.Message) != "" {
 				msg = current.RefreshError.Message
 			}
-			current.LastError = &Error{Code: "unauthorized", Message: msg, HTTPStatus: http.StatusUnauthorized}
+			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
+			if current.LastError.Code == "refresh_outcome_unknown" {
+				current.StatusMessage = current.LastError.Message
+			}
 			m.auths[id] = current
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
@@ -1551,8 +1555,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.NextRefreshAfter = time.Time{}
 					current.NextRetryAfter = time.Time{}
 					current.RefreshFailures = 0
-					current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
-					if unauthorized {
+					current.LastError = refreshAccessError(current, sanitizedRefreshErr.Message, accessTokenRejected, wasTerminalUnauthorized)
+					if current.LastError.Code == "refresh_outcome_unknown" {
+						current.StatusMessage = current.LastError.Message
+					} else if unauthorized {
 						current.StatusMessage = "unauthorized"
 					} else {
 						current.StatusMessage = "unauthorized (refresh token invalid)"
@@ -1658,7 +1664,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			updated.StatusMessage = "unauthorized (refresh token invalid)"
 		}
 		if updated.LastError == nil && updated.RefreshError != nil {
-			updated.LastError = &Error{Code: "unauthorized", Message: updated.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+			updated.LastError = refreshAccessError(updated, updated.RefreshError.Message, failedAccessToken != "" && authMatchesTokenPartition(updated, failedAccessToken), hasUnauthorizedAuthFailure(base))
+			if updated.LastError.Code == "refresh_outcome_unknown" {
+				updated.StatusMessage = updated.LastError.Message
+			}
 		}
 	}
 	updated.UpdatedAt = now
