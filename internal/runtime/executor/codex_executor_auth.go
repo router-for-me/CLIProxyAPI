@@ -517,7 +517,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		auth.Metadata = mergedDisk
 	}
 	if siwcRefreshed {
-		log.Info("SIWC token renewal completed")
+		log.Debug("SIWC token renewal completed")
 	}
 	return auth, nil
 }

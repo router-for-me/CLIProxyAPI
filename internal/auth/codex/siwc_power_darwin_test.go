@@ -39,8 +39,14 @@ func TestSIWCRefreshDefersDuringMaintenanceWakeThenRenews(t *testing.T) {
 			})}}
 			auth.SetRefreshJournal(&memoryRefreshJournal{})
 			token, errRefresh := auth.RefreshSIWCTokensWithRetry(context.Background(), "sleep-refresh", "oaiapp_sleep", "", 3)
-			if token != nil || !errors.Is(errRefresh, context.Canceled) || calls != 0 || checks != 1 {
-				t.Fatalf("maintenance wake: token returned = %t, error = %v, requests = %d, checks = %d; want cancellation without token requests or retries", token != nil, errRefresh, calls, checks)
+			if token != nil || errRefresh == nil || calls != 0 || checks != 1 {
+				t.Fatalf("maintenance wake: token returned = %t, error = %v, requests = %d, checks = %d; want deferral without token requests or retries", token != nil, errRefresh, calls, checks)
+			}
+			if errors.Is(errRefresh, context.Canceled) {
+				t.Fatalf("maintenance wake: refresh returned context.Canceled; want a dedicated deferral error: %v", errRefresh)
+			}
+			if strings.TrimSpace(state) == "Graphics Network" && !strings.Contains(errRefresh.Error(), "unexpected pmset output") {
+				t.Fatalf("maintenance wake: error = %v; want parse diagnostics for unexpected pmset output", errRefresh)
 			}
 			var partition *SIWCRefreshError
 			if !errors.As(errRefresh, &partition) {

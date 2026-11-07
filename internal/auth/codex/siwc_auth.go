@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -184,8 +185,35 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	if (requireIDToken || scope.Exists()) && (scope.Type != ojson.String || strings.TrimSpace(scope.Str) == "") {
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid scope")
 	}
-	expiresIn, errExpiry := strconv.ParseInt(tokenResp.Get("expires_in").Raw, 10, 64)
-	if errExpiry != nil || expiresIn <= 0 {
+	expiresInResult := tokenResp.Get("expires_in")
+	maxExpiresInSeconds := int64(^uint64(0)>>1) / int64(time.Second)
+	var expiresIn int64
+	switch expiresInResult.Type {
+	case ojson.Number:
+		f, errParse := strconv.ParseFloat(expiresInResult.Raw, 64)
+		if errParse != nil || f <= 0 || math.IsInf(f, 0) || math.IsNaN(f) || f != math.Trunc(f) || f > float64(maxExpiresInSeconds) {
+			return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
+		}
+		expiresIn = int64(f)
+	case ojson.String:
+		raw := strings.TrimSpace(expiresInResult.Str)
+		if raw == "" {
+			return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
+		}
+		i, errParse := strconv.ParseInt(raw, 10, 64)
+		if errParse == nil {
+			if i <= 0 || i > maxExpiresInSeconds {
+				return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
+			}
+			expiresIn = i
+			break
+		}
+		f, errParse := strconv.ParseFloat(raw, 64)
+		if errParse != nil || f <= 0 || math.IsInf(f, 0) || math.IsNaN(f) || f != math.Trunc(f) || f > float64(maxExpiresInSeconds) {
+			return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
+		}
+		expiresIn = int64(f)
+	default:
 		return nil, fmt.Errorf("OpenAI OAuth token response has invalid expires_in")
 	}
 
@@ -339,7 +367,7 @@ func (o *CodexAuth) RefreshSIWCTokensWithRetry(ctx context.Context, refreshToken
 		if errRefresh == nil {
 			return tokenData, nil
 		}
-		if errors.Is(errRefresh, context.Canceled) {
+		if errors.Is(errRefresh, context.Canceled) || errors.Is(errRefresh, ErrSIWCRefreshDeferred) {
 			return nil, errRefresh
 		}
 		if isNonRetryableRefreshErr(errRefresh) {

@@ -17,7 +17,7 @@ func TestSIWCWakeCancellationPreservesOuterRefreshFailure(t *testing.T) {
 			if terminalOuter {
 				outerErr = errors.New(`token refresh failed with status 401: {"error":{"code":"refresh_token_reused"}}`)
 			}
-			deferred := codex.WrapSIWCRefreshError(fmt.Errorf("SIWC renewal deferred until interactive macOS wake: %w", context.Canceled))
+			deferred := codex.WrapSIWCRefreshError(fmt.Errorf("SIWC renewal deferred until interactive macOS wake: %w", codex.ErrSIWCRefreshDeferred))
 			executor := &issue6819OuterOnlyRefreshExecutor{id: "codex", refreshErr: codex.NewPartitionRefreshError(outerErr, deferred)}
 			manager := NewManager(nil, nil, nil)
 			manager.RegisterExecutor(executor)

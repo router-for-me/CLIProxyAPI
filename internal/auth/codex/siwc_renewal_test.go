@@ -51,6 +51,42 @@ func TestSIWCTokenResponseValidatesScope(t *testing.T) {
 	}
 }
 
+func TestSIWCTokenResponseValidatesExpiresIn(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		expiresInRaw string
+		wantError    bool
+	}{
+		{name: "accept float json number", expiresInRaw: "3600.0"},
+		{name: "accept scientific notation", expiresInRaw: "3.6e3"},
+		{name: "reject fractional value", expiresInRaw: "3600.5", wantError: true},
+		{name: "reject oversized seconds", expiresInRaw: "1e20", wantError: true},
+		{name: "reject infinity string", expiresInRaw: `"Inf"`, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"access_token":"access","refresh_token":"refresh","expires_in":3600}`)
+			if errSet := doc.SetRaw("expires_in", tc.expiresInRaw); errSet != nil {
+				t.Fatal(errSet)
+			}
+			body := doc.String()
+			auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}}
+			auth.SetRefreshJournal(&memoryRefreshJournal{})
+			token, errRefresh := auth.RefreshSIWCTokens(context.Background(), "refresh", "oaiapp_expires_in", "")
+			if tc.wantError {
+				if errRefresh == nil || token != nil {
+					t.Fatalf("error = %v, token returned = %t; want error", errRefresh, token != nil)
+				}
+				return
+			}
+			if errRefresh != nil || token == nil {
+				t.Fatalf("error = %v, token returned = %t; want success", errRefresh, token != nil)
+			}
+		})
+	}
+}
+
 func TestSIWCRefreshReceiptPreservesServerWindow(t *testing.T) {
 	for _, window := range []string{`"2026-11-07T13:07:09Z"`, `1794056829`, `null`} {
 		t.Run(window, func(t *testing.T) {

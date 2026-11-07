@@ -22,15 +22,26 @@ func siwcRefreshReadiness(ctx context.Context) error {
 	if errState != nil {
 		return fmt.Errorf("SIWC renewal deferred: macOS power state unavailable: %w", errState)
 	}
+	foundCapabilities := false
+	var fields []string
 	for _, line := range strings.Split(string(state), "\n") {
 		capabilities, ok := strings.CutPrefix(strings.TrimSpace(line), "Current System Capabilities are:")
 		if !ok {
 			continue
 		}
-		fields := strings.Fields(capabilities)
+		foundCapabilities = true
+		fields = strings.Fields(capabilities)
 		if slices.Contains(fields, "Graphics") && slices.Contains(fields, "Network") {
 			return nil
 		}
 	}
-	return fmt.Errorf("SIWC renewal deferred until interactive macOS wake: %w", context.Canceled)
+	if !foundCapabilities {
+		raw := strings.TrimSpace(string(state))
+		raw = strings.Join(strings.Fields(strings.ReplaceAll(raw, "\n", " ")), " ")
+		if len(raw) > 200 {
+			raw = raw[:200] + "..."
+		}
+		return fmt.Errorf("SIWC renewal deferred: unexpected pmset output: %q: %w", raw, ErrSIWCRefreshDeferred)
+	}
+	return fmt.Errorf("SIWC renewal deferred until interactive macOS wake: missing Graphics/Network (%v): %w", fields, ErrSIWCRefreshDeferred)
 }
