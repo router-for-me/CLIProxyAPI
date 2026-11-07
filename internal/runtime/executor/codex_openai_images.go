@@ -480,6 +480,46 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		return nil, err
 	}
 
+	// The native images endpoints may ignore stream=true and answer with one JSON
+	// document (images/edits does). Re-emit it as the SSE events the client asked for.
+	if codexIsJSONContentType(httpResp.Header.Get("Content-Type")) {
+		data, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			return nil, errRead
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		root, items, errItems := codexParseDirectImageJSON(data)
+		if errItems != nil {
+			err = errItems
+			return nil, err
+		}
+		reporter.Publish(ctx, helps.ParseOpenAIImageUsage(body, data, contentType))
+		reporter.EnsurePublished(ctx)
+		headers := httpResp.Header.Clone()
+		headers.Set("Content-Type", "text/event-stream")
+		headers.Del("Content-Length")
+		eventName := codexDirectImageStreamPrefix(endpointPath) + ".completed"
+		// Build each frame only when it is sent, so a multi-image body is not
+		// copied into a full set of frames up front.
+		out := make(chan cliproxyexecutor.StreamChunk)
+		go func() {
+			defer close(out)
+			for i, item := range items {
+				frame := codexBuildDirectImageJSONFrame(root, item, eventName, i == len(items)-1)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: frame}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+	}
+
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -1214,6 +1254,69 @@ func codexBuildSSEFrame(eventName string, data []byte) []byte {
 	buf.Write(data)
 	buf.WriteString("\n\n")
 	return buf.Bytes()
+}
+
+func codexIsJSONContentType(contentType string) bool {
+	mediaType, _, errParse := mime.ParseMediaType(strings.TrimSpace(contentType))
+	return errParse == nil && strings.EqualFold(mediaType, "application/json")
+}
+
+func codexDirectImageStreamPrefix(endpointPath string) string {
+	if endpointPath == codexDirectImagesEdit {
+		return "image_edit"
+	}
+	return "image_generation"
+}
+
+// codexParseDirectImageJSON validates a non-streamed Images API response and
+// returns the data[] items that carry image output. The result references body,
+// which must not be mutated afterwards.
+func codexParseDirectImageJSON(body []byte) (ojson.Result, []ojson.Result, error) {
+	if !ojson.ValidBytes(body) {
+		return ojson.Result{}, nil, statusErr{code: http.StatusBadGateway, msg: "upstream returned invalid image JSON"}
+	}
+	root := util.ParseGJSONBytesNoCopy(body)
+	var items []ojson.Result
+	for _, item := range root.Get("data").Array() {
+		if strings.TrimSpace(item.Get("b64_json").String()) != "" || strings.TrimSpace(item.Get("url").String()) != "" {
+			items = append(items, item)
+		}
+	}
+	if len(items) == 0 {
+		msg := "upstream did not return image output"
+		if upstreamMsg := strings.TrimSpace(root.Get("error.message").String()); upstreamMsg != "" {
+			msg += ": " + upstreamMsg
+		}
+		return ojson.Result{}, nil, statusErr{code: http.StatusBadGateway, msg: msg}
+	}
+	return root, items, nil
+}
+
+// codexBuildDirectImageJSONFrame builds one "<prefix>.completed" SSE frame for an
+// image item. Usage covers the whole request, so only the last frame carries it.
+func codexBuildDirectImageJSONFrame(root, item ojson.Result, eventName string, last bool) []byte {
+	dataDoc := ojson.NewDoc([]byte(`{"type":""}`))
+	_ = dataDoc.Set("type", eventName)
+	if b64 := strings.TrimSpace(item.Get("b64_json").String()); b64 != "" {
+		_ = dataDoc.Set("b64_json", b64)
+	} else {
+		_ = dataDoc.Set("url", strings.TrimSpace(item.Get("url").String()))
+	}
+	if revised := item.Get("revised_prompt").String(); revised != "" {
+		_ = dataDoc.Set("revised_prompt", revised)
+	}
+	if created := root.Get("created"); created.Exists() {
+		_ = dataDoc.Set("created_at", created.Int())
+	}
+	for _, field := range []string{"size", "quality", "background", "output_format"} {
+		if value := root.Get(field).String(); value != "" {
+			_ = dataDoc.Set(field, value)
+		}
+	}
+	if usage := root.Get("usage"); last && usage.IsObject() {
+		_ = dataDoc.SetRaw("usage", usage.Raw)
+	}
+	return codexBuildSSEFrame(eventName, dataDoc.Bytes())
 }
 
 func codexMimeTypeFromOutputFormat(outputFormat string) string {
