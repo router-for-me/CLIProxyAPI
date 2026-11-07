@@ -62,10 +62,14 @@ export function resolveUsageModel(
 ): string | null {
   const normalized = normalizeAutocompleteText(text);
   if (!normalized) return '';
-  return (
-    models.find((model) => normalizeAutocompleteText(model) === normalized) ??
-    (appliedModel && normalizeAutocompleteText(appliedModel) === normalized ? appliedModel : null)
-  );
+  const candidate = models.find((model) => normalizeAutocompleteText(model) === normalized);
+  if (candidate) return candidate;
+  if (appliedModel && normalizeAutocompleteText(appliedModel) === normalized) return appliedModel;
+  // Serving-pinned IDs (channel/model) bypass the trimmed candidate list so a
+  // rare model outside the top candidates still applies; bare-model text only
+  // resolves through candidates to preserve the no-fuzzy rule.
+  if (normalized.includes('/')) return normalized;
+  return null;
 }
 
 export function resolveUsageKey(text: string, options: UsageKeyOption[]): UsageKeyOption | null {

@@ -48,6 +48,13 @@ describe('usage filters and autocomplete resolution', () => {
     expect(resolveUsageModel('deepseek-flash', models)).toBe(models[0]);
   });
 
+  test('serving-pinned model IDs bypass a trimmed candidate list', () => {
+    // Huge catalogs only ship the top candidates; a rare channel/model ID must
+    // still apply directly instead of collapsing to null.
+    expect(resolveUsageModel('573-bigprov/model-00001', models)).toBe('573-bigprov/model-00001');
+    expect(resolveUsageModel('573-bigprov/model-99999', [])).toBe('573-bigprov/model-99999');
+  });
+
   test('clearing removes the filter and saved model selections survive empty candidates', () => {
     expect(resolveUsageKey('', keys)).toEqual({ label: '' });
     expect(resolveUsageModel('', models, models[1])).toBe('');

@@ -660,6 +660,7 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 		rankLabel := map[string]map[string]string{"model": {}, "consumer": {}, "credential": {}}
 		traces := map[string]bool{}
 		models := map[string]bool{}
+		modelCalls := map[string]int64{}
 		providers := map[string]bool{}
 		endpoints := map[string]bool{}
 		statuses := map[int]bool{}
@@ -744,7 +745,7 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 		for rows.Next() {
 			var day string
 			var hour int64
-			var consumer, owner, channelID, credentialID, keyID, channel, model, trace string
+			var consumer, owner, channelID, credentialID, _keyID, channel, model, trace string
 			var failed, superseded, known bool
 			var input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft int64
 			var provider string
@@ -752,7 +753,7 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 			var stream bool
 			var endpoint, effort string
 			var balanced bool
-			if errScan := rows.Scan(&day, &hour, &consumer, &owner, &channelID, &credentialID, &keyID, &channel, &model, &trace,
+			if errScan := rows.Scan(&day, &hour, &consumer, &owner, &channelID, &credentialID, &_keyID, &channel, &model, &trace,
 				&failed, &superseded, &known, &input, &output, &reasoning, &cacheRead, &cacheCreate, &total, &latency, &ttft,
 				&provider, &status, &stream, &endpoint, &effort, &balanced); errScan != nil {
 				return nil, 0, errScan
@@ -765,15 +766,8 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 			if statsMatch && !superseded {
 				t := &result.Total
 				t.Executions++
-				tr := trace
-				if tr == "" {
-					tr = keyID
-				}
-				if tr == "" {
-					tr = model
-				}
-				if !traces[tr] {
-					traces[tr] = true
+				if !traces[trace] {
+					traces[trace] = true
 					t.Calls++
 				}
 				if failed {
@@ -809,8 +803,11 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 			}
 			if attrsOK && model != "" {
 				models[model] = true
+				modelCalls[model]++
 				if channel != "" && !strings.HasPrefix(model, channel+"/") {
-					models[channel+"/"+model] = true
+					serving := channel + "/" + model
+					models[serving] = true
+					modelCalls[serving]++
 				}
 			}
 			if v := providerBase(provider); v != "" && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "provider") {
@@ -860,7 +857,19 @@ func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOvervi
 		for m := range models {
 			result.Models = append(result.Models, m)
 		}
-		sort.Strings(result.Models)
+		// Huge upstream catalogs (10k+ model IDs) must not become a response
+		// payload or an unbounded dropdown; the overview keeps the most-used
+		// IDs, and a rare ID still resolves via the list's substring match.
+		const overviewModelLimit = 512
+		sort.Slice(result.Models, func(i, k int) bool {
+			if modelCalls[result.Models[i]] != modelCalls[result.Models[k]] {
+				return modelCalls[result.Models[i]] > modelCalls[result.Models[k]]
+			}
+			return result.Models[i] < result.Models[k]
+		})
+		if len(result.Models) > overviewModelLimit {
+			result.Models = result.Models[:overviewModelLimit]
+		}
 		for v := range providers {
 			result.Facets.Providers = append(result.Facets.Providers, v)
 		}
