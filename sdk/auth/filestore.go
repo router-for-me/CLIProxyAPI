@@ -134,16 +134,25 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 				return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 			}
 			if existing, errRead := os.ReadFile(path); errRead == nil {
-				if jsonEqual(existing, raw) {
-					break
-				}
-				file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+				// Restrict the opened inode before truncating it, even when the
+				// metadata is unchanged. OpenFile's mode only applies at creation.
+				file, errOpen := os.OpenFile(path, os.O_WRONLY, 0o600)
 				if errOpen != nil {
 					return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
 				}
-				if _, errWrite := file.Write(raw); errWrite != nil {
+				if errChmod := file.Chmod(0o600); errChmod != nil {
 					_ = file.Close()
-					return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
+					return "", fmt.Errorf("auth filestore: restrict existing permissions failed: %w", errChmod)
+				}
+				if !jsonEqual(existing, raw) {
+					if errTruncate := file.Truncate(0); errTruncate != nil {
+						_ = file.Close()
+						return "", fmt.Errorf("auth filestore: truncate existing failed: %w", errTruncate)
+					}
+					if _, errWrite := file.Write(raw); errWrite != nil {
+						_ = file.Close()
+						return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
+					}
 				}
 				if errClose := file.Close(); errClose != nil {
 					return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
