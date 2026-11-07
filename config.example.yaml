@@ -143,6 +143,7 @@ access:
   #     opus-model: "gemini-4-argon-high"
   #     sonnet-model: "gemini-3.8-flash-high"
   #     haiku-model: "gemini-3-flash"
+  #     fallback-model: "claude-sonnet-5-5-high" # optional same-provider fallback when primary model quota is exhausted
 
 # Optional credential concurrency and observation contracts.
 

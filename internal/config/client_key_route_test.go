@@ -16,12 +16,13 @@ func TestAPIKeyRoutesV8RoundTrip(t *testing.T) {
       opus-model: gemini-4-argon-high
       sonnet-model: gemini-3.8-flash-high
       haiku-model: gemini-3-flash
+      fallback-model: claude-sonnet-5-5-high
 `
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(source), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.APIKeys) != 2 || len(cfg.APIKeyRoutes) != 1 || cfg.APIKeyRoutes[0].APIKey != "google-key" || cfg.APIKeyRoutes[0].OpusModel != "gemini-4-argon-high" || cfg.APIKeyRoutes[0].SonnetModel != "gemini-3.8-flash-high" || cfg.APIKeyRoutes[0].HaikuModel != "gemini-3-flash" {
+	if len(cfg.APIKeys) != 2 || len(cfg.APIKeyRoutes) != 1 || cfg.APIKeyRoutes[0].APIKey != "google-key" || cfg.APIKeyRoutes[0].OpusModel != "gemini-4-argon-high" || cfg.APIKeyRoutes[0].SonnetModel != "gemini-3.8-flash-high" || cfg.APIKeyRoutes[0].HaikuModel != "gemini-3-flash" || cfg.APIKeyRoutes[0].FallbackModel != "claude-sonnet-5-5-high" {
 		t.Fatalf("access policy did not load: %+v", cfg.APIKeyRoutes)
 	}
 	clone := cfg.CloneForRuntime()

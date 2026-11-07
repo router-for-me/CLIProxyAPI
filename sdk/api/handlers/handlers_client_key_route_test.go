@@ -184,3 +184,60 @@ func TestClientKeyRouteInvalidPolicyFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestClientKeyRouteFallbackModelOnQuotaExhaustion(t *testing.T) {
+	for _, path := range []string{"messages", "stream"} {
+		t.Run(path, func(t *testing.T) {
+			var attemptedModels []string
+			executor := &interceptorCaptureExecutor{
+				provider: "antigravity",
+				execute: func(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+					attemptedModels = append(attemptedModels, req.Model)
+					if req.Model == "gemini-3.8-flash-high" {
+						return coreexecutor.Response{}, &coreauth.Error{Code: "quota", Message: "Individual quota reached", HTTPStatus: http.StatusTooManyRequests}
+					}
+					return coreexecutor.Response{Payload: []byte(`{"id":"msg_fb","type":"message"}`)}, nil
+				},
+				stream: func(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+					attemptedModels = append(attemptedModels, req.Model)
+					if req.Model == "gemini-3.8-flash-high" {
+						return nil, &coreauth.Error{Code: "quota", Message: "Individual quota reached", HTTPStatus: http.StatusTooManyRequests}
+					}
+					chunks := make(chan coreexecutor.StreamChunk, 1)
+					chunks <- coreexecutor.StreamChunk{Payload: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")}
+					close(chunks)
+					return &coreexecutor.StreamResult{Chunks: chunks}, nil
+				},
+			}
+			cfg := clientKeyRouteConfig()
+			cfg.APIKeyRoutes[0].FallbackModel = "claude-sonnet-5-5-high"
+			h := newInterceptorHandler(t, "gemini-3.8-flash-high", executor, cfg)
+			h.AuthManager.SetRetryConfig(0, 0, 0)
+			registry.GetGlobalRegistry().RegisterClient("handler-interceptor-gemini-3.8-flash-high", "antigravity", []*registry.ModelInfo{
+				{ID: "gemini-3.8-flash-high"},
+				{ID: "claude-sonnet-5-5-high"},
+			})
+			ctx := coreusage.WithAPIKey(context.Background(), "google-key")
+			payload := []byte(`{"model":"claude-sonnet-5-5","messages":[]}`)
+			switch path {
+			case "messages":
+				_, _, errMsg := h.ExecuteWithAuthManager(ctx, "claude", "claude-sonnet-5-5", payload, "")
+				if errMsg != nil {
+					t.Fatalf("unexpected error: %v", errMsg)
+				}
+			case "stream":
+				data, _, errs := h.ExecuteStreamWithAuthManager(ctx, "claude", "claude-sonnet-5-5", payload, "")
+				for range data {
+				}
+				for errMsg := range errs {
+					if errMsg != nil {
+						t.Fatalf("unexpected stream error: %v", errMsg)
+					}
+				}
+			}
+			if len(attemptedModels) != 2 || attemptedModels[0] != "gemini-3.8-flash-high" || attemptedModels[1] != "claude-sonnet-5-5-high" {
+				t.Fatalf("attemptedModels = %v, want [gemini-3.8-flash-high claude-sonnet-5-5-high]", attemptedModels)
+			}
+		})
+	}
+}

@@ -120,13 +120,14 @@ type SDKConfig struct {
 // requests when OpusModel, SonnetModel, or HaikuModel is set.
 // Provider is a strict single-provider selection, not a fallback preference.
 type APIKeyRoute struct {
-	Name        string `yaml:"name,omitempty" json:"name,omitempty"`
-	APIKey      string `yaml:"api-key" json:"api-key"`
-	Provider    string `yaml:"provider" json:"provider"`
-	Model       string `yaml:"model" json:"model"`
-	OpusModel   string `yaml:"opus-model,omitempty" json:"opus-model,omitempty"`
-	SonnetModel string `yaml:"sonnet-model,omitempty" json:"sonnet-model,omitempty"`
-	HaikuModel  string `yaml:"haiku-model,omitempty" json:"haiku-model,omitempty"`
+	Name          string `yaml:"name,omitempty" json:"name,omitempty"`
+	APIKey        string `yaml:"api-key" json:"api-key"`
+	Provider      string `yaml:"provider" json:"provider"`
+	Model         string `yaml:"model" json:"model"`
+	OpusModel     string `yaml:"opus-model,omitempty" json:"opus-model,omitempty"`
+	SonnetModel   string `yaml:"sonnet-model,omitempty" json:"sonnet-model,omitempty"`
+	HaikuModel    string `yaml:"haiku-model,omitempty" json:"haiku-model,omitempty"`
+	FallbackModel string `yaml:"fallback-model,omitempty" json:"fallback-model,omitempty"`
 }
 
 // TLSHandshakeTimeout returns the configured upstream TLS handshake bound

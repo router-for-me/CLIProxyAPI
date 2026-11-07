@@ -107,7 +107,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, interceptErr
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	resp, err := h.executeWithRouteFallbacks(ctx, providers, &normalizedModel, &req, opts, routeDecision.FallbackModels)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
