@@ -54,6 +54,92 @@ func TestOutputStyleIdempotent(t *testing.T) {
 	}
 }
 
+func TestOutputStyleInjectsIntoChatSystemParts(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"system","content":[{"type":"text","text":"base"}]},` +
+		`{"role":"user","content":"hi"}]}`)
+
+	out, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "chat" {
+		t.Fatalf("style target = %q", stats.Style)
+	}
+	parts := gjson.GetBytes(out, "messages.0.content")
+	if parts.Get("#").Int() != 2 {
+		t.Fatalf("expected two system parts, got %s", parts.Raw)
+	}
+	if parts.Get("0.text").String() != "base" {
+		t.Fatalf("cached part was rewritten: %s", parts.Raw)
+	}
+	if !strings.Contains(parts.Get("1.text").String(), outputStyleMarker) {
+		t.Fatalf("style part missing: %s", parts.Raw)
+	}
+
+	_, again := ApplyAll(cfg, "m", out)
+	if again.Style != "already" {
+		t.Fatalf("second pass reported %q, want already", again.Style)
+	}
+}
+
+func TestOutputStylePrefersTopLevelSystemOverMidSystemTurn(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","system":[{"type":"text","text":"base"}],"messages":[` +
+		`{"role":"system","content":[{"type":"text","text":"mid"}]},` +
+		`{"role":"user","content":"hi"}]}`)
+
+	out, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "claude" {
+		t.Fatalf("style target = %q", stats.Style)
+	}
+	if !strings.Contains(gjson.GetBytes(out, "system.1.text").String(), outputStyleMarker) {
+		t.Fatalf("top-level system not styled: %s", gjson.GetBytes(out, "system").Raw)
+	}
+	if strings.Contains(gjson.GetBytes(out, "messages.0.content").Raw, outputStyleMarker) {
+		t.Fatal("style leaked into the mid-system turn")
+	}
+}
+
+func TestOutputStyleInjectsIntoGeminiSystemInstruction(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","systemInstruction":{"parts":[{"text":"base"}]},` +
+		`"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+
+	out, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "gemini" {
+		t.Fatalf("style target = %q", stats.Style)
+	}
+	parts := gjson.GetBytes(out, "systemInstruction.parts")
+	if parts.Get("#").Int() != 2 {
+		t.Fatalf("expected two system parts, got %s", parts.Raw)
+	}
+	if parts.Get("0.text").String() != "base" {
+		t.Fatalf("cached part was rewritten: %s", parts.Raw)
+	}
+	if !strings.Contains(parts.Get("1.text").String(), outputStyleMarker) {
+		t.Fatalf("style part missing: %s", parts.Raw)
+	}
+
+	_, again := ApplyAll(cfg, "m", out)
+	if again.Style != "already" {
+		t.Fatalf("second pass reported %q, want already", again.Style)
+	}
+}
+
+func TestOutputStyleInjectsIntoLegacyGeminiSystemInstruction(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	body := []byte(`{"model":"m","system_instruction":"base",` +
+		`"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+
+	out, stats := ApplyAll(cfg, "m", body)
+	if stats.Style != "gemini" {
+		t.Fatalf("style target = %q", stats.Style)
+	}
+	system := gjson.GetBytes(out, "system_instruction").String()
+	if !strings.HasPrefix(system, "base") || !strings.Contains(system, outputStyleMarker) {
+		t.Fatalf("legacy system instruction not extended:\n%s", system)
+	}
+}
+
 func TestOutputStyleMarkerEchoedBackDoesNotDisableStyling(t *testing.T) {
 	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
 	body := []byte(`{"model":"m","messages":[` +
