@@ -620,7 +620,7 @@ func TestForwardRawImageStreamPrefersPendingErrorOnClose(t *testing.T) {
 		close(errs)
 		var canceled error
 
-		h.forwardRawImageStream(context.Background(), c, func(err error) { canceled = err }, data, errs)
+		h.forwardRawImageStream(context.Background(), c, func(err error) { canceled = err }, data, errs, nil)
 		if canceled == nil || !strings.Contains(canceled.Error(), "image upstream busy") {
 			t.Fatalf("iteration %d: cancel=%v body=%q", i, canceled, recorder.Body.String())
 		}

@@ -1417,10 +1417,8 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 			stopKeepAlive()
 			setImagesSSEHeaders(c)
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			_, _ = c.Writer.Write(chunk)
-			flusher.Flush()
 			streamStarted = true
-			h.forwardRawImageStream(cliCtx, c, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardRawImageStream(cliCtx, c, func(err error) { cliCancel(err) }, dataChan, errChan, chunk)
 			return
 		case <-keepAliveC:
 			setImagesSSEHeaders(c)
@@ -1431,7 +1429,25 @@ func (h *OpenAIAPIHandler) streamRoutedImages(c *gin.Context, imageReq []byte, i
 	}
 }
 
-func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Context, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Context, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, firstChunk []byte) {
+	state := rawImageSSEState{trailingNewlines: 2}
+	writeChunk := func(chunk []byte) {
+		state.observe(chunk)
+		_, _ = c.Writer.Write(chunk)
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	writeError := func(errMsg *interfaces.ErrorMessage) {
+		state.ensureBoundary(c.Writer)
+		writeImagesStreamErrorEvent(c, errMsg)
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+	if len(firstChunk) > 0 {
+		writeChunk(firstChunk)
+	}
 	stopKeepAlive, keepAliveC := h.newImagesStreamKeepAliveTicker()
 	defer stopKeepAlive()
 
@@ -1445,10 +1461,7 @@ func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Con
 			return
 		case errMsg, ok := <-errs:
 			if ok && errMsg != nil {
-				writeImagesStreamErrorEvent(c, errMsg)
-				if flusher, ok := c.Writer.(http.Flusher); ok {
-					flusher.Flush()
-				}
+				writeError(errMsg)
 				cancel(errMsg.Error)
 				return
 			}
@@ -1456,23 +1469,19 @@ func (h *OpenAIAPIHandler) forwardRawImageStream(ctx context.Context, c *gin.Con
 		case chunk, ok := <-data:
 			if !ok {
 				if errMsg, hasPendingError := handlers.PendingStreamError(errs); hasPendingError {
-					writeImagesStreamErrorEvent(c, errMsg)
-					if flusher, ok := c.Writer.(http.Flusher); ok {
-						flusher.Flush()
-					}
+					writeError(errMsg)
 					cancel(errMsg.Error)
 					return
 				}
 				cancel(nil)
 				return
 			}
-			_, _ = c.Writer.Write(chunk)
-			if flusher, ok := c.Writer.(http.Flusher); ok {
-				flusher.Flush()
-			}
+			writeChunk(chunk)
 		case <-keepAliveC:
-			if flusher, ok := c.Writer.(http.Flusher); ok {
-				writeImagesStreamKeepAlive(c, flusher)
+			if state.atBoundary() {
+				if flusher, ok := c.Writer.(http.Flusher); ok {
+					writeImagesStreamKeepAlive(c, flusher)
+				}
 			}
 		}
 	}
@@ -1557,15 +1566,24 @@ func (h *OpenAIAPIHandler) streamOpenAICompatImages(c *gin.Context, compatReq []
 			stopKeepAlive()
 			setImagesSSEHeaders(c)
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			state := rawImageSSEState{trailingNewlines: 2}
+			state.observe(chunk)
 			_, _ = c.Writer.Write(chunk)
 			flusher.Flush()
 			streamStarted = true
 			h.ForwardStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, handlers.StreamForwardOptions{
 				NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
 				WriteChunk: func(next []byte) {
+					state.observe(next)
 					_, _ = c.Writer.Write(next)
 				},
+				WriteKeepAlive: func() {
+					if state.atBoundary() {
+						_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+					}
+				},
 				WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+					state.ensureBoundary(c.Writer)
 					writeImagesStreamErrorEvent(c, errMsg)
 				},
 			})
