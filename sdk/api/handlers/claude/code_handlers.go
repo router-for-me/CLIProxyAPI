@@ -36,6 +36,7 @@ import (
 // It holds a pool of clients to interact with the backend service.
 type ClaudeCodeAPIHandler struct {
 	*handlers.BaseAPIHandler
+	autoModeSessions autoModeSessionModels
 }
 
 // NewClaudeCodeAPIHandler creates a new Claude API handlers instance.
@@ -86,6 +87,9 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Decode claude-fable-5-dd-<reversed> model IDs back to the real model name for routing.
 	rawJSON = rewriteClaudeDDModelInBody(rawJSON)
+	if cfg := h.CurrentConfig(); cfg != nil && cfg.ClaudeAutoModeFollowSession {
+		rawJSON = h.autoModeSessions.route(c.Request.Header, rawJSON, time.Now())
+	}
 
 	// Check if the client requested a streaming response.
 	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
