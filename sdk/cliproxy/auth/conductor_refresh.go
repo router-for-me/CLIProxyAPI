@@ -1387,7 +1387,22 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
-	if err != nil && errors.Is(err, context.Canceled) && !codex.IsRefreshOutcomeUnknown(err) {
+	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
+	if refreshCanceled {
+		var partitions interface {
+			OuterRefreshError() error
+			SIWCRefreshError() error
+		}
+		if errors.As(err, &partitions) {
+			for _, partitionErr := range []error{partitions.OuterRefreshError(), partitions.SIWCRefreshError()} {
+				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
+					refreshCanceled = false
+					break
+				}
+			}
+		}
+	}
+	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {

@@ -114,7 +114,7 @@ retain the corresponding business operation's fields.
 | `/oauth/callback` | GET, POST | Submit an OAuth callback. |
 | `/plugins` | GET | List installed plugins. |
 | `/plugins/<id>` | DELETE | Delete a plugin. |
-| `/plugins/store` | GET | List the plugin store. |
+| `/plugins/store` | GET | List the plugin store (supports optional `?refresh=true` to bypass cached release checks). |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
