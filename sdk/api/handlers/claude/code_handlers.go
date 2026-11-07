@@ -578,16 +578,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
-	if status == http.StatusTooManyRequests && msg != nil && msg.Error != nil {
-		var cooldown interface{ IsModelCooldown() bool }
-		if errors.As(msg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
-			if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
-				delay := retryAfter + "s"
-				if seconds <= (1<<63-1)/int64(time.Second) {
-					delay = (time.Duration(seconds) * time.Second).String()
-				}
-				message += " (reset after " + delay + ")"
+	// Claude Code shows only error.message and ignores Retry-After, so state the delay there too.
+	if status == http.StatusTooManyRequests && !strings.Contains(message, "(reset after ") {
+		if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
+			delay := retryAfter + "s"
+			if seconds <= (1<<63-1)/int64(time.Second) {
+				delay = (time.Duration(seconds) * time.Second).String()
 			}
+			message += " (reset after " + delay + ")"
 		}
 	}
 	response := claudeErrorResponse{
@@ -635,11 +633,8 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		_, _ = c.Writer.Write(body)
 		return
 	}
-	var retryAfter string
 	if msg != nil && msg.Error != nil {
-		safeHeaders := coreauth.SafeResponseHeaders(msg.Error)
-		retryAfter = safeHeaders.Get("Retry-After")
-		for _, value := range safeHeaders.Values("Retry-After") {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
 		}
 	}
@@ -660,7 +655,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
+	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, c.Writer.Header().Get("Retry-After")))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}
