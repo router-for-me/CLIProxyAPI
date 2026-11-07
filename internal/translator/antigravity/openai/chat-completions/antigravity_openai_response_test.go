@@ -434,3 +434,70 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 		}
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAI_MultiPartThoughtAndTrailingSignature(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("thought followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"thought":true,"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+		if role := ojson.GetBytesNoCopy(out[0], "choices.0.delta.role").String(); role != "assistant" {
+			t.Fatalf("delta.role = %q, want assistant; payload=%s", role, out[0])
+		}
+	})
+
+	t.Run("thought followed by non-thought empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+	})
+
+	t.Run("visible text followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Final answer"},{"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Final answer" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Final answer", out[0])
+		}
+		if reasoning := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content"); reasoning.Type != ojson.Null {
+			t.Fatalf("delta.reasoning_content = %s (type %v), want null; payload=%s", reasoning.Raw, reasoning.Type, out[0])
+		}
+	})
+
+	t.Run("multiple thought parts and multiple text parts in same chunk", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Step 1. "},{"thought":true,"text":"Step 2."},{"text":"Hello "},{"text":"world"}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Step 1. Step 2." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Step 1. Step 2.", out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Hello world" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Hello world", out[0])
+		}
+	})
+}
