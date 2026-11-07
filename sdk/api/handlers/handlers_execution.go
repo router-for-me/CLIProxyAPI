@@ -109,10 +109,13 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
-		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, errMsg
+		resp, err = h.executeCLISubFallback(ctx, originalRequestedModel, req, opts, err)
+		if err != nil {
+			err = enrichAuthSelectionError(err, providers, normalizedModel)
+			errMsg := executionErrorMessage(err)
+			lifecycle.completeError(ctx, errMsg)
+			return nil, nil, errMsg
+		}
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
@@ -120,6 +123,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
+	responseHeaders = preserveCLIProxyUpstreamHeader(responseHeaders, rawResponseHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
