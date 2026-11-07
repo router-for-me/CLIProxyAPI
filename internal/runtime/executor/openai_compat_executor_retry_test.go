@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -52,6 +53,40 @@ func TestOpenAICompatRetryAfter(t *testing.T) {
 			headers: http.Header{"Retry-After": {"5"}},
 			body:    `{"error":{"code":"ModelAccountTpmRateLimitExceeded"}}`,
 			want:    durationPointer(5 * time.Second),
+		},
+		{
+			name:   "OpenRouter body reset for exhausted daily limit",
+			status: http.StatusTooManyRequests,
+			body:   openRouterLimitBody("0", now.Add(10*time.Hour).UnixMilli()),
+			want:   durationPointer(10 * time.Hour),
+		},
+		{
+			name:   "OpenRouter body reset as JSON numbers",
+			status: http.StatusTooManyRequests,
+			body:   `{"error":{"code":429,"metadata":{"headers":{"X-RateLimit-Remaining":0,"X-RateLimit-Reset":` + strconv.FormatInt(now.Add(90*time.Second).UnixMilli(), 10) + `}}}}`,
+			want:   durationPointer(90 * time.Second),
+		},
+		{
+			name:    "provider header wins over body reset",
+			status:  http.StatusTooManyRequests,
+			headers: http.Header{"Retry-After": {"5"}},
+			body:    openRouterLimitBody("0", now.Add(10*time.Hour).UnixMilli()),
+			want:    durationPointer(5 * time.Second),
+		},
+		{
+			name:   "body reset ignored while requests remain",
+			status: http.StatusTooManyRequests,
+			body:   openRouterLimitBody("3", now.Add(10*time.Hour).UnixMilli()),
+		},
+		{
+			name:   "past body reset ignored",
+			status: http.StatusTooManyRequests,
+			body:   openRouterLimitBody("0", now.Add(-time.Minute).UnixMilli()),
+		},
+		{
+			name:   "implausibly distant body reset ignored",
+			status: http.StatusTooManyRequests,
+			body:   openRouterLimitBody("0", now.Add(30*24*time.Hour).UnixMilli()),
 		},
 		{
 			name:   "generic 429 has no invented deadline",
@@ -140,4 +175,9 @@ func TestOpenAICompatExecutorPropagatesRetryAfter(t *testing.T) {
 
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
+}
+
+func openRouterLimitBody(remaining string, resetMillis int64) string {
+	return `{"error":{"message":"Rate limit exceeded: free-models-per-day.","code":429,"metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"` +
+		remaining + `","X-RateLimit-Reset":"` + strconv.FormatInt(resetMillis, 10) + `"},"limit_source":"openrouter_free_tier_daily"}}}`
 }
