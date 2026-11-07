@@ -312,7 +312,8 @@ enter the site scope, and other members remain in their own scope.
 **Usage page.** Every control writes the URL directly (no apply button): range
 chips, model and Key/member autocompletes (applied once the text matches a
 candidate exactly), the channel select, outcome tabs and pagination. One
-`/usage/summary` response drives the KPI strip, trend and breakdown. KPIs:
+`/usage/overview` request drives the KPI strip, trend, breakdown, model
+candidates and facet values. KPIs:
 requests (`total.calls`, distinct traces), upstream success
 (`1 - failures/executions`), Tokens, cache hit rate, and average latency/TTFT over
 successful attempts only (`latency_ms/latency_count`, `ttft_ms/ttft_count`). The
@@ -364,7 +365,10 @@ that specific state automatically and cancels retries when leaving the page. Oth
 pages and event appends do not wait for history construction. Lists read only the
 selected page from the journal; summary and performance queries use the index, with
 bounded, data-versioned aggregate caches (at most 32 results and 32,768 groups or
-buckets). No history is sampled and request/retry and Token accounting stay unchanged.
+buckets). Analytics keys (`overview:`, `summary:`, `facets:`) may additionally
+serve a slightly stale result for up to 10 s so continuous writes do not force
+every statistics query to rescan; list and attempt queries always read current
+data. No history is sampled and request/retry and Token accounting stay unchanged.
 
 The index and its `-wal`/`-shm` sidecars are not required in backups. To rebuild the
 index, stop the proxy, remove only those derived files, and restart; never remove
@@ -409,7 +413,7 @@ The account API base is `/v8/hub`. Protected endpoints accept
 | `/oauth/session` | DELETE | Cancel a pending OAuth flow. |
 | `/users`, `/users/:username` | GET / PATCH | All-member directory / admin `role` or `disabled` changes only. |
 | `/invites`, `/invites/:id` | GET, POST / DELETE | Administrator invitation issue/list/revoke. |
-| `/usage`, `/usage/summary`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/summary` returns `total`, `groups` (day/consumer/owner/channel/model/credential) and hourly `buckets`; `/usage/attempts?trace=` lists every attempt of one request. |
+| `/usage`, `/usage/overview`, `/usage/summary`, `/usage/facets`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/overview` is the bounded page payload (`total`, adaptive `buckets`, per-dimension `rank` Top-50, `models`, `facets`) computed over covering index `usage_summary_v3`; `/usage/summary` additionally returns every `day × consumer × owner × channel × model` group; `/usage/attempts?trace=` lists every attempt of one request. |
 
 Quota lookup never requires credential export permission. The server resolves Kimi's
 `.com`/`.ai` usage host from the live credential and substitutes Meta's persisted

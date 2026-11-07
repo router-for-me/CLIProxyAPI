@@ -1,10 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  buildTrend,
-  deriveKpis,
-  rankMetric,
-  rankUsage,
-} from '../src/features/sharing/usageBreakdown';
+import { buildTrend, deriveKpis } from '../src/features/sharing/usageBreakdown';
 import type { Summary, SummaryBucket } from '../src/features/sharing/types';
 
 const group = (overrides: Partial<Summary>): Summary => ({
@@ -21,77 +16,6 @@ const group = (overrides: Partial<Summary>): Summary => ({
   latency_ms: 1000,
   latency_count: 1,
   ...overrides,
-});
-
-describe('usage ranking', () => {
-  test('folds days, owners and channels using additive metrics only', () => {
-    const rows = rankUsage(
-      [
-        group({
-          day: '2026-11-01',
-          consumer: 'alice',
-          channel: 'a#1',
-          model: 'kimi-k3',
-          executions: 2,
-          failures: 1,
-          total_tokens: 140,
-        }),
-        group({
-          day: '2026-11-02',
-          consumer: 'bob',
-          channel: 'b#1',
-          model: 'kimi-k3',
-          executions: 3,
-          failures: 1,
-          total_tokens: 260,
-          latency_ms: 4000,
-          latency_count: 2,
-        }),
-      ],
-      'model'
-    );
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      key: 'kimi-k3',
-      executions: 5,
-      failures: 2,
-      total_tokens: 400,
-      latency_ms: 5000,
-      latency_count: 3,
-    });
-    // Distinct-trace request counts are not additive across groups.
-    expect(rows[0]).not.toHaveProperty('calls');
-  });
-
-  test('ranks by Tokens, then calls, then name', () => {
-    const rows = rankUsage(
-      [
-        group({ consumer: 'bob', total_tokens: 20, executions: 1 }),
-        group({ consumer: 'alice', total_tokens: 20, executions: 1 }),
-        group({ consumer: 'carol', total_tokens: 20, executions: 5 }),
-        group({ consumer: 'dave', total_tokens: 90, executions: 1 }),
-      ],
-      'consumer'
-    );
-    expect(rows.map((row) => row.key)).toEqual(['dave', 'carol', 'alice', 'bob']);
-    expect(rankMetric(rows)).toBe('tokens');
-    expect(rankMetric(rankUsage([group({ total_tokens: 0 })], 'model'))).toBe('calls');
-  });
-
-  test('credential ranking keys by ID and labels by pinned prefix', () => {
-    const rows = rankUsage(
-      [
-        group({ credential_id: 'c1.json', channel: '123-kimi#1', total_tokens: 10 }),
-        group({ credential_id: 'c1.json', channel: '123-kimi#1', total_tokens: 5 }),
-        group({ credential_id: 'c2.json', channel: '123-kimi#2', total_tokens: 40 }),
-      ],
-      'credential'
-    );
-    expect(rows.map((row) => [row.key, row.label, row.total_tokens])).toEqual([
-      ['c2.json', '123-kimi#2', 40],
-      ['c1.json', '123-kimi#1', 15],
-    ]);
-  });
 });
 
 describe('usage trend', () => {

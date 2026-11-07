@@ -58,8 +58,14 @@ CREATE INDEX IF NOT EXISTS audit_actor ON events(actor, at DESC, source, positio
 CREATE INDEX IF NOT EXISTS usage_consumer_trace ON events(consumer,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_owner_trace ON events(owner,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_performance ON events(hour,model,failed,latency,ttft,output) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_provider ON events(provider, at DESC, source, position) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_status ON events(status, at DESC, source, position) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_endpoint ON events(endpoint, at DESC, source, position) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_sort_tokens ON events(total DESC, at DESC, source, position) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS usage_sort_latency ON events(latency DESC, at DESC, source, position) WHERE kind=1;
 DROP INDEX IF EXISTS usage_summary;
-CREATE INDEX IF NOT EXISTS usage_summary_v2 ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,latency,ttft,hour,at,channel_id,credential_id,key_id,model_lower,serving_lower) WHERE kind=1;
+DROP INDEX IF EXISTS usage_summary_v2;
+CREATE INDEX IF NOT EXISTS usage_summary_v3 ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,latency,ttft,hour,at,channel_id,credential_id,key_id,model_lower,serving_lower,provider,status,stream,endpoint,effort) WHERE kind=1;
 `
 
 const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
@@ -309,10 +315,11 @@ func (j *journalIndex) sync() error {
 	changed := false
 	defer func() {
 		if changed {
+			// Bump the version only: cache entries carry the version they were
+			// computed against, so old results fall into the stale-TTL path
+			// instead of forcing every analytics query to rescan on each write.
 			j.cacheMu.Lock()
 			j.version++
-			j.cache = map[string]journalCacheEntry{}
-			j.weight = 0
 			j.cacheMu.Unlock()
 		}
 	}()

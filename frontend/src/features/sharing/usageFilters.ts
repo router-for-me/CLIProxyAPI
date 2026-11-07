@@ -23,9 +23,7 @@ export function buildCredentialUsagePath(
 }
 
 /** Query for the main summary/log requests: scope identity folded in,
- * pagination removed. Must stay identical to buildModelCandidateQuery when
- * no model filter is applied, so the page can reuse the main summary as the
- * model candidate source instead of issuing a duplicate request. */
+ * pagination removed. */
 export function buildUsageFilterQuery(queryString: string, scope: UsageScope, me: string): string {
   const values = Object.fromEntries(new URLSearchParams(queryString));
   delete values.page;
@@ -49,52 +47,6 @@ export function withoutListParams(query: string): string {
   const values = new URLSearchParams(query);
   for (const key of ['outcome', 'status', 'sort']) values.delete(key);
   return values.toString();
-}
-
-/** Attribute facets describe every value present under the current scope, time
- * range and resource, so a dropdown never collapses to its own selection. */
-export function buildFacetQuery(queryString: string, scope: UsageScope, me: string): string {
-  const values = Object.fromEntries(new URLSearchParams(queryString));
-  delete values.scope;
-  delete values.page;
-  delete values.page_size;
-  for (const key of [
-    'outcome',
-    'status',
-    'sort',
-    'model',
-    'key_id',
-    'consumer',
-    'provider',
-    'stream',
-    'endpoint',
-    'effort',
-    'balanced',
-  ])
-    delete values[key];
-  if (scope === 'mine') values.consumer = me;
-  if (scope === 'contributed') values.owner = me;
-  return new URLSearchParams(values).toString();
-}
-
-// Model candidates must not depend on the applied model filter itself;
-// otherwise applying one collapses the dropdown to just that model.
-export function buildModelCandidateQuery(
-  queryString: string,
-  scope: UsageScope,
-  me: string
-): string {
-  const values = Object.fromEntries(new URLSearchParams(queryString));
-  delete values.scope;
-  delete values.model;
-  delete values.outcome;
-  delete values.status;
-  delete values.sort;
-  delete values.page;
-  delete values.page_size;
-  if (scope === 'mine') values.consumer = me;
-  if (scope === 'contributed') values.owner = me;
-  return new URLSearchParams(values).toString();
 }
 
 export interface UsageKeyOption {

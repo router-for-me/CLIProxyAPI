@@ -2,21 +2,22 @@ import { memo, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatCompactNumber } from '@/utils/format';
 import { number } from './hooks';
-import type { Summary } from './types';
-import { rankMetric, rankUsage, type UsageDimension, type UsageRankEntry } from './usageBreakdown';
+import type { OverviewRankRow } from './types';
+import type { UsageDimension } from './usageBreakdown';
 import { percent } from './usageFormat';
 import styles from './Usage.module.scss';
 
 const COMPACT_COUNT = 5;
 
 export const UsageRanking = memo(function UsageRanking({
-  groups,
+  rank,
   dimensions,
   active,
   compact,
   onSelect,
 }: {
-  groups: Summary[];
+  /** Server-computed top rows per dimension; empty while loading. */
+  rank?: Partial<Record<UsageDimension, OverviewRankRow[]>>;
   /** Phones show the top entries with an expand toggle instead of a scroll box. */
   compact: boolean;
   dimensions: UsageDimension[];
@@ -28,17 +29,17 @@ export const UsageRanking = memo(function UsageRanking({
   const [dimension, setDimension] = useState<UsageDimension>(dimensions[0]);
   const current = dimensions.includes(dimension) ? dimension : dimensions[0];
 
-  const entries = useMemo(() => rankUsage(groups, current), [groups, current]);
-  const metric = rankMetric(entries);
-  const valueOf = (entry: UsageRankEntry) =>
-    metric === 'tokens' ? entry.total_tokens : entry.executions;
+  const entries = useMemo(() => rank?.[current] ?? [], [rank, current]);
+  const metric = entries.some((entry) => entry.value.total_tokens > 0) ? 'tokens' : 'calls';
+  const valueOf = (row: OverviewRankRow) =>
+    metric === 'tokens' ? row.value.total_tokens : row.value.executions;
   const sum = entries.reduce((total, entry) => total + valueOf(entry), 0) || 1;
   const top = entries.length ? valueOf(entries[0]) || 1 : 1;
   const [expanded, setExpanded] = useState(false);
   const visible = compact && !expanded ? entries.slice(0, COMPACT_COUNT) : entries;
 
-  const label = (entry: UsageRankEntry) =>
-    entry.label ? (current === 'consumer' ? `@${entry.label}` : entry.label) : t('sharing.unknown');
+  const label = (row: OverviewRankRow) =>
+    row.label ? (current === 'consumer' ? `@${row.label}` : row.label) : t('sharing.unknown');
 
   return (
     <section className={styles.panel} aria-labelledby="usage-ranking-title">
@@ -70,19 +71,21 @@ export const UsageRanking = memo(function UsageRanking({
         <p className={styles.panelEmpty}>{t('sharing.trend_empty')}</p>
       ) : (
         <ol className={styles.rankList}>
-          {visible.map((entry, index) => {
-            const share = (valueOf(entry) / sum) * 100;
+          {visible.map((row, index) => {
+            const value = row.value;
+            const share = (valueOf(row) / sum) * 100;
             const success =
-              entry.executions > 0
-                ? ((entry.executions - entry.failures) / entry.executions) * 100
+              value.executions > 0
+                ? ((value.executions - value.failures) / value.executions) * 100
                 : null;
-            const selected = active[current] !== undefined && active[current] === entry.key;
+            const selected = active[current] !== undefined && active[current] === row.key;
+            const latencyCount = value.latency_count ?? 0;
             return (
-              <li key={entry.key || '∅'}>
+              <li key={row.key || '∅'}>
                 <button
                   type="button"
                   className={`${styles.rankRow} ${selected ? styles.rankRowActive : ''}`}
-                  onClick={() => onSelect(current, entry.key)}
+                  onClick={() => onSelect(current, row.key)}
                   aria-pressed={selected}
                   title={t('sharing.ranking_filter_hint')}
                 >
@@ -92,32 +95,32 @@ export const UsageRanking = memo(function UsageRanking({
                       <span
                         className={`${styles.rankName} ${current !== 'consumer' ? styles.mono : ''}`}
                       >
-                        {label(entry)}
+                        {label(row)}
                       </span>
-                      <span className={styles.rankValue} title={number(valueOf(entry))}>
+                      <span className={styles.rankValue} title={number(valueOf(row))}>
                         {metric === 'tokens'
-                          ? formatCompactNumber(entry.total_tokens)
-                          : number(entry.executions)}
+                          ? formatCompactNumber(value.total_tokens)
+                          : number(value.executions)}
                         <span className={styles.rankShare}>{percent(share)}</span>
                       </span>
                     </span>
                     <span className={styles.rankTrack} aria-hidden="true">
                       <span
                         className={styles.rankBar}
-                        style={{ width: `${Math.max(1.5, (valueOf(entry) / top) * 100)}%` }}
+                        style={{ width: `${Math.max(1.5, (valueOf(row) / top) * 100)}%` }}
                       />
                     </span>
                     <span className={styles.rankMeta}>
-                      <span>{t('sharing.ranking_calls', { count: number(entry.executions) })}</span>
+                      <span>{t('sharing.ranking_calls', { count: number(value.executions) })}</span>
                       {success !== null && (
                         <span className={success < 95 ? styles.rankMetaWarn : undefined}>
                           {t('sharing.ranking_success', { rate: percent(success) })}
                         </span>
                       )}
-                      {entry.latency_count > 0 && (
+                      {latencyCount > 0 && (
                         <span>
                           {t('sharing.ranking_latency', {
-                            value: `${(entry.latency_ms / entry.latency_count / 1000).toFixed(1)}s`,
+                            value: `${((value.latency_ms ?? 0) / latencyCount / 1000).toFixed(1)}s`,
                           })}
                         </span>
                       )}

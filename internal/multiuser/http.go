@@ -169,6 +169,7 @@ func (h *Controller) RegisterRoutes(public, member *gin.RouterGroup) {
 	member.DELETE("/invites/:id", h.Admin(), h.deleteInvite)
 	member.GET("/usage", h.usage)
 	member.GET("/calls", h.calls)
+	member.GET("/usage/overview", h.usageOverview)
 	member.GET("/usage/summary", h.summary)
 	member.GET("/usage/attempts", h.usageAttempts)
 	member.GET("/usage/facets", h.usageFacets)
@@ -513,6 +514,23 @@ func (h *Controller) calls(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"items": items, "total": total, "page": f.Page, "page_size": f.PageSize})
 }
+func (h *Controller) usageOverview(c *gin.Context) {
+	f, err := queryFilter(c)
+	if err != nil {
+		replyError(c, err)
+		return
+	}
+	if !h.historyReady(c) {
+		return
+	}
+	overview, err := h.Store.OverviewContext(c.Request.Context(), f)
+	if err != nil {
+		replyError(c, err)
+		return
+	}
+	c.JSON(200, overview)
+}
+
 func (h *Controller) summary(c *gin.Context) {
 	f, err := queryFilter(c)
 	if err != nil {

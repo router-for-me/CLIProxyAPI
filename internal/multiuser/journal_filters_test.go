@@ -165,3 +165,85 @@ CREATE TABLE sources (name TEXT PRIMARY KEY, offset INTEGER NOT NULL, modified I
 		t.Fatalf("rebuilt index lost the record: %v", got)
 	}
 }
+
+func TestOverviewTotalsRanksModelsAndFacets(t *testing.T) {
+	s := filterFixture(t)
+	overview, err := s.OverviewContext(context.Background(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Totals mirror the shared summary computation for the same filter.
+	total, _, err := s.Summary(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Total != total {
+		t.Fatalf("overview total %+v want %+v", overview.Total, total)
+	}
+	if overview.Rank["model"][0].Key != "gpt-5" {
+		t.Fatalf("top model %+v", overview.Rank["model"])
+	}
+	if len(overview.Rank["consumer"]) != 1 || overview.Rank["consumer"][0].Label != "bob" {
+		t.Fatalf("consumer rank %+v", overview.Rank["consumer"])
+	}
+	cred := overview.Rank["credential"]
+	if len(cred) != 1 || cred[0].Label != "route-one" {
+		t.Fatalf("credential rank %+v", cred)
+	}
+	if !reflect.DeepEqual(overview.Models, []string{"gpt-5", "route-one/gpt-5"}) {
+		t.Fatalf("models %+v", overview.Models)
+	}
+	want := UsageFacets{
+		Providers: []string{"codex", "kimi", "openai-compatible"},
+		Endpoints: []string{"POST /v1/chat/completions", "POST /v1/messages"},
+		Statuses:  []int{200, 429, 502},
+		Efforts:   []string{"high", "low", "none"},
+	}
+	if !reflect.DeepEqual(overview.Facets, want) {
+		t.Fatalf("facets %+v", overview.Facets)
+	}
+	if len(overview.Buckets) != 1 || overview.Buckets[0].Executions != 4 {
+		t.Fatalf("buckets %+v", overview.Buckets)
+	}
+}
+
+// Every facet list ignores its own applied filter so a selected value never
+// collapses the dropdown.
+func TestOverviewFacetsIgnoreOwnFilter(t *testing.T) {
+	s := filterFixture(t)
+	overview, err := s.OverviewContext(context.Background(), Filter{Provider: "kimi", Status: "200"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The provider facet sees every provider matching the *status* filter.
+	if !reflect.DeepEqual(overview.Facets.Providers, []string{"codex", "kimi"}) {
+		t.Fatalf("provider facet %+v", overview.Facets.Providers)
+	}
+	// The status facet keeps the statuses matching the *provider* filter.
+	if !reflect.DeepEqual(overview.Facets.Statuses, []int{200, 502}) {
+		t.Fatalf("status facet %+v", overview.Facets.Statuses)
+	}
+}
+
+// Analytics tolerate a few seconds of staleness instead of rescanning on
+// every write; past the TTL the new rows must appear.
+func TestAggregateServesStaleThenRefreshes(t *testing.T) {
+	s := filterFixture(t)
+	first, err := s.SummaryResultContext(context.Background(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendUsageEvent(t, s, UsageEvent{ID: "z", RequestID: "z", TraceID: "z", At: balancedFixtureAt.Add(10 * time.Second), Consumer: "bob", Owner: "alice", Model: "gpt-5", Provider: "kimi", Status: 200})
+	second, err := s.SummaryResultContext(context.Background(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("expected the fresh-enough cached entry: %+v", second)
+	}
+	s.now = func() time.Time { return time.Now().Add(aggregateTTL + time.Second) }
+	third, err := s.SummaryResultContext(context.Background(), Filter{})
+	if err != nil || third.Total.Executions != 5 {
+		t.Fatalf("stale entry did not refresh past the TTL: %+v err=%v", third, err)
+	}
+}

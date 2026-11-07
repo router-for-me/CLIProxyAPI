@@ -195,6 +195,9 @@ func TestJournalIndexIncrementalRecoveryAndFileChanges(t *testing.T) {
 	}
 	appendUsage(s, at.Add(-48*time.Hour), "late-old-day")
 	appendUsage(s, at, "retry")
+	// Summary analytics tolerate a few seconds of staleness; advancing the
+	// store clock past the TTL proves the new rows do land in the index.
+	s.now = func() time.Time { return time.Now().Add(aggregateTTL + time.Second) }
 	total, _, err := s.Summary(Filter{})
 	if err != nil || total.Executions != 3 {
 		t.Fatalf("incremental/cached total: %+v err=%v", total, err)

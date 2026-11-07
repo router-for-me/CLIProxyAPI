@@ -187,6 +187,22 @@ export interface UsageFacets {
   efforts: string[];
 }
 
+/** One ranked row in the usage overview breakdown. */
+export interface OverviewRankRow {
+  key: string;
+  label: string;
+  value: Summary;
+}
+
+/** Bounded overview payload: totals, trend, rankings, models and facets. */
+export interface UsageOverview {
+  total: Summary;
+  buckets?: SummaryBucket[];
+  rank: { model?: OverviewRankRow[]; consumer?: OverviewRankRow[]; credential?: OverviewRankRow[] };
+  models: string[];
+  facets: UsageFacets;
+}
+
 export interface SummaryResponse {
   total: Summary;
   groups: Summary[];

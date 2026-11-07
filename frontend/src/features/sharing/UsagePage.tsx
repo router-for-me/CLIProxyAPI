@@ -18,8 +18,6 @@ import type { Account, Channel, PersonalKey, SharedKeyRef, UsageEntry } from './
 import { Pager } from './shared';
 import { duration, number, useSharingData } from './hooks';
 import {
-  buildFacetQuery,
-  buildModelCandidateQuery,
   buildUsageFilterQuery,
   resolveUsageKey,
   resolveUsageModel,
@@ -27,7 +25,7 @@ import {
   type UsageKeyOption,
 } from './usageFilters';
 import { buildTrend, deriveKpis, type UsageDimension } from './usageBreakdown';
-import { percent, servingModelId } from './usageFormat';
+import { percent } from './usageFormat';
 import { UsageTrend } from './UsageTrend';
 import { UsageRanking } from './UsageRanking';
 import { UsageDetailSheet, UsageRecords } from './UsageRecords';
@@ -231,9 +229,9 @@ export function UsagePage() {
     () => buildUsageFilterQuery(queryString, scope, me),
     [queryString, scope, me]
   );
-  const summaryQuery = useMemo(() => withoutListParams(filterQuery), [filterQuery]);
+  const overviewQuery = useMemo(() => withoutListParams(filterQuery), [filterQuery]);
   const {
-    data: summary,
+    data: overview,
     loading: summaryLoading,
     error: summaryError,
     refresh: refreshSummary,
@@ -241,13 +239,13 @@ export function UsagePage() {
     useCallback(
       // The fetch time bounds the trend for ranges that end in the future.
       async (signal: AbortSignal) => ({
-        ...(await sharingApi.summary(
-          Object.fromEntries(new URLSearchParams(summaryQuery)),
+        ...(await sharingApi.overview(
+          Object.fromEntries(new URLSearchParams(overviewQuery)),
           signal
         )),
         fetchedAt: Date.now(),
       }),
-      [summaryQuery]
+      [overviewQuery]
     ),
     // Within one scope the previous figures stay on screen (dimmed) while a new
     // filter loads, so the layout never collapses; a scope switch drops them.
@@ -276,39 +274,6 @@ export function UsagePage() {
     if (next.toString() !== params.toString()) setParams(next, { replace: true });
   }, [params, setParams, usage, loading, error]);
 
-  // Model candidates ignore the applied model filter, so choosing a model never
-  // shrinks the dropdown to itself. Without an applied model the main summary
-  // doubles as the candidate source (no duplicate request).
-  const candidateQuery = useMemo(
-    () => buildModelCandidateQuery(queryString, scope, me),
-    [queryString, scope, me]
-  );
-  const { data: candidateSummary, refresh: refreshCandidates } = useSharingData(
-    useCallback(
-      (signal: AbortSignal) =>
-        appliedModel
-          ? sharingApi.summary(Object.fromEntries(new URLSearchParams(candidateQuery)), signal)
-          : Promise.resolve(null),
-      [appliedModel, candidateQuery]
-    ),
-    { keepPreviousData: true, headerRefresh: false }
-  );
-
-  // Facet values describe what exists under the scope+range+resource, so a
-  // dropdown can offer every choice and never collapses to its own selection.
-  const facetQuery = useMemo(
-    () => buildFacetQuery(queryString, scope, me),
-    [queryString, scope, me]
-  );
-  const { data: facets, refresh: refreshFacets } = useSharingData(
-    useCallback(
-      (signal: AbortSignal) =>
-        sharingApi.usageFacets(Object.fromEntries(new URLSearchParams(facetQuery)), signal),
-      [facetQuery]
-    ),
-    { keepPreviousData: false, headerRefresh: false, dataKey: facetQuery }
-  );
-
   const { data: credentialsList } = useSharingData(
     useCallback(async (signal: AbortSignal): Promise<SharedCredential[]> => {
       const response = await sharingCredentials.list(signal);
@@ -328,36 +293,27 @@ export function UsagePage() {
   // The app header's refresh button reloads statistics, records and candidates together.
   useHeaderRefresh(
     useCallback(async () => {
-      await Promise.all([refreshSummary(), refreshUsage(), refreshCandidates(), refreshFacets()]);
-    }, [refreshSummary, refreshUsage, refreshCandidates, refreshFacets])
+      await Promise.all([refreshSummary(), refreshUsage()]);
+    }, [refreshSummary, refreshUsage])
   );
 
-  const groups = useMemo(() => summary?.groups ?? [], [summary]);
-  const kpis = useMemo(() => deriveKpis(summary?.total), [summary]);
+  const kpis = useMemo(() => deriveKpis(overview?.total), [overview]);
   // A range ending in the future (today, last 7 days) is drawn up to the time
   // the statistics were fetched, never into hours that have not happened yet.
   const trend = useMemo(
     () =>
-      buildTrend(summary?.buckets ?? [], {
+      buildTrend(overview?.buckets ?? [], {
         from: appliedFrom ? new Date(appliedFrom).getTime() : undefined,
         to: appliedTo ? new Date(appliedTo).getTime() : undefined,
-        now: summary?.fetchedAt,
+        now: overview?.fetchedAt,
       }),
-    [summary, appliedFrom, appliedTo]
+    [overview, appliedFrom, appliedTo]
   );
 
-  // Candidates pair every bare model (even load balancing) with each channel
-  // that served it; selecting one pins the filter to that serving channel.
-  const models = useMemo(() => {
-    const set = new Set<string>();
-    for (const group of (appliedModel ? candidateSummary?.groups : summary?.groups) ?? []) {
-      if (!group.model) continue;
-      set.add(group.model);
-      const serving = servingModelId(group);
-      if (serving) set.add(`${group.model}（${serving}）`);
-    }
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [appliedModel, candidateSummary, summary]);
+  // The overview pairs every bare model with its serving channel so even-load
+  // calls can be pinned to the credential that actually served them.
+  const models = useMemo(() => overview?.models ?? [], [overview]);
+  const facets = overview?.facets;
 
   const keyLabel = useCallback(
     (key: PersonalKey | SharedKeyRef) =>
@@ -426,7 +382,7 @@ export function UsagePage() {
     : credentialIsProvider
       ? credentialInfo?.label || credentialInfo?.provider_name || t('sharing.history_resource')
       : credentialIdentity?.primary ||
-        groups.find((group) => group.credential_id === appliedCredentialID)?.channel ||
+        overview?.rank.credential?.find((row) => row.key === appliedCredentialID)?.label ||
         t('sharing.history_resource');
   const channelTitle = appliedChannel
     ? options.channels.find((channel) => channel.id === appliedChannel)?.slug || appliedChannel
@@ -539,7 +495,7 @@ export function UsagePage() {
   const rankDimensions: UsageDimension[] =
     scope === 'mine' ? ['model', 'credential'] : ['model', 'consumer', 'credential'];
 
-  const staleSummary = summaryLoading && Boolean(summary);
+  const staleSummary = summaryLoading && Boolean(overview);
   // This theme's warning and error colors coincide, so only a clearly degraded
   // success rate (below 95%) is highlighted, matching the ranking rows.
   const failureTone =
@@ -888,11 +844,11 @@ export function UsagePage() {
       </section>
 
       <div className={`${styles.insights} ${staleSummary ? styles.stale : ''}`}>
-        {summary ? (
+        {overview ? (
           <>
             <UsageTrend points={trend.points} granularity={trend.granularity} />
             <UsageRanking
-              groups={groups}
+              rank={overview?.rank}
               dimensions={rankDimensions}
               compact={isMobile}
               active={{

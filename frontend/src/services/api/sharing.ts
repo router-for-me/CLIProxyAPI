@@ -13,6 +13,7 @@ import type {
   SharedKeyRef,
   SummaryResponse,
   UsageFacets,
+  UsageOverview,
   UsageEntry,
 } from '@/features/sharing/types';
 
@@ -199,6 +200,8 @@ export const sharingApi = {
     indexAwareGet<HistoryPage<UsageEntry>>(sharingPath('/usage'), params, signal),
   summary: (params: Record<string, string | number>, signal?: AbortSignal) =>
     indexAwareGet<SummaryResponse>(sharingPath('/usage/summary'), params, signal),
+  overview: (params: Record<string, string | number>, signal?: AbortSignal) =>
+    indexAwareGet<UsageOverview>(sharingPath('/usage/overview'), params, signal),
   usageFacets: (params: Record<string, string | number>, signal?: AbortSignal) =>
     indexAwareGet<UsageFacets>(sharingPath('/usage/facets'), params, signal),
   usageAttempts: (trace: string, signal?: AbortSignal) =>

@@ -15,8 +15,10 @@ import (
 )
 
 type journalCacheEntry struct {
-	value  any
-	weight int
+	value   any
+	weight  int
+	version uint64
+	at      time.Time
 }
 
 type journalFlight struct {
@@ -27,11 +29,26 @@ type journalFlight struct {
 	err    error
 }
 
+// aggregateTTL is how long a stale analytics entry may still be served. Usage
+// appends continuously, so a strict version check would drop every entry on
+// the next write; ~10s of freshness is fine for statistics.
+const aggregateTTL = 10 * time.Second
+
+// aggregateStaleOK reports whether a cache key belongs to an analytics
+// endpoint that tolerates a slightly stale result.
+func aggregateStaleOK(key string) bool {
+	return strings.HasPrefix(key, "overview:") ||
+		strings.HasPrefix(key, "summary:") ||
+		strings.HasPrefix(key, "facets:")
+}
+
 // aggregate shares identical reads and cancels the SQL work when its last reader leaves.
 func (j *journalIndex) aggregate(ctx context.Context, key string, compute func(context.Context) (any, int, error)) (any, error) {
 	j.cacheMu.Lock()
-	key = strconv.FormatUint(j.version, 10) + ":" + key
-	if entry, ok := j.cache[key]; ok {
+	// The cache key stays unversioned so an entry written under an older journal
+	// version can still be served when it is fresh enough.
+	if entry, ok := j.cache[key]; ok &&
+		(entry.version == j.version || (aggregateStaleOK(key) && j.store.now().Sub(entry.at) <= aggregateTTL)) {
 		j.cacheMu.Unlock()
 		return entry.value, nil
 	}
@@ -40,16 +57,20 @@ func (j *journalIndex) aggregate(ctx context.Context, key string, compute func(c
 		shared, cancel := context.WithCancel(j.ctx)
 		flight = &journalFlight{done: make(chan struct{}), cancel: cancel}
 		j.flights[key] = flight
+		// The entry is stamped with the version it was computed against; a later
+		// journal write demotes it to the stale-TTL path instead of letting it
+		// claim freshness.
+		version := j.version
 		go func() {
 			value, weight, err := compute(shared)
 			j.cacheMu.Lock()
 			flight.value, flight.err = value, err
-			if err == nil && shared.Err() == nil && weight <= 32768 && strings.HasPrefix(key, strconv.FormatUint(j.version, 10)+":") {
+			if err == nil && shared.Err() == nil && weight <= 32768 {
 				if len(j.cache) >= 32 || j.weight+weight > 32768 {
 					j.cache = map[string]journalCacheEntry{}
 					j.weight = 0
 				}
-				j.cache[key] = journalCacheEntry{value: value, weight: weight}
+				j.cache[key] = journalCacheEntry{value: value, weight: weight, version: version, at: j.store.now()}
 				j.weight += weight
 			}
 			if j.flights[key] == flight {
@@ -454,6 +475,272 @@ func (s *Store) SummaryContext(ctx context.Context, filter Filter) (Summary, []S
 	return result.Total, result.Groups, err
 }
 
+// overviewRankLimit caps each ranking tab so the payload stays small on large
+// histories; the full breakdown remains reachable through the same filters.
+const overviewRankLimit = 50
+
+// OverviewRankRow is one ranked breakdown row. Label is the display value
+// (model ID, username or credential prefix).
+type OverviewRankRow struct {
+	Key   string  `json:"key"`
+	Label string  `json:"label"`
+	Value Summary `json:"value"`
+}
+
+// UsageOverview is the bounded payload driving the usage page: totals,
+// adaptive trend buckets, per-dimension top rows, model candidates and facet
+// values. It replaces three unbounded requests the page used to make.
+type UsageOverview struct {
+	Total   Summary                      `json:"total"`
+	Buckets []SummaryBucket              `json:"buckets"`
+	Rank    map[string][]OverviewRankRow `json:"rank"`
+	Models  []string                     `json:"models"`
+	Facets  UsageFacets                  `json:"facets"`
+}
+
+// overviewGroupColumns mirrors summaryColumns minus the leading trace count;
+// overviewRowDest mirrors summaryDest minus Calls.
+const overviewGroupColumns = `COUNT(*), COALESCE(SUM(failed),0),
+ COALESCE(SUM(input),0), COALESCE(SUM(output),0), COALESCE(SUM(reasoning),0),
+ COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0), COALESCE(SUM(total),0), COALESCE(SUM(1-known),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN latency ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN 1 ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN ttft ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN 1 ELSE 0 END),0)`
+
+func overviewRowDest(sum *Summary) []any {
+	return summaryDest(sum)[1:]
+}
+
+func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOverview, error) {
+	j, err := s.queryJournal(ctx)
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
+	key, err := json.Marshal(filter)
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	value, err := j.aggregate(ctx, "overview:"+string(key), func(ctx context.Context) (any, int, error) {
+		result := UsageOverview{
+			Buckets: []SummaryBucket{},
+			Rank:    map[string][]OverviewRankRow{"model": {}, "consumer": {}, "credential": {}},
+			Models:  []string{},
+			Facets:  UsageFacets{Providers: []string{}, Endpoints: []string{}, Statuses: []int{}, Efforts: []string{}},
+		}
+		where, args := journalWhere(1, filter)
+		// usage_summary_v3 covers every column these queries touch, so all of
+		// the scans below stay index-only even on large histories.
+		from := "events INDEXED BY usage_summary_v3"
+		tx, errBegin := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if errBegin != nil {
+			return nil, 0, errBegin
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// Distinct-trace request count; additive totals in a second scan.
+		traceFrom := from
+		if where == "kind=1" {
+			traceFrom = "events INDEXED BY usage_trace"
+		} else if filter.Consumer != "" && filter == (Filter{Consumer: filter.Consumer}) {
+			traceFrom = "events INDEXED BY usage_consumer_trace"
+		} else if filter.Owner != "" && filter == (Filter{Owner: filter.Owner}) {
+			traceFrom = "events INDEXED BY usage_owner_trace"
+		}
+		if errTotal := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT trace) FROM "+traceFrom+" WHERE "+where, args...).Scan(&result.Total.Calls); errTotal != nil {
+			return nil, 0, errTotal
+		}
+		if collapsesAttempts(filter) {
+			folded := strings.Replace(where, "superseded=0", "superseded=1", 1)
+			if errFolded := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+from+" WHERE "+folded, args...).Scan(&result.Total.Failovers); errFolded != nil {
+				return nil, 0, errFolded
+			}
+		}
+		if errAgg := tx.QueryRowContext(ctx, "SELECT "+overviewGroupColumns+" FROM "+from+" WHERE "+where, args...).Scan(overviewRowDest(&result.Total)...); errAgg != nil {
+			return nil, 0, errAgg
+		}
+
+		// Trend: hourly for ranges up to two days, daily otherwise. Day buckets
+		// use UTC-midnight seconds; the client folds them into local days.
+		bucketExpr := "unixepoch(day||' 00:00:00')"
+		if !filter.From.IsZero() && !filter.To.IsZero() && filter.To.Sub(filter.From) <= 48*time.Hour {
+			bucketExpr = "hour"
+		}
+		buckets, errBuckets := tx.QueryContext(ctx, "SELECT "+bucketExpr+", COUNT(*), COALESCE(SUM(failed),0), COALESCE(SUM(total),0), COALESCE(SUM(input),0), COALESCE(SUM(output),0) FROM "+from+" WHERE "+where+" GROUP BY "+bucketExpr+" ORDER BY "+bucketExpr, args...)
+		if errBuckets != nil {
+			return nil, 0, errBuckets
+		}
+		for buckets.Next() {
+			var b SummaryBucket
+			if errScan := buckets.Scan(&b.Start, &b.Calls, &b.Failures, &b.TotalTokens, &b.InputTokens, &b.OutputTokens); errScan != nil {
+				_ = buckets.Close()
+				return nil, 0, errScan
+			}
+			b.Executions = b.Calls
+			result.Buckets = append(result.Buckets, b)
+		}
+		if errRows := buckets.Err(); errRows != nil {
+			_ = buckets.Close()
+			return nil, 0, errRows
+		}
+		_ = buckets.Close()
+
+		rankQuery := func(dimension, groupExpr, keyExpr, labelExpr string) error {
+			query := "SELECT " + keyExpr + ", " + labelExpr + ", " + overviewGroupColumns +
+				" FROM " + from + " WHERE " + where + " GROUP BY " + groupExpr +
+				" ORDER BY COALESCE(SUM(total),0) DESC, " + keyExpr + " LIMIT ?"
+			rows, errQuery := tx.QueryContext(ctx, query, append(append([]any{}, args...), overviewRankLimit)...)
+			if errQuery != nil {
+				return errQuery
+			}
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var row OverviewRankRow
+				dest := append([]any{&row.Key, &row.Label}, overviewRowDest(&row.Value)...)
+				if errScan := rows.Scan(dest...); errScan != nil {
+					return errScan
+				}
+				if row.Label == "" {
+					row.Label = row.Key
+				}
+				result.Rank[dimension] = append(result.Rank[dimension], row)
+			}
+			return rows.Err()
+		}
+		if err := rankQuery("model", "model", "model", "model"); err != nil {
+			return nil, 0, err
+		}
+		if err := rankQuery("consumer", "consumer", "consumer", "consumer"); err != nil {
+			return nil, 0, err
+		}
+		if err := rankQuery("credential", "credential_id,channel", "credential_id", "channel"); err != nil {
+			return nil, 0, err
+		}
+
+		// Model candidates pair each bare model with its serving channel so the
+		// UI can pin even-load calls; the applied model filter is excluded.
+		candidateFilter := filter
+		candidateFilter.Model = ""
+		modelWhere, modelArgs := journalWhere(1, candidateFilter)
+		models, errModels := tx.QueryContext(ctx, "SELECT model, channel FROM "+from+" WHERE "+modelWhere+" GROUP BY model, channel ORDER BY model", modelArgs...)
+		if errModels != nil {
+			return nil, 0, errModels
+		}
+		seen := map[string]bool{}
+		for models.Next() {
+			var model, channel string
+			if errScan := models.Scan(&model, &channel); errScan != nil {
+				_ = models.Close()
+				return nil, 0, errScan
+			}
+			if model != "" && !seen[model] {
+				seen[model] = true
+				result.Models = append(result.Models, model)
+			}
+			if channel != "" && !strings.HasPrefix(model, channel+"/") {
+				serving := channel + "/" + model
+				if !seen[serving] {
+					seen[serving] = true
+					result.Models = append(result.Models, serving)
+				}
+			}
+		}
+		if errRows := models.Err(); errRows != nil {
+			_ = models.Close()
+			return nil, 0, errRows
+		}
+		_ = models.Close()
+		sort.Strings(result.Models)
+
+		// Facet dropdowns only list values that exist under the other filters;
+		// each dimension ignores its own applied value. Sorting matches the
+		// standalone facets endpoint (alphabetical, "none" last naturally).
+		facetColumns := []struct {
+			dim  string
+			dest func(string)
+		}{
+			{"provider", func(v string) { result.Facets.Providers = append(result.Facets.Providers, v) }},
+			{"endpoint", func(v string) { result.Facets.Endpoints = append(result.Facets.Endpoints, v) }},
+			{"effort", func(v string) {
+				if v == "" {
+					v = "none"
+				}
+				result.Facets.Efforts = append(result.Facets.Efforts, v)
+			}},
+		}
+		for _, column := range facetColumns {
+			facetFilter := filter
+			switch column.dim {
+			case "provider":
+				facetFilter.Provider = ""
+			case "endpoint":
+				facetFilter.Endpoint = ""
+			case "effort":
+				facetFilter.Effort = ""
+			}
+			facetWhere, facetArgs := journalWhere(1, facetFilter)
+			rows, errRows := tx.QueryContext(ctx, "SELECT DISTINCT "+column.dim+" FROM "+from+" WHERE "+facetWhere+" ORDER BY "+column.dim, facetArgs...)
+			if errRows != nil {
+				return nil, 0, errRows
+			}
+			for rows.Next() {
+				var v string
+				if errScan := rows.Scan(&v); errScan != nil {
+					_ = rows.Close()
+					return nil, 0, errScan
+				}
+				if v != "" {
+					column.dest(v)
+				} else if column.dim == "effort" {
+					column.dest(v)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return nil, 0, err
+			}
+			_ = rows.Close()
+		}
+		{
+			statusFilter := filter
+			statusFilter.Status = ""
+			statusWhere, statusArgs := journalWhere(1, statusFilter)
+			rows, errRows := tx.QueryContext(ctx, "SELECT DISTINCT status FROM "+from+" WHERE "+statusWhere+" ORDER BY status", statusArgs...)
+			if errRows != nil {
+				return nil, 0, errRows
+			}
+			for rows.Next() {
+				var status int
+				if errScan := rows.Scan(&status); errScan != nil {
+					_ = rows.Close()
+					return nil, 0, errScan
+				}
+				result.Facets.Statuses = append(result.Facets.Statuses, status)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return nil, 0, err
+			}
+			_ = rows.Close()
+		}
+
+		sort.Strings(result.Facets.Providers)
+		sort.Strings(result.Facets.Endpoints)
+		sort.Strings(result.Facets.Efforts)
+		weight := 1 + len(result.Buckets) + len(result.Models)
+		for _, rows := range result.Rank {
+			weight += len(rows)
+		}
+		weight += len(result.Facets.Providers) + len(result.Facets.Endpoints) + len(result.Facets.Statuses) + len(result.Facets.Efforts)
+		return result, weight, nil
+	})
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	return value.(UsageOverview), nil
+}
+
 func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (SummaryResult, error) {
 	j, err := s.queryJournal(ctx)
 	if err != nil {
@@ -469,7 +756,7 @@ func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (Summar
 		where, args := journalWhere(1, filter)
 		// The covering index avoids a random table read per event, even when
 		// an account or time filter happens to match nearly the whole history.
-		from := "events INDEXED BY usage_summary_v2"
+		from := "events INDEXED BY usage_summary_v3"
 		tx, errBegin := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if errBegin != nil {
 			return nil, 0, errBegin

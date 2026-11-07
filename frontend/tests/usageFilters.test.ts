@@ -2,8 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import { matchesAutocompleteQuery } from '../src/components/ui/autocompleteMatching';
 import {
   buildCredentialUsagePath,
-  buildModelCandidateQuery,
-  buildUsageFilterQuery,
   resolveUsageKey,
   resolveUsageModel,
   type UsageKeyOption,
@@ -18,70 +16,7 @@ const keys: UsageKeyOption[] = [
   { label: '手机（@bob）', keyId: 'bob-phone-id' },
 ];
 
-describe('usage autocomplete candidates', () => {
-  test('candidate query ignores the applied model filter and pagination', () => {
-    const parsed = new URLSearchParams(
-      buildModelCandidateQuery(
-        'scope=contributed&model=deepseek-flash&page=3&page_size=50&channel_id=c1&credential_id=cred-1&from=2026-10-01T00%3A00%3A00.000Z',
-        'contributed',
-        'alice'
-      )
-    );
-    expect(parsed.get('model')).toBeNull();
-    expect(parsed.get('page')).toBeNull();
-    expect(parsed.get('page_size')).toBeNull();
-    expect(parsed.get('scope')).toBeNull();
-    expect(parsed.get('channel_id')).toBe('c1');
-    expect(parsed.get('credential_id')).toBe('cred-1');
-    expect(parsed.get('from')).toBe('2026-10-01T00:00:00.000Z');
-    expect(parsed.get('owner')).toBe('alice');
-    expect(parsed.get('consumer')).toBeNull();
-  });
-
-  test('candidate query equals the main filter query when no model filter is applied', () => {
-    // This equality is what lets the usage page reuse its main summary as the
-    // model candidate source instead of issuing a duplicate summary request.
-    const cases: [string, 'mine' | 'contributed' | 'site', string][] = [
-      [
-        'scope=site&channel_id=c1&consumer=bob&from=2026-10-01T00:00:00.000Z&to=2026-10-02T00:00:00.000Z',
-        'site',
-        'alice',
-      ],
-      ['key_id=k9&page=4&page_size=100', 'mine', 'alice'],
-      ['scope=contributed&key_id=k9&key=phone', 'contributed', 'alice'],
-    ];
-    for (const [query, scope, me] of cases) {
-      expect(buildModelCandidateQuery(query, scope, me)).toBe(
-        buildUsageFilterQuery(query, scope, me)
-      );
-    }
-  });
-
-  test('applying a model diverges the candidate query from the main filter query', () => {
-    const query = 'model=kimi-k3&channel_id=c1&credential_id=cred-1';
-    expect(buildModelCandidateQuery(query, 'mine', 'alice')).not.toBe(
-      buildUsageFilterQuery(query, 'mine', 'alice')
-    );
-    const main = new URLSearchParams(buildUsageFilterQuery(query, 'mine', 'alice'));
-    expect(main.get('model')).toBe('kimi-k3');
-    expect(main.get('credential_id')).toBe('cred-1');
-  });
-
-  test('pagination changes do not alter the candidate query', () => {
-    expect(buildModelCandidateQuery('model=x&page=2&page_size=100', 'mine', 'alice')).toBe(
-      buildModelCandidateQuery('model=x&page=9&page_size=50', 'mine', 'alice')
-    );
-  });
-
-  test('candidate query keeps scope identity for mine and site', () => {
-    const mine = new URLSearchParams(buildModelCandidateQuery('model=x', 'mine', 'alice'));
-    expect(mine.get('consumer')).toBe('alice');
-    expect(mine.get('owner')).toBeNull();
-    const site = new URLSearchParams(buildModelCandidateQuery('model=x', 'site', 'alice'));
-    expect(site.get('consumer')).toBeNull();
-    expect(site.get('owner')).toBeNull();
-  });
-
+describe('usage filters and autocomplete resolution', () => {
   test('partial text narrows model candidates without becoming a model filter', () => {
     expect(models.filter((model) => matchesAutocompleteQuery(model, 'FLASH'))).toEqual(
       models.slice(0, 2)
