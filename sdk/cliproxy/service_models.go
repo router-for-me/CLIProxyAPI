@@ -936,12 +936,40 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 		if resolved := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking()); resolved.Thinking != nil {
 			info.Thinking = resolved.Thinking
 		}
-		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil && staticInfo.NativeCapabilities != nil {
-			info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil {
+			if staticInfo.NativeCapabilities != nil {
+				info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+			}
+			inheritStaticModelLimits(info, staticInfo)
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+// inheritStaticModelLimits fills the context window and output limit a configured
+// model leaves unset from the catalog entry of its upstream model. Without them,
+// clients such as the Codex model list fall back to template defaults. Values
+// set in the configuration (max-context-length) win. Gemini catalog entries keep
+// their limits in InputTokenLimit and OutputTokenLimit instead.
+func inheritStaticModelLimits(info, staticInfo *ModelInfo) {
+	if info == nil || staticInfo == nil {
+		return
+	}
+	contextLength := staticInfo.ContextLength
+	if contextLength <= 0 {
+		contextLength = staticInfo.InputTokenLimit
+	}
+	maxCompletionTokens := staticInfo.MaxCompletionTokens
+	if maxCompletionTokens <= 0 {
+		maxCompletionTokens = staticInfo.OutputTokenLimit
+	}
+	if info.ContextLength <= 0 && contextLength > 0 {
+		info.ContextLength = contextLength
+	}
+	if info.MaxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+		info.MaxCompletionTokens = maxCompletionTokens
+	}
 }
 
 func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {
