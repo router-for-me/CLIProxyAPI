@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
@@ -84,9 +85,10 @@ type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
 type authSelectionEligibility struct {
-	requiredKind     string
-	credentialPolicy string
-	disallowFreeAuth bool
+	requiredKind       string
+	credentialPolicy   string
+	disallowFreeAuth   bool
+	requireCodexAPIKey bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -106,7 +108,10 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{
+		disallowFreeAuth:   disallowFreeAuthFromMetadata(opts.Metadata),
+		requireCodexAPIKey: opts.SourceFormat == sdktranslator.FormatOpenAIDecisions,
+	}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -116,6 +121,10 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if e.requireCodexAPIKey && (!strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") ||
+		auth.AuthKind() != AuthKindAPIKey || strings.TrimSpace(auth.Attributes[AttributeAPIKey]) == "") {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {

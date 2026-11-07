@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -427,26 +428,36 @@ func TestHandlerLifecycleCompletesSuccessfulRequestOnce(t *testing.T) {
 }
 
 func TestHandlerLifecycleCompletesFailedRequest(t *testing.T) {
-	model := "handler-interceptor-lifecycle-failed"
-	executor := &interceptorCaptureExecutor{
-		execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
-			return coreexecutor.Response{}, fmt.Errorf("upstream failed")
-		},
-	}
-	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
-	var completion pluginapi.RequestCompletion
-	handler.SetPluginHost(&handlerInterceptorTestHost{
-		completeRequest: func(_ context.Context, got pluginapi.RequestCompletion) {
-			completion = got
-		},
-	})
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "executor failure", err: fmt.Errorf("upstream failed")},
+		{name: "native upstream response", err: &helps.UpstreamResponseError{Code: http.StatusBadRequest, Body: []byte(`{"error":{"message":"invalid question"}}`)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := t.Name()
+			executor := &interceptorCaptureExecutor{
+				execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+					return coreexecutor.Response{}, tc.err
+				},
+			}
+			handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+			var completion pluginapi.RequestCompletion
+			handler.SetPluginHost(&handlerInterceptorTestHost{
+				completeRequest: func(_ context.Context, got pluginapi.RequestCompletion) {
+					completion = got
+				},
+			})
 
-	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
-	if errMsg == nil {
-		t.Fatal("ExecuteWithAuthManager() error = nil")
-	}
-	if completion.Outcome != pluginapi.RequestCompletionFailed || completion.Error == "" {
-		t.Fatalf("completion = %#v", completion)
+			_, _, errMsg := handler.ExecuteWithAuthManager(t.Context(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
+			if errMsg == nil {
+				t.Fatal("ExecuteWithAuthManager() error = nil")
+			}
+			if completion.Outcome != pluginapi.RequestCompletionFailed || completion.Error == "" {
+				t.Fatalf("completion = %#v", completion)
+			}
+		})
 	}
 }
 
