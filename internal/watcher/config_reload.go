@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 
 	log "github.com/sirupsen/logrus"
@@ -92,6 +95,98 @@ func (w *Watcher) reloadConfigIfChanged() {
 	}
 }
 
+func (w *Watcher) rebaseAuthDirStateLocked(nextAuthDir string) {
+	resolvedNext := strings.TrimSpace(nextAuthDir)
+	if resolvedNext == "" {
+		return
+	}
+	if resolved, errResolve := util.ResolveAuthDir(resolvedNext); errResolve == nil && strings.TrimSpace(resolved) != "" {
+		resolvedNext = resolved
+	}
+	rebasedKey := func(trackedPath string) (string, bool) {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), resolvedNext) {
+			return "", false
+		}
+		target := w.normalizeAuthPath(filepath.Join(resolvedNext, filepath.Base(trackedPath)))
+		return target, target != "" && target != trackedPath
+	}
+	for trackedPath, set := range w.fileAuthsByPath {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.fileAuthsByPath, trackedPath)
+			w.fileAuthsByPath[target] = set
+		}
+	}
+	for trackedPath, hash := range w.lastAuthHashes {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.lastAuthHashes, trackedPath)
+			w.lastAuthHashes[target] = hash
+		}
+	}
+	for trackedPath, content := range w.lastAuthContents {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.lastAuthContents, trackedPath)
+			w.lastAuthContents[target] = content
+		}
+	}
+	for trackedPath, obs := range w.fileObservations {
+		if target, changed := rebasedKey(trackedPath); changed {
+			delete(w.fileObservations, trackedPath)
+			if obs > w.fileObservations[target] {
+				w.fileObservations[target] = obs
+			}
+		}
+	}
+	rebaseAuthMapPaths := func(authMap map[string]*coreauth.Auth) {
+		for _, existing := range authMap {
+			if existing == nil || len(existing.Attributes) == 0 {
+				continue
+			}
+			rebased := false
+			for _, key := range []string{coreauth.AttributePath, coreauth.AttributeSource} {
+				raw := strings.TrimSpace(existing.Attributes[key])
+				if raw == "" || strings.HasPrefix(raw, "config:") {
+					continue
+				}
+				if w.matchesAuthDir(filepath.Dir(raw), resolvedNext) {
+					target := filepath.Join(resolvedNext, filepath.Base(raw))
+					if existing.Attributes[key] != target {
+						existing.Attributes[key] = target
+						rebased = true
+					}
+				}
+			}
+			if rebased {
+				existing.ClearFileSnapshot()
+			}
+		}
+	}
+	rebaseAuthMapPaths(w.currentAuths)
+	rebaseAuthMapPaths(w.pendingProviderReloadAuths)
+}
+
+func (w *Watcher) purgeStaleAuthDirStateLocked(nextAuthDir string) {
+	for _, existing := range w.currentAuths {
+		if existing != nil && existing.HasFileSnapshot() && !w.matchesAuthDir(filepath.Dir(existing.FileSnapshotPath()), nextAuthDir) {
+			existing.InvalidateFileSnapshot()
+		}
+	}
+	for trackedPath := range w.fileAuthsByPath {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.fileAuthsByPath, trackedPath)
+		}
+	}
+	for trackedPath := range w.lastAuthHashes {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.lastAuthHashes, trackedPath)
+		}
+	}
+	for trackedPath := range w.lastAuthContents {
+		if !w.matchesAuthDir(filepath.Dir(trackedPath), nextAuthDir) {
+			delete(w.lastAuthContents, trackedPath)
+		}
+	}
+}
+
 func (w *Watcher) reloadConfig() bool {
 	log.Debug("=========================== CONFIG RELOAD ============================")
 	log.Debugf("starting config reload from: %s", w.configPath)
@@ -112,12 +207,30 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
+	w.authRescanMu.Lock()
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
+	oldAuthDir := w.authDir
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
+	candidateAuthDir := strings.TrimSpace(newConfig.AuthDir)
+	realDirSwitch := false
+	if candidateAuthDir != "" {
+		w.authDir = candidateAuthDir
+		if oldAuthDir != "" {
+			if !w.matchesAuthDir(oldAuthDir, candidateAuthDir) {
+				realDirSwitch = true
+				w.authDirGeneration++
+				w.purgeStaleAuthDirStateLocked(candidateAuthDir)
+			} else if oldAuthDir != candidateAuthDir {
+				w.rebaseAuthDirStateLocked(candidateAuthDir)
+			}
+		}
+	}
+	nextAuthDir := w.authDir
 	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
@@ -141,7 +254,10 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
-	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
+	authDirChanged := oldConfig == nil || realDirSwitch
+	if nextAuthDir != "" {
+		w.rewatchAuthDir(nextAuthDir)
+	}
 	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || !reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged)
 

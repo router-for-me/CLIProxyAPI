@@ -26,6 +26,126 @@ func matchProvider(provider string, targets []string) (string, bool) {
 	return p, false
 }
 
+func (w *Watcher) currentAuthDir() string {
+	if w == nil {
+		return ""
+	}
+	w.clientsMutex.RLock()
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	return authDir
+}
+
+func sameDirectoryIdentity(a, b string) bool {
+	infoA, errA := os.Stat(a)
+	if errA != nil {
+		return false
+	}
+	infoB, errB := os.Stat(b)
+	if errB != nil {
+		return false
+	}
+	return os.SameFile(infoA, infoB)
+}
+
+func (w *Watcher) matchesAuthDir(dir, targetAuthDir string) bool {
+	return w.sameNormalizedAuthPath(dir, targetAuthDir) || sameDirectoryIdentity(dir, targetAuthDir)
+}
+
+func (w *Watcher) isCurrentAuthDir(dir string) bool {
+	if w == nil {
+		return false
+	}
+	w.clientsMutex.RLock()
+	authDir := w.authDir
+	watchedDir := w.watchedAuthDir
+	w.clientsMutex.RUnlock()
+	if w.matchesAuthDir(dir, authDir) {
+		return true
+	}
+	if watchedDir != "" && w.matchesAuthDir(authDir, watchedDir) && w.matchesAuthDir(dir, watchedDir) {
+		return true
+	}
+	return false
+}
+
+func (w *Watcher) rebaseAuthFilePathLocked(path, authDir string) string {
+	trimmedPath := strings.TrimSpace(path)
+	trimmedAuthDir := strings.TrimSpace(authDir)
+	if trimmedPath == "" || trimmedAuthDir == "" {
+		return trimmedPath
+	}
+	dir := filepath.Dir(trimmedPath)
+	if w.matchesAuthDir(dir, trimmedAuthDir) {
+		return filepath.Join(trimmedAuthDir, filepath.Base(trimmedPath))
+	}
+	if w.watchedAuthDir != "" && w.matchesAuthDir(trimmedAuthDir, w.watchedAuthDir) && w.matchesAuthDir(dir, w.watchedAuthDir) {
+		return filepath.Join(trimmedAuthDir, filepath.Base(trimmedPath))
+	}
+	return trimmedPath
+}
+
+func (w *Watcher) rebaseAuthFilePath(path string) string {
+	if w == nil {
+		return path
+	}
+	w.clientsMutex.RLock()
+	rebased := w.rebaseAuthFilePathLocked(path, w.authDir)
+	w.clientsMutex.RUnlock()
+	return rebased
+}
+
+func (w *Watcher) rewatchAuthDir(nextAuthDir string) {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return
+	}
+	nextTrimmed := strings.TrimSpace(nextAuthDir)
+	if nextTrimmed == "" {
+		return
+	}
+	w.clientsMutex.RLock()
+	prevWatched := strings.TrimSpace(w.watchedAuthDir)
+	w.clientsMutex.RUnlock()
+	if prevWatched == "" || prevWatched == nextTrimmed {
+		return
+	}
+	if errMkdir := os.MkdirAll(nextTrimmed, 0o700); errMkdir != nil {
+		log.Debugf("failed to ensure updated auth directory %s: %v", nextTrimmed, errMkdir)
+	}
+	removePrev := !w.matchesAuthDir(prevWatched, filepath.Dir(w.configPath))
+	if w.matchesAuthDir(prevWatched, nextTrimmed) {
+		// For equivalent directory aliases (such as symlink -> real dir), remove the old
+		// alias first so platforms that deduplicate watches by inode do not drop the watch
+		// when removing prevWatched after adding nextTrimmed.
+		if removePrev {
+			if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
+				log.Debugf("failed to remove old auth directory alias watch %s: %v", prevWatched, errRemove)
+			}
+		}
+		if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
+			log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
+			if removePrev {
+				_ = w.watcher.Add(prevWatched)
+			}
+			return
+		}
+	} else {
+		if errAdd := w.watcher.Add(nextTrimmed); errAdd != nil {
+			log.Errorf("failed to watch updated auth directory %s: %v", nextTrimmed, errAdd)
+			return
+		}
+		if removePrev {
+			if errRemove := w.watcher.Remove(prevWatched); errRemove != nil {
+				log.Debugf("failed to remove old auth directory watch %s: %v", prevWatched, errRemove)
+			}
+		}
+	}
+	w.clientsMutex.Lock()
+	w.watchedAuthDir = nextTrimmed
+	w.clientsMutex.Unlock()
+	log.Debugf("watching updated auth directory: %s", nextTrimmed)
+}
+
 func (w *Watcher) start(ctx context.Context) error {
 	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
 		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
@@ -33,11 +153,15 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+	authDir := w.currentAuthDir()
+	if errAddAuthDir := w.watcher.Add(authDir); errAddAuthDir != nil {
+		log.Errorf("failed to watch auth directory %s: %v", authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
+	w.clientsMutex.Lock()
+	w.watchedAuthDir = strings.TrimSpace(authDir)
+	w.clientsMutex.Unlock()
+	log.Debugf("watching auth directory: %s", authDir)
 
 	go w.processEvents(ctx)
 
@@ -69,10 +193,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := filepath.Dir(normalizedName) == normalizedAuthDir && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON := w.isCurrentAuthDir(filepath.Dir(normalizedName)) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -91,6 +214,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Handle auth directory changes incrementally (.json only)
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
+	if !w.isCurrentAuthDir(filepath.Dir(normalizedName)) {
+		return
+	}
+	event.Name = w.rebaseAuthFilePath(event.Name)
+	normalizedName = w.normalizeAuthPath(event.Name)
 	w.observeAuthFile(event.Name)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
@@ -146,6 +274,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 // observeAuthFile invalidates in-flight scans even if hash or content deduplication
 // suppresses an update. It must not invalidate an otherwise valid queued auth event.
 func (w *Watcher) observeAuthFile(path string) {
+	path = w.rebaseAuthFilePath(path)
 	normalized := w.normalizeAuthPath(path)
 	if normalized == "" {
 		return
@@ -166,6 +295,7 @@ func (w *Watcher) observeAuthFile(path string) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
+	path = w.rebaseAuthFilePath(path)
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		return false, errRead
@@ -187,6 +317,7 @@ func (w *Watcher) authFileUnchanged(path string) (bool, error) {
 }
 
 func (w *Watcher) isKnownAuthFile(path string) bool {
+	path = w.rebaseAuthFilePath(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.RLock()
 	defer w.clientsMutex.RUnlock()
