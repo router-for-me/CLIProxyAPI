@@ -187,13 +187,13 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						} else {
 							_ = partDoc.Set(resultPath, toolResult.Result)
 						}
-						partItems = append(partItems, partDoc.Bytes())
 						for _, img := range toolResult.Images {
-							imagePartDoc := ojson.NewDocString(`{"inline_data":{"mime_type":"","data":""}}`)
-							_ = imagePartDoc.Set("inline_data.mime_type", img.MimeType)
-							_ = imagePartDoc.Set("inline_data.data", img.Data)
-							partItems = append(partItems, imagePartDoc.Bytes())
+							imagePartDoc := ojson.NewDocString(`{"inlineData":{"mimeType":"","data":""}}`)
+							_ = imagePartDoc.Set("inlineData.mimeType", img.MimeType)
+							_ = imagePartDoc.Set("inlineData.data", img.Data)
+							_ = partDoc.SetRawBytes("functionResponse.parts.-1", imagePartDoc.Bytes())
 						}
+						partItems = append(partItems, partDoc.Bytes())
 
 					case "image", "document", "container_upload":
 						if part := claudeBase64InlineData(contentResult.Get("source")); part != nil {

@@ -2154,6 +2154,56 @@ func TestDevinExecutor_ResponsesToolsFilterAndObfuscate(t *testing.T) {
 	}
 }
 
+func TestDevinExecutor_PrepareDevinHTTPRequest_ObfuscatesCodeModeExecDescription(t *testing.T) {
+	responsesPayload := []byte(`{
+		"model": "devin/claude-opus-5-5",
+		"tools": [
+			{
+				"type": "custom",
+				"name": "exec",
+				"description": "Run JavaScript code to orchestrate/compose tool calls\n### exec_command\nRuns a command in a PTY, returning output or a session ID for ongoing interaction.\n### write_stdin\nWrites characters to an existing unified exec session and returns recent output.\n"
+			}
+		],
+		"input": "Reply with exactly: OK"
+	}`)
+
+	exec := NewDevinExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "test-session-token",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "devin/claude-opus-5-5",
+		Payload: responsesPayload,
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: responsesPayload,
+	}
+
+	httpReq, _, logBody, errPrep := exec.prepareDevinHTTPRequest(context.Background(), auth, req, opts)
+	if errPrep != nil {
+		t.Fatalf("prepareDevinHTTPRequest failed: %v", errPrep)
+	}
+	bodyBytes, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	flag, wireBytes, errUnwrap := helps.ReadConnectFrame(bytes.NewReader(bodyBytes))
+	if errUnwrap != nil || flag != 0 {
+		t.Fatalf("unwrap connect frame: flag=%d err=%v", flag, errUnwrap)
+	}
+	for label, raw := range map[string]string{"wire": string(wireBytes), "log": string(logBody)} {
+		if strings.Contains(raw, "a session ID") || strings.Contains(raw, "to an existing unified") {
+			t.Fatalf("%s still contains unsanitized exec_command/write_stdin phrase: %s", label, raw)
+		}
+		if !strings.Contains(raw, "an session ID") || !strings.Contains(raw, "to a existing unified") {
+			t.Fatalf("%s missing obfuscated exec_command/write_stdin phrase: %s", label, raw)
+		}
+	}
+}
+
 func TestDevinExecutor_ToolResultImagesInInteractionsPayload(t *testing.T) {
 	interactionsJSON := []byte(`{
 		"model": "devin/swe-2",

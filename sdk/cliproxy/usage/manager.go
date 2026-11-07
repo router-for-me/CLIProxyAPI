@@ -84,6 +84,10 @@ type Record struct {
 // accepted upstream stream that ended without its terminal frame.
 const FailureStreamTruncatedCode = "stream_truncated"
 
+// FailureRequestScopedCode marks failures belonging to the request rather than
+// the selected credential, including local capability validation failures.
+const FailureRequestScopedCode = "request_scoped"
+
 // Failure holds HTTP failure metadata for an upstream request attempt.
 type Failure struct {
 	StatusCode int
@@ -116,6 +120,8 @@ type Detail struct {
 	VideoInputTokens         *int64
 	FileInputTokens          *int64
 	CachedTextTokens         *int64
+	CachedImageTokens        *int64
+	CachedAudioTokens        *int64
 	TextOutputTokens         *int64
 	ImageOutputTokens        *int64
 	AudioOutputTokens        *int64
@@ -777,6 +783,7 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
 		m.dispatch(item)

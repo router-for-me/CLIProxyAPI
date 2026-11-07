@@ -54,6 +54,8 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 	switch method {
 	case pluginabi.MethodPluginRegister:
 		return l.callLifecycle(request, false)
+	case pluginabi.MethodPluginQuiesce:
+		return marshalRPCError("unknown_method", "unknown method "+method), nil
 	case pluginabi.MethodPluginReconfigure:
 		return l.callLifecycle(request, true)
 	case pluginabi.MethodThinkingIdentifier:

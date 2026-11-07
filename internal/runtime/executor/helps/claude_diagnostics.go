@@ -14,6 +14,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
 
 const (
@@ -21,7 +22,18 @@ const (
 	claudeDiagnosticsCleanupPeriod  = 15 * time.Minute
 	claudeDiagnosticsMaxEntries     = 4096
 	claudeDiagnosticsEvictBatchSize = 256
+	claudeSessionDatePinKVPrefix    = "cpa:claude:session-date-pin:"
 )
+
+type claudeSessionDatePinKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error)
+}
+
+var currentClaudeSessionDatePinKVClient = func() (claudeSessionDatePinKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
 
 var (
 	claudeRequestIDPattern = regexp.MustCompile(`^req_[A-Za-z0-9_-]{1,36}$`)
@@ -145,24 +157,104 @@ func ClaudeSessionDatePinKey(sessionID string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// LookupClaudeSessionDatePin returns the retained pinned date for a session
-// without creating or refreshing it. Non-positive retention returns "".
-func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
-	if retention <= 0 {
+func claudeSessionDatePinKVKey(pinKey string) string {
+	if pinKey == "" {
 		return ""
 	}
+	return claudeSessionDatePinKVPrefix + pinKey
+}
+
+func normalizeClaudePinnedDate(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) != len("2006-01-02") {
+		return ""
+	}
+	if _, errParse := time.Parse("2006-01-02", trimmed); errParse != nil {
+		return ""
+	}
+	return trimmed
+}
+
+func lookupClaudeSessionDatePinLocked(pinKey string, now time.Time) string {
+	if pinKey == "" {
+		return ""
+	}
+	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
+	if !okPin {
+		return ""
+	}
+	if !pin.expiresAt.IsZero() && now.After(pin.expiresAt) {
+		return ""
+	}
+	return normalizeClaudePinnedDate(pin.date)
+}
+
+func storePermanentClaudeSessionDatePinLocked(pinKey, date string, now time.Time) {
+	if pinKey == "" || date == "" {
+		return
+	}
+	cleanupClaudeDiagnosticsLocked(now)
+	if _, okPin := claudeDiagnosticsState.datePins[pinKey]; !okPin {
+		evictClaudeSessionDatePinsLocked()
+	}
+	claudeDiagnosticsState.datePins[pinKey] = claudeSessionDatePin{
+		date:      date,
+		expiresAt: time.Time{},
+	}
+}
+
+func storePermanentClaudeSessionDatePin(pinKey, date string) {
+	if pinKey == "" || date == "" {
+		return
+	}
+	now := time.Now()
+	claudeDiagnosticsState.Lock()
+	storePermanentClaudeSessionDatePinLocked(pinKey, date, now)
+	claudeDiagnosticsState.Unlock()
+}
+
+// IsClaudeSessionDatePinKVActive reports whether a persistent KV store (local
+// bbolt or Home KV) is configured as the backing store for Claude session date pins.
+func IsClaudeSessionDatePinKVActive() bool {
+	_, kvMode, _ := currentClaudeSessionDatePinKVClient()
+	return kvMode
+}
+
+// LookupClaudeSessionDatePin returns the retained pinned date for a session
+// without creating or refreshing it. When a KV store is active, pins are stored
+// permanently and retention is ignored; otherwise non-positive retention returns "".
+func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
 	pinKey := ClaudeSessionDatePinKey(sessionID)
 	if pinKey == "" {
+		return ""
+	}
+	client, kvMode, errClient := currentClaudeSessionDatePinKVClient()
+	if kvMode {
+		if errClient == nil && client != nil {
+			raw, found, errGet := client.KVGet(context.Background(), claudeSessionDatePinKVKey(pinKey))
+			if errGet == nil {
+				if !found {
+					return ""
+				}
+				pinned := normalizeClaudePinnedDate(string(raw))
+				if pinned != "" {
+					storePermanentClaudeSessionDatePin(pinKey, pinned)
+				}
+				return pinned
+			}
+		}
+		now := time.Now()
+		claudeDiagnosticsState.Lock()
+		defer claudeDiagnosticsState.Unlock()
+		return lookupClaudeSessionDatePinLocked(pinKey, now)
+	}
+	if retention <= 0 {
 		return ""
 	}
 	now := time.Now()
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
-	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
-	if !okPin || now.After(pin.expiresAt) {
-		return ""
-	}
-	return pin.date
+	return lookupClaudeSessionDatePinLocked(pinKey, now)
 }
 
 // IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
@@ -237,11 +329,12 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 
 // PinClaudeSessionDate returns the calendar date pinned for a session,
 // recording date on the first call and returning the pinned value on later
-// calls. A non-positive retention keeps the legacy continuity-scoped pin,
-// whose lifetime follows claudeDiagnosticsTTL. A positive retention stores
-// the pin separately under a session-only key, so continuity expiry or a
-// credential switch cannot re-anchor it before the retention expires. An
-// unknown continuity key returns date unchanged, matching per-request dates.
+// calls. When a KV store is active, the pin is persisted permanently under a
+// session-only KV key and retention is ignored. Otherwise, a non-positive
+// retention keeps the legacy continuity-scoped pin (whose lifetime follows
+// claudeDiagnosticsTTL) and a positive retention stores the pin in memory
+// under a session-only key for retention. An unknown continuity key returns
+// date unchanged, matching per-request dates.
 func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) string {
 	key = strings.TrimSpace(key)
 	sessionID = strings.TrimSpace(sessionID)
@@ -249,13 +342,90 @@ func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) 
 	if key == "" || date == "" {
 		return date
 	}
-	now := time.Now()
+	client, kvMode, errClient := currentClaudeSessionDatePinKVClient()
 	claudeDiagnosticsState.Lock()
-	defer claudeDiagnosticsState.Unlock()
 	entry, okEntry := claudeDiagnosticsState.entries[key]
 	if !okEntry {
+		claudeDiagnosticsState.Unlock()
 		return date
 	}
+	if sessionID != "" && kvMode {
+		pinKey := ClaudeSessionDatePinKey(sessionID)
+		now := time.Now()
+		targetDate := normalizeClaudePinnedDate(date)
+		if l1Date := lookupClaudeSessionDatePinLocked(pinKey, now); l1Date != "" {
+			targetDate = l1Date
+		}
+		if errClient == nil && client != nil {
+			claudeDiagnosticsState.Unlock()
+			ctx := context.Background()
+			kvKey := claudeSessionDatePinKVKey(pinKey)
+			raw, found, errGet := client.KVGet(ctx, kvKey)
+			if errGet == nil && found {
+				if pinned := normalizeClaudePinnedDate(string(raw)); pinned != "" {
+					storePermanentClaudeSessionDatePin(pinKey, pinned)
+					return pinned
+				}
+				if targetDate == "" {
+					return date
+				}
+				swapped, errCAS := client.KVCompareAndSwap(ctx, kvKey, raw, true, []byte(targetDate), 0)
+				if errCAS == nil && swapped {
+					storePermanentClaudeSessionDatePin(pinKey, targetDate)
+					return targetDate
+				}
+				if errCAS == nil && !swapped {
+					if rawRace, foundRace, errRace := client.KVGet(ctx, kvKey); errRace == nil && foundRace {
+						if pinned := normalizeClaudePinnedDate(string(rawRace)); pinned != "" {
+							storePermanentClaudeSessionDatePin(pinKey, pinned)
+							return pinned
+						}
+					}
+				}
+			} else if errGet == nil && !found {
+				if targetDate == "" {
+					return date
+				}
+				written, errSet := client.KVSetNX(ctx, kvKey, []byte(targetDate), 0)
+				if errSet == nil && written {
+					storePermanentClaudeSessionDatePin(pinKey, targetDate)
+					return targetDate
+				}
+				if errSet == nil && !written {
+					if rawRace, foundRace, errRace := client.KVGet(ctx, kvKey); errRace == nil && foundRace {
+						if pinned := normalizeClaudePinnedDate(string(rawRace)); pinned != "" {
+							storePermanentClaudeSessionDatePin(pinKey, pinned)
+							return pinned
+						}
+					}
+				}
+			}
+			claudeDiagnosticsState.Lock()
+			entry, okEntry = claudeDiagnosticsState.entries[key]
+			if !okEntry {
+				claudeDiagnosticsState.Unlock()
+				return date
+			}
+			now = time.Now()
+			if l1Date := lookupClaudeSessionDatePinLocked(pinKey, now); l1Date != "" {
+				targetDate = l1Date
+			}
+		}
+		if targetDate != "" {
+			storePermanentClaudeSessionDatePinLocked(pinKey, targetDate, now)
+			if entry.pinnedDate == "" {
+				entry.pinnedDate = targetDate
+				claudeDiagnosticsState.entries[key] = entry
+			}
+			claudeDiagnosticsState.Unlock()
+			return targetDate
+		}
+		claudeDiagnosticsState.Unlock()
+		return date
+	}
+	defer claudeDiagnosticsState.Unlock()
+
+	now := time.Now()
 	if retention <= 0 || sessionID == "" {
 		if entry.pinnedDate == "" {
 			entry.pinnedDate = date
@@ -270,7 +440,7 @@ func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) 
 	if !okPin {
 		evictClaudeSessionDatePinsLocked()
 	}
-	if !okPin || now.After(pin.expiresAt) {
+	if !okPin || (!pin.expiresAt.IsZero() && now.After(pin.expiresAt)) {
 		pin.date = date
 	}
 	pin.expiresAt = now.Add(retention)
@@ -341,7 +511,7 @@ func cleanupClaudeDiagnosticsLocked(now time.Time) {
 		}
 	}
 	for key, pin := range claudeDiagnosticsState.datePins {
-		if now.After(pin.expiresAt) {
+		if !pin.expiresAt.IsZero() && now.After(pin.expiresAt) {
 			delete(claudeDiagnosticsState.datePins, key)
 		}
 	}
@@ -363,6 +533,11 @@ func evictClaudeSessionDatePinsLocked() {
 		candidates = append(candidates, candidate{key: key, expiresAt: pin.expiresAt})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		iZero := candidates[i].expiresAt.IsZero()
+		jZero := candidates[j].expiresAt.IsZero()
+		if iZero != jZero {
+			return !iZero
+		}
 		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
 	})
 	count := min(claudeDiagnosticsEvictBatchSize, len(candidates))

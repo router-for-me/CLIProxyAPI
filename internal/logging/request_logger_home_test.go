@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
 
 type stubHomeRequestLogClient struct {
@@ -346,6 +349,70 @@ func TestFileRequestLogger_HomeEnabled_ForwardsStreamingRequestID(t *testing.T) 
 	}
 	if got.RequestLog == "" {
 		t.Fatalf("request_log empty, want non-empty")
+	}
+}
+
+func TestFileRequestLogger_HomeEnabled_ForwardsStreamingAPIErrorResponses(t *testing.T) {
+	original := currentHomeRequestLogClient
+	defer func() {
+		currentHomeRequestLogClient = original
+	}()
+
+	stub := &stubHomeRequestLogClient{heartbeatOK: true}
+	currentHomeRequestLogClient = func() homeRequestLogClient {
+		return stub
+	}
+
+	logsDir := t.TempDir()
+	logger := NewFileRequestLogger(true, logsDir, "", 0)
+	logger.SetHomeEnabled(true)
+
+	writer, errLog := logger.LogStreamingRequest(
+		"/v1/messages",
+		http.MethodPost,
+		map[string][]string{"Content-Type": {"application/json"}},
+		[]byte(`{"messages":[{"role":"user","content":"test"}]}`),
+		"stream-req-err-1",
+	)
+	if errLog != nil {
+		t.Fatalf("LogStreamingRequest error: %v", errLog)
+	}
+
+	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+		t.Fatalf("WriteStatus(200) error: %v", errStatus)
+	}
+	writer.WriteChunkAsync([]byte("event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"refusal\"}}\n\n"))
+	if errStatus := writer.WriteStatus(http.StatusBadRequest, nil); errStatus != nil {
+		t.Fatalf("WriteStatus(400) error: %v", errStatus)
+	}
+	if errAPI := writer.WriteAPIResponseErrors([]*interfaces.ErrorMessage{
+		{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New("claude refusal (cyber): blocked by policy"),
+		},
+	}); errAPI != nil {
+		t.Fatalf("WriteAPIResponseErrors error: %v", errAPI)
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatalf("Close error: %v", errClose)
+	}
+
+	if len(stub.pushed) != 1 {
+		t.Fatalf("home pushed records = %d, want 1", len(stub.pushed))
+	}
+
+	var got homeRequestLogPayload
+	if errUnmarshal := json.Unmarshal(stub.pushed[0], &got); errUnmarshal != nil {
+		t.Fatalf("unmarshal payload: %v", errUnmarshal)
+	}
+	if !strings.Contains(got.RequestLog, "=== API ERROR RESPONSE ===") {
+		t.Fatalf("forwarded request_log missing API ERROR RESPONSE section: %s", got.RequestLog)
+	}
+	if !strings.Contains(got.RequestLog, "claude refusal (cyber): blocked by policy") {
+		t.Fatalf("forwarded request_log missing classified refusal message: %s", got.RequestLog)
+	}
+	if !strings.Contains(got.RequestLog, "Status: 400") {
+		t.Fatalf("forwarded request_log missing overridden Status: 400: %s", got.RequestLog)
 	}
 }
 

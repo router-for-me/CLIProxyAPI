@@ -103,7 +103,13 @@ type siwcTokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 }
 
-func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clientID, deviceID string, requireIDToken bool) (*CodexSIWCTokenData, error) {
+func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clientID, deviceID string, requireIDToken bool) (result *CodexSIWCTokenData, errResult error) {
+	stage := "request-create"
+	defer func() {
+		if form.Get("grant_type") == "refresh_token" && errResult != nil && !isNonRetryableRefreshErr(errResult) {
+			errResult = &RefreshOutcomeUnknownError{Stage: stage, Cause: errResult}
+		}
+	}()
 	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, siwcTokenEndpointURL, strings.NewReader(form.Encode()))
 	if errReq != nil {
 		return nil, fmt.Errorf("failed to create SIWC token request: %w", errReq)
@@ -111,7 +117,12 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, errDo := o.httpClient.Do(req)
+	stage = "transport"
+	request := o.httpClient.Do
+	if form.Get("grant_type") == "refresh_token" {
+		request = o.doRefreshRequest
+	}
+	resp, errDo := request(req)
 	if errDo != nil {
 		return nil, fmt.Errorf("SIWC token request failed: %w", errDo)
 	}
@@ -121,14 +132,17 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 		}
 	}()
 
+	stage = "response-read"
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
 		return nil, fmt.Errorf("failed to read SIWC token response: %w", errRead)
 	}
 	if resp.StatusCode != http.StatusOK {
+		stage = "response-status"
 		return nil, fmt.Errorf("OpenAI OAuth token request failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	stage = "response-decode"
 	var tokenResp siwcTokenResponse
 	if errUnmarshal := json.Unmarshal(body, &tokenResp); errUnmarshal != nil {
 		return nil, fmt.Errorf("failed to parse SIWC token response: %w", errUnmarshal)
@@ -263,7 +277,9 @@ func (o *CodexAuth) RefreshSIWCTokens(ctx context.Context, refreshToken, clientI
 			"refresh_token": {refreshToken},
 			"resource":      {SIWCResource},
 		}
-		return o.requestSIWCToken(refreshCtx, form, clientID, deviceID, false)
+		return journalRefresh(refreshCtx, o.journal(ctx), clientID, refreshToken, func() (*CodexSIWCTokenData, error) {
+			return o.requestSIWCToken(refreshCtx, form, clientID, deviceID, false)
+		}, decodeSIWCRefreshReceipt)
 	})
 	if errSF != nil {
 		return nil, WrapSIWCRefreshError(errSF)

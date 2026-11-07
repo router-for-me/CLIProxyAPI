@@ -398,3 +398,97 @@ func TestStreamCallbacksKeepPlainErrorStrings(t *testing.T) {
 		t.Fatalf("plain stream error = %v, want boom", chunk.Err)
 	}
 }
+
+func TestPluginCountTokensNotImplementedDoesNotTriggerCooldown(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+
+	_, errDecode := decodeEnvelopeResult[pluginapi.ExecutorResponse](pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:       "not_implemented",
+			Message:    "count-tokens/http-request are not implemented yet",
+			HTTPStatus: http.StatusNotImplemented,
+		},
+	})
+	if errDecode == nil {
+		t.Fatal("decodeEnvelopeResult returned nil error")
+	}
+
+	const (
+		provider = "kiro-plugin-count-tokens-501"
+		model    = "claude-opus-5.5"
+		authID   = "kiro-auth-count-tokens-501"
+	)
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "kiro-plugin-count-tokens-501"})
+	host := newHostWithRecords(executorRecord)
+	exec := &fakeExecutor{
+		identifier: provider,
+		countTokens: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{}, errDecode
+		},
+		execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"id":"msg_1","type":"message","content":[{"type":"text","text":"ok"}]}`)}, nil
+		},
+	}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatClaude},
+		[]sdktranslator.Format{sdktranslator.FormatClaude},
+	)
+	adapter.provider = provider
+
+	authMgr := coreauth.NewManager(nil, nil, nil)
+	authMgr.RegisterExecutor(adapter)
+	auth := &coreauth.Auth{
+		ID:         authID,
+		Provider:   provider,
+		Status:     coreauth.StatusActive,
+		FileName:   "kiro-auth-count-tokens-501.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+	if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register auth: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	req := coreexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"claude-opus-5.5","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, errCount := authMgr.ExecuteCount(context.Background(), []string{provider}, req, opts)
+		if errCount == nil {
+			t.Fatalf("attempt %d: ExecuteCount returned nil error, want 501", attempt)
+		}
+		var sc interface{ StatusCode() int }
+		if !errors.As(errCount, &sc) || sc.StatusCode() != http.StatusNotImplemented {
+			t.Fatalf("attempt %d: ExecuteCount status = %v, want 501 (%v)", attempt, sc, errCount)
+		}
+	}
+
+	updated, okAuth := authMgr.GetByID(authID)
+	if !okAuth || updated == nil {
+		t.Fatalf("GetByID(%q) missing", authID)
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth marked unavailable after count_tokens 501: %+v", updated)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("model state after count_tokens 501 = %+v, want nil", state)
+	}
+
+	resp, errExec := authMgr.Execute(context.Background(), []string{provider}, req, opts)
+	if errExec != nil {
+		t.Fatalf("Execute after count_tokens 501 failed: %v", errExec)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute returned empty payload")
+	}
+}

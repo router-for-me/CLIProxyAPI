@@ -122,6 +122,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		VideoInputTokens:         coreusage.CloneInt64Ptr(usageDetail.VideoInputTokens),
 		FileInputTokens:          coreusage.CloneInt64Ptr(usageDetail.FileInputTokens),
 		CachedTextTokens:         coreusage.CloneInt64Ptr(usageDetail.CachedTextTokens),
+		CachedImageTokens:        coreusage.CloneInt64Ptr(usageDetail.CachedImageTokens),
+		CachedAudioTokens:        coreusage.CloneInt64Ptr(usageDetail.CachedAudioTokens),
 		TextOutputTokens:         coreusage.CloneInt64Ptr(usageDetail.TextOutputTokens),
 		ImageOutputTokens:        coreusage.CloneInt64Ptr(usageDetail.ImageOutputTokens),
 		AudioOutputTokens:        coreusage.CloneInt64Ptr(usageDetail.AudioOutputTokens),
@@ -282,6 +284,8 @@ type tokenStats struct {
 	VideoInputTokens         *int64 `json:"video_input_tokens,omitempty"`
 	FileInputTokens          *int64 `json:"file_input_tokens,omitempty"`
 	CachedTextTokens         *int64 `json:"cached_text_tokens,omitempty"`
+	CachedImageTokens        *int64 `json:"cached_image_tokens,omitempty"`
+	CachedAudioTokens        *int64 `json:"cached_audio_tokens,omitempty"`
 	TextOutputTokens         *int64 `json:"text_output_tokens,omitempty"`
 	ImageOutputTokens        *int64 `json:"image_output_tokens,omitempty"`
 	AudioOutputTokens        *int64 `json:"audio_output_tokens,omitempty"`

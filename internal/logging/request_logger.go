@@ -118,6 +118,9 @@ type StreamingLogWriter interface {
 	//   - error: An error if writing fails, nil otherwise
 	WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error
 
+	// WriteAPIResponseErrors writes upstream API error entries to the log.
+	WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error
+
 	// SetFirstChunkTimestamp sets the TTFB timestamp captured when first chunk was received.
 	//
 	// Parameters:

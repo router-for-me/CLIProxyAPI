@@ -535,4 +535,119 @@ func TestTextSearchTextOrderPreservedInStreamingAndReplay(t *testing.T) {
 	if strings.Join(replayedBlocks, ",") != strings.Join(wantBlocks, ",") {
 		t.Fatalf("replayed block types = %v, want %v", replayedBlocks, wantBlocks)
 	}
+	if got := ojson.GetBytesNoCopy(replayed, "messages.0.content.3.citations.0.encrypted_index").String(); got != "IDX_ORD" {
+		t.Fatalf("replayed citation encrypted_index with results = %q, want IDX_ORD", got)
+	}
+}
+
+func TestWebSearchCallWithoutResultsDropsAssistantCitations(t *testing.T) {
+	sig := mustTestSignature(t)
+	t.Run("codex replay without results drops citations and keeps text", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"earlier context"}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"search question"}]}`,
+			`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking 1"}],"encrypted_content":"`+sig+`"}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":{"type":"search","query":"q"}}`,
+			`{"type":"reasoning","id":"rs_2","summary":[{"type":"summary_text","text":"thinking 2"}],"encrypted_content":"`+sig+`"}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Cited answer.","annotations":[{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"Cited answer.","encrypted_index":"IDX_A"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with OK"}]}`,
+		)
+		out, errConvert := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertOpenAIResponsesRequestToClaude() error = %v", errConvert)
+		}
+		assistant := ojson.GetBytesNoCopy(out, "messages.1.content")
+		if got := assistant.Get("2.type").String(); got != "web_search_tool_result" {
+			t.Fatalf("messages.1.content.2.type = %q, want web_search_tool_result: %s", got, assistant.Raw)
+		}
+		if got := assistant.Get("2.content.#").Int(); got != 0 {
+			t.Fatalf("messages.1.content.2.content.# = %d, want 0", got)
+		}
+		textBlock := assistant.Get("4")
+		if got := textBlock.Get("type").String(); got != "text" {
+			t.Fatalf("messages.1.content.4.type = %q, want text: %s", got, assistant.Raw)
+		}
+		if got := textBlock.Get("text").String(); got != "Cited answer." {
+			t.Fatalf("messages.1.content.4.text = %q, want %q", got, "Cited answer.")
+		}
+		if citations := textBlock.Get("citations"); citations.Exists() {
+			t.Fatalf("expected citations to be dropped when web_search_tool_result has no results, got: %s", citations.Raw)
+		}
+	})
+
+	t.Run("results without encrypted_content also drop citations", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":{"type":"search","query":"q"},"results":[{"title":"T","url":"https://example.com/a"}]}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Cited answer.","annotations":[{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"Cited answer.","encrypted_index":"IDX_A"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"follow up"}]}`,
+		)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+		textBlock := ojson.GetBytesNoCopy(out, "messages.1.content.2")
+		if got := textBlock.Get("text").String(); got != "Cited answer." {
+			t.Fatalf("messages.1.content.2.text = %q, want %q", got, "Cited answer.")
+		}
+		if citations := textBlock.Get("citations"); citations.Exists() {
+			t.Fatalf("expected citations to be dropped when results degrade to empty, got: %s", citations.Raw)
+		}
+	})
+
+	t.Run("interleaved client tool call within same assistant turn drops unbacked citations", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":{"type":"search","query":"q"}}`,
+			`{"type":"function_call","call_id":"call_1","name":"exec","arguments":"{}"}`,
+			`{"type":"function_call_output","call_id":"call_1","output":"ok"}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"After tool.","annotations":[{"type":"web_search_result_location","url":"https://example.com/a","title":"A","cited_text":"After tool.","encrypted_index":"IDX_A"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"follow up"}]}`,
+		)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+		msg3Content := ojson.GetBytesNoCopy(out, "messages.3.content")
+		text := msg3Content.String()
+		if msg3Content.IsArray() {
+			text = msg3Content.Get("0.text").String()
+		}
+		if text != "After tool." {
+			t.Fatalf("messages.3 text = %q, want %q: %s", text, "After tool.", ojson.GetBytesNoCopy(out, "messages.3").Raw)
+		}
+		if citations := msg3Content.Get("0.citations"); citations.Exists() {
+			t.Fatalf("expected citations after interleaved tool_result to be dropped, got: %s", citations.Raw)
+		}
+	})
+
+	t.Run("later turn with results keeps its citations after earlier turn dropped theirs", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"q1"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":{"type":"search","query":"q1"}}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Turn 1 answer.","annotations":[{"type":"web_search_result_location","url":"https://example.com/1","title":"1","cited_text":"Turn 1 answer.","encrypted_index":"IDX_1"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"q2"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_2","status":"completed","action":{"type":"search","query":"q2"},"results":[{"title":"2","url":"https://example.com/2","encrypted_content":"ENC_2"}]}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Turn 2 answer.","annotations":[{"type":"web_search_result_location","url":"https://example.com/2","title":"2","cited_text":"Turn 2 answer.","encrypted_index":"IDX_2"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"q3"}]}`,
+		)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+		if citations := ojson.GetBytesNoCopy(out, "messages.1.content.2.citations"); citations.Exists() {
+			t.Fatalf("turn 1 citations must be dropped, got: %s", citations.Raw)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.3.content.2.citations.0.encrypted_index").String(); got != "IDX_2" {
+			t.Fatalf("turn 2 citation encrypted_index = %q, want IDX_2: %s", got, ojson.GetBytesNoCopy(out, "messages.3").Raw)
+		}
+	})
+
+	t.Run("multiple searches in one turn drop citations when any search lacks results", func(t *testing.T) {
+		raw := responsesRequestFromItems(
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_1","status":"completed","action":{"type":"search","query":"q1"},"results":[{"title":"1","url":"https://example.com/1","encrypted_content":"ENC_1"}]}`,
+			`{"type":"web_search_call","id":"ws_srvtoolu_2","status":"completed","action":{"type":"search","query":"q2"}}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Combined answer.","annotations":[{"type":"web_search_result_location","url":"https://example.com/2","title":"2","cited_text":"Combined answer.","encrypted_index":"IDX_2"}]}]}`,
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}`,
+		)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-opus-5-5", raw, false)
+		if citations := ojson.GetBytesNoCopy(out, "messages.1.content.4.citations"); citations.Exists() {
+			t.Fatalf("expected citations to be dropped when one search in turn has no results, got: %s", citations.Raw)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.1.content.4.text").String(); got != "Combined answer." {
+			t.Fatalf("expected text to be preserved, got %q", got)
+		}
+	})
 }

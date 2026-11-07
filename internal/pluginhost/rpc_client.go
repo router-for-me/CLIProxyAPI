@@ -59,6 +59,10 @@ func (e rpcError) Error() string {
 	return e.message
 }
 
+func (e rpcError) ErrorCode() string {
+	return e.Code
+}
+
 func (e rpcError) StatusCode() int {
 	return e.statusCode
 }
@@ -740,9 +744,25 @@ func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.Thi
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
+	if a == nil {
+		return
+	}
+	if a.host != nil {
+		a.host.dispatchPluginUsageRecord(ctx, a.id, record)
+		return
+	}
+	_ = a.deliverUsage(ctx, record)
+}
+
+func (a *rpcPluginAdapter) deliverUsage(ctx context.Context, record pluginapi.UsageRecord) error {
+	if a == nil {
+		return nil
+	}
 	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
 		log.Debugf("pluginhost: usage.handle to %s failed: %v", a.id, errCall)
+		return errCall
 	}
+	return nil
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(ctx context.Context, req pluginapi.CommandLineRegistrationRequest) (pluginapi.CommandLineRegistrationResponse, error) {

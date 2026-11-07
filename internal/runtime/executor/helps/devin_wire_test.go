@@ -990,3 +990,49 @@ func TestRegressionIssue5910_ToolCallDeltaFields(t *testing.T) {
 		t.Errorf("tc.IsCustomToolCall = %v, want true", tc.IsCustomToolCall)
 	}
 }
+
+func TestBuildDevinGetChatMessageRequest_ObfuscatesEmbeddedExecDescriptions(t *testing.T) {
+	tools := []DevinTool{
+		{
+			Name: "functions__exec",
+			Description: "Run JavaScript code to orchestrate/compose tool calls\n" +
+				"### exec_command\nRuns a command in a PTY, returning output or a session ID for ongoing interaction.\n" +
+				"### write_stdin\nWrites characters to an existing unified exec session and returns recent output.\n",
+		},
+	}
+
+	req := BuildDevinGetChatMessageRequest(
+		"token-123",
+		"device-seed-1",
+		"swe-2",
+		"system prompt",
+		nil,
+		tools,
+		nil,
+		1000,
+		"session-1",
+		"cascade-1",
+		nil,
+	)
+	logBody := BuildDevinUpstreamLogBody(
+		nil,
+		false,
+		"swe-2",
+		"system prompt",
+		nil,
+		tools,
+		nil,
+		1000,
+		"session-1",
+		"cascade-1",
+	)
+
+	for label, body := range map[string]string{"wire": string(req), "log": string(logBody)} {
+		if strings.Contains(body, "a session ID") || strings.Contains(body, "to an existing unified") {
+			t.Fatalf("%s body should not contain the original exec phrases: %s", label, body)
+		}
+		if !strings.Contains(body, "an session ID") || !strings.Contains(body, "to a existing unified") {
+			t.Fatalf("%s body should contain the obfuscated exec phrases: %s", label, body)
+		}
+	}
+}

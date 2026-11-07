@@ -44,6 +44,7 @@ type oauthRecoveryTarget struct {
 	Provider         string
 	Email            string
 	AccountID        string
+	OrganizationID   string
 	VerifyAfterLogin bool
 	VerifyModel      string
 }

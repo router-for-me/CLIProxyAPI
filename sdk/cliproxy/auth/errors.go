@@ -105,6 +105,14 @@ func (e *Error) Error() string {
 	return e.Code + ": " + e.Message
 }
 
+// ErrorCode returns the machine-readable error code embedded in the Error.
+func (e *Error) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // StatusCode implements optional status accessor for manager decision making.
 func (e *Error) StatusCode() int {
 	if e == nil {

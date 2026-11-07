@@ -599,26 +599,69 @@ func TestDetectClaudeCodeRequestRecognizesAgentSDKHaiku55Helpers(t *testing.T) {
 	webSearchPayload := []byte(`{"max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"search query"}]}],"metadata":{"user_id":` + string(encodedUserID) + `},"model":"claude-haiku-5-5","output_config":{"effort":"medium"},"stream":true,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.304.2e0; cc_entrypoint=sdk-ts"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."},{"type":"text","text":"Perform web search."}],"tool_choice":{"type":"auto"},"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
 
 	for _, tc := range []struct {
-		name    string
-		betas   string
-		payload []byte
+		name       string
+		userAgent  string
+		entrypoint string
+		subclient  string
+		betas      string
+		payload    []byte
+		cfg        *config.Config
 	}{
-		{name: "sdk-ts title helper", betas: titleBetas, payload: titlePayload},
-		{name: "sdk-ts web_search helper", betas: webSearchBetas, payload: webSearchPayload},
+		{name: "sdk-ts title helper", userAgent: "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", betas: titleBetas, payload: titlePayload},
+		{name: "sdk-ts web_search helper", userAgent: "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", betas: webSearchBetas, payload: webSearchPayload},
+		{
+			name:       "configured t3-code title helper",
+			userAgent:  "claude-cli/2.1.316 (external, t3-code, agent-sdk/0.3.276)",
+			entrypoint: "t3-code",
+			subclient:  "claude-code-t3-code",
+			betas:      titleBetas,
+			payload:    []byte(strings.Replace(string(titlePayload), "cc_entrypoint=sdk-ts", "cc_entrypoint=t3-code", 1)),
+			cfg:        &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{NativeEntrypoints: []string{"t3-code"}}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			headers := measuredClaudeCodeHelperHeaders(tc.betas)
-			headers.Set("User-Agent", "claude-cli/2.1.304 (external, sdk-ts, agent-sdk/0.3.276)")
+			headers.Set("User-Agent", tc.userAgent)
 			headers.Set("X-Stainless-Package-Version", "0.128.0")
 			headers.Del("X-Client-Request-Id")
 
-			detection := DetectClaudeCodeRequest(headers, tc.payload, false)
+			detection := DetectClaudeCodeRequest(headers, tc.payload, false, tc.cfg)
 			if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.HelperProfile {
-				t.Fatalf("detection = %#v, want confirmed sdk-ts Haiku 5.5 helper", detection)
+				t.Fatalf("detection = %#v, want confirmed %s Haiku 5.5 helper", detection, tc.entrypoint)
 			}
-			if detection.Entrypoint != "sdk-ts" || detection.Subclient != "claude-code-sdk-ts" || detection.AgentSDKVersion != "0.3.276" {
-				t.Fatalf("detection identity = %#v, want sdk-ts / claude-code-sdk-ts / 0.3.276", detection)
+			if detection.Entrypoint != tc.entrypoint || detection.Subclient != tc.subclient || detection.AgentSDKVersion != "0.3.276" {
+				t.Fatalf("detection identity = %#v, want %s / %s / 0.3.276", detection, tc.entrypoint, tc.subclient)
 			}
 		})
+	}
+}
+
+func TestDetectClaudeCodeRequestAcceptsConfiguredNativeEntrypoints(t *testing.T) {
+	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
+	headers := confirmedClaudeCodeHeaders()
+	headers.Set("User-Agent", "claude-cli/2.1.316 (external, t3-code, agent-sdk/0.3.276)")
+
+	if detection := DetectClaudeCodeRequest(headers, payload, false); detection.Confirmed || detection.NativeClient {
+		t.Fatalf("default detection = %#v, want unconfirmed without native-entrypoints config", detection)
+	}
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			NativeEntrypoints: []string{"t3-code"},
+		},
+	}
+	detection := DetectClaudeCodeRequest(headers, payload, false, cfg)
+	if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient {
+		t.Fatalf("configured detection = %#v, want confirmed native client", detection)
+	}
+	if detection.Entrypoint != "t3-code" || detection.Subclient != "claude-code-t3-code" || detection.AgentSDKVersion != "0.3.276" {
+		t.Fatalf("configured detection identity = %#v, want t3-code / claude-code-t3-code / 0.3.276", detection)
+	}
+
+	missingBetaHeaders := confirmedClaudeCodeHeaders()
+	missingBetaHeaders.Set("User-Agent", "claude-cli/2.1.316 (external, t3-code, agent-sdk/0.3.276)")
+	missingBetaHeaders.Del("Anthropic-Beta")
+	if unconfirmed := DetectClaudeCodeRequest(missingBetaHeaders, payload, false, cfg); unconfirmed.Confirmed || unconfirmed.StrongSignals {
+		t.Fatalf("configured entrypoint without strong signals = %#v, want unconfirmed", unconfirmed)
 	}
 }

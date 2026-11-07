@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -122,9 +123,12 @@ type ClaudeConfig struct {
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
-	// this many days, independently of continuity expiry and credential
-	// switches. A nil value (unset) defaults to 7 days; an explicit 0 keeps
-	// the continuity-scoped pin (1h lifetime).
+	// this many days in in-memory mode (server.kv-store.disabled: true without
+	// Home), independently of continuity expiry and credential switches. A nil
+	// value (unset) defaults to 7 days; an explicit 0 keeps the
+	// continuity-scoped pin (1h lifetime). When a KV store (local bbolt or Home
+	// KV) is active, session date pins are persisted permanently and
+	// session-date-pin-days is ignored.
 	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
 }
 
@@ -156,6 +160,7 @@ func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
 // Claude Code, package, and runtime versions exactly match this baseline; unmeasured
 // versions use the configured values. Timeout remains a fallback. Stabilized profiles
 // also pin OS and Arch and never learn newer software versions automatically.
+// NativeEntrypoints extends the built-in native Claude Code entrypoint allowlist.
 // AnthropicBetaStrip and AnthropicBetaAppend are exact-name operator overrides applied
 // to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
 // first-party Claude Code CLI request shape.
@@ -168,6 +173,7 @@ type ClaudeHeaderDefaults struct {
 	Timeout                string   `yaml:"timeout" json:"timeout"`
 	Timezone               string   `yaml:"timezone" json:"timezone"`
 	StabilizeDeviceProfile *bool    `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	NativeEntrypoints      []string `yaml:"native-entrypoints,omitempty" json:"native-entrypoints,omitempty"`
 	AnthropicBetaStrip     []string `yaml:"anthropic-beta-strip,omitempty" json:"anthropic-beta-strip,omitempty"`
 	AnthropicBetaAppend    []string `yaml:"anthropic-beta-append,omitempty" json:"anthropic-beta-append,omitempty"`
 	InjectDiagnostics      *bool    `yaml:"inject-diagnostics,omitempty" json:"inject-diagnostics,omitempty"`
@@ -421,6 +427,47 @@ type PprofConfig struct {
 type DiscoveryInterfacesConfig struct {
 	Include []string `yaml:"include" json:"include"`
 	Exclude []string `yaml:"exclude" json:"exclude"`
+}
+
+// KVStoreConfig holds configuration for the local persistent bbolt KV store.
+type KVStoreConfig struct {
+	// Disabled turns off the local bbolt KV store when true (fallback to in-memory).
+	// Defaults to false (bbolt enabled by default in non-Home mode).
+	Disabled bool `yaml:"disabled" json:"disabled"`
+
+	// Path is the file system path to the bbolt database file.
+	// When empty, it defaults to "<auth-dir>/kv.db".
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+// EffectivePath returns the trimmed Path or DefaultKVStorePath ("kv.db") when empty.
+func (c KVStoreConfig) EffectivePath() string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	return DefaultKVStorePath
+}
+
+// EffectivePathForAuthDir returns the trimmed Path when explicitly configured,
+// or joins the given authDir (falling back to DefaultAuthDir when authDir is empty)
+// with DefaultKVStorePath ("<auth-dir>/kv.db").
+func (c KVStoreConfig) EffectivePathForAuthDir(authDir string) string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	baseDir := strings.TrimSpace(authDir)
+	if baseDir == "" {
+		baseDir = DefaultAuthDir
+	}
+	return filepath.Join(baseDir, DefaultKVStorePath)
+}
+
+// EffectiveKVStorePath returns the configured KVStore.Path or "<auth-dir>/kv.db" when empty.
+func (cfg *Config) EffectiveKVStorePath() string {
+	if cfg == nil {
+		return filepath.Join(DefaultAuthDir, DefaultKVStorePath)
+	}
+	return cfg.KVStore.EffectivePathForAuthDir(cfg.AuthDir)
 }
 
 // DiscoveryConfig controls local network mDNS / DNS-SD service advertising.

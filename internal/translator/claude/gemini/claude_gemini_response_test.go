@@ -61,9 +61,9 @@ func TestConvertClaudeResponseToGemini_StreamThinkingSignature(t *testing.T) {
 		wantSignature string
 	}{
 		{
-			name:          "foreign claude signature maps to bypass sentinel",
+			name:          "foreign claude signature is omitted",
 			signature:     "foreign_claude_sig_123",
-			wantSignature: "skip_thought_signature_validator",
+			wantSignature: "",
 		},
 		{
 			name:          "preserves valid gemini signature",
@@ -121,9 +121,9 @@ func TestConvertClaudeResponseToGeminiNonStream_ThinkingSignature(t *testing.T) 
 		wantSignature string
 	}{
 		{
-			name:          "foreign claude signature maps to bypass sentinel",
+			name:          "foreign claude signature is omitted",
 			signature:     "foreign_claude_sig_123",
-			wantSignature: "skip_thought_signature_validator",
+			wantSignature: "",
 		},
 		{
 			name:          "preserves valid gemini signature",

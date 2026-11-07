@@ -64,6 +64,7 @@ func (s *Service) Run(ctx context.Context) error {
 		forceHomeRuntimeConfig(s.cfg)
 		cfg = s.cfg
 		s.cfgMu.Unlock()
+		s.applyKVStoreConfig(cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
 	}
 
@@ -79,6 +80,7 @@ func (s *Service) Run(ctx context.Context) error {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
 		}
+		s.applyKVStoreConfig(cfg)
 	}
 
 	s.applyRetryConfig(cfg)
@@ -387,6 +389,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			s.pluginHost.ShutdownAllContext(ctx)
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+			}
+		}
+
+		if errShutdownKV := s.shutdownKVStore(); errShutdownKV != nil {
+			log.Errorf("failed to stop local kv store: %v", errShutdownKV)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownKV
 			}
 		}
 

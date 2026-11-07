@@ -21,7 +21,7 @@ import (
 func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 	for _, transport := range []string{"http", "websocket"} {
 		for _, stream := range []bool{false, true} {
-			for _, model := range []string{"gpt-5.6-sol", "gpt-5.6-luna"} {
+			for _, model := range []string{"gpt-5.4", "gpt-5.5"} {
 				t.Run(transport+"/"+model+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
 					captured := make(chan []byte, 1)
 					completed := []byte(`{"type":"response.completed","response":{"id":"resp_barrier","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
@@ -59,7 +59,7 @@ func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 						_, _ = w.Write(append(append([]byte("data: "), completed...), '\n', '\n'))
 					}))
 					defer server.Close()
-					cfg := &config.Config{Payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gpt-5.6-sol"}}, Params: []string{`tools.#(type=="image_generation")#`, "instructions", "prompt_cache_key"}}}}}
+					cfg := &config.Config{Payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "gpt-5.4"}}, Params: []string{`tools.#(type=="image_generation")#`, "instructions", "prompt_cache_key"}}}}}
 					var executor cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
 					if transport == "websocket" {
 						executor = NewCodexWebsocketsExecutor(cfg)
@@ -82,10 +82,10 @@ func TestPayloadBarrierCodexImageFilter(t *testing.T) {
 					}
 					body := <-captured
 					image := ojson.GetBytes(body, `tools.#(type=="image_generation")`).Exists()
-					if image != (model == "gpt-5.6-luna") {
+					if image != (model == "gpt-5.5") {
 						t.Fatalf("image tool presence = %v: %s", image, body)
 					}
-					if model == "gpt-5.6-sol" && (ojson.GetBytes(body, "instructions").Exists() || ojson.GetBytes(body, "prompt_cache_key").Exists()) {
+					if model == "gpt-5.4" && (ojson.GetBytes(body, "instructions").Exists() || ojson.GetBytes(body, "prompt_cache_key").Exists()) {
 						t.Fatalf("late injection undid filter: %s", body)
 					}
 				})

@@ -223,7 +223,7 @@ func PrepareAntigravityCompactionSummaryPayloadDoc(doc *ojson.Doc, modelName str
 		var filtered []string
 		for _, item := range input.Array() {
 			itemType := item.Get("type").String()
-			if itemType == "compaction_trigger" {
+			if itemType == "compaction_trigger" || itemType == "additional_tools" {
 				continue
 			}
 			filtered = append(filtered, item.Raw)

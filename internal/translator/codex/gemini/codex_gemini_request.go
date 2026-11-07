@@ -7,10 +7,10 @@ package gemini
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -341,10 +341,27 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	_ = outDoc.Set("parallel_tool_calls", true)
 	setCodexToolChoiceFromGeminiToolConfigDoc(outDoc, hasTools, root.Get("toolConfig.functionCallingConfig"))
 
+	genConfig := root.Get("generationConfig")
+	if !genConfig.Exists() {
+		genConfig = root.Get("generation_config")
+	}
+	for _, v := range []ojson.Result{
+		genConfig.Get("maxOutputTokens"),
+		genConfig.Get("max_output_tokens"),
+		root.Get("maxOutputTokens"),
+		root.Get("max_output_tokens"),
+		root.Get("max_tokens"),
+	} {
+		if v.Type == ojson.Number {
+			_ = outDoc.Set("max_output_tokens", v.Int())
+			break
+		}
+	}
+
 	// Convert Gemini thinkingConfig to Codex reasoning.effort.
 	// Note: Google official Python SDK sends snake_case fields (thinking_level/thinking_budget).
 	effortSet := false
-	if genConfig := root.Get("generationConfig"); genConfig.Exists() {
+	if genConfig.Exists() {
 		thinkingLevel := genConfig.Get("thinkingLevel")
 		if !thinkingLevel.Exists() {
 			thinkingLevel = genConfig.Get("thinking_level")

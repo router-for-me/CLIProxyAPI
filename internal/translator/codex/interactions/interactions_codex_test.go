@@ -3,13 +3,123 @@ package interactions
 import (
 	"bytes"
 	"context"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
+
+func TestConvertInteractionsRequestToCodexMaxOutputTokens(t *testing.T) {
+	for _, path := range []string{
+		"generation_config.max_output_tokens",
+		"generation_config.maxOutputTokens",
+		"generation_config.max_completion_tokens",
+		"generation_config.maxCompletionTokens",
+		"generation_config.max_tokens",
+		"generationConfig.max_output_tokens",
+		"generationConfig.maxOutputTokens",
+		"generationConfig.max_completion_tokens",
+		"generationConfig.maxCompletionTokens",
+		"generationConfig.max_tokens",
+		"max_output_tokens",
+		"maxOutputTokens",
+		"max_completion_tokens",
+		"maxCompletionTokens",
+		"max_tokens",
+		"agent_config.max_total_tokens",
+		"agentConfig.maxTotalTokens",
+	} {
+		t.Run(path, func(t *testing.T) {
+			inputDoc := ojson.NewDocString(`{"input":"hi"}`)
+			_ = inputDoc.Set(path, 1024)
+			out, errConvert := ConvertInteractionsRequestToCodex("codex-test", inputDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != "1024" {
+				t.Fatalf("max_output_tokens = %q, want 1024; output=%s", got, out)
+			}
+			for _, sourcePath := range []string{"generation_config", "generationConfig", "maxOutputTokens", "max_completion_tokens", "maxCompletionTokens", "max_tokens", "agent_config", "agentConfig"} {
+				if ojson.GetBytesNoCopy(out, sourcePath).Exists() {
+					t.Fatalf("%s should not be forwarded; output=%s", sourcePath, out)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToCodexMaxOutputTokensPriority(t *testing.T) {
+	for _, prefix := range []string{"generation_config.", "generationConfig.", ""} {
+		paths := []string{"max_output_tokens", "maxOutputTokens", "max_completion_tokens", "maxCompletionTokens", "max_tokens"}
+		if prefix == "" {
+			paths = append(paths, "agent_config.max_total_tokens", "agentConfig.maxTotalTokens")
+		}
+		for index, path := range paths {
+			t.Run(prefix+path, func(t *testing.T) {
+				inputDoc := ojson.NewDocString(`{"input":"hi"}`)
+				for offset, sourcePath := range paths[index:] {
+					_ = inputDoc.Set(prefix+sourcePath, 1024+offset)
+				}
+				if prefix != "" {
+					_ = inputDoc.Set("max_output_tokens", 4096)
+					_ = inputDoc.Set("agent_config.max_total_tokens", 8192)
+				}
+				out, errConvert := ConvertInteractionsRequestToCodex("codex-test", inputDoc.Bytes(), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertInteractionsRequestToCodex() error = %v", errConvert)
+				}
+				if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != "1024" {
+					t.Fatalf("max_output_tokens = %q, want first matching limit 1024; output=%s", got, out)
+				}
+			})
+		}
+	}
+}
+
+func TestConvertInteractionsRequestToCodexMaxOutputTokensFallbacks(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{"input":"hi"}`, ""},
+		{"empty generation config", `{"input":"hi","generation_config":{},"max_tokens":1024}`, "1024"},
+		{"generation config without token limit", `{"input":"hi","generationConfig":{"thinking_level":"high"},"agentConfig":{"maxTotalTokens":1024}}`, "1024"},
+		{"zero config limit takes precedence", `{"input":"hi","generation_config":{"max_tokens":0},"max_output_tokens":1024}`, "0"},
+		{"zero top-level limit takes precedence", `{"input":"hi","max_output_tokens":0,"max_tokens":1024}`, "0"},
+		{"snake config takes precedence", `{"input":"hi","generation_config":{"max_tokens":1024},"generationConfig":{"max_output_tokens":2048}}`, "1024"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertInteractionsRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToCodexGenerationConfigAliasPriority(t *testing.T) {
+	out, errConvert := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"input":"hi","generation_config":{"top_p":0.5,"topP":0.9,"parallel_tool_calls":false,"parallelToolCalls":true,"tool_choice":"none","toolChoice":"auto","text":{"verbosity":"low"},"verbosity":"high"}}`), false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToCodex() error = %v", errConvert)
+	}
+	for path, want := range map[string]string{
+		"top_p":               "0.5",
+		"parallel_tool_calls": "false",
+		"tool_choice":         `"none"`,
+		"text.verbosity":      `"low"`,
+	} {
+		if got := ojson.GetBytesNoCopy(out, path).Raw; got != want {
+			t.Fatalf("%s = %q, want %q; output=%s", path, got, want, out)
+		}
+	}
+}
 
 func TestConvertInteractionsRequestToCodexWithToolMessagesDirect(t *testing.T) {
 	out, _ := ConvertInteractionsRequestToCodex("codex-test", []byte(`{"model":"codex-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"thought","content":[{"type":"text","text":"thinking"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)

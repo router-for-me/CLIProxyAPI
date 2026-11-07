@@ -430,6 +430,19 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return auth.NextRefreshAfter, true
 	}
 
+	if authHasUnchangedRejectedRefreshToken(auth) {
+		if auth.HasValidAccessToken(now) {
+			if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+				return exp, true
+			}
+			return time.Time{}, false
+		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return time.Time{}, false
+		}
+		return now, true
+	}
+
 	if siwcDueAt, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, now); hasSIWC {
 		minDue := siwcDueAt
 		if outerDueAt, hasOuter, _ := CodexOuterNeedsRefresh(auth, now); hasOuter && outerDueAt.Before(minDue) {

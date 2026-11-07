@@ -608,6 +608,18 @@ func AuthGrantFingerprint(a *Auth) string {
 	if accessToken == "" {
 		accessToken = authAccessToken(a)
 	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "api_key")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["api_key"])
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "session_token")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["session_token"])
+	}
 	refreshToken := authRefreshToken(a)
 	email := authMetadataString(a, "email")
 	if email == "" && a.Attributes != nil {
@@ -1321,6 +1333,37 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 		return due, true, false
 	}
 	return now, true, true
+}
+
+// OuterAccessTokenExpirationTime returns the expiration time of the outer access_token,
+// ignoring the nested "siwc" section.
+func (a *Auth) OuterAccessTokenExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	tokenStr := authOuterAccessToken(a)
+	if tokenStr == "" {
+		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if jwtExp, ok := parseJWTExp(tokenStr); ok {
+		return jwtExp, true
+	}
+	return a.OuterExpirationTime()
+}
+
+// AccessTokenExpirationTimeForRequest returns the expiration time of the access_token
+// selected for the request context and client headers.
+func (a *Auth) AccessTokenExpirationTimeForRequest(ctx context.Context, clientHeaders ...http.Header) (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) && !IsCodexUseSIWCForRequest(ctx, a, clientHeaders...) {
+		return a.OuterAccessTokenExpirationTime()
+	}
+	return a.AccessTokenExpirationTime()
 }
 
 // AccessTokenExpirationTime returns the expiration time of the specific access_token.

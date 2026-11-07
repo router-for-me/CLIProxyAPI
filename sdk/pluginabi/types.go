@@ -178,6 +178,14 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
+// ErrorCode returns the machine-readable error code embedded in the Error.
+func (e *Error) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // StatusCode returns the HTTP status code embedded in the Error, or 0 if unset.
 func (e *Error) StatusCode() int {
 	if e == nil {

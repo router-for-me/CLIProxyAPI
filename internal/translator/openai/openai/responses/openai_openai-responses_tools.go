@@ -21,6 +21,7 @@ type responsesToolDeclaration struct {
 	namespace string
 	custom    bool
 	shell     bool
+	search    bool // client tool_search, bridged as a function
 }
 
 // walkResponsesToolDeclarations visits the tool declarations of a Responses
@@ -37,7 +38,7 @@ type responsesToolDeclaration struct {
 func walkResponsesToolDeclarations(root ojson.Result, visit func(responsesToolDeclaration) bool) {
 	var declarations []responsesToolDeclaration
 	emit := func(tool ojson.Result, namespaceName string) {
-		var custom, shell bool
+		var custom, shell, search bool
 		switch strings.TrimSpace(tool.Get("type").String()) {
 		case "", "function":
 		case "custom":
@@ -47,12 +48,19 @@ func walkResponsesToolDeclarations(root ojson.Result, visit func(responsesToolDe
 				return
 			}
 			shell = true
+		case util.ResponsesToolSearchType:
+			if namespaceName != "" || !util.IsResponsesClientToolSearchDeclaration(tool) {
+				return
+			}
+			search = true
 		default:
 			return
 		}
 		localName := responsesToolName(tool)
 		if shell {
 			localName = "__cpa_local_shell"
+		} else if search {
+			localName = util.ResponsesToolSearchFunctionName
 		}
 		if localName == "" {
 			return
@@ -64,6 +72,7 @@ func walkResponsesToolDeclarations(root ojson.Result, visit func(responsesToolDe
 			namespace: namespaceName,
 			custom:    custom,
 			shell:     shell,
+			search:    search,
 		})
 	}
 	scan := func(tools ojson.Result) {
@@ -89,17 +98,25 @@ func walkResponsesToolDeclarations(root ojson.Result, visit func(responsesToolDe
 	scan(root.Get("tools"))
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
 		input.ForEach(func(_, item ojson.Result) bool {
-			if item.Get("type").String() == "additional_tools" {
+			switch item.Get("type").String() {
+			case "additional_tools":
 				scan(item.Get("tools"))
+			case util.ResponsesToolSearchOutputType:
+				// Tools loaded by a client tool search stay declared on every
+				// later request, so the model can call them.
+				if util.IsResponsesClientToolSearchItem(item) {
+					scan(item.Get("tools"))
+				}
 			}
 			return true
 		})
 	}
 
-	// Reserve user identities before assigning the synthetic shell name.
+	// Reserve user identities before assigning the synthetic shell and
+	// tool_search names.
 	reserved := make(map[string]bool)
 	for _, d := range declarations {
-		if !d.shell {
+		if !d.shell && !d.search {
 			reserved[d.localName] = true
 			reserved[d.chatName] = true
 			reserved[rawResponsesNamespaceQualifiedName(d.namespace, d.localName)] = true
@@ -109,10 +126,17 @@ func walkResponsesToolDeclarations(root ojson.Result, visit func(responsesToolDe
 	for suffix := 1; reserved[shellName]; suffix++ {
 		shellName = "__cpa_local_shell_" + strconv.Itoa(suffix)
 	}
+	searchName := util.ResponsesToolSearchFunctionName
+	for suffix := 1; reserved[searchName]; suffix++ {
+		searchName = util.ResponsesToolSearchFunctionName + "_" + strconv.Itoa(suffix)
+	}
 	for i := range declarations {
 		if declarations[i].shell {
 			declarations[i].localName = shellName
 			declarations[i].chatName = shellName
+		} else if declarations[i].search {
+			declarations[i].localName = searchName
+			declarations[i].chatName = searchName
 		}
 	}
 	disambiguateResponsesChatToolNames(declarations)

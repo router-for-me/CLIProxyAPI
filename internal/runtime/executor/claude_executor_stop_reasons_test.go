@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,5 +180,109 @@ func TestClaudeExecutorChatRefusalStaysSuccessful(t *testing.T) {
 	}
 	if got := ojson.GetBytes(resp.Payload, "choices.0.finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q: %s", got, resp.Payload)
+	}
+}
+
+func TestWrapClaudeFastRequestErrorPreservesClassifiedStatusCode(t *testing.T) {
+	inner := statusErr{code: http.StatusBadRequest, msg: "claude refusal (cyber): blocked"}
+	wrapped := wrapClaudeFastRequestError(true, http.StatusOK, inner)
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(wrapped, &statusCoder) || statusCoder == nil {
+		t.Fatalf("expected wrapped error to implement StatusCode()")
+	}
+	if got := statusCoder.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("statusCoder.StatusCode() = %d, want %d", got, http.StatusBadRequest)
+	}
+}
+
+func TestClaudeExecutorExecuteReturnsBadRequestOnPolicyRefusal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"claude-sonnet-5-5","id":"msg_cyber","type":"message","role":"assistant","content":[],"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback."},"usage":{"input_tokens":4,"output_tokens":0}}`))
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{ID: "cyber-refusal", Attributes: map[string]string{"api_key": "sk-ant-test", "base_url": server.URL}}
+	payload := []byte(`{"model":"claude-sonnet-5-5","stream":false,"messages":[{"role":"user","content":"test"}]}`)
+	_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "claude-sonnet-5-5", Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload})
+	if errExecute == nil {
+		t.Fatal("expected policy refusal error, got nil")
+	}
+	var statusCoder interface{ StatusCode() int }
+	if !errors.As(errExecute, &statusCoder) || statusCoder == nil || statusCoder.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected HTTP 400 status error, got %v", errExecute)
+	}
+}
+
+func TestClaudeExecutorStreamSparseStopDetailsPreservesMessageStop(t *testing.T) {
+	sseBody := strings.Join([]string{
+		`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_sparse","type":"message","model":"claude-sonnet-5-5","role":"assistant","content":[],"usage":{"input_tokens":4,"output_tokens":0}}}`,
+		`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}`,
+		`event: message_stop` + "\n" + `data: {"type":"message_stop"}`,
+	}, "\n\n") + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseBody))
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		name           string
+		sourceFormat   sdktranslator.Format
+		responseFormat sdktranslator.Format
+		payload        string
+		wantStopMarker string
+	}{
+		{
+			name:           "passthrough_claude",
+			sourceFormat:   sdktranslator.FormatClaude,
+			responseFormat: sdktranslator.FormatClaude,
+			payload:        `{"model":"claude-sonnet-5-5","stream":true,"messages":[{"role":"user","content":"test"}]}`,
+			wantStopMarker: "message_stop",
+		},
+		{
+			name:           "translated_openai",
+			sourceFormat:   sdktranslator.FormatOpenAI,
+			responseFormat: sdktranslator.FormatOpenAI,
+			payload:        `{"model":"claude-sonnet-5-5","stream":true,"messages":[{"role":"user","content":"test"}]}`,
+			wantStopMarker: "content_filter",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{ID: "sparse-refusal-" + tc.name, Attributes: map[string]string{"api_key": "sk-ant-test", "base_url": server.URL}}
+			result, errStream := NewClaudeExecutor(&config.Config{}).ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-sonnet-5-5",
+				Payload: []byte(tc.payload),
+			}, cliproxyexecutor.Options{
+				SourceFormat:    tc.sourceFormat,
+				ResponseFormat:  tc.responseFormat,
+				Stream:          true,
+				OriginalRequest: []byte(tc.payload),
+			})
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+
+			var output strings.Builder
+			var streamErr error
+			for chunk := range result.Chunks {
+				if len(chunk.Payload) > 0 {
+					output.Write(chunk.Payload)
+				}
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if !strings.Contains(output.String(), tc.wantStopMarker) {
+				t.Fatalf("expected %q in stream output before refusal error, got: %s", tc.wantStopMarker, output.String())
+			}
+			var statusCoder interface{ StatusCode() int }
+			if !errors.As(streamErr, &statusCoder) || statusCoder == nil || statusCoder.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("expected HTTP 400 refusal error, got %v", streamErr)
+			}
+		})
 	}
 }

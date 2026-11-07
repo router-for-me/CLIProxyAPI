@@ -128,6 +128,8 @@ func (idx *responsesToolIndex) chatTools() [][]byte {
 			convert = convertResponsesCustomToolToOpenAIChat
 		} else if d.shell {
 			convert = convertResponsesShellToolToOpenAIChat
+		} else if d.search {
+			convert = convertResponsesToolSearchToolToOpenAIChat
 		}
 		if tool, ok := convert(d.tool, d.chatName); ok {
 			merged = append(merged, tool)

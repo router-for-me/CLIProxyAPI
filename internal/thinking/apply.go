@@ -777,7 +777,15 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 		if ojson.GetBytesNoCopy(body, "thinking.type").String() == "between_tools" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
-		return extractThinkingConfig(body, provider)
+		config := extractThinkingConfig(body, provider)
+		if config.Mode == ModeNone && hasThinkingConfig(config) {
+			return config
+		}
+		// The last effort directive, not the cached top-level placeholder, is the turn's effort.
+		if directive := extractClaudeEffortDirectiveConfig(body); hasThinkingConfig(directive) {
+			return directive
+		}
+		return config
 	default:
 		return extractThinkingConfig(body, provider)
 	}

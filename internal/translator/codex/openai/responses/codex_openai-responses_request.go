@@ -34,8 +34,16 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 		setCodexRequiredBoolDoc(rawJSON, ensureDoc, "parallel_tool_calls", true)
 	}
 	setCodexRequiredIncludeDoc(rawJSON, ensureDoc)
-	// Codex Responses rejects token limit fields, so strip them out before forwarding.
-	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "max_output_tokens", "max_completion_tokens", "temperature", "top_p")
+	// Preserve max_output_tokens and fill it from legacy token limits when unset.
+	if maxOutputTokens := ojson.GetBytesNoCopy(rawJSON, "max_output_tokens"); !maxOutputTokens.Exists() || maxOutputTokens.Type == ojson.Null {
+		for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+			if v := ojson.GetBytesNoCopy(rawJSON, path); v.Type == ojson.Number {
+				_ = ensureDoc().Set("max_output_tokens", v.Int())
+				break
+			}
+		}
+	}
+	deleteCodexRequestFieldsDoc(rawJSON, ensureDoc, "max_completion_tokens", "max_tokens", "temperature", "top_p")
 	if serviceTier := ojson.GetBytesNoCopy(rawJSON, "service_tier"); serviceTier.Exists() {
 		if serviceTier.Type == ojson.String {
 			switch strings.ToLower(strings.TrimSpace(serviceTier.String())) {

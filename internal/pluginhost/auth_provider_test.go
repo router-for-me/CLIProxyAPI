@@ -465,6 +465,116 @@ func TestRefreshAuthAllowsPluginPriorityWithoutFilePriority(t *testing.T) {
 	}
 }
 
+func TestRefreshAuthPreservesDisabledStateWhenPluginOmitsFlag_Issue7225(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{
+				identifier: "plugin-provider",
+				refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+					return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
+						Metadata: map[string]any{"access_token": "new-token"},
+					}}, nil
+				},
+			},
+		}},
+	})
+	auth := &coreauth.Auth{
+		ID:       "auth-1",
+		Provider: "plugin-provider",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+	if errRefresh != nil || !handled || refreshed == nil {
+		t.Fatalf("RefreshAuth() auth = %#v, handled = %t, error = %v", refreshed, handled, errRefresh)
+	}
+	if !refreshed.Disabled || refreshed.Status != coreauth.StatusDisabled {
+		t.Fatalf("RefreshAuth() disabled=%t status=%q, want disabled auth to stay disabled", refreshed.Disabled, refreshed.Status)
+	}
+	if got := refreshed.Metadata["access_token"]; got != "new-token" {
+		t.Fatalf("RefreshAuth() access_token = %q, want new-token", got)
+	}
+}
+
+func TestRefreshAuthPreservesDisabledStatusWithoutFlag_Issue7225(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{
+				identifier: "plugin-provider",
+				refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+					return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
+						Metadata: map[string]any{"access_token": "new-token"},
+					}}, nil
+				},
+			},
+		}},
+	})
+	auth := &coreauth.Auth{
+		ID:       "auth-1",
+		Provider: "plugin-provider",
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{"access_token": "old-token"},
+	}
+	refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+	if errRefresh != nil || !handled || refreshed == nil {
+		t.Fatalf("RefreshAuth() auth = %#v, handled = %t, error = %v", refreshed, handled, errRefresh)
+	}
+	if !refreshed.Disabled || refreshed.Status != coreauth.StatusDisabled {
+		t.Fatalf("RefreshAuth() disabled=%t status=%q, want disabled auth to stay disabled", refreshed.Disabled, refreshed.Status)
+	}
+}
+
+func TestRefreshAuthDisabledStateOneWayPreservation_Issue7225(t *testing.T) {
+	tests := []struct {
+		name           string
+		pluginDisabled bool
+		wantDisabled   bool
+	}{
+		{name: "enabled auth stays enabled when plugin omits flag", pluginDisabled: false, wantDisabled: false},
+		{name: "enabled auth becomes disabled when plugin returns disabled", pluginDisabled: true, wantDisabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host := newHostWithRecords(capabilityRecord{
+				id: "auth-plugin",
+				plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+							return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{
+								Disabled: tt.pluginDisabled,
+								Metadata: map[string]any{"access_token": "new-token"},
+							}}, nil
+						},
+					},
+				}},
+			})
+			auth := &coreauth.Auth{
+				ID:       "auth-1",
+				Provider: "plugin-provider",
+				Metadata: map[string]any{"access_token": "old-token"},
+			}
+			refreshed, handled, errRefresh := host.RefreshAuth(context.Background(), auth)
+			if errRefresh != nil || !handled || refreshed == nil {
+				t.Fatalf("RefreshAuth() auth = %#v, handled = %t, error = %v", refreshed, handled, errRefresh)
+			}
+			if refreshed.Disabled != tt.wantDisabled {
+				t.Fatalf("RefreshAuth() disabled=%t, want %t", refreshed.Disabled, tt.wantDisabled)
+			}
+			wantStatus := coreauth.StatusActive
+			if tt.wantDisabled {
+				wantStatus = coreauth.StatusDisabled
+			}
+			if refreshed.Status != wantStatus {
+				t.Fatalf("RefreshAuth() status=%q, want %q", refreshed.Status, wantStatus)
+			}
+		})
+	}
+}
+
 func TestPluginTokenStorageRemovesDeletedPriority(t *testing.T) {
 	storage := &pluginTokenStorage{
 		provider: "plugin-provider",

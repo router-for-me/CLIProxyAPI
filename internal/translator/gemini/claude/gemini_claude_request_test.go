@@ -354,14 +354,143 @@ func TestConvertClaudeRequestToGemini_StructuredToolResult(t *testing.T) {
 	if got := fr.Get("response.result.text").String(); got != "alpha" {
 		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
 	}
-	// The image block must be emitted as a separate inline_data part, not embedded in result.
-	img := ojson.GetBytesNoCopy(output, "contents.1.parts.1.inline_data")
-	if got := img.Get("mime_type").String(); got != "image/png" {
-		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
+	parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part (functionResponse with nested inlineData), got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+	}
+	// The image block must be nested under functionResponse.parts as inlineData, not emitted as a sibling part.
+	img := fr.Get("parts.0.inlineData")
+	if !img.Exists() {
+		t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got %s", fr.Raw)
+	}
+	if got := img.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("expected image mimeType 'image/png', got '%s'", got)
 	}
 	if got := img.Get("data").String(); got != "aGVsbG8=" {
 		t.Fatalf("expected image data 'aGVsbG8=', got '%s'", got)
 	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolResultImagesNestedInFunctionResponseParts(t *testing.T) {
+	t.Run("image-only tool_result nests inlineData under functionResponse.parts", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash-high",
+			"messages": [
+				{
+					"role": "assistant",
+					"content": [
+						{"type": "tool_use", "id": "toolu_read_img", "name": "Read", "input": {"file_path": "/tmp/photo.png"}}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "toolu_read_img",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUg=="}}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output, err := ConvertClaudeRequestToGemini("gemini-3.8-flash-high", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part in tool response turn, got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+		}
+		fr := parts[0].Get("functionResponse")
+		if got := fr.Get("name").String(); got != "Read" {
+			t.Fatalf("functionResponse.name = %q, want Read", got)
+		}
+		if got := fr.Get("response.result").String(); got != "" {
+			t.Fatalf("functionResponse.response.result = %q, want empty string", got)
+		}
+		img := fr.Get("parts.0.inlineData")
+		if !img.Exists() {
+			t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got: %s", fr.Raw)
+		}
+		if got := img.Get("mimeType").String(); got != "image/png" {
+			t.Fatalf("mimeType = %q, want image/png", got)
+		}
+		if got := img.Get("data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
+			t.Fatalf("data = %q, want iVBORw0KGgoAAAANSUhEUg==", got)
+		}
+	})
+
+	t.Run("multiple images and parallel aligned tool_results stay bound to their own functionResponse", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash-high",
+			"messages": [
+				{
+					"role": "assistant",
+					"content": [
+						{"type": "tool_use", "id": "call_a", "name": "Read", "input": {"file_path": "/tmp/a.png"}},
+						{"type": "tool_use", "id": "call_b", "name": "Read", "input": {"file_path": "/tmp/b.jpg"}}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_b",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "DATA_B1"}},
+								{"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "DATA_B2"}}
+							]
+						},
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_a",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "DATA_A1"}}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output, err := ConvertClaudeRequestToGemini("gemini-3.8-flash-high", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 functionResponse parts, got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+		}
+
+		frA := parts[0].Get("functionResponse")
+		if got := frA.Get("id").String(); got != "call_a" {
+			t.Fatalf("first functionResponse.id = %q, want call_a", got)
+		}
+		frAParts := frA.Get("parts").Array()
+		if len(frAParts) != 1 || frAParts[0].Get("inlineData.mimeType").String() != "image/png" || frAParts[0].Get("inlineData.data").String() != "DATA_A1" {
+			t.Fatalf("unexpected call_a functionResponse.parts: %s", frA.Raw)
+		}
+
+		frB := parts[1].Get("functionResponse")
+		if got := frB.Get("id").String(); got != "call_b" {
+			t.Fatalf("second functionResponse.id = %q, want call_b", got)
+		}
+		frBParts := frB.Get("parts").Array()
+		if len(frBParts) != 2 {
+			t.Fatalf("expected 2 nested image parts for call_b, got %d: %s", len(frBParts), frB.Raw)
+		}
+		if frBParts[0].Get("inlineData.mimeType").String() != "image/jpeg" || frBParts[0].Get("inlineData.data").String() != "DATA_B1" {
+			t.Fatalf("unexpected call_b image 0: %s", frBParts[0].Raw)
+		}
+		if frBParts[1].Get("inlineData.mimeType").String() != "image/webp" || frBParts[1].Get("inlineData.data").String() != "DATA_B2" {
+			t.Fatalf("unexpected call_b image 1: %s", frBParts[1].Raw)
+		}
+	})
 }
 
 func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixedText(t *testing.T) {

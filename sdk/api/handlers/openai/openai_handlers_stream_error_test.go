@@ -242,3 +242,38 @@ func TestCompletionsHandlerSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testi
 		t.Fatalf("missing SSE JSON error payload after keepalive: %q", body)
 	}
 }
+
+func TestChatCompletionsHandlerRecordsAPIResponseErrorOnInitialEmbeddedErrorChunk(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"error":{"message":"blocked by cyber_policy","type":"invalid_request_error","code":"cyber_policy"}}`)}
+	close(chunks)
+
+	executor := &preFTKeepAliveChatExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "initial-embedded-error-chat-model"
+	auth := &coreauth.Auth{ID: "initial-embedded-error-chat-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIAPIHandler(base)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.ChatCompletions(c)
+
+	rawErrs, exists := c.Get("API_RESPONSE_ERROR")
+	if !exists || rawErrs == nil {
+		t.Fatalf("expected API_RESPONSE_ERROR to be recorded on initial embedded error chunk, body=%q", recorder.Body.String())
+	}
+}

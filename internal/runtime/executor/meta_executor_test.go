@@ -1067,6 +1067,9 @@ func TestMetaExecutor_PrepareRequest_ClientIdHeader_Issue6117(t *testing.T) {
 	if _, exists := req.Header["X-Client-Id:"]; exists {
 		t.Errorf("X-Client-Id: with trailing colon must not exist in headers")
 	}
+	if got := req.Header.Get("X-Tbh-Contributor-Mode"); got != "" {
+		t.Errorf("X-Tbh-Contributor-Mode = %q, want empty", got)
+	}
 }
 
 func TestMetaExecutor_ApplyMetaAPIHeaders_ClientIdHeader_Issue6117(t *testing.T) {
@@ -1096,9 +1099,186 @@ func TestMetaExecutor_ApplyMetaAPIHeaders_ClientIdHeader_Issue6117(t *testing.T)
 	if got := req.Header.Get("X-Tbh-Agent-Role"); got != "main" {
 		t.Errorf("X-Tbh-Agent-Role = %q, want main", got)
 	}
-	if got := req.Header.Get("X-Tbh-Contributor-Mode"); got != "1" {
-		t.Errorf("X-Tbh-Contributor-Mode = %q, want 1", got)
+	if got := req.Header.Get("X-Tbh-Contributor-Mode"); got != "" {
+		t.Errorf("X-Tbh-Contributor-Mode = %q, want empty", got)
 	}
+
+	contributorReq, errContributorReq := http.NewRequest(http.MethodPost, "https://api.meta.ai/responses", nil)
+	if errContributorReq != nil {
+		t.Fatal(errContributorReq)
+	}
+	contributorReq.Header.Set("X-Tbh-Session-Id", sessionID)
+	applyMetaAPIHeaders(contributorReq, auth, "test-key", true, nil, "muse-wonder-1.0-contributor")
+	if got := contributorReq.Header.Get("X-Tbh-Contributor-Mode"); got != "1" {
+		t.Errorf("contributor model X-Tbh-Contributor-Mode = %q, want 1", got)
+	}
+}
+
+func TestMetaExecutor_ContributorModeHeader_Issue7272(t *testing.T) {
+	var capturedHeaders []http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = append(capturedHeaders, r.Header.Clone())
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	cases := []struct {
+		name            string
+		model           string
+		wantContributor string
+	}{
+		{
+			name:            "plain muse-wonder-1.0 omits contributor header",
+			model:           "muse-wonder-1.0",
+			wantContributor: "",
+		},
+		{
+			name:            "plain muse-wonder-full-1.0 omits contributor header",
+			model:           "muse-wonder-full-1.0",
+			wantContributor: "",
+		},
+		{
+			name:            "plain muse-spark-1.3 omits contributor header",
+			model:           "muse-spark-1.3",
+			wantContributor: "",
+		},
+		{
+			name:            "contributor muse-wonder-1.0-contributor sets header",
+			model:           "muse-wonder-1.0-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor muse-wonder-full-1.0-contributor sets header",
+			model:           "muse-wonder-full-1.0-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor muse-spark-1.3-contributor sets header",
+			model:           "muse-spark-1.3-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor model with thinking suffix sets header",
+			model:           "muse-wonder-1.0-contributor(high)",
+			wantContributor: "1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("Execute/"+tc.name, func(t *testing.T) {
+			before := len(capturedHeaders)
+			payload := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, tc.model))
+			_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   tc.model,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai"),
+			})
+			if errExec != nil {
+				t.Fatalf("Execute(%q) error = %v", tc.model, errExec)
+			}
+			if len(capturedHeaders) != before+1 {
+				t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+			}
+			hdr := capturedHeaders[len(capturedHeaders)-1]
+			if got := hdr.Get("X-Tbh-Contributor-Mode"); got != tc.wantContributor {
+				t.Errorf("Execute(%q): X-Tbh-Contributor-Mode = %q, want %q", tc.model, got, tc.wantContributor)
+			}
+			if tc.wantContributor == "" && len(hdr.Values("X-Tbh-Contributor-Mode")) != 0 {
+				t.Errorf("Execute(%q): expected X-Tbh-Contributor-Mode header to be absent, got %v", tc.model, hdr.Values("X-Tbh-Contributor-Mode"))
+			}
+		})
+
+		t.Run("ExecuteStream/"+tc.name, func(t *testing.T) {
+			before := len(capturedHeaders)
+			payload := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, tc.model))
+			streamRes, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   tc.model,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai"),
+				Stream:       true,
+			})
+			if errStream != nil {
+				t.Fatalf("ExecuteStream(%q) error = %v", tc.model, errStream)
+			}
+			for chunk := range streamRes.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("ExecuteStream(%q) chunk error = %v", tc.model, chunk.Err)
+				}
+			}
+			if len(capturedHeaders) != before+1 {
+				t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+			}
+			hdr := capturedHeaders[len(capturedHeaders)-1]
+			if got := hdr.Get("X-Tbh-Contributor-Mode"); got != tc.wantContributor {
+				t.Errorf("ExecuteStream(%q): X-Tbh-Contributor-Mode = %q, want %q", tc.model, got, tc.wantContributor)
+			}
+			if tc.wantContributor == "" && len(hdr.Values("X-Tbh-Contributor-Mode")) != 0 {
+				t.Errorf("ExecuteStream(%q): expected X-Tbh-Contributor-Mode header to be absent, got %v", tc.model, hdr.Values("X-Tbh-Contributor-Mode"))
+			}
+		})
+	}
+
+	t.Run("payload override model determines contributor header", func(t *testing.T) {
+		overrideExec := NewMetaExecutor(&config.Config{
+			Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: []config.PayloadModelRule{{Name: "muse-wonder-1.0", Protocol: "meta"}},
+						Params: map[string]any{"model": "muse-wonder-1.0-contributor"},
+					},
+					{
+						Models: []config.PayloadModelRule{{Name: "muse-wonder-1.0-contributor", Protocol: "meta"}},
+						Params: map[string]any{"model": "muse-wonder-1.0"},
+					},
+				},
+			},
+		})
+
+		before := len(capturedHeaders)
+		_, errToContrib := overrideExec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-wonder-1.0",
+			Payload: []byte(`{"model":"muse-wonder-1.0","messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+		})
+		if errToContrib != nil {
+			t.Fatalf("Execute(override to contributor) error = %v", errToContrib)
+		}
+		if len(capturedHeaders) != before+1 {
+			t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+		}
+		if got := capturedHeaders[len(capturedHeaders)-1].Get("X-Tbh-Contributor-Mode"); got != "1" {
+			t.Errorf("override to contributor: X-Tbh-Contributor-Mode = %q, want 1", got)
+		}
+
+		before = len(capturedHeaders)
+		_, errToPlain := overrideExec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-wonder-1.0-contributor",
+			Payload: []byte(`{"model":"muse-wonder-1.0-contributor","messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+		})
+		if errToPlain != nil {
+			t.Fatalf("Execute(override to plain) error = %v", errToPlain)
+		}
+		if len(capturedHeaders) != before+1 {
+			t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+		}
+		if vals := capturedHeaders[len(capturedHeaders)-1].Values("X-Tbh-Contributor-Mode"); len(vals) != 0 {
+			t.Errorf("override to plain: expected X-Tbh-Contributor-Mode absent, got %v", vals)
+		}
+	})
 }
 
 func TestMetaExecutor_Execute_SendsClientIdHeader_Issue6117(t *testing.T) {

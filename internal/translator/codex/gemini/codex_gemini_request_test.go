@@ -2,12 +2,73 @@ package gemini
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 )
+
+func TestConvertGeminiRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"camel config camel field", `{"generationConfig":{"maxOutputTokens":1024}}`, "1024"},
+		{"camel config snake field", `{"generationConfig":{"max_output_tokens":1024}}`, "1024"},
+		{"snake config snake field", `{"generation_config":{"max_output_tokens":2048}}`, "2048"},
+		{"snake config camel field", `{"generation_config":{"maxOutputTokens":2048}}`, "2048"},
+		{"top-level camel field", `{"maxOutputTokens":1024}`, "1024"},
+		{"top-level snake field", `{"max_output_tokens":1024}`, "1024"},
+		{"top-level max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"config takes precedence", `{"generationConfig":{"maxOutputTokens":1024},"maxOutputTokens":2048,"max_output_tokens":4096,"max_tokens":8192}`, "1024"},
+		{"snake config takes precedence", `{"generation_config":{"max_output_tokens":1024},"max_output_tokens":2048}`, "1024"},
+		{"camel config takes precedence", `{"generationConfig":{"maxOutputTokens":1024},"generation_config":{"max_output_tokens":2048}}`, "1024"},
+		{"camel config field takes precedence", `{"generationConfig":{"maxOutputTokens":1024,"max_output_tokens":2048}}`, "1024"},
+		{"top-level camel field takes precedence", `{"maxOutputTokens":1024,"max_output_tokens":2048,"max_tokens":4096}`, "1024"},
+		{"top-level snake field takes precedence", `{"max_output_tokens":1024,"max_tokens":2048}`, "1024"},
+		{"empty config uses top-level fallback", `{"generationConfig":{},"max_tokens":1024}`, "1024"},
+		{"empty snake config uses top-level fallback", `{"generation_config":{},"max_tokens":1024}`, "1024"},
+		{"invalid config field skipped", `{"generationConfig":{"maxOutputTokens":"1024","max_output_tokens":2048}}`, "2048"},
+		{"null config field skipped", `{"generation_config":{"max_output_tokens":null},"max_tokens":1024}`, "1024"},
+		{"invalid top-level fields skipped", `{"maxOutputTokens":false,"max_output_tokens":{},"max_tokens":1024}`, "1024"},
+		{"zero takes precedence", `{"generationConfig":{"maxOutputTokens":0},"max_tokens":1024}`, "0"},
+		{"non-numeric limits ignored", `{"generationConfig":{"maxOutputTokens":"1024"},"max_tokens":null}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertGeminiRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToCodex_GenerationConfigAliases(t *testing.T) {
+	for _, path := range []string{"generationConfig", "generation_config"} {
+		t.Run(path, func(t *testing.T) {
+			inputDoc := ojson.NewDocString(`{}`)
+			_ = inputDoc.Set(path+".thinking_level", "high")
+			_ = inputDoc.Set(path+".max_output_tokens", 1024)
+			out, errConvert := ConvertGeminiRequestToCodex("codex-test", inputDoc.Bytes(), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "reasoning.effort").String(); got != "high" {
+				t.Fatalf("reasoning.effort = %q, want high; output=%s", got, out)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Int(); got != 1024 {
+				t.Fatalf("max_output_tokens = %d, want 1024; output=%s", got, out)
+			}
+		})
+	}
+}
 
 func TestConvertGeminiRequestToCodex_PreservesCustomCallIDs(t *testing.T) {
 	tests := []struct {

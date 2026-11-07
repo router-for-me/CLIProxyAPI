@@ -3,6 +3,7 @@ package main
 /*
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 typedef struct {
 	void* ptr;
@@ -40,6 +41,43 @@ extern void cliproxyPluginShutdown(void);
 #define PLUGIN_VERSION 1
 #endif
 
+#if PLUGIN_VERSION == 4
+#include <signal.h>
+__attribute__((constructor)) static void cliproxyTestSigillOnDlopen(void) {
+	raise(SIGILL);
+}
+#elif PLUGIN_VERSION == 5
+#include <unistd.h>
+__attribute__((constructor)) static void cliproxyTestPrematureExitZeroOnDlopen(void) {
+	_exit(0);
+}
+#elif PLUGIN_VERSION == 6
+#include <signal.h>
+__attribute__((constructor)) static void cliproxyTestSigkillOnDlopen(void) {
+	raise(SIGKILL);
+}
+#elif PLUGIN_VERSION == 7
+#include <stdio.h>
+#include <unistd.h>
+__attribute__((constructor)) static void cliproxyTestInheritedStdioGrandchildOnDlopen(void) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		pause();
+		_exit(0);
+	}
+	if (pid > 0) {
+		const char* pid_path = getenv("CLIPROXY_TEST_GRANDCHILD_PID_FILE");
+		if (pid_path != NULL && pid_path[0] != '\0') {
+			FILE* fp = fopen(pid_path, "w");
+			if (fp != NULL) {
+				fprintf(fp, "%d\n", (int)pid);
+				fclose(fp);
+			}
+		}
+	}
+}
+#endif
+
 static const char* cliproxyTestMarker(void) {
 #if PLUGIN_VERSION == 2
 	return "v2";
@@ -53,6 +91,30 @@ static int cliproxyTestFailInit(void) {
 	return 1;
 #else
 	return 0;
+#endif
+}
+
+static const cliproxy_host_api* cliproxy_test_stored_host = NULL;
+
+static void cliproxyTestStoreHost(const cliproxy_host_api* host) {
+	cliproxy_test_stored_host = host;
+}
+
+static void cliproxyTestOnShutdown(void) {
+#if PLUGIN_VERSION == 8
+	if (cliproxy_test_stored_host != NULL && cliproxy_test_stored_host->call != NULL) {
+		cliproxy_buffer resp = {0};
+		(void)cliproxy_test_stored_host->call(cliproxy_test_stored_host->host_ctx, "host.log", NULL, 0, &resp);
+	}
+	char chunk[4096];
+	for (size_t i = 0; i < sizeof(chunk); i++) {
+		chunk[i] = 'E';
+	}
+	chunk[sizeof(chunk) - 1] = '\n';
+	for (int i = 0; i < 32; i++) {
+		(void)write(2, chunk, sizeof(chunk));
+	}
+	_exit(1);
 #endif
 }
 */
@@ -73,15 +135,14 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	if plugin == nil {
 		return 1
 	}
+	C.cliproxyTestStoreHost(host)
 	if failInit {
-		_ = host
 		return 7
 	}
 	plugin.abi_version = 1
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
 	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
-	_ = host
 	return 0
 }
 
@@ -119,6 +180,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
 	shutdownCalls.Add(1)
+	C.cliproxyTestOnShutdown()
 }
 
 func main() {}

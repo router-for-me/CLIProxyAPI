@@ -1082,7 +1082,7 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 		t.Fatal("VerifyInference must fail when stream ends with response.incomplete")
 	}
 
-	// Operator-triggered VerifyInference pins to primary, uses an isolated session and minimal 1-token prompt, and marks InferenceVerified = true upon response.completed.
+	// Operator-triggered VerifyInference pins to primary, uses an isolated session and a minimal 16-token (Codex floor) prompt, and marks InferenceVerified = true upon response.completed.
 	executor.mu.Lock()
 	executor.streamPayloads = nil
 	executor.streamCalls = nil
@@ -1102,8 +1102,8 @@ func TestManager_CodexTerminalRenewalRecoveryLifecycle_Issue5783(t *testing.T) {
 	if gotSession := verifyOpts.Headers.Get("X-Session-Id"); gotSession == "" || len(gotSession) < 7 || gotSession[:7] != "verify-" {
 		t.Fatalf("VerifyInference X-Session-Id = %q, want isolated verify-* session", gotSession)
 	}
-	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":1`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
-		t.Fatalf("VerifyInference payload = %s, want minimal 1-token non-stored prompt", string(verifyReq.Payload))
+	if !containsSubstr(string(verifyReq.Payload), `"max_output_tokens":16`) || !containsSubstr(string(verifyReq.Payload), `"store":false`) {
+		t.Fatalf("VerifyInference payload = %s, want minimal 16-token non-stored prompt", string(verifyReq.Payload))
 	}
 	if !afterVerify.InferenceVerified || afterVerify.RecoveryStageAt(now) != RecoveryStageInferenceVerified {
 		t.Fatalf("expected InferenceVerified=true and stage=inference_verified after VerifyInference, got %v / %q", afterVerify.InferenceVerified, afterVerify.RecoveryStageAt(now))
