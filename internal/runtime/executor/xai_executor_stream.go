@@ -105,16 +105,23 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					switch ojson.GetBytesNoCopy(eventData, "type").String() {
 					case "response.output_item.done":
 						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-					case "response.completed", "response.incomplete":
-						// Reconstruct only after the bridge has restored dispatcher children.
-						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-						eventData = xaiNormalizeReasoningSummaryData(eventData)
-						if ojson.GetBytesNoCopy(eventData, "type").String() == "response.completed" {
-							// Only completed responses carry replayable terminal state.
-							cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
+					case "response.completed", "response.incomplete", "response.done":
+						// response.done is a legitimate terminal on xAI Responses SSE.
+						// Promote only a clean success; incomplete stays incomplete;
+						// failed, cancelled, or error-bearing events stay response.done.
+						terminalType := xaiDoneTerminalType(eventData)
+						if terminalType != "response.done" {
+							eventData = xaiSetTerminalEventType(eventData, terminalType)
+							// Reconstruct only after the bridge has restored dispatcher children.
+							eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+							eventData = xaiNormalizeReasoningSummaryData(eventData)
+							if terminalType == "response.completed" {
+								// Only completed responses carry replayable terminal state.
+								cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, eventData)
+							}
+							ending := line[len(bytes.TrimRight(line, "\r\n")):]
+							line = append(append([]byte("data: "), eventData...), ending...)
 						}
-						ending := line[len(bytes.TrimRight(line, "\r\n")):]
-						line = append(append([]byte("data: "), eventData...), ending...)
 					}
 				}
 				chunks = append(chunks, helps.TranslateStreamWithClaudeInputTokens(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, line, &param, claudeInputTokens)...)
@@ -157,7 +164,10 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
 				hasPendingEventLine := pendingEventLine != nil
 				for i, eventData := range eventDataList {
-					if rawEventType := ojson.GetBytesNoCopy(eventData, "type").String(); rawEventType == "response.output_item.done" || rawEventType == "response.completed" || rawEventType == "response.incomplete" || rawEventType == "response.done" {
+					// A failed, cancelled, or error-bearing response.done is not a
+					// usage source. Clean done events are classified as completed
+					// or incomplete before they are observed.
+					if terminalType := xaiDoneTerminalType(eventData); terminalType == "response.output_item.done" || terminalType == "response.completed" || terminalType == "response.incomplete" {
 						streamUsage.ObserveResponsesStream(eventData)
 					}
 					prepared.applyPatch.RememberDispatcherEvent(eventData)
@@ -173,7 +183,9 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 						continue
 					}
 					reporter.ObserveResponseModel(eventData)
-					normalizedEventName := ojson.GetBytesNoCopy(eventData, "type").String()
+					// Keep the event: line aligned with the data-line rewrite in
+					// emitTranslatedLine. Failures stay response.done.
+					normalizedEventName := xaiDoneTerminalType(eventData)
 
 					if hasPendingEventLine {
 						eventLine := []byte("event: " + normalizedEventName)
@@ -237,4 +249,77 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+// xaiDoneTerminalType resolves the downstream terminal type for a response.done
+// event. Only a clean success (no error, and status empty or completed) is
+// promoted to response.completed. Incomplete stays response.incomplete. Failed,
+// cancelled, or error-bearing payloads keep response.done so nothing downstream
+// can report a fabricated success or replay a failed turn.
+func xaiDoneTerminalType(eventData []byte) string {
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
+	if eventType != "response.done" {
+		return eventType
+	}
+	if xaiTerminalHasError(eventData) {
+		return "response.done"
+	}
+	switch strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "response.status").String())) {
+	case "", "completed":
+		return "response.completed"
+	case "incomplete":
+		return "response.incomplete"
+	default:
+		return "response.done"
+	}
+}
+
+// xaiTerminalHasError reports whether a terminal event carries a non-empty
+// error. An explicit JSON null, empty object, or empty array is not an error.
+func xaiTerminalHasError(eventData []byte) bool {
+	for _, path := range []string{"response.error", "error"} {
+		node := ojson.GetBytesNoCopy(eventData, path)
+		if !node.Exists() || node.Type == ojson.Null {
+			continue
+		}
+		switch node.Type {
+		case ojson.JSON:
+			if node.IsObject() && len(node.Map()) > 0 {
+				return true
+			}
+			if node.IsArray() && len(node.Array()) > 0 {
+				return true
+			}
+		case ojson.String:
+			if strings.TrimSpace(node.String()) != "" {
+				return true
+			}
+		default:
+			if strings.TrimSpace(node.Raw) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func xaiSetTerminalEventType(eventData []byte, eventType string) []byte {
+	if eventType == "" || ojson.GetBytesNoCopy(eventData, "type").String() == eventType {
+		return eventData
+	}
+	updated, err := ojson.SetBytes(eventData, "type", eventType)
+	if err != nil || len(updated) == 0 {
+		return eventData
+	}
+	return updated
+}
+
+// xaiTerminalFailurePayload unwraps a failure response.done without rewriting
+// its status or error. Callers must not treat this payload as a success.
+func xaiTerminalFailurePayload(eventData []byte) []byte {
+	response := ojson.GetBytes(eventData, "response")
+	if response.Exists() && response.IsObject() {
+		return []byte(response.Raw)
+	}
+	return append([]byte(nil), eventData...)
 }
