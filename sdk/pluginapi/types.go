@@ -1730,6 +1730,14 @@ type UsageDetail struct {
 	CacheReadTokens int64
 	// CacheCreationTokens is the cache creation token count.
 	CacheCreationTokens int64
+	// CacheCreation5mTokens, CacheCreation30mTokens, CacheCreation1hTokens and CacheCreation12hTokens
+	// split CacheCreationTokens by cache TTL when the upstream reports it (for example Claude's
+	// usage.cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens). Writes with a
+	// longer TTL are billed at a higher rate. Nil when the upstream did not report that bucket.
+	CacheCreation5mTokens  *int64 `json:",omitempty"`
+	CacheCreation30mTokens *int64 `json:",omitempty"`
+	CacheCreation1hTokens  *int64 `json:",omitempty"`
+	CacheCreation12hTokens *int64 `json:",omitempty"`
 	// TotalTokens is the total token count.
 	TotalTokens int64
 }
