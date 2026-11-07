@@ -317,6 +317,9 @@ func applyOutputStyles(cfg Config, body []byte) ([]byte, string) {
 	if out, ok := injectChatSystem(body, instruction); ok {
 		return out, "chat"
 	}
+	if out, ok := injectGeminiSystem(body, instruction); ok {
+		return out, "gemini"
+	}
 	if out, ok := injectResponsesInstructions(body, instruction); ok {
 		return out, "responses"
 	}
@@ -371,9 +374,12 @@ func firstChatSystemContent(body []byte) (string, gjson.Result) {
 	return path, content
 }
 
+// geminiSystemKeys are the spellings Gemini and Interactions endpoints accept.
+var geminiSystemKeys = []string{"systemInstruction", "system_instruction"}
+
 // outputStyleTargets returns the exact texts style injection appends to: the
-// first chat system/developer string, the Anthropic system string or block
-// texts, and the Responses instructions string.
+// first chat system/developer content, the Anthropic system string or block
+// texts, the Gemini system instruction, and the Responses instructions string.
 func outputStyleTargets(body []byte) []string {
 	var targets []string
 	if path, content := firstChatSystemContent(body); path != "" {
@@ -384,6 +390,21 @@ func outputStyleTargets(body []byte) []string {
 			for _, block := range content.Array() {
 				if block.Get("type").String() == "text" {
 					targets = append(targets, block.Get("text").String())
+				}
+			}
+		}
+	}
+	for _, key := range geminiSystemKeys {
+		field := gjson.Get(bodyString(body), key)
+		switch {
+		case field.Type == gjson.String:
+			targets = append(targets, field.String())
+		case field.IsObject():
+			if parts := field.Get("parts"); parts.IsArray() {
+				for _, part := range parts.Array() {
+					if text := part.Get("text"); text.Type == gjson.String {
+						targets = append(targets, text.String())
+					}
 				}
 			}
 		}
@@ -432,6 +453,39 @@ func injectClaudeSystem(body []byte, instruction string) ([]byte, bool) {
 			return nil, false
 		}
 		return out, true
+	}
+	return nil, false
+}
+
+// injectGeminiSystem appends to the Gemini top-level system instruction.
+func injectGeminiSystem(body []byte, instruction string) ([]byte, bool) {
+	part := []byte(`{"text":` + string(appendJSONString(nil, instruction)) + `}`)
+	for _, key := range geminiSystemKeys {
+		field := gjson.Get(bodyString(body), key)
+		switch {
+		case field.Type == gjson.String:
+			out, err := sjson.SetBytes(body, key, field.String()+"\n\n"+instruction)
+			if err != nil {
+				return nil, false
+			}
+			return out, true
+		case field.IsObject():
+			parts := field.Get("parts")
+			var out []byte
+			var err error
+			switch {
+			case parts.IsArray():
+				out, err = sjson.SetRawBytes(body, key+".parts.-1", part)
+			case !parts.Exists():
+				out, err = sjson.SetRawBytes(body, key+".parts", []byte("["+string(part)+"]"))
+			}
+			if err != nil {
+				return nil, false
+			}
+			if out != nil {
+				return out, true
+			}
+		}
 	}
 	return nil, false
 }
