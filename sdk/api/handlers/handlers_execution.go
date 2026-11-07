@@ -45,20 +45,40 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	originalRequestedModel := modelName
+	var body []byte
+	var headers http.Header
+	servedModel, failure := h.runModelFallback(ctx, modelName, execOptions, func(attemptModel string) *modelAttemptFailure {
+		var attemptFailure *modelAttemptFailure
+		body, headers, attemptFailure = h.executeModelAttempt(ctx, entryProtocol, exitProtocol, attemptModel, modelName, rawJSON, alt, allowImageModel, execOptions)
+		return attemptFailure
+	})
+	if failure != nil {
+		return nil, nil, failure.msg
+	}
+	return body, withModelFallbackHeader(headers, modelName, servedModel), nil
+}
+
+// executeModelAttempt runs one non-streaming execution of modelName on behalf of the
+// client-requested model. Failures from AuthManager.Execute carry the upstream error so
+// the model fallback driver can evaluate them.
+func (h *BaseAPIHandler) executeModelAttempt(ctx context.Context, entryProtocol, exitProtocol, modelName, requestedModel string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *modelAttemptFailure) {
+	originalRequestedModel := requestedModel
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
-		return nil, nil, errMsg
+		return nil, nil, terminalModelAttemptFailure(errMsg)
 	}
 	if routeDecision.ExecutorPluginID != "" {
-		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		body, headers, errMsg := h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		return body, headers, terminalModelAttemptFailure(errMsg)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	// modelName equals the requested model on the first attempt; fallback attempts
+	// resolve providers for their own target model.
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, modelName, allowImageModel, routeDecision, execOptions)
 	if errMsg != nil {
-		return nil, nil, errMsg
+		return nil, nil, unresolvedModelAttemptFailure(errMsg)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -104,15 +124,14 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
-		return nil, nil, interceptErr
+		return nil, nil, terminalModelAttemptFailure(interceptErr)
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
+		errMsg := executionErrorMessage(enrichAuthSelectionError(err, providers, normalizedModel))
 		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, errMsg
+		return nil, nil, upstreamModelAttemptFailure(errMsg, err)
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
@@ -121,6 +140,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	if modelName != originalRequestedModel {
+		responseHeaders = withModelFallbackHeader(responseHeaders, originalRequestedModel, executedReq.Model)
+	}
 	return body, responseHeaders, nil
 }
 
@@ -131,14 +153,30 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	originalRequestedModel := modelName
+	var body []byte
+	var headers http.Header
+	servedModel, failure := h.runModelFallback(ctx, modelName, execOptions, func(attemptModel string) *modelAttemptFailure {
+		var attemptFailure *modelAttemptFailure
+		body, headers, attemptFailure = h.countModelAttempt(ctx, handlerType, attemptModel, modelName, rawJSON, alt, execOptions)
+		return attemptFailure
+	})
+	if failure != nil {
+		return nil, nil, failure.msg
+	}
+	return body, withModelFallbackHeader(headers, modelName, servedModel), nil
+}
+
+// countModelAttempt runs one token-count execution of modelName on behalf of requestedModel.
+func (h *BaseAPIHandler) countModelAttempt(ctx context.Context, handlerType, modelName, requestedModel string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *modelAttemptFailure) {
+	originalRequestedModel := requestedModel
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
-		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		body, headers, errMsg := h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
+		return body, headers, terminalModelAttemptFailure(errMsg)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, modelName, false, routeDecision, execOptions)
 	if errMsg != nil {
-		return nil, nil, errMsg
+		return nil, nil, unresolvedModelAttemptFailure(errMsg)
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
@@ -175,15 +213,14 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
 		lifecycle.completeError(ctx, interceptErr)
-		return nil, nil, interceptErr
+		return nil, nil, terminalModelAttemptFailure(interceptErr)
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
-		errMsg := executionErrorMessage(err)
+		errMsg := executionErrorMessage(enrichAuthSelectionError(err, providers, normalizedModel))
 		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, errMsg
+		return nil, nil, upstreamModelAttemptFailure(errMsg, err)
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
@@ -192,6 +229,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
+	if modelName != originalRequestedModel {
+		responseHeaders = withModelFallbackHeader(responseHeaders, originalRequestedModel, executedReq.Model)
+	}
 	return body, responseHeaders, nil
 }
 
