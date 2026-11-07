@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +253,14 @@ func codexDeviceIsSuccessStatus(code int) bool {
 }
 
 func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+	return a.buildAuthRecordForOS(authSvc, authBundle, runtime.GOOS)
+}
+
+// buildAuthRecordForOS builds the record of the maintained CLI login. Its file
+// name is codex.PlatformCredentialFileName, the name the import writes, so a
+// re-login replaces an imported account on Windows too. goos is a parameter so
+// the Windows rule can be tested anywhere.
+func (a *CodexAuthenticator) buildAuthRecordForOS(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle, goos string) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -280,7 +289,7 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	}
 	tokenStorage.PlanType = planType
 
-	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+	fileName := codex.PlatformCredentialFileName(tokenStorage.Email, planType, hashAccountID, goos)
 	metadata := map[string]any{
 		"email":     tokenStorage.Email,
 		"plan_type": planType,
