@@ -475,272 +475,6 @@ func (s *Store) SummaryContext(ctx context.Context, filter Filter) (Summary, []S
 	return result.Total, result.Groups, err
 }
 
-// overviewRankLimit caps each ranking tab so the payload stays small on large
-// histories; the full breakdown remains reachable through the same filters.
-const overviewRankLimit = 50
-
-// OverviewRankRow is one ranked breakdown row. Label is the display value
-// (model ID, username or credential prefix).
-type OverviewRankRow struct {
-	Key   string  `json:"key"`
-	Label string  `json:"label"`
-	Value Summary `json:"value"`
-}
-
-// UsageOverview is the bounded payload driving the usage page: totals,
-// adaptive trend buckets, per-dimension top rows, model candidates and facet
-// values. It replaces three unbounded requests the page used to make.
-type UsageOverview struct {
-	Total   Summary                      `json:"total"`
-	Buckets []SummaryBucket              `json:"buckets"`
-	Rank    map[string][]OverviewRankRow `json:"rank"`
-	Models  []string                     `json:"models"`
-	Facets  UsageFacets                  `json:"facets"`
-}
-
-// overviewGroupColumns mirrors summaryColumns minus the leading trace count;
-// overviewRowDest mirrors summaryDest minus Calls.
-const overviewGroupColumns = `COUNT(*), COALESCE(SUM(failed),0),
- COALESCE(SUM(input),0), COALESCE(SUM(output),0), COALESCE(SUM(reasoning),0),
- COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0), COALESCE(SUM(total),0), COALESCE(SUM(1-known),0),
- COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN latency ELSE 0 END),0),
- COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN 1 ELSE 0 END),0),
- COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN ttft ELSE 0 END),0),
- COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN 1 ELSE 0 END),0)`
-
-func overviewRowDest(sum *Summary) []any {
-	return summaryDest(sum)[1:]
-}
-
-func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOverview, error) {
-	j, err := s.queryJournal(ctx)
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
-	key, err := json.Marshal(filter)
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	value, err := j.aggregate(ctx, "overview:"+string(key), func(ctx context.Context) (any, int, error) {
-		result := UsageOverview{
-			Buckets: []SummaryBucket{},
-			Rank:    map[string][]OverviewRankRow{"model": {}, "consumer": {}, "credential": {}},
-			Models:  []string{},
-			Facets:  UsageFacets{Providers: []string{}, Endpoints: []string{}, Statuses: []int{}, Efforts: []string{}},
-		}
-		where, args := journalWhere(1, filter)
-		// usage_summary_v3 covers every column these queries touch, so all of
-		// the scans below stay index-only even on large histories.
-		from := "events INDEXED BY usage_summary_v3"
-		tx, errBegin := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-		if errBegin != nil {
-			return nil, 0, errBegin
-		}
-		defer func() { _ = tx.Rollback() }()
-
-		// Distinct-trace request count; additive totals in a second scan.
-		traceFrom := from
-		if where == "kind=1" {
-			traceFrom = "events INDEXED BY usage_trace"
-		} else if filter.Consumer != "" && filter == (Filter{Consumer: filter.Consumer}) {
-			traceFrom = "events INDEXED BY usage_consumer_trace"
-		} else if filter.Owner != "" && filter == (Filter{Owner: filter.Owner}) {
-			traceFrom = "events INDEXED BY usage_owner_trace"
-		}
-		if errTotal := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT trace) FROM "+traceFrom+" WHERE "+where, args...).Scan(&result.Total.Calls); errTotal != nil {
-			return nil, 0, errTotal
-		}
-		if collapsesAttempts(filter) {
-			folded := strings.Replace(where, "superseded=0", "superseded=1", 1)
-			if errFolded := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+from+" WHERE "+folded, args...).Scan(&result.Total.Failovers); errFolded != nil {
-				return nil, 0, errFolded
-			}
-		}
-		if errAgg := tx.QueryRowContext(ctx, "SELECT "+overviewGroupColumns+" FROM "+from+" WHERE "+where, args...).Scan(overviewRowDest(&result.Total)...); errAgg != nil {
-			return nil, 0, errAgg
-		}
-
-		// Trend: hourly for ranges up to two days, daily otherwise. Day buckets
-		// use UTC-midnight seconds; the client folds them into local days.
-		bucketExpr := "unixepoch(day||' 00:00:00')"
-		if !filter.From.IsZero() && !filter.To.IsZero() && filter.To.Sub(filter.From) <= 48*time.Hour {
-			bucketExpr = "hour"
-		}
-		buckets, errBuckets := tx.QueryContext(ctx, "SELECT "+bucketExpr+", COUNT(*), COALESCE(SUM(failed),0), COALESCE(SUM(total),0), COALESCE(SUM(input),0), COALESCE(SUM(output),0) FROM "+from+" WHERE "+where+" GROUP BY "+bucketExpr+" ORDER BY "+bucketExpr, args...)
-		if errBuckets != nil {
-			return nil, 0, errBuckets
-		}
-		for buckets.Next() {
-			var b SummaryBucket
-			if errScan := buckets.Scan(&b.Start, &b.Calls, &b.Failures, &b.TotalTokens, &b.InputTokens, &b.OutputTokens); errScan != nil {
-				_ = buckets.Close()
-				return nil, 0, errScan
-			}
-			b.Executions = b.Calls
-			result.Buckets = append(result.Buckets, b)
-		}
-		if errRows := buckets.Err(); errRows != nil {
-			_ = buckets.Close()
-			return nil, 0, errRows
-		}
-		_ = buckets.Close()
-
-		rankQuery := func(dimension, groupExpr, keyExpr, labelExpr string) error {
-			query := "SELECT " + keyExpr + ", " + labelExpr + ", " + overviewGroupColumns +
-				" FROM " + from + " WHERE " + where + " GROUP BY " + groupExpr +
-				" ORDER BY COALESCE(SUM(total),0) DESC, " + keyExpr + " LIMIT ?"
-			rows, errQuery := tx.QueryContext(ctx, query, append(append([]any{}, args...), overviewRankLimit)...)
-			if errQuery != nil {
-				return errQuery
-			}
-			defer func() { _ = rows.Close() }()
-			for rows.Next() {
-				var row OverviewRankRow
-				dest := append([]any{&row.Key, &row.Label}, overviewRowDest(&row.Value)...)
-				if errScan := rows.Scan(dest...); errScan != nil {
-					return errScan
-				}
-				if row.Label == "" {
-					row.Label = row.Key
-				}
-				result.Rank[dimension] = append(result.Rank[dimension], row)
-			}
-			return rows.Err()
-		}
-		if err := rankQuery("model", "model", "model", "model"); err != nil {
-			return nil, 0, err
-		}
-		if err := rankQuery("consumer", "consumer", "consumer", "consumer"); err != nil {
-			return nil, 0, err
-		}
-		if err := rankQuery("credential", "credential_id,channel", "credential_id", "channel"); err != nil {
-			return nil, 0, err
-		}
-
-		// Model candidates pair each bare model with its serving channel so the
-		// UI can pin even-load calls; the applied model filter is excluded.
-		candidateFilter := filter
-		candidateFilter.Model = ""
-		modelWhere, modelArgs := journalWhere(1, candidateFilter)
-		models, errModels := tx.QueryContext(ctx, "SELECT model, channel FROM "+from+" WHERE "+modelWhere+" GROUP BY model, channel ORDER BY model", modelArgs...)
-		if errModels != nil {
-			return nil, 0, errModels
-		}
-		seen := map[string]bool{}
-		for models.Next() {
-			var model, channel string
-			if errScan := models.Scan(&model, &channel); errScan != nil {
-				_ = models.Close()
-				return nil, 0, errScan
-			}
-			if model != "" && !seen[model] {
-				seen[model] = true
-				result.Models = append(result.Models, model)
-			}
-			if channel != "" && !strings.HasPrefix(model, channel+"/") {
-				serving := channel + "/" + model
-				if !seen[serving] {
-					seen[serving] = true
-					result.Models = append(result.Models, serving)
-				}
-			}
-		}
-		if errRows := models.Err(); errRows != nil {
-			_ = models.Close()
-			return nil, 0, errRows
-		}
-		_ = models.Close()
-		sort.Strings(result.Models)
-
-		// Facet dropdowns only list values that exist under the other filters;
-		// each dimension ignores its own applied value. Sorting matches the
-		// standalone facets endpoint (alphabetical, "none" last naturally).
-		facetColumns := []struct {
-			dim  string
-			dest func(string)
-		}{
-			{"provider", func(v string) { result.Facets.Providers = append(result.Facets.Providers, v) }},
-			{"endpoint", func(v string) { result.Facets.Endpoints = append(result.Facets.Endpoints, v) }},
-			{"effort", func(v string) {
-				if v == "" {
-					v = "none"
-				}
-				result.Facets.Efforts = append(result.Facets.Efforts, v)
-			}},
-		}
-		for _, column := range facetColumns {
-			facetFilter := filter
-			switch column.dim {
-			case "provider":
-				facetFilter.Provider = ""
-			case "endpoint":
-				facetFilter.Endpoint = ""
-			case "effort":
-				facetFilter.Effort = ""
-			}
-			facetWhere, facetArgs := journalWhere(1, facetFilter)
-			rows, errRows := tx.QueryContext(ctx, "SELECT DISTINCT "+column.dim+" FROM "+from+" WHERE "+facetWhere+" ORDER BY "+column.dim, facetArgs...)
-			if errRows != nil {
-				return nil, 0, errRows
-			}
-			for rows.Next() {
-				var v string
-				if errScan := rows.Scan(&v); errScan != nil {
-					_ = rows.Close()
-					return nil, 0, errScan
-				}
-				if v != "" {
-					column.dest(v)
-				} else if column.dim == "effort" {
-					column.dest(v)
-				}
-			}
-			if err := rows.Err(); err != nil {
-				_ = rows.Close()
-				return nil, 0, err
-			}
-			_ = rows.Close()
-		}
-		{
-			statusFilter := filter
-			statusFilter.Status = ""
-			statusWhere, statusArgs := journalWhere(1, statusFilter)
-			rows, errRows := tx.QueryContext(ctx, "SELECT DISTINCT status FROM "+from+" WHERE "+statusWhere+" ORDER BY status", statusArgs...)
-			if errRows != nil {
-				return nil, 0, errRows
-			}
-			for rows.Next() {
-				var status int
-				if errScan := rows.Scan(&status); errScan != nil {
-					_ = rows.Close()
-					return nil, 0, errScan
-				}
-				result.Facets.Statuses = append(result.Facets.Statuses, status)
-			}
-			if err := rows.Err(); err != nil {
-				_ = rows.Close()
-				return nil, 0, err
-			}
-			_ = rows.Close()
-		}
-
-		sort.Strings(result.Facets.Providers)
-		sort.Strings(result.Facets.Endpoints)
-		sort.Strings(result.Facets.Efforts)
-		weight := 1 + len(result.Buckets) + len(result.Models)
-		for _, rows := range result.Rank {
-			weight += len(rows)
-		}
-		weight += len(result.Facets.Providers) + len(result.Facets.Endpoints) + len(result.Facets.Statuses) + len(result.Facets.Efforts)
-		return result, weight, nil
-	})
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	return value.(UsageOverview), nil
-}
-
 func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (SummaryResult, error) {
 	j, err := s.queryJournal(ctx)
 	if err != nil {
@@ -837,6 +571,328 @@ func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (Summar
 	}, nil
 }
 
+// overviewRankLimit caps each ranking tab so the payload stays small on large
+// histories; the full breakdown remains reachable through the same filters.
+const overviewRankLimit = 50
+
+// OverviewRankRow is one ranked breakdown row. Label is the display value
+// (model ID, username or credential prefix).
+type OverviewRankRow struct {
+	Key   string  `json:"key"`
+	Label string  `json:"label"`
+	Value Summary `json:"value"`
+}
+
+// UsageOverview is the bounded payload driving the usage page: totals,
+// adaptive trend buckets, per-dimension top rows, model candidates and facet
+// values. It replaces three unbounded requests the page used to make.
+type UsageOverview struct {
+	Total   Summary                      `json:"total"`
+	Buckets []SummaryBucket              `json:"buckets"`
+	Rank    map[string][]OverviewRankRow `json:"rank"`
+	Models  []string                     `json:"models"`
+	Facets  UsageFacets                  `json:"facets"`
+}
+
+// overviewGroupColumns mirrors summaryColumns minus the leading trace count;
+// overviewRowDest mirrors summaryDest minus Calls.
+const overviewGroupColumns = `COUNT(*), COALESCE(SUM(failed),0),
+ COALESCE(SUM(input),0), COALESCE(SUM(output),0), COALESCE(SUM(reasoning),0),
+ COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0), COALESCE(SUM(total),0), COALESCE(SUM(1-known),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN latency ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN 1 ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN ttft ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN 1 ELSE 0 END),0)`
+
+func overviewRowDest(sum *Summary) []any {
+	return summaryDest(sum)[1:]
+}
+
+func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOverview, error) {
+	j, err := s.queryJournal(ctx)
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
+	key, err := json.Marshal(filter)
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	value, err := j.aggregate(ctx, "overview:"+string(key), func(ctx context.Context) (any, int, error) {
+		result := UsageOverview{
+			Buckets: []SummaryBucket{},
+			Rank:    map[string][]OverviewRankRow{"model": {}, "consumer": {}, "credential": {}},
+			Models:  []string{},
+			Facets:  UsageFacets{Providers: []string{}, Endpoints: []string{}, Statuses: []int{}, Efforts: []string{}},
+		}
+		// One sequential read of the covering index produces every statistic.
+		// SQL narrows by kind, time, identity, resource and outcome only; the
+		// model match and the six attribute predicates run in Go so a single
+		// pass yields totals, ranks, candidates and facets that can each
+		// ignore their own applied filter.
+		sqlFilter := filter
+		sqlFilter.Model = ""
+		sqlFilter.Provider = ""
+		sqlFilter.Stream = ""
+		sqlFilter.Status = ""
+		sqlFilter.Endpoint = ""
+		sqlFilter.Effort = ""
+		sqlFilter.Balanced = ""
+		where, args := journalWhere(1, sqlFilter)
+		if collapsesAttempts(sqlFilter) {
+			// Stats must still see superseded rows: they count as failovers,
+			// not as executions.
+			where = strings.Replace(where, "superseded=0", "1=1", 1)
+		}
+		const projection = "day, hour, consumer, owner, channel_id, credential_id, key_id, channel, model, trace, " +
+			"failed, superseded, known, input, output, reasoning, cache_read, cache_create, total, latency, ttft, " +
+			"provider, status, stream, endpoint, effort, balanced"
+		rows, errQuery := j.db.QueryContext(ctx,
+			"SELECT "+projection+" FROM events INDEXED BY usage_summary_v3 WHERE "+where, args...)
+		if errQuery != nil {
+			return nil, 0, errQuery
+		}
+		defer func() { _ = rows.Close() }()
+
+		hourly := !filter.From.IsZero() && !filter.To.IsZero() && filter.To.Sub(filter.From) <= 48*time.Hour
+		buckets := map[int64]*SummaryBucket{}
+		ranks := map[string]map[string]*Summary{"model": {}, "consumer": {}, "credential": {}}
+		rankLabel := map[string]map[string]string{"model": {}, "consumer": {}, "credential": {}}
+		traces := map[string]bool{}
+		models := map[string]bool{}
+		providers := map[string]bool{}
+		endpoints := map[string]bool{}
+		statuses := map[int]bool{}
+		efforts := map[string]bool{}
+
+		matchesAttrs := func(provider, endpoint string, status int64, stream, balanced bool, effort, skip string) bool {
+			if skip != "provider" && filter.Provider != "" && providerBase(provider) != filter.Provider {
+				return false
+			}
+			if skip != "stream" && filter.Stream != "" && stream != (filter.Stream == "stream") {
+				return false
+			}
+			if skip != "status" && filter.Status != "" {
+				low, high, ok := statusRange(filter.Status)
+				if !ok || status < int64(low) || status > int64(high) {
+					return false
+				}
+			}
+			if skip != "endpoint" && filter.Endpoint != "" && endpoint != filter.Endpoint {
+				return false
+			}
+			if skip != "effort" && filter.Effort != "" && effort != effortValue(filter.Effort) {
+				return false
+			}
+			if skip != "balanced" && filter.Balanced != "" && balanced != (filter.Balanced == "yes") {
+				return false
+			}
+			return true
+		}
+		matchModel := func(model, channel string) bool {
+			return filter.Model == "" || matchModelQuery(UsageEvent{Model: model, Channel: channel}, filter.Model)
+		}
+		addRank := func(dimension, key, label string, failed, known bool, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft int64) {
+			if key == "" {
+				key = label
+			}
+			sum := ranks[dimension][key]
+			if sum == nil {
+				sum = &Summary{}
+				ranks[dimension][key] = sum
+				rankLabel[dimension][key] = label
+			}
+			sum.Executions++
+			if failed {
+				sum.Failures++
+			} else {
+				if latency > 0 {
+					sum.LatencyMS += latency
+					sum.LatencyCount++
+				}
+				if ttft > 0 {
+					sum.TTFTMS += ttft
+					sum.TTFTCount++
+				}
+			}
+			if !known {
+				sum.UnknownTokenRecords++
+			}
+			sum.InputTokens += input
+			sum.OutputTokens += output
+			sum.ReasoningTokens += reasoning
+			sum.CacheReadTokens += cacheRead
+			sum.CacheCreationTokens += cacheCreate
+			sum.TotalTokens += total
+		}
+		addBucket := func(start int64, failed bool, input, output, total int64) {
+			b := buckets[start]
+			if b == nil {
+				b = &SummaryBucket{Start: start}
+				buckets[start] = b
+			}
+			b.Calls++
+			b.Executions = b.Calls
+			if failed {
+				b.Failures++
+			}
+			b.TotalTokens += total
+			b.InputTokens += input
+			b.OutputTokens += output
+		}
+
+		for rows.Next() {
+			var day string
+			var hour int64
+			var consumer, owner, channelID, credentialID, keyID, channel, model, trace string
+			var failed, superseded, known bool
+			var input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft int64
+			var provider string
+			var status int64
+			var stream bool
+			var endpoint, effort string
+			var balanced bool
+			if errScan := rows.Scan(&day, &hour, &consumer, &owner, &channelID, &credentialID, &keyID, &channel, &model, &trace,
+				&failed, &superseded, &known, &input, &output, &reasoning, &cacheRead, &cacheCreate, &total, &latency, &ttft,
+				&provider, &status, &stream, &endpoint, &effort, &balanced); errScan != nil {
+				return nil, 0, errScan
+			}
+			attrsOK := matchesAttrs(provider, endpoint, status, stream, balanced, effort, "")
+			statsMatch := attrsOK && matchModel(model, channel)
+			if statsMatch && superseded {
+				result.Total.Failovers++
+			}
+			if statsMatch && !superseded {
+				t := &result.Total
+				t.Executions++
+				tr := trace
+				if tr == "" {
+					tr = keyID
+				}
+				if tr == "" {
+					tr = model
+				}
+				if !traces[tr] {
+					traces[tr] = true
+					t.Calls++
+				}
+				if failed {
+					t.Failures++
+				} else {
+					if latency > 0 {
+						t.LatencyMS += latency
+						t.LatencyCount++
+					}
+					if ttft > 0 {
+						t.TTFTMS += ttft
+						t.TTFTCount++
+					}
+				}
+				if !known {
+					t.UnknownTokenRecords++
+				}
+				t.InputTokens += input
+				t.OutputTokens += output
+				t.ReasoningTokens += reasoning
+				t.CacheReadTokens += cacheRead
+				t.CacheCreationTokens += cacheCreate
+				t.TotalTokens += total
+				addRank("model", model, model, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
+				addRank("consumer", consumer, consumer, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
+				addRank("credential", credentialID, channel, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
+				if hourly {
+					addBucket(hour, failed, input, output, total)
+				} else {
+					dayTime, _ := time.Parse(journalTimeFormat, day+"T00:00:00.000000000Z")
+					addBucket(dayTime.Unix(), failed, input, output, total)
+				}
+			}
+			if attrsOK && model != "" {
+				models[model] = true
+				if channel != "" && !strings.HasPrefix(model, channel+"/") {
+					models[channel+"/"+model] = true
+				}
+			}
+			if v := providerBase(provider); v != "" && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "provider") {
+				providers[v] = true
+			}
+			if endpoint != "" && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "endpoint") {
+				endpoints[endpoint] = true
+			}
+			if status > 0 && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "status") {
+				statuses[int(status)] = true
+			}
+			if matchesAttrs(provider, endpoint, status, stream, balanced, effort, "effort") {
+				efforts[effort] = true
+			}
+		}
+		if errRows := rows.Err(); errRows != nil {
+			return nil, 0, errRows
+		}
+
+		starts := make([]int64, 0, len(buckets))
+		for start := range buckets {
+			starts = append(starts, start)
+		}
+		sort.Slice(starts, func(i, k int) bool { return starts[i] < starts[k] })
+		for _, start := range starts {
+			result.Buckets = append(result.Buckets, *buckets[start])
+		}
+		for dimension, byKey := range ranks {
+			rows2 := make([]OverviewRankRow, 0, len(byKey))
+			for key, sum := range byKey {
+				rows2 = append(rows2, OverviewRankRow{Key: key, Label: rankLabel[dimension][key], Value: *sum})
+			}
+			sort.Slice(rows2, func(i, k int) bool {
+				if rows2[i].Value.TotalTokens != rows2[k].Value.TotalTokens {
+					return rows2[i].Value.TotalTokens > rows2[k].Value.TotalTokens
+				}
+				if rows2[i].Value.Executions != rows2[k].Value.Executions {
+					return rows2[i].Value.Executions > rows2[k].Value.Executions
+				}
+				return rows2[i].Label < rows2[k].Label
+			})
+			if len(rows2) > overviewRankLimit {
+				rows2 = rows2[:overviewRankLimit]
+			}
+			result.Rank[dimension] = rows2
+		}
+		for m := range models {
+			result.Models = append(result.Models, m)
+		}
+		sort.Strings(result.Models)
+		for v := range providers {
+			result.Facets.Providers = append(result.Facets.Providers, v)
+		}
+		sort.Strings(result.Facets.Providers)
+		for v := range endpoints {
+			result.Facets.Endpoints = append(result.Facets.Endpoints, v)
+		}
+		sort.Strings(result.Facets.Endpoints)
+		for v := range statuses {
+			result.Facets.Statuses = append(result.Facets.Statuses, v)
+		}
+		sort.Ints(result.Facets.Statuses)
+		for v := range efforts {
+			if v == "" {
+				v = "none"
+			}
+			result.Facets.Efforts = append(result.Facets.Efforts, v)
+		}
+		sort.Strings(result.Facets.Efforts)
+
+		weight := 1 + len(result.Buckets) + len(result.Models)
+		for _, rows := range result.Rank {
+			weight += len(rows)
+		}
+		weight += len(result.Facets.Providers) + len(result.Facets.Endpoints) + len(result.Facets.Statuses) + len(result.Facets.Efforts)
+		return result, weight, nil
+	})
+	if err != nil {
+		return UsageOverview{}, err
+	}
+	return value.(UsageOverview), nil
+}
 func (s *Store) ModelPerformanceContext(ctx context.Context, now time.Time) (map[string]*ModelPerformance, error) {
 	j, err := s.queryJournal(ctx)
 	if err != nil {

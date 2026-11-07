@@ -216,7 +216,7 @@ func (j *journalIndex) open() error {
 	}
 	uri := &url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	values := url.Values{}
-	for _, pragma := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "synchronous(NORMAL)", "cache_size(-8192)", "temp_store(FILE)", "journal_size_limit(16777216)"} {
+	for _, pragma := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "synchronous(NORMAL)", "cache_size(-65536)", "temp_store(MEMORY)", "journal_size_limit(16777216)"} {
 		values.Add("_pragma", pragma)
 	}
 	uri.RawQuery = values.Encode()

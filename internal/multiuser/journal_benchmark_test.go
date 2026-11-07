@@ -99,6 +99,11 @@ func BenchmarkJournalQueries(b *testing.B) {
 					return err
 				}},
 				{"SummaryMember", func() error { _, _, err := s.Summary(Filter{Consumer: "user-3"}); return err }},
+				{"OverviewSite", func() error { _, err := s.OverviewContext(context.Background(), Filter{}); return err }},
+				{"OverviewMember", func() error {
+					_, err := s.OverviewContext(context.Background(), Filter{Consumer: "user-3"})
+					return err
+				}},
 				{"Performance24h", func() error { _, err := s.ModelPerformance(now); return err }},
 			}
 			for _, query := range queries {
