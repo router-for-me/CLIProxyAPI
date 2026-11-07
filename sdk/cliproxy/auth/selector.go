@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -162,6 +163,41 @@ func (e *modelCooldownError) Error() string {
 		return fmt.Sprintf(`{"error":{"code":"model_cooldown","message":"%s"}}`, message)
 	}
 	return string(data)
+}
+
+// UsageLimitCooldownBody returns err's model cooldown as a usage_limit_reached
+// error when the last credential failure was one, resetting when the first
+// credential recovers (which may be another credential's shorter backoff, so
+// never late). Codex ends the turn and reports that reset for this error type;
+// for a plain cooldown it sleeps out Retry-After inside the turn.
+func UsageLimitCooldownBody(err error, now time.Time) (string, bool) {
+	var cooldown *modelCooldownError
+	if !errors.As(err, &cooldown) || cooldown == nil || cooldown.resetIn <= 0 || !isUsageLimitCause(cooldown.cause) {
+		return "", false
+	}
+	resetSeconds := int64(math.Ceil(cooldown.resetIn.Seconds()))
+	doc := ojson.NewDoc([]byte(cooldown.Error()))
+	for path, value := range map[string]any{
+		"error.type":              "usage_limit_reached",
+		"error.resets_in_seconds": resetSeconds,
+		"error.resets_at":         now.Unix() + resetSeconds,
+	} {
+		if errSet := doc.Set(path, value); errSet != nil {
+			return "", false
+		}
+	}
+	return string(doc.Bytes()), true
+}
+
+func isUsageLimitCause(cause error) bool {
+	if cause == nil {
+		return false
+	}
+	raw := strings.TrimSpace(cause.Error())
+	if idx := strings.Index(raw, ": {"); !ojson.Valid(raw) && idx != -1 && idx < 50 {
+		raw = strings.TrimSpace(raw[idx+2:])
+	}
+	return strings.EqualFold(strings.TrimSpace(ojson.Get(raw, "error.type").String()), "usage_limit_reached")
 }
 
 var (
