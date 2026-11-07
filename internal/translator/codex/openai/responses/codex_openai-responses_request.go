@@ -3,6 +3,7 @@ package responses
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -60,8 +61,44 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON = convertSystemRoleToDeveloper(rawJSON)
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
 	rawJSON = normalizeEmptyFunctionCallArguments(rawJSON)
+	rawJSON = stripWebSearchResultLocationAnnotations(rawJSON)
 
 	return rawJSON, nil
+}
+
+// stripWebSearchResultLocationAnnotations removes output-only search locations
+// from replayed message content; Codex rejects this annotation type on input.
+func stripWebSearchResultLocationAnnotations(rawJSON []byte) []byte {
+	if !bytes.Contains(rawJSON, []byte(`"web_search_result_location"`)) {
+		return rawJSON
+	}
+	input := util.GetGJSONBytesNoCopy(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+	for itemIndex, item := range input.Array() {
+		content := item.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for partIndex, part := range content.Array() {
+			annotations := part.Get("annotations")
+			if !annotations.IsArray() {
+				continue
+			}
+			values := annotations.Array()
+			for annotationIndex := len(values) - 1; annotationIndex >= 0; annotationIndex-- {
+				if values[annotationIndex].Get("type").String() != "web_search_result_location" {
+					continue
+				}
+				path := "input." + strconv.Itoa(itemIndex) + ".content." + strconv.Itoa(partIndex) + ".annotations." + strconv.Itoa(annotationIndex)
+				if updated, errDelete := sjson.DeleteBytes(rawJSON, path); errDelete == nil {
+					rawJSON = updated
+				}
+			}
+		}
+	}
+	return rawJSON
 }
 
 // normalizeEmptyFunctionCallArguments rewrites blank string arguments on

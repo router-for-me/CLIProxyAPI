@@ -1056,3 +1056,42 @@ func TestConvertOpenAIResponsesRequestToCodexParallelToolCalls(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToCodex_FiltersWebSearchResultLocationAnnotations(t *testing.T) {
+	const location = `{"type":"web_search_result_location","cited_text":"source text","encrypted_index":"opaque","title":"Source","url":"https://example.com"}`
+	const urlCitation = `{"type":"url_citation","start_index":0,"end_index":4,"url":"https://example.com","title":"Source"}`
+	const fileCitation = `{"type":"file_citation","file_id":"file_1","index":0}`
+	const containerCitation = `{"type":"container_file_citation","container_id":"container_1","file_id":"file_2","start_index":0,"end_index":4}`
+	for _, tc := range []struct {
+		name        string
+		annotations string
+		want        string
+	}{
+		{"only location", "[" + location + "]", "[]"},
+		{"mixed", "[" + location + "," + urlCitation + "," + location + "," + fileCitation + "," + containerCitation + "]", "[" + urlCitation + "," + fileCitation + "," + containerCitation + "]"},
+		{"allowed", "[" + urlCitation + "," + fileCitation + "," + containerCitation + "]", "[" + urlCitation + "," + fileCitation + "," + containerCitation + "]"},
+		{"unknown preserved", `[{"type":"future_annotation"}]`, `[{"type":"future_annotation"}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte(`{"input":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"keep text","annotations":` + tc.annotations + `},{"type":"output_text","text":"second part","annotations":` + tc.annotations + `}]},{"type":"message","role":"user","content":"next"}]}`)
+			output, err := ConvertOpenAIResponsesRequestToCodex("gpt-6.1-sol", input, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, index := range []string{"0", "1"} {
+				if got := gjson.GetBytes(output, "input.0.content."+index+".annotations").Raw; got != tc.want {
+					t.Errorf("content %s annotations = %s, want %s", index, got, tc.want)
+				}
+			}
+			if got := gjson.GetBytes(output, "input.0.content.0.text").String(); got != "keep text" {
+				t.Errorf("text changed: %q", got)
+			}
+			if got := gjson.GetBytes(output, "input.0.content.1.text").String(); got != "second part" {
+				t.Errorf("second text changed: %q", got)
+			}
+			if got := gjson.GetBytes(output, "input.1.content").String(); got != "next" {
+				t.Errorf("user content changed: %q", got)
+			}
+		})
+	}
+}
