@@ -683,3 +683,59 @@ func TestObserveResponseHeadersKeepsPrimaryWhenTruncatingAdditional(t *testing.T
 		t.Fatalf("snapshot size = %d, want %d", len(quota.Signals), maxQuotaSignalHeaders)
 	}
 }
+
+func TestObserveResponseHeadersIfNotOlderKeepsNewestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	newer := time.Unix(1790000100, 0)
+	older := newer.Add(-time.Minute)
+	quota := QuotaState{
+		ObservedAt: newer,
+		Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "40"},
+	}
+
+	if quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"10"}}, older) {
+		t.Fatal("older observation replaced a newer snapshot")
+	}
+	if quota.ObservedAt != newer || quota.Signals["X-Codex-Primary-Used-Percent"] != "40" {
+		t.Fatalf("snapshot changed by older observation: %#v", quota)
+	}
+
+	latest := newer.Add(time.Minute)
+	if !quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"55"}}, latest) {
+		t.Fatal("newer observation was not applied")
+	}
+	if quota.ObservedAt != latest || quota.Signals["X-Codex-Primary-Used-Percent"] != "55" {
+		t.Fatalf("snapshot = %#v, want newest observation", quota)
+	}
+}
+
+func TestRebaseRelativeQuotaHeaders(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000600, 0)
+	headers := http.Header{
+		"X-Codex-Primary-Reset-After-Seconds":   []string{"3600"},
+		"X-Codex-Secondary-Reset-After-Seconds": []string{"120"},
+		"X-Codex-Primary-Used-Percent":          []string{"12"},
+	}
+	received := map[string]time.Time{
+		"X-Codex-Primary-Reset-After-Seconds":   observedAt.Add(-10 * time.Minute),
+		"X-Codex-Secondary-Reset-After-Seconds": observedAt.Add(-5 * time.Minute),
+		"X-Codex-Primary-Used-Percent":          observedAt,
+	}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(name string) time.Time { return received[name] })
+	if v := got.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3000" {
+		t.Fatalf("primary reset-after = %q, want 3000", v)
+	}
+	if v := got.Get("X-Codex-Secondary-Reset-After-Seconds"); v != "0" {
+		t.Fatalf("secondary reset-after = %q, want 0 (already elapsed)", v)
+	}
+	if v := got.Get("X-Codex-Primary-Used-Percent"); v != "12" {
+		t.Fatalf("used percent = %q, want 12", v)
+	}
+	if v := headers.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3600" {
+		t.Fatalf("input headers modified: %q", v)
+	}
+}
