@@ -103,16 +103,68 @@ func ObservePluginExecutorStreamTTFT(protocol string, reporter *UsageReporter, p
 		return
 	}
 	reporter.RecordFirstPacket()
+	var observe func(*UsageReporter, []byte)
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
-		ObserveClaudeTokenEvent(reporter, payload)
-	case "gemini", "antigravity", "interactions", "interactions-response":
-		ObserveGeminiTokenEvent(reporter, payload)
+		observe = ObserveClaudeTokenEvent
+	case "gemini", "antigravity":
+		observe = ObserveGeminiTokenEvent
+	case "interactions", "interactions-response":
+		observe = ObserveInteractionsTokenEvent
 	case "codex", "openai-response":
-		ObserveResponsesTokenEvent(reporter, payload)
+		observe = ObserveResponsesTokenEvent
 	default:
-		ObserveChatTokenEvent(reporter, payload)
+		observe = ObserveChatTokenEvent
 	}
+	for _, event := range splitSSEEventData(payload) {
+		observe(reporter, event)
+	}
+}
+
+// splitSSEEventData returns the data of each SSE event in payload, so that a
+// chunk holding several events, or an "event:" line before the data, is
+// classified event by event. The data lines of one event are joined with
+// newlines, as the SSE spec says. A payload with no "data:" line is not SSE
+// (for example bare or pretty-printed JSON) and is returned whole.
+func splitSSEEventData(payload []byte) [][]byte {
+	lines := bytes.Split(payload, []byte("\n"))
+	isSSE := false
+	for _, line := range lines {
+		if bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) {
+			isSSE = true
+			break
+		}
+	}
+	if !isSSE {
+		return [][]byte{payload}
+	}
+	var events [][]byte
+	var data []byte
+	inEvent := false
+	flush := func() {
+		if inEvent {
+			events = append(events, data)
+		}
+		data, inEvent = nil, false
+	}
+	for _, line := range lines {
+		line = bytes.TrimRight(line, "\r")
+		if len(bytes.TrimSpace(line)) == 0 {
+			flush()
+			continue
+		}
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue // event:, id:, retry: and comment lines carry no payload
+		}
+		value := bytes.TrimPrefix(line[len("data:"):], []byte(" "))
+		if inEvent {
+			data = append(data, '\n')
+		}
+		data = append(data, value...)
+		inEvent = true
+	}
+	flush()
+	return events
 }
 
 func parseClaudePayloadUsage(payload []byte) usage.Detail {
