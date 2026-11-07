@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -97,23 +98,16 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
-			entries, errReadDir := os.ReadDir(resolvedAuthDir)
+			paths, errReadDir := authpublication.Files(resolvedAuthDir)
 			if errReadDir != nil {
 				if !errors.Is(errReadDir, fs.ErrNotExist) {
 					incompleteRescanDir = resolvedAuthDir
 				}
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
-				for _, entry := range entries {
-					if entry == nil || entry.IsDir() {
-						continue
-					}
-					name := entry.Name()
-					if !strings.HasSuffix(strings.ToLower(name), ".json") {
-						continue
-					}
-					fullPath := filepath.Join(resolvedAuthDir, name)
-					data, errReadFile := os.ReadFile(fullPath)
+				for _, fullPath := range paths {
+					name := filepath.Base(fullPath)
+					data, errReadFile := authpublication.ReadFile(fullPath)
 					if errReadFile != nil {
 						if !errors.Is(errReadFile, fs.ErrNotExist) {
 							if incompleteRescanPaths == nil {
@@ -161,7 +155,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 		if incompleteRescanDir != "" {
 			markDirMemberIncomplete := func(trackedPath string) {
-				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
+				relative, errRel := filepath.Rel(incompleteRescanDir, trackedPath)
+				if errRel != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
 					return
 				}
 				if incompleteRescanPaths == nil {
@@ -313,7 +308,7 @@ func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
 	w.observeAuthFile(path)
-	data, errRead := os.ReadFile(path)
+	data, errRead := authpublication.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
 		return
@@ -411,7 +406,7 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	updates := w.computePerPathUpdatesLocked(oldByID, newByID)
 	w.clientsMutex.Unlock()
 
-	if errSynthesize == nil {
+	if errSynthesize == nil && !authpublication.HasPending(path) {
 		w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 	}
 	w.dispatchAuthUpdates(updates)
@@ -426,6 +421,10 @@ func (w *Watcher) removeClient(path string) {
 }
 
 func (w *Watcher) removeClientLocked(path string) {
+	if authpublication.HasPending(path) {
+		w.addOrUpdateClientLocked(path)
+		return
+	}
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
@@ -517,23 +516,15 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		return 0
 	}
 
-	entries, errReadDir := os.ReadDir(authDir)
+	paths, errReadDir := authpublication.Files(authDir)
 	if errReadDir != nil {
 		log.Errorf("error reading auth directory: %v", errReadDir)
 		return 0
 	}
-	for _, entry := range entries {
-		if entry == nil || entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			continue
-		}
+	for _, fullPath := range paths {
 		authFileCount++
-		log.Debugf("processing auth file %d: %s", authFileCount, name)
-		fullPath := filepath.Join(authDir, name)
-		if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
+		log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(fullPath))
+		if data, errReadFile := authpublication.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
 			successfulAuthCount++
 		}
 	}

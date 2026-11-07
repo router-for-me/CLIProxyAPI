@@ -198,19 +198,25 @@ func (w *Watcher) refreshAuthState(force bool) {
 			}
 			target = filepath.Dir(rawPath)
 		}
-		normalized := w.normalizeAuthPath(target)
-		if normalized == "" {
-			return false
-		}
-		if _, ok := incompletePaths[normalized]; ok {
-			return true
-		}
-		if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
-			if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
+		for {
+			normalized := w.normalizeAuthPath(target)
+			if normalized == "" {
+				return false
+			}
+			if _, ok := incompletePaths[normalized]; ok {
 				return true
 			}
+			if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+				if _, ok := incompletePaths[w.normalizeAuthPath(abs)]; ok {
+					return true
+				}
+			}
+			parent := filepath.Dir(target)
+			if !checkDir || parent == target {
+				return false
+			}
+			target = parent
 		}
-		return false
 	}
 	if len(incompletePaths) > 0 {
 		for knownPath := range w.lastAuthHashes {

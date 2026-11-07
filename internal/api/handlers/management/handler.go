@@ -38,32 +38,33 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                     *config.Config
-	configFilePath          string
-	mu                      sync.Mutex
-	authStatusMu            sync.Mutex
-	reloadMu                sync.Mutex
-	reloadGeneration        uint64
-	appliedReloadGeneration uint64
-	attemptsMu              sync.Mutex
-	failedAttempts          map[string]*attemptInfo // keyed by client IP
-	authManager             *coreauth.Manager
-	tokenStore              coreauth.Store
-	localPassword           string
-	allowRemoteOverride     bool
-	envSecret               string
-	logDir                  string
-	postAuthHook            coreauth.PostAuthHook
-	postAuthPersistHook     coreauth.PostAuthHook
-	pluginHost              *pluginhost.Host
-	configReloadHook        func(context.Context, *config.Config)
-	pluginStoreRegistryURL  string
-	pluginStoreHTTPClient   pluginstore.HTTPDoer
-	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
-	pluginReleases          pluginReleaseCache
-	siwcOAuthFactory        func(*config.Config) siwcOAuthService
-	siwcCommitMu            sync.Mutex
-	pluginLoginSaveMu       sync.Mutex
+	cfg                      *config.Config
+	configFilePath           string
+	mu                       sync.Mutex
+	authStatusMu             sync.Mutex
+	reloadMu                 sync.Mutex
+	reloadGeneration         uint64
+	appliedReloadGeneration  uint64
+	attemptsMu               sync.Mutex
+	failedAttempts           map[string]*attemptInfo // keyed by client IP
+	authManager              *coreauth.Manager
+	codexDeviceAuthenticator sdkAuth.Authenticator
+	tokenStore               coreauth.Store
+	localPassword            string
+	allowRemoteOverride      bool
+	envSecret                string
+	logDir                   string
+	postAuthHook             coreauth.PostAuthHook
+	postAuthPersistHook      coreauth.PostAuthHook
+	pluginHost               *pluginhost.Host
+	configReloadHook         func(context.Context, *config.Config)
+	pluginStoreRegistryURL   string
+	pluginStoreHTTPClient    pluginstore.HTTPDoer
+	pluginStoreRateLimiter   *pluginstore.GitHubRateLimiter
+	pluginReleases           pluginReleaseCache
+	siwcOAuthFactory         func(*config.Config) siwcOAuthService
+	siwcCommitMu             sync.Mutex
+	pluginLoginSaveMu        sync.Mutex
 }
 
 type configReloadSnapshot struct {

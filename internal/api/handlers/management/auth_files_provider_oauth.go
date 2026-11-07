@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -510,26 +511,7 @@ func applyOAuthRecoveryTargetToRecord(target oauthRecoveryTarget, record *coreau
 		}
 	}
 
-	record.ID = target.AuthID
-	targetFileName := strings.TrimSpace(target.FileName)
-	if targetFileName == "" {
-		targetFileName = target.AuthID
-	}
-	targetPath := strings.TrimSpace(target.Path)
-	if targetPath == "" && strings.ContainsAny(target.AuthID, "/\\") {
-		targetFileName = target.AuthID
-	}
-	record.FileName = targetFileName
-	if record.Attributes == nil {
-		record.Attributes = make(map[string]string)
-	}
-	if targetPath != "" {
-		record.Attributes[coreauth.AttributePath] = targetPath
-		record.Attributes[coreauth.AttributeSource] = targetPath
-	} else {
-		delete(record.Attributes, coreauth.AttributePath)
-		record.Attributes[coreauth.AttributeSource] = targetFileName
-	}
+	applyOAuthRecoveryTargetLocation(record, target)
 	return true
 }
 
@@ -1810,7 +1792,7 @@ func (h *Handler) savePluginLoginRecords(ctx context.Context, records []*coreaut
 		var rb savedPluginRecordRollback
 		candidatePath := h.candidatePluginRecordPath(record)
 		if candidatePath != "" {
-			prevBytes, errRead := os.ReadFile(candidatePath)
+			prevBytes, errRead := authpublication.ReadFile(candidatePath)
 			if errRead == nil {
 				rb.existedOnDisk = true
 				rb.prevDiskBytes = prevBytes
@@ -1954,7 +1936,7 @@ func (h *Handler) restoreOverwrittenPluginRecord(ctx context.Context, rb savedPl
 			restoreRecord.Storage = restored.Storage
 		}
 	}
-	if _, errRestore := store.Save(ctx, restoreRecord); errRestore != nil {
+	if _, errRestore := store.Save(coreauth.WithAuthCreationIntent(ctx), restoreRecord); errRestore != nil {
 		log.WithError(errRestore).WithField("path", diskPath).Warn("failed to restore overwritten plugin auth token in store")
 	}
 }
@@ -1971,7 +1953,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 					return errPluginRollbackSuperseded
 				}
 				if rb.existedOnDisk && diskPath != "" {
-					currentBytes, errRead := os.ReadFile(diskPath)
+					currentBytes, errRead := authpublication.ReadFile(diskPath)
 					if errRead != nil {
 						return errPluginRollbackSuperseded
 					}
@@ -1984,7 +1966,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 					}
 				} else if savedPath != "" {
 					if diskPath != "" {
-						if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+						if currentBytes, errRead := authpublication.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
 							return errPluginRollbackSuperseded
 						}
 					}
@@ -2031,7 +2013,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 					}
 					if !diskHandled {
 						if rb.existedOnDisk && diskPath != "" {
-							if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil {
+							if currentBytes, errRead := authpublication.ReadFile(diskPath); errRead == nil {
 								matchesSaved := len(rb.savedDiskBytes) == 0 || jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes)
 								if !matchesSaved && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.prevDiskBytes) {
 									superseded = true
@@ -2043,7 +2025,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 							}
 						} else if savedPath != "" {
 							if diskPath != "" {
-								if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+								if currentBytes, errRead := authpublication.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
 									superseded = true
 									return false
 								}
@@ -2068,7 +2050,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 
 		diskSuperseded := false
 		if rb.existedOnDisk && diskPath != "" {
-			currentBytes, errRead := os.ReadFile(diskPath)
+			currentBytes, errRead := authpublication.ReadFile(diskPath)
 			if errRead == nil {
 				matchesSaved := len(rb.savedDiskBytes) == 0 || jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes)
 				if !matchesSaved {
@@ -2081,7 +2063,7 @@ func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks
 			}
 		} else if savedPath != "" {
 			if diskPath != "" {
-				if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+				if currentBytes, errRead := authpublication.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
 					diskSuperseded = true
 				}
 			}
