@@ -27,19 +27,25 @@ func TestClaudeCooldownMessageMatchesRetryAfter(t *testing.T) {
 		duration   time.Duration
 		header     string
 		resetAfter string
+		lastError  string
 	}{
 		{name: "reported delay", duration: 8250 * time.Second, header: "8250", resetAfter: "2h17m30s"},
 		{name: "round up fractional second", duration: 60*time.Second + 100*time.Millisecond, header: "61", resetAfter: "1m1s"},
 		{name: "largest duration", duration: time.Duration(1<<63 - 1), header: "9223372037", resetAfter: "9223372037s"},
+		{name: "upstream proxy hint in last error", duration: 61 * time.Second, header: "61", resetAfter: "1m1s", lastError: "upstream cooling down (reset after 5m0s)"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 			handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+			err := coreauth.NewModelCooldownError("claude-sonnet-4-5-20250929", "claude", tt.duration)
+			if tt.lastError != "" {
+				err = cooldownWithLastError{err: err, lastError: tt.lastError}
+			}
 			handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
 				StatusCode: http.StatusTooManyRequests,
-				Error:      coreauth.NewModelCooldownError("claude-sonnet-4-5-20250929", "claude", tt.duration),
+				Error:      err,
 			})
 
 			if recorder.Code != http.StatusTooManyRequests {
@@ -58,6 +64,18 @@ func TestClaudeCooldownMessageMatchesRetryAfter(t *testing.T) {
 		})
 	}
 }
+
+type cooldownWithLastError struct {
+	err       error
+	lastError string
+}
+
+// Error mirrors modelCooldownError, which puts its cause in the message.
+func (e cooldownWithLastError) Error() string {
+	return `{"error":{"code":"model_cooldown","message":"All credentials for model claude-sonnet-4-5-20250929 are cooling down via provider claude (last error: ` + e.lastError + `)"}}`
+}
+
+func (e cooldownWithLastError) Unwrap() error { return e.err }
 
 func TestClaudeCooldownMessageInCommittedStream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -90,7 +108,7 @@ func TestClaudeCooldownMessageInCommittedStream(t *testing.T) {
 	}
 }
 
-func TestClaudeCooldownLeavesOrdinary429MessageUnchanged(t *testing.T) {
+func TestClaudeOrdinary429MessageStatesPassedThroughRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -104,8 +122,8 @@ func TestClaudeCooldownLeavesOrdinary429MessageUnchanged(t *testing.T) {
 	if got := recorder.Header().Get("Retry-After"); got != "300" {
 		t.Fatalf("Retry-After = %q, want passed-through 300", got)
 	}
-	if got := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "error.message").String(); got != "upstream quota exceeded" {
-		t.Fatalf("error.message = %q, want original upstream message", got)
+	if got := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "error.message").String(); got != "upstream quota exceeded (reset after 5m0s)" {
+		t.Fatalf("error.message = %q, want upstream message with reset after 5m0s", got)
 	}
 }
 
