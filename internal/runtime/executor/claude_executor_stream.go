@@ -209,6 +209,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
+	extraBetas, _ = extractAndRemoveBetasDoc(doc)
+	extraBetas = withClaudeLatestAliasContextBeta(baseModel, extraBetas)
 	var oauthToolNamesReverseMap map[string]string
 	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx, opts.Metadata, req.Metadata)
