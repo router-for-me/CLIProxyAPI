@@ -50,19 +50,59 @@ func TestPackRuleOrderingPutsPhrasingFirst(t *testing.T) {
 }
 
 func TestUnsupportedPatternsAreSkipped(t *testing.T) {
-	// Backreferences cannot be expressed in RE2 and must be dropped, not guessed.
-	if _, ok := compilePackRule(packRule{
+	// Backreferences and lookarounds are outside RE2 but the fallback engine
+	// supports them, so the shipped rules keep their behaviour instead of
+	// disappearing. Only a pattern no engine can parse is dropped.
+	rule, ok := compilePackRule(packRule{
 		Name:        "backref",
 		Pattern:     `([\p{L}]+)\s+\1`,
 		Replacement: strPtr("$1"),
-	}); ok {
-		t.Fatal("backreference rule must be rejected")
+	})
+	if !ok {
+		t.Fatal("backreference rule must compile through the fallback engine")
 	}
-	if _, ok := compilePackRule(packRule{
-		Name:    "lookahead",
-		Pattern: `foo(?=bar)`,
-	}); ok {
-		t.Fatal("unsupported lookahead must be rejected")
+	if got := rule.apply("abc abc"); got != "abc" {
+		t.Fatalf("backreference did not collapse a repeat: %q", got)
+	}
+	if got := rule.apply("abc def"); got != "abc def" {
+		t.Fatalf("backreference rule changed unrelated text: %q", got)
+	}
+	rule, ok = compilePackRule(packRule{
+		Name:        "lookahead",
+		Pattern:     `foo(?=bar)`,
+		Replacement: strPtr(""),
+	})
+	if !ok {
+		t.Fatal("lookahead rule must compile through the fallback engine")
+	}
+	if got := rule.apply("foobar fooqux"); got != "bar fooqux" {
+		t.Fatalf("lookahead rule misfired: %q", got)
+	}
+	if _, ok := compilePackRule(packRule{Name: "unparseable", Pattern: `(unclosed`}); ok {
+		t.Fatal("a pattern no engine can parse must be rejected")
+	}
+}
+
+// TestGuardPeelDoesNotBreakBackreferences pins the all-or-nothing rule for
+// guard peeling: a pattern whose *boundary* lookarounds are peelable but whose
+// body still needs the fallback engine must go to that engine whole. Peeling
+// only the boundaries renumbers capture groups under a live \1 and changes what
+// the rule deletes.
+func TestGuardPeelDoesNotBreakBackreferences(t *testing.T) {
+	rule, ok := compilePackRule(packRule{
+		Name:        "word_duplication",
+		Pattern:     `(?<![\p{L}\p{N}_])([\p{L}\p{N}_]+)\s+\1(?![\p{L}\p{N}_])`,
+		Flags:       "giu",
+		Replacement: strPtr("$1"),
+	})
+	if !ok {
+		t.Fatal("rule must compile")
+	}
+	if rule.notAfterWord || rule.notBeforeWord {
+		t.Fatal("guards must not be peeled when the body still needs the fallback engine")
+	}
+	if got := rule.apply("это очень очень плохо"); got != "это очень плохо" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -83,6 +123,43 @@ func TestLookbehindBecomesGuard(t *testing.T) {
 	}
 	if got := rule.apply("I am sure about it"); got != "I am about it" {
 		t.Fatalf("guard blocked a valid match: %q", got)
+	}
+}
+
+// TestPackRulesUsingLookaroundRun pins the rewrite of the 43 rules that used
+// lookaround or backreferences. They used to be dropped at load time, which
+// silently disabled most non-English emphasis, article and leader-phrase
+// stripping. Each case is a rule that only the fallback engine can express.
+func TestPackRulesUsingLookaroundRun(t *testing.T) {
+	cases := []struct{ lang, rule, in, want string }{
+		{"de", "de_emphasis", "Das ist sehr gut", "Das ist gut"},
+		{"es", "es_articles", "el archivo y la funcion", "archivo y funcion"},
+		{"fr", "fr_articles", "le fichier et la fonction", "fichier et fonction"},
+		{"it", "it_articles", "il file e la funzione", "file e funzione"},
+		{"hu", "emphasis_removal", "ez nagyon fontos", "ez fontos"},
+		{"pt-BR", "pt_terse_leader_phrases", "eu vou fazer isso", "fazer isso"},
+		{"de", "de_leader_phrases", "ich kann das machen", "das machen"},
+		{"zh", "zh_ultra_modal_particles", "你好吗？我是助手", "你好？我是助手"},
+		{"ru", "thought_repetition", "Это плохо. Это плохо. Дальше", "Это плохо. Дальше"},
+		{"ru", "word_duplication", "это очень очень плохо", "это очень плохо"},
+		{"ru", "ultra_lowercase", "Это конец.      Дальше", "Это конец. Дальше"},
+	}
+	for _, c := range cases {
+		rules := packRulesFor(c.lang)
+		var found *cavemanRule
+		for i := range rules {
+			if rules[i].name == c.rule {
+				found = &rules[i]
+				break
+			}
+		}
+		if found == nil {
+			t.Errorf("%s/%s: rule missing from the loaded pack", c.lang, c.rule)
+			continue
+		}
+		if got := found.apply(c.in); got != c.want {
+			t.Errorf("%s/%s: apply(%q) = %q, want %q", c.lang, c.rule, c.in, got, c.want)
+		}
 	}
 }
 
