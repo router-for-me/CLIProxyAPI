@@ -73,7 +73,7 @@ func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
 
 func isBuiltInSelector(selector Selector) bool {
 	switch selector.(type) {
-	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector:
+	case *RoundRobinSelector, *WeightedRoundRobinSelector, *FillFirstSelector, *SoonestResetSelector:
 		return true
 	default:
 		return false
@@ -1829,7 +1829,11 @@ func (m *Manager) useSchedulerFastPath() bool {
 	if m == nil || m.scheduler == nil {
 		return false
 	}
-	return isBuiltInSelector(m.Selector())
+	// Built-in selectors the scheduler cannot emulate (soonest-reset ranks by live quota
+	// snapshots) still take the legacy path so their Pick runs; the scheduler would
+	// otherwise fall back to round-robin for them.
+	selector := m.Selector()
+	return isBuiltInSelector(selector) && selectorStrategy(selector) != schedulerStrategyCustom
 }
 
 func shouldRetrySchedulerPick(err error) bool {

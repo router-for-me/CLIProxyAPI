@@ -220,3 +220,49 @@ func TestManagementV8PluginOperationMigratesConfiguration(t *testing.T) {
 		t.Fatal("missing configuration reload")
 	}
 }
+
+// The v8 configuration API stores the routing strategy as written; the service
+// normalizes soonest-reset and its aliases when it applies the configuration.
+func TestManagementV8RoutingStrategySoonestReset(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("port: 8317\nremote-management: {secret-key: test-password}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := management.NewHandler(cfg, path, nil)
+	h.SetLocalPassword("test-password")
+	s := &Server{cfg: cfg, engine: gin.New(), mgmt: h}
+	s.managementRoutesEnabled.Store(true)
+	s.registerManagementRoutes()
+	request := func(method, url, body string) string {
+		t.Helper()
+		req := httptest.NewRequest(method, url, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		response := httptest.NewRecorder()
+		s.engine.ServeHTTP(response, req)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s %s: status=%d body=%s", method, url, response.Code, response.Body.String())
+		}
+		return strings.TrimSpace(response.Body.String())
+	}
+	for _, tc := range []struct{ method, url, body, want string }{
+		{http.MethodPatch, "/v8/management/config", `{"routing":{"strategy":"soonest-reset"}}`, "soonest-reset"},
+		{http.MethodPut, "/v8/management/config/routing/strategy", `"reset-first"`, "reset-first"},
+	} {
+		request(tc.method, tc.url, tc.body)
+		if got := request(http.MethodGet, "/v8/management/config/routing/strategy", ""); got != `"`+tc.want+`"` {
+			t.Fatalf("%s %s: strategy = %s, want %q", tc.method, tc.url, got, tc.want)
+		}
+		saved, errLoad := config.LoadConfig(path)
+		if errLoad != nil {
+			t.Fatal(errLoad)
+		}
+		if saved.Routing.Strategy != tc.want {
+			t.Fatalf("%s %s: persisted strategy = %q, want %q", tc.method, tc.url, saved.Routing.Strategy, tc.want)
+		}
+	}
+}
