@@ -90,7 +90,7 @@ func TestClaudeCooldownMessageInCommittedStream(t *testing.T) {
 	}
 }
 
-func TestClaudeCooldownLeavesOrdinary429MessageUnchanged(t *testing.T) {
+func TestClaudeOrdinary429MessageStatesPassedThroughRetryAfter(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -104,8 +104,8 @@ func TestClaudeCooldownLeavesOrdinary429MessageUnchanged(t *testing.T) {
 	if got := recorder.Header().Get("Retry-After"); got != "300" {
 		t.Fatalf("Retry-After = %q, want passed-through 300", got)
 	}
-	if got := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "error.message").String(); got != "upstream quota exceeded" {
-		t.Fatalf("error.message = %q, want original upstream message", got)
+	if got := ojson.GetBytesNoCopy(recorder.Body.Bytes(), "error.message").String(); got != "upstream quota exceeded (reset after 5m0s)" {
+		t.Fatalf("error.message = %q, want upstream message with reset after 5m0s", got)
 	}
 }
 
