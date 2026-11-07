@@ -253,6 +253,26 @@ func isHierarchyParent(primary, fallback string) bool {
 	return false
 }
 
+func (m *Manager) updateHomeResponseSessionAlias(result Result) {
+	if m == nil || !m.HomeEnabled() || !result.Success || result.AuthID == "" || result.Options.Metadata == nil {
+		return
+	}
+	responseID := sessionMetadataString(result.Options.Metadata, cliproxyexecutor.ResponseAffinityIDMetadataKey)
+	responseID = normalizedSessionCandidate(responseID)
+	if responseID == "" {
+		return
+	}
+	sessionID := sessionMetadataString(result.Options.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
+	if sessionID == "" {
+		sessionID, _ = m.homeDispatchSessionIDs(result.Options)
+	}
+	if sessionID == "" {
+		return
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	m.homeSessionAliases.canonical(sessionID, "response:"+responseID, homeSessionAliasTTL(cfg), time.Now())
+}
+
 func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string, string) {
 	primary, fallback := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	hasAuthoritativeInput := primary != ""
