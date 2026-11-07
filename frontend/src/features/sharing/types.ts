@@ -146,6 +146,7 @@ export interface Summary {
   owner?: string;
   channel?: string;
   model?: string;
+  credential_id?: string;
   day?: string;
   calls: number;
   executions: number;
@@ -157,8 +158,39 @@ export interface Summary {
   cache_creation_tokens: number;
   total_tokens: number;
   unknown_token_records: number;
+  /** Successful attempts only; divide by the matching count for averages. */
+  latency_ms?: number;
+  latency_count?: number;
+  ttft_ms?: number;
+  ttft_count?: number;
   /** Earlier failed balanced attempts folded into their final attempt (total only). */
   failovers?: number;
+}
+
+/** One hour of usage (unix seconds start). */
+export interface SummaryBucket {
+  start: number;
+  calls: number;
+  executions: number;
+  failures: number;
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+/** Distinct attribute values present under a usage filter. */
+export interface UsageFacets {
+  providers: string[];
+  endpoints: string[];
+  statuses: number[];
+  /** Reasoning levels; "none" stands for records without one. */
+  efforts: string[];
+}
+
+export interface SummaryResponse {
+  total: Summary;
+  groups: Summary[];
+  buckets?: SummaryBucket[];
 }
 
 export interface AuditEntry {

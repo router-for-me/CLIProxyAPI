@@ -40,7 +40,9 @@ func seedJournal(tb testing.TB, s *Store, count int) time.Time {
 			KeyID: fmt.Sprintf("key-%d", request%100), KeyName: "工作用量",
 			ChannelID: fmt.Sprintf("channel-%d", request%10), Channel: fmt.Sprintf("route-%d", request%10),
 			CredentialID: fmt.Sprintf("credential-%d", request%50), Model: fmt.Sprintf("model-%d", request%8),
-			Provider: "openai", Failed: i%3 == 0, Status: 200, TokensKnown: true,
+			Provider: []string{"openai", "kimi", "openai-compatible-hub-ch-x-y"}[i%3], Failed: i%3 == 0,
+			Status: []int{502, 200, 200, 429}[i%4], Stream: i%2 == 0, Endpoint: []string{"POST /v1/chat/completions", "POST /v1/messages"}[i%2],
+			ReasoningEffort: []string{"", "high", "low"}[i%3], TokensKnown: true,
 			InputTokens: 1000, OutputTokens: 100, ReasoningTokens: 50, CacheReadTokens: 500, TotalTokens: 1100,
 			LatencyMS: 2000, TTFTMS: 200,
 		}

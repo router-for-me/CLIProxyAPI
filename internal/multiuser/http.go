@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -170,6 +171,7 @@ func (h *Controller) RegisterRoutes(public, member *gin.RouterGroup) {
 	member.GET("/calls", h.calls)
 	member.GET("/usage/summary", h.summary)
 	member.GET("/usage/attempts", h.usageAttempts)
+	member.GET("/usage/facets", h.usageFacets)
 	member.GET("/audit", h.audits)
 }
 
@@ -399,7 +401,7 @@ func (h *Controller) deleteInvite(c *gin.Context) {
 }
 
 func queryFilter(c *gin.Context) (Filter, error) {
-	f := Filter{Consumer: c.Query("consumer"), Owner: c.Query("owner"), ChannelID: c.Query("channel_id"), CredentialID: c.Query("credential_id"), KeyID: c.Query("key_id"), Model: c.Query("model"), Outcome: c.Query("outcome"), Actor: c.Query("actor"), Action: c.Query("action"), Page: 1, PageSize: 50}
+	f := Filter{Consumer: c.Query("consumer"), Owner: c.Query("owner"), ChannelID: c.Query("channel_id"), CredentialID: c.Query("credential_id"), KeyID: c.Query("key_id"), Model: c.Query("model"), Outcome: c.Query("outcome"), Provider: c.Query("provider"), Stream: c.Query("stream"), Status: c.Query("status"), Endpoint: c.Query("endpoint"), Effort: c.Query("effort"), Balanced: c.Query("balanced"), Sort: c.Query("sort"), Actor: c.Query("actor"), Action: c.Query("action"), Page: 1, PageSize: 50}
 	for name, dest := range map[string]*int{"page": &f.Page, "page_size": &f.PageSize} {
 		if raw := c.Query(name); raw != "" {
 			value, err := strconv.Atoi(raw)
@@ -418,7 +420,17 @@ func queryFilter(c *gin.Context) (Filter, error) {
 			*dest = value
 		}
 	}
-	if f.Outcome != "" && f.Outcome != "ok" && f.Outcome != "failed" {
+	for value, allowed := range map[string][]string{
+		f.Outcome:  {"ok", "failed"},
+		f.Stream:   {"stream", "nonstream"},
+		f.Balanced: {"yes", "no"},
+		f.Sort:     {"time", "tokens", "latency"},
+	} {
+		if value != "" && !slices.Contains(allowed, value) {
+			return f, ErrInvalid
+		}
+	}
+	if _, _, ok := statusRange(f.Status); f.Status != "" && !ok {
 		return f, ErrInvalid
 	}
 	if !f.From.IsZero() && !f.To.IsZero() && !f.To.After(f.From) {
@@ -451,6 +463,23 @@ func (h *Controller) usage(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"items": items, "total": total, "page": f.Page, "page_size": f.PageSize})
 }
+func (h *Controller) usageFacets(c *gin.Context) {
+	f, err := queryFilter(c)
+	if err != nil {
+		replyError(c, err)
+		return
+	}
+	if !h.historyReady(c) {
+		return
+	}
+	facets, err := h.Store.UsageFacetsContext(c.Request.Context(), f)
+	if err != nil {
+		replyError(c, err)
+		return
+	}
+	c.JSON(200, facets)
+}
+
 func (h *Controller) usageAttempts(c *gin.Context) {
 	trace := strings.TrimSpace(c.Query("trace"))
 	if trace == "" {
@@ -493,12 +522,12 @@ func (h *Controller) summary(c *gin.Context) {
 	if !h.historyReady(c) {
 		return
 	}
-	total, groups, err := h.Store.SummaryContext(c.Request.Context(), f)
+	result, err := h.Store.SummaryResultContext(c.Request.Context(), f)
 	if err != nil {
 		replyError(c, err)
 		return
 	}
-	c.JSON(200, gin.H{"total": total, "groups": groups})
+	c.JSON(200, gin.H{"total": result.Total, "groups": result.Groups, "buckets": result.Buckets})
 }
 func (h *Controller) audits(c *gin.Context) {
 	f, err := queryFilter(c)

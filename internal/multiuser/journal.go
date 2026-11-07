@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -108,7 +109,20 @@ type Filter struct {
 	KeyID        string
 	Model        string
 	// Outcome narrows usage to "ok" or "failed" attempts; empty keeps both.
-	Outcome  string
+	Outcome string
+	// Provider matches the upstream type ("kimi", "openai-compatible").
+	Provider string
+	// Stream is "stream" or "nonstream"; empty keeps both.
+	Stream string
+	// Status is an exact HTTP status or a class such as "4xx".
+	Status   string
+	Endpoint string
+	// Effort is the translated reasoning level; "none" matches records without one.
+	Effort string
+	// Balanced is "yes" or "no"; empty keeps both.
+	Balanced string
+	// Sort orders usage lists: "" or "time" (newest first), "tokens", "latency".
+	Sort     string
 	Actor    string
 	Action   string
 	From     time.Time
@@ -213,7 +227,43 @@ func matchUsage(event UsageEvent, filter Filter) bool {
 		(filter.Owner == "" || event.Owner == filter.Owner) && (filter.ChannelID == "" || event.ChannelID == filter.ChannelID) &&
 		(filter.CredentialID == "" || event.CredentialID == filter.CredentialID) && (filter.KeyID == "" || event.KeyID == filter.KeyID) &&
 		matchModelQuery(event, filter.Model) &&
-		(filter.Outcome == "" || event.Failed == (filter.Outcome == "failed"))
+		(filter.Outcome == "" || event.Failed == (filter.Outcome == "failed")) &&
+		(filter.Provider == "" || providerBase(event.Provider) == filter.Provider) &&
+		(filter.Stream == "" || event.Stream == (filter.Stream == "stream")) &&
+		matchStatus(event.Status, filter.Status) &&
+		(filter.Endpoint == "" || event.Endpoint == filter.Endpoint) &&
+		(filter.Effort == "" || event.ReasoningEffort == effortValue(filter.Effort)) &&
+		(filter.Balanced == "" || event.Balanced == (filter.Balanced == "yes"))
+}
+
+// effortValue maps the "none" sentinel to records without a reasoning level.
+func effortValue(effort string) string {
+	if effort == "none" {
+		return ""
+	}
+	return effort
+}
+
+// statusRange parses "200" into [200,200] and "4xx" into [400,499].
+func statusRange(status string) (int, int, bool) {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if len(status) == 3 && strings.HasSuffix(status, "xx") && status[0] >= '1' && status[0] <= '5' {
+		base := int(status[0]-'0') * 100
+		return base, base + 99, true
+	}
+	code, err := strconv.Atoi(status)
+	if err != nil || code < 100 || code > 599 {
+		return 0, 0, false
+	}
+	return code, code, true
+}
+
+func matchStatus(status int, filter string) bool {
+	if filter == "" {
+		return true
+	}
+	low, high, ok := statusRange(filter)
+	return ok && status >= low && status <= high
 }
 
 // Parenthesized channel/model suffixes pin bare-model calls to their serving
@@ -289,6 +339,7 @@ type Summary struct {
 	Owner               string `json:"owner,omitempty"`
 	Channel             string `json:"channel,omitempty"`
 	Model               string `json:"model,omitempty"`
+	CredentialID        string `json:"credential_id,omitempty"`
 	Day                 string `json:"day,omitempty"`
 	Calls               int64  `json:"calls"`
 	Executions          int64  `json:"executions"`
@@ -300,9 +351,26 @@ type Summary struct {
 	CacheCreationTokens int64  `json:"cache_creation_tokens"`
 	TotalTokens         int64  `json:"total_tokens"`
 	UnknownTokenRecords int64  `json:"unknown_token_records"`
+	// Latency and TTFT sums cover successful attempts with a measured value;
+	// callers divide by the matching count, so groups stay mergeable.
+	LatencyMS    int64 `json:"latency_ms"`
+	LatencyCount int64 `json:"latency_count"`
+	TTFTMS       int64 `json:"ttft_ms"`
+	TTFTCount    int64 `json:"ttft_count"`
 	// Failovers counts earlier failed attempts folded into balanced requests;
 	// only the overall total carries it.
 	Failovers int64 `json:"failovers,omitempty"`
+}
+
+// SummaryBucket is one hour of usage for the trend chart.
+type SummaryBucket struct {
+	Start        int64 `json:"start"`
+	Calls        int64 `json:"calls"`
+	Executions   int64 `json:"executions"`
+	Failures     int64 `json:"failures"`
+	TotalTokens  int64 `json:"total_tokens"`
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
 }
 
 func (s *Store) Summary(filter Filter) (Summary, []Summary, error) {

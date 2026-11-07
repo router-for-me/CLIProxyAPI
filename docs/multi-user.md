@@ -282,8 +282,9 @@ channel succeeded, otherwise the last failure. Listed balanced rows report the
 trace's total `attempts`; the summary reports folded attempts as `failovers`.
 `GET /usage/attempts?trace=` returns the full ordered chain for the detail view.
 Owner, channel, credential or pinned-model filters show every attempt, because
-each was a real call against that upstream. Folding happens when the index
-imports a later attempt of the same trace.
+each was a real call against that upstream. A failed balanced attempt stays
+hidden until the client request ends (its call record, whose ID is the usage
+trace, is imported); if no attempt succeeded, the last failure is then shown.
 
 Status 499 is displayed as **Request interrupted**: the caller interrupted the
 request, not an upstream service failure. Codex HTTP response streams that close
@@ -303,6 +304,25 @@ Model-side usage (for example, image-tool usage) can produce additional usage
 records. Summary Token totals use the existing non-overlapping canonical token
 breakdown where it is complete. Missing token information is shown as unknown,
 not converted to an estimated charge.
+
+Credential and AI-provider cards in the account console link directly to
+`/usage?credential_id=<id>`. Owners enter the contributed scope, administrators
+enter the site scope, and other members remain in their own scope.
+
+**Usage page.** Every control writes the URL directly (no apply button): range
+chips, model and Key/member autocompletes (applied once the text matches a
+candidate exactly), the channel select, outcome tabs and pagination. One
+`/usage/summary` response drives the KPI strip, trend and breakdown. KPIs:
+requests (`total.calls`, distinct traces), upstream success
+(`1 - failures/executions`), Tokens, cache hit rate, and average latency/TTFT over
+successful attempts only (`latency_ms/latency_count`, `ttft_ms/ttft_count`). The
+trend uses the hourly `buckets`; ranges up to two days stay hourly, longer ranges
+fold into local days, gaps are zero-filled, and ranges ending in the future stop
+at the fetch time. The breakdown ranks models, users (not in 我的调用) or
+credentials by Tokens using only additive group fields (never summed per-group
+`calls`); selecting a row toggles the matching `model`/`consumer`/`credential_id`
+filter. Within one scope the previous figures stay visible (dimmed) while a new
+filter loads; record rows are cleared on filter changes.
 
 **Subscription quota is separate from Token usage.** The credential page exposes
 provider-supported passive quota signals and their observation timestamps, plus
@@ -389,7 +409,7 @@ The account API base is `/v8/hub`. Protected endpoints accept
 | `/oauth/session` | DELETE | Cancel a pending OAuth flow. |
 | `/users`, `/users/:username` | GET / PATCH | All-member directory / admin `role` or `disabled` changes only. |
 | `/invites`, `/invites/:id` | GET, POST / DELETE | Administrator invitation issue/list/revoke. |
-| `/usage`, `/usage/summary`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/attempts?trace=` lists every attempt of one request. |
+| `/usage`, `/usage/summary`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/summary` returns `total`, `groups` (day/consumer/owner/channel/model/credential) and hourly `buckets`; `/usage/attempts?trace=` lists every attempt of one request. |
 
 Quota lookup never requires credential export permission. The server resolves Kimi's
 `.com`/`.ai` usage host from the live credential and substitutes Meta's persisted
@@ -411,14 +431,20 @@ immutable identity fields. Model editor PATCH accepts `enabled_models` or
 `all_models: true`. Clients select a channel through the model ID, not headers.
 
 History filters: `consumer`, `owner`, `channel_id`, `credential_id`, `key_id`,
-`model`, `outcome` (`ok` or `failed`, usage only), `from`, `to`, `page`, `page_size`
-(maximum 200). The usage page applies `outcome` to the list only; its statistics
-always cover both outcomes. Dates are RFC3339; `from`
+`model`, `provider`, `stream`, `status` (exact code or `4xx`/`5xx` class),
+`endpoint`, `effort`, `balanced`, `outcome` (`ok` or `failed`, usage only),
+`from`, `to`, `page`, `page_size` (maximum 200) and `sort` (`time`, `tokens`,
+`latency`). The usage page applies `outcome`, `status` and `sort` to the list
+only; its statistics cover the full result set. `GET /usage/facets` returns the
+distinct provider/endpoint/status/effort values present under the same filters.
+Mounted AI providers are indexed by base type (`openai-compatible`), not the hub
+route ID. Upgrading from an older index rebuilds the derived
+`journal-index.sqlite` once at startup; journal files are unchanged. Dates are RFC3339; `from`
 is inclusive and `to` is exclusive. Audit filters additionally include `actor`
 and `action`. Owner/channel/credential filters apply to upstream usage, not the
 client-call table, because early client errors have no serving credential.
 The usage page matches partial input against dropdown candidates only; incomplete
-model/Key input cannot be submitted. Key choices resolve to an exact `key_id`,
+model/Key input never changes the applied filter. Key choices resolve to an exact `key_id`,
 and `@username` choices resolve to `consumer` (all of that member's keys).
 Model choices retain the existing requested-model matching; a trailing
 `model(channel/model)` or `model（channel/model）` pins the serving channel for
@@ -432,7 +458,8 @@ returns to the last valid page after a successful response reports fewer records
 and preserves the selected size when applying or clearing filters. Browser history
 restores the applied filters. Page changes fetch entries without refetching summaries;
 the header refresh reloads entries, statistics, and model candidates together.
-Usage and audit pagination hide the previous page while loading and disable page
+Audit pagination hides the previous page while loading; usage pagination dims it.
+Both disable page
 controls until the request settles. Local credential, quota, and marketplace lists
 also synchronize their stored page after shrinkage, so later growth cannot restore
 an obsolete page. Board history allows one earlier-message request at a time,

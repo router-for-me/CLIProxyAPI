@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { matchesAutocompleteQuery } from '../src/components/ui/autocompleteMatching';
 import {
+  buildCredentialUsagePath,
   buildModelCandidateQuery,
   buildUsageFilterQuery,
   resolveUsageKey,
@@ -21,7 +22,7 @@ describe('usage autocomplete candidates', () => {
   test('candidate query ignores the applied model filter and pagination', () => {
     const parsed = new URLSearchParams(
       buildModelCandidateQuery(
-        'scope=contributed&model=deepseek-flash&page=3&page_size=50&channel_id=c1&from=2026-10-01T00%3A00%3A00.000Z',
+        'scope=contributed&model=deepseek-flash&page=3&page_size=50&channel_id=c1&credential_id=cred-1&from=2026-10-01T00%3A00%3A00.000Z',
         'contributed',
         'alice'
       )
@@ -31,6 +32,7 @@ describe('usage autocomplete candidates', () => {
     expect(parsed.get('page_size')).toBeNull();
     expect(parsed.get('scope')).toBeNull();
     expect(parsed.get('channel_id')).toBe('c1');
+    expect(parsed.get('credential_id')).toBe('cred-1');
     expect(parsed.get('from')).toBe('2026-10-01T00:00:00.000Z');
     expect(parsed.get('owner')).toBe('alice');
     expect(parsed.get('consumer')).toBeNull();
@@ -49,18 +51,20 @@ describe('usage autocomplete candidates', () => {
       ['scope=contributed&key_id=k9&key=phone', 'contributed', 'alice'],
     ];
     for (const [query, scope, me] of cases) {
-      expect(buildModelCandidateQuery(query, scope, me)).toBe(buildUsageFilterQuery(query, scope, me));
+      expect(buildModelCandidateQuery(query, scope, me)).toBe(
+        buildUsageFilterQuery(query, scope, me)
+      );
     }
   });
 
   test('applying a model diverges the candidate query from the main filter query', () => {
-    const query = 'model=kimi-k3&channel_id=c1';
+    const query = 'model=kimi-k3&channel_id=c1&credential_id=cred-1';
     expect(buildModelCandidateQuery(query, 'mine', 'alice')).not.toBe(
       buildUsageFilterQuery(query, 'mine', 'alice')
     );
-    expect(new URLSearchParams(buildUsageFilterQuery(query, 'mine', 'alice')).get('model')).toBe(
-      'kimi-k3'
-    );
+    const main = new URLSearchParams(buildUsageFilterQuery(query, 'mine', 'alice'));
+    expect(main.get('model')).toBe('kimi-k3');
+    expect(main.get('credential_id')).toBe('cred-1');
   });
 
   test('pagination changes do not alter the candidate query', () => {
@@ -79,9 +83,13 @@ describe('usage autocomplete candidates', () => {
   });
 
   test('partial text narrows model candidates without becoming a model filter', () => {
-    expect(models.filter((model) => matchesAutocompleteQuery(model, 'FLASH'))).toEqual(models.slice(0, 2));
+    expect(models.filter((model) => matchesAutocompleteQuery(model, 'FLASH'))).toEqual(
+      models.slice(0, 2)
+    );
     expect(resolveUsageModel('FLASH', models)).toBeNull();
-    expect(models.filter((model) => matchesAutocompleteQuery(model, '123-123'))).toEqual([models[1]]);
+    expect(models.filter((model) => matchesAutocompleteQuery(model, '123-123'))).toEqual([
+      models[1],
+    ]);
     expect(resolveUsageModel('123-123', models)).toBeNull();
   });
 
@@ -107,9 +115,30 @@ describe('usage autocomplete candidates', () => {
 
   test('clearing removes the filter and saved model selections survive empty candidates', () => {
     expect(resolveUsageKey('', keys)).toEqual({ label: '' });
-    expect(resolveUsageModel('', models)).toBe('');
+    expect(resolveUsageModel('', models, models[1])).toBe('');
     expect(resolveUsageModel(models[1], [], models[1])).toBe(models[1]);
     expect(resolveUsageModel('flash', [], models[1])).toBeNull();
     expect(resolveUsageKey('不存在', keys)).toBeNull();
+  });
+
+  test('credential deep links preserve exact IDs and select the appropriate scope', () => {
+    const ownerPath = buildCredentialUsagePath(
+      { id: 'cred / 中文#1', owner: 'alice' },
+      'alice',
+      false
+    );
+    const ownerParams = new URLSearchParams(ownerPath.slice(ownerPath.indexOf('?') + 1));
+    expect(ownerPath.startsWith('/usage?')).toBe(true);
+    expect(ownerParams.get('credential_id')).toBe('cred / 中文#1');
+    expect(ownerParams.get('scope')).toBe('contributed');
+
+    const adminParams = new URLSearchParams(
+      buildCredentialUsagePath({ id: 'cred-1', owner: 'alice' }, 'bob', true).split('?')[1]
+    );
+    expect(adminParams.get('scope')).toBe('site');
+
+    const memberPath = buildCredentialUsagePath({ id: 'cred-1', owner: 'alice' }, 'bob', false);
+    expect(new URLSearchParams(memberPath.split('?')[1]).get('scope')).toBeNull();
+    expect(buildCredentialUsagePath({ owner: 'alice' }, 'alice', false)).toBe('');
   });
 });

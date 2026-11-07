@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { useAuthStore, useNotificationStore } from '@/stores';
 import { sharingApi } from '@/services/api/sharing';
+import { loginRedirectTarget } from '@/router/location';
 
 export function AccountLoginForm({
   apiBase,
@@ -15,6 +16,7 @@ export function AccountLoginForm({
   needsSetup: boolean;
 }) {
   const { t } = useTranslation();
+  const location = useLocation();
   const navigate = useNavigate();
   const login = useAuthStore((state) => state.loginAccount);
   const notify = useNotificationStore((state) => state.showNotification);
@@ -36,7 +38,7 @@ export function AccountLoginForm({
         notify(t('sharing.registered'), 'success');
       }
       await login(apiBase, username, password, remember);
-      navigate('/', { replace: true });
+      navigate(loginRedirectTarget(location.state), { replace: true });
     } catch (error) {
       setError(error instanceof Error ? error.message : String(error));
     } finally {

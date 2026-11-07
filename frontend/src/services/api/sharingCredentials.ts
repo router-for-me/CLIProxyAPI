@@ -32,10 +32,11 @@ let credentialRevision = -1;
 export const clearSharedCredentials = () => {
   credentials = [];
 };
-const load = async () => {
+const load = async (signal?: AbortSignal) => {
   const revision = apiClient.getConnectionRevision();
   const response = await apiClient.get<{ credentials: SharedCredential[] }>(
-    sharingPath('/credentials')
+    sharingPath('/credentials'),
+    { signal }
   );
   if (revision === apiClient.getConnectionRevision()) {
     credentials = response.credentials;
@@ -62,7 +63,9 @@ const findByAuthIndex = async (authIndex: string) => {
 };
 
 export const sharingCredentials = {
-  list: async (): Promise<AuthFilesResponse> => ({ files: await load() }),
+  list: async (signal?: AbortSignal): Promise<AuthFilesResponse> => ({
+    files: await load(signal),
+  }),
   findByAuthIndex,
   models: async (name: string) => {
     const file = await find(name);

@@ -1,46 +1,44 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { AutocompleteInput } from '@/components/ui/AutocompleteInput';
-import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
 import { DatePickerInput } from '@/components/ui/DatePickerInput';
-import { EmptyState } from '@/components/ui/EmptyState';
 import { Select } from '@/components/ui/Select';
-import { Sheet } from '@/components/ui/Sheet';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { IconChevronDown, IconSlidersHorizontal, IconX } from '@/components/ui/icons';
 import { useAuthStore } from '@/stores';
 import { sharingApi } from '@/services/api/sharing';
+import { sharingCredentials, type SharedCredential } from '@/services/api/sharingCredentials';
+import { deriveAuthFileIdentity } from '@/features/authFiles/identity';
 import { formatCompactNumber } from '@/utils/format';
 import { normalizePaginationParams, parsePage, parsePageSize } from '@/utils/pagination';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
-import {
-  Table,
-  TableHeader,
-  TableBody,
-  TableRow,
-  TableHead,
-  TableCell,
-} from '@/components/ui/Table';
 import type { Account, Channel, PersonalKey, SharedKeyRef, UsageEntry } from './types';
-import { DailyTrend, LoadState, PageHeader, Pager } from './shared';
-import { compactDate, date, duration, number, useSharingActions, useSharingData } from './hooks';
+import { Pager } from './shared';
+import { duration, number, useSharingData } from './hooks';
 import {
+  buildFacetQuery,
   buildModelCandidateQuery,
   buildUsageFilterQuery,
   resolveUsageKey,
   resolveUsageModel,
-  withoutOutcome,
+  withoutListParams,
   type UsageKeyOption,
 } from './usageFilters';
-import styles from './Sharing.module.scss';
+import { buildTrend, deriveKpis, type UsageDimension } from './usageBreakdown';
+import { percent, servingModelId } from './usageFormat';
+import { UsageTrend } from './UsageTrend';
+import { UsageRanking } from './UsageRanking';
+import { UsageDetailSheet, UsageRecords } from './UsageRecords';
+import styles from './Usage.module.scss';
 
 type UsageScope = 'mine' | 'contributed' | 'site';
 type UsageOutcome = '' | 'ok' | 'failed';
 type RangePreset = 'all' | 'today' | 'yesterday' | '7d' | '30d' | 'custom';
 
-const DAY_MS = 86400000;
-const RANGE_PRESETS: RangePreset[] = ['all', 'today', 'yesterday', '7d', '30d', 'custom'];
+const DAY_MS = 86_400_000;
+const RANGE_PRESETS: RangePreset[] = ['today', 'yesterday', '7d', '30d', 'all', 'custom'];
 
 const startOfDay = (value: Date) =>
   new Date(value.getFullYear(), value.getMonth(), value.getDate());
@@ -83,531 +81,25 @@ function detectPreset(from: string, to: string): RangePreset {
   return 'custom';
 }
 
-const stripJsonExt = (name: string) => name.replace(/\.json$/i, '');
-// Channel-mounted credential files are named "<channel>-<type>#<n>-<internal>.json";
-// the pinned prefix alone identifies the credential, the rest is internal.
-const credentialDisplayName = (name: string) =>
-  stripJsonExt(name).replace(/^(.+#\d+)-[^#]+$/, '$1');
-const tokensPerSecond = (entry: UsageEntry) =>
-  entry.tokens_known && entry.latency_ms > 0 && entry.output_tokens > 0
-    ? Math.round(entry.output_tokens / (entry.latency_ms / 1000))
-    : null;
-
-// Cache hit rate: the share of total input tokens served from the upstream cache.
-export const cacheHitRate = (
-  entry: Pick<UsageEntry, 'input_tokens' | 'cache_read_tokens'>
-): number | null =>
-  entry.input_tokens > 0 && entry.cache_read_tokens > 0
-    ? (entry.cache_read_tokens / entry.input_tokens) * 100
-    : null;
-
-const statusKind = (status: number, failed: boolean): 'ok' | 'fail' | 'interrupted' =>
-  status === 499 ? 'interrupted' : failed || status >= 400 ? 'fail' : 'ok';
-
-const entryStatus = (entry: UsageEntry): 'ok' | 'fail' | 'interrupted' =>
-  statusKind(entry.status, entry.failed);
-
-export function RequestStatus({ status, failed = false }: { status: number; failed?: boolean }) {
-  const { t } = useTranslation();
-  const kind = statusKind(status, failed);
-  const label =
-    kind === 'interrupted'
-      ? t('sharing.status_interrupted')
-      : kind === 'fail'
-        ? t('sharing.status_failed')
-        : t('sharing.status_success');
-  return (
-    <span
-      className={
-        kind === 'interrupted'
-          ? styles.pillInterrupted
-          : kind === 'fail'
-            ? styles.pillFail
-            : styles.pillOk
-      }
-    >
-      {label} {status}
-    </span>
-  );
-}
-
-function Field({ label, children }: { label: ReactNode; children: ReactNode }) {
-  return (
-    <div className={styles.field}>
-      <dt>{label}</dt>
-      <dd>{children}</dd>
-    </div>
-  );
-}
-
-function DetailSection({
+function Kpi({
+  label,
+  value,
   title,
-  meta,
-  children,
+  hint,
+  tone,
 }: {
-  title: ReactNode;
-  meta?: ReactNode;
-  children: ReactNode;
+  label: string;
+  value: string;
+  title?: string;
+  hint?: string;
+  tone?: 'danger';
 }) {
   return (
-    <section className={styles.detailSection}>
-      <h3 className={styles.detailSectionTitle}>
-        {title}
-        {meta && <span className={styles.detailSectionMeta}>{meta}</span>}
-      </h3>
-      {children}
-    </section>
-  );
-}
-
-// Upstream error bodies are usually JSON envelopes; surface the human message
-// and keep the raw body available separately.
-export function errorMessage(body: string | undefined): string {
-  const text = (body || '').trim();
-  if (!text) return '';
-  const pick = (value: unknown): string => {
-    if (typeof value === 'string') return value;
-    if (!value || typeof value !== 'object') return '';
-    const record = value as Record<string, unknown>;
-    return pick(record.message) || pick(record.error) || pick(record.detail);
-  };
-  try {
-    const message = pick(JSON.parse(text)).trim();
-    if (message) return message;
-  } catch {
-    // Not JSON; fall back to the raw text.
-  }
-  return text;
-}
-
-function ErrorBlock({ body }: { body?: string }) {
-  const { t } = useTranslation();
-  const { copy } = useSharingActions(noRefresh);
-  const raw = (body || '').trim();
-  if (!raw) return <p className={styles.errorEmpty}>{t('sharing.no_error_body')}</p>;
-  const message = errorMessage(raw);
-  return (
-    <div className={styles.errorBlock}>
-      <div className={styles.errorHead}>
-        <span>{t('sharing.error_title')}</span>
-        <button type="button" className={styles.linkButton} onClick={() => void copy(raw)}>
-          {t('common.copy')}
-        </button>
-      </div>
-      <p className={styles.errorMessage}>{message}</p>
-      {message !== raw && (
-        <details className={styles.errorRaw}>
-          <summary>{t('sharing.error_raw')}</summary>
-          <pre>{raw}</pre>
-        </details>
-      )}
+    <div className={`${styles.kpi} ${tone ? styles[`kpi_${tone}`] : ''}`} title={title}>
+      <span className={styles.kpiLabel}>{label}</span>
+      <strong className={styles.kpiValue}>{value}</strong>
+      <span className={styles.kpiHint}>{hint || '\u00a0'}</span>
     </div>
-  );
-}
-
-const noRefresh = async () => {};
-
-function AttemptTimeline({ entry }: { entry: UsageEntry }) {
-  const { t } = useTranslation();
-  const trace = entry.trace_id || entry.request_id;
-  const [state, setState] = useState<{ items: UsageEntry[]; error: string; loading: boolean }>({
-    items: [],
-    error: '',
-    loading: true,
-  });
-  useEffect(() => {
-    const controller = new AbortController();
-    setState({ items: [], error: '', loading: true });
-    sharingApi.usageAttempts(trace, controller.signal).then(
-      (result) => {
-        if (!controller.signal.aborted)
-          setState({ items: result.items ?? [], error: '', loading: false });
-      },
-      (error) => {
-        if (controller.signal.aborted) return;
-        setState({
-          items: [],
-          error: error instanceof Error ? error.message : String(error),
-          loading: false,
-        });
-      }
-    );
-    return () => controller.abort();
-  }, [trace]);
-  const items = state.items.length ? state.items : [entry];
-  return (
-    <DetailSection
-      title={t('sharing.attempts_title')}
-      meta={t('sharing.balanced_attempts', { count: Math.max(items.length, entry.attempts || 1) })}
-    >
-      <LoadState loading={state.loading} error={state.error} />
-      <ol className={styles.timeline}>
-        {items.map((attempt, index) => {
-          const kind = entryStatus(attempt);
-          const current = attempt.id === entry.id;
-          const message = kind === 'ok' ? '' : errorMessage(attempt.error);
-          return (
-            <li
-              key={attempt.id}
-              className={`${styles.timelineItem} ${
-                kind === 'ok'
-                  ? styles.timelineOk
-                  : kind === 'fail'
-                    ? styles.timelineFail
-                    : styles.timelineMuted
-              } ${current ? styles.timelineCurrent : ''}`}
-            >
-              <div className={styles.timelineHead}>
-                <span className={styles.timelineIndex}>
-                  {t('sharing.attempt_index', { index: index + 1 })}
-                </span>
-                <span className={`${styles.mono} ${styles.timelineModel}`}>
-                  {servingModelId(attempt) || attempt.model}
-                </span>
-                <RequestStatus status={attempt.status} failed={attempt.failed} />
-              </div>
-              <div className={styles.cellSecondary}>
-                {[
-                  attempt.credential_name ? credentialDisplayName(attempt.credential_name) : '',
-                  attempt.owner ? `@${attempt.owner}` : '',
-                  `${t('sharing.latency_total_short')} ${duration(attempt.latency_ms)}`,
-                  attempt.ttft_ms > 0
-                    ? `${t('sharing.latency_ttft_short')} ${duration(attempt.ttft_ms)}`
-                    : '',
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </div>
-              {message && (
-                <div className={styles.timelineError} title={message}>
-                  {message}
-                </div>
-              )}
-              {kind !== 'ok' && index < items.length - 1 && (
-                <div className={styles.timelineNext}>{t('sharing.attempt_switched')}</div>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </DetailSection>
-  );
-}
-
-function UsageDetailSheet({
-  entry,
-  showConsumer,
-  onClose,
-}: {
-  entry: UsageEntry | null;
-  showConsumer: boolean;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation();
-  const { copy } = useSharingActions(noRefresh);
-  const cacheRate = entry ? cacheHitRate(entry) : null;
-  const rate = entry ? tokensPerSecond(entry) : null;
-  const kind = entry ? entryStatus(entry) : 'ok';
-  const serving = entry ? servingModelId(entry) : '';
-  const idValue = (value: string) => (
-    <span className={styles.idValue}>
-      <span className={styles.mono}>{value}</span>
-      <button type="button" className={styles.linkButton} onClick={() => void copy(value)}>
-        {t('common.copy')}
-      </button>
-    </span>
-  );
-  return (
-    <Sheet
-      open={!!entry}
-      onClose={onClose}
-      size="md"
-      eyebrow={entry ? date(entry.at) : undefined}
-      title={entry?.model}
-      description={
-        entry
-          ? `${entry.endpoint} · ${t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}`
-          : undefined
-      }
-    >
-      {entry && (
-        <div className={styles.detailBody}>
-          <div
-            className={`${styles.outcomeBanner} ${
-              kind === 'ok'
-                ? styles.outcomeOk
-                : kind === 'fail'
-                  ? styles.outcomeFail
-                  : styles.outcomeMuted
-            }`}
-          >
-            <div className={styles.outcomeMain}>
-              <RequestStatus status={entry.status} failed={entry.failed} />
-              {entry.balanced && <BalancedTag attempts={entry.attempts} />}
-            </div>
-            <div className={styles.outcomeStats}>
-              <span>
-                {t('sharing.latency_total_short')} <strong>{duration(entry.latency_ms)}</strong>
-              </span>
-              {entry.ttft_ms > 0 && (
-                <span>
-                  {t('sharing.latency_ttft_short')} <strong>{duration(entry.ttft_ms)}</strong>
-                </span>
-              )}
-              {rate !== null && (
-                <span>
-                  <strong>{rate}</strong> t/s
-                </span>
-              )}
-            </div>
-            {kind === 'interrupted' && (
-              <p className={styles.cellSecondary}>{t('sharing.status_interrupted_hint')}</p>
-            )}
-            {kind === 'fail' && <ErrorBlock body={entry.error} />}
-          </div>
-
-          {entry.balanced && <AttemptTimeline entry={entry} />}
-
-          <DetailSection title={t('sharing.section_call')}>
-            <dl className={styles.fieldGrid}>
-              {showConsumer && <Field label={t('sharing.consumer')}>@{entry.consumer}</Field>}
-              <Field label={t('sharing.field_key')}>{entry.key_name || '—'}</Field>
-              <Field label={t('sharing.field_model')}>
-                <span className={styles.mono}>{entry.model}</span>
-              </Field>
-              {serving && (
-                <Field label={t('sharing.field_serving_model')}>
-                  <span className={styles.mono}>{serving}</span>
-                </Field>
-              )}
-              {entry.upstream_model && entry.upstream_model !== entry.model && (
-                <Field label={t('sharing.field_upstream_model')}>
-                  <span className={styles.mono}>{entry.upstream_model}</span>
-                </Field>
-              )}
-              <Field label={t('sharing.channel')}>
-                {entry.channel || '—'}
-                {entry.owner && entry.owner !== entry.consumer && (
-                  <span className={styles.cellSecondary}>（@{entry.owner}）</span>
-                )}
-              </Field>
-              <Field label={t('sharing.field_credential')}>
-                {entry.credential_name ? credentialDisplayName(entry.credential_name) : '—'}
-              </Field>
-              {entry.reasoning_effort && (
-                <Field label={t('sharing.field_reasoning_effort')}>
-                  <span className={styles.mono}>{entry.reasoning_effort}</span>
-                </Field>
-              )}
-            </dl>
-          </DetailSection>
-
-          {(entry.tokens_known || kind === 'ok') && (
-            <DetailSection title={t('sharing.field_tokens')}>
-              {entry.tokens_known ? (
-                <div className={styles.tokenTiles}>
-                  <div className={styles.tokenTile}>
-                    <span className={styles.statLabel}>{t('sharing.token_input')}</span>
-                    <strong>{number(entry.input_tokens)}</strong>
-                    {entry.cache_read_tokens > 0 && (
-                      <span className={styles.cellSecondary}>
-                        {t('sharing.token_cache', { count: number(entry.cache_read_tokens) })}
-                      </span>
-                    )}
-                    {entry.cache_creation_tokens > 0 && (
-                      <span className={styles.cellSecondary}>
-                        {t('sharing.token_cache_write', {
-                          count: number(entry.cache_creation_tokens),
-                        })}
-                      </span>
-                    )}
-                  </div>
-                  <div className={styles.tokenTile}>
-                    <span className={styles.statLabel}>{t('sharing.token_output')}</span>
-                    <strong>{number(entry.output_tokens)}</strong>
-                    {entry.reasoning_tokens > 0 && (
-                      <span className={styles.cellSecondary}>
-                        {t('sharing.token_reasoning', { count: number(entry.reasoning_tokens) })}
-                      </span>
-                    )}
-                  </div>
-                  {cacheRate !== null && (
-                    <div className={styles.tokenTile}>
-                      <span className={styles.statLabel}>{t('sharing.field_cache_hit')}</span>
-                      <strong>{cacheRate.toFixed(1)}%</strong>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <p className={styles.cellSecondary}>{t('sharing.unknown')}</p>
-              )}
-            </DetailSection>
-          )}
-
-          {(entry.trace_id || entry.request_id) && (
-            <DetailSection title={t('sharing.section_ids')}>
-              <dl className={styles.fieldGrid}>
-                {entry.trace_id && (
-                  <Field label={t('sharing.field_trace')}>{idValue(entry.trace_id)}</Field>
-                )}
-                {entry.request_id && (
-                  <Field label={t('sharing.field_request')}>{idValue(entry.request_id)}</Field>
-                )}
-              </dl>
-            </DetailSection>
-          )}
-        </div>
-      )}
-    </Sheet>
-  );
-}
-
-export function BalancedTag({ attempts }: { attempts?: number }) {
-  const { t } = useTranslation();
-  return (
-    <span className={styles.balancedTag} title={t('sharing.balanced_tag_hint')}>
-      {t('sharing.auto_balance')}
-      {attempts && attempts > 1 ? ` · ${t('sharing.balanced_attempts', { count: attempts })}` : ''}
-    </span>
-  );
-}
-
-// Bare base-model calls (keys with even load balancing) are served by one
-// channel's pinned model ID; surface it next to the requested name.
-export const servingModelId = (entry: Partial<Pick<UsageEntry, 'model' | 'channel'>>): string =>
-  entry.model && entry.channel && !entry.model.startsWith(`${entry.channel}/`)
-    ? `${entry.channel}/${entry.model}`
-    : '';
-
-const tokenLine = (entry: UsageEntry) =>
-  `${number(entry.input_tokens)}${
-    entry.cache_read_tokens > 0 ? `（${number(entry.cache_read_tokens)}）` : ''
-  } / ${number(entry.output_tokens)}${
-    entry.reasoning_tokens > 0 ? `（${number(entry.reasoning_tokens)}）` : ''
-  }`;
-
-export function UsageLogRow({
-  entry,
-  showConsumer,
-  onOpen,
-}: {
-  entry: UsageEntry;
-  showConsumer: boolean;
-  onOpen: () => void;
-}) {
-  const { t } = useTranslation();
-  const status = entryStatus(entry);
-  const rate = tokensPerSecond(entry);
-  const serving = servingModelId(entry);
-  const latencyClass =
-    status === 'fail'
-      ? styles.latencyFail
-      : status === 'interrupted'
-        ? styles.latencyInterrupted
-        : '';
-  const error = status === 'fail' ? errorMessage(entry.error) : '';
-  return (
-    <TableRow className={styles.clickableRow} onClick={onOpen}>
-      <TableCell>
-        <div className={`${styles.cellPrimary} ${styles.mono}`}>{compactDate(entry.at)}</div>
-        <div className={styles.cellSecondary}>
-          {t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}
-          {rate !== null ? ` · ${rate} t/s` : ''}
-        </div>
-      </TableCell>
-      <TableCell>
-        <div className={styles.cellPrimary}>{entry.key_name || '—'}</div>
-        {showConsumer && <div className={styles.cellSecondary}>@{entry.consumer}</div>}
-      </TableCell>
-      <TableCell>
-        <div className={`${styles.cellPrimary} ${styles.mono}`}>{entry.model}</div>
-        <div className={styles.modelMeta}>
-          {entry.balanced && <BalancedTag attempts={entry.attempts} />}
-          {serving && (
-            <span className={`${styles.cellSecondary} ${styles.mono}`}>（{serving}）</span>
-          )}
-        </div>
-      </TableCell>
-      <TableCell>
-        {entry.tokens_known ? (
-          <div className={`${styles.cellPrimary} ${styles.mono}`}>{tokenLine(entry)}</div>
-        ) : (
-          <span className={styles.cellSecondary}>{t('sharing.unknown')}</span>
-        )}
-      </TableCell>
-      <TableCell>
-        <div className={`${styles.latency} ${latencyClass}`}>
-          {entry.ttft_ms > 0 && (
-            <div>
-              {t('sharing.latency_ttft_short')} {duration(entry.ttft_ms)}
-            </div>
-          )}
-          <div>
-            {t('sharing.latency_total_short')} {duration(entry.latency_ms)}
-          </div>
-        </div>
-      </TableCell>
-      <TableCell>
-        <RequestStatus status={entry.status} failed={entry.failed} />
-        {error && (
-          <div className={styles.rowError} title={error}>
-            {error}
-          </div>
-        )}
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function UsageLogCard({
-  entry,
-  showConsumer,
-  onOpen,
-}: {
-  entry: UsageEntry;
-  showConsumer: boolean;
-  onOpen: () => void;
-}) {
-  const { t } = useTranslation();
-  const status = entryStatus(entry);
-  const rate = tokensPerSecond(entry);
-  const serving = servingModelId(entry);
-  const error = status === 'fail' ? errorMessage(entry.error) : '';
-  return (
-    <button type="button" className={`${styles.keyCard} ${styles.usageCard}`} onClick={onOpen}>
-      <span className={styles.keyCardHead}>
-        <span className={`${styles.cellPrimary} ${styles.mono}`}>{entry.model}</span>
-        <RequestStatus status={entry.status} failed={entry.failed} />
-      </span>
-      {(entry.balanced || serving) && (
-        <span className={styles.modelMeta}>
-          {entry.balanced && <BalancedTag attempts={entry.attempts} />}
-          {serving && (
-            <span className={`${styles.cellSecondary} ${styles.mono}`}>（{serving}）</span>
-          )}
-        </span>
-      )}
-      <span className={styles.cellSecondary}>
-        {compactDate(entry.at)} · {entry.key_name || '—'}
-        {showConsumer ? ` · @${entry.consumer}` : ''} · {entry.channel}
-      </span>
-      <span className={styles.cellSecondary}>
-        {duration(entry.latency_ms)}
-        {rate !== null ? ` · ${rate} t/s` : ''}
-        {entry.tokens_known
-          ? ` · ${t('sharing.hint_tokens_io', {
-              input: `${number(entry.input_tokens)}${
-                entry.cache_read_tokens > 0 ? `（${number(entry.cache_read_tokens)}）` : ''
-              }`,
-              output: `${number(entry.output_tokens)}${
-                entry.reasoning_tokens > 0 ? `（${number(entry.reasoning_tokens)}）` : ''
-              }`,
-            })}`
-          : ''}
-        {` · ${t(entry.stream ? 'sharing.stream' : 'sharing.nonstream')}`}
-      </span>
-      {error && <span className={styles.rowError}>{error}</span>}
-    </button>
   );
 }
 
@@ -627,47 +119,84 @@ export function UsagePage() {
         : 'mine';
   const page = parsePage(params.get('page'));
   const pageSize = parsePageSize(params.get('page_size'));
-  const appliedKeyID = params.get('key_id') || '';
   const queryString = params.toString();
+  const appliedKeyID = params.get('key_id') || '';
   const appliedModel = params.get('model') || '';
   const appliedChannel = params.get('channel_id') || '';
+  const appliedCredentialID = params.get('credential_id') || '';
   const appliedConsumer = scope === 'mine' ? '' : params.get('consumer') || '';
   const appliedFrom = params.get('from') || '';
   const appliedTo = params.get('to') || '';
+  const appliedProvider = params.get('provider') || '';
+  const appliedStream = params.get('stream') || '';
+  const appliedStatus = params.get('status') || '';
+  const appliedEndpoint = params.get('endpoint') || '';
+  const appliedEffort = params.get('effort') || '';
+  const appliedBalanced = params.get('balanced') || '';
+  const appliedSort = params.get('sort') || '';
   const outcome: UsageOutcome =
     params.get('outcome') === 'ok' || params.get('outcome') === 'failed'
       ? (params.get('outcome') as UsageOutcome)
       : '';
+  const preset = detectPreset(appliedFrom, appliedTo);
 
-  const [model, setModel] = useState(params.get('model') || '');
-  const [channelID, setChannelID] = useState(params.get('channel_id') || '');
-  const [keyDraft, setKeyText] = useState<string | null>(null);
-  const [preset, setPreset] = useState<RangePreset>(() =>
-    detectPreset(params.get('from') || '', params.get('to') || '')
+  // URL is the single source of truth; every control writes it directly.
+  const update = useCallback(
+    (mutate: (next: URLSearchParams) => void, options?: { keepPage?: boolean }) => {
+      const next = new URLSearchParams(params);
+      mutate(next);
+      if (!options?.keepPage) next.delete('page');
+      setParams(next);
+    },
+    [params, setParams]
   );
-  const [customFrom, setCustomFrom] = useState(() => toDayInput(params.get('from'), 0));
-  const [customTo, setCustomTo] = useState(() => toDayInput(params.get('to'), -1));
 
+  const [customOpen, setCustomOpen] = useState(preset === 'custom');
+  const [customFrom, setCustomFrom] = useState(() => toDayInput(appliedFrom, 0));
+  const [customTo, setCustomTo] = useState(() => toDayInput(appliedTo, -1));
   useEffect(() => {
-    setModel(appliedModel);
-    setChannelID(appliedChannel);
-    setKeyText(null);
-    setPreset(detectPreset(appliedFrom, appliedTo));
     setCustomFrom(toDayInput(appliedFrom, 0));
     setCustomTo(toDayInput(appliedTo, -1));
-  }, [appliedModel, appliedChannel, appliedKeyID, appliedConsumer, appliedFrom, appliedTo, scope]);
+    if (detectPreset(appliedFrom, appliedTo) === 'custom') setCustomOpen(true);
+  }, [appliedFrom, appliedTo]);
 
+  const setPreset = (value: RangePreset) => {
+    if (value === 'custom') {
+      setCustomOpen(true);
+      return;
+    }
+    setCustomOpen(false);
+    update((next) => {
+      if (value === 'all') {
+        next.delete('from');
+        next.delete('to');
+        return;
+      }
+      const range = presetRange(value);
+      next.set('from', range.from.toISOString());
+      next.set('to', range.to.toISOString());
+    });
+  };
+
+  const applyCustom = (fromDay: string, toDay: string) => {
+    if (fromDay && toDay && parseDayInput(toDay) < parseDayInput(fromDay)) return;
+    update((next) => {
+      if (fromDay) next.set('from', startOfDay(parseDayInput(fromDay)).toISOString());
+      else next.delete('from');
+      if (toDay)
+        next.set('to', new Date(startOfDay(parseDayInput(toDay)).getTime() + DAY_MS).toISOString());
+      else next.delete('to');
+    });
+  };
+
+  // Filter suggestions load per scope and independently: one failing list never
+  // hides the others, and loaded lists are not refetched on scope switches.
   const [options, setOptions] = useState<{
     channels: Channel[];
     keys: PersonalKey[];
     users: Account[];
     allKeys: SharedKeyRef[];
   }>({ channels: [], keys: [], users: [], allKeys: [] });
-  const [selected, setSelected] = useState<UsageEntry | null>(null);
-
-  // Filter suggestions load per scope and independently: each list lands when
-  // it arrives, one failing list never hides the others or the usage records,
-  // and pieces that already loaded are not refetched on scope switches.
   const optionsLoaded = useRef(new Set<keyof typeof options>());
   useEffect(() => {
     const controller = new AbortController();
@@ -695,15 +224,14 @@ export function UsagePage() {
         }
       );
     }
-    return () => {
-      controller.abort();
-    };
+    return () => controller.abort();
   }, [scope]);
 
   const filterQuery = useMemo(
     () => buildUsageFilterQuery(queryString, scope, me),
     [queryString, scope, me]
   );
+  const summaryQuery = useMemo(() => withoutListParams(filterQuery), [filterQuery]);
   const {
     data: summary,
     loading: summaryLoading,
@@ -711,14 +239,19 @@ export function UsagePage() {
     refresh: refreshSummary,
   } = useSharingData(
     useCallback(
-      (signal: AbortSignal) =>
-        sharingApi.summary(
-          Object.fromEntries(new URLSearchParams(withoutOutcome(filterQuery))),
+      // The fetch time bounds the trend for ranges that end in the future.
+      async (signal: AbortSignal) => ({
+        ...(await sharingApi.summary(
+          Object.fromEntries(new URLSearchParams(summaryQuery)),
           signal
-        ),
-      [filterQuery]
+        )),
+        fetchedAt: Date.now(),
+      }),
+      [summaryQuery]
     ),
-    { keepPreviousData: false, headerRefresh: false }
+    // Within one scope the previous figures stay on screen (dimmed) while a new
+    // filter loads, so the layout never collapses; a scope switch drops them.
+    { keepPreviousData: false, headerRefresh: false, dataKey: `${scope}:${me}` }
   );
   const {
     data: usage,
@@ -729,17 +262,13 @@ export function UsagePage() {
     useCallback(
       (signal: AbortSignal) =>
         sharingApi.usage(
-          {
-            ...Object.fromEntries(new URLSearchParams(filterQuery)),
-            page,
-            page_size: pageSize,
-          },
+          { ...Object.fromEntries(new URLSearchParams(filterQuery)), page, page_size: pageSize },
           signal
         ),
       [filterQuery, page, pageSize]
     ),
-    // Same filter scope keeps the previous rows while a new page loads; a
-    // scope/filter/account change clears them so no out-of-scope rows show.
+    // Pagination keeps the current rows; a filter change clears them so no
+    // out-of-filter rows are ever shown.
     { keepPreviousData: false, headerRefresh: false, dataKey: filterQuery }
   );
   useEffect(() => {
@@ -747,12 +276,9 @@ export function UsagePage() {
     if (next.toString() !== params.toString()) setParams(next, { replace: true });
   }, [params, setParams, usage, loading, error]);
 
-  const groups = useMemo(() => summary?.groups ?? [], [summary]);
-
-  // Model suggestions use a summary that ignores the applied model filter and
-  // pagination, so choosing a model never shrinks the dropdown to itself.
-  // Without an applied model that query is exactly the main filter query, so
-  // the main summary doubles as the candidate source (no duplicate request).
+  // Model candidates ignore the applied model filter, so choosing a model never
+  // shrinks the dropdown to itself. Without an applied model the main summary
+  // doubles as the candidate source (no duplicate request).
   const candidateQuery = useMemo(
     () => buildModelCandidateQuery(queryString, scope, me),
     [queryString, scope, me]
@@ -765,21 +291,66 @@ export function UsagePage() {
           : Promise.resolve(null),
       [appliedModel, candidateQuery]
     ),
-    { keepPreviousData: false, headerRefresh: false }
+    { keepPreviousData: true, headerRefresh: false }
   );
+
+  // Facet values describe what exists under the scope+range+resource, so a
+  // dropdown can offer every choice and never collapses to its own selection.
+  const facetQuery = useMemo(
+    () => buildFacetQuery(queryString, scope, me),
+    [queryString, scope, me]
+  );
+  const { data: facets, refresh: refreshFacets } = useSharingData(
+    useCallback(
+      (signal: AbortSignal) =>
+        sharingApi.usageFacets(Object.fromEntries(new URLSearchParams(facetQuery)), signal),
+      [facetQuery]
+    ),
+    { keepPreviousData: false, headerRefresh: false, dataKey: facetQuery }
+  );
+
+  const { data: credentialsList } = useSharingData(
+    useCallback(async (signal: AbortSignal): Promise<SharedCredential[]> => {
+      const response = await sharingCredentials.list(signal);
+      return response.files as SharedCredential[];
+    }, []),
+    { keepPreviousData: true, headerRefresh: false, dataKey: 'credentials' }
+  );
+  const credentialInfo = useMemo(
+    () =>
+      appliedCredentialID
+        ? (credentialsList?.find((file) => file.id === appliedCredentialID) ?? null)
+        : null,
+    [credentialsList, appliedCredentialID]
+  );
+  const credentialInfoLoading = Boolean(appliedCredentialID) && credentialsList === undefined;
+
+  // The app header's refresh button reloads statistics, records and candidates together.
   useHeaderRefresh(
     useCallback(async () => {
-      await Promise.all([refreshSummary(), refreshUsage(), refreshCandidates()]);
-    }, [refreshSummary, refreshUsage, refreshCandidates])
+      await Promise.all([refreshSummary(), refreshUsage(), refreshCandidates(), refreshFacets()]);
+    }, [refreshSummary, refreshUsage, refreshCandidates, refreshFacets])
+  );
+
+  const groups = useMemo(() => summary?.groups ?? [], [summary]);
+  const kpis = useMemo(() => deriveKpis(summary?.total), [summary]);
+  // A range ending in the future (today, last 7 days) is drawn up to the time
+  // the statistics were fetched, never into hours that have not happened yet.
+  const trend = useMemo(
+    () =>
+      buildTrend(summary?.buckets ?? [], {
+        from: appliedFrom ? new Date(appliedFrom).getTime() : undefined,
+        to: appliedTo ? new Date(appliedTo).getTime() : undefined,
+        now: summary?.fetchedAt,
+      }),
+    [summary, appliedFrom, appliedTo]
   );
 
   // Candidates pair every bare model (even load balancing) with each channel
-  // that served it, in the same display form the log entries use; selecting
-  // one pins the filter to that exact serving channel server-side.
+  // that served it; selecting one pins the filter to that serving channel.
   const models = useMemo(() => {
     const set = new Set<string>();
-    const groups = appliedModel ? candidateSummary?.groups : summary?.groups;
-    for (const group of groups ?? []) {
+    for (const group of (appliedModel ? candidateSummary?.groups : summary?.groups) ?? []) {
       if (!group.model) continue;
       set.add(group.model);
       const serving = servingModelId(group);
@@ -793,7 +364,6 @@ export function UsagePage() {
       key.name || ('hint' in key ? key.hint : '') || t('sharing.unnamed_key'),
     [t]
   );
-
   const keyOptions = useMemo<UsageKeyOption[]>(() => {
     if (scope === 'mine')
       return options.keys.map((key) => ({ label: keyLabel(key), keyId: key.id }));
@@ -805,123 +375,191 @@ export function UsagePage() {
       })),
     ];
   }, [options, scope, keyLabel]);
-  const keyFilterOptions = useMemo(() => keyOptions.map((option) => option.label), [keyOptions]);
-  const keyText =
-    keyDraft ??
-    (appliedKeyID
-      ? keyOptions.find((option) => option.keyId === appliedKeyID)?.label || ''
-      : appliedConsumer
-        ? `@${appliedConsumer}`
-        : '');
-  const resolvedModel = resolveUsageModel(model, models, params.get('model') || '');
-  const resolvedKey =
-    keyDraft === null && (appliedKeyID || appliedConsumer)
-      ? { label: keyText, keyId: appliedKeyID || undefined, consumer: appliedConsumer || undefined }
-      : resolveUsageKey(keyText, keyOptions);
-  const canApply = resolvedModel !== null && resolvedKey !== null;
+  const appliedKeyText = appliedKeyID
+    ? keyOptions.find((option) => option.keyId === appliedKeyID)?.label || ''
+    : appliedConsumer
+      ? `@${appliedConsumer}`
+      : '';
 
-  const apply = () => {
-    if (resolvedModel === null || resolvedKey === null) return;
-    const next = new URLSearchParams();
-    if (scope !== 'mine') next.set('scope', scope);
-    if (pageSize !== 50) next.set('page_size', String(pageSize));
-    if (outcome) next.set('outcome', outcome);
-    if (resolvedModel) next.set('model', resolvedModel);
-    if (channelID) next.set('channel_id', channelID);
-    if (resolvedKey.keyId) next.set('key_id', resolvedKey.keyId);
-    if (resolvedKey.consumer && scope !== 'mine') next.set('consumer', resolvedKey.consumer);
-    if (preset === 'custom') {
-      if (customFrom) next.set('from', startOfDay(parseDayInput(customFrom)).toISOString());
-      if (customTo)
-        next.set(
-          'to',
-          new Date(startOfDay(parseDayInput(customTo)).getTime() + DAY_MS).toISOString()
-        );
-    } else if (preset !== 'all') {
-      const range = presetRange(preset);
-      next.set('from', range.from.toISOString());
-      next.set('to', range.to.toISOString());
-    }
-    setParams(next);
+  // Typing only searches candidates; a filter applies when the text matches
+  // one exactly (picked from the list or typed in full), or clears when emptied.
+  const [modelText, setModelText] = useState(appliedModel);
+  const [keyText, setKeyText] = useState(appliedKeyText);
+  useEffect(() => setModelText(appliedModel), [appliedModel]);
+  useEffect(() => setKeyText(appliedKeyText), [appliedKeyText]);
+
+  const changeModel = (text: string) => {
+    setModelText(text);
+    const resolved = resolveUsageModel(text, models, appliedModel);
+    if (resolved === null || resolved === appliedModel) return;
+    update((next) => {
+      if (resolved) next.set('model', resolved);
+      else next.delete('model');
+    });
+  };
+  const changeKey = (text: string) => {
+    setKeyText(text);
+    const resolved = resolveUsageKey(text, keyOptions);
+    if (!resolved) return;
+    if ((resolved.keyId || '') === appliedKeyID && (resolved.consumer || '') === appliedConsumer)
+      return;
+    update((next) => {
+      next.delete('key_id');
+      next.delete('consumer');
+      if (resolved.keyId) next.set('key_id', resolved.keyId);
+      if (resolved.consumer && scope !== 'mine') next.set('consumer', resolved.consumer);
+    });
   };
 
-  const reset = () => {
-    setModel('');
-    setChannelID('');
-    setKeyText('');
-    setPreset('all');
-    setCustomFrom('');
-    setCustomTo('');
-    const next = new URLSearchParams();
-    if (scope !== 'mine') next.set('scope', scope);
-    if (pageSize !== 50) next.set('page_size', String(pageSize));
-    setParams(next);
-  };
+  const setScope = (value: UsageScope) =>
+    update((next) => {
+      next.delete('key_id');
+      next.delete('consumer');
+      if (value === 'mine') next.delete('scope');
+      else next.set('scope', value);
+    });
 
-  const setScope = (value: UsageScope) => {
-    const next = new URLSearchParams(params);
-    next.delete('page');
-    next.delete('key_id');
-    next.delete('consumer');
-    setKeyText('');
-    if (value === 'mine') next.delete('scope');
-    else next.set('scope', value);
-    setParams(next);
-  };
+  const credentialIdentity = credentialInfo ? deriveAuthFileIdentity(credentialInfo) : null;
+  const credentialIsProvider = credentialInfo?.kind === 'provider';
+  const credentialTitle = credentialInfoLoading
+    ? t('common.loading')
+    : credentialIsProvider
+      ? credentialInfo?.label || credentialInfo?.provider_name || t('sharing.history_resource')
+      : credentialIdentity?.primary ||
+        groups.find((group) => group.credential_id === appliedCredentialID)?.channel ||
+        t('sharing.history_resource');
+  const channelTitle = appliedChannel
+    ? options.channels.find((channel) => channel.id === appliedChannel)?.slug || appliedChannel
+    : '';
 
-  const setOutcome = (value: UsageOutcome) => {
-    const next = new URLSearchParams(params);
-    next.delete('page');
-    if (value) next.set('outcome', value);
-    else next.delete('outcome');
-    setParams(next);
-  };
+  const appliedBaseFilters = useMemo(
+    () =>
+      [
+        { param: 'model', value: appliedModel, label: () => appliedModel },
+        { param: 'channel_id', value: appliedChannel, label: () => channelTitle },
+        { param: 'key_id', value: appliedKeyID, label: () => appliedKeyText },
+        { param: 'consumer', value: appliedConsumer, label: () => `@${appliedConsumer}` },
+        { param: 'credential_id', value: appliedCredentialID, label: () => credentialTitle },
+        { param: 'provider', value: appliedProvider, label: () => appliedProvider },
+        {
+          param: 'stream',
+          value: appliedStream,
+          label: () => t(appliedStream === 'stream' ? 'sharing.stream' : 'sharing.nonstream'),
+        },
+        { param: 'status', value: appliedStatus, label: () => appliedStatus },
+        { param: 'endpoint', value: appliedEndpoint, label: () => appliedEndpoint },
+        {
+          param: 'effort',
+          value: appliedEffort,
+          label: () => t('sharing.effort_' + (appliedEffort || 'none')),
+        },
+        {
+          param: 'balanced',
+          value: appliedBalanced,
+          label: () => t('sharing.balanced_' + appliedBalanced),
+        },
+      ].filter((item) => item.value),
+    [
+      appliedModel,
+      appliedChannel,
+      appliedKeyID,
+      appliedConsumer,
+      appliedCredentialID,
+      appliedProvider,
+      appliedStream,
+      appliedStatus,
+      appliedEndpoint,
+      appliedEffort,
+      appliedBalanced,
+      appliedKeyText,
+      credentialTitle,
+      channelTitle,
+      t,
+    ]
+  );
+  const activeFilterCount = appliedBaseFilters.length;
+  // Phones collapse the field filters by default so the figures stay above the fold.
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(
+    Boolean(
+      appliedCredentialID ||
+      appliedProvider ||
+      appliedStream ||
+      appliedStatus ||
+      appliedEndpoint ||
+      appliedEffort ||
+      appliedBalanced
+    )
+  );
 
-  const setPageSize = (size: number) => {
-    const next = new URLSearchParams(params);
-    if (size === 50) next.delete('page_size');
-    else next.set('page_size', String(size));
-    next.delete('page');
-    setParams(next);
-  };
+  const clearParam = (param: string) =>
+    update((next) => {
+      next.delete(param);
+    });
+  const setParam = (param: string, value: string) =>
+    update((next) => {
+      if (value) next.set(param, value);
+      else next.delete(param);
+    });
 
-  const total = summary?.total;
-  const failureRate =
-    total && total.executions > 0 ? (total.failures / total.executions) * 100 : null;
-  const tokenHint = total
-    ? [
-        number(total.total_tokens),
-        t('sharing.hint_tokens_io', {
-          input: number(total.input_tokens),
-          output: number(total.output_tokens),
-        }),
-        total.unknown_token_records > 0
-          ? t('sharing.hint_tokens_unknown', { count: number(total.unknown_token_records) })
-          : '',
-      ]
-        .filter(Boolean)
-        .join('；')
-    : undefined;
-  const cacheRate =
-    total && total.input_tokens > 0 && total.cache_read_tokens > 0
-      ? (total.cache_read_tokens / total.input_tokens) * 100
-      : null;
+  const clearFilters = () =>
+    update((next) => {
+      for (const key of [
+        'model',
+        'channel_id',
+        'key_id',
+        'consumer',
+        'credential_id',
+        'outcome',
+        'provider',
+        'stream',
+        'status',
+        'endpoint',
+        'effort',
+        'balanced',
+        'sort',
+      ])
+        next.delete(key);
+    });
 
+  const selectRank = (dimension: UsageDimension, value: string) =>
+    update((next) => {
+      const param =
+        dimension === 'model' ? 'model' : dimension === 'consumer' ? 'consumer' : 'credential_id';
+      if (next.get(param) === value) {
+        next.delete(param);
+        return;
+      }
+      next.set(param, value);
+      if (dimension === 'consumer') next.delete('key_id');
+    });
+
+  const [selected, setSelected] = useState<UsageEntry | null>(null);
   const showConsumer = scope !== 'mine';
+  const rankDimensions: UsageDimension[] =
+    scope === 'mine' ? ['model', 'credential'] : ['model', 'consumer', 'credential'];
+
+  const staleSummary = summaryLoading && Boolean(summary);
+  // This theme's warning and error colors coincide, so only a clearly degraded
+  // success rate (below 95%) is highlighted, matching the ranking rows.
+  const failureTone =
+    kpis?.successRate != null && kpis.successRate < 95 ? ('danger' as const) : undefined;
 
   return (
     <div className={styles.page}>
-      <PageHeader
-        title={t('sharing.usage')}
-        actions={
-          <div className={styles.segmented}>
+      <header className={styles.top}>
+        <h1 className={styles.title}>{t('sharing.usage')}</h1>
+        <div className={styles.topActions}>
+          <div className={styles.scopeTabs} role="tablist" aria-label={t('sharing.usage')}>
             {(['mine', 'contributed', 'site'] as const)
               .filter((value) => value !== 'site' || isAdmin)
               .map((value) => (
                 <button
                   key={value}
                   type="button"
-                  className={`${styles.segmentedItem} ${scope === value ? styles.active : ''}`}
+                  role="tab"
+                  aria-selected={scope === value}
+                  className={`${styles.scopeTab} ${scope === value ? styles.scopeTabActive : ''}`}
                   onClick={() => setScope(value)}
                 >
                   {value === 'mine'
@@ -932,46 +570,90 @@ export function UsagePage() {
                 </button>
               ))}
           </div>
-        }
-      />
-      <Card>
-        <div className={styles.filters}>
-          <div className="form-group">
-            <label>{t('sharing.range_label')}</label>
-            <Select
-              value={preset}
-              onChange={(value) => setPreset(value as RangePreset)}
-              ariaLabel={t('sharing.range_label')}
-              options={RANGE_PRESETS.map((value) => ({
-                value,
-                label: t('sharing.range_' + value),
-              }))}
+        </div>
+      </header>
+
+      <section className={styles.filterBar} aria-label={t('sharing.filters_label')}>
+        <div className={styles.rangeChips} role="group" aria-label={t('sharing.range_label')}>
+          {RANGE_PRESETS.map((value) => {
+            const active =
+              value === 'custom'
+                ? customOpen || preset === 'custom'
+                : !customOpen && preset === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={active}
+                className={`${styles.chip} ${active ? styles.chipActive : ''}`}
+                onClick={() => setPreset(value)}
+              >
+                {t('sharing.range_' + value)}
+              </button>
+            );
+          })}
+        </div>
+        {customOpen && (
+          <div className={styles.customRange}>
+            <DatePickerInput
+              label={t('sharing.from')}
+              value={customFrom}
+              onChange={(value) => {
+                setCustomFrom(value);
+                applyCustom(value, customTo);
+              }}
+            />
+            <DatePickerInput
+              label={t('sharing.to')}
+              value={customTo}
+              onChange={(value) => {
+                setCustomTo(value);
+                applyCustom(customFrom, value);
+              }}
             />
           </div>
-          {preset === 'custom' && (
-            <>
-              <DatePickerInput
-                label={t('sharing.from')}
-                value={customFrom}
-                onChange={setCustomFrom}
-              />
-              <DatePickerInput label={t('sharing.to')} value={customTo} onChange={setCustomTo} />
-            </>
-          )}
+        )}
+        {isMobile && (
+          <button
+            type="button"
+            className={styles.filterToggle}
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((value) => !value)}
+          >
+            <IconSlidersHorizontal size={15} />
+            {t('sharing.filters_label')}
+            {activeFilterCount > 0 && (
+              <span className={styles.filterCount}>{activeFilterCount}</span>
+            )}
+            <IconChevronDown
+              size={15}
+              className={`${styles.filterChevron} ${filtersOpen ? styles.filterChevronOpen : ''}`}
+            />
+          </button>
+        )}
+        <div className={styles.filterFields} hidden={isMobile && !filtersOpen}>
           <AutocompleteInput
             label={t('sharing.model')}
-            value={model}
-            onChange={setModel}
+            value={modelText}
+            onChange={changeModel}
             options={models}
             placeholder={t('sharing.all_models')}
             emptyHint={t('sharing.no_model_options')}
             clearLabel={t('sharing.clear_filter')}
           />
+          <AutocompleteInput
+            label={scope === 'mine' ? t('sharing.key_label') : t('sharing.key_member_label')}
+            value={keyText}
+            onChange={changeKey}
+            options={keyOptions.map((option) => option.label)}
+            placeholder={scope === 'mine' ? t('sharing.all_keys') : t('sharing.key_or_member')}
+            clearLabel={t('sharing.clear_filter')}
+          />
           <div className="form-group">
             <label>{t('sharing.channel')}</label>
             <Select
-              value={channelID}
-              onChange={setChannelID}
+              value={appliedChannel}
+              onChange={(value) => setParam('channel_id', value)}
               ariaLabel={t('sharing.channel')}
               options={[
                 { value: '', label: t('sharing.all_channels') },
@@ -982,148 +664,331 @@ export function UsagePage() {
               ]}
             />
           </div>
-          <AutocompleteInput
-            label={scope === 'mine' ? t('sharing.key_label') : t('sharing.key_member_label')}
-            value={keyText}
-            onChange={setKeyText}
-            options={keyFilterOptions}
-            placeholder={scope === 'mine' ? t('sharing.all_keys') : t('sharing.key_or_member')}
-            clearLabel={t('sharing.clear_filter')}
-          />
-          <div className={styles.actions}>
-            <Button onClick={apply} disabled={!canApply}>
-              {t('sharing.apply_filter')}
-            </Button>
-            <Button variant="secondary" onClick={reset}>
-              {t('sharing.clear_filter')}
-            </Button>
-          </div>
         </div>
-      </Card>
-      <div className={styles.usageStats}>
-        <div className={styles.usageStat} title={t('sharing.hint_executions')}>
-          <span className={styles.statLabel}>{t('sharing.pill_calls')}</span>
-          <strong className={styles.statValue}>{total ? number(total.executions) : '—'}</strong>
-          <span className={styles.statHint}>
-            {total && total.failovers
-              ? t('sharing.stat_failovers', { count: number(total.failovers) })
-              : ' '}
-          </span>
+        <div className={styles.moreBar}>
+          <button
+            type="button"
+            className={styles.filterToggle}
+            aria-expanded={moreOpen}
+            onClick={() => setMoreOpen((value) => !value)}
+          >
+            <IconSlidersHorizontal size={15} />
+            {t('sharing.more_filters')}
+            {activeFilterCount > 0 && (
+              <span className={styles.filterCount}>{activeFilterCount}</span>
+            )}
+            <IconChevronDown
+              size={15}
+              className={`${styles.filterChevron} ${moreOpen ? styles.filterChevronOpen : ''}`}
+            />
+          </button>
         </div>
-        <div
-          className={`${styles.usageStat} ${
-            failureRate !== null && failureRate > 0 ? styles.usageStatDanger : ''
-          }`}
-        >
-          <span className={styles.statLabel}>{t('sharing.success_rate')}</span>
-          <strong className={styles.statValue}>
-            {failureRate !== null ? `${(100 - failureRate).toFixed(1)}%` : '—'}
-          </strong>
-          <span className={styles.statHint}>
-            {total
-              ? t('sharing.hint_failures_detail', {
-                  failures: number(total.failures),
-                  executions: number(total.executions),
-                })
-              : ' '}
-          </span>
-        </div>
-        <div className={styles.usageStat} title={tokenHint}>
-          <span className={styles.statLabel}>{t('sharing.pill_tokens')}</span>
-          <strong className={styles.statValue}>
-            {total ? formatCompactNumber(total.total_tokens) : '—'}
-          </strong>
-          <span className={styles.statHint}>
-            {total
-              ? t('sharing.hint_tokens_io', {
-                  input: formatCompactNumber(total.input_tokens),
-                  output: formatCompactNumber(total.output_tokens),
-                })
-              : ' '}
-          </span>
-        </div>
-        <div className={styles.usageStat}>
-          <span className={styles.statLabel}>{t('sharing.field_cache_hit')}</span>
-          <strong className={styles.statValue}>
-            {cacheRate !== null ? `${cacheRate.toFixed(1)}%` : '—'}
-          </strong>
-          <span className={styles.statHint}>
-            {total && total.cache_read_tokens > 0
-              ? t('sharing.token_cache', { count: formatCompactNumber(total.cache_read_tokens) })
-              : ' '}
-          </span>
-        </div>
-      </div>
-      <Card title={t('sharing.trend_title')}>
-        {summaryLoading && !summary ? null : <DailyTrend groups={groups} />}
-      </Card>
-      <div className={styles.listToolbar}>
-        <h2 className={styles.listTitle}>{t('sharing.records_title')}</h2>
-        <div className={styles.segmented}>
-          {(['', 'ok', 'failed'] as const).map((value) => (
-            <button
-              key={value || 'all'}
-              type="button"
-              className={`${styles.segmentedItem} ${outcome === value ? styles.active : ''}`}
-              onClick={() => setOutcome(value)}
-            >
-              {t('sharing.outcome_' + (value || 'all'))}
-            </button>
-          ))}
-        </div>
-      </div>
-      <LoadState loading={loading || summaryLoading} error={error || summaryError} />
-      {!loading && !error && !usage?.items.length && (
-        <EmptyState title={t('sharing.no_records')} description={t('sharing.no_records_hint')} />
-      )}
-      {Boolean(usage?.items.length) &&
-        (isMobile ? (
-          <div className={styles.keyCards}>
-            {usage?.items.map((entry) => (
-              <UsageLogCard
-                key={entry.id}
-                entry={entry}
-                showConsumer={showConsumer}
-                onOpen={() => setSelected(entry)}
+        {moreOpen && (
+          <div className={styles.moreFilters}>
+            <div className="form-group">
+              <label>{t('sharing.field_credential')}</label>
+              <Select
+                value={appliedCredentialID}
+                onChange={(value) => setParam('credential_id', value)}
+                ariaLabel={t('sharing.field_credential')}
+                options={[
+                  { value: '', label: t('sharing.all_credentials') },
+                  ...(credentialsList ?? []).map((file) => ({
+                    value: file.id,
+                    label: deriveAuthFileIdentity(file).primary || file.name,
+                  })),
+                ]}
               />
-            ))}
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.provider')}</label>
+              <Select
+                value={appliedProvider}
+                onChange={(value) => setParam('provider', value)}
+                ariaLabel={t('sharing.provider')}
+                options={[
+                  { value: '', label: t('sharing.all_providers') },
+                  ...(facets?.providers ?? []).map((provider) => ({
+                    value: provider,
+                    label: provider,
+                  })),
+                ]}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.col_mode')}</label>
+              <Select
+                value={appliedStream}
+                onChange={(value) => setParam('stream', value)}
+                ariaLabel={t('sharing.col_mode')}
+                options={[
+                  { value: '', label: t('sharing.all_modes') },
+                  { value: 'stream', label: t('sharing.stream') },
+                  { value: 'nonstream', label: t('sharing.nonstream') },
+                ]}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.status_label')}</label>
+              <Select
+                value={appliedStatus}
+                onChange={(value) => setParam('status', value)}
+                ariaLabel={t('sharing.status_label')}
+                options={[
+                  { value: '', label: t('sharing.all_statuses') },
+                  { value: '2xx', label: '2xx' },
+                  { value: '4xx', label: '4xx' },
+                  { value: '5xx', label: '5xx' },
+                  ...(facets?.statuses ?? []).map((status) => ({
+                    value: String(status),
+                    label: String(status),
+                  })),
+                ]}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.field_endpoint')}</label>
+              <Select
+                value={appliedEndpoint}
+                onChange={(value) => setParam('endpoint', value)}
+                ariaLabel={t('sharing.field_endpoint')}
+                options={[
+                  { value: '', label: t('sharing.all_endpoints') },
+                  ...(facets?.endpoints ?? []).map((endpoint) => ({
+                    value: endpoint,
+                    label: endpoint,
+                  })),
+                ]}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.field_reasoning_effort')}</label>
+              <Select
+                value={appliedEffort}
+                onChange={(value) => setParam('effort', value)}
+                ariaLabel={t('sharing.field_reasoning_effort')}
+                options={[
+                  { value: '', label: t('sharing.all_efforts') },
+                  ...(facets?.efforts ?? []).map((effort) => ({
+                    value: effort,
+                    label: t(`sharing.effort_${effort}`),
+                  })),
+                ]}
+              />
+            </div>
+            <div className="form-group">
+              <label>{t('sharing.auto_balance')}</label>
+              <Select
+                value={appliedBalanced}
+                onChange={(value) => setParam('balanced', value)}
+                ariaLabel={t('sharing.auto_balance')}
+                options={[
+                  { value: '', label: t('sharing.balanced_all') },
+                  { value: 'yes', label: t('sharing.balanced_yes') },
+                  { value: 'no', label: t('sharing.balanced_no') },
+                ]}
+              />
+            </div>
           </div>
+        )}
+        {activeFilterCount > 0 && (
+          <div className={styles.activeFilters}>
+            {appliedBaseFilters.map((item) => (
+              <span key={item.param} className={styles.filterTag}>
+                <span className={styles.filterTagLabel}>{t('sharing.param_' + item.param)}</span>
+                <span className={styles.mono}>{item.label()}</span>
+                <button
+                  type="button"
+                  aria-label={t('sharing.filter_remove')}
+                  title={t('sharing.filter_remove')}
+                  onClick={() => clearParam(item.param)}
+                >
+                  <IconX size={13} />
+                </button>
+              </span>
+            ))}
+            <button type="button" className={styles.clearAll} onClick={clearFilters}>
+              {t('sharing.clear_all_filters')}
+            </button>
+          </div>
+        )}
+      </section>
+
+      {summaryError && (
+        <div className="error-box" role="alert">
+          {summaryError}
+        </div>
+      )}
+
+      <section
+        className={`${styles.kpis} ${staleSummary ? styles.stale : ''}`}
+        aria-label={t('sharing.kpi_label')}
+        aria-busy={summaryLoading}
+      >
+        {!kpis ? (
+          Array.from({ length: 5 }, (_, index) => <Skeleton key={index} height={96} rounded={12} />)
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {['time', 'key_label', 'model', 'col_tokens', 'col_latency', 'status_label'].map(
-                  (key) => (
-                    <TableHead key={key}>{t('sharing.' + key)}</TableHead>
-                  )
-                )}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {usage?.items.map((entry) => (
-                <UsageLogRow
-                  key={entry.id}
-                  entry={entry}
-                  showConsumer={showConsumer}
-                  onOpen={() => setSelected(entry)}
-                />
+          <>
+            <Kpi
+              label={t('sharing.requests_label')}
+              value={number(kpis.requests)}
+              title={t('sharing.hint_requests')}
+              hint={
+                kpis.executions !== kpis.requests
+                  ? t('sharing.stat_upstream_calls', { count: number(kpis.executions) })
+                  : undefined
+              }
+            />
+            <Kpi
+              label={t('sharing.upstream_success_rate')}
+              value={percent(kpis.successRate)}
+              title={t('sharing.hint_executions')}
+              tone={failureTone}
+              hint={
+                kpis.failures > 0
+                  ? t('sharing.kpi_failures', { count: number(kpis.failures) })
+                  : kpis.failovers > 0
+                    ? t('sharing.stat_failovers', { count: number(kpis.failovers) })
+                    : undefined
+              }
+            />
+            <Kpi
+              label={t('sharing.pill_tokens')}
+              value={formatCompactNumber(kpis.tokens)}
+              title={[
+                number(kpis.tokens),
+                kpis.unknownTokenRecords > 0
+                  ? t('sharing.hint_tokens_unknown', { count: number(kpis.unknownTokenRecords) })
+                  : '',
+              ]
+                .filter(Boolean)
+                .join('；')}
+              hint={t('sharing.hint_tokens_io', {
+                input: formatCompactNumber(kpis.inputTokens),
+                output: formatCompactNumber(kpis.outputTokens),
+              })}
+            />
+            <Kpi
+              label={t('sharing.field_cache_hit')}
+              value={percent(kpis.cacheRate)}
+              title={t('sharing.hint_cache_rate')}
+            />
+            <Kpi
+              label={t('sharing.kpi_latency')}
+              value={kpis.avgLatency === null ? '—' : duration(Math.round(kpis.avgLatency))}
+              title={t('sharing.hint_latency')}
+              hint={
+                kpis.avgTtft === null
+                  ? undefined
+                  : `${t('sharing.latency_ttft_short')} ${duration(Math.round(kpis.avgTtft))}`
+              }
+            />
+          </>
+        )}
+      </section>
+
+      <div className={`${styles.insights} ${staleSummary ? styles.stale : ''}`}>
+        {summary ? (
+          <>
+            <UsageTrend points={trend.points} granularity={trend.granularity} />
+            <UsageRanking
+              groups={groups}
+              dimensions={rankDimensions}
+              compact={isMobile}
+              active={{
+                model: appliedModel || undefined,
+                consumer: appliedConsumer || undefined,
+                credential: appliedCredentialID || undefined,
+              }}
+              onSelect={selectRank}
+            />
+          </>
+        ) : (
+          !summaryError && (
+            <>
+              <Skeleton height={300} rounded={12} />
+              <Skeleton height={300} rounded={12} />
+            </>
+          )
+        )}
+      </div>
+
+      <section className={styles.records} aria-labelledby="usage-records-title">
+        <header className={styles.recordsHead}>
+          <h2 className={styles.panelTitle} id="usage-records-title">
+            {t('sharing.records_title')}
+            {usage && <span className={styles.recordsCount}>{number(usage.total)}</span>}
+          </h2>
+          <div className={styles.recordsActions}>
+            <Select
+              value={appliedSort}
+              onChange={(value) => setParam('sort', value)}
+              ariaLabel={t('sharing.sort_label')}
+              size="sm"
+              options={[
+                { value: '', label: t('sharing.sort_time') },
+                { value: 'tokens', label: t('sharing.sort_tokens') },
+                { value: 'latency', label: t('sharing.sort_latency') },
+              ]}
+            />
+            <div className={styles.miniTabs} role="tablist" aria-label={t('sharing.status_label')}>
+              {(['', 'ok', 'failed'] as const).map((value) => (
+                <button
+                  key={value || 'all'}
+                  type="button"
+                  role="tab"
+                  aria-selected={outcome === value}
+                  className={`${styles.miniTab} ${outcome === value ? styles.miniTabActive : ''}`}
+                  onClick={() =>
+                    update((next) => {
+                      if (value) next.set('outcome', value);
+                      else next.delete('outcome');
+                    })
+                  }
+                >
+                  {t('sharing.outcome_' + (value || 'all'))}
+                </button>
               ))}
-            </TableBody>
-          </Table>
-        ))}
-      <Pager
-        page={page}
-        total={usage?.total || 0}
-        pageSize={pageSize}
-        loading={loading}
-        onPageSize={setPageSize}
-        onPage={(value) => {
-          const next = new URLSearchParams(params);
-          if (value === 1) next.delete('page');
-          else next.set('page', String(value));
-          setParams(next);
-        }}
-      />
+            </div>
+          </div>
+        </header>
+        {error && (
+          <div className="error-box" role="alert">
+            {error}
+          </div>
+        )}
+        <UsageRecords
+          items={usage?.items}
+          loading={loading}
+          isMobile={isMobile}
+          showConsumer={showConsumer}
+          onOpen={setSelected}
+        />
+        {Boolean(usage?.total) && (
+          <Pager
+            page={page}
+            total={usage?.total || 0}
+            pageSize={pageSize}
+            loading={loading}
+            onPageSize={(size) =>
+              update((next) => {
+                if (size === 50) next.delete('page_size');
+                else next.set('page_size', String(size));
+              })
+            }
+            onPage={(value) =>
+              update(
+                (next) => {
+                  if (value === 1) next.delete('page');
+                  else next.set('page', String(value));
+                },
+                { keepPage: true }
+              )
+            }
+          />
+        )}
+      </section>
+
       <UsageDetailSheet
         entry={selected}
         showConsumer={showConsumer}

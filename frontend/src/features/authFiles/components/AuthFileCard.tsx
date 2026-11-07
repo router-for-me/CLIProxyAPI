@@ -6,6 +6,7 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
+  IconChartColumnIncreasing,
   IconDownload,
   IconInfo,
   IconModelCluster,
@@ -52,6 +53,7 @@ export type AuthFileCardProps = {
   /** 首屏一次性级联入场的延迟；null/undefined 表示不做入场动画。 */
   entranceDelayMs?: number | null;
   onShowModels?: (file: AuthFileItem) => void;
+  onShowUsage?: (file: AuthFileItem) => void;
   onDownload?: (name: string) => void;
   onManualRefresh?: (file: AuthFileItem) => void;
   onCooldownReset?: (file: AuthFileItem) => void;
@@ -79,6 +81,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     statusBarCache,
     entranceDelayMs,
     onShowModels,
+    onShowUsage,
     onDownload,
     onManualRefresh,
     onCooldownReset,
@@ -101,6 +104,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
      a bare bordered footer strip. */
   const hasFooterActions =
     (showModelsButton && Boolean(onShowModels)) ||
+    Boolean(onShowUsage) ||
     showUtilityActions ||
     (!isRuntimeOnly && Boolean(onToggleStatus));
   const isManualRefreshing = manualRefreshing[getAuthFileRefreshKey(file)] === true;
@@ -266,6 +270,18 @@ export function AuthFileCard(props: AuthFileCardProps) {
       {hasFooterActions && (
       <footer className={styles.actions}>
         <div className={styles.actionsMain}>
+          {onShowUsage && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onShowUsage(file)}
+              title={t('sharing.view_usage')}
+              disabled={disableControls}
+            >
+              <IconChartColumnIncreasing size={14} />
+              {t('sharing.view_usage')}
+            </Button>
+          )}
           {showModelsButton && onShowModels && (
             <Button
               variant="secondary"

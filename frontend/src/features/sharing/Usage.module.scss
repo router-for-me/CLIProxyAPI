@@ -1,0 +1,1486 @@
+@use '../../styles/mixins' as *;
+
+// Usage page. Layout: top bar → filter bar → KPI strip → trend + ranking →
+// records. All surfaces use theme tokens so light/dark/parchment themes work.
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  min-width: 0;
+}
+
+.mono {
+  font-family: $font-mono;
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.strong {
+  display: block;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.stale {
+  opacity: 0.55;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+}
+
+// ---------- Top bar ----------
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+}
+
+.title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.topActions {
+  display: flex;
+  align-items: center;
+  gap: $spacing-sm;
+  min-width: 0;
+}
+
+.scopeTabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+}
+
+.scopeTab {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color $transition-fast,
+    color $transition-fast,
+    box-shadow $transition-fast;
+
+  &:hover {
+    color: var(--text-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.scopeTabActive {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+}
+
+// ---------- Filter bar ----------
+
+.filterBar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+}
+
+.rangeChips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  padding: 7px 12px;
+  border-radius: $radius-full;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color $transition-fast,
+    border-color $transition-fast,
+    color $transition-fast;
+
+  &:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.chipActive {
+  background: var(--primary-color);
+  border-color: var(--primary-color);
+  color: var(--primary-contrast, #fff);
+
+  &:hover {
+    color: var(--primary-contrast, #fff);
+    border-color: var(--primary-color);
+  }
+}
+
+.customRange {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 220px));
+  gap: 12px;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+  }
+}
+
+.filterFields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+    min-width: 0;
+  }
+}
+
+.filterFields[hidden] {
+  display: none;
+}
+
+.filterToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filterCount {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: $radius-full;
+  background: var(--primary-color);
+  color: var(--primary-contrast, #fff);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.filterChevron {
+  color: var(--text-secondary);
+  transition: transform $transition-fast;
+}
+
+.filterChevronOpen {
+  transform: rotate(180deg);
+}
+
+.moreBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 12px;
+  margin-top: 2px;
+}
+
+.moreFilters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  padding-top: 4px;
+
+  :global(.form-group) {
+    margin-bottom: 0;
+    min-width: 0;
+  }
+}
+
+.recordsActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.activeFilters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.filterTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+
+  .mono {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    flex: none;
+    border: none;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+
+    &:hover {
+      color: var(--text-primary);
+      background: color-mix(in srgb, var(--primary-color) 18%, transparent);
+    }
+  }
+}
+
+.filterTagLabel {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.clearAll {
+  border: none;
+  background: none;
+  padding: 4px 2px;
+  color: var(--primary-color);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+// ---------- KPI strip ----------
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpi {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  overflow: hidden;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--primary-color);
+    opacity: 0.7;
+  }
+}
+
+.kpi_danger::before {
+  background: var(--danger-color);
+  opacity: 1;
+}
+
+.kpi_danger .kpiValue {
+  color: var(--danger-color);
+}
+
+.kpiLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.kpiValue {
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 650;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpiHint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// ---------- Panels (trend + ranking) ----------
+
+.insights {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  gap: 12px;
+  // Both panels share one fixed height so the ranking scrolls instead of
+  // stretching the trend chart into a tall empty block.
+  height: 380px;
+
+  > * {
+    min-height: 0;
+  }
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.panelTitle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.panelEmpty {
+  margin: auto 0;
+  padding: 32px 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.panelMore {
+  align-self: center;
+  margin-top: 6px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: $radius-md;
+  background: none;
+  color: var(--primary-color);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--bg-secondary);
+  }
+}
+
+.miniTabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.miniTab {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+}
+
+.miniTabActive {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
+}
+
+// ---------- Trend ----------
+
+.trendReadout {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 16px;
+  flex-wrap: wrap;
+  min-height: 24px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.trendReadoutLabel {
+  font-family: $font-mono;
+  color: var(--text-secondary);
+}
+
+.trendReadoutValue strong {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.trendReadoutFail strong {
+  color: var(--danger-color);
+}
+
+.trendChart {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 196px;
+}
+
+.trendGrid {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 32px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-tertiary, var(--text-secondary));
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.trendBars {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-color);
+  background-image: linear-gradient(var(--border-color) 1px, transparent 1px);
+  background-size: 100% 50%;
+  background-position: 0 0;
+}
+
+.trendBar {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 3px 3px 0 0;
+
+  &:hover,
+  &:focus-visible,
+  &.trendBarActive {
+    background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+    outline: none;
+  }
+
+  &:hover .trendFill,
+  &:focus-visible .trendFill,
+  &.trendBarActive .trendFill {
+    opacity: 1;
+  }
+}
+
+.trendFill {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  width: 100%;
+  max-width: 28px;
+  margin: 0 auto;
+  border-radius: 3px 3px 0 0;
+  background: var(--primary-color);
+  opacity: 0.72;
+  overflow: hidden;
+  transition: opacity $transition-fast;
+}
+
+.trendFail {
+  width: 100%;
+  background: var(--viz-failure, var(--danger-color));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .trendFill {
+    transform-origin: bottom;
+    animation: usage-bar 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .kpi,
+  .panel,
+  .records {
+    animation: usage-rise 0.32s ease-out both;
+  }
+
+  .panel {
+    animation-delay: 0.05s;
+  }
+
+  .records {
+    animation-delay: 0.1s;
+  }
+}
+
+@keyframes usage-bar {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+@keyframes usage-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.trendAxis {
+  display: flex;
+  gap: 2px;
+  margin: 6px 0 0 40px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+
+  span {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: visible;
+    white-space: nowrap;
+  }
+}
+
+// ---------- Ranking ----------
+
+.rankList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0 -6px;
+  padding: 0 6px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.rankRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: $radius-md;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color $transition-fast;
+
+  &:hover {
+    background: var(--bg-secondary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+.rankRowActive {
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+
+  &:hover {
+    background: color-mix(in srgb, var(--primary-color) 16%, transparent);
+  }
+
+  .rankBar {
+    opacity: 1;
+  }
+}
+
+.rankIndex {
+  flex: none;
+  width: 18px;
+  padding-top: 1px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rankBody {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+}
+
+.rankTop {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rankName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.rankValue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.rankShare {
+  min-width: 42px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.rankTrack {
+  height: 4px;
+  border-radius: $radius-full;
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.rankBar {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary-color);
+  opacity: 0.75;
+  transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.rankMeta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.rankMetaWarn {
+  color: var(--danger-color);
+}
+
+// ---------- Records ----------
+
+.records {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.recordsHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.recordsCount {
+  padding: 1px 8px;
+  border-radius: $radius-full;
+  background: var(--bg-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.recordTableWrap {
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  overflow-x: auto;
+}
+
+// Fixed proportions keep columns tight on wide screens; min-width scrolls the
+// table horizontally on narrow desktop windows instead of squeezing cells.
+.colTime {
+  width: 14%;
+}
+.colKey {
+  width: 13%;
+}
+.colModel {
+  width: 27%;
+}
+.colTokens {
+  width: 20%;
+}
+.colLatency {
+  width: 12%;
+}
+.colStatus {
+  width: 14%;
+}
+
+.recordTable {
+  width: 100%;
+  min-width: 860px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 10px 14px;
+    background: var(--muted-bg, var(--bg-secondary));
+    border-bottom: 1px solid var(--border-color);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+}
+
+.recordRow {
+  cursor: pointer;
+  transition: background-color $transition-fast;
+
+  &:hover td {
+    background: color-mix(in srgb, var(--accent-bg, var(--bg-secondary)) 60%, transparent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+.modelCell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.modelName {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.modelMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+
+  .muted {
+    display: inline;
+  }
+}
+
+.latency {
+  display: flex;
+  flex-direction: column;
+  padding-left: 8px;
+  border-left: 3px solid currentColor;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.latencyOk {
+  color: var(--success-color);
+}
+
+.latencyFail {
+  color: var(--danger-color);
+}
+
+.latencyMuted {
+  color: var(--text-secondary);
+}
+
+.rowError {
+  display: block;
+  max-width: 260px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--danger-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: $radius-full;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.statusDot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status_ok {
+  color: var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 12%, transparent);
+}
+
+.status_fail {
+  color: var(--danger-color);
+  background: color-mix(in srgb, var(--danger-color) 12%, transparent);
+}
+
+.status_interrupted {
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+}
+
+.balancedTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: $radius-full;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--primary-color);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+}
+
+.recordSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.emptyBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 40px 16px;
+  border: 1px dashed var(--border-color);
+  border-radius: $radius-lg;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+
+  strong {
+    font-size: 14px;
+    color: var(--text-primary);
+  }
+}
+
+.recordCards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recordCard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color $transition-fast;
+
+  &:active {
+    border-color: var(--border-hover);
+  }
+
+  .rowError {
+    max-width: none;
+    margin-top: 0;
+  }
+}
+
+.recordCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+
+  .modelCell {
+    flex: 1;
+    font-size: 14px;
+    font-weight: 600;
+  }
+}
+
+.cardFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.cardField {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cardFieldWide {
+  grid-column: 1 / -1;
+}
+
+.cardLabel {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cardValue {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+
+  .latency {
+    flex-direction: row;
+    padding-left: 6px;
+    white-space: normal;
+  }
+}
+
+// ---------- Detail sheet ----------
+
+.detailBody {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.detailSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.detailSectionTitle {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.detailSectionMeta {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+
+  @include mobile {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.detailField {
+  min-width: 0;
+
+  dt {
+    margin-bottom: 2px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  dd {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+  }
+}
+
+.outcome {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: $radius-md;
+  border-left: 3px solid var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 7%, var(--bg-primary));
+}
+
+.outcome_fail {
+  border-left-color: var(--danger-color);
+  background: color-mix(in srgb, var(--danger-color) 7%, var(--bg-primary));
+}
+
+.outcome_interrupted {
+  border-left-color: var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.outcomeMain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.outcomeStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+
+  strong {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+}
+
+.errorBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.errorHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.errorMessage {
+  margin: 0;
+  font-size: 13px;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.errorRaw {
+  font-size: 12px;
+  color: var(--text-secondary);
+
+  summary {
+    cursor: pointer;
+  }
+
+  pre {
+    max-height: 240px;
+    margin: 6px 0 0;
+    padding: 8px;
+    overflow: auto;
+    border-radius: $radius-sm;
+    background: var(--bg-secondary);
+    font-family: $font-mono;
+    font-size: 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.linkButton {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary-color);
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.idValue {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+
+  .mono {
+    overflow-wrap: anywhere;
+  }
+}
+
+.tokenTiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.tokenTile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  border-radius: $radius-md;
+  background: var(--bg-secondary);
+
+  strong {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tokenTileLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timelineItem {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: $radius-md;
+  border-left: 3px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.timeline_ok {
+  border-left-color: var(--success-color);
+}
+
+.timeline_fail {
+  border-left-color: var(--danger-color);
+}
+
+.timelineCurrent {
+  box-shadow: inset 0 0 0 1px var(--border-hover);
+}
+
+.timelineHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.timelineIndex {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.timelineModel {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.timelineMeta {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 0;
+
+  .latency {
+    flex-direction: row;
+    padding-left: 6px;
+  }
+}
+
+.timelineError {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--danger-color);
+  overflow-wrap: anywhere;
+}
+
+.timelineNext {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+// ---------- Responsive ----------
+
+@media (max-width: 1180px) {
+  .kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1024px) {
+  .insights {
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+  }
+
+  .rankList {
+    max-height: 420px;
+  }
+}
+
+@include mobile {
+  // Phones scroll the page, not a nested list: show the top entries inline.
+  .rankList {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
+@include mobile {
+  .page {
+    gap: 12px;
+  }
+
+  .top {
+    gap: 10px;
+  }
+
+  .title {
+    font-size: 20px;
+  }
+
+  .topActions {
+    width: 100%;
+  }
+
+  .scopeTabs {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .scopeTab {
+    flex: 1;
+    min-height: 36px;
+    padding: 6px 8px;
+  }
+
+  .filterBar {
+    padding: 12px;
+  }
+
+  // Range chips scroll horizontally instead of wrapping into a tall block.
+  .rangeChips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    margin: 0 -12px;
+    padding: 0 12px 2px;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .chip {
+    flex: none;
+    padding: 9px 14px;
+  }
+
+  .customRange,
+  .filterFields {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+
+    // Five KPIs: the last one spans the row so the grid has no hole.
+    > :last-child {
+      grid-column: 1 / -1;
+    }
+  }
+
+  .kpi {
+    padding: 12px;
+  }
+
+  .kpiValue {
+    font-size: 20px;
+  }
+
+  .panel {
+    padding: 12px;
+  }
+
+  .trendChart {
+    min-height: 168px;
+  }
+
+  .rankRow {
+    padding: 10px 6px;
+  }
+
+  .miniTab {
+    min-height: 30px;
+    padding: 4px 12px;
+  }
+}

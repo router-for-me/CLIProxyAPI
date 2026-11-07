@@ -75,10 +75,10 @@ func referenceSummary(entries []journalEntry, filter Filter) (Summary, []Summary
 			continue
 		}
 		day := u.At.UTC().Format("2006-01-02")
-		key := strings.Join([]string{day, u.Consumer, u.Owner, u.Channel, u.Model}, "|")
+		key := strings.Join([]string{day, u.Consumer, u.Owner, u.Channel, u.Model, u.CredentialID}, "|")
 		group := groups[key]
 		if group == nil {
-			group = &Summary{Day: day, Consumer: u.Consumer, Owner: u.Owner, Channel: u.Channel, Model: u.Model}
+			group = &Summary{Day: day, Consumer: u.Consumer, Owner: u.Owner, Channel: u.Channel, Model: u.Model, CredentialID: u.CredentialID}
 			groups[key] = group
 			groupTraces[key] = map[string]bool{}
 		}
@@ -96,6 +96,14 @@ func referenceSummary(entries []journalEntry, filter Filter) (Summary, []Summary
 			sum.CacheReadTokens += u.CacheReadTokens
 			sum.CacheCreationTokens += u.CacheCreationTokens
 			sum.TotalTokens += u.TotalTokens
+			if !u.Failed && u.LatencyMS > 0 {
+				sum.LatencyMS += u.LatencyMS
+				sum.LatencyCount++
+			}
+			if !u.Failed && u.TTFTMS > 0 {
+				sum.TTFTMS += u.TTFTMS
+				sum.TTFTCount++
+			}
 		}
 		trace := u.TraceID
 		if trace == "" {
@@ -142,6 +150,9 @@ func TestJournalIndexMatchesReference(t *testing.T) {
 		{From: now.Add(-24 * time.Hour), To: now}, {From: now, To: now.Add(time.Nanosecond)},
 		{Model: " MoDeL-1 "}, {Model: "Model-A（route-0/厂商/Model-A）"},
 		{Model: "Model-A(route-0/厂商/Model-A)"}, {Model: "_%"}, {Consumer: "missing"},
+		{Provider: "kimi"}, {Provider: "openai-compatible"}, {Stream: "stream"}, {Stream: "nonstream"},
+		{Status: "200"}, {Status: "4xx"}, {Status: "5xx", Owner: "owner-2"}, {Endpoint: "POST /v1/messages"},
+		{Effort: "none"}, {Effort: "high", Stream: "stream"}, {Balanced: "no"},
 	} {
 		t.Run(fmt.Sprintf("%+v", filter), func(t *testing.T) {
 			want := []UsageEvent{}

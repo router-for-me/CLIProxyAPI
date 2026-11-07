@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,25 @@ func journalWhere(kind int, f Filter) (string, []any) {
 		case "ok":
 			clauses = append(clauses, "failed=0")
 		}
+		if f.Provider != "" {
+			add("provider=?", f.Provider)
+		}
+		if f.Stream != "" {
+			add("stream=?", f.Stream == "stream")
+		}
+		if low, high, ok := statusRange(f.Status); ok && f.Status != "" {
+			clauses = append(clauses, "status BETWEEN ? AND ?")
+			args = append(args, low, high)
+		}
+		if f.Endpoint != "" {
+			add("endpoint=?", f.Endpoint)
+		}
+		if f.Effort != "" {
+			add("effort=?", effortValue(f.Effort))
+		}
+		if f.Balanced != "" {
+			add("balanced=?", f.Balanced == "yes")
+		}
 		if collapsesAttempts(f) {
 			clauses = append(clauses, "superseded=0")
 		}
@@ -133,6 +153,89 @@ func journalWhere(kind int, f Filter) (string, []any) {
 		}
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// journalOrder maps a usage sort key to a stable ORDER BY clause; ties and all
+// other kinds fall back to newest first.
+func journalOrder(kind int, sort string) string {
+	const newest = "at DESC, source, position"
+	if kind != 1 {
+		return newest
+	}
+	switch sort {
+	case "tokens":
+		return "total DESC, " + newest
+	case "latency":
+		return "latency DESC, " + newest
+	default:
+		return newest
+	}
+}
+
+// UsageFacets lists the distinct values present under a filter, so dropdowns
+// only offer choices that can match something.
+type UsageFacets struct {
+	Providers []string `json:"providers"`
+	Endpoints []string `json:"endpoints"`
+	Statuses  []int    `json:"statuses"`
+	Efforts   []string `json:"efforts"`
+}
+
+func (s *Store) UsageFacetsContext(ctx context.Context, filter Filter) (UsageFacets, error) {
+	j, err := s.queryJournal(ctx)
+	if err != nil {
+		return UsageFacets{}, err
+	}
+	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
+	key, err := json.Marshal(filter)
+	if err != nil {
+		return UsageFacets{}, err
+	}
+	value, err := j.aggregate(ctx, "facets:"+string(key), func(ctx context.Context) (any, int, error) {
+		where, args := journalWhere(1, filter)
+		rows, errQuery := j.db.QueryContext(ctx, "SELECT DISTINCT provider, endpoint, status, effort FROM events WHERE "+where, args...)
+		if errQuery != nil {
+			return nil, 0, errQuery
+		}
+		defer func() { _ = rows.Close() }()
+		seen := map[string]map[string]bool{"p": {}, "e": {}, "s": {}, "r": {}}
+		out := UsageFacets{Providers: []string{}, Endpoints: []string{}, Statuses: []int{}, Efforts: []string{}}
+		for rows.Next() {
+			var provider, endpoint, effort string
+			var status int
+			if errScan := rows.Scan(&provider, &endpoint, &status, &effort); errScan != nil {
+				return nil, 0, errScan
+			}
+			if provider != "" && !seen["p"][provider] {
+				seen["p"][provider] = true
+				out.Providers = append(out.Providers, provider)
+			}
+			if endpoint != "" && !seen["e"][endpoint] {
+				seen["e"][endpoint] = true
+				out.Endpoints = append(out.Endpoints, endpoint)
+			}
+			if code := strconv.Itoa(status); status > 0 && !seen["s"][code] {
+				seen["s"][code] = true
+				out.Statuses = append(out.Statuses, status)
+			}
+			if !seen["r"][effort] {
+				seen["r"][effort] = true
+				if effort == "" {
+					effort = "none"
+				}
+				out.Efforts = append(out.Efforts, effort)
+			}
+		}
+		sort.Strings(out.Providers)
+		sort.Strings(out.Endpoints)
+		sort.Ints(out.Statuses)
+		sort.Strings(out.Efforts)
+		return out, len(out.Providers) + len(out.Endpoints) + len(out.Statuses) + len(out.Efforts) + 1, rows.Err()
+	})
+	if err != nil {
+		return UsageFacets{}, err
+	}
+	return value.(UsageFacets), nil
 }
 
 // collapsesAttempts reports whether earlier failed attempts of even-load-balanced
@@ -160,7 +263,7 @@ func journalPage[T any](ctx context.Context, j *journalIndex, kind int, filter F
 	}
 	start, end := pageBounds(filter, count)
 	args = append(args, end-start, start)
-	rows, err := tx.QueryContext(ctx, "SELECT source, position, length FROM events WHERE "+where+" ORDER BY at DESC, source, position LIMIT ? OFFSET ?", args...)
+	rows, err := tx.QueryContext(ctx, "SELECT source, position, length FROM events WHERE "+where+" ORDER BY "+journalOrder(kind, filter.Sort)+" LIMIT ? OFFSET ?", args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -326,35 +429,47 @@ func (s *Store) AuditsContext(ctx context.Context, filter Filter) ([]AuditEvent,
 	return journalPage(ctx, j, 3, filter, func(e journalEntry) *AuditEvent { return e.Audit })
 }
 
-type summaryResult struct {
-	total  Summary
-	groups []Summary
-}
-
 const summaryColumns = `COUNT(DISTINCT trace), COUNT(*), COALESCE(SUM(failed),0),
  COALESCE(SUM(input),0), COALESCE(SUM(output),0), COALESCE(SUM(reasoning),0),
- COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0), COALESCE(SUM(total),0), COALESCE(SUM(1-known),0)`
+ COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_create),0), COALESCE(SUM(total),0), COALESCE(SUM(1-known),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN latency ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND latency>0 THEN 1 ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN ttft ELSE 0 END),0),
+ COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN 1 ELSE 0 END),0)`
 
 func summaryDest(sum *Summary) []any {
-	return []any{&sum.Calls, &sum.Executions, &sum.Failures, &sum.InputTokens, &sum.OutputTokens, &sum.ReasoningTokens, &sum.CacheReadTokens, &sum.CacheCreationTokens, &sum.TotalTokens, &sum.UnknownTokenRecords}
+	return []any{&sum.Calls, &sum.Executions, &sum.Failures, &sum.InputTokens, &sum.OutputTokens, &sum.ReasoningTokens, &sum.CacheReadTokens, &sum.CacheCreationTokens, &sum.TotalTokens, &sum.UnknownTokenRecords, &sum.LatencyMS, &sum.LatencyCount, &sum.TTFTMS, &sum.TTFTCount}
+}
+
+// SummaryResult is one summary query: the overall total, per day/consumer/
+// owner/channel/model groups, and hourly trend buckets.
+type SummaryResult struct {
+	Total   Summary
+	Groups  []Summary
+	Buckets []SummaryBucket
 }
 
 func (s *Store) SummaryContext(ctx context.Context, filter Filter) (Summary, []Summary, error) {
+	result, err := s.SummaryResultContext(ctx, filter)
+	return result.Total, result.Groups, err
+}
+
+func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (SummaryResult, error) {
 	j, err := s.queryJournal(ctx)
 	if err != nil {
-		return Summary{}, nil, err
+		return SummaryResult{}, err
 	}
-	filter.Page, filter.PageSize = 0, 0
+	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
 	key, err := json.Marshal(filter)
 	if err != nil {
-		return Summary{}, nil, err
+		return SummaryResult{}, err
 	}
 	value, err := j.aggregate(ctx, "summary:"+string(key), func(ctx context.Context) (any, int, error) {
-		result := summaryResult{groups: []Summary{}}
+		result := SummaryResult{Groups: []Summary{}, Buckets: []SummaryBucket{}}
 		where, args := journalWhere(1, filter)
 		// The covering index avoids a random table read per event, even when
 		// an account or time filter happens to match nearly the whole history.
-		from := "events INDEXED BY usage_summary"
+		from := "events INDEXED BY usage_summary_v2"
 		tx, errBegin := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if errBegin != nil {
 			return nil, 0, errBegin
@@ -368,45 +483,71 @@ func (s *Store) SummaryContext(ctx context.Context, filter Filter) (Summary, []S
 		} else if filter.Owner != "" && filter == (Filter{Owner: filter.Owner}) {
 			traceFrom = "events INDEXED BY usage_owner_trace"
 		}
-		if errTotal := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT trace) FROM "+traceFrom+" WHERE "+where, args...).Scan(&result.total.Calls); errTotal != nil {
+		if errTotal := tx.QueryRowContext(ctx, "SELECT COUNT(DISTINCT trace) FROM "+traceFrom+" WHERE "+where, args...).Scan(&result.Total.Calls); errTotal != nil {
 			return nil, 0, errTotal
 		}
 		if collapsesAttempts(filter) {
 			// The superseded clause carries no argument, so swapping it keeps args aligned.
 			folded := strings.Replace(where, "superseded=0", "superseded=1", 1)
-			if errFolded := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+from+" WHERE "+folded, args...).Scan(&result.total.Failovers); errFolded != nil {
+			if errFolded := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+from+" WHERE "+folded, args...).Scan(&result.Total.Failovers); errFolded != nil {
 				return nil, 0, errFolded
 			}
 		}
-		rows, errQuery := tx.QueryContext(ctx, "SELECT day, consumer, owner, channel, model, "+summaryColumns+" FROM "+from+" WHERE "+where+" GROUP BY day,consumer,owner,channel,model ORDER BY day DESC,channel||consumer||model", args...)
+		rows, errQuery := tx.QueryContext(ctx, "SELECT day, consumer, owner, channel, model, credential_id, "+summaryColumns+" FROM "+from+" WHERE "+where+" GROUP BY day,consumer,owner,channel,model,credential_id ORDER BY day DESC,channel||consumer||model", args...)
 		if errQuery != nil {
 			return nil, 0, errQuery
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var group Summary
-			dest := append([]any{&group.Day, &group.Consumer, &group.Owner, &group.Channel, &group.Model}, summaryDest(&group)...)
+			dest := append([]any{&group.Day, &group.Consumer, &group.Owner, &group.Channel, &group.Model, &group.CredentialID}, summaryDest(&group)...)
 			if errScan := rows.Scan(dest...); errScan != nil {
 				return nil, 0, errScan
 			}
-			result.groups = append(result.groups, group)
-			result.total.Executions += group.Executions
-			result.total.Failures += group.Failures
-			result.total.InputTokens += group.InputTokens
-			result.total.OutputTokens += group.OutputTokens
-			result.total.ReasoningTokens += group.ReasoningTokens
-			result.total.CacheReadTokens += group.CacheReadTokens
-			result.total.CacheCreationTokens += group.CacheCreationTokens
-			result.total.TotalTokens += group.TotalTokens
-			result.total.UnknownTokenRecords += group.UnknownTokenRecords
+			result.Groups = append(result.Groups, group)
+			t := &result.Total
+			t.Executions += group.Executions
+			t.Failures += group.Failures
+			t.InputTokens += group.InputTokens
+			t.OutputTokens += group.OutputTokens
+			t.ReasoningTokens += group.ReasoningTokens
+			t.CacheReadTokens += group.CacheReadTokens
+			t.CacheCreationTokens += group.CacheCreationTokens
+			t.TotalTokens += group.TotalTokens
+			t.UnknownTokenRecords += group.UnknownTokenRecords
+			t.LatencyMS += group.LatencyMS
+			t.LatencyCount += group.LatencyCount
+			t.TTFTMS += group.TTFTMS
+			t.TTFTCount += group.TTFTCount
 		}
-		return result, len(result.groups) + 1, rows.Err()
+		if errRows := rows.Err(); errRows != nil {
+			return nil, 0, errRows
+		}
+		_ = rows.Close()
+		// Hourly buckets; the client folds them into days for longer ranges.
+		buckets, errBuckets := tx.QueryContext(ctx, "SELECT hour, COUNT(DISTINCT trace), COUNT(*), COALESCE(SUM(failed),0), COALESCE(SUM(total),0), COALESCE(SUM(input),0), COALESCE(SUM(output),0) FROM "+from+" WHERE "+where+" GROUP BY hour ORDER BY hour", args...)
+		if errBuckets != nil {
+			return nil, 0, errBuckets
+		}
+		defer func() { _ = buckets.Close() }()
+		for buckets.Next() {
+			var b SummaryBucket
+			if errScan := buckets.Scan(&b.Start, &b.Calls, &b.Executions, &b.Failures, &b.TotalTokens, &b.InputTokens, &b.OutputTokens); errScan != nil {
+				return nil, 0, errScan
+			}
+			result.Buckets = append(result.Buckets, b)
+		}
+		return result, len(result.Groups) + len(result.Buckets) + 1, buckets.Err()
 	})
 	if err != nil {
-		return Summary{}, nil, err
+		return SummaryResult{}, err
 	}
-	result := value.(summaryResult)
-	return result.total, append([]Summary{}, result.groups...), nil
+	result := value.(SummaryResult)
+	return SummaryResult{
+		Total:   result.Total,
+		Groups:  append([]Summary{}, result.Groups...),
+		Buckets: append([]SummaryBucket{}, result.Buckets...),
+	}, nil
 }
 
 func (s *Store) ModelPerformanceContext(ctx context.Context, now time.Time) (map[string]*ModelPerformance, error) {

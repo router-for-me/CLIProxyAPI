@@ -81,6 +81,18 @@ export function IconModelCluster({ size = 20, ...props }: IconProps) {
   );
 }
 
+export function IconChartColumnIncreasing({ size = 20, ...props }: IconProps) {
+  return (
+    <svg {...baseSvgProps} width={size} height={size} {...props}>
+      <path d="M3 3v16a2 2 0 0 0 2 2h16" />
+      <path d="M7 16v-3" />
+      <path d="M11 16V9" />
+      <path d="M15 16V5" />
+      <path d="M19 16v-6" />
+    </svg>
+  );
+}
+
 export function IconFilterAll({ size = 20, ...props }: IconProps) {
   return (
     <svg {...baseSvgProps} width={size} height={size} {...props}>

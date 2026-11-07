@@ -40,8 +40,11 @@ CREATE TABLE IF NOT EXISTS events (
  reasoning INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_create INTEGER NOT NULL, total INTEGER NOT NULL,
  latency INTEGER NOT NULL, ttft INTEGER NOT NULL,
  balanced INTEGER NOT NULL, superseded INTEGER NOT NULL,
+ provider TEXT NOT NULL, stream INTEGER NOT NULL, status INTEGER NOT NULL, endpoint TEXT NOT NULL, effort TEXT NOT NULL,
  PRIMARY KEY (source, position, kind)
 );
+CREATE INDEX IF NOT EXISTS usage_trace ON events(trace) WHERE kind=1;
+CREATE INDEX IF NOT EXISTS call_trace ON events(trace) WHERE kind=2;
 `
 
 const journalIndexes = `
@@ -52,18 +55,33 @@ CREATE INDEX IF NOT EXISTS usage_key ON events(key_id, at DESC, source, position
 CREATE INDEX IF NOT EXISTS usage_channel ON events(channel_id, at DESC, source, position) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_credential ON events(credential_id, at DESC, source, position) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS audit_actor ON events(actor, at DESC, source, position) WHERE kind=3;
-CREATE INDEX IF NOT EXISTS usage_trace ON events(trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_consumer_trace ON events(consumer,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_owner_trace ON events(owner,trace) WHERE kind=1;
 CREATE INDEX IF NOT EXISTS usage_performance ON events(hour,model,failed,latency,ttft,output) WHERE kind=1;
-CREATE INDEX IF NOT EXISTS usage_summary ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,at,channel_id,credential_id,key_id,model_lower,serving_lower) WHERE kind=1;
+DROP INDEX IF EXISTS usage_summary;
+CREATE INDEX IF NOT EXISTS usage_summary_v2 ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,latency,ttft,hour,at,channel_id,credential_id,key_id,model_lower,serving_lower) WHERE kind=1;
 `
 
-const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // supersedeAttemptsSQL hides earlier failed attempts of an even-load-balanced
 // request once a later attempt of the same trace exists.
 const supersedeAttemptsSQL = `UPDATE events SET superseded=1 WHERE kind=1 AND trace=? AND balanced=1 AND failed=1 AND superseded=0`
+
+// callFinishedSQL reports whether the client request of a trace has ended.
+// A failed balanced attempt stays hidden until then, since a later channel may
+// still succeed.
+const callFinishedSQL = `SELECT EXISTS(SELECT 1 FROM events INDEXED BY call_trace WHERE kind=2 AND trace=?)`
+
+// revealFinalFailureSQL shows the last failed attempt of a finished balanced
+// request when no attempt succeeded.
+const revealFinalFailureSQL = `UPDATE events SET superseded=0 WHERE rowid=(
+ SELECT rowid FROM events INDEXED BY usage_trace WHERE kind=1 AND trace=?1 AND balanced=1 AND failed=1 ORDER BY at DESC, source DESC, position DESC LIMIT 1
+) AND NOT EXISTS(SELECT 1 FROM events INDEXED BY usage_trace WHERE kind=1 AND trace=?1 AND failed=0)`
+
+type journalStatements struct {
+	insert, supersede, callFinished, reveal *sql.Stmt
+}
 
 type journalIndex struct {
 	store    *Store
@@ -218,8 +236,10 @@ func (j *journalIndex) resetOutdatedSchema() error {
 	if err := j.db.QueryRowContext(j.ctx, "SELECT COUNT(*) FROM pragma_table_info('events')").Scan(&count); err != nil {
 		return err
 	}
+	// The effort column arrived last with the provider/stream/status/endpoint
+	// filter columns; any layout without it is reimported from the journal.
 	var current int
-	if err := j.db.QueryRowContext(j.ctx, "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='superseded'").Scan(&current); err != nil {
+	if err := j.db.QueryRowContext(j.ctx, "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='effort'").Scan(&current); err != nil {
 		return err
 	}
 	if count == 0 || current == 1 {
@@ -382,16 +402,18 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 				}
 				reset = false
 			}
-			statement, errPrepare := tx.PrepareContext(j.ctx, insertEventSQL)
-			if errPrepare != nil {
-				return errPrepare
+			var statements journalStatements
+			for _, prepared := range []struct {
+				dest **sql.Stmt
+				sql  string
+			}{{&statements.insert, insertEventSQL}, {&statements.supersede, supersedeAttemptsSQL}, {&statements.callFinished, callFinishedSQL}, {&statements.reveal, revealFinalFailureSQL}} {
+				statement, errPrepare := tx.PrepareContext(j.ctx, prepared.sql)
+				if errPrepare != nil {
+					return errPrepare
+				}
+				defer func() { _ = statement.Close() }()
+				*prepared.dest = statement
 			}
-			defer func() { _ = statement.Close() }()
-			supersede, errPrepare := tx.PrepareContext(j.ctx, supersedeAttemptsSQL)
-			if errPrepare != nil {
-				return errPrepare
-			}
-			defer func() { _ = supersede.Close() }()
 			for n := 0; n < 2048 && offset < source.size; n++ {
 				if errContext := j.ctx.Err(); errContext != nil {
 					return errContext
@@ -407,7 +429,7 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 				if errDecode := json.Unmarshal(line, &entry); errDecode != nil {
 					return fmt.Errorf("invalid journal %s at byte %d: %w", source.name, offset, errDecode)
 				}
-				if errInsert := insertJournalEntry(j.ctx, statement, supersede, source.name, offset, len(line), entry); errInsert != nil {
+				if errInsert := insertJournalEntry(j.ctx, statements, source.name, offset, len(line), entry); errInsert != nil {
 					return errInsert
 				}
 				offset += int64(len(line))
@@ -430,7 +452,7 @@ func (j *journalIndex) importFile(source, previous journalSource, exists bool) e
 	}
 }
 
-func insertJournalEntry(ctx context.Context, statement, supersede *sql.Stmt, source string, offset int64, length int, entry journalEntry) error {
+func insertJournalEntry(ctx context.Context, statements journalStatements, source string, offset int64, length int, entry journalEntry) error {
 	insert := func(kind int, at time.Time, u UsageEvent, actor, action string) error {
 		model := strings.ToLower(u.Model)
 		serving := model
@@ -438,17 +460,32 @@ func insertJournalEntry(ctx context.Context, statement, supersede *sql.Stmt, sou
 			serving = strings.ToLower(u.Channel) + "/" + model
 		}
 		trace := usageTrace(u)
+		superseded := false
 		if kind == 1 && u.Balanced {
-			if _, err := supersede.ExecContext(ctx, trace); err != nil {
+			if _, err := statements.supersede.ExecContext(ctx, trace); err != nil {
 				return err
 			}
+			if u.Failed {
+				var finished bool
+				if err := statements.callFinished.QueryRowContext(ctx, trace).Scan(&finished); err != nil {
+					return err
+				}
+				superseded = !finished
+			}
 		}
-		_, err := statement.ExecContext(ctx, source, offset, length, kind,
+		if _, err := statements.insert.ExecContext(ctx, source, offset, length, kind,
 			at.UTC().Format(journalTimeFormat), at.UTC().Format("2006-01-02"), at.UTC().Truncate(time.Hour).Unix(),
 			u.Consumer, u.Owner, u.ChannelID, u.CredentialID, u.KeyID, u.Channel, u.Model, model, serving,
 			actor, action, trace, u.Failed, u.TokensKnown, u.InputTokens, u.OutputTokens,
-			u.ReasoningTokens, u.CacheReadTokens, u.CacheCreationTokens, u.TotalTokens, u.LatencyMS, u.TTFTMS, u.Balanced, false)
-		return err
+			u.ReasoningTokens, u.CacheReadTokens, u.CacheCreationTokens, u.TotalTokens, u.LatencyMS, u.TTFTMS, u.Balanced, superseded,
+			providerBase(u.Provider), u.Stream, u.Status, u.Endpoint, u.ReasoningEffort); err != nil {
+			return err
+		}
+		if kind == 2 && trace != "" {
+			_, err := statements.reveal.ExecContext(ctx, trace)
+			return err
+		}
+		return nil
 	}
 	if entry.Usage != nil {
 		if err := insert(1, entry.Usage.At, *entry.Usage, "", ""); err != nil {
@@ -457,7 +494,8 @@ func insertJournalEntry(ctx context.Context, statement, supersede *sql.Stmt, sou
 	}
 	if entry.Call != nil {
 		c := entry.Call
-		if err := insert(2, c.At, UsageEvent{Consumer: c.Consumer, KeyID: c.KeyID, Model: c.Model}, "", ""); err != nil {
+		// The call ID is the inbound request ID that its usage attempts carry as trace.
+		if err := insert(2, c.At, UsageEvent{ID: c.ID, Consumer: c.Consumer, KeyID: c.KeyID, Model: c.Model}, "", ""); err != nil {
 			return err
 		}
 	}
@@ -466,6 +504,16 @@ func insertJournalEntry(ctx context.Context, statement, supersede *sql.Stmt, sou
 		return insert(3, a.At, UsageEvent{}, a.Actor, a.Action)
 	}
 	return nil
+}
+
+// providerBase strips the hub route suffix from mounted AI-provider IDs
+// ("openai-compatible-hub-ch-<id>-<name>" -> "openai-compatible") so the
+// provider filter groups by upstream type, matching the console badges.
+func providerBase(provider string) string {
+	if cut := strings.Index(provider, "-hub-ch-"); cut > 0 {
+		return provider[:cut]
+	}
+	return provider
 }
 
 // usageTrace groups the attempts of one client request.

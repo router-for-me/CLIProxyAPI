@@ -29,6 +29,7 @@ import { AuthFileRefreshResults } from '@/features/authFiles/components/AuthFile
 import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileModelsModal';
 import { CredentialModelsModal } from '@/features/sharing/CredentialModelsModal';
 import type { SharedCredential } from '@/services/api/sharingCredentials';
+import type { AuthFileItem } from '@/types/authFile';
 import { AuthFilesToolbar } from '@/features/authFiles/components/AuthFilesToolbar';
 import { BatchActionBar } from '@/features/authFiles/components/BatchActionBar';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
@@ -60,6 +61,7 @@ import {
 import { useAuthStore, useNotificationStore, useThemeStore } from '@/stores';
 import styles from './AuthFilesPage.module.scss';
 import { ChannelPicker } from '@/features/sharing/ChannelPicker';
+import { buildCredentialUsagePath } from '@/features/sharing/usageFilters';
 
 const DEFAULT_REGULAR_PAGE_SIZE = 9;
 const DEFAULT_COMPACT_PAGE_SIZE = 12;
@@ -545,6 +547,15 @@ export function AuthFilesPage() {
     [filter, navigate]
   );
 
+  const openUsage = useCallback(
+    (file: AuthFileItem) => {
+      if (!account) return;
+      const path = buildCredentialUsagePath(file, account.username, account.role === 'admin');
+      if (path) navigate(path);
+    },
+    [account, navigate]
+  );
+
   const clearFilters = useCallback(() => {
     setFilter('all');
     setStatusFilterMode('all');
@@ -725,6 +736,7 @@ export function AuthFilesPage() {
                     void showModels(file);
                   }
                 }}
+                onShowUsage={account ? openUsage : undefined}
                 onDownload={handleDownload}
                 onManualRefresh={handleManualRefresh}
                 onCooldownReset={handleCooldownReset}

@@ -44,9 +44,22 @@ func TestBalancedCollapseHidesFailedAttemptsBehindFinalSuccess(t *testing.T) {
 	final := balancedUsage(at.Add(2*time.Millisecond), trace, "att-3", false)
 	appendUsageEvent(t, s, first)
 	appendUsageEvent(t, s, second)
-	appendUsageEvent(t, s, final)
 
+	// Failed attempts of an unfinished request must not surface before the
+	// success that follows them.
 	items, total, err := s.Usage(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("in-flight failures must stay hidden: total=%d items=%+v", total, items)
+	}
+
+	appendUsageEvent(t, s, final)
+	if err := s.RecordCall(CallEvent{ID: trace, At: at.Add(3 * time.Millisecond), Consumer: "bob", Status: 200}); err != nil {
+		t.Fatal(err)
+	}
+	items, total, err = s.Usage(Filter{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +112,19 @@ func TestBalancedCollapseKeepsOnlyLastFailureWhenAllAttemptsFail(t *testing.T) {
 		appendUsageEvent(t, s, u)
 	}
 
+	// While the client request is still running, a later channel may succeed.
 	items, total, err := s.Usage(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("in-flight failures must stay hidden: total=%d items=%+v", total, items)
+	}
+
+	if err := s.RecordCall(CallEvent{ID: trace, At: at.Add(4 * time.Millisecond), Consumer: "bob", Status: 429}); err != nil {
+		t.Fatal(err)
+	}
+	items, total, err = s.Usage(Filter{})
 	if err != nil {
 		t.Fatal(err)
 	}

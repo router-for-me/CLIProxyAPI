@@ -309,6 +309,36 @@ func TestUsageAttributionRetryTotalsAndPersistence(t *testing.T) {
 	}
 }
 
+func TestSummaryLatencyAndHourlyBuckets(t *testing.T) {
+	s, _, _ := testAccounts(t)
+	at := time.Date(2026, 10, 6, 12, 10, 0, 0, time.UTC)
+	record := func(trace string, at time.Time, failed bool, latency, ttft time.Duration, tokens int64) usage.Record {
+		return usage.Record{Attribution: usage.Attribution{SiteID: s.SiteID(), Consumer: "bob", Owner: "alice", Channel: "alice-gpt"}, RequestedAt: at, AuthID: "cred.json", Alias: "alice-gpt/gpt-5", Model: "gpt-5", TraceID: trace, RequestID: trace, Failed: failed, Latency: latency, TTFT: ttft, Detail: usage.Detail{InputTokens: tokens, TotalTokens: tokens}}
+	}
+	s.HandleUsage(context.Background(), record("t1", at, false, 2*time.Second, 400*time.Millisecond, 10))
+	s.HandleUsage(context.Background(), record("t2", at.Add(20*time.Minute), false, 4*time.Second, 0, 20))
+	// Failed attempts never contribute latency, so slow errors cannot skew averages.
+	s.HandleUsage(context.Background(), record("t3", at.Add(time.Hour), true, 30*time.Second, time.Second, 0))
+	result, err := s.SummaryResultContext(context.Background(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := result.Total
+	if total.LatencyMS != 6000 || total.LatencyCount != 2 || total.TTFTMS != 400 || total.TTFTCount != 1 {
+		t.Fatalf("wrong latency aggregates: %#v", total)
+	}
+	if len(result.Buckets) != 2 {
+		t.Fatalf("expected two hourly buckets: %#v", result.Buckets)
+	}
+	first, second := result.Buckets[0], result.Buckets[1]
+	if first.Start != at.Truncate(time.Hour).Unix() || first.Calls != 2 || first.TotalTokens != 30 || first.Failures != 0 {
+		t.Fatalf("wrong first bucket: %#v", first)
+	}
+	if second.Start != at.Truncate(time.Hour).Add(time.Hour).Unix() || second.Calls != 1 || second.Failures != 1 {
+		t.Fatalf("wrong second bucket: %#v", second)
+	}
+}
+
 func TestModelPerformanceBucketsLast24Hours(t *testing.T) {
 	s, _, _ := testAccounts(t)
 	now := time.Date(2026, 10, 6, 12, 30, 0, 0, time.UTC)

@@ -23,6 +23,7 @@ import { DailyTrend, LoadState, PageHeader } from './shared';
 import { date, number, useSharingActions, useSharingData } from './hooks';
 import { useChannelStore } from './useChannelStore';
 import { CredentialModelsModal } from './CredentialModelsModal';
+import { buildCredentialUsagePath } from './usageFilters';
 import styles from './Sharing.module.scss';
 
 const EMPTY_STATUS_BAR_CACHE = new Map();
@@ -42,6 +43,8 @@ function ChannelCredentialCard({
   refresh: () => Promise<void>;
 }) {
   const { t } = useTranslation();
+  const account = useAuthStore((state) => state.account);
+  const navigate = useNavigate();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const { run, confirm } = useSharingActions(refresh);
   const [statusUpdating, setStatusUpdating] = useState(false);
@@ -71,6 +74,14 @@ function ChannelCredentialCard({
         quotaFilterType="all"
         statusBarCache={EMPTY_STATUS_BAR_CACHE}
         onShowModels={() => setModelsOpen(true)}
+        onShowUsage={() => {
+          const path = buildCredentialUsagePath(
+            file,
+            account?.username || '',
+            account?.role === 'admin'
+          );
+          if (path) navigate(path);
+        }}
         onDownload={
           manageable
             ? (name) =>
@@ -293,9 +304,15 @@ function ChannelProviderCard({
   onEdit: () => void;
 }) {
   const { t } = useTranslation();
+  const account = useAuthStore((state) => state.account);
   const { run, confirm } = useSharingActions(refresh);
   const [statusUpdating, setStatusUpdating] = useState(false);
   const manageable = provider.manageable === true;
+  const usagePath = buildCredentialUsagePath(
+    provider,
+    account?.username || '',
+    account?.role === 'admin'
+  );
 
   return (
     <Card
@@ -307,24 +324,31 @@ function ChannelProviderCard({
         </span>
       }
       extra={
-        manageable && (
-          <span className={styles.actions}>
-            <Button variant="secondary" size="sm" onClick={onEdit}>
-              {t('common.edit')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() =>
-                confirm(t('sharing.delete_provider_confirm'), () =>
-                  sharingCredentials.remove([provider.name])
-                )
-              }
-            >
-              {t('common.delete')}
-            </Button>
-          </span>
-        )
+        <span className={styles.actions}>
+          {usagePath && (
+            <Link to={usagePath} className="btn btn-secondary btn-sm">
+              {t('sharing.view_usage')}
+            </Link>
+          )}
+          {manageable && (
+            <>
+              <Button variant="secondary" size="sm" onClick={onEdit}>
+                {t('common.edit')}
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() =>
+                  confirm(t('sharing.delete_provider_confirm'), () =>
+                    sharingCredentials.remove([provider.name])
+                  )
+                }
+              >
+                {t('common.delete')}
+              </Button>
+            </>
+          )}
+        </span>
       }
     >
       <dl className={styles.fieldGrid}>

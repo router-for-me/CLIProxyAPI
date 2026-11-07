@@ -11,7 +11,8 @@ import type {
   ModelPerformance,
   PersonalKey,
   SharedKeyRef,
-  Summary,
+  SummaryResponse,
+  UsageFacets,
   UsageEntry,
 } from '@/features/sharing/types';
 
@@ -93,10 +94,7 @@ const indexAwareGet = <T>(
   params: Record<string, string | number> | undefined,
   signal?: AbortSignal
 ) =>
-  retryWhileIndexBuilding(
-    (attempt) => apiClient.get<T>(path, { params, signal: attempt }),
-    signal
-  );
+  retryWhileIndexBuilding((attempt) => apiClient.get<T>(path, { params, signal: attempt }), signal);
 
 export const sharingApi = {
   status: () => apiClient.get<{ needs_setup: boolean }>(sharingPath('/status')),
@@ -155,11 +153,18 @@ export const sharingApi = {
       ...(proxy_url ? { proxy_url } : {}),
     }),
   marketplace: (signal?: AbortSignal) =>
-    apiClient.get<{ models: MarketplaceModel[]; channels: Channel[] }>(sharingPath('/marketplace'), {
-      signal,
-    }),
+    apiClient.get<{ models: MarketplaceModel[]; channels: Channel[] }>(
+      sharingPath('/marketplace'),
+      {
+        signal,
+      }
+    ),
   marketplacePerformance: (signal?: AbortSignal) =>
-    indexAwareGet<{ models: ModelPerformance[] }>(sharingPath('/marketplace/performance'), undefined, signal),
+    indexAwareGet<{ models: ModelPerformance[] }>(
+      sharingPath('/marketplace/performance'),
+      undefined,
+      signal
+    ),
   keys: async (signal?: AbortSignal) => {
     const response = await apiClient.get<{ keys: PersonalKeyResponse[] }>(sharingPath('/keys'), {
       signal,
@@ -193,7 +198,9 @@ export const sharingApi = {
   usage: (params: Record<string, string | number>, signal?: AbortSignal) =>
     indexAwareGet<HistoryPage<UsageEntry>>(sharingPath('/usage'), params, signal),
   summary: (params: Record<string, string | number>, signal?: AbortSignal) =>
-    indexAwareGet<{ total: Summary; groups: Summary[] }>(sharingPath('/usage/summary'), params, signal),
+    indexAwareGet<SummaryResponse>(sharingPath('/usage/summary'), params, signal),
+  usageFacets: (params: Record<string, string | number>, signal?: AbortSignal) =>
+    indexAwareGet<UsageFacets>(sharingPath('/usage/facets'), params, signal),
   usageAttempts: (trace: string, signal?: AbortSignal) =>
     indexAwareGet<{ items: UsageEntry[] }>(sharingPath('/usage/attempts'), { trace }, signal),
   audits: (params: Record<string, string | number>, signal?: AbortSignal) =>

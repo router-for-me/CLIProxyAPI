@@ -7,12 +7,9 @@ import { I18nextProvider } from 'react-i18next';
 import english from '../src/i18n/locales/en.json';
 import { AccountLoginForm } from '../src/features/sharing/AccountLoginForm';
 import { AccountPage } from '../src/features/sharing/AccountPage';
-import {
-  RequestStatus,
-  UsageLogRow,
-  cacheHitRate,
-  errorMessage,
-} from '../src/features/sharing/UsagePage';
+import { RequestStatus } from '../src/features/sharing/UsageStatus';
+import { UsageLogRow } from '../src/features/sharing/UsageRecords';
+import { cacheHitRate, errorMessage } from '../src/features/sharing/usageFormat';
 import { obfuscatedStorage } from '../src/services/storage/secureStorage';
 import { readFileSync } from 'node:fs';
 import { apiClient } from '../src/services/api/client';

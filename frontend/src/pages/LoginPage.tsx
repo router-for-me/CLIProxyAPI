@@ -20,10 +20,9 @@ import type { ApiError } from '@/types';
 import { LegacyBackendError } from '@/services/api/legacyBackendProbe';
 import styles from './LoginPage.module.scss';
 import { AccountLoginForm } from '@/features/sharing/AccountLoginForm';
+import { loginRedirectTarget } from '@/router/location';
 import { sharingApi } from '@/services/api/sharing';
 import { apiClient } from '@/services/api/client';
-
-type RedirectState = { from?: { pathname?: string } };
 
 /**
  * Converts an API error into a localized user-friendly message.
@@ -147,8 +146,7 @@ export function LoginPage() {
           setAutoLoginSuccess(true);
           // Delay the redirect so the success animation is visible.
           setTimeout(() => {
-            const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-            navigate(redirect, { replace: true });
+            navigate(loginRedirectTarget(location.state), { replace: true });
           }, 1500);
         } else {
           setApiBase(storedBase || detectedBase);
@@ -218,8 +216,7 @@ export function LoginPage() {
   );
 
   if (isAuthenticated && !autoLoading && !autoLoginSuccess) {
-    const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-    return <Navigate to={redirect} replace />;
+    return <Navigate to={loginRedirectTarget(location.state)} replace />;
   }
 
   // Show the splash animation while auto-login is pending or has succeeded.
