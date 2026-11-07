@@ -220,6 +220,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var pendingJSON []byte
 		var replayCommitted bool
 		var terminalDelivered bool
+		var pendingCompletion [][]byte
+		deferCompletion := responseFormat == sdktranslator.FormatOpenAIResponse && !resolveAntigravityPoolSettings(e.cfg).shortMode
 		var param any
 		commitReplay := func() {
 			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && helps.ApplyPatchTranslationError(param) == nil {
@@ -368,13 +370,27 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					}
 				}
 				for i := range chunks {
+					// Responses consumers cancel on completion. Reach HTTP EOF
+					// before delivering it so the connection can return to its pool.
+					if deferCompletion {
+						completion := len(pendingCompletion) > 0
+						for _, line := range bytes.Split(chunks[i], []byte("\n")) {
+							if ojson.GetBytesNoCopy(helps.JSONPayload(line), "type").String() == "response.completed" {
+								completion = true
+							}
+						}
+						if completion {
+							pendingCompletion = append(pendingCompletion, bytes.Clone(chunks[i]))
+							continue
+						}
+					}
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 					case <-ctx.Done():
 						return false
 					}
 				}
-				if isTerminalChunk {
+				if isTerminalChunk && len(pendingCompletion) == 0 {
 					terminalDelivered = true
 				}
 				return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
@@ -426,6 +442,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			case <-ctx.Done():
 			}
 		} else if ctx.Err() == nil {
+			for _, chunk := range pendingCompletion {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
+					terminalDelivered = true
+				case <-ctx.Done():
+					return
+				}
+			}
 			// Only a clean end of stream may produce a synthetic terminal event.
 			// Translating [DONE] after a read error would report a truncated
 			// stream as a successful completion. A clean EOF is a normal end
