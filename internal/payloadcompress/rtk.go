@@ -174,9 +174,9 @@ const rtkTruncatedByChars = "\n[rtk:truncated by chars]\n"
 
 // rtkDefaultPriority is the vocabulary the engine-level cap rescues from the
 // middle of a line elision. Filter packs pass their own preserve patterns.
-var rtkDefaultPriority = []*regexp.Regexp{rtkSeverity}
+var rtkDefaultPriority = []*packRegex{{std: rtkSeverity}}
 
-func rtkTruncate(lines []string, limits rtkLimits, priority []*regexp.Regexp) ([]string, bool) {
+func rtkTruncate(lines []string, limits rtkLimits, priority []*packRegex) ([]string, bool) {
 	overLines := limits.maxLines > 0 && len(lines) > limits.maxLines
 	overChars := limits.maxChars > 0 && charLen(strings.Join(lines, "\n")) > limits.maxChars
 	if !overLines && !overChars {
@@ -184,11 +184,11 @@ func rtkTruncate(lines []string, limits rtkLimits, priority []*regexp.Regexp) ([
 	}
 	// A pattern matching most lines is not selective: it would fill the head with
 	// the same text the plain head already keeps.
-	patterns := make([]*regexp.Regexp, 0, len(priority))
+	patterns := make([]*packRegex, 0, len(priority))
 	for _, re := range priority {
 		hits := 0
 		for _, line := range lines {
-			if re.MatchString(line) {
+			if re.match(line) {
 				hits++
 			}
 		}
@@ -212,7 +212,7 @@ func rtkTruncate(lines []string, limits rtkLimits, priority []*regexp.Regexp) ([
 	}
 	for _, line := range lines {
 		for _, re := range patterns {
-			if re.MatchString(line) {
+			if re.match(line) {
 				add(line)
 				break
 			}
@@ -237,20 +237,20 @@ func rtkTruncate(lines []string, limits rtkLimits, priority []*regexp.Regexp) ([
 // rtkTruncateByChars enforces the char budget after the line pass. Priority lines
 // come from the middle, so their room is reserved before the budget is split; a
 // blind cut would delete exactly the diagnostics the line pass preserved.
-func rtkTruncateByChars(lines []string, patterns []*regexp.Regexp, maxChars int) []string {
+func rtkTruncateByChars(lines []string, patterns []*packRegex, maxChars int) []string {
 	budget := maxChars - charLen(rtkTruncatedByChars)
 	if budget <= 0 {
 		return []string{"[rtk:truncated by chars]"}
 	}
 	type ranked struct {
-		re   *regexp.Regexp
+		re   *packRegex
 		hits int
 	}
 	order := make([]ranked, 0, len(patterns))
 	for _, re := range patterns {
 		hits := 0
 		for _, line := range lines {
-			if re.MatchString(line) {
+			if re.match(line) {
 				hits++
 			}
 		}
@@ -268,7 +268,7 @@ func rtkTruncateByChars(lines []string, patterns []*regexp.Regexp, maxChars int)
 			if _, ok := seen[line]; ok {
 				continue
 			}
-			if !entry.re.MatchString(line) {
+			if !entry.re.match(line) {
 				continue
 			}
 			cost := charLen(line) + 1

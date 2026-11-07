@@ -16,8 +16,9 @@ import (
 
 // Language packs are the caveman rule sets, one directory per language, taken
 // from OmniRoute's rules/ tree. They are data, not code: loaded once and compiled
-// on first use. Patterns Go's RE2 cannot express (backreferences) are skipped
-// rather than approximated, because a wrong filter silently corrupts prompts.
+// on first use. Patterns Go's RE2 cannot express fall back to a backtracking
+// engine rather than being approximated, because a wrong filter silently
+// corrupts prompts. A rule is skipped only when no engine can parse it.
 //
 //go:embed rules
 var rulesFS embed.FS
@@ -101,7 +102,7 @@ func loadPacks() {
 		packsByTag[tag] = ordered
 	}
 	if skipped > 0 {
-		log.Infof("payloadcompress: %d language-pack rules skipped (not expressible in RE2)", skipped)
+		log.Infof("payloadcompress: %d language-pack rules skipped (no engine could compile them)", skipped)
 	}
 }
 
@@ -133,25 +134,61 @@ func languageTags() []string {
 }
 
 // compilePackRule converts one JS-flavoured pack rule into a Go rule. It reports
-// false for patterns RE2 cannot express.
+// false only for patterns no supported engine can compile.
 func compilePackRule(raw packRule) (cavemanRule, bool) {
 	if raw.Pattern == "" {
 		return cavemanRule{}, false
 	}
-	// Backreferences are the one construct with no safe rewrite.
-	for i := 0; i+1 < len(raw.Pattern); i++ {
-		if raw.Pattern[i] == '\\' && raw.Pattern[i+1] >= '1' && raw.Pattern[i+1] <= '9' {
-			return cavemanRule{}, false
-		}
-	}
-
-	pattern := raw.Pattern
 	rule := cavemanRule{name: raw.Name, level: strings.ToLower(raw.MinIntensity), context: raw.Context}
 
+	pattern := raw.Pattern
+	// Lookbehind and lookahead guards that encode a simple boundary are peeled
+	// off and checked in Go, which keeps those rules on the linear-time engine.
+	// Peeling is all-or-nothing: a partially stripped pattern (say, a
+	// backreference left pointing at a group the peel removed) must go to the
+	// backtracking engine whole, or captures change meaning.
+	prefix := "(?i)"
+	for _, flag := range raw.Flags {
+		switch flag {
+		case 'm':
+			prefix += "(?m)"
+		case 's':
+			prefix += "(?s)"
+		}
+	}
+	if guardPattern, ok := decodePackGuards(pattern, &rule); ok {
+		if _, errRE2 := regexp.Compile(prefix + guardPattern); errRE2 == nil {
+			pattern = guardPattern
+		} else {
+			rule = cavemanRule{name: raw.Name, level: strings.ToLower(raw.MinIntensity), context: raw.Context}
+		}
+	} else {
+		rule = cavemanRule{name: raw.Name, level: strings.ToLower(raw.MinIntensity), context: raw.Context}
+	}
+
+	compiled, err := compilePackRegex(prefix + pattern)
+	if err != nil {
+		return cavemanRule{}, false
+	}
+	rule.re = compiled
+
+	if len(raw.ReplacementMap) > 0 {
+		rule.table = raw.ReplacementMap
+	} else if raw.Replacement != nil {
+		rule.repl = *raw.Replacement
+	}
+	return rule, true
+}
+
+// decodePackGuards peels the lookaround guards the packs wrap around their
+// match text into fields the rule applies in Go. It reports false when a guard
+// is not one of the decoded shapes, which is the signal to use the
+// backtracking engine instead of guessing at the boundary.
+func decodePackGuards(pattern string, rule *cavemanRule) (string, bool) {
 	for strings.HasPrefix(pattern, "(?<!") {
 		end := strings.Index(pattern, ")")
 		if end < 0 {
-			return cavemanRule{}, false
+			return "", false
 		}
 		inner := pattern[4:end]
 		pattern = pattern[end+1:]
@@ -163,7 +200,7 @@ func compilePackRule(raw packRule) (cavemanRule, bool) {
 		case isPlainLiteral(inner):
 			rule.notAfter = append(rule.notAfter, inner)
 		default:
-			return cavemanRule{}, false
+			return "", false
 		}
 	}
 
@@ -187,7 +224,7 @@ func compilePackRule(raw packRule) (cavemanRule, bool) {
 		case rest == `[,.]?\s*`:
 			rule.tail = tailPunct
 		default:
-			return cavemanRule{}, false
+			return "", false
 		}
 		pattern = pattern[:idx]
 		rule.notBeforeWord = true
@@ -196,34 +233,9 @@ func compilePackRule(raw packRule) (cavemanRule, bool) {
 
 	if strings.Contains(pattern, "(?=") || strings.Contains(pattern, "(?!") ||
 		strings.Contains(pattern, "(?<") || strings.Contains(pattern, "(?>") {
-		return cavemanRule{}, false
+		return "", false
 	}
-
-	// The packs omit the `i` flag that their TS originals carried, and list the
-	// capitalised variants by hand only for some rules. Prose filler matching is
-	// case-insensitive by intent, so it is always applied here.
-	prefix := "(?i)"
-	for _, flag := range raw.Flags {
-		switch flag {
-		case 'm':
-			prefix += "(?m)"
-		case 's':
-			prefix += "(?s)"
-		}
-	}
-
-	compiled, err := regexp.Compile(prefix + pattern)
-	if err != nil {
-		return cavemanRule{}, false
-	}
-	rule.re = compiled
-
-	if len(raw.ReplacementMap) > 0 {
-		rule.table = raw.ReplacementMap
-	} else if raw.Replacement != nil {
-		rule.repl = *raw.Replacement
-	}
-	return rule, true
+	return pattern, true
 }
 
 func isWordClass(inner string) bool {

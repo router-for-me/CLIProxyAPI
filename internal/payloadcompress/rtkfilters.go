@@ -21,8 +21,9 @@ import (
 // Two upstream layers have no counterpart here. Command detection by command
 // name needs the originating command line, which a chat payload does not carry,
 // so filters are selected by the output's own content. Patterns Go's RE2 cannot
-// express (lookaround) are dropped rather than approximated: a wrong filter
-// silently deletes lines, while a dropped one only compresses less.
+// express (lookaround, backreferences) fall back to a backtracking engine with a
+// match timeout rather than being dropped: dropping was safe but silently
+// disabled the structured-output guards the packs were written to provide.
 //
 //go:embed rtkfilters
 var rtkFiltersFS embed.FS
@@ -86,12 +87,12 @@ type rtkFilter struct {
 	id       string
 	priority int
 	types    []string
-	commands []*regexp.Regexp
-	match    []*regexp.Regexp
-	keep     []*regexp.Regexp
-	drop     []*regexp.Regexp
-	collapse []*regexp.Regexp
-	rescue   []*regexp.Regexp
+	commands []*packRegex
+	match    []*packRegex
+	keep     []*packRegex
+	drop     []*packRegex
+	collapse []*packRegex
+	rescue   []*packRegex
 	replace  []rtkCompiledReplace
 	emit     []rtkCompiledEmit
 	tests    []rtkFilterTest
@@ -106,28 +107,28 @@ type rtkFilter struct {
 }
 
 type rtkCompiledReplace struct {
-	re   *regexp.Regexp
+	re   *packRegex
 	repl string
 }
 
 type rtkCompiledEmit struct {
-	re      *regexp.Regexp
-	unless  *regexp.Regexp
+	re      *packRegex
+	unless  *packRegex
 	message string
 }
 
 var (
 	rtkFiltersOnce sync.Once
 	rtkFilterList  []*rtkFilter
-	rtkFilterKinds map[string][]*regexp.Regexp
+	rtkFilterKinds map[string][]*packRegex
 	// rtkFilterCommands maps a filter type to the command lines it claims,
 	// compiled from each pack's match.commands.
-	rtkFilterCommands map[string][]*regexp.Regexp
+	rtkFilterCommands map[string][]*packRegex
 )
 
 // compileRTKCommands compiles a pack's command patterns. Upstream matches them
 // case-insensitively against the whole command line.
-func compileRTKCommands(id string, patterns []string) []*regexp.Regexp {
+func compileRTKCommands(id string, patterns []string) []*packRegex {
 	prefixed := make([]string, 0, len(patterns))
 	for _, pattern := range patterns {
 		prefixed = append(prefixed, "(?i)"+pattern)
@@ -135,19 +136,13 @@ func compileRTKCommands(id string, patterns []string) []*regexp.Regexp {
 	return compileRTKPatterns(id, "command", prefixed)
 }
 
-// compileRTKPatterns drops the patterns RE2 rejects. Upstream instead guards
-// against ReDoS with a heuristic; linear-time matching makes that unnecessary.
-func compileRTKPatterns(id, field string, patterns []string) []*regexp.Regexp {
-	out := make([]*regexp.Regexp, 0, len(patterns))
-	for _, pattern := range patterns {
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			log.Debugf("payloadcompress: rtk filter %s: dropping %s pattern %q: %v", id, field, pattern, err)
-			continue
-		}
-		out = append(out, re)
-	}
-	return out
+// compileRTKPatterns compiles a pack's patterns, falling back to the
+// backtracking engine for the lookaround and backreference constructs RE2
+// rejects. Upstream instead guards against ReDoS with a heuristic; here the
+// linear-time engine covers almost everything and the fallback carries a match
+// timeout.
+func compileRTKPatterns(id, field string, patterns []string) []*packRegex {
+	return compilePackRegexes("rtk filter "+id, field, patterns)
 }
 
 func compileRTKFilter(pack rtkFilterPack) *rtkFilter {
@@ -171,20 +166,22 @@ func compileRTKFilter(pack rtkFilterPack) *rtkFilter {
 		tests:          pack.Tests,
 	}
 	for _, rule := range pack.Rules.Replace {
-		re, err := regexp.Compile(rule.Pattern)
+		re, err := compilePackRegex(rule.Pattern)
 		if err != nil {
 			continue
 		}
 		f.replace = append(f.replace, rtkCompiledReplace{re: re, repl: rule.Replacement})
 	}
 	for _, rule := range pack.Rules.MatchOutput {
-		re, err := regexp.Compile("(?im)" + rule.Pattern)
+		re, err := compilePackRegex("(?im)" + rule.Pattern)
 		if err != nil {
 			continue
 		}
-		unless, errUnless := regexp.Compile("(?im)" + rule.Unless)
-		if rule.Unless == "" || errUnless != nil {
-			unless = nil
+		var unless *packRegex
+		if rule.Unless != "" {
+			if compiled, errUnless := compilePackRegex("(?im)" + rule.Unless); errUnless == nil {
+				unless = compiled
+			}
 		}
 		f.emit = append(f.emit, rtkCompiledEmit{re: re, unless: unless, message: rule.Message})
 	}
@@ -206,7 +203,7 @@ func loadRTKFilters() []*rtkFilter {
 			}
 		}
 		sort.Strings(names)
-		rtkFilterKinds = make(map[string][]*regexp.Regexp, len(rtkDetectors))
+		rtkFilterKinds = make(map[string][]*packRegex, len(rtkDetectors))
 		for _, detector := range rtkDetectors {
 			rtkFilterKinds[detector.typ] = compileRTKPatterns(detector.typ, "content", detector.patterns)
 		}
@@ -226,7 +223,7 @@ func loadRTKFilters() []*rtkFilter {
 			}
 			rtkFilterList = append(rtkFilterList, compileRTKFilter(pack))
 		}
-		rtkFilterCommands = make(map[string][]*regexp.Regexp, len(rtkFilterList))
+		rtkFilterCommands = make(map[string][]*packRegex, len(rtkFilterList))
 		for _, filter := range rtkFilterList {
 			for _, typ := range filter.types {
 				if len(filter.commands) == 0 {
@@ -263,7 +260,7 @@ func detectRTKOutputType(text, command string) string {
 	for _, detector := range rtkDetectors {
 		hits := 0
 		for _, re := range rtkFilterKinds[detector.typ] {
-			if re.MatchString(text) {
+			if re.match(text) {
 				hits++
 			}
 		}
@@ -283,7 +280,7 @@ func detectRTKTypeFromCommand(command string) string {
 	}
 	for _, detector := range rtkDetectors {
 		for _, re := range rtkFilterCommands[detector.typ] {
-			if re.MatchString(command) {
+			if re.match(command) {
 				return detector.typ
 			}
 		}
@@ -302,7 +299,7 @@ func (f *rtkFilter) hasType(typ string) bool {
 
 func (f *rtkFilter) matchesText(text string) bool {
 	for _, re := range f.match {
-		if re.MatchString(text) {
+		if re.match(text) {
 			return true
 		}
 	}
@@ -368,12 +365,12 @@ func (f *rtkFilter) apply(text string) (string, bool) {
 	}
 	for _, rule := range f.replace {
 		for i, line := range lines {
-			lines[i] = rule.re.ReplaceAllString(line, rule.repl)
+			lines[i] = rule.re.replaceAllString(line, rule.repl)
 		}
 	}
 	for _, rule := range f.emit {
 		blob := strings.Join(lines, "\n")
-		if !rule.re.MatchString(blob) || (rule.unless != nil && rule.unless.MatchString(blob)) {
+		if !rule.re.match(blob) || (rule.unless != nil && rule.unless.match(blob)) {
 			continue
 		}
 		return rule.message, rule.message != text
@@ -440,9 +437,9 @@ func (f *rtkFilter) apply(text string) (string, bool) {
 	return out, out != text
 }
 
-func rtkAnyMatch(patterns []*regexp.Regexp, line string) bool {
+func rtkAnyMatch(patterns []*packRegex, line string) bool {
 	for _, re := range patterns {
-		if re.MatchString(line) {
+		if re.match(line) {
 			return true
 		}
 	}

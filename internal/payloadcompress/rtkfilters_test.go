@@ -45,6 +45,50 @@ func TestRTKFilterPacksCompile(t *testing.T) {
 	}
 }
 
+// TestRTKLookaroundPatternsMatch pins the three pack patterns written with
+// negative lookahead. They used to be dropped at load time, which silently
+// disabled the structured-output guard on gh and kubectl and the added/removed
+// line guard on git diffs.
+func TestRTKLookaroundPatternsMatch(t *testing.T) {
+	gh := compileRTKCommands("gh", []string{
+		`^gh\s+(?:pr|issue|repo|run|workflow|release|auth|browse|gist|secret|label|search|status)(?!.*--json)\b`,
+	})
+	if len(gh) != 1 {
+		t.Fatal("gh command pattern did not compile")
+	}
+	if !gh[0].match("gh pr list") {
+		t.Fatal("gh pr list must match")
+	}
+	if gh[0].match("gh pr list --json number,title") {
+		t.Fatal("gh --json must stay unfiltered")
+	}
+
+	kubectl := compileRTKCommands("kubectl", []string{
+		`^kubectl\s+(?:get|describe|apply|delete|rollout|events?)(?!.*(?:-o|--output)(?:\s+|=)(?:json|yaml|go-template|jsonpath|template|name))\b`,
+	})
+	if len(kubectl) != 1 || !kubectl[0].match("kubectl get pods") {
+		t.Fatal("kubectl plain get must match")
+	}
+	if kubectl[0].match("kubectl get pods -o json") || kubectl[0].match("kubectl get pods --output=yaml") {
+		t.Fatal("kubectl structured output must stay unfiltered")
+	}
+
+	diff := compileRTKPatterns("git-diff", "preserve", []string{`^[+-](?![+-]{2})`})
+	if len(diff) != 1 {
+		t.Fatal("git-diff preserve pattern did not compile")
+	}
+	for _, kept := range []string{"+added", "-removed"} {
+		if !diff[0].match(kept) {
+			t.Fatalf("%q must be preserved", kept)
+		}
+	}
+	for _, headers := range []string{"+++ b/file", "--- a/file"} {
+		if diff[0].match(headers) {
+			t.Fatalf("%q is diff metadata, not a changed line", headers)
+		}
+	}
+}
+
 // TestRTKFilterSelection pins the cascade: the detected output type wins, then
 // the pack's own content patterns, and a document read gets no filter at all.
 func TestRTKFilterSelection(t *testing.T) {

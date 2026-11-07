@@ -140,7 +140,7 @@ type cavemanRule struct {
 	// context is the message role the rule was written for: "user", "assistant"
 	// or "all". See filterRulesByContext.
 	context string
-	re      *regexp.Regexp
+	re      *packRegex
 	repl    string
 	table   map[string]string
 	// lowerOnly deletes a match only when the next byte is a lowercase letter.
@@ -173,9 +173,9 @@ func (r cavemanRule) guarded() bool {
 
 func (r cavemanRule) apply(text string) string {
 	if !r.guarded() {
-		return r.re.ReplaceAllString(text, r.repl)
+		return r.re.replaceAllString(text, r.repl)
 	}
-	locs := r.re.FindAllStringIndex(text, -1)
+	locs := r.re.matchSpans(text)
 	if len(locs) == 0 {
 		return text
 	}
@@ -200,14 +200,20 @@ func (r cavemanRule) apply(text string) string {
 		}
 		end := extendTail(text, loc[1], r.tail)
 		b.WriteString(text[prev:loc[0]])
-		b.WriteString(r.replacement(text[loc[0]:loc[1]]))
+		b.WriteString(r.replacementFor(text, loc))
 		prev = end
 	}
 	b.WriteString(text[prev:])
 	return b.String()
 }
 
-func (r cavemanRule) replacement(match string) string {
+// replacementFor returns the text substituted for the match at loc in text.
+// Expansion runs against the original text: a $n replacement needs the match's
+// captures, and those only exist in the context the pattern matched in. Running
+// it on the sliced match would fail whenever the pattern anchors on what came
+// before it, such as a lookbehind.
+func (r cavemanRule) replacementFor(text string, loc [2]int) string {
+	match := text[loc[0]:loc[1]]
 	if r.table != nil {
 		key := strings.ToLower(strings.TrimRight(match, " \t\n"))
 		if repl, ok := r.table[key]; ok {
@@ -217,7 +223,10 @@ func (r cavemanRule) replacement(match string) string {
 			return match
 		}
 	}
-	return r.repl
+	if !strings.Contains(r.repl, "$") {
+		return r.repl
+	}
+	return r.re.expandCaptures(text, loc, r.repl)
 }
 
 // extendTail walks past the punctuation or whitespace the original pattern
