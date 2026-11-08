@@ -74,6 +74,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	inputResult = convertSystemRoleToDeveloperDoc(inputResult, ensureDoc)
 	normalizeCodexBuiltinToolsDoc(rawJSON, ensureDoc)
 	normalizeEmptyFunctionCallArgumentsDoc(inputResult, ensureDoc)
+	translatorcommon.SanitizeOrphanResponsesToolOutputsInputDoc(inputResult, ensureDoc)
 
 	if doc != nil {
 		return doc.Bytes(), nil
