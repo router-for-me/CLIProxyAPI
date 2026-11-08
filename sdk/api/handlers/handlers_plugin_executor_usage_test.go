@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -372,8 +373,9 @@ func TestHandlerPluginExecutorPublishesUsageStreamInteractions(t *testing.T) {
 
 	originalModel := "gemini-2.5-flash"
 
-	chunks := make(chan coreexecutor.StreamChunk, 2)
-	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"finish\",\"metadata\":{\"total_usage\":{\"total_input_tokens\":30,\"total_output_tokens\":70,\"total_tokens\":100}}}\n\n")}
+	chunks := make(chan coreexecutor.StreamChunk, 3)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"start\",\"usage\":{\"input_tokens\":100,\"cache_read_tokens\":20,\"output_tokens\":0,\"reasoning_tokens\":0,\"total_tokens\":100}}\n\n")}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"event_type\":\"finish\",\"usage\":{\"input_tokens\":100,\"cache_read_tokens\":20,\"output_tokens\":30,\"reasoning_tokens\":10,\"total_tokens\":140}}\n\n")}
 	chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
 	close(chunks)
 
@@ -401,8 +403,15 @@ func TestHandlerPluginExecutorPublishesUsageStreamInteractions(t *testing.T) {
 	if record.Provider != targetPluginID {
 		t.Errorf("record.Provider = %q, want %q", record.Provider, targetPluginID)
 	}
-	if record.Detail.InputTokens != 30 || record.Detail.OutputTokens != 70 || record.Detail.TotalTokens != 100 {
-		t.Errorf("record.Detail = %+v, want input=30 output=70 total=100", record.Detail)
+	if record.Detail.InputTokens != 100 || record.Detail.CacheReadTokens != 20 || record.Detail.OutputTokens != 30 || record.Detail.ReasoningTokens != 10 || record.Detail.TotalTokens != 140 {
+		t.Errorf("record.Detail = %+v, want input=100 cache_read=20 output=30 reasoning=10 total=140", record.Detail)
+	}
+	tb := record.Detail.TokenBreakdown
+	if !tb.Valid() || tb.Quality != usage.TokenAccountingQualityComplete ||
+		tb.TotalTokens != 140 ||
+		tb.Input.TotalTokens != 100 || tb.Input.UncachedTokens != 80 || tb.Input.CacheReadTokens != 20 ||
+		tb.Output.TotalTokens != 40 || tb.Output.NonReasoningTokens != 30 || tb.Output.ReasoningTokens != 10 {
+		t.Errorf("record.Detail.TokenBreakdown = %+v, want valid separate-reasoning breakdown with total=140 input=(100/80/20/0) output=(40/30/10)", tb)
 	}
 }
 
@@ -550,9 +559,13 @@ func TestHandlerPluginExecutorPublishesStreamCancellation(t *testing.T) {
 	handler.SetModelRouterHost(mockHost)
 
 	dataChan, _, _ := handler.ExecuteStreamWithAuthManager(ctx, "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
-	// Receive first chunk then cancel context
+	// Receive the first chunk, then cancel. The chunk channel stays open until the stream
+	// goroutine has exited: closed early, it races ctx.Done() in nextStreamChunk's select and the
+	// stream can end as a normal completion (about 1 in 1000 runs under -race).
 	<-dataChan
 	cancel()
+	for range dataChan {
+	}
 	close(chunks)
 
 	record := plugin.waitRecord(t)
@@ -743,6 +756,7 @@ type mockPluginUsageHost struct {
 	execErr      error
 	execFunc     func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
 	streamResult *coreexecutor.StreamResult
+	streamFunc   func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
 }
 
 func (h *mockPluginUsageHost) ExecutePluginExecutor(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
@@ -762,5 +776,159 @@ func (h *mockPluginUsageHost) ExecutePluginExecutorStream(ctx context.Context, p
 	h.lastPluginID = pluginID
 	h.lastRequest = req
 	h.lastOptions = opts
+	if h.streamFunc != nil {
+		return h.streamFunc(ctx, pluginID, req, opts)
+	}
 	return h.streamResult, nil
+}
+
+func advanceMonotonicClock() time.Duration {
+	start := time.Now()
+	for {
+		elapsed := time.Since(start)
+		if elapsed > 0 {
+			return elapsed
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestHandlerPluginExecutorPublishesNonZeroTTFTNonStream(t *testing.T) {
+	targetPluginID := "custom-ttft-nonstream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-ttft-nonstream", plugin)
+
+	originalModel := "gpt-4o"
+	openAIResponseBody := []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46}}`)
+
+	mockHost := &mockPluginUsageHost{
+		execFunc: func(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			advanceMonotonicClock()
+			return coreexecutor.Response{Payload: openAIResponseBody}, nil
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if len(body) == 0 {
+		t.Fatal("empty response body")
+	}
+
+	record := plugin.waitRecord(t)
+	if record.TTFT <= 0 {
+		t.Fatalf("record.TTFT = %v, want > 0", record.TTFT)
+	}
+	if record.Latency <= 0 {
+		t.Fatalf("record.Latency = %v, want > 0", record.Latency)
+	}
+}
+
+func TestHandlerPluginExecutorPublishesNonZeroTTFTStream(t *testing.T) {
+	targetPluginID := "custom-ttft-stream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-ttft-stream", plugin)
+
+	originalModel := "codex-5.2"
+	firstChunkDelivered := make(chan struct{})
+	var minTokenOffset time.Duration
+
+	mockHost := &mockPluginUsageHost{
+		streamFunc: func(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			streamStart := time.Now()
+			chunks := make(chan coreexecutor.StreamChunk)
+			go func() {
+				defer close(chunks)
+				advanceMonotonicClock()
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n")}
+				<-firstChunkDelivered
+				advanceMonotonicClock()
+				minTokenOffset = time.Since(streamStart)
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\n")}
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n")}
+				chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			}()
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
+	firstSeen := false
+	for range dataChan {
+		if !firstSeen {
+			firstSeen = true
+			close(firstChunkDelivered)
+		}
+	}
+	if !firstSeen {
+		close(firstChunkDelivered)
+	}
+	for err := range errChan {
+		if err != nil {
+			t.Fatalf("stream error = %+v", err)
+		}
+	}
+
+	record := plugin.waitRecord(t)
+	if record.TTFT <= 0 {
+		t.Fatalf("record.TTFT = %v, want > 0", record.TTFT)
+	}
+	if record.TTFT < minTokenOffset {
+		t.Fatalf("record.TTFT = %v, want >= token delta offset %v (must reflect token event, not metadata first packet)", record.TTFT, minTokenOffset)
+	}
+}
+
+func TestHandlerPluginExecutorPublishesFirstPacketFallbackTTFTStream(t *testing.T) {
+	targetPluginID := "custom-ttft-fallback-stream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-ttft-fallback-stream", plugin)
+
+	originalModel := "codex-5.2"
+
+	mockHost := &mockPluginUsageHost{
+		streamFunc: func(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			advanceMonotonicClock()
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
+	for range dataChan {
+	}
+	for err := range errChan {
+		if err != nil {
+			t.Fatalf("stream error = %+v", err)
+		}
+	}
+
+	record := plugin.waitRecord(t)
+	if record.TTFT <= 0 {
+		t.Fatalf("record.TTFT = %v, want > 0 for first-packet fallback", record.TTFT)
+	}
 }

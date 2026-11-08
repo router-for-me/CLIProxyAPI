@@ -129,7 +129,11 @@ func (m *Manager) BindCodexSIWC(ctx context.Context, id string, expectedEpoch ui
 		if !updated.Disabled {
 			applyPreservedRejectedTokens(current, updated, false)
 			if updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken {
-				if hasUnauthorizedAuthFailure(current) || (updated.LastError != nil && isUnauthorizedError(updated.LastError)) {
+				updated.RefreshFailures = 0
+				updated.NextRefreshAfter = time.Time{}
+				if hasUnauthorizedAuthFailure(current) ||
+					(updated.LastError != nil && (isUnauthorizedError(updated.LastError) || isInvalidGrantResultError(updated.LastError))) ||
+					(updated.Unavailable && !updated.NextRetryAfter.After(now) && !updated.Quota.NextRecoverAt.After(now)) {
 					updated.Unavailable = false
 					updated.LastError = nil
 					updated.StatusMessage = ""

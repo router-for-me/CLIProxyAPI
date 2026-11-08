@@ -25,14 +25,15 @@ type rebalanceInstruction struct {
 }
 
 type clusterBalanceState struct {
-	moving      bool
-	returning   bool
-	target      clusterNode
-	origin      clusterNode
-	request     rebalanceInstruction
-	result      string
-	registered  bool
-	unsupported bool
+	moving           bool
+	returning        bool
+	target           clusterNode
+	origin           clusterNode
+	request          rebalanceInstruction
+	result           string
+	registered       bool
+	unsupported      bool
+	latencySupported bool
 }
 
 func (c *Client) canExecuteRebalanceLocked() bool {
@@ -58,7 +59,18 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	}
 	options.ReadTimeout = -1
 	options.WriteTimeout = -1
-	options.Dialer = redis.NewDialer(options)
+	baseDialer := redis.NewDialer(options)
+	options.Dialer = func(dialCtx context.Context, network, dialAddress string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, dialAddress)
+		if errDial != nil {
+			return nil, errDial
+		}
+		if ctx.Err() != nil {
+			_ = closeUnderlyingTransport(conn)
+			return nil, context.Cause(ctx)
+		}
+		return newPluginSyncCancelableConn(ctx, conn), nil
+	}
 	command := redis.NewClient(options)
 	stopCancel := context.AfterFunc(ctx, func() { _ = command.Close() })
 	defer func() {
@@ -96,7 +108,8 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 			return fmt.Errorf("register Home rebalance: %w", errEnable)
 		}
 		var response struct {
-			OK bool `json:"ok"`
+			OK           bool     `json:"ok"`
+			Capabilities []string `json:"capabilities"`
 		}
 		if errJSON := json.Unmarshal([]byte(raw), &response); errJSON != nil {
 			return fmt.Errorf("decode Home rebalance ENABLE response: %w", errJSON)
@@ -106,6 +119,11 @@ func (c *Client) syncClusterBalance(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.balance.registered = true
+		for _, capability := range response.Capabilities {
+			if capability == clusterLatencyCapability {
+				c.balance.latencySupported = true
+			}
+		}
 		c.mu.Unlock()
 	}
 	if result == "" {

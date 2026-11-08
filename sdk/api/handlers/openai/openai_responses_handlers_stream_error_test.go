@@ -1163,3 +1163,22 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 		}
 	})
 }
+
+func TestResponsesSSEPayloadErrorMessage_ImageGenerationUserErrorMapsToBadRequest(t *testing.T) {
+	payloads := [][]byte{
+		[]byte(`{"type":"response.failed","response":{"status":"failed","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}}`),
+		[]byte(`{"type":"error","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}`),
+	}
+	for _, payload := range payloads {
+		errMsg := responsesSSEPayloadErrorMessage(payload)
+		if errMsg == nil {
+			t.Fatalf("expected non-nil ErrorMessage for %s", payload)
+		}
+		if errMsg.StatusCode != http.StatusBadRequest {
+			t.Fatalf("StatusCode = %d, want %d for payload %s", errMsg.StatusCode, http.StatusBadRequest, payload)
+		}
+		if !strings.Contains(errMsg.Error.Error(), "/v1/images/generations") || !strings.Contains(errMsg.Error.Error(), "gpt-5.4-mini") {
+			t.Fatalf("expected remediation guidance in error message, got %q", errMsg.Error.Error())
+		}
+	}
+}

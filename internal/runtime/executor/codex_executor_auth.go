@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -45,8 +47,25 @@ func codexUseSIWC(auth *cliproxyauth.Auth) bool {
 	return enabled
 }
 
+func codexUseSIWCForRequest(ctx context.Context, auth *cliproxyauth.Auth, clientHeaders ...http.Header) bool {
+	return cliproxyauth.IsCodexUseSIWCForRequest(ctx, auth, clientHeaders...)
+}
+
 func ensureCodexSIWCCredentials(auth *cliproxyauth.Auth, apiKey string) error {
-	if codexUseSIWC(auth) && strings.TrimSpace(apiKey) == "" {
+	return ensureCodexSIWCCredentialsForRequest(context.Background(), auth, apiKey)
+}
+
+func ensureCodexSIWCCredentialsForRequest(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, clientHeaders ...http.Header) error {
+	if !codexUseSIWC(auth) {
+		return nil
+	}
+	if cliproxyauth.IsCodexClientRequest(ctx, clientHeaders...) {
+		if strings.TrimSpace(apiKey) == "" {
+			return statusErr{code: 401, msg: "codex executor: original OAuth access_token is required for Codex client requests"}
+		}
+		return nil
+	}
+	if strings.TrimSpace(apiKey) == "" {
 		return statusErr{code: 401, msg: "codex executor: use_siwc is enabled but siwc access_token is missing"}
 	}
 	return nil
@@ -122,7 +141,11 @@ func resolveCodexAuthDiskPath(cfg *config.Config, auth *cliproxyauth.Auth) (stri
 			return "", fmt.Errorf("codex executor: stat credential file %s: %w", candidate, errStat)
 		}
 		if !info.IsDir() {
-			return candidate, nil
+			canonical, errCanonical := filepath.EvalSymlinks(candidate)
+			if errCanonical != nil {
+				return "", fmt.Errorf("codex executor: resolve credential path: %w", errCanonical)
+			}
+			return filepath.Abs(canonical)
 		}
 	}
 	return "", nil
@@ -274,21 +297,56 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			needSIWC = hasSIWC
 		}
 	}
+	// Explicit refresh requests must also respect the server's renewal window.
+	if earliest, okEarliest := auth.SIWCEarliestRefreshTime(); okEarliest && now.Before(earliest) {
+		needSIWC = false
+	}
+	suppressedRejectedOuter := false
+	if !diskRotatedOuter && auth.RejectedRefreshToken != "" && outerRefreshToken == strings.TrimSpace(auth.RejectedRefreshToken) {
+		if needOuter {
+			suppressedRejectedOuter = true
+		}
+		needOuter = false
+	}
+	suppressedRejectedSIWC := false
+	if !diskRotatedSIWC && auth.RejectedSIWCRefreshToken != "" && siwcRefreshToken == strings.TrimSpace(auth.RejectedSIWCRefreshToken) {
+		if needSIWC {
+			suppressedRejectedSIWC = true
+		}
+		needSIWC = false
+	}
 
 	if !needOuter && !needSIWC {
 		if diskRotatedOuter || diskRotatedSIWC {
 			patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, diskRotatedOuter, diskRotatedSIWC)
+			patch.SetUpstreamRefreshed(false)
 			auth.CodexRefreshPatch = patch
 			if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 				clonedStorage := *storage
 				clonedStorage.RefreshPatch = patch
 				auth.Storage = &clonedStorage
 			}
+			return auth, nil
+		}
+		if suppressedRejectedOuter || suppressedRejectedSIWC {
+			if auth.RefreshError != nil {
+				return nil, auth.RefreshError
+			}
+			return nil, statusErr{code: http.StatusUnauthorized, msg: "codex executor: refresh token is invalid; sign-in required"}
 		}
 		return auth, nil
 	}
 
 	svc := codexauth.NewCodexAuthWithProxyURL(cfg, auth.ProxyURL)
+	if diskPath != "" && (cfg == nil || cfg.AuthDir == "") {
+		svc.SetRefreshJournal(&codexauth.FileRefreshJournal{Dir: filepath.Dir(diskPath)})
+	}
+	store := sdkauth.GetTokenStore()
+	if _, isFileStore := store.(*sdkauth.FileTokenStore); !isFileStore {
+		if journal, okJournal := store.(codexauth.RefreshJournal); okJournal {
+			svc.SetRefreshJournal(journal)
+		}
+	}
 
 	outerRefreshed := false
 	var outerErr error
@@ -393,6 +451,7 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 				mergedSIWC = make(map[string]any)
 			}
 			delete(mergedSIWC, "expires_at")
+			delete(mergedSIWC, "earliest_refresh_at")
 			for k, v := range siwcTD.ToMap() {
 				mergedSIWC[k] = v
 			}
@@ -421,11 +480,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if !outerRefreshed && !siwcRefreshed && !diskRotatedOuter && !diskRotatedSIWC {
-		if outerErr != nil {
-			return nil, outerErr
-		}
-		if siwcErr != nil {
-			return nil, siwcErr
+		if errCombined := codexauth.NewPartitionRefreshError(outerErr, siwcErr); errCombined != nil {
+			return nil, errCombined
 		}
 		return nil, fmt.Errorf("codex executor: refresh failed")
 	}
@@ -437,6 +493,8 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, outerRefreshed || diskRotatedOuter, siwcRefreshed || diskRotatedSIWC)
+	patch.SetUpstreamRefreshed(outerRefreshed || siwcRefreshed)
+	patch.SetPartitionErrors(outerErr, siwcErr)
 	auth.CodexRefreshPatch = patch
 	if storage, ok := auth.Storage.(*codexauth.CodexTokenStorage); ok && storage != nil {
 		clonedStorage := *storage
@@ -458,17 +516,24 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		}
 		auth.Metadata = mergedDisk
 	}
+	if siwcRefreshed {
+		log.Debug("SIWC token renewal completed")
+	}
 	return auth, nil
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
+	return codexCredsForRequest(context.Background(), a)
+}
+
+func codexCredsForRequest(ctx context.Context, a *cliproxyauth.Auth, clientHeaders ...http.Header) (apiKey, baseURL string) {
 	if a == nil {
 		return "", ""
 	}
 	if a.Attributes != nil {
 		baseURL = a.Attributes["base_url"]
 	}
-	if codexUseSIWC(a) {
+	if codexUseSIWCForRequest(ctx, a, clientHeaders...) {
 		apiKey = codexSIWCAccessToken(a)
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = defaultOpenAISIWCBaseURL

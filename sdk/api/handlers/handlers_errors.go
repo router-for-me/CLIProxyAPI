@@ -133,6 +133,11 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 				continue
 			}
+			// A locally trusted cooldown deadline outranks the raw upstream
+			// Retry-After; keep the value written above.
+			if coreauth.HasTrustedRetryDeadline(msg.Error) && http.CanonicalHeaderKey(key) == "Retry-After" {
+				continue
+			}
 			c.Writer.Header().Del(key)
 			for _, value := range values {
 				c.Writer.Header().Add(key, value)
@@ -196,17 +201,22 @@ func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorM
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
-	if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
-			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
-					slicesAPIResponseError = append(slicesAPIResponseError, err)
-					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
-				}
-			} else {
-				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
+	if h == nil || err == nil || ctx == nil {
+		return
+	}
+	ginContext, ok := ctx.(*gin.Context)
+	if !ok || ginContext == nil {
+		ginContext, ok = ctx.Value("gin").(*gin.Context)
+	}
+	if ok && ginContext != nil {
+		if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
+			if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
+				slicesAPIResponseError = append(slicesAPIResponseError, err)
+				ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
 			}
+		} else {
+			// Create new response data entry
+			ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
 		}
 	}
 }

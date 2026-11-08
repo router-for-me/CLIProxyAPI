@@ -22,6 +22,12 @@ type SDKConfig struct {
 	// Values <= 0 disable the limit (default).
 	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
 
+	// ResponseCompression controls negotiated compression of downstream HTTP responses.
+	// It is configured under server.response-compression. Config.ServerResponseCompression
+	// mirrors it for JSON and programmatic access; read the effective value via
+	// Config.EffectiveResponseCompression.
+	ResponseCompression ResponseCompressionConfig `yaml:"response-compression" json:"-"`
+
 	// Client configures client-facing compatibility behavior.
 	Client ClientConfig `yaml:"client" json:"client"`
 
@@ -121,7 +127,15 @@ func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
 
 // ClientConfig configures client-facing compatibility behavior.
 type ClientConfig struct {
-	Codex CodexClientConfig `yaml:"codex" json:"codex"`
+	Codex  CodexClientConfig  `yaml:"codex" json:"codex"`
+	Claude ClaudeClientConfig `yaml:"claude" json:"claude"`
+}
+
+// ClaudeClientConfig controls client-facing Claude protocol compatibility.
+type ClaudeClientConfig struct {
+	// ShowCodexCommentary mirrors public Codex progress into visible Claude text.
+	// Default false preserves the existing hidden-commentary behavior.
+	ShowCodexCommentary bool `yaml:"show-codex-commentary" json:"show-codex-commentary"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

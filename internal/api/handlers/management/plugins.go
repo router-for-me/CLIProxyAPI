@@ -25,20 +25,22 @@ type pluginListResponse struct {
 }
 
 type pluginListEntry struct {
-	ID               string                  `json:"id"`
-	Path             string                  `json:"path"`
-	Configured       bool                    `json:"configured"`
-	Registered       bool                    `json:"registered"`
-	Enabled          bool                    `json:"enabled"`
-	EffectiveEnabled bool                    `json:"effective_enabled"`
-	SupportsOAuth    bool                    `json:"supports_oauth"`
-	OAuthProvider    string                  `json:"oauth_provider"`
-	SupportsQuota    bool                    `json:"supports_quota"`
-	QuotaProvider    string                  `json:"quota_provider,omitempty"`
-	Logo             string                  `json:"logo"`
-	ConfigFields     []pluginConfigFieldInfo `json:"config_fields"`
-	Menus            []pluginMenuInfo        `json:"menus"`
-	Metadata         *pluginMetadataInfo     `json:"metadata"`
+	ID                   string                         `json:"id"`
+	Path                 string                         `json:"path"`
+	Configured           bool                           `json:"configured"`
+	Registered           bool                           `json:"registered"`
+	Enabled              bool                           `json:"enabled"`
+	EffectiveEnabled     bool                           `json:"effective_enabled"`
+	SupportsOAuth        bool                           `json:"supports_oauth"`
+	OAuthProvider        string                         `json:"oauth_provider"`
+	OAuthProviders       []string                       `json:"oauth_providers,omitempty"`
+	OAuthProviderEntries []pluginOAuthProviderEntryInfo `json:"oauth_provider_entries,omitempty"`
+	SupportsQuota        bool                           `json:"supports_quota"`
+	QuotaProvider        string                         `json:"quota_provider,omitempty"`
+	Logo                 string                         `json:"logo"`
+	ConfigFields         []pluginConfigFieldInfo        `json:"config_fields"`
+	Menus                []pluginMenuInfo               `json:"menus"`
+	Metadata             *pluginMetadataInfo            `json:"metadata"`
 }
 
 type pluginMetadataInfo struct {
@@ -56,6 +58,12 @@ type pluginConfigFieldInfo struct {
 	Type        string   `json:"type"`
 	EnumValues  []string `json:"enum_values"`
 	Description string   `json:"description"`
+}
+
+type pluginOAuthProviderEntryInfo struct {
+	Identifier string `json:"identifier"`
+	Name       string `json:"name"`
+	Logo       string `json:"logo"`
 }
 
 type pluginMenuInfo struct {
@@ -125,6 +133,8 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
+			entry.OAuthProviders = pluginOAuthProviders(info.OAuthProviders)
+			entry.OAuthProviderEntries = pluginOAuthProviderEntries(info.OAuthProviderEntries)
 			entry.SupportsQuota = info.SupportsQuota
 			entry.QuotaProvider = htmlsanitize.String(info.QuotaProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
@@ -473,6 +483,28 @@ func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo 
 			Default:     htmlsanitize.JSONValue(field.Default),
 			EnumValues:  htmlsanitize.Strings(field.EnumValues),
 			Description: htmlsanitize.String(field.Description),
+		})
+	}
+	return out
+}
+
+func pluginOAuthProviders(providers []string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	return htmlsanitize.Strings(providers)
+}
+
+func pluginOAuthProviderEntries(entries []pluginapi.AuthProviderEntry) []pluginOAuthProviderEntryInfo {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]pluginOAuthProviderEntryInfo, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, pluginOAuthProviderEntryInfo{
+			Identifier: htmlsanitize.String(entry.Identifier),
+			Name:       htmlsanitize.String(entry.Name),
+			Logo:       htmlsanitize.String(entry.Logo),
 		})
 	}
 	return out

@@ -3,7 +3,7 @@ package util
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestSanitizeClaudeFunctionName(t *testing.T) {
@@ -219,7 +219,7 @@ func TestDeduplicateFunctionDeclarations(t *testing.T) {
 		{"name":"lookup","description":"second"}
 	]`)
 	deduped := DeduplicateFunctionDeclarations(raw)
-	declarations := gjson.ParseBytes(deduped).Array()
+	declarations := ojson.ParseBytes(deduped).Array()
 	if len(declarations) != 2 {
 		t.Fatalf("declaration count = %d, want 2: %s", len(declarations), deduped)
 	}
@@ -642,5 +642,162 @@ func TestCleanClaudeToolArguments(t *testing.T) {
 				t.Errorf("CleanClaudeToolArguments(%q, %q) = %q, want %q", tt.rawArgs, tt.toolName, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCleanClaudeToolArguments_ImplicitOpenObjectPreservesArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		schema     string
+		want       string
+		wantNoArgs bool
+	}{
+		{"additionalProperties_omitted", `{"type":"object","properties":{}}`, `{"user":"v"}`, false},
+		{"additionalProperties_omitted_no_properties", `{"type":"object"}`, `{"user":"v"}`, false},
+		{"additionalProperties_true", `{"type":"object","properties":{},"additionalProperties":true}`, `{"user":"v"}`, false},
+		{"additionalProperties_false", `{"type":"object","properties":{},"additionalProperties":false}`, `{}`, true},
+		{"additionalProperties_false_no_properties", `{"type":"object","additionalProperties":false}`, `{}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := []byte(`{"tools":[{"name":"echo","input_schema":` + tc.schema + `}]}`)
+			cleanedSchema := CleanJSONSchemaForGeminiJSONSchema(tc.schema)
+			translated := []byte(`{"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":` + cleanedSchema + `}]}]}`)
+			args := `{"user":"v"}`
+			direct := CleanClaudeToolArguments(args, "echo", original)
+			withTranslated := CleanClaudeToolArgumentsWithTranslated(args, "echo", original, translated)
+			noArgs := ClaudeToolIsParameterless("echo", original)
+			if direct != tc.want || withTranslated != tc.want || noArgs != tc.wantNoArgs {
+				t.Errorf("want direct/translated=%s parameterless=%v; got direct=%s translated=%s parameterless=%v",
+					tc.want, tc.wantNoArgs, direct, withTranslated, noArgs)
+			}
+		})
+	}
+
+	t.Run("implicit_open_strips_injected_placeholder_but_keeps_user_arg", func(t *testing.T) {
+		schema := `{"type":"object","properties":{}}`
+		original := []byte(`{"tools":[{"name":"echo","input_schema":` + schema + `}]}`)
+		antigravitySchema := CleanJSONSchemaForAntigravity(schema)
+		translated := []byte(`{"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":` + antigravitySchema + `}]}]}`)
+		args := `{"user":"v","reason":"Brief explanation"}`
+		if got := CleanClaudeToolArguments(args, "echo", original); got != `{"user":"v"}` {
+			t.Errorf("CleanClaudeToolArguments = %s, want {\"user\":\"v\"}", got)
+		}
+		if got := CleanClaudeToolArgumentsWithTranslated(args, "echo", original, translated); got != `{"user":"v"}` {
+			t.Errorf("CleanClaudeToolArgumentsWithTranslated = %s, want {\"user\":\"v\"}", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name       string
+		schema     string
+		args       string
+		want       string
+		wantNoArgs bool
+	}{
+		{
+			"nested_implicit_open_preserves_user_arg",
+			`{"type":"object","properties":{"opts":{"type":"object","properties":{}}}}`,
+			`{"opts":{"user":"v"}}`,
+			`{"opts":{"user":"v"}}`,
+			false,
+		},
+		{
+			"nested_explicit_closed_erases_user_arg",
+			`{"type":"object","properties":{"opts":{"type":"object","properties":{},"additionalProperties":false}}}`,
+			`{"opts":{"user":"v"}}`,
+			`{"opts":{}}`,
+			false,
+		},
+		{
+			"array_item_implicit_open_preserves_user_arg",
+			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{}}}}}`,
+			`{"items":[{"user":"v"}]}`,
+			`{"items":[{"user":"v"}]}`,
+			false,
+		},
+		{
+			"array_item_explicit_closed_erases_user_arg",
+			`{"type":"object","properties":{"items":{"type":"array","items":{"type":"object","properties":{},"additionalProperties":false}}}}`,
+			`{"items":[{"user":"v"}]}`,
+			`{"items":[{}]}`,
+			false,
+		},
+		{
+			"allOf_implicit_open_preserves_user_arg",
+			`{"type":"object","allOf":[{"type":"object","properties":{}}]}`,
+			`{"user":"v"}`,
+			`{"user":"v"}`,
+			false,
+		},
+		{
+			"allOf_explicit_closed_erases_user_arg",
+			`{"type":"object","allOf":[{"type":"object","properties":{},"additionalProperties":false}]}`,
+			`{"user":"v"}`,
+			`{}`,
+			true,
+		},
+		{
+			"local_ref_implicit_open_preserves_user_arg",
+			`{"$ref":"#/$defs/open","$defs":{"open":{"type":"object","properties":{}}}}`,
+			`{"user":"v"}`,
+			`{"user":"v"}`,
+			false,
+		},
+		{
+			"local_ref_explicit_closed_erases_user_arg",
+			`{"$ref":"#/$defs/closed","$defs":{"closed":{"type":"object","properties":{},"additionalProperties":false}}}`,
+			`{"user":"v"}`,
+			`{}`,
+			true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := []byte(`{"tools":[{"name":"echo","input_schema":` + tc.schema + `}]}`)
+			cleanedSchema := CleanJSONSchemaForGeminiJSONSchema(tc.schema)
+			translated := []byte(`{"tools":[{"functionDeclarations":[{"name":"echo","parametersJsonSchema":` + cleanedSchema + `}]}]}`)
+			direct := CleanClaudeToolArguments(tc.args, "echo", original)
+			withTranslated := CleanClaudeToolArgumentsWithTranslated(tc.args, "echo", original, translated)
+			noArgs := ClaudeToolIsParameterless("echo", original)
+			if direct != tc.want || withTranslated != tc.want || noArgs != tc.wantNoArgs {
+				t.Errorf("want direct/translated=%s parameterless=%v; got direct=%s translated=%s parameterless=%v",
+					tc.want, tc.wantNoArgs, direct, withTranslated, noArgs)
+			}
+		})
+	}
+}
+
+func TestToolNameMapsDoNotAliasInputBytes(t *testing.T) {
+	raw := []byte(`{"tools":[{"name":"mcp__alpha__run/tool"},{"type":"namespace","name":"ns","tools":[{"type":"custom","name":"patch/tool"}]}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"Inline/Tool"}}}]}]}`)
+	claudeMap := ToolNameMapFromClaudeRequest(raw)
+	unambiguousMap := UnambiguousToolNameMapFromClaudeRequest(raw)
+	sanitizedToolMap := SanitizedToolNameMap(raw)
+	sanitizedFuncMap := SanitizedFunctionNameMap(raw)
+	disambiguatedMap := DisambiguatedToolNameMap(raw)
+	reverseIdentityMap := ResponsesToolReverseIdentityMap(raw)
+
+	for i := range raw {
+		raw[i] = 'X'
+	}
+
+	if got := claudeMap[CanonicalToolName("mcp__alpha__run/tool")]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("ToolNameMapFromClaudeRequest aliased input buffer: got %q", got)
+	}
+	if got := claudeMap[CanonicalToolName("Inline/Tool")]; got != "Inline/Tool" {
+		t.Fatalf("ToolNameMapFromClaudeRequest inline tool_addition aliased input buffer: got %q", got)
+	}
+	if got := unambiguousMap[CanonicalToolName("mcp__alpha__run/tool")]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("UnambiguousToolNameMapFromClaudeRequest aliased input buffer: got %q", got)
+	}
+	if got := sanitizedToolMap["mcp__alpha__run_tool"]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("SanitizedToolNameMap aliased input buffer: got %q", got)
+	}
+	if got := sanitizedFuncMap["mcp__alpha__run/tool"]; got != "mcp__alpha__run_tool" {
+		t.Fatalf("SanitizedFunctionNameMap aliased input buffer: got %q", got)
+	}
+	if got := disambiguatedMap["mcp__alpha__run_tool"]; got != "mcp__alpha__run/tool" {
+		t.Fatalf("DisambiguatedToolNameMap aliased input buffer: got %q", got)
+	}
+	if got := reverseIdentityMap["ns__patch_tool"]; got.Name != "patch/tool" || got.Namespace != "ns" {
+		t.Fatalf("ResponsesToolReverseIdentityMap aliased input buffer: got %+v", got)
 	}
 }

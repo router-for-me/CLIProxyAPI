@@ -8,9 +8,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 // SessionInfo encapsulates incoming request details needed for session affinity and upstream reporting.
@@ -36,19 +36,19 @@ type SessionTreeInfo = SessionInfo
 // sessionObject indexes top-level fields once so missing session keys do not
 // rescan large message arrays for every candidate path.
 type sessionObject struct {
-	result     gjson.Result
-	fields     map[string]gjson.Result
+	result     ojson.Result
+	fields     map[string]ojson.Result
 	duplicates map[string]bool
 }
 
-func newSessionObject(result gjson.Result) sessionObject {
+func newSessionObject(result ojson.Result) sessionObject {
 	object := sessionObject{result: result}
-	if result.Type != gjson.JSON {
+	if result.Type != ojson.JSON {
 		return object
 	}
-	result.ForEach(func(key, value gjson.Result) bool {
+	result.ForEach(func(key, value ojson.Result) bool {
 		if object.fields == nil {
-			object.fields = make(map[string]gjson.Result)
+			object.fields = make(map[string]ojson.Result)
 		}
 		if _, exists := object.fields[key.Str]; exists {
 			if object.duplicates == nil {
@@ -67,7 +67,7 @@ func (object sessionObject) Exists() bool {
 	return object.result.Exists()
 }
 
-func (object sessionObject) Get(path string) gjson.Result {
+func (object sessionObject) Get(path string) ojson.Result {
 	key, remaining, nested := strings.Cut(path, ".")
 	if nested && object.duplicates[key] {
 		return object.result.Get(path)
@@ -298,9 +298,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			break
 		}
 	}
-	var codexTurnMetaJSON gjson.Result
+	var codexTurnMetaJSON ojson.Result
 	if codexTurnMeta != "" {
-		codexTurnMetaJSON = gjson.Parse(codexTurnMeta)
+		codexTurnMetaJSON = ojson.Parse(codexTurnMeta)
 	}
 
 	if sid == "" && codexTurnMetaJSON.Exists() {
@@ -788,7 +788,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 		if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
 			conversationID = "conv:" + sid
-		} else if conversation.Type == gjson.String {
+		} else if conversation.Type == ojson.String {
 			if sid := normalizedSessionCandidate(conversation.String()); sid != "" {
 				conversationID = "conv:" + sid
 			}
@@ -947,16 +947,21 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	if info.SessionID == "" {
 		return SessionInfo{}, false
 	}
-	info.SessionID = BoundSessionIdentity(info.SessionID)
+	info.SessionID = strings.Clone(BoundSessionIdentity(info.SessionID))
 	if info.ParentSessionID != "" {
-		info.ParentSessionID = BoundSessionIdentity(info.ParentSessionID)
+		info.ParentSessionID = strings.Clone(BoundSessionIdentity(info.ParentSessionID))
 	}
 	if info.AgentName == "" {
 		info.AgentName = "main"
+	} else {
+		info.AgentName = strings.Clone(info.AgentName)
 	}
 	if info.ClientType == "" {
 		info.ClientType = "generic"
+	} else {
+		info.ClientType = strings.Clone(info.ClientType)
 	}
+	info.NodeKind = strings.Clone(info.NodeKind)
 	// Self-referential loop protection
 	if info.ParentSessionID == info.SessionID {
 		info.ParentSessionID = ""

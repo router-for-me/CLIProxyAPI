@@ -86,8 +86,8 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	if got, _ := modalities[1].(string); got != "image" {
 		t.Fatalf("input_modalities[1] = %q, want image", got)
 	}
-	if got, ok := visionEntry["supports_image_detail_original"].(bool); !ok || !got {
-		t.Fatalf("supports_image_detail_original = %#v, want true", visionEntry["supports_image_detail_original"])
+	if got, ok := visionEntry["supports_image_detail_original"].(bool); !ok || got {
+		t.Fatalf("supports_image_detail_original = %#v, want false for non-Codex model", visionEntry["supports_image_detail_original"])
 	}
 
 	if textOnlyEntry == nil {
@@ -117,8 +117,8 @@ func TestCodexClientModelsResponse_InputModalitiesFromRegistry(t *testing.T) {
 	if got, _ := mixedModalities[1].(string); got != "image" {
 		t.Fatalf("mixed input_modalities[1] = %q, want image", got)
 	}
-	if got, ok := mixedEntry["supports_image_detail_original"].(bool); !ok || !got {
-		t.Fatalf("mixed supports_image_detail_original = %#v, want true", mixedEntry["supports_image_detail_original"])
+	if got, ok := mixedEntry["supports_image_detail_original"].(bool); !ok || got {
+		t.Fatalf("mixed supports_image_detail_original = %#v, want false for non-Codex model", mixedEntry["supports_image_detail_original"])
 	}
 
 	if imageEntry == nil {
@@ -476,7 +476,14 @@ func TestApplyCodexClientModelMetadataPreservesMultiAgentVersionWhenDisabled(t *
 
 func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) {
 	const wantOverride = 1048576
-	const wantDefault = 272000
+	// Non-template models inherit context windows from the catalog's
+	// default template (currently the gpt-5.5 entry).
+	_, defaultTemplate, errLoadTemplates := loadCodexClientModelTemplates()
+	if errLoadTemplates != nil || defaultTemplate == nil {
+		t.Fatalf("load codex client model templates: %v", errLoadTemplates)
+	}
+	wantDefaultContext := intModelValue(defaultTemplate, "context_window")
+	wantDefaultMaxContext := intModelValue(defaultTemplate, "max_context_window")
 
 	resp := BuildResponse([]map[string]any{
 		{"id": "deepseek-v4-flash", "max_context_length": wantOverride},
@@ -494,22 +501,23 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 	}
 
 	for _, testCase := range []struct {
-		slug string
-		want int
+		slug           string
+		wantContext    int
+		wantMaxContext int
 	}{
-		{slug: "deepseek-v4-flash", want: wantOverride},
-		{slug: "deepseek-v4-pro", want: wantDefault},
-		{slug: "gpt-5.5", want: wantOverride},
+		{slug: "deepseek-v4-flash", wantContext: wantOverride, wantMaxContext: wantOverride},
+		{slug: "deepseek-v4-pro", wantContext: wantDefaultContext, wantMaxContext: wantDefaultMaxContext},
+		{slug: "gpt-5.5", wantContext: wantOverride, wantMaxContext: wantOverride},
 	} {
 		entry := bySlug[testCase.slug]
 		if entry == nil {
 			t.Fatalf("missing model %q", testCase.slug)
 		}
-		if got := intModelValue(entry, "context_window"); got != testCase.want {
-			t.Errorf("%s context_window = %d, want %d", testCase.slug, got, testCase.want)
+		if got := intModelValue(entry, "context_window"); got != testCase.wantContext {
+			t.Errorf("%s context_window = %d, want %d", testCase.slug, got, testCase.wantContext)
 		}
-		if got := intModelValue(entry, "max_context_window"); got != testCase.want {
-			t.Errorf("%s max_context_window = %d, want %d", testCase.slug, got, testCase.want)
+		if got := intModelValue(entry, "max_context_window"); got != testCase.wantMaxContext {
+			t.Errorf("%s max_context_window = %d, want %d", testCase.slug, got, testCase.wantMaxContext)
 		}
 	}
 }
@@ -931,8 +939,14 @@ func TestCodexClientModelsResponse_UnrelatedCustomProviderRetainsFallback(t *tes
 	if got := stringModelValue(entry, "slug"); got != "my-unrelated-custom-model" {
 		t.Errorf("slug = %q, want my-unrelated-custom-model", got)
 	}
-	if got := stringModelValue(entry, "comp_hash"); got != "2911" {
-		t.Errorf("comp_hash = %q, want 2911 (from generic gpt-5.5 fallback)", got)
+	// The fallback clones the catalog's default template (currently the
+	// gpt-5.5 entry); comp_hash is inherited from it verbatim.
+	_, defaultTemplate, errLoadTemplates := loadCodexClientModelTemplates()
+	if errLoadTemplates != nil || defaultTemplate == nil {
+		t.Fatalf("load codex client model templates: %v", errLoadTemplates)
+	}
+	if got, want := stringModelValue(entry, "comp_hash"), stringModelValue(defaultTemplate, "comp_hash"); got != want {
+		t.Errorf("comp_hash = %q, want %q (from generic fallback template)", got, want)
 	}
 	if got, _ := entry["supports_search_tool"].(bool); got {
 		t.Errorf("supports_search_tool = %v, want false for non-template fallback", got)
@@ -942,8 +956,8 @@ func TestCodexClientModelsResponse_UnrelatedCustomProviderRetainsFallback(t *tes
 	if !okMods || len(mods) != 2 {
 		t.Fatalf("unrelated model input_modalities = %#v, want generic [text image]", entry["input_modalities"])
 	}
-	if got, _ := entry["supports_image_detail_original"].(bool); !got {
-		t.Errorf("supports_image_detail_original = %v, want true for generic fallback", got)
+	if got, ok := entry["supports_image_detail_original"].(bool); !ok || got {
+		t.Errorf("supports_image_detail_original = %#v, want false for generic fallback", entry["supports_image_detail_original"])
 	}
 }
 
@@ -1556,7 +1570,7 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 			"id":           "devin/gpt-6-astra",
 			"display_name": "GPT-6 Astra",
 		},
-		// 2. Template Devin model without display_name (inherits template "GPT-5.5")
+		// 2. Template Devin model without display_name (inherits the template's display_name)
 		{
 			"id": "devin/gpt-5.5",
 		},
@@ -1636,15 +1650,21 @@ func TestCodexClientModelsResponse_DevinDisplayName(t *testing.T) {
 		bySlug[slug] = m
 	}
 
+	templates, _, errLoadTemplates := loadCodexClientModelTemplates()
+	if errLoadTemplates != nil || templates["gpt-5.5"] == nil {
+		t.Fatalf("load codex client model templates: %v", errLoadTemplates)
+	}
+	templateDisplayName := stringModelValue(templates["gpt-5.5"], "display_name")
+
 	testCases := []struct {
 		slug            string
 		wantDisplayName string
 	}{
 		{"devin/gpt-6-astra", "GPT-6 Astra (Devin)"},
-		{"devin/gpt-5.5", "GPT-5.5 (Devin)"},
+		{"devin/gpt-5.5", templateDisplayName + " (Devin)"},
 		{"devin/swe-2", "SWE-2 (Devin)"},
 		{"gpt-6-astra", "GPT 6.0 Astra"},
-		{"gpt-5.5", "GPT-5.5"},
+		{"gpt-5.5", templateDisplayName},
 		{"devin/swe-1-7", "SWE-1.7 (Devin)"},
 		{"custom-devin-by-type", "Custom Model (Devin)"},
 		{"custom-devin-by-owned", "Cognition Model (Devin)"},
@@ -1851,6 +1871,115 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 		}
 		if got, ok := entry["supports_reasoning_effort_updates"].(bool); !ok || got {
 			t.Errorf("%s supports_reasoning_effort_updates = %#v, want false", slug, entry["supports_reasoning_effort_updates"])
+		}
+	}
+}
+
+func TestCodexClientModelsResponse_DoesNotAdvertiseImageDetailOriginalForClaudeOrNonCodexRoutes_Issue7209(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	claudeClientID := "codex-claude-image-detail-original-test"
+	codexClientID := "codex-native-image-detail-original-test"
+	claudeAlias := "claude-backed-astra-issue7209"
+	mixedAlias := "mixed-claude-codex-astra-issue7209"
+
+	modelRegistry.RegisterClient(claudeClientID, "claude", []*registry.ModelInfo{
+		{
+			ID:                       "claude-opus-5-5",
+			DisplayName:              "Claude Opus 5.5",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+		{
+			ID:                       "claude-sonnet-5-5",
+			DisplayName:              "Claude Sonnet 5.5",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+		{
+			ID:                       "claude-haiku-5-5",
+			DisplayName:              "Claude Haiku 5.5",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+		{
+			ID:                       "claude-fable-5-1",
+			DisplayName:              "Claude Fable 5.1",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+		{
+			ID:                       claudeAlias,
+			MetadataModelID:          "gpt-6-astra",
+			DisplayName:              "Claude Backed Astra",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+		{
+			ID:                       mixedAlias,
+			MetadataModelID:          "gpt-6-astra",
+			DisplayName:              "Mixed Claude Codex Astra",
+			SupportedInputModalities: []string{"text", "image"},
+		},
+	})
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{
+			ID:              "gpt-6-astra",
+			MetadataModelID: "gpt-6-astra",
+			DisplayName:     "GPT 6.0 Astra",
+		},
+		{
+			ID:              mixedAlias,
+			MetadataModelID: "gpt-6-astra",
+			DisplayName:     "Mixed Claude Codex Astra",
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(claudeClientID)
+		modelRegistry.UnregisterClient(codexClientID)
+	})
+
+	available := []map[string]any{
+		{"id": "gpt-6-astra"},
+		{"id": "claude-opus-5-5"},
+		{"id": "claude-sonnet-5-5"},
+		{"id": "claude-haiku-5-5"},
+		{"id": "claude-fable-5-1"},
+		{"id": claudeAlias},
+		{"id": mixedAlias},
+	}
+
+	resp := BuildResponseForClient(available, modelRegistry.GetModelProviders, false, "0.166.0")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != len(available) {
+		t.Fatalf("models = %#v, want %d entries", resp["models"], len(available))
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, entry := range models {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+
+	native := bySlug["gpt-6-astra"]
+	if native == nil {
+		t.Fatal("missing gpt-6-astra entry")
+	}
+	if got, ok := native["supports_image_detail_original"].(bool); !ok || !got {
+		t.Errorf("gpt-6-astra supports_image_detail_original = %#v, want true", native["supports_image_detail_original"])
+	}
+
+	for _, slug := range []string{
+		"claude-opus-5-5",
+		"claude-sonnet-5-5",
+		"claude-haiku-5-5",
+		"claude-fable-5-1",
+		claudeAlias,
+		mixedAlias,
+	} {
+		entry := bySlug[slug]
+		if entry == nil {
+			t.Fatalf("missing %s entry", slug)
+		}
+		modalities, okMods := entry["input_modalities"].([]any)
+		if !okMods || !hasImageModality(modalities) {
+			t.Errorf("%s input_modalities = %#v, want image modality preserved", slug, entry["input_modalities"])
+		}
+		if got, ok := entry["supports_image_detail_original"].(bool); !ok || got {
+			t.Errorf("%s supports_image_detail_original = %#v, want false", slug, entry["supports_image_detail_original"])
 		}
 	}
 }

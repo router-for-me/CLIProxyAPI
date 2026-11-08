@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // ConvertCodexResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
@@ -49,11 +49,11 @@ func responsesBridge(param *any) *translatorcommon.ApplyPatchResponsesBridge {
 }
 
 func setResponsesModel(rawJSON []byte, modelName string, originalRequestRawJSON, requestRawJSON []byte) []byte {
-	eventType := gjson.GetBytes(rawJSON, "type").String()
+	eventType := ojson.GetBytesNoCopy(rawJSON, "type").String()
 	if eventType != "response.created" && eventType != "response.in_progress" {
 		return rawJSON
 	}
-	if gjson.GetBytes(rawJSON, "response.model").Exists() {
+	if ojson.GetBytesNoCopy(rawJSON, "response.model").Exists() {
 		return rawJSON
 	}
 
@@ -65,7 +65,7 @@ func setResponsesModel(rawJSON []byte, modelName string, originalRequestRawJSON,
 		return rawJSON
 	}
 
-	updated, errSet := sjson.SetBytes(rawJSON, "response.model", requestModelName)
+	updated, errSet := ojson.SetBytes(rawJSON, "response.model", requestModelName)
 	if errSet != nil {
 		return rawJSON
 	}
@@ -84,7 +84,7 @@ func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string,
 			return nil
 		}
 	}
-	rootResult := gjson.ParseBytes(converted)
+	rootResult := util.ParseGJSONBytesNoCopy(converted)
 	// Verify this is a terminal response event.
 	responseType := rootResult.Get("type").String()
 	if responseType == "" && rootResult.Get("output").IsArray() {

@@ -141,15 +141,15 @@ func TestPreferredDisplayAddressesSkipsBareLinkLocal(t *testing.T) {
 	if primary != "gateway.local" {
 		t.Fatalf("primary = %q, want hostname", primary)
 	}
-	if len(all) != 2 || all[0] != "gateway.local" || all[1] != "fe80::1" {
+	if len(all) != 1 || all[0] != "gateway.local" {
 		t.Fatalf("addresses = %v", all)
 	}
 	primary, all = preferredDisplayAddresses(discovery.DiscoveredService{
 		Host: "\x1b[31mevil.local.",
 		IPv6: []net.IP{net.ParseIP("fe80::1")},
 	})
-	if primary != "fe80::1" {
-		t.Fatalf("unsafe hostname primary = %q, want link-local fallback", primary)
+	if primary != "" {
+		t.Fatalf("unsafe hostname primary = %q, want no unscoped fallback", primary)
 	}
 	if strings.Contains(primary, "\x1b") || strings.Contains(strings.Join(all, ","), "\x1b") || strings.Contains(strings.Join(all, ","), "evil") {
 		t.Fatalf("unsanitized hostname leaked: %q %v", primary, all)

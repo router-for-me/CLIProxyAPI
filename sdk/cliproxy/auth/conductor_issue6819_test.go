@@ -607,3 +607,93 @@ func TestIssue6819_ExecuteRetry401WithConcurrentOuterRefreshAndSameTokenRebind(t
 		t.Fatalf("CodexSIWCStatus after re-binding new token C = %q, want %q", got, SIWCStatusValid)
 	}
 }
+
+type codexClientOuter401Executor struct {
+	issue6819OuterOnlyRefreshExecutor
+}
+
+func (e *codexClientOuter401Executor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if authOuterAccessToken(auth) == "outer-token-2" {
+		return cliproxyexecutor.Response{Payload: []byte(`{"id":"ok"}`)}, nil
+	}
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusUnauthorized, Code: "unauthorized", Message: "401 unauthorized"}
+}
+
+func TestCodexClient401OnSIWCAuthRejectsAndRefreshesOuterTokenOnly(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	auth := &Auth{
+		ID:       "codex-client-outer-401.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  "outer-token-1",
+			"refresh_token": "outer-refresh-1",
+			"account_id":    "acct-1",
+			"expired":       now.Add(2 * time.Hour).Format(time.RFC3339),
+			"use_siwc":      true,
+			"siwc": map[string]any{
+				"access_token":  "siwc-valid-token",
+				"refresh_token": "siwc-refresh-1",
+				"client_id":     "oaiapp_1",
+				"expires_at":    now.Add(30 * time.Minute).Format(time.RFC3339),
+				"expired":       now.Add(27 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	exec := &codexClientOuter401Executor{
+		issue6819OuterOnlyRefreshExecutor: issue6819OuterOnlyRefreshExecutor{
+			id:          "codex",
+			nextOuter:   "outer-token-2",
+			refreshSIWC: false,
+		},
+	}
+	m.RegisterExecutor(exec)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errReg := m.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register error: %v", errReg)
+	}
+
+	resp, errExec := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5.4"}, cliproxyexecutor.Options{
+		Headers: http.Header{"User-Agent": []string{"codex-tui/0.154.0"}},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute with Codex client after outer 401 refresh error: %v", errExec)
+	}
+	if string(resp.Payload) != `{"id":"ok"}` {
+		t.Fatalf("Execute payload = %s, want {\"id\":\"ok\"}", resp.Payload)
+	}
+	after, _ := m.GetByID(auth.ID)
+	if got := after.CodexSIWCStatus(now); got != SIWCStatusValid {
+		t.Fatalf("CodexSIWCStatus after Codex client outer 401 = %q, want %q", got, SIWCStatusValid)
+	}
+	if after.RejectedSIWCAccessToken != "" {
+		t.Fatalf("RejectedSIWCAccessToken = %q, want empty", after.RejectedSIWCAccessToken)
+	}
+
+	// Simulate SIWC token rotation bumping CredentialVersion while outer token remains "outer-token-2".
+	// A result from a Codex client whose User-Agent was only in gin.Context (not Result.Options.Headers)
+	// and which used "outer-token-2" at the previous CredentialVersion must NOT be treated as stale.
+	prevVersion := after.CredentialVersion
+	siwcRotated := after.Clone()
+	siwcRotated.Metadata["siwc"].(map[string]any)["access_token"] = "siwc-rotated-token-v2"
+	if _, errUpd := m.Update(context.Background(), siwcRotated); errUpd != nil {
+		t.Fatalf("Update siwcRotated: %v", errUpd)
+	}
+	currentAfterSIWCRotate, _ := m.GetByID(auth.ID)
+	if isStaleExecutionResult(Result{
+		AuthID:            auth.ID,
+		Provider:          "codex",
+		Model:             "gpt-5.4",
+		Success:           false,
+		AccessToken:       "outer-token-2",
+		CredentialVersion: prevVersion,
+		RegistrationEpoch: currentAfterSIWCRotate.RegistrationEpoch,
+	}, currentAfterSIWCRotate) {
+		t.Fatal("expected Codex client result with current outer token not to be treated as stale when only SIWC token rotated")
+	}
+}

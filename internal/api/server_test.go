@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -43,7 +44,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -2159,6 +2159,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -2275,6 +2278,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		"gpt-image-2.5-flare":            false,
 		"gpt-image-2.5-sunburst":         false,
 		"gpt-image-2.5":                  false,
+		"gpt-image-2.6-flare":            false,
+		"gpt-image-2.6-sunburst":         false,
+		"gpt-image-2.6":                  false,
 		"grok-imagine-image":             false,
 		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
@@ -2811,6 +2817,99 @@ func TestDecodeHomeModelsKeepsTokenMetadata(t *testing.T) {
 	}
 	if got, ok := formatted["thinking"].(*registry.ThinkingSupport); !ok || !reflect.DeepEqual(got.Levels, []string{"low", "medium", "high"}) {
 		t.Fatalf("formatted Gemini thinking metadata = %#v, want low/medium/high", formatted["thinking"])
+	}
+}
+
+func TestHomeGeminiModelsIncludeTokenLimits(t *testing.T) {
+	withLimits := formatHomeGeminiModel(homeModelEntry{
+		id:                  "gemini-3.8-flash",
+		displayName:         "Gemini 3.8 Flash",
+		contextLength:       1048576,
+		maxCompletionTokens: 65536,
+	})
+	if got := withLimits["name"]; got != "models/gemini-3.8-flash" {
+		t.Fatalf("name = %v, want models/gemini-3.8-flash", got)
+	}
+	if got := withLimits["displayName"]; got != "Gemini 3.8 Flash" {
+		t.Fatalf("displayName = %v, want Gemini 3.8 Flash", got)
+	}
+	if got := withLimits["inputTokenLimit"]; got != 1048576 {
+		t.Fatalf("inputTokenLimit = %v, want 1048576", got)
+	}
+	if got := withLimits["outputTokenLimit"]; got != 65536 {
+		t.Fatalf("outputTokenLimit = %v, want 65536", got)
+	}
+
+	withoutLimits := formatHomeGeminiModel(homeModelEntry{
+		id: "gemini-no-limits",
+	})
+	if _, ok := withoutLimits["inputTokenLimit"]; ok {
+		t.Fatalf("expected inputTokenLimit to be omitted when unknown, got %v", withoutLimits)
+	}
+	if _, ok := withoutLimits["outputTokenLimit"]; ok {
+		t.Fatalf("expected outputTokenLimit to be omitted when unknown, got %v", withoutLimits)
+	}
+
+	server := newTestServer(t)
+	server.cfg.Home.Enabled = true
+	engine := gin.New()
+	engine.GET("/v1beta/models", server.geminiModelsHandler(nil))
+	engine.GET("/v1beta/models/*action", server.geminiGetHandler(nil))
+
+	client := newHomeCatalogClient(t, `{
+		"a-custom": [
+			{
+				"id": "gemini-3.8-flash"
+			}
+		],
+		"gemini": [
+			{
+				"id": "gemini-3.8-flash",
+				"display_name": "Gemini 3.8 Flash",
+				"context_length": 1048576,
+				"max_completion_tokens": 65536
+			}
+		]
+	}`)
+	previousHome := home.Current()
+	home.SetCurrent(client)
+	t.Cleanup(func() { home.SetCurrent(previousHome) })
+
+	listRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(listRecorder, httptest.NewRequest(http.MethodGet, "/v1beta/models", nil))
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1beta/models status = %d; body=%s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listPayload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(listRecorder.Body.Bytes(), &listPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal /v1beta/models response: %v", errUnmarshal)
+	}
+	if len(listPayload.Models) != 1 {
+		t.Fatalf("models len = %d, want 1; body=%s", len(listPayload.Models), listRecorder.Body.String())
+	}
+	if got := homeModelInt64Value(listPayload.Models[0], "inputTokenLimit"); got != 1048576 {
+		t.Fatalf("list inputTokenLimit = %d, want 1048576; model=%v", got, listPayload.Models[0])
+	}
+	if got := homeModelInt64Value(listPayload.Models[0], "outputTokenLimit"); got != 65536 {
+		t.Fatalf("list outputTokenLimit = %d, want 65536; model=%v", got, listPayload.Models[0])
+	}
+
+	getRecorder := httptest.NewRecorder()
+	engine.ServeHTTP(getRecorder, httptest.NewRequest(http.MethodGet, "/v1beta/models/gemini-3.8-flash", nil))
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1beta/models/gemini-3.8-flash status = %d; body=%s", getRecorder.Code, getRecorder.Body.String())
+	}
+	var getPayload map[string]any
+	if errUnmarshal := json.Unmarshal(getRecorder.Body.Bytes(), &getPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal /v1beta/models/gemini-3.8-flash response: %v", errUnmarshal)
+	}
+	if got := homeModelInt64Value(getPayload, "inputTokenLimit"); got != 1048576 {
+		t.Fatalf("get inputTokenLimit = %d, want 1048576; model=%v", got, getPayload)
+	}
+	if got := homeModelInt64Value(getPayload, "outputTokenLimit"); got != 65536 {
+		t.Fatalf("get outputTokenLimit = %d, want 65536; model=%v", got, getPayload)
 	}
 }
 
@@ -3847,7 +3946,7 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errRead1 != nil {
 		t.Fatalf("read turn 1: %v", errRead1)
 	}
-	if got := gjson.GetBytes(msg1, "type").String(); got != "response.completed" {
+	if got := ojson.GetBytesNoCopy(msg1, "type").String(); got != "response.completed" {
 		t.Fatalf("turn 1 event type = %q, want response.completed (%s)", got, msg1)
 	}
 
@@ -3879,10 +3978,10 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errRead2 != nil {
 		t.Fatalf("read turn 2: %v", errRead2)
 	}
-	if got := gjson.GetBytes(msg2, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(msg2, "type").String(); got != "error" {
 		t.Fatalf("turn 2 event type = %q, want error (%s)", got, msg2)
 	}
-	if got := int(gjson.GetBytes(msg2, "status").Int()); got != http.StatusUnauthorized {
+	if got := int(ojson.GetBytesNoCopy(msg2, "status").Int()); got != http.StatusUnauthorized {
 		t.Fatalf("turn 2 error status = %d, want %d (%s)", got, http.StatusUnauthorized, msg2)
 	}
 	if gotCalls := wsExec.calls.Load(); gotCalls != 1 {

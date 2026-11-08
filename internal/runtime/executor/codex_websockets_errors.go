@@ -7,11 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type statusErrWithHeaders struct {
@@ -34,12 +33,12 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	if len(payload) == 0 {
 		return nil, false
 	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "error" {
+	if strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) != "error" {
 		return nil, false
 	}
-	status := int(gjson.GetBytes(payload, "status").Int())
+	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
 	if status == 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
+		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
 	}
 	if status <= 0 {
 		return nil, false
@@ -48,16 +47,24 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	headers := parseCodexWebsocketErrorHeaders(payload)
 	isUsageLimit := isCodexUsageLimitError(out)
+	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
 	statusError := statusErr{
-		code:             status,
-		msg:              string(out),
-		credentialScoped: isUsageLimit && !modelLevelCooling,
+		code:               status,
+		msg:                string(out),
+		credentialScoped:   isUsageLimit && !modelLevelCooling,
+		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
 	}
+	// Hint precedence: the quota body reset wins, then the connection-limit
+	// immediate-retry contract, then the generic Retry-After header.
 	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
+	} else if status == http.StatusTooManyRequests {
+		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
+			statusError.retryAfter = retryAfter
+		}
 	}
 	return statusErrWithHeaders{
 		statusErr: statusError,
@@ -66,9 +73,9 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 }
 
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {
-	status := int(gjson.GetBytes(payload, "status").Int())
+	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
 	if status == 0 {
-		status = int(gjson.GetBytes(payload, "status_code").Int())
+		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
 	}
 	if status <= 0 {
 		return nil
@@ -77,25 +84,25 @@ func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexR
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
-	out := []byte(`{}`)
-	out, _ = sjson.SetBytes(out, "status", status)
+	doc := ojson.NewDoc([]byte(`{}`))
+	_ = doc.Set("status", status)
 
-	if bodyNode := gjson.GetBytes(payload, "body"); bodyNode.Exists() {
-		out, _ = sjson.SetRawBytes(out, "body", []byte(bodyNode.Raw))
+	if bodyNode := ojson.GetBytesNoCopy(payload, "body"); bodyNode.Exists() {
+		_ = doc.SetRawBytes("body", []byte(bodyNode.Raw))
 		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() {
-			out, _ = sjson.SetRawBytes(out, "error", []byte(bodyErrorNode.Raw))
-			return out
+			_ = doc.SetRawBytes("error", []byte(bodyErrorNode.Raw))
+			return doc.Bytes()
 		}
 	}
 
-	if errNode := gjson.GetBytes(payload, "error"); errNode.Exists() {
-		out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
-		return out
+	if errNode := ojson.GetBytesNoCopy(payload, "error"); errNode.Exists() {
+		_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+		return doc.Bytes()
 	}
 
-	out, _ = sjson.SetBytes(out, "error.type", "server_error")
-	out, _ = sjson.SetBytes(out, "error.message", http.StatusText(status))
-	return out
+	_ = doc.Set("error.type", "server_error")
+	_ = doc.Set("error.message", http.StatusText(status))
+	return doc.Bytes()
 }
 
 func isCodexWebsocketConnectionLimitError(payload []byte) bool {
@@ -103,7 +110,7 @@ func isCodexWebsocketConnectionLimitError(payload []byte) bool {
 		return false
 	}
 	for _, path := range []string{"error.code", "error.type", "body.error.code", "body.error.type", "code", "error"} {
-		if strings.TrimSpace(gjson.GetBytes(payload, path).String()) == "websocket_connection_limit_reached" {
+		if strings.TrimSpace(ojson.GetBytesNoCopy(payload, path).String()) == "websocket_connection_limit_reached" {
 			return true
 		}
 	}
@@ -111,24 +118,24 @@ func isCodexWebsocketConnectionLimitError(payload []byte) bool {
 }
 
 func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
-	headersNode := gjson.GetBytes(payload, "headers")
+	headersNode := ojson.GetBytesNoCopy(payload, "headers")
 	if !headersNode.Exists() || !headersNode.IsObject() {
 		return nil
 	}
 	mapped := make(http.Header)
-	headersNode.ForEach(func(key, value gjson.Result) bool {
+	headersNode.ForEach(func(key, value ojson.Result) bool {
 		name := strings.TrimSpace(key.String())
 		if name == "" {
 			return true
 		}
 		switch value.Type {
-		case gjson.String:
+		case ojson.String:
 			if v := strings.TrimSpace(value.String()); v != "" {
-				mapped.Set(name, v)
+				mapped.Set(strings.Clone(name), strings.Clone(v))
 			}
-		case gjson.Number, gjson.True, gjson.False:
+		case ojson.Number, ojson.True, ojson.False:
 			if v := strings.TrimSpace(value.Raw); v != "" {
-				mapped.Set(name, v)
+				mapped.Set(strings.Clone(name), strings.Clone(v))
 			}
 		default:
 		}
@@ -141,8 +148,8 @@ func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
 }
 
 func normalizeCodexWebsocketCompletion(payload []byte) []byte {
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.done" {
-		updated, err := sjson.SetBytes(payload, "type", "response.completed")
+	if strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) == "response.done" {
+		updated, err := ojson.SetBytes(payload, "type", "response.completed")
 		if err == nil && len(updated) > 0 {
 			return updated
 		}

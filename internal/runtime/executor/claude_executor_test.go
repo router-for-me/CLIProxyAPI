@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/andybalholm/brotli"
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
@@ -25,9 +26,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func resetClaudeDeviceProfileCache() {
@@ -125,8 +125,8 @@ func TestApplyClaudeHeaders_FastModeBetaIsConditional(t *testing.T) {
 
 func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Header, deviceIDs []string, accountUUID string) {
 	t.Helper()
-	userID := gjson.GetBytes(body, "metadata.user_id").String()
-	deviceID := gjson.Get(userID, "device_id").String()
+	userID := ojson.GetBytes(body, "metadata.user_id").String()
+	deviceID := ojson.Get(userID, "device_id").String()
 	inPool := false
 	for _, candidate := range deviceIDs {
 		if deviceID == candidate {
@@ -137,10 +137,10 @@ func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Head
 	if !inPool {
 		t.Fatalf("device_id = %q, want selected credential device pool entry", deviceID)
 	}
-	if got := gjson.Get(userID, "account_uuid").String(); got != accountUUID {
+	if got := ojson.Get(userID, "account_uuid").String(); got != accountUUID {
 		t.Fatalf("account_uuid = %q, want selected credential account %q", got, accountUUID)
 	}
-	sessionID := gjson.Get(userID, "session_id").String()
+	sessionID := ojson.Get(userID, "session_id").String()
 	if sessionID == "" || sessionID != headers.Get("X-Claude-Code-Session-Id") {
 		t.Fatalf("metadata session_id = %q, header session ID = %q", sessionID, headers.Get("X-Claude-Code-Session-Id"))
 	}
@@ -159,7 +159,7 @@ func assertClaudeCredentialIdentity(t *testing.T, body []byte, headers http.Head
 // credential identity travels only on the header and on the Messages endpoint.
 func assertClaudeCountTokensIdentity(t *testing.T, body []byte, headers http.Header) {
 	t.Helper()
-	if got := gjson.GetBytes(body, "metadata"); got.Exists() {
+	if got := ojson.GetBytes(body, "metadata"); got.Exists() {
 		t.Fatalf("count_tokens metadata = %s, want it absent", got.Raw)
 	}
 	if got := headers.Get("X-Claude-Code-Session-Id"); got == "" {
@@ -824,7 +824,7 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 		t.Fatalf("Anthropic-Beta = %q, want %q", seenHeaders.Get("Anthropic-Beta"), want)
 	}
 
-	system := gjson.GetBytes(seenBody, "system").Array()
+	system := ojson.GetBytes(seenBody, "system").Array()
 	if len(system) != 2 {
 		t.Fatalf("system block count = %d, want 2: %s", len(system), seenBody)
 	}
@@ -846,18 +846,18 @@ func TestClaudeExecutor_NonClaudeRequestUsesClaudeCode220CLIFingerprint(t *testi
 	if betas := seenHeaders.Get("Anthropic-Beta"); strings.Contains(betas, claudeExtendedCacheTTLBeta) {
 		t.Fatalf("API-key request must not declare extended-cache-ttl: %s", betas)
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
 	assertEphemeralUserTextBlock(t, content[1], "x", "")
 
-	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
+	userID := ojson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
 		t.Fatalf("metadata.user_id = %q, want Claude Code JSON shape", userID)
 	}
-	if got, want := gjson.Get(userID, "session_id").String(), seenHeaders.Get("X-Claude-Code-Session-Id"); got != want {
+	if got, want := ojson.Get(userID, "session_id").String(), seenHeaders.Get("X-Claude-Code-Session-Id"); got != want {
 		t.Fatalf("metadata session_id = %q, header session ID = %q", got, want)
 	}
 }
@@ -905,13 +905,13 @@ func TestClaudeExecutor_ConfirmedNewerPatchClaudeCodeRequestPreservesInteractive
 	}
 
 	assertClaudeFingerprint(t, seenHeaders, "claude-cli/2.1.281 (external, cli)", "0.112.1", "v26.3.0", "MacOS", "arm64")
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "interactive-system" {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "interactive-system" {
 		t.Fatalf("system.0.text = %q, want confirmed client system preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 1 {
 		t.Fatalf("system block count = %d, want 1", got)
 	}
-	if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
+	if got := ojson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
 		t.Fatalf("metadata.user_id = %q, want preserved %q", got, userID)
 	}
 	if got := seenHeaders.Get("Anthropic-Beta"); got != incoming.Get("Anthropic-Beta") {
@@ -979,11 +979,11 @@ func TestClaudeExecutor_ConfirmedClaudeCodeWithoutCacheControlPreservesContent(t
 				t.Fatalf("Execute() error = %v", errExecute)
 			}
 
-			content := gjson.GetBytes(seenBody, "messages.0.content")
-			if content.Type != gjson.String || content.String() != "x" {
+			content := ojson.GetBytes(seenBody, "messages.0.content")
+			if content.Type != ojson.String || content.String() != "x" {
 				t.Fatalf("messages.0.content = %s, want native string content preserved; body=%s", content.Raw, seenBody)
 			}
-			if gjson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
+			if ojson.GetBytes(seenBody, "messages.0.content.0.cache_control").Exists() {
 				t.Fatalf("confirmed markerless native request received synthetic cache_control: %s", seenBody)
 			}
 		})
@@ -1031,7 +1031,7 @@ func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 	if got := seenHeaders.Get("Anthropic-Beta"); got != betas {
 		t.Errorf("native betas = %q, want %q", got, betas)
 	}
-	blocks := gjson.GetBytes(seenBody, "system").Array()
+	blocks := ojson.GetBytes(seenBody, "system").Array()
 	if len(blocks) != 3 {
 		t.Fatalf("native system blocks = %d, want 3", len(blocks))
 	}
@@ -1043,7 +1043,7 @@ func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 	if blocks[1].Get("text").String() != "native identity" || blocks[2].Get("text").String() != "native model block" {
 		t.Error("native system prompt blocks were rebuilt")
 	}
-	if got := gjson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
+	if got := ojson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
 		t.Errorf("native fallback = %q, want claude-opus-4-8", got)
 	}
 }
@@ -1102,22 +1102,22 @@ func TestClaudeExecutor_ConfirmedVSCodeAgentSDKRequestPreservesIdentity(t *testi
 	if got := seenHeaders.Get("X-Claude-Code-Session-Id"); got != sessionID {
 		t.Fatalf("X-Claude-Code-Session-Id = %q, want preserved %q", got, sessionID)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != billingHeader {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != billingHeader {
 		t.Fatalf("system.0.text = %q, want VSCode attribution preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
 		t.Fatalf("system.1.text = %q, want VSCode Agent SDK identity preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.cache_control.ttl").String(); got != "1h" {
+	if got := ojson.GetBytes(seenBody, "system.1.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("system.1.cache_control.ttl = %q, want preserved 1h", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != "vscode-agent-system" {
+	if got := ojson.GetBytes(seenBody, "system.2.text").String(); got != "vscode-agent-system" {
 		t.Fatalf("system.2.text = %q, want VSCode Agent SDK system preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 3 {
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 3 {
 		t.Fatalf("system block count = %d, want 3", got)
 	}
-	if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
+	if got := ojson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
 		t.Fatalf("metadata.user_id = %q, want preserved %q", got, userID)
 	}
 }
@@ -1159,19 +1159,19 @@ func TestClaudeExecutor_CopiedVSCodeAgentSDKHeadersWithoutMetadataAreCloaked(t *
 	if got := seenHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("User-Agent = %q, want CLI cloak", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 3 {
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 3 {
 		t.Fatalf("system block count = %d, want billing, CLI identity, and caller system", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != "spoofed-system" {
+	if got := ojson.GetBytes(seenBody, "system.2.text").String(); got != "spoofed-system" {
 		t.Fatalf("system.2.text = %q, want spoofed-system", got)
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
 	assertEphemeralUserTextBlock(t, content[1], "x", "")
-	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
 		t.Fatalf("message count = %d, want no trailing system turn", got)
 	}
 }
@@ -1213,10 +1213,10 @@ func TestClaudeExecutor_AgentSDKEntrypointWithStrongSignalsUsesCLICloak(t *testi
 	if got := seenHeaders.Get("User-Agent"); got != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("User-Agent = %q, want CLI cloak", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_entrypoint=cli;") {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(got, "cc_entrypoint=cli;") {
 		t.Fatalf("billing attribution = %q, want cli", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("system.1.text = %q, want official CLI identity", got)
 	}
 }
@@ -1267,18 +1267,18 @@ func TestClaudeExecutor_ConfirmedVSCodeOAuthPreservesToolNames(t *testing.T) {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "bash" {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); got != "bash" {
 		t.Fatalf("tools.0.name = %q, want confirmed native known name preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.1.name").String(); got != "search_web" {
+	if got := ojson.GetBytes(seenBody, "tools.1.name").String(); got != "search_web" {
 		t.Fatalf("tools.1.name = %q, want confirmed native unknown name preserved", got)
 	}
 	assertClaudeCredentialIdentity(t, seenBody, seenHeaders, deviceIDs, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-	upstreamUserID := gjson.GetBytes(seenBody, "metadata.user_id").String()
-	if upstreamDeviceID := gjson.Get(upstreamUserID, "device_id").String(); upstreamDeviceID == strings.Repeat("c", 64) {
+	upstreamUserID := ojson.GetBytes(seenBody, "metadata.user_id").String()
+	if upstreamDeviceID := ojson.Get(upstreamUserID, "device_id").String(); upstreamDeviceID == strings.Repeat("c", 64) {
 		t.Fatalf("device_id = %q, want native device replaced by credential pool", upstreamDeviceID)
 	}
-	if got := gjson.Get(upstreamUserID, "session_id").String(); got != "33333333-4444-4555-8666-777777777777" {
+	if got := ojson.Get(upstreamUserID, "session_id").String(); got != "33333333-4444-4555-8666-777777777777" {
 		t.Fatalf("session_id = %q, want downstream agent session", got)
 	}
 	if got := seenHeaders.Get("X-Claude-Code-Session-Id"); got != "33333333-4444-4555-8666-777777777777" {
@@ -1341,28 +1341,113 @@ func TestClaudeExecutor_ConfirmedSDKTSAgentSDKRequestPassesThroughWithRealProfil
 	}
 
 	assertClaudeFingerprint(t, seenHeaders, sdkTSUA, "0.128.0", "v26.3.0", "MacOS", "arm64")
-	if got := gjson.GetBytes(seenBody, "system.#").Int(); got != 3 {
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 3 {
 		t.Fatalf("system block count = %d, want 3: %s", got, seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts; cch=") {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.304.179; cc_entrypoint=sdk-ts; cch=") {
 		t.Fatalf("system.0.text = %q, want sdk-ts billing header with signed cch", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." {
 		t.Fatalf("system.1.text = %q, want Agent SDK CLI identity preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.2.text").String(); got != "t3-code-system-prompt" {
+	if got := ojson.GetBytes(seenBody, "system.2.text").String(); got != "t3-code-system-prompt" {
 		t.Fatalf("system.2.text = %q, want caller system prompt preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "Agent" {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); got != "Agent" {
 		t.Fatalf("tools.0.name = %q, want Agent preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.1.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(seenBody, "tools.1.name").String(); got != "Bash" {
 		t.Fatalf("tools.1.name = %q, want Bash preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
 		t.Fatalf("messages.# = %d, want 1 (no relocated system turn)", got)
 	}
-	if got := gjson.GetBytes(seenBody, "messages.0.content.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "messages.0.content.#").Int(); got != 1 {
+		t.Fatalf("messages.0.content.# = %d, want 1 (no currentDate pin injected)", got)
+	}
+}
+
+func TestClaudeExecutor_ConfiguredNativeEntrypointPassesThroughWithRealProfile(t *testing.T) {
+	helps.ResetClaudeDeviceProfileCache()
+	var seenBody []byte
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	const sessionID = "33333333-4444-4555-8666-777777777777"
+	const userID = `{"account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","device_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","session_id":"33333333-4444-4555-8666-777777777777"}`
+	const t3CodeUA = "claude-cli/2.1.316 (external, t3-code, agent-sdk/0.3.276)"
+	const billingHeader = "x-anthropic-billing-header: cc_version=2.1.316.179; cc_entrypoint=t3-code;"
+	payload := []byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"system":[{"type":"text","text":` + fmt.Sprintf("%q", billingHeader) + `},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK.","cache_control":{"type":"ephemeral","ttl":"1h"}},{"type":"text","text":"t3-code-system-prompt","cache_control":{"type":"ephemeral","ttl":"1h"}}],"tools":[{"name":"Agent","description":"subagent","input_schema":{"type":"object"}},{"name":"Bash","description":"shell","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `},"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"}}`)
+	incoming := http.Header{
+		"User-Agent":     {t3CodeUA},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,dangerous-tool-use-2026-09-03,afk-mode-2026-01-31,extended-cache-ttl-2025-04-11"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	deviceIDs := []string{"0000000000000000000000000000000000000000000000000000000000000000"}
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			NativeEntrypoints: []string{"t3-code"},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-t3-code-oauth",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-native-t3-code",
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": deviceIDs,
+		},
+	}
+
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-5-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incoming,
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	assertClaudeFingerprint(t, seenHeaders, t3CodeUA, "0.128.0", "v26.3.0", "MacOS", "arm64")
+	if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 3 {
+		t.Fatalf("system block count = %d, want 3: %s", got, seenBody)
+	}
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header: cc_version=2.1.316.179; cc_entrypoint=t3-code; cch=") {
+		t.Fatalf("system.0.text = %q, want t3-code billing header with signed cch", got)
+	}
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("system.1.text = %q, want Agent SDK identity preserved", got)
+	}
+	if got := ojson.GetBytes(seenBody, "system.2.text").String(); got != "t3-code-system-prompt" {
+		t.Fatalf("system.2.text = %q, want caller system prompt preserved", got)
+	}
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); got != "Agent" {
+		t.Fatalf("tools.0.name = %q, want Agent preserved", got)
+	}
+	if got := ojson.GetBytes(seenBody, "tools.1.name").String(); got != "Bash" {
+		t.Fatalf("tools.1.name = %q, want Bash preserved", got)
+	}
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages.# = %d, want 1 (no relocated system turn)", got)
+	}
+	if got := ojson.GetBytes(seenBody, "messages.0.content.#").Int(); got != 1 {
 		t.Fatalf("messages.0.content.# = %d, want 1 (no currentDate pin injected)", got)
 	}
 }
@@ -1519,16 +1604,16 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_alpha" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "proxy_alpha" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_alpha")
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_bravo" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "proxy_bravo" {
 		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_bravo")
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "proxy_charlie" {
+	if got := ojson.GetBytes(out, "tool_choice.name").String(); got != "proxy_charlie" {
 		t.Fatalf("tool_choice.name = %q, want %q", got, "proxy_charlie")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_delta" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_delta" {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "proxy_delta")
 	}
 }
@@ -1537,10 +1622,10 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
-	if got := gjson.GetBytes(out, "messages.0.content.0.tool_name").String(); got != "proxy_beta" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.tool_name").String(); got != "proxy_beta" {
 		t.Fatalf("messages.0.content.0.tool_name = %q, want %q", got, "proxy_beta")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_gamma" {
+	if got := ojson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_gamma" {
 		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "proxy_gamma")
 	}
 }
@@ -1551,13 +1636,13 @@ func TestSanitizeClaudeWebSearchDomains(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search","allowed_domains":["anthropic.com"],"blocked_domains":[],"max_uses":8}]}`)
 	out := sanitizeClaudeWebSearchDomains(input)
 
-	if gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+	if ojson.GetBytes(out, "tools.0.blocked_domains").Exists() {
 		t.Fatalf("empty blocked_domains should be removed: %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.allowed_domains").Array(); len(got) != 1 || got[0].String() != "anthropic.com" {
+	if got := ojson.GetBytes(out, "tools.0.allowed_domains").Array(); len(got) != 1 || got[0].String() != "anthropic.com" {
 		t.Fatalf("non-empty allowed_domains should be preserved: %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.max_uses").Int(); got != 8 {
+	if got := ojson.GetBytes(out, "tools.0.max_uses").Int(); got != 8 {
 		t.Fatalf("max_uses should be preserved: got %d", got)
 	}
 }
@@ -1567,10 +1652,10 @@ func TestSanitizeClaudeWebSearchDomains_LeavesNonBuiltinAndNonEmpty(t *testing.T
 	input := []byte(`{"tools":[{"type":"custom","name":"x","blocked_domains":[]},{"type":"web_search_20250305","name":"web_search","blocked_domains":["evil.com"]}]}`)
 	out := sanitizeClaudeWebSearchDomains(input)
 
-	if !gjson.GetBytes(out, "tools.0.blocked_domains").Exists() {
+	if !ojson.GetBytes(out, "tools.0.blocked_domains").Exists() {
 		t.Fatalf("non-web_search tool fields should be untouched: %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.1.blocked_domains").Array(); len(got) != 1 || got[0].String() != "evil.com" {
+	if got := ojson.GetBytes(out, "tools.1.blocked_domains").Array(); len(got) != 1 || got[0].String() != "evil.com" {
 		t.Fatalf("non-empty blocked_domains should be preserved: %s", string(out))
 	}
 }
@@ -1579,10 +1664,10 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
 		t.Fatalf("built-in tool name should not be prefixed: tools.0.name = %q, want %q", got, "web_search")
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_my_custom_tool" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "proxy_my_custom_tool" {
 		t.Fatalf("custom tool should be prefixed: tools.1.name = %q, want %q", got, "proxy_my_custom_tool")
 	}
 }
@@ -1602,16 +1687,16 @@ func TestApplyClaudeToolPrefix_BuiltinToolSkipped(t *testing.T) {
 	}`)
 	out := applyClaudeToolPrefix(body, "proxy_")
 
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "web_search")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "web_search")
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_Read" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "proxy_Read" {
 		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_Read")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_Read" {
+	if got := ojson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_Read" {
 		t.Fatalf("messages.0.content.1.name = %q, want %q", got, "proxy_Read")
 	}
 }
@@ -1629,10 +1714,10 @@ func TestApplyClaudeToolPrefix_KnownBuiltinInHistoryOnly(t *testing.T) {
 	}`)
 	out := applyClaudeToolPrefix(body, "proxy_")
 
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != "web_search" {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "web_search")
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Read")
 	}
 }
@@ -1649,16 +1734,16 @@ func TestApplyClaudeToolPrefix_CustomToolsPrefixed(t *testing.T) {
 	}`)
 	out := applyClaudeToolPrefix(body, "proxy_")
 
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
 		t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Read")
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "proxy_Write" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "proxy_Write" {
 		t.Fatalf("tools.1.name = %q, want %q", got, "proxy_Write")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_Read" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != "proxy_Read" {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, "proxy_Read")
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_Write" {
+	if got := ojson.GetBytes(out, "messages.0.content.1.name").String(); got != "proxy_Write" {
 		t.Fatalf("messages.0.content.1.name = %q, want %q", got, "proxy_Write")
 	}
 }
@@ -1673,7 +1758,7 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 	}`)
 	out := applyClaudeToolPrefix(body, "proxy_")
 
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "tool_choice.name").String(); got != "web_search" {
 		t.Fatalf("tool_choice.name = %q, want %q", got, "web_search")
 	}
 }
@@ -1688,19 +1773,19 @@ func TestApplyClaudeToolPrefix_KnownFallbackBuiltinsRemainUnprefixed(t *testing.
 			}`, builtin, builtin, builtin, builtin))
 			out := applyClaudeToolPrefix(input, "proxy_")
 
-			if got := gjson.GetBytes(out, "tool_choice.name").String(); got != builtin {
+			if got := ojson.GetBytes(out, "tool_choice.name").String(); got != builtin {
 				t.Fatalf("tool_choice.name = %q, want %q", got, builtin)
 			}
-			if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != builtin {
+			if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != builtin {
 				t.Fatalf("messages.0.content.0.name = %q, want %q", got, builtin)
 			}
-			if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != builtin {
+			if got := ojson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != builtin {
 				t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, builtin)
 			}
-			if got := gjson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != builtin {
+			if got := ojson.GetBytes(out, "messages.0.content.2.content.0.tool_name").String(); got != builtin {
 				t.Fatalf("messages.0.content.2.content.0.tool_name = %q, want %q", got, builtin)
 			}
-			if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
+			if got := ojson.GetBytes(out, "tools.0.name").String(); got != "proxy_Read" {
 				t.Fatalf("tools.0.name = %q, want %q", got, "proxy_Read")
 			}
 		})
@@ -1711,10 +1796,10 @@ func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
-	if got := gjson.GetBytes(out, "content.0.name").String(); got != "alpha" {
+	if got := ojson.GetBytes(out, "content.0.name").String(); got != "alpha" {
 		t.Fatalf("content.0.name = %q, want %q", got, "alpha")
 	}
-	if got := gjson.GetBytes(out, "content.1.name").String(); got != "bravo" {
+	if got := ojson.GetBytes(out, "content.1.name").String(); got != "bravo" {
 		t.Fatalf("content.1.name = %q, want %q", got, "bravo")
 	}
 }
@@ -1723,10 +1808,10 @@ func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
-	if got := gjson.GetBytes(out, "content.0.tool_name").String(); got != "alpha" {
+	if got := ojson.GetBytes(out, "content.0.tool_name").String(); got != "alpha" {
 		t.Fatalf("content.0.tool_name = %q, want %q", got, "alpha")
 	}
-	if got := gjson.GetBytes(out, "content.1.tool_name").String(); got != "bravo" {
+	if got := ojson.GetBytes(out, "content.1.tool_name").String(); got != "bravo" {
 		t.Fatalf("content.1.tool_name = %q, want %q", got, "bravo")
 	}
 }
@@ -1739,7 +1824,7 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	if bytes.HasPrefix(payload, []byte("data:")) {
 		payload = bytes.TrimSpace(payload[len("data:"):])
 	}
-	if got := gjson.GetBytes(payload, "content_block.name").String(); got != "alpha" {
+	if got := ojson.GetBytes(payload, "content_block.name").String(); got != "alpha" {
 		t.Fatalf("content_block.name = %q, want %q", got, "alpha")
 	}
 }
@@ -1752,7 +1837,7 @@ func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 	if bytes.HasPrefix(payload, []byte("data:")) {
 		payload = bytes.TrimSpace(payload[len("data:"):])
 	}
-	if got := gjson.GetBytes(payload, "content_block.tool_name").String(); got != "beta" {
+	if got := ojson.GetBytes(payload, "content_block.tool_name").String(); got != "beta" {
 		t.Fatalf("content_block.tool_name = %q, want %q", got, "beta")
 	}
 }
@@ -1760,7 +1845,7 @@ func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 func TestApplyClaudeToolPrefix_PreservesNestedMCPToolReference(t *testing.T) {
 	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp__nia__manage_resource"}]}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
-	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
+	got := ojson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "mcp__nia__manage_resource" {
 		t.Fatalf("nested tool_reference tool_name = %q, want MCP name preserved", got)
 	}
@@ -1804,7 +1889,7 @@ func TestClaudeExecutor_ExecuteStripsOpenAIEncryptedThinkingBeforeUpstream(t *te
 	if strings.Contains(string(seenBody), "gAAAAABopenai-encrypted-content") || strings.Contains(string(seenBody), "codex reasoning") {
 		t.Fatalf("invalid thinking block was forwarded: %s", string(seenBody))
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
 	}
@@ -1855,7 +1940,7 @@ func TestClaudeExecutor_ExecuteStripsForeignToolUseSignaturesBeforeUpstream(t *t
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	toolUse := gjson.GetBytes(seenBody, "messages.0.content.0")
+	toolUse := ojson.GetBytes(seenBody, "messages.0.content.0")
 	if !toolUse.Get("type").Exists() || toolUse.Get("type").String() != "tool_use" {
 		t.Fatalf("tool_use block was not preserved: %s", string(seenBody))
 	}
@@ -1887,6 +1972,26 @@ func TestShouldSanitizeClaudeMessagesForUpstream_OnlyClaudeFamily(t *testing.T) 
 	}
 }
 
+func TestSanitizeClaudeMessagesForClaudeUpstream_RestoresCommentaryMarkerForNonClaudeModel(t *testing.T) {
+	body := []byte(`{"model":"kimi-k2.5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"COMMENTARY_SENTINEL","signature":"cpa:commentary:v1"},{"type":"thinking","thinking":"reason","signature":"skip_thought_signature_validator"},{"type":"text","text":"FINAL_SENTINEL"}]}]}`)
+
+	out := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
+	content := ojson.GetBytes(out, "messages.0.content")
+	if len(content.Array()) != 3 {
+		t.Fatalf("expected 3 content blocks after marker restore: %s", out)
+	}
+	first := content.Get("0")
+	if first.Get("type").String() != "text" || first.Get("text").String() != "COMMENTARY_SENTINEL" || first.Get("signature").Exists() {
+		t.Fatalf("commentary marker should become a plain text block for non-Claude models: %s", out)
+	}
+	if got := content.Get("1.signature").String(); got != "skip_thought_signature_validator" {
+		t.Fatalf("non-marker opaque signature must pass through untouched for non-Claude models, got %q: %s", got, out)
+	}
+	if got := content.Get("2.text").String(); got != "FINAL_SENTINEL" {
+		t.Fatalf("final text = %q, want FINAL_SENTINEL: %s", got, out)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMatrix(t *testing.T) {
 	rawSignature := "skip_thought_signature_validator"
 	body := []byte(`{
@@ -1904,7 +2009,7 @@ func TestSanitizeClaudeMessagesForClaudeUpstream_BypassesUnknownModelSignatureMa
 	}`)
 
 	output := sanitizeClaudeMessagesForClaudeUpstreamWithDebug(context.Background(), body, "kimi-k2.5")
-	parts := gjson.GetBytes(output, "messages.0.content").Array()
+	parts := ojson.GetBytes(output, "messages.0.content").Array()
 	if len(parts) != 3 {
 		t.Fatalf("content length = %d, want 3 when sanitizer is bypassed: %s", len(parts), output)
 	}
@@ -1995,7 +2100,7 @@ func TestClaudeExecutor_ExecuteStripsMalformedEPrefixThinkingBeforeUpstream(t *t
 	if strings.Contains(string(seenBody), malformedSignature) || strings.Contains(string(seenBody), "bad reasoning") {
 		t.Fatalf("malformed E-prefix thinking block was forwarded: %s", string(seenBody))
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
 	}
@@ -2042,7 +2147,7 @@ func TestClaudeExecutor_ExecuteStripsInvalidBase64ThinkingBeforeUpstream(t *test
 	if strings.Contains(string(seenBody), "E!!!invalid!!!") || strings.Contains(string(seenBody), "bad reasoning") {
 		t.Fatalf("invalid-base64 thinking block was forwarded: %s", string(seenBody))
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
 	}
@@ -2083,7 +2188,7 @@ func TestClaudeExecutor_ExecuteStripsEmptySignatureEmptyTextThinking(t *testing.
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	content := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	content := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(content) != 1 {
 		t.Fatalf("messages.0.content length = %d, want 1: %s", len(content), string(seenBody))
 	}
@@ -2355,8 +2460,8 @@ func TestClaudeExecutor_ExecuteStreamOpenAIResponseTranslatesCacheAndTrailingUsa
 
 	var trailingUsageChunk []byte
 	for _, chunk := range allChunks {
-		choices := gjson.GetBytes(chunk, "choices")
-		if choices.Exists() && len(choices.Array()) == 0 && gjson.GetBytes(chunk, "usage").Exists() {
+		choices := ojson.GetBytes(chunk, "choices")
+		if choices.Exists() && len(choices.Array()) == 0 && ojson.GetBytes(chunk, "usage").Exists() {
 			trailingUsageChunk = chunk
 			break
 		}
@@ -2366,16 +2471,16 @@ func TestClaudeExecutor_ExecuteStreamOpenAIResponseTranslatesCacheAndTrailingUsa
 		t.Fatalf("expected trailing usage chunk with choices: [], got: %s", string(bytes.Join(allChunks, []byte("\n"))))
 	}
 
-	if gotCached := gjson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cached_tokens").Int(); gotCached != 355598 {
+	if gotCached := ojson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cached_tokens").Int(); gotCached != 355598 {
 		t.Errorf("cached_tokens = %d, want 355598", gotCached)
 	}
-	if gotWrite := gjson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cache_write_tokens").Int(); gotWrite != 7185 {
+	if gotWrite := ojson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cache_write_tokens").Int(); gotWrite != 7185 {
 		t.Errorf("cache_write_tokens = %d, want 7185", gotWrite)
 	}
-	if gotCreation := gjson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cached_creation_tokens").Int(); gotCreation != 7185 {
+	if gotCreation := ojson.GetBytes(trailingUsageChunk, "usage.prompt_tokens_details.cached_creation_tokens").Int(); gotCreation != 7185 {
 		t.Errorf("cached_creation_tokens = %d, want 7185", gotCreation)
 	}
-	if gotOutput := gjson.GetBytes(trailingUsageChunk, "usage.completion_tokens").Int(); gotOutput != 15 {
+	if gotOutput := ojson.GetBytes(trailingUsageChunk, "usage.completion_tokens").Int(); gotOutput != 15 {
 		t.Errorf("completion_tokens = %d, want 15", gotOutput)
 	}
 }
@@ -2455,7 +2560,7 @@ func TestClaudeExecutor_CountTokensExcludesInvalidOpenAIThinking(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CountTokens() error = %v", err)
 		}
-		return gjson.GetBytes(resp.Payload, "input_tokens").Int()
+		return ojson.GetBytes(resp.Payload, "input_tokens").Int()
 	}
 
 	withInvalidThinking := []byte(`{
@@ -2529,7 +2634,7 @@ func TestClaudeExecutor_LegacySystemReminderAcrossMessagesAndStream(t *testing.T
 			return
 		}
 		kind := "messages"
-		if gjson.GetBytes(body, "stream").Bool() {
+		if ojson.GetBytes(body, "stream").Bool() {
 			kind = "stream"
 		}
 		mu.Lock()
@@ -2579,7 +2684,7 @@ func TestClaudeExecutor_LegacySystemReminderAcrossMessagesAndStream(t *testing.T
 	if errCount != nil {
 		t.Fatalf("CountTokens() error = %v", errCount)
 	}
-	if got := gjson.GetBytes(countResp.Payload, "input_tokens").Int(); got <= 0 {
+	if got := ojson.GetBytes(countResp.Payload, "input_tokens").Int(); got <= 0 {
 		t.Fatalf("local count_tokens input_tokens = %d, want positive estimate", got)
 	}
 	streamResult, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
@@ -2652,7 +2757,7 @@ func TestClaudeExecutor_CountTokensUpstreamCloakNeverPreservesCustomTool(t *test
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "search_web" {
+	if got := ojson.GetBytes(upstreamBody, "tools.0.name").String(); got != "search_web" {
 		t.Fatalf("count_tokens tool name = %q, want cloak=never passthrough", got)
 	}
 	assertClaudeCountTokensIdentity(t, upstreamBody, upstreamHeaders)
@@ -2662,7 +2767,7 @@ func TestClaudeExecutor_CountTokensUpstreamConfirmedVSCodePreservesCustomTool(t 
 	var upstreamName string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		upstreamName = gjson.GetBytes(body, "tools.0.name").String()
+		upstreamName = ojson.GetBytes(body, "tools.0.name").String()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"input_tokens":7}`))
 	}))
@@ -2716,15 +2821,15 @@ func TestClaudeExecutor_CountTokensCloakMatchesMeasuredDirectAnthropicShape(t *t
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system"); got.Exists() {
+	if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
 		t.Fatalf("cloaked direct count system = %s, want absent", got.Raw)
 	}
 	for _, field := range []string{"metadata", "context_management", "diagnostics", "betas"} {
-		if got := gjson.GetBytes(upstreamBody, field); got.Exists() {
+		if got := ojson.GetBytes(upstreamBody, field); got.Exists() {
 			t.Fatalf("cloaked direct count %s = %s, want absent", field, got.Raw)
 		}
 	}
-	if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); !helps.IsClaudeMCPToolName(got) {
+	if got := ojson.GetBytes(upstreamBody, "tools.0.name").String(); !helps.IsClaudeMCPToolName(got) {
 		t.Fatalf("cloaked direct count tool = %q, want OAuth MCP alias", got)
 	}
 }
@@ -2780,18 +2885,18 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 			}
 
 			// Claude Code's count_tokens never carries a system field.
-			if got := gjson.GetBytes(upstreamBody, "system"); got.Exists() {
+			if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
 				t.Fatalf("cloaked count system = %s, want absent", got.Raw)
 			}
 			// The caller's system prompt must still be counted, relocated into messages.
 			// Compare decoded text so JSON escaping does not affect the assertions.
 			var decodedTexts []string
 			sawSystemRole := false
-			gjson.GetBytes(upstreamBody, "messages").ForEach(func(_, message gjson.Result) bool {
+			ojson.GetBytes(upstreamBody, "messages").ForEach(func(_, message ojson.Result) bool {
 				if message.Get("role").String() == "system" {
 					sawSystemRole = true
 				}
-				message.Get("content").ForEach(func(_, block gjson.Result) bool {
+				message.Get("content").ForEach(func(_, block ojson.Result) bool {
 					decodedTexts = append(decodedTexts, block.Get("text").String())
 					return true
 				})
@@ -2848,7 +2953,7 @@ func TestClaudeExecutor_CountTokensCloakStrictModeDropsCallerSystem(t *testing.T
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system"); got.Exists() {
+	if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
 		t.Fatalf("strict cloaked count system = %s, want absent", got.Raw)
 	}
 	if strings.Contains(string(upstreamBody), "secret directive") {
@@ -2894,7 +2999,7 @@ func TestClaudeExecutor_CountTokensConfirmedNativePreservesMeasuredOAuthBody(t *
 		t.Fatalf("confirmed native count body changed\n got: %s\nwant: %s", upstreamBody, payload)
 	}
 	for _, field := range []string{"system", "metadata", "context_management", "betas"} {
-		if got := gjson.GetBytes(upstreamBody, field); got.Exists() {
+		if got := ojson.GetBytes(upstreamBody, field); got.Exists() {
 			t.Fatalf("confirmed native count body %s = %s, want absent", field, got.Raw)
 		}
 	}
@@ -2941,7 +3046,7 @@ func TestClaudeExecutor_CountTokensCountsLocallyWithoutUpstreamRequest(t *testin
 			if errCount != nil {
 				t.Fatalf("CountTokens() error = %v", errCount)
 			}
-			if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got != expectedCount {
+			if got := ojson.GetBytes(resp.Payload, "input_tokens").Int(); got != expectedCount {
 				t.Fatalf("input_tokens = %d, want %d; payload = %s", got, expectedCount, resp.Payload)
 			}
 		})
@@ -2958,10 +3063,10 @@ func TestClaudeExecutor_CountTokensCountsLocallyWithoutUpstreamRequest(t *testin
 	if err != nil {
 		t.Fatalf("CountTokens() Gemini response error = %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "totalTokens").Int(); got != expectedCount {
+	if got := ojson.GetBytes(resp.Payload, "totalTokens").Int(); got != expectedCount {
 		t.Fatalf("Gemini totalTokens = %d, want %d; payload = %s", got, expectedCount, resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "promptTokensDetails.0.tokenCount").Int(); got != expectedCount {
+	if got := ojson.GetBytes(resp.Payload, "promptTokensDetails.0.tokenCount").Int(); got != expectedCount {
 		t.Fatalf("Gemini prompt token detail = %d, want %d; payload = %s", got, expectedCount, resp.Payload)
 	}
 }
@@ -3019,7 +3124,7 @@ func TestClaudeExecutor_CountTokensRebuildsMidSystemMessagesBeforeValidation(t *
 	if err != nil {
 		t.Fatalf("CountTokens() error = %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 {
+	if got := ojson.GetBytes(resp.Payload, "input_tokens").Int(); got <= 0 {
 		t.Fatalf("input_tokens = %d, want positive count; payload = %s", got, resp.Payload)
 	}
 }
@@ -3029,8 +3134,8 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	var requestModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		userID := gjson.GetBytes(body, "metadata.user_id").String()
-		model := gjson.GetBytes(body, "model").String()
+		userID := ojson.GetBytes(body, "metadata.user_id").String()
+		model := ojson.GetBytes(body, "model").String()
 		userIDs = append(userIDs, userID)
 		requestModels = append(requestModels, model)
 		t.Logf("HTTP Server received request: model=%s, user_id=%s, url=%s", model, userID, r.URL.String())
@@ -3062,7 +3167,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	models := []string{"claude-3-5-sonnet", "claude-3-5-haiku"}
 	for _, model := range models {
 		t.Logf("Sending request for model: %s", model)
-		modelPayload, _ := sjson.SetBytes(payload, "model", model)
+		modelPayload, _ := ojson.SetBytes(payload, "model", model)
 		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 			Model:   model,
 			Payload: modelPayload,
@@ -3094,7 +3199,7 @@ func TestClaudeExecutor_DefaultDoesNotInjectUserID(t *testing.T) {
 	var userIDs []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
+		userIDs = append(userIDs, ojson.GetBytes(body, "metadata.user_id").String())
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
@@ -3184,16 +3289,16 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamConvertsValidClaudeStream(t *testi
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "msg_123" {
+	if got := ojson.GetBytes(resp.Payload, "id").String(); got != "msg_123" {
 		t.Fatalf("response id = %q, want msg_123; payload=%s", got, string(resp.Payload))
 	}
-	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "claude-3-5-sonnet-20241022" {
+	if got := ojson.GetBytes(resp.Payload, "model").String(); got != "claude-3-5-sonnet-20241022" {
 		t.Fatalf("response model = %q, want claude-3-5-sonnet-20241022", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ok" {
 		t.Fatalf("response content = %q, want ok", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
+	if got := ojson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != 3 {
 		t.Fatalf("usage.total_tokens = %d, want 3", got)
 	}
 }
@@ -3274,7 +3379,7 @@ func TestClaudeExecutor_ExecutePayloadStreamOverrideDoesNotChangeResponseParser(
 			if err != nil {
 				t.Fatalf("Execute error: %v", err)
 			}
-			stream := gjson.GetBytes(seenBody, "stream")
+			stream := ojson.GetBytes(seenBody, "stream")
 			if !stream.Exists() || stream.Bool() != !tt.wantStream {
 				t.Fatalf("upstream stream = %s, want %t; body=%s", stream.Raw, !tt.wantStream, string(seenBody))
 			}
@@ -3336,7 +3441,7 @@ func assertStatusErr(t *testing.T, err error, want int) {
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
-	got := gjson.GetBytes(out, "content.0.content.0.tool_name").String()
+	got := ojson.GetBytes(out, "content.0.content.0.tool_name").String()
 	if got != "mcp__nia__manage_resource" {
 		t.Fatalf("nested tool_reference tool_name = %q, want %q", got, "mcp__nia__manage_resource")
 	}
@@ -3346,7 +3451,7 @@ func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T
 	// tool_result.content can be a string - should not be processed
 	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
-	got := gjson.GetBytes(out, "messages.0.content.0.content").String()
+	got := ojson.GetBytes(out, "messages.0.content.0.content").String()
 	if got != "plain string result" {
 		t.Fatalf("string content should remain unchanged = %q", got)
 	}
@@ -3355,7 +3460,7 @@ func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T
 func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`)
 	out := applyClaudeToolPrefix(input, "proxy_")
-	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
+	got := ojson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "web_search" {
 		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
 	}
@@ -3370,10 +3475,10 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 
 	out := normalizeCacheControlTTL(payload)
 
-	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+	if got := ojson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
 	}
-	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+	if ojson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
 	}
 }
@@ -3396,7 +3501,7 @@ func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
 
 	out := normalizeCacheControlTTL(payload)
 
-	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+	if ojson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
 	}
 
@@ -3431,13 +3536,13 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 	if got := countCacheControls(out); got != 4 {
 		t.Fatalf("cache_control count = %d, want 4", got)
 	}
-	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+	if ojson.GetBytes(out, "tools.0.cache_control").Exists() {
 		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
 	}
-	if !gjson.GetBytes(out, "tools.1.cache_control").Exists() {
+	if !ojson.GetBytes(out, "tools.1.cache_control").Exists() {
 		t.Fatalf("tools.1.cache_control (last tool) should be preserved")
 	}
-	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
+	if !ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !ojson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
 		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
 	}
 }
@@ -3450,7 +3555,7 @@ func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
 	if got := countCacheControls(out); got != 4 {
 		t.Fatalf("cache_control count = %d, want 4", got)
 	}
-	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+	if ojson.GetBytes(out, "tools.0.cache_control").Exists() {
 		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
 	}
 
@@ -3504,10 +3609,10 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	if got := countCacheControls(out); got != 4 {
 		t.Fatalf("cache_control count = %d, want 4", got)
 	}
-	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+	if ojson.GetBytes(out, "tools.0.cache_control").Exists() {
 		t.Fatalf("tools.0.cache_control should be removed to satisfy max=4")
 	}
-	if !gjson.GetBytes(out, "tools.4.cache_control").Exists() {
+	if !ojson.GetBytes(out, "tools.4.cache_control").Exists() {
 		t.Fatalf("last tool cache_control should be preserved when possible")
 	}
 }
@@ -3540,11 +3645,11 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 	if got := countCacheControls(out); got != 1 {
 		t.Fatalf("countCacheControls after enforce = %d, want 1", got)
 	}
-	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+	if !ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("real cache_control at messages.0.content.0 was incorrectly stripped")
 	}
-	if gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String() != "ephemeral" {
-		t.Fatalf("messages.0.content.0.cache_control.type = %q, want ephemeral", gjson.GetBytes(out, "messages.0.content.0.cache_control.type").String())
+	if ojson.GetBytes(out, "messages.0.content.0.cache_control.type").String() != "ephemeral" {
+		t.Fatalf("messages.0.content.0.cache_control.type = %q, want ephemeral", ojson.GetBytes(out, "messages.0.content.0.cache_control.type").String())
 	}
 
 	// Auto-injection must not be suppressed by "cache_control": null in system or tools.
@@ -3552,7 +3657,7 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 		"tools": [{"name": "tool1", "description": "desc", "cache_control": null}]
 	}`)
 	injectedTools := injectToolsCacheControl(toolsPayload)
-	if got := gjson.GetBytes(injectedTools, "tools.0.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytes(injectedTools, "tools.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("injectToolsCacheControl should inject cache_control when existing value is null, got %q", got)
 	}
 
@@ -3560,7 +3665,7 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 		"system": [{"type": "text", "text": "sys", "cache_control": null}]
 	}`)
 	injectedSystem := injectSystemCacheControl(systemPayload)
-	if got := gjson.GetBytes(injectedSystem, "system.0.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytes(injectedSystem, "system.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("injectSystemCacheControl should inject cache_control when existing value is null, got %q", got)
 	}
 
@@ -3570,7 +3675,7 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 		]
 	}`)
 	injectedMessages := injectMessagesCacheControl(messagesPayload)
-	if got := gjson.GetBytes(injectedMessages, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytes(injectedMessages, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("injectMessagesCacheControl should inject cache_control when existing value is null, got %q", got)
 	}
 
@@ -3602,10 +3707,10 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 	if got := countCacheControls(outExcess); got != 4 {
 		t.Fatalf("countCacheControls after enforce with excess = %d, want 4", got)
 	}
-	if gjson.GetBytes(outExcess, "tools.0.cache_control").Exists() {
+	if ojson.GetBytes(outExcess, "tools.0.cache_control").Exists() {
 		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
 	}
-	if !gjson.GetBytes(outExcess, "tools.2.cache_control").Exists() {
+	if !ojson.GetBytes(outExcess, "tools.2.cache_control").Exists() {
 		t.Fatalf("last tool cache_control should be preserved")
 	}
 
@@ -3617,7 +3722,7 @@ func TestClaudeExecutor_NullCacheControlIgnored(t *testing.T) {
 		]
 	}`)
 	normalized := normalizeCacheControlTTL(mixedTTLPayload)
-	if got := gjson.GetBytes(normalized, "system.1.cache_control.ttl").String(); got != "1h" {
+	if got := ojson.GetBytes(normalized, "system.1.cache_control.ttl").String(); got != "1h" {
 		t.Fatalf("normalizeCacheControlTTL downgraded 1h TTL due to null cache_control: %s", normalized)
 	}
 }
@@ -3661,7 +3766,7 @@ func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	parts := gjson.GetBytes(seenBody, "messages.0.content").Array()
+	parts := ojson.GetBytes(seenBody, "messages.0.content").Array()
 	if len(parts) != 2 {
 		t.Fatalf("messages.0.content length = %d, want 2; body=%s", len(parts), seenBody)
 	}
@@ -3750,7 +3855,7 @@ func TestEnsureModelMaxTokens_UsesRegisteredMaxCompletionTokens(t *testing.T) {
 	input := []byte(`{"model":"test-claude-max-completion-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
 	out := ensureModelMaxTokens(input, modelID)
 
-	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 4096 {
+	if got := ojson.GetBytes(out, "max_tokens").Int(); got != 4096 {
 		t.Fatalf("max_tokens = %d, want %d", got, 4096)
 	}
 }
@@ -3772,7 +3877,7 @@ func TestEnsureModelMaxTokens_DefaultsMissingValue(t *testing.T) {
 	input := []byte(`{"model":"test-claude-default-max-tokens-model","messages":[{"role":"user","content":"hi"}]}`)
 	out := ensureModelMaxTokens(input, modelID)
 
-	if got := gjson.GetBytes(out, "max_tokens").Int(); got != defaultModelMaxTokens {
+	if got := ojson.GetBytes(out, "max_tokens").Int(); got != defaultModelMaxTokens {
 		t.Fatalf("max_tokens = %d, want %d", got, defaultModelMaxTokens)
 	}
 }
@@ -3795,7 +3900,7 @@ func TestEnsureModelMaxTokens_PreservesExplicitValue(t *testing.T) {
 	input := []byte(`{"model":"test-claude-preserve-max-tokens-model","max_tokens":2048,"messages":[{"role":"user","content":"hi"}]}`)
 	out := ensureModelMaxTokens(input, modelID)
 
-	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 2048 {
+	if got := ojson.GetBytes(out, "max_tokens").Int(); got != 2048 {
 		t.Fatalf("max_tokens = %d, want %d", got, 2048)
 	}
 }
@@ -3804,8 +3909,8 @@ func TestEnsureModelMaxTokens_SkipsUnregisteredModel(t *testing.T) {
 	input := []byte(`{"model":"test-claude-unregistered-model","messages":[{"role":"user","content":"hi"}]}`)
 	out := ensureModelMaxTokens(input, "test-claude-unregistered-model")
 
-	if gjson.GetBytes(out, "max_tokens").Exists() {
-		t.Fatalf("max_tokens should remain unset, got %s", gjson.GetBytes(out, "max_tokens").Raw)
+	if ojson.GetBytes(out, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should remain unset, got %s", ojson.GetBytes(out, "max_tokens").Raw)
 	}
 }
 
@@ -4230,10 +4335,10 @@ func TestClaudeExecutor_ExecuteStream_AcceptEncodingOverrideCannotBypassIdentity
 func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, messageIndex int, wantText, wantTTL string) {
 	t.Helper()
 	messagePath := fmt.Sprintf("messages.%d", messageIndex)
-	if got := gjson.GetBytes(body, messagePath+".role").String(); got != "system" {
+	if got := ojson.GetBytes(body, messagePath+".role").String(); got != "system" {
 		t.Fatalf("%s.role = %q, want system", messagePath, got)
 	}
-	content := gjson.GetBytes(body, messagePath+".content").Array()
+	content := ojson.GetBytes(body, messagePath+".content").Array()
 	if len(content) != 1 {
 		t.Fatalf("%s.content has %d blocks, want 1", messagePath, len(content))
 	}
@@ -4250,13 +4355,13 @@ func assertClaudeMidConversationSystemMessage(t *testing.T, body []byte, message
 
 func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSystem, wantUser, wantTTL string) {
 	t.Helper()
-	if got := gjson.GetBytes(body, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(body, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want billing and identity only", got)
 	}
-	if got := gjson.GetBytes(body, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(body, "messages.#").Int(); got != 1 {
 		t.Fatalf("message count = %d, want one user turn and no role=system", got)
 	}
-	content := gjson.GetBytes(body, "messages.0.content").Array()
+	content := ojson.GetBytes(body, "messages.0.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("user content has %d blocks, want currentDate, caller reminder, and user text", len(content))
 	}
@@ -4270,12 +4375,12 @@ func assertClaudeLegacySystemReminderLayout(t *testing.T, body []byte, wantSyste
 	assertEphemeralUserTextBlock(t, content[2], wantUser, wantTTL)
 }
 
-func assertClaudeCodeCurrentDateBlock(t *testing.T, block gjson.Result) {
+func assertClaudeCodeCurrentDateBlock(t *testing.T, block ojson.Result) {
 	t.Helper()
 	assertClaudeCodeCurrentDateBlockAt(t, block, time.Now())
 }
 
-func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now time.Time) {
+func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block ojson.Result, now time.Time) {
 	t.Helper()
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("currentDate block type = %q, want text", got)
@@ -4291,7 +4396,7 @@ func assertClaudeCodeCurrentDateBlockAt(t *testing.T, block gjson.Result, now ti
 // assertEphemeralUserTextBlock checks the cloaked first-user block. wantTTL is ""
 // for the native default marker and "1h" once upgradeClaudeCacheControlTTL has run,
 // which only happens for OAuth credentials.
-func assertEphemeralUserTextBlock(t *testing.T, block gjson.Result, wantText, wantTTL string) {
+func assertEphemeralUserTextBlock(t *testing.T, block ojson.Result, wantText, wantTTL string) {
 	t.Helper()
 	if got := block.Get("type").String(); got != "text" {
 		t.Fatalf("user block type = %q, want text", got)
@@ -4367,7 +4472,7 @@ func TestInjectClaudeCodeCurrentDateIsIdempotentAndAlignsFirstUserCache(t *testi
 	if !bytes.Equal(first, second) {
 		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	content := gjson.GetBytes(first, "messages.0.content").Array()
+	content := ojson.GetBytes(first, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("first user content has %d blocks, want 2: %s", len(content), first)
 	}
@@ -4428,7 +4533,7 @@ func TestClaudeCallerCurrentDateSeedsOnlyFirstAnchor(t *testing.T) {
 
 func TestInjectClaudeCodeCurrentDateStripsCallerReminderFromStringContent(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"user","content":""}]}`)
-	payload, _ = sjson.SetBytes(payload, "messages.0.content", claudeCodeCurrentDateReminder("2026-08-01")+"hello")
+	payload, _ = ojson.SetBytes(payload, "messages.0.content", claudeCodeCurrentDateReminder("2026-08-01")+"hello")
 
 	if got := claudeCallerCurrentDateReminderDate(payload); got != "2026-08-01" {
 		t.Fatalf("string caller date = %q, want 2026-08-01", got)
@@ -4445,17 +4550,17 @@ func TestInjectClaudeCodeCurrentDateStripsCallerReminderFromStringContent(t *tes
 	if got := strings.Count(string(stripped), "Today's date is"); got != 1 {
 		t.Fatalf("stripped payload has %d date reminders, want 1: %s", got, stripped)
 	}
-	if got := gjson.GetBytes(stripped, "messages.0.content.1.text").String(); got != "hello" {
+	if got := ojson.GetBytes(stripped, "messages.0.content.1.text").String(); got != "hello" {
 		t.Fatalf("user text after strip = %q, want hello: %s", got, stripped)
 	}
 	// A caller reminder without the trailing blank lines is still stripped.
 	noTrailer := []byte(`{"messages":[{"role":"user","content":""}]}`)
-	noTrailer, _ = sjson.SetBytes(noTrailer, "messages.0.content", strings.TrimRight(claudeCodeCurrentDateReminder("2026-08-01"), "\n")+"hello")
+	noTrailer, _ = ojson.SetBytes(noTrailer, "messages.0.content", strings.TrimRight(claudeCodeCurrentDateReminder("2026-08-01"), "\n")+"hello")
 	strippedNoTrailer := injectClaudeCodeCurrentDate(stripFirstUserClaudeCodeCurrentDateReminder(noTrailer), "2026-08-01")
 	if got := strings.Count(string(strippedNoTrailer), "Today's date is"); got != 1 {
 		t.Fatalf("no-trailer payload has %d date reminders, want 1: %s", got, strippedNoTrailer)
 	}
-	if got := gjson.GetBytes(strippedNoTrailer, "messages.0.content.1.text").String(); got != "hello" {
+	if got := ojson.GetBytes(strippedNoTrailer, "messages.0.content.1.text").String(); got != "hello" {
 		t.Fatalf("user text after no-trailer strip = %q, want hello: %s", got, strippedNoTrailer)
 	}
 }
@@ -4470,7 +4575,7 @@ func TestApplyCloakingStringCallerReminderPreservesUserText(t *testing.T) {
 	ctx := helps.WithClaudeSessionID(context.Background(), "apply-cloaking-string-session")
 
 	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":""}]}`)
-	payload, _ = sjson.SetBytes(payload, "messages.0.content", claudeCodeCurrentDateReminder("2026-08-01")+"hello")
+	payload, _ = ojson.SetBytes(payload, "messages.0.content", claudeCodeCurrentDateReminder("2026-08-01")+"hello")
 
 	out, didCloak, errCloaking := applyCloaking(ctx, cfg, auth, payload, "sk-ant-oat-test", false, false)
 	if errCloaking != nil {
@@ -4483,7 +4588,7 @@ func TestApplyCloakingStringCallerReminderPreservesUserText(t *testing.T) {
 		t.Fatalf("cloaked payload has %d date reminders, want 1: %s", got, out)
 	}
 	foundHello := false
-	for _, block := range gjson.GetBytes(out, "messages.0.content").Array() {
+	for _, block := range ojson.GetBytes(out, "messages.0.content").Array() {
 		if block.Get("text").String() == "hello" {
 			foundHello = true
 		}
@@ -4500,7 +4605,7 @@ func TestInjectClaudeCodeCurrentDateMovesExistingCopyToFirstBlock(t *testing.T) 
 		`{"type":"text","text":"hello"},` + dateBlock + `]}]}`)
 
 	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("content has %d blocks, want one currentDate and user text: %s", len(content), out)
 	}
@@ -4516,7 +4621,7 @@ func TestInjectClaudeCodeCurrentDatePrecedesExistingReminder(t *testing.T) {
 		`{"type":"text","text":"continue","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
 
 	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content has %d blocks, want currentDate, reminder, and user text: %s", len(content), out)
 	}
@@ -4541,7 +4646,7 @@ func TestInjectClaudeCodeCurrentDateFollowsLeadingToolResults(t *testing.T) {
 		t.Fatalf("currentDate injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
 
-	content := gjson.GetBytes(first, "messages.1.content").Array()
+	content := ojson.GetBytes(first, "messages.1.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content has %d blocks, want tool_result, currentDate, and user text: %s", len(content), first)
 	}
@@ -4566,7 +4671,7 @@ func TestInjectClaudeCodeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
 		`{"type":"tool_result","tool_use_id":"toolu_2","content":"ok"}]}]}`)
 
 	out := injectClaudeCodeCurrentDate(payload, claudeCodeLocalDate(fixed))
-	content := gjson.GetBytes(out, "messages.1.content").Array()
+	content := ojson.GetBytes(out, "messages.1.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("content has %d blocks, want two tool_results and currentDate: %s", len(content), out)
 	}
@@ -4588,7 +4693,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	system := gjson.GetBytes(out, "system")
+	system := ojson.GetBytes(out, "system")
 	if !system.IsArray() {
 		t.Fatalf("system should be an array, got %s", system.Type)
 	}
@@ -4608,7 +4713,7 @@ func TestCheckSystemInstructionsWithMode_StringSystemPreserved(t *testing.T) {
 	if blocks[1].Get("cache_control.ttl").Exists() {
 		t.Fatalf("blocks[1] cache_control must not carry a default ttl: %s", blocks[1].Raw)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
@@ -4644,10 +4749,10 @@ func TestCheckSystemInstructionsWithMode_FutureModelDefaultsToMidSystem(t *testi
 	payload := []byte(`{"model":"claude-opus-6","system":"future instructions","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"follow-up"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2", got)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
@@ -4660,13 +4765,13 @@ func TestCheckSystemInstructionsWithMode_LegacyModelUsesSystemReminder(t *testin
 	payload := []byte(`{"model":"claude-opus-4-6","system":"legacy instructions","messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want billing and identity only", got)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 1 {
 		t.Fatalf("message count = %d, want no role=system insertion", got)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 3 {
 		t.Fatalf("user content has %d blocks, want currentDate, caller reminder, and user text", len(content))
 	}
@@ -4687,7 +4792,7 @@ func TestCheckSystemInstructionsWithMode_LegacyModelKeepsSystemBlocksSeparate(t 
 		`"messages":[{"role":"user","content":"hi"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 4 {
 		t.Fatalf("user content has %d blocks, want currentDate, two caller reminders, and user text: %s", len(content), out)
 	}
@@ -4710,11 +4815,11 @@ func TestCheckSystemInstructionsWithMode_StringSystemStrict(t *testing.T) {
 
 	out := checkSystemInstructionsWithMode(payload, true)
 
-	blocks := gjson.GetBytes(out, "system").Array()
+	blocks := ojson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
 		t.Fatalf("strict mode should produce 2 injected blocks, got %d", len(blocks))
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("strict mode content has %d blocks, want currentDate and user text", len(content))
 	}
@@ -4728,11 +4833,11 @@ func TestCheckSystemInstructionsWithMode_EmptyStringSystemIgnored(t *testing.T) 
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	blocks := gjson.GetBytes(out, "system").Array()
+	blocks := ojson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
 		t.Fatalf("empty string system should still produce 2 injected blocks, got %d", len(blocks))
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("empty system content has %d blocks, want 2", len(content))
 	}
@@ -4746,11 +4851,11 @@ func TestCheckSystemInstructionsWithMode_ArraySystemStillWorks(t *testing.T) {
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	blocks := gjson.GetBytes(out, "system").Array()
+	blocks := ojson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
 		t.Fatalf("expected 2 top-level system blocks, got %d", len(blocks))
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want currentDate and user text", len(content))
 	}
@@ -4766,10 +4871,10 @@ func TestCheckSystemInstructionsWithMode_ArraySystemKeepsBlocksAsSeparateMessage
 		`"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"follow-up"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 5 {
 		t.Fatalf("message count = %d, want user, two system messages, assistant, and user: %s", got, out)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("user content has %d blocks, want currentDate and user text: %s", len(content), out)
 	}
@@ -4786,17 +4891,17 @@ func TestCheckSystemInstructionsWithMode_TerminalUserRunKeepsSystemTopLevel(t *t
 		`"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false, true)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 4 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 4 {
 		t.Fatalf("top-level system block count = %d, want 4 (2 identity + 2 caller blocks): %s", got, out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("message count = %d, want 2 without trailing system turns: %s", got, out)
 	}
 	for idx, want := range []string{"first guidance", "second guidance"} {
-		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.text", idx+2)).String(); got != want {
+		if got := ojson.GetBytes(out, fmt.Sprintf("system.%d.text", idx+2)).String(); got != want {
 			t.Fatalf("system.%d.text = %q, want %q", idx+2, got, want)
 		}
-		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx+2)).String(); got != "ephemeral" {
+		if got := ojson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx+2)).String(); got != "ephemeral" {
 			t.Fatalf("system.%d.cache_control.type = %q, want ephemeral", idx+2, got)
 		}
 	}
@@ -4808,10 +4913,10 @@ func TestCheckSystemInstructionsWithMode_SingleTerminalUserRelocatesSystemToMess
 		`"messages":[{"role":"user","content":"request"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2 Claude Code blocks: %s", got, out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("message count = %d, want user and relocated system turns: %s", got, out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
@@ -4824,10 +4929,10 @@ func TestCheckSystemInstructionsWithMode_LeadingUserRunRelocatesSystemAfterAssis
 		`{"role":"assistant","content":"answer"},{"role":"user","content":"follow-up"}]}`)
 
 	out := checkSystemInstructionsWithMode(payload, false)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2 Claude Code blocks: %s", got, out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 5 {
 		t.Fatalf("message count = %d, want inserted system turn: %s", got, out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 2, "caller guidance", "")
@@ -4857,13 +4962,13 @@ func TestCheckSystemInstructionsWithMode_ExplicitTopLevelPolicyKeepsAffectedSyst
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out := checkSystemInstructionsWithMode([]byte(test.payload), false, true)
-			if got := gjson.GetBytes(out, "system.#").Int(); got != 3 {
+			if got := ojson.GetBytes(out, "system.#").Int(); got != 3 {
 				t.Fatalf("top-level system block count = %d, want 3: %s", got, out)
 			}
-			if got := gjson.GetBytes(out, "system.2.text").String(); got != test.wantSystemTxt {
+			if got := ojson.GetBytes(out, "system.2.text").String(); got != test.wantSystemTxt {
 				t.Fatalf("system.2.text = %q, want %q", got, test.wantSystemTxt)
 			}
-			if got := gjson.GetBytes(out, "messages.#").Int(); got != test.wantMessages {
+			if got := ojson.GetBytes(out, "messages.#").Int(); got != test.wantMessages {
 				t.Fatalf("message count = %d, want %d: %s", got, test.wantMessages, out)
 			}
 		})
@@ -4877,17 +4982,17 @@ func TestRelocateClaudeSystemPromptForCountTokens_TerminalUserRunKeepsSystemTopL
 		`"messages":[{"role":"user","content":"first"},{"role":"user","content":"second"}]}`)
 
 	out := relocateClaudeSystemPromptForCountTokensWithPolicy(payload, false, false, true)
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2 caller blocks: %s", got, out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("message count = %d, want 2 without trailing system turns: %s", got, out)
 	}
 	for idx, want := range []string{"first guidance", "second guidance"} {
-		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.text", idx)).String(); got != want {
+		if got := ojson.GetBytes(out, fmt.Sprintf("system.%d.text", idx)).String(); got != want {
 			t.Fatalf("system.%d.text = %q, want %q", idx, got, want)
 		}
-		if got := gjson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx)).String(); got != "ephemeral" {
+		if got := ojson.GetBytes(out, fmt.Sprintf("system.%d.cache_control.type", idx)).String(); got != "ephemeral" {
 			t.Fatalf("system.%d.cache_control.type = %q, want ephemeral", idx, got)
 		}
 	}
@@ -4899,10 +5004,10 @@ func TestRelocateClaudeSystemPromptForCountTokens_SingleTerminalUserRelocatesSys
 		`"messages":[{"role":"user","content":"request"}]}`)
 
 	out := relocateClaudeSystemPromptForCountTokens(payload, false)
-	if gjson.GetBytes(out, "system").Exists() {
+	if ojson.GetBytes(out, "system").Exists() {
 		t.Fatalf("top-level system field should be removed: %s", out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("message count = %d, want user and relocated system turns: %s", got, out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
@@ -4915,10 +5020,10 @@ func TestRelocateClaudeSystemPromptForCountTokens_LeadingUserRunRelocatesSystemA
 		`{"role":"assistant","content":"answer"},{"role":"user","content":"follow-up"}]}`)
 
 	out := relocateClaudeSystemPromptForCountTokens(payload, false)
-	if gjson.GetBytes(out, "system").Exists() {
+	if ojson.GetBytes(out, "system").Exists() {
 		t.Fatalf("top-level system field should be removed: %s", out)
 	}
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 5 {
 		t.Fatalf("message count = %d, want inserted system turn: %s", got, out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 2, "caller guidance", "")
@@ -4942,11 +5047,11 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 				`"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"follow-up"}]}`)
 
 			out := relocateClaudeSystemPromptForCountTokens(payload, false)
-			if gjson.GetBytes(out, "system").Exists() {
+			if ojson.GetBytes(out, "system").Exists() {
 				t.Fatalf("count_tokens system must be absent: %s", out)
 			}
 			if test.legacy {
-				content := gjson.GetBytes(out, "messages.0.content").Array()
+				content := ojson.GetBytes(out, "messages.0.content").Array()
 				if len(content) != 3 {
 					t.Fatalf("legacy content has %d blocks, want two reminders and user text: %s", len(content), out)
 				}
@@ -4961,7 +5066,7 @@ func TestRelocateClaudeSystemPromptForCountTokensKeepsBlocksSeparate(t *testing.
 				}
 				return
 			}
-			if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+			if got := ojson.GetBytes(out, "messages.#").Int(); got != 5 {
 				t.Fatalf("message count = %d, want user, two system messages, assistant, and user: %s", got, out)
 			}
 			assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
@@ -5006,10 +5111,10 @@ func TestCheckSystemInstructionsWithMode_AdvisorToolResultPreservesTopLevelSyste
 
 	// Messages must NOT have mid-conversation role=system turns inserted,
 	// so the message count stays at 4 and roles remain intact.
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 4 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 4 {
 		t.Fatalf("messages count = %d, want 4 (no mid-conversation system splice): %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "assistant", "user", "assistant"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
@@ -5018,7 +5123,7 @@ func TestCheckSystemInstructionsWithMode_AdvisorToolResultPreservesTopLevelSyste
 	}
 
 	// Top-level system must retain caller system blocks in addition to Claude Code identity blocks.
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 4 {
 		t.Fatalf("system blocks count = %d, want 4 (2 identity + 2 caller blocks): %s", len(systemBlocks), out)
 	}
@@ -5067,7 +5172,7 @@ func TestRelocateClaudeSystemPromptForCountTokens_AdvisorToolResultLeavesMessage
 
 	// Caller system blocks must be retained in top-level system so that
 	// their tokens are counted, without splicing them into messages[].
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 2 {
 		t.Fatalf("count_tokens system blocks count = %d, want 2: %s", len(systemBlocks), out)
 	}
@@ -5078,10 +5183,10 @@ func TestRelocateClaudeSystemPromptForCountTokens_AdvisorToolResultLeavesMessage
 		t.Fatalf("system[1].text = %q, want second guidance", got)
 	}
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("count_tokens messages count = %d, want 3 (no mid-conversation system splice): %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "assistant", "user"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
@@ -5110,10 +5215,10 @@ func TestCheckSystemInstructionsWithMode_UnicodeEscapedAdvisor(t *testing.T) {
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
 	}
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
 	}
@@ -5142,17 +5247,17 @@ func TestCheckSystemInstructionsWithMode_StandaloneAdvisorCallWithoutResult(t *t
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "assistant"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
 	}
@@ -5190,17 +5295,17 @@ func TestCheckSystemInstructionsWithMode_StandaloneAdvisorResultWithoutCall(t *t
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 2 {
 		t.Fatalf("messages count = %d, want 2 (no mid-conversation splice): %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "user"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
 	}
@@ -5226,7 +5331,7 @@ func TestCheckSystemInstructionsWithMode_NormalTextWithAdvisorWordDoesNotBypassM
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	// Since there is no advisor tool invocation/result, normal mid-conversation system insertion occurs.
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 5 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 5 {
 		t.Fatalf("messages count = %d, want 5 (user + 2 system messages + assistant + user): %s", got, out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 1, "first guidance", "")
@@ -5267,17 +5372,17 @@ func TestCheckSystemInstructionsWithMode_AdvisorToolResultArrayContent(t *testin
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("messages count = %d, want 3: %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "assistant", "user"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
 	}
@@ -5320,17 +5425,17 @@ func TestCheckSystemInstructionsWithMode_ToolResultWithAdvisorRedactedResult(t *
 
 	out := checkSystemInstructionsWithMode(payload, false)
 
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("messages count = %d, want 3: %s", got, out)
 	}
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "assistant", "user"}
 	for idx, wantRole := range wantRoles {
 		if got := roles[idx].String(); got != wantRole {
 			t.Fatalf("messages[%d].role = %q, want %q", idx, got, wantRole)
 		}
 	}
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("system blocks count = %d, want 3: %s", len(systemBlocks), out)
 	}
@@ -5374,7 +5479,7 @@ func TestCheckSystemInstructionsWithMode_ClientToolNamedAdvisorRelocatesSystemPr
 
 	// Caller prompt must be relocated to a mid-conversation system message,
 	// so the top-level system must only have the 2 Claude Code cloak blocks.
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 2 {
 		t.Fatalf("system blocks count = %d, want 2 (caller prompt must be relocated, not hoisted): %s", len(systemBlocks), out)
 	}
@@ -5415,7 +5520,7 @@ func TestRelocateClaudeSystemPromptForCountTokens_ClientToolNamedAdvisorRelocate
 
 	out := relocateClaudeSystemPromptForCountTokens(payload, false)
 
-	if gjson.GetBytes(out, "system").Exists() {
+	if ojson.GetBytes(out, "system").Exists() {
 		t.Fatalf("count_tokens system field should have been relocated out of top-level system: %s", out)
 	}
 	assertClaudeMidConversationSystemMessage(t, out, 1, "caller guidance", "")
@@ -5428,10 +5533,10 @@ func TestCheckSystemInstructionsWithMode_StringWithSpecialChars(t *testing.T) {
 	out := checkSystemInstructionsWithMode(payload, false)
 
 	wantSystem := `Use <xml> tags & "quotes" in output.`
-	if got := gjson.GetBytes(out, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(out, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2", got)
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("messages[0].content has %d blocks, want 2", len(content))
 	}
@@ -5461,13 +5566,13 @@ func TestCheckSystemInstructionsWithSigningMode_LongPromptIsExactAndIdempotent(t
 	if !bytes.Equal(first, second) {
 		t.Fatalf("complete cloak layout is not byte-idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	if got := gjson.GetBytes(first, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(first, "system.#").Int(); got != 2 {
 		t.Fatalf("top-level system block count = %d, want 2", got)
 	}
-	if got := gjson.GetBytes(first, "messages.#").Int(); got != 4 {
+	if got := ojson.GetBytes(first, "messages.#").Int(); got != 4 {
 		t.Fatalf("message count = %d, want user, system, assistant, and user", got)
 	}
-	content := gjson.GetBytes(first, "messages.0.content").Array()
+	content := ojson.GetBytes(first, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("user content has %d blocks, want currentDate and user text", len(content))
 	}
@@ -5561,7 +5666,7 @@ func TestClaudeExecutor_CustomBaseURLAPIKeyDoesNotEnableCCHSigning(t *testing.T)
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	if got := gjson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != messageText {
+	if got := ojson.GetBytes(seenBody, "messages.0.content.0.text").String(); got != messageText {
 		t.Fatalf("message text = %q, want %q", got, messageText)
 	}
 	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") {
@@ -5600,7 +5705,7 @@ func TestClaudeExecutor_CustomBaseURLOAuthGeneratesMissingCCH(t *testing.T) {
 	if _, ok := claudeBillingCCHDigitsOffset(seenBody); !ok {
 		t.Fatalf("Claude OAuth custom BaseURL body is missing generated CCH: %s", seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "keep original system" {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "keep original system" {
 		t.Fatalf("system.1.text = %q, want preserved system text", got)
 	}
 }
@@ -5642,10 +5747,10 @@ func TestClaudeExecutor_RebuildMidSystemMessageDisabledByDefault(t *testing.T) {
 	if len(seenBody) == 0 {
 		t.Fatal("expected request body to be captured")
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "Top rule" {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "Top rule" {
 		t.Fatalf("system.0.text = %q, want top-level system preserved", got)
 	}
-	if got := gjson.GetBytes(seenBody, `messages.#(role=="system").content`).String(); got != "Mid rule" {
+	if got := ojson.GetBytes(seenBody, `messages.#(role=="system").content`).String(); got != "Mid rule" {
 		t.Fatalf("mid system message = %q, want original message preserved", got)
 	}
 }
@@ -5689,9 +5794,9 @@ func TestClaudeExecutor_RebuildMidSystemMessageOptInMovesSystemMessages(t *testi
 		t.Fatal("expected request body to be captured")
 	}
 
-	system := gjson.GetBytes(seenBody, "system").Array()
+	system := ojson.GetBytes(seenBody, "system").Array()
 	if len(system) != 3 {
-		t.Fatalf("system has %d items, want 3: %s", len(system), gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("system has %d items, want 3: %s", len(system), ojson.GetBytes(seenBody, "system").Raw)
 	}
 	wantTexts := []string{"Top rule", "Mid string rule", "Mid array rule"}
 	for i, want := range wantTexts {
@@ -5699,13 +5804,13 @@ func TestClaudeExecutor_RebuildMidSystemMessageOptInMovesSystemMessages(t *testi
 			t.Fatalf("system[%d].text = %q, want %q", i, got, want)
 		}
 	}
-	if got := gjson.GetBytes(seenBody, "system.2.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytes(seenBody, "system.2.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
 	}
-	if gjson.GetBytes(seenBody, `messages.#(role=="system")`).Exists() {
-		t.Fatalf("messages should not contain system role after rebuild: %s", gjson.GetBytes(seenBody, "messages").Raw)
+	if ojson.GetBytes(seenBody, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("messages should not contain system role after rebuild: %s", ojson.GetBytes(seenBody, "messages").Raw)
 	}
-	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 3 {
 		t.Fatalf("messages count = %d, want 3", got)
 	}
 }
@@ -5770,11 +5875,11 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	if !cloaked {
 		t.Fatal("applyCloaking() cloaked = false, want true")
 	}
-	blocks := gjson.GetBytes(out, "system").Array()
+	blocks := ojson.GetBytes(out, "system").Array()
 	if len(blocks) != 2 {
 		t.Fatalf("expected strict mode to keep the 2 injected Claude CLI system blocks, got %d", len(blocks))
 	}
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	content := ojson.GetBytes(out, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("strict mode should add only currentDate before user text, got %d content blocks", len(content))
 	}
@@ -5808,18 +5913,18 @@ func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 			if cloaked == tt.confirmed {
 				t.Fatalf("cloaked = %v, confirmed = %v", cloaked, tt.confirmed)
 			}
-			fallbacks := gjson.GetBytes(body, "fallbacks").Array()
+			fallbacks := ojson.GetBytes(body, "fallbacks").Array()
 			if tt.wantModel == "" {
 				if len(fallbacks) != 0 {
-					t.Fatalf("unexpected fallback: %s", gjson.GetBytes(body, "fallbacks").Raw)
+					t.Fatalf("unexpected fallback: %s", ojson.GetBytes(body, "fallbacks").Raw)
 				}
 			} else if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != tt.wantModel {
-				t.Fatalf("fallbacks = %s, want %s", gjson.GetBytes(body, "fallbacks").Raw, tt.wantModel)
+				t.Fatalf("fallbacks = %s, want %s", ojson.GetBytes(body, "fallbacks").Raw, tt.wantModel)
 			}
 			if tt.confirmed && string(body) != tt.payload {
 				t.Fatal("confirmed native payload was cloaked")
 			}
-			if !tt.confirmed && !strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cc_turn_origin=human;") {
+			if !tt.confirmed && !strings.Contains(ojson.GetBytes(body, "system.0.text").String(), "cc_turn_origin=human;") {
 				t.Fatal("cloaked main request is missing its CLI turn origin")
 			}
 		})
@@ -5848,7 +5953,7 @@ func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
+	if got := ojson.GetBytes(seenBody, "fallbacks.0.model").String(); got != "claude-opus-4-8" {
 		t.Errorf("fallback model = %q", got)
 	}
 	for _, beta := range []string{
@@ -5862,7 +5967,7 @@ func TestClaudeExecutor_CloakedOpus55PairsFallbackAndBetas(t *testing.T) {
 			t.Errorf("missing %s beta", beta)
 		}
 	}
-	if text := gjson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(text, "cc_turn_origin=human;") {
+	if text := ojson.GetBytes(seenBody, "system.0.text").String(); !strings.Contains(text, "cc_turn_origin=human;") {
 		t.Error("cloaked request is missing human turn origin")
 	}
 	if got := seenHeaders.Get("X-Claude-Code-Request-Class"); got != "" {
@@ -5885,7 +5990,7 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := reconcileClaudeCodeFableModelAfterPayload([]byte(tt.body), state, false, false, true, tt.probe)
-			if model := gjson.GetBytes(got, "fallbacks.0.model").String(); model != tt.wantFallback {
+			if model := ojson.GetBytes(got, "fallbacks.0.model").String(); model != tt.wantFallback {
 				t.Errorf("fallback = %q, want %q", model, tt.wantFallback)
 			}
 		})
@@ -5893,7 +5998,7 @@ func TestClaudeOpus55FallbackReconcilesAfterModelOverride(t *testing.T) {
 	got := reconcileClaudeCodeFableModelAfterPayload(
 		[]byte(`{"model":"claude-opus-5-5","system":[]}`), claudeCodeFableState{}, false, false, true, false,
 	)
-	if fallback := gjson.GetBytes(got, "fallbacks.0.model").String(); fallback != "claude-opus-4-8" {
+	if fallback := ojson.GetBytes(got, "fallbacks.0.model").String(); fallback != "claude-opus-4-8" {
 		t.Errorf("Sonnet rewritten to Opus fallback = %q", fallback)
 	}
 }
@@ -5924,12 +6029,12 @@ func TestApplyCloaking_FableInjectsFallbacksAndDisplayUpdates(t *testing.T) {
 		t.Fatal("applyCloaking() cloaked = false, want true")
 	}
 
-	fallbacks := gjson.GetBytes(out, "fallbacks").Array()
+	fallbacks := ojson.GetBytes(out, "fallbacks").Array()
 	if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != "claude-opus-5" {
-		t.Fatalf("expected fallbacks=[{\"model\":\"claude-opus-5\"}], got: %s", gjson.GetBytes(out, "fallbacks").Raw)
+		t.Fatalf("expected fallbacks=[{\"model\":\"claude-opus-5\"}], got: %s", ojson.GetBytes(out, "fallbacks").Raw)
 	}
 
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 3 {
 		t.Fatalf("expected 3 system blocks for Fable cloaking (billing, identity, reporting outcomes), got %d", len(systemBlocks))
 	}
@@ -5940,7 +6045,7 @@ func TestApplyCloaking_FableInjectsFallbacksAndDisplayUpdates(t *testing.T) {
 		t.Fatalf("system block 2 for Reporting outcomes should have no cache_control, got: %s", systemBlocks[2].Get("cache_control").Raw)
 	}
 
-	display := gjson.GetBytes(out, "thinking.display").String()
+	display := ojson.GetBytes(out, "thinking.display").String()
 	if display != "updates" {
 		t.Fatalf("expected thinking.display=updates, got: %q", display)
 	}
@@ -5983,7 +6088,7 @@ func TestApplyCloaking_SonnetOmitsReportingOutcomes(t *testing.T) {
 		t.Fatal("applyCloaking() cloaked = false, want true")
 	}
 
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 2 {
 		t.Fatalf("expected 2 system blocks for Sonnet (billing, identity only), got %d", len(systemBlocks))
 	}
@@ -6017,11 +6122,11 @@ func TestApplyCloaking_DisabledByConfigLeavesFableUntouched(t *testing.T) {
 	if cloaked {
 		t.Fatal("applyCloaking() cloaked = true, want false when DisableClaudeCloakMode is true")
 	}
-	if got := gjson.GetBytes(out, "system").String(); got != originalSystem {
+	if got := ojson.GetBytes(out, "system").String(); got != originalSystem {
 		t.Fatalf("expected system to be preserved unchanged, got: %s", got)
 	}
-	if gjson.GetBytes(out, "fallbacks").Exists() {
-		t.Fatalf("expected no fallbacks injected when cloaking is disabled, got: %s", gjson.GetBytes(out, "fallbacks").Raw)
+	if ojson.GetBytes(out, "fallbacks").Exists() {
+		t.Fatalf("expected no fallbacks injected when cloaking is disabled, got: %s", ojson.GetBytes(out, "fallbacks").Raw)
 	}
 }
 
@@ -6051,7 +6156,7 @@ func TestApplyCloaking_NativeClaudeCodeLeavesFableUntouched(t *testing.T) {
 	if cloaked {
 		t.Fatal("applyCloaking() cloaked = true, want false for confirmed native Claude Code")
 	}
-	if got := gjson.GetBytes(out, "system").String(); got != originalSystem {
+	if got := ojson.GetBytes(out, "system").String(); got != originalSystem {
 		t.Fatalf("expected system to be preserved unchanged for native client, got: %s", got)
 	}
 }
@@ -6082,11 +6187,11 @@ func TestApplyCloaking_Fable5OmitsFallbacksAndReportingOutcomes(t *testing.T) {
 		t.Fatal("applyCloaking() cloaked = false, want true")
 	}
 
-	if gjson.GetBytes(out, "fallbacks").Exists() {
-		t.Fatalf("claude-fable-5 should not have fallbacks injected, got: %s", gjson.GetBytes(out, "fallbacks").Raw)
+	if ojson.GetBytes(out, "fallbacks").Exists() {
+		t.Fatalf("claude-fable-5 should not have fallbacks injected, got: %s", ojson.GetBytes(out, "fallbacks").Raw)
 	}
 
-	systemBlocks := gjson.GetBytes(out, "system").Array()
+	systemBlocks := ojson.GetBytes(out, "system").Array()
 	if len(systemBlocks) != 2 {
 		t.Fatalf("expected 2 system blocks for claude-fable-5, got %d", len(systemBlocks))
 	}
@@ -6139,8 +6244,8 @@ func TestClaudeExecutor_TitleHelperWithSystemPromptIsolated(t *testing.T) {
 	}
 
 	// Title helper must NOT carry diagnostics
-	if gjson.GetBytes(seenBody, "diagnostics").Exists() {
-		t.Fatalf("expected title helper to omit diagnostics, got: %s", gjson.GetBytes(seenBody, "diagnostics").Raw)
+	if ojson.GetBytes(seenBody, "diagnostics").Exists() {
+		t.Fatalf("expected title helper to omit diagnostics, got: %s", ojson.GetBytes(seenBody, "diagnostics").Raw)
 	}
 
 	// Title helper must NOT advance session continuity state
@@ -6196,7 +6301,7 @@ func TestClaudeExecutor_SubagentAndProbeOmit1hCacheTTLAndBeta(t *testing.T) {
 	if strings.Contains(seenHeaders.Get("Anthropic-Beta"), "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("subagent must not carry extended-cache-ttl beta, got: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		if blk.Get("cache_control.ttl").String() == "1h" {
 			t.Fatalf("subagent system block must not carry ttl: 1h, got: %s", blk.Raw)
 		}
@@ -6216,7 +6321,7 @@ func TestClaudeExecutor_SubagentAndProbeOmit1hCacheTTLAndBeta(t *testing.T) {
 	if strings.Contains(seenHeaders.Get("Anthropic-Beta"), "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("probe must not carry extended-cache-ttl beta, got: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		if blk.Get("cache_control.ttl").String() == "1h" {
 			t.Fatalf("probe system block must not carry ttl: 1h, got: %s", blk.Raw)
 		}
@@ -6237,14 +6342,14 @@ func TestClaudeExecutor_SubagentAndProbeOmit1hCacheTTLAndBeta(t *testing.T) {
 		t.Fatalf("main thread request must carry extended-cache-ttl beta, got: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
 	has1h := false
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		if blk.Get("cache_control.ttl").String() == "1h" {
 			has1h = true
 			break
 		}
 	}
 	if !has1h {
-		t.Fatalf("main thread request system block must carry ttl: 1h, got: %s", gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("main thread request system block must carry ttl: 1h, got: %s", ojson.GetBytes(seenBody, "system").Raw)
 	}
 
 	// 4. Confirmed native Claude Code subagent: must NOT have extended-cache-ttl restored
@@ -6311,14 +6416,14 @@ func TestClaudeExecutor_PayloadOverrideFableModelLeavesBuiltinsUnchanged(t *test
 	}
 
 	// Model was rewritten to claude-sonnet-5
-	if got := gjson.GetBytes(seenBody, "model").String(); got != "claude-sonnet-5" {
+	if got := ojson.GetBytes(seenBody, "model").String(); got != "claude-sonnet-5" {
 		t.Fatalf("model = %q, want claude-sonnet-5", got)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
+	if ojson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6367,14 +6472,14 @@ func TestClaudeExecutor_PayloadOverrideNonFableModelDoesNotInjectFableBuiltins(t
 	}
 
 	// Model was rewritten to claude-fable-5-1
-	if got := gjson.GetBytes(seenBody, "model").String(); got != "claude-fable-5-1" {
+	if got := ojson.GetBytes(seenBody, "model").String(); got != "claude-fable-5-1" {
 		t.Fatalf("model = %q, want claude-fable-5-1", got)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
+	if ojson.GetBytes(seenBody, "fallbacks").Exists() {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if strings.Contains(gjson.GetBytes(seenBody, "system").Raw, "eporting outcomes") {
+	if strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6426,9 +6531,9 @@ func TestClaudeExecutor_PayloadOverridePreservesExplicitFallbacks(t *testing.T) 
 	}
 
 	// Explicit payload fallback override must be preserved!
-	fallbacks := gjson.GetBytes(seenBody, "fallbacks").Array()
+	fallbacks := ojson.GetBytes(seenBody, "fallbacks").Array()
 	if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != "claude-opus-5" {
-		t.Fatalf("explicit payload fallback override must be preserved, got: %s", gjson.GetBytes(seenBody, "fallbacks").Raw)
+		t.Fatalf("explicit payload fallback override must be preserved, got: %s", ojson.GetBytes(seenBody, "fallbacks").Raw)
 	}
 	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
 		t.Fatalf("server-side-fallback beta must be present for explicit fallback, got: %s", seenHeaders.Get("Anthropic-Beta"))
@@ -6487,10 +6592,10 @@ func TestClaudeExecutor_PayloadUnrelatedRuleLeavesBuiltinFallbacksUnchanged(t *t
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
+	if ojson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if gjson.GetBytes(seenBody, "model").String() != "claude-sonnet-5" {
+	if ojson.GetBytes(seenBody, "model").String() != "claude-sonnet-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6539,11 +6644,11 @@ func TestClaudeExecutor_PayloadMaxTokensOverrideDoesNotReclassifyBuiltins(t *tes
 	}
 
 	// Payload rule made it max_tokens: 1
-	if got := gjson.GetBytes(seenBody, "max_tokens").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "max_tokens").Int(); got != 1 {
 		t.Fatalf("max_tokens = %d, want 1", got)
 	}
 
-	if !strings.Contains(gjson.GetBytes(seenBody, "system").Raw, `"ttl":"1h"`) {
+	if !strings.Contains(ojson.GetBytes(seenBody, "system").Raw, `"ttl":"1h"`) {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6592,13 +6697,13 @@ func TestClaudeExecutor_PayloadFableProbeOverrideKeepsBuiltinAdditions(t *testin
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if gjson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
+	if ojson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if gjson.GetBytes(seenBody, "max_tokens").Int() != 1 || gjson.GetBytes(seenBody, "thinking.display").String() != "updates" {
+	if ojson.GetBytes(seenBody, "max_tokens").Int() != 1 || ojson.GetBytes(seenBody, "thinking.display").String() != "updates" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6647,7 +6752,7 @@ func TestClaudeExecutor_PayloadProbeToNormalDoesNotReinitializeBuiltins(t *testi
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if gjson.GetBytes(seenBody, "max_tokens").Int() != 1000 || gjson.GetBytes(seenBody, "fallbacks").Exists() || strings.Contains(gjson.GetBytes(seenBody, "system").Raw, `"ttl":"1h"`) {
+	if ojson.GetBytes(seenBody, "max_tokens").Int() != 1000 || ojson.GetBytes(seenBody, "fallbacks").Exists() || strings.Contains(ojson.GetBytes(seenBody, "system").Raw, `"ttl":"1h"`) {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6688,8 +6793,8 @@ func TestClaudeExecutor_CallerOwnedDiagnosticsPreservedOnProbe(t *testing.T) {
 	}
 
 	// Caller-owned diagnostics must be preserved!
-	if got := gjson.GetBytes(seenBody, "diagnostics.caller_custom_key").String(); got != "val123" {
-		t.Fatalf("caller diagnostics must be preserved, got: %s", gjson.GetBytes(seenBody, "diagnostics").Raw)
+	if got := ojson.GetBytes(seenBody, "diagnostics.caller_custom_key").String(); got != "val123" {
+		t.Fatalf("caller diagnostics must be preserved, got: %s", ojson.GetBytes(seenBody, "diagnostics").Raw)
 	}
 }
 
@@ -6738,8 +6843,8 @@ func TestClaudeExecutor_PayloadOverrideParentThinkingPreventsDisplayUpdates(t *t
 	}
 
 	// Payload rule replaced parent "thinking" without "display", so "display" must NOT be re-added!
-	if gjson.GetBytes(seenBody, "thinking.display").Exists() {
-		t.Fatalf("thinking.display must not be injected when parent thinking was overridden, got: %s", gjson.GetBytes(seenBody, "thinking").Raw)
+	if ojson.GetBytes(seenBody, "thinking.display").Exists() {
+		t.Fatalf("thinking.display must not be injected when parent thinking was overridden, got: %s", ojson.GetBytes(seenBody, "thinking").Raw)
 	}
 }
 
@@ -6786,10 +6891,10 @@ func TestClaudeExecutor_PayloadSystemTTLOverrideKeepsBuiltinFableReporting(t *te
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if gjson.GetBytes(seenBody, "system.0.cache_control.ttl").String() != cfg.Payload.Override[0].Params["system.0.cache_control.ttl"] {
+	if ojson.GetBytes(seenBody, "system.0.cache_control.ttl").String() != cfg.Payload.Override[0].Params["system.0.cache_control.ttl"] {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6838,10 +6943,10 @@ func TestClaudeExecutor_PayloadSonnetToFableDoesNotAddReporting(t *testing.T) {
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if strings.Contains(gjson.GetBytes(seenBody, "system").Raw, "eporting outcomes") {
+	if strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if gjson.GetBytes(seenBody, "system.1.cache_control.ttl").String() != "1h" {
+	if ojson.GetBytes(seenBody, "system.1.cache_control.ttl").String() != "1h" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6894,8 +6999,8 @@ func TestClaudeExecutor_PayloadOverrideProbeWithExplicitDiagnosticsPreserved(t *
 	}
 
 	// The operator-provided diagnostics object must be preserved!
-	if got := gjson.GetBytes(seenBody, "diagnostics.operator_custom").String(); got != "custom_value_123" {
-		t.Fatalf("operator custom diagnostics must be preserved, got: %s", gjson.GetBytes(seenBody, "diagnostics").Raw)
+	if got := ojson.GetBytes(seenBody, "diagnostics.operator_custom").String(); got != "custom_value_123" {
+		t.Fatalf("operator custom diagnostics must be preserved, got: %s", ojson.GetBytes(seenBody, "diagnostics").Raw)
 	}
 }
 
@@ -6942,7 +7047,7 @@ func TestClaudeExecutor_PayloadStringSystemFableWinsReportingBlock(t *testing.T)
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if got := gjson.GetBytes(seenBody, "system"); got.Type != gjson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
+	if got := ojson.GetBytes(seenBody, "system"); got.Type != ojson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
 		t.Fatalf("payload system override was rewritten: %s", seenBody)
 	}
 }
@@ -6990,7 +7095,7 @@ func TestClaudeExecutor_PayloadStringSystemMentioningReportingOutcomesStaysExact
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if got := gjson.GetBytes(seenBody, "system"); got.Type != gjson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
+	if got := ojson.GetBytes(seenBody, "system"); got.Type != ojson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
 		t.Fatalf("payload system override was rewritten: %s", seenBody)
 	}
 }
@@ -7038,7 +7143,7 @@ func TestClaudeExecutor_PayloadStringSystemWithExactReportingPromptDoesNotDuplic
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if got := gjson.GetBytes(seenBody, "system"); got.Type != gjson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
+	if got := ojson.GetBytes(seenBody, "system"); got.Type != ojson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
 		t.Fatalf("payload system override was rewritten: %s", seenBody)
 	}
 }
@@ -7090,8 +7195,8 @@ func TestClaudeExecutor_PayloadFableThinkingAdaptiveToDisabledKeepsBuiltinDispla
 	}
 
 	// The scalar override does not rerun thinking normalization.
-	if gjson.GetBytes(seenBody, "thinking.display").String() != "updates" {
-		t.Fatalf("thinking.display must remain untouched by the thinking.type override, got: %s", gjson.GetBytes(seenBody, "thinking").Raw)
+	if ojson.GetBytes(seenBody, "thinking.display").String() != "updates" {
+		t.Fatalf("thinking.display must remain untouched by the thinking.type override, got: %s", ojson.GetBytes(seenBody, "thinking").Raw)
 	}
 	// thinking-display-updates beta header must NOT be present
 	betas := seenHeaders.Get("anthropic-beta")
@@ -7137,7 +7242,7 @@ func TestClaudeExecutor_UncloakedProbePreservesCallerBillingTags(t *testing.T) {
 	}
 
 	// Because cloaking was disabled, the caller-owned billing header must be preserved exactly!
-	gotSystem := gjson.GetBytes(seenBody, "system.0.text").String()
+	gotSystem := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.Contains(gotSystem, "cc_prompt_id=00000000-0000-4000-8000-000000000001") {
 		t.Fatalf("uncloaked request must preserve caller billing tags on probe, got: %s", gotSystem)
 	}
@@ -7180,7 +7285,7 @@ func TestClaudeExecutor_FableWithSensitiveWordsHasSingleObfuscatedReportingBlock
 	}
 
 	reportingCount := 0
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		raw := blk.Get("text").String()
 		cleaned := strings.ReplaceAll(raw, "\u200B", "")
 		if cleaned == claudeCodeFableReportingOutcomes {
@@ -7194,7 +7299,7 @@ func TestClaudeExecutor_FableWithSensitiveWordsHasSingleObfuscatedReportingBlock
 		}
 	}
 	if reportingCount != 1 {
-		t.Fatalf("expected exactly 1 reporting block, got %d; system = %s", reportingCount, gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("expected exactly 1 reporting block, got %d; system = %s", reportingCount, ojson.GetBytes(seenBody, "system").Raw)
 	}
 }
 
@@ -7243,7 +7348,7 @@ func TestClaudeExecutor_PayloadSonnetToFableWithSensitiveWordsDoesNotInjectRepor
 	}
 
 	reportingCount := 0
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		raw := blk.Get("text").String()
 		cleaned := strings.ReplaceAll(raw, "\u200B", "")
 		if cleaned == claudeCodeFableReportingOutcomes {
@@ -7257,7 +7362,7 @@ func TestClaudeExecutor_PayloadSonnetToFableWithSensitiveWordsDoesNotInjectRepor
 		}
 	}
 	if reportingCount != 0 {
-		t.Fatalf("expected no newly injected reporting block, got %d; system = %s", reportingCount, gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("expected no newly injected reporting block, got %d; system = %s", reportingCount, ojson.GetBytes(seenBody, "system").Raw)
 	}
 }
 
@@ -7305,10 +7410,10 @@ func TestClaudeExecutor_PayloadFableToSonnetPreservesObfuscatedBuiltins(t *testi
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if !strings.Contains(strings.ReplaceAll(gjson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(gjson.GetBytes(seenBody, "system").Raw, "\u200b") {
+	if !strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "\u200b") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -7351,7 +7456,7 @@ func TestClaudeExecutor_SensitiveWordsDoNotCorruptBillingHeaderTags(t *testing.T
 	}
 
 	// system[0] billing header must NOT contain zero-width spaces in its tags
-	billingText := gjson.GetBytes(seenBody, "system.0.text").String()
+	billingText := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header: cc_version=") {
 		t.Fatalf("billing header must start cleanly without obfuscation, got: %q", billingText)
 	}
@@ -7499,7 +7604,7 @@ func TestClaudeExecutor_PayloadReplacesSystemOnOriginalFableWithoutReinjection(t
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if got := gjson.GetBytes(seenBody, "system"); got.Type != gjson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
+	if got := ojson.GetBytes(seenBody, "system"); got.Type != ojson.String || got.String() != cfg.Payload.Override[0].Params["system"] {
 		t.Fatalf("payload system override was rewritten: %s", seenBody)
 	}
 }
@@ -7544,20 +7649,20 @@ func TestClaudeExecutor_UserTitlePromptWithoutSchemaTreatedAsNormalTurn(t *testi
 	// Must NOT be treated as a title helper:
 	// 1. Must carry 1h cache TTL and extended-cache-ttl beta
 	has1h := false
-	for _, blk := range gjson.GetBytes(seenBody, "system").Array() {
+	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		if blk.Get("cache_control.ttl").String() == "1h" {
 			has1h = true
 			break
 		}
 	}
 	if !has1h {
-		t.Fatalf("user title query must carry 1h cache, got: %s", gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("user title query must carry 1h cache, got: %s", ojson.GetBytes(seenBody, "system").Raw)
 	}
 	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), "extended-cache-ttl-2025-04-11") {
 		t.Fatalf("user title query must carry extended-cache-ttl beta, got: %s", seenHeaders.Get("Anthropic-Beta"))
 	}
 	// 2. Billing header must carry cc_prompt_id
-	billingText := gjson.GetBytes(seenBody, "system.0.text").String()
+	billingText := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.Contains(billingText, "cc_prompt_id=") {
 		t.Fatalf("user title query must carry cc_prompt_id, got: %s", billingText)
 	}
@@ -7609,9 +7714,9 @@ func TestClaudeExecutor_PayloadOverrideRawPreservesExplicitFallbacks(t *testing.
 	}
 
 	// Raw payload override setting fallbacks must be preserved!
-	fallbacks := gjson.GetBytes(seenBody, "fallbacks").Array()
+	fallbacks := ojson.GetBytes(seenBody, "fallbacks").Array()
 	if len(fallbacks) != 1 || fallbacks[0].Get("model").String() != "claude-opus-5" {
-		t.Fatalf("explicit raw payload fallback override must be preserved, got: %s", gjson.GetBytes(seenBody, "fallbacks").Raw)
+		t.Fatalf("explicit raw payload fallback override must be preserved, got: %s", ojson.GetBytes(seenBody, "fallbacks").Raw)
 	}
 	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
 		t.Fatalf("server-side-fallback beta must be present for explicit raw fallback, got: %s", seenHeaders.Get("Anthropic-Beta"))
@@ -7661,8 +7766,8 @@ func TestClaudeExecutor_PayloadFilterFallbacksPreservesRemovalOnFable(t *testing
 	}
 
 	// fallbacks was filtered out by operator rule, must NOT be recreated!
-	if gjson.GetBytes(seenBody, "fallbacks").Exists() {
-		t.Fatalf("fallbacks must remain deleted after payload filter, got: %s", gjson.GetBytes(seenBody, "fallbacks").Raw)
+	if ojson.GetBytes(seenBody, "fallbacks").Exists() {
+		t.Fatalf("fallbacks must remain deleted after payload filter, got: %s", ojson.GetBytes(seenBody, "fallbacks").Raw)
 	}
 	if strings.Contains(seenHeaders.Get("Anthropic-Beta"), "server-side-fallback") {
 		t.Fatalf("server-side-fallback beta must be absent when fallbacks is filtered, got: %s", seenHeaders.Get("Anthropic-Beta"))
@@ -7714,7 +7819,7 @@ func TestClaudeExecutor_PayloadCustomReportingOutcomesPreservedOnRewrite(t *test
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	system := gjson.GetBytes(seenBody, "system").Array()
+	system := ojson.GetBytes(seenBody, "system").Array()
 	hasCustom := false
 	for _, blk := range system {
 		if strings.Contains(blk.Get("text").String(), "Custom user prompt") {
@@ -7722,7 +7827,7 @@ func TestClaudeExecutor_PayloadCustomReportingOutcomesPreservedOnRewrite(t *test
 		}
 	}
 	if !hasCustom {
-		t.Fatalf("custom user system prompt must NOT be deleted, got: %s", gjson.GetBytes(seenBody, "system").Raw)
+		t.Fatalf("custom user system prompt must NOT be deleted, got: %s", ojson.GetBytes(seenBody, "system").Raw)
 	}
 }
 
@@ -7730,7 +7835,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
 	out := normalizeClaudeSamplingForUpstream(payload, false)
 
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
 }
@@ -7739,7 +7844,7 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTemperatureWithThinkingEnable
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
 	out := normalizeClaudeSamplingForUpstream(payload, false)
 
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
 }
@@ -7748,13 +7853,13 @@ func TestNormalizeClaudeSamplingForUpstream_RemovesTopPAndTopKForThinking(t *tes
 	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
 	out := normalizeClaudeSamplingForUpstream(payload, false)
 
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
-	if gjson.GetBytes(out, "top_p").Exists() {
+	if ojson.GetBytes(out, "top_p").Exists() {
 		t.Fatalf("top_p should be removed when thinking is active")
 	}
-	if gjson.GetBytes(out, "top_k").Exists() {
+	if ojson.GetBytes(out, "top_k").Exists() {
 		t.Fatalf("top_k should be removed when thinking is active")
 	}
 }
@@ -7763,13 +7868,13 @@ func TestNormalizeClaudeSamplingForUpstream_NoThinkingRemovesTemperatureAndTopP(
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
 	out := normalizeClaudeSamplingForUpstream(payload, false)
 
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
-	if gjson.GetBytes(out, "top_p").Exists() {
+	if ojson.GetBytes(out, "top_p").Exists() {
 		t.Fatalf("top_p should be removed")
 	}
-	if got := gjson.GetBytes(out, "top_k").Int(); got != 40 {
+	if got := ojson.GetBytes(out, "top_k").Int(); got != 40 {
 		t.Fatalf("top_k = %v, want 40", got)
 	}
 }
@@ -7779,10 +7884,10 @@ func TestNormalizeClaudeSamplingForUpstream_AfterForcedToolChoiceRemovesTemperat
 	out := disableThinkingIfToolChoiceForced(payload)
 	out = normalizeClaudeSamplingForUpstream(out, false)
 
-	if gjson.GetBytes(out, "thinking").Exists() {
+	if ojson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
 	}
-	if gjson.GetBytes(out, "temperature").Exists() {
+	if ojson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
 }
@@ -7794,13 +7899,13 @@ func TestNormalizeClaudeSamplingForUpstream_AfterForcedToolChoiceRemovesTemperat
 func TestNormalizeClaudeSamplingForUpstreamNativeKeepsMeasuredHelperTemperature(t *testing.T) {
 	// Top-level key order and values mirror the measured structured helper.
 	payload := []byte(`{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"helper probe"}]}],"system":[{"type":"text","text":"Return a short title."}],"tools":[],"metadata":{"user_id":"u"},"max_tokens":32000,"thinking":{"type":"disabled"},"temperature":1,"output_config":{"format":{"type":"json_schema"}},"stream":true}`)
-	if got := gjson.GetBytes(payload, "temperature"); !got.Exists() || got.Num != 1 {
+	if got := ojson.GetBytes(payload, "temperature"); !got.Exists() || got.Num != 1 {
 		t.Fatalf("measured helper fixture should carry temperature=1, got %q", got.Raw)
 	}
 
 	out := normalizeClaudeSamplingForUpstream(payload, true)
 
-	if got := gjson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
+	if got := ojson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
 		t.Fatalf("confirmed native must preserve the measured temperature, got %q", got.Raw)
 	}
 }
@@ -7869,13 +7974,13 @@ func TestNormalizeClaudeSamplingForUpstreamNativeDropsOnlyRejectedCombinations(t
 			out := normalizeClaudeSamplingForUpstream([]byte(tc.payload), true)
 
 			for field, want := range tc.keep {
-				got := gjson.GetBytes(out, field)
+				got := ojson.GetBytes(out, field)
 				if !got.Exists() || got.Num != want {
 					t.Fatalf("%s = %q, want %v preserved", field, got.Raw, want)
 				}
 			}
 			for _, field := range tc.dropped {
-				if got := gjson.GetBytes(out, field); got.Exists() {
+				if got := ojson.GetBytes(out, field); got.Exists() {
 					t.Fatalf("%s = %q, want dropped because Anthropic rejects it", field, got.Raw)
 				}
 			}
@@ -7888,7 +7993,7 @@ func TestRemapOAuthToolNames_AllClientNamesUseMCPAliases(t *testing.T) {
 		t.Run(original, func(t *testing.T) {
 			body := []byte(`{"tools":[{"name":` + fmt.Sprintf("%q", original) + `,"description":"Run a client tool","input_schema":{"type":"object"}}]}`)
 			out, reverseMap := remapOAuthToolNames(body)
-			alias := gjson.GetBytes(out, "tools.0.name").String()
+			alias := ojson.GetBytes(out, "tools.0.name").String()
 			if !helps.IsClaudeMCPToolName(alias) {
 				t.Fatalf("tools.0.name = %q, want MCP alias", alias)
 			}
@@ -7900,7 +8005,7 @@ func TestRemapOAuthToolNames_AllClientNamesUseMCPAliases(t *testing.T) {
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
-			if got := gjson.GetBytes(reversed, "content.0.name").String(); got != original {
+			if got := ojson.GetBytes(reversed, "content.0.name").String(); got != original {
 				t.Fatalf("content.0.name = %q, want %q", got, original)
 			}
 		})
@@ -7932,33 +8037,33 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 
 	out, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "credential-secret"})
 
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
 		t.Fatalf("typed builtin = %q, want unchanged", got)
 	}
-	bashAlias := gjson.GetBytes(out, "tools.1.name").String()
-	readAlias := gjson.GetBytes(out, "tools.2.name").String()
+	bashAlias := ojson.GetBytes(out, "tools.1.name").String()
+	readAlias := ojson.GetBytes(out, "tools.2.name").String()
 	if !helps.IsClaudeMCPToolName(bashAlias) || !helps.IsClaudeMCPToolName(readAlias) {
 		t.Fatalf("former vetted names did not receive MCP aliases: bash=%q Read=%q", bashAlias, readAlias)
 	}
-	if got := gjson.GetBytes(out, "tools.1.description").String(); got != "client shell tool" {
+	if got := ojson.GetBytes(out, "tools.1.description").String(); got != "client shell tool" {
 		t.Fatalf("bash description = %q, want preserved", got)
 	}
-	if got := gjson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
+	if got := ojson.GetBytes(out, "tools.1.input_schema.type").String(); got != "object" {
 		t.Fatalf("bash schema changed: %s", out)
 	}
-	if got := gjson.GetBytes(out, "tools.3.name").String(); got != "mcp__context7__query-docs" {
+	if got := ojson.GetBytes(out, "tools.3.name").String(); got != "mcp__context7__query-docs" {
 		t.Fatalf("existing MCP tool = %q, want unchanged", got)
 	}
 
-	searchAlias := gjson.GetBytes(out, "tools.4.name").String()
-	caseAlias := gjson.GetBytes(out, "tools.5.name").String()
+	searchAlias := ojson.GetBytes(out, "tools.4.name").String()
+	caseAlias := ojson.GetBytes(out, "tools.5.name").String()
 	if !helps.IsClaudeMCPToolName(searchAlias) || !helps.IsClaudeMCPToolName(caseAlias) {
 		t.Fatalf("generated aliases are invalid: %q, %q", searchAlias, caseAlias)
 	}
 	if searchAlias == caseAlias {
 		t.Fatalf("case-distinct names share alias %q", searchAlias)
 	}
-	if got := gjson.GetBytes(out, "tools.6.name").String(); got != searchAlias {
+	if got := ojson.GetBytes(out, "tools.6.name").String(); got != searchAlias {
 		t.Fatalf("repeated declaration alias = %q, want %q", got, searchAlias)
 	}
 	if !strings.HasSuffix(searchAlias, "_search_web") || !strings.HasSuffix(caseAlias, "_Search_Web") {
@@ -7967,25 +8072,25 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 	if len(searchAlias) > 64 || len(caseAlias) > 64 {
 		t.Fatalf("generated aliases exceed 64 characters: %q, %q", searchAlias, caseAlias)
 	}
-	if got := gjson.GetBytes(out, "tools.4.description").String(); got != "unknown one" {
+	if got := ojson.GetBytes(out, "tools.4.description").String(); got != "unknown one" {
 		t.Fatalf("description = %q, want preserved", got)
 	}
-	if got := gjson.GetBytes(out, "tools.4.input_schema.required.0").String(); got != "q" {
+	if got := ojson.GetBytes(out, "tools.4.input_schema.required.0").String(); got != "q" {
 		t.Fatalf("input schema was not preserved: %s", out)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != searchAlias {
+	if got := ojson.GetBytes(out, "tool_choice.name").String(); got != searchAlias {
 		t.Fatalf("tool_choice.name = %q, want %q", got, searchAlias)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != searchAlias {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != searchAlias {
 		t.Fatalf("historical tool_use.name = %q, want %q", got, searchAlias)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.id").String(); got != "toolu_unknown" {
+	if got := ojson.GetBytes(out, "messages.0.content.0.id").String(); got != "toolu_unknown" {
 		t.Fatalf("tool_use.id = %q, want unchanged", got)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != caseAlias {
+	if got := ojson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != caseAlias {
 		t.Fatalf("tool_reference.tool_name = %q, want %q", got, caseAlias)
 	}
-	if got := gjson.GetBytes(out, "messages.1.content.0.content.0.tool_name").String(); got != searchAlias {
+	if got := ojson.GetBytes(out, "messages.1.content.0.content.0.tool_name").String(); got != searchAlias {
 		t.Fatalf("nested tool_reference.tool_name = %q, want %q", got, searchAlias)
 	}
 	if reverseMap[searchAlias] != "search_web" || reverseMap[caseAlias] != "Search_Web" ||
@@ -8002,13 +8107,13 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "search_web" {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "search_web" {
 		t.Fatalf("restored tool_use.name = %q, want search_web", got)
 	}
-	if got := gjson.GetBytes(restored, "content.1.tool_name").String(); got != "Search_Web" {
+	if got := ojson.GetBytes(restored, "content.1.tool_name").String(); got != "Search_Web" {
 		t.Fatalf("restored tool_reference.tool_name = %q, want Search_Web", got)
 	}
-	if got := gjson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "search_web" {
+	if got := ojson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "search_web" {
 		t.Fatalf("restored nested tool_reference = %q, want search_web", got)
 	}
 
@@ -8017,7 +8122,7 @@ func TestRemapOAuthToolNames_AllClientToolsAsMCP(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "search_web" {
+	if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "search_web" {
 		t.Fatalf("restored stream name = %q, want search_web: %s", got, restoredLine)
 	}
 }
@@ -8034,27 +8139,27 @@ func TestRemapOAuthToolNames_TypedCustomUsesMCPAlias(t *testing.T) {
 	}`)
 	out, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "caller-secret"})
 
-	alias := gjson.GetBytes(out, "tools.0.name").String()
+	alias := ojson.GetBytes(out, "tools.0.name").String()
 	if !helps.IsClaudeMCPToolName(alias) {
 		t.Fatalf("typed custom alias = %q, want MCP name", alias)
 	}
-	if gjson.GetBytes(out, "tools.0.type").Exists() {
+	if ojson.GetBytes(out, "tools.0.type").Exists() {
 		t.Fatalf("typed custom type was not normalized away: %s", out)
 	}
-	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "keep" {
+	if got := ojson.GetBytes(out, "tools.0.description").String(); got != "keep" {
 		t.Fatalf("typed custom description = %q, want preserved", got)
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "web_search" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "web_search" {
 		t.Fatalf("server builtin name = %q, want unchanged", got)
 	}
-	extensionAlias := gjson.GetBytes(out, "tools.2.name").String()
-	if !helps.IsClaudeMCPToolName(extensionAlias) || gjson.GetBytes(out, "tools.2.type").Exists() {
+	extensionAlias := ojson.GetBytes(out, "tools.2.name").String()
+	if !helps.IsClaudeMCPToolName(extensionAlias) || ojson.GetBytes(out, "tools.2.type").Exists() {
 		t.Fatalf("unknown typed client tool was not normalized: %s", out)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != alias {
+	if got := ojson.GetBytes(out, "tool_choice.name").String(); got != alias {
 		t.Fatalf("tool_choice.name = %q, want %q", got, alias)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != alias {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != alias {
 		t.Fatalf("historical tool_use.name = %q, want %q", got, alias)
 	}
 	if reverseMap[alias] != "client_custom" || reverseMap[extensionAlias] != "client_extension" {
@@ -8071,10 +8176,10 @@ func TestRemapOAuthToolNames_MCPAliasAvoidsClientCollision(t *testing.T) {
 	]}`, initialCandidate))
 
 	out, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: secret})
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != initialCandidate {
+	if got := ojson.GetBytes(out, "tools.0.name").String(); got != initialCandidate {
 		t.Fatalf("existing MCP tool = %q, want %q", got, initialCandidate)
 	}
-	alias := gjson.GetBytes(out, "tools.1.name").String()
+	alias := ojson.GetBytes(out, "tools.1.name").String()
 	if alias == initialCandidate {
 		t.Fatalf("generated alias collided with client MCP name %q", alias)
 	}
@@ -8086,7 +8191,7 @@ func TestRemapOAuthToolNames_MCPAliasAvoidsClientCollision(t *testing.T) {
 func TestRemapOAuthToolNames_MCPAliasIsMandatory(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"search_web","input_schema":{"type":"object"}}]}`)
 	out, reverseMap := remapOAuthToolNames(body)
-	alias := gjson.GetBytes(out, "tools.0.name").String()
+	alias := ojson.GetBytes(out, "tools.0.name").String()
 	if !helps.IsClaudeMCPToolName(alias) {
 		t.Fatalf("tools.0.name = %q, want mandatory MCP alias", alias)
 	}
@@ -8101,7 +8206,7 @@ func TestRemapOAuthToolNames_SemanticAliasRestoresLongOriginal(t *testing.T) {
 	options := claudeMCPAliasOptions{secret: "stable-caller"}
 
 	out, reverseMap := remapOAuthToolNamesWithOptions(body, options)
-	alias := gjson.GetBytes(out, "tools.0.name").String()
+	alias := ojson.GetBytes(out, "tools.0.name").String()
 	if !helps.IsClaudeMCPToolName(alias) || len(alias) > 64 {
 		t.Fatalf("semantic alias is invalid or too long: len=%d name=%q", len(alias), alias)
 	}
@@ -8113,7 +8218,7 @@ func TestRemapOAuthToolNames_SemanticAliasRestoresLongOriginal(t *testing.T) {
 	}
 
 	second, _ := remapOAuthToolNamesWithOptions(body, options)
-	if got := gjson.GetBytes(second, "tools.0.name").String(); got != alias {
+	if got := ojson.GetBytes(second, "tools.0.name").String(); got != alias {
 		t.Fatalf("semantic alias is not stable across requests: %q != %q", got, alias)
 	}
 	response := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":` + fmt.Sprintf("%q", alias) + `,"input":{}}]}`)
@@ -8121,7 +8226,7 @@ func TestRemapOAuthToolNames_SemanticAliasRestoresLongOriginal(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != original {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != original {
 		t.Fatalf("restored tool name = %q, want exact original %q", got, original)
 	}
 }
@@ -8134,18 +8239,18 @@ func TestPrepareClaudeOAuthToolNamesForUpstream_PreservesMCPConvention(t *testin
 	],"tool_choice":{"type":"tool","name":"search_web"}}`)
 	out, reverseMap := prepareClaudeOAuthToolNamesForUpstream(body, claudeMCPAliasOptions{secret: "credential-secret"})
 
-	alias := gjson.GetBytes(out, "tools.0.name").String()
+	alias := ojson.GetBytes(out, "tools.0.name").String()
 	if !helps.IsClaudeMCPToolName(alias) || strings.HasPrefix(alias, "proxy_") {
 		t.Fatalf("unknown alias = %q, want bare mcp__ name", alias)
 	}
-	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "mcp__context7__query-docs" {
+	if got := ojson.GetBytes(out, "tools.1.name").String(); got != "mcp__context7__query-docs" {
 		t.Fatalf("existing MCP name = %q, want unchanged", got)
 	}
-	bashAlias := gjson.GetBytes(out, "tools.2.name").String()
+	bashAlias := ojson.GetBytes(out, "tools.2.name").String()
 	if !helps.IsClaudeMCPToolName(bashAlias) || strings.HasPrefix(bashAlias, "proxy_") {
 		t.Fatalf("former vetted tool = %q, want bare MCP alias", bashAlias)
 	}
-	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != alias {
+	if got := ojson.GetBytes(out, "tool_choice.name").String(); got != alias {
 		t.Fatalf("tool_choice.name = %q, want %q", got, alias)
 	}
 	if reverseMap[alias] != "search_web" || reverseMap[bashAlias] != "bash" {
@@ -8173,6 +8278,145 @@ func TestResolveClaudeMCPAliasOptions(t *testing.T) {
 	if otherSecret := resolveClaudeMCPAliasOptions(otherCtx).secret; otherSecret == firstSecret {
 		t.Fatalf("different downstream callers shared alias secret %q", firstSecret)
 	}
+
+	replayMeta := map[string]any{
+		cliproxyexecutor.CallerScopeMetadataKey: session.CallerScope("downstream-caller-one"),
+	}
+	if replaySecret := resolveClaudeMCPAliasOptions(context.Background(), replayMeta).secret; replaySecret != firstSecret {
+		t.Fatalf("replay caller_scope alias secret = %q, want original caller secret %q", replaySecret, firstSecret)
+	}
+}
+
+func TestClaudeExecutor_CallerScopeMetadataReproducesOAuthMCPToolAliases(t *testing.T) {
+	var seenBodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		seenBodies = append(seenBodies, body)
+		if strings.Contains(r.URL.Path, "/count_tokens") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"input_tokens":42}`))
+			return
+		}
+		if ojson.GetBytes(body, "stream").Bool() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_exec_1","type":"message","model":"claude-sonnet-4-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-oauth-caller-scope-replay",
+		Metadata: claudeOAuthTestMetadata(),
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-caller-scope-test",
+			"base_url": server.URL,
+		},
+	}
+	payload := []byte(`{"model":"claude-sonnet-4-5","tools":[{"name":"read_file","input_schema":{"type":"object"}},{"name":"run_bash","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"read_file"},"messages":[{"role":"user","content":"warm cache"}]}`)
+
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("userApiKey", "sk-downstream-pi-caller")
+	callerCtx := context.WithValue(context.Background(), "gin", ginCtx)
+	callerScope := session.CallerScope("sk-downstream-pi-caller")
+
+	// 1. Original HTTP stream request with gin context.
+	streamRes, errStream := executor.ExecuteStream(callerCtx, auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	})
+	if errStream != nil {
+		t.Fatalf("original ExecuteStream() error = %v", errStream)
+	}
+	for range streamRes.Chunks {
+	}
+
+	// 2. Plugin replay stream request on background context (no gin.Context) with CallerScope metadata.
+	replayStreamRes, errReplayStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	})
+	if errReplayStream != nil {
+		t.Fatalf("replay ExecuteStream() error = %v", errReplayStream)
+	}
+	for range replayStreamRes.Chunks {
+	}
+
+	// 3. Plugin replay non-stream Execute on background context with CallerScope metadata.
+	if _, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	}); errExec != nil {
+		t.Fatalf("replay Execute() error = %v", errExec)
+	}
+
+	// 4. Plugin replay countTokensUpstream on background context with CallerScope metadata.
+	if _, errCount := executor.countTokensUpstream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.CallerScopeMetadataKey: callerScope,
+		},
+	}); errCount != nil {
+		t.Fatalf("replay CountTokens() error = %v", errCount)
+	}
+
+	// 5. Unscoped background request (default caller fallback).
+	defaultStreamRes, errDefaultStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-sonnet-4-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Stream:       true,
+	})
+	if errDefaultStream != nil {
+		t.Fatalf("default ExecuteStream() error = %v", errDefaultStream)
+	}
+	for range defaultStreamRes.Chunks {
+	}
+
+	if len(seenBodies) != 5 {
+		t.Fatalf("seenBodies len = %d, want 5", len(seenBodies))
+	}
+	origTool0 := ojson.GetBytes(seenBodies[0], "tools.0.name").String()
+	origTool1 := ojson.GetBytes(seenBodies[0], "tools.1.name").String()
+	origChoice := ojson.GetBytes(seenBodies[0], "tool_choice.name").String()
+	if !helps.IsClaudeMCPToolName(origTool0) || !helps.IsClaudeMCPToolName(origTool1) || origChoice != origTool0 {
+		t.Fatalf("unexpected original MCP tool names: tool0=%q tool1=%q choice=%q", origTool0, origTool1, origChoice)
+	}
+	for idx, label := range []string{"replay_stream", "replay_execute", "replay_count_tokens"} {
+		body := seenBodies[idx+1]
+		if got0, got1 := ojson.GetBytes(body, "tools.0.name").String(), ojson.GetBytes(body, "tools.1.name").String(); got0 != origTool0 || got1 != origTool1 {
+			t.Fatalf("%s tools = (%q, %q), want (%q, %q)", label, got0, got1, origTool0, origTool1)
+		}
+	}
+	defaultTool0 := ojson.GetBytes(seenBodies[4], "tools.0.name").String()
+	if defaultTool0 == origTool0 {
+		t.Fatalf("default caller tool0 %q matched scoped caller tool0", defaultTool0)
+	}
 }
 
 func TestRemapOAuthToolNames_MixedCaseNamesRemainDistinct(t *testing.T) {
@@ -8181,8 +8425,8 @@ func TestRemapOAuthToolNames_MixedCaseNamesRemainDistinct(t *testing.T) {
 		`{"name":"bash","input_schema":{"type":"object"}}` +
 		`]}`)
 	out, reverseMap := remapOAuthToolNames(body)
-	upperAlias := gjson.GetBytes(out, "tools.0.name").String()
-	lowerAlias := gjson.GetBytes(out, "tools.1.name").String()
+	upperAlias := ojson.GetBytes(out, "tools.0.name").String()
+	lowerAlias := ojson.GetBytes(out, "tools.1.name").String()
 	if !helps.IsClaudeMCPToolName(upperAlias) || !helps.IsClaudeMCPToolName(lowerAlias) || upperAlias == lowerAlias {
 		t.Fatalf("mixed-case aliases = %q, %q, want distinct MCP names", upperAlias, lowerAlias)
 	}
@@ -8230,15 +8474,15 @@ func TestPrepareClaudeOAuthToolNamesForUpstream_AllCustomToolsWithHistory(t *tes
 		`]}]}`)
 
 	out, reverseMap := prepareClaudeOAuthToolNamesForUpstream(body, claudeMCPAliasOptions{secret: "mixed-case-caller"})
-	bashAlias := gjson.GetBytes(out, "tools.0.name").String()
-	globAlias := gjson.GetBytes(out, "tools.1.name").String()
+	bashAlias := ojson.GetBytes(out, "tools.0.name").String()
+	globAlias := ojson.GetBytes(out, "tools.1.name").String()
 	if !helps.IsClaudeMCPToolName(bashAlias) || !helps.IsClaudeMCPToolName(globAlias) || bashAlias == globAlias {
 		t.Fatalf("tool aliases = %q, %q, want distinct bare MCP names", bashAlias, globAlias)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.0.name").String(); got != bashAlias {
+	if got := ojson.GetBytes(out, "messages.0.content.0.name").String(); got != bashAlias {
 		t.Fatalf("messages.0.content.0.name = %q, want %q", got, bashAlias)
 	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.name").String(); got != globAlias {
+	if got := ojson.GetBytes(out, "messages.0.content.1.name").String(); got != globAlias {
 		t.Fatalf("messages.0.content.1.name = %q, want %q", got, globAlias)
 	}
 	if reverseMap[bashAlias] != "Bash" || reverseMap[globAlias] != "glob" {
@@ -8274,10 +8518,10 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.
 			http.Error(w, errRead.Error(), http.StatusBadRequest)
 			return
 		}
-		toolName := gjson.GetBytes(body, "tools.0.name").String()
+		toolName := ojson.GetBytes(body, "tools.0.name").String()
 		upstreamRequests <- upstreamRequest{
 			toolName: toolName,
-			stream:   gjson.GetBytes(body, "stream").Bool(),
+			stream:   ojson.GetBytes(body, "stream").Bool(),
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		responseBody := strings.Replace(upstreamBody, `"name":"Bash"`, `"name":`+fmt.Sprintf("%q", toolName), 1)
@@ -8314,7 +8558,7 @@ func TestClaudeExecutor_ExecuteOpenAINonStreamRestoresOAuthToolNames(t *testing.
 	if !helps.IsClaudeMCPToolName(upstream.toolName) || !strings.HasSuffix(upstream.toolName, "_bash") {
 		t.Fatalf("upstream tools.0.name = %q, want semantic MCP alias", upstream.toolName)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "bash" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "bash" {
 		t.Fatalf("tool_calls.0.function.name = %q, want %q; payload=%s", got, "bash", string(resp.Payload))
 	}
 }
@@ -8327,7 +8571,7 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		upstreamBody = bytes.Clone(body)
 		upstreamHeaders = r.Header.Clone()
-		upstreamAlias = gjson.GetBytes(body, "tools.0.name").String()
+		upstreamAlias = ojson.GetBytes(body, "tools.0.name").String()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-opus-4-6","content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{"query":"go"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, upstreamAlias)
 	}))
@@ -8353,7 +8597,7 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if !helps.IsClaudeMCPToolName(upstreamAlias) || strings.HasPrefix(upstreamAlias, "proxy_") || !strings.HasSuffix(upstreamAlias, "_search_web") {
 		t.Fatalf("upstream tool name = %q, want semantic mcp__ alias", upstreamAlias)
 	}
-	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "search_web" {
+	if got := ojson.GetBytes(resp.Payload, "content.0.name").String(); got != "search_web" {
 		t.Fatalf("client response tool name = %q, want search_web; payload=%s", got, resp.Payload)
 	}
 	if _, ok := claudeBillingCCHDigitsOffset(upstreamBody); !ok {
@@ -8366,19 +8610,19 @@ func TestClaudeExecutor_ExecuteOAuthCustomToolMCPAliasRoundTrip(t *testing.T) {
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("Messages Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+	if got := ojson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("Messages system.1.text = %q, want official CLI identity", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
 		t.Fatalf("Messages top-level system block count = %d, want 2 Claude Code blocks", got)
 	}
-	content := gjson.GetBytes(upstreamBody, "messages.0.content").Array()
+	content := ojson.GetBytes(upstreamBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("Messages first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
 	assertEphemeralUserTextBlock(t, content[1], "search", "1h")
-	if got := gjson.GetBytes(upstreamBody, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(upstreamBody, "messages.#").Int(); got != 2 {
 		t.Fatalf("Messages count = %d, want user and relocated system turns", got)
 	}
 	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "messages-system-prompt", "1h")
@@ -8392,7 +8636,7 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 		body, _ := io.ReadAll(r.Body)
 		upstreamBody = bytes.Clone(body)
 		upstreamHeaders = r.Header.Clone()
-		upstreamAlias = gjson.GetBytes(body, "tools.0.name").String()
+		upstreamAlias = ojson.GetBytes(body, "tools.0.name").String()
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":%q,\"input\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", upstreamAlias)
 	}))
@@ -8446,19 +8690,19 @@ func TestClaudeExecutor_ExecuteStreamOAuthCustomToolMCPAliasRoundTrip(t *testing
 	if got := upstreamHeaders.Get("Anthropic-Beta"); got != wantBetas {
 		t.Fatalf("streaming Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+	if got := ojson.GetBytes(upstreamBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("streaming system.1.text = %q, want official CLI identity", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
+	if got := ojson.GetBytes(upstreamBody, "system.#").Int(); got != 2 {
 		t.Fatalf("streaming top-level system block count = %d, want 2 Claude Code blocks", got)
 	}
-	content := gjson.GetBytes(upstreamBody, "messages.0.content").Array()
+	content := ojson.GetBytes(upstreamBody, "messages.0.content").Array()
 	if len(content) != 2 {
 		t.Fatalf("streaming first user content has %d blocks, want currentDate and user text", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
 	assertEphemeralUserTextBlock(t, content[1], "fetch", "1h")
-	if got := gjson.GetBytes(upstreamBody, "messages.#").Int(); got != 2 {
+	if got := ojson.GetBytes(upstreamBody, "messages.#").Int(); got != 2 {
 		t.Fatalf("streaming message count = %d, want user and relocated system turns", got)
 	}
 	assertClaudeMidConversationSystemMessage(t, upstreamBody, 1, "stream-system-prompt", "1h")
@@ -8483,7 +8727,7 @@ func TestPrependClaudeSystemReminders_FollowsToolResultsAndIsIdempotent(t *testi
 	if !bytes.Equal(first, second) {
 		t.Fatalf("caller reminder insertion is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	content := gjson.GetBytes(first, "messages.1.content").Array()
+	content := ojson.GetBytes(first, "messages.1.content").Array()
 	if len(content) != 4 {
 		t.Fatalf("content has %d blocks, want tool_result, two caller reminders, and user text", len(content))
 	}
@@ -8507,10 +8751,10 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsToolResultUserTurn(t *
 		`]}`)
 
 	out := insertClaudeMidConversationSystemMessages(payload, []string{"guidance"})
-	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(out, "messages.#").Int(); got != 3 {
 		t.Fatalf("message count = %d, want 3: %s", got, out)
 	}
-	blocks := gjson.GetBytes(out, "messages.1.content")
+	blocks := ojson.GetBytes(out, "messages.1.content")
 	if got := blocks.Get("0.type").String(); got != "tool_result" {
 		t.Fatalf("first block type = %q, want tool_result: %s", got, out)
 	}
@@ -8528,7 +8772,7 @@ func TestInsertClaudeMidConversationSystemMessages_PrecedesExistingAssistantTurn
 		`]}`)
 
 	out := insertClaudeMidConversationSystemMessages(payload, []string{"guidance"})
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "system", "assistant", "user"}
 	if len(roles) != len(wantRoles) {
 		t.Fatalf("message count = %d, want %d: %s", len(roles), len(wantRoles), out)
@@ -8549,7 +8793,7 @@ func TestInsertClaudeMidConversationSystemMessages_FollowsConsecutiveUserRun(t *
 		`]}`)
 
 	out := insertClaudeMidConversationSystemMessages(payload, []string{"guidance"})
-	roles := gjson.GetBytes(out, "messages.#.role").Array()
+	roles := ojson.GetBytes(out, "messages.#.role").Array()
 	wantRoles := []string{"user", "user", "system", "assistant"}
 	if len(roles) != len(wantRoles) {
 		t.Fatalf("message count = %d, want %d: %s", len(roles), len(wantRoles), out)
@@ -8570,7 +8814,7 @@ func TestInsertClaudeMidConversationSystemMessages_IsIdempotent(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("mid-conversation system insertion is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
 	}
-	if got := gjson.GetBytes(first, "messages.#").Int(); got != 3 {
+	if got := ojson.GetBytes(first, "messages.#").Int(); got != 3 {
 		t.Fatalf("message count = %d, want user and two system messages: %s", got, first)
 	}
 	assertClaudeMidConversationSystemMessage(t, first, 1, texts[0], "")
@@ -9058,7 +9302,7 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 			if !automaticallyInjected {
 				t.Fatal("automatic context_management injection was not reported")
 			}
-			if diff := gjson.GetBytes(got, "context_management").Raw; diff != captured {
+			if diff := ojson.GetBytes(got, "context_management").Raw; diff != captured {
 				t.Fatalf("context_management = %s, want the captured object %s", diff, captured)
 			}
 		})
@@ -9093,7 +9337,7 @@ func TestInjectClaudeCodeContextManagement(t *testing.T) {
 			if !bytes.Equal(got, ineligible) {
 				t.Errorf("ineligible payload was modified: %s", got)
 			}
-			if cm := gjson.GetBytes(got, "context_management"); cm.Exists() {
+			if cm := ojson.GetBytes(got, "context_management"); cm.Exists() {
 				t.Errorf("context_management = %s, want absent", cm.Raw)
 			}
 		})
@@ -9133,9 +9377,9 @@ func TestClaudeCodeContextManagementNeverOutlivesEligibleThinking(t *testing.T) 
 			body = disableThinkingIfToolChoiceForced(body)
 			body = reconcileClaudeCodeContextManagement(body, state)
 
-			thinkingEligible := gjson.GetBytes(body, "thinking.type").String() == "enabled" ||
-				gjson.GetBytes(body, "thinking.type").String() == "adaptive"
-			cm := gjson.GetBytes(body, "context_management")
+			thinkingEligible := ojson.GetBytes(body, "thinking.type").String() == "enabled" ||
+				ojson.GetBytes(body, "thinking.type").String() == "adaptive"
+			cm := ojson.GetBytes(body, "context_management")
 			if cm.Exists() && !thinkingEligible {
 				t.Fatalf("context_management = %s survived ineligible thinking; Anthropic would reject this: %s", cm.Raw, body)
 			}
@@ -9220,7 +9464,7 @@ func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := reconcileClaudeCodeContextManagement([]byte(test.payload), test.state)
-			if raw := gjson.GetBytes(got, "context_management").Raw; raw != test.wantRaw {
+			if raw := ojson.GetBytes(got, "context_management").Raw; raw != test.wantRaw {
 				t.Fatalf("context_management = %s, want %s; body=%s", raw, test.wantRaw, got)
 			}
 		})
@@ -9245,10 +9489,10 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 				Params: map[string]any{"thinking.type": "disabled"},
 			}}}}
 			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, test.stream)
-			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+			if got := ojson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
 				t.Fatalf("final upstream thinking.type = %q, want disabled; body=%s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+			if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 				t.Errorf("final upstream context_management = %s with disabled thinking, want absent", got.Raw)
 			}
 		})
@@ -9261,7 +9505,7 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 		}}}}
 		payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"context_management":{"edits":[{"type":"caller_owned"}]}}`)
 		upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, false)
-		if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
+		if got := ojson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
 			t.Fatalf("caller context_management type = %q, want caller_owned; body=%s", got, upstreamBody)
 		}
 	})
@@ -9275,7 +9519,7 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 			},
 		}}}}
 		upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, false)
-		if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
+		if got := ojson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
 			t.Fatalf("payload-rule context_management type = %q, want payload_rule; body=%s", got, upstreamBody)
 		}
 	})
@@ -9343,10 +9587,10 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					upstreamBody := executeClaudeContextManagementRequest(t, ownership.cfg, basePayload, stream)
-					if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
+					if got := ojson.GetBytes(upstreamBody, "thinking.type").String(); got != "disabled" {
 						t.Fatalf("final upstream thinking.type = %q, want disabled; body=%s", got, upstreamBody)
 					}
-					if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
+					if got := ojson.GetBytes(upstreamBody, "context_management").Raw; got != claudeCodeContextManagement {
 						t.Fatalf("%s context_management = %s, want payload-rule-owned %s; body=%s", ownership.name, got, claudeCodeContextManagement, upstreamBody)
 					}
 				})
@@ -9360,7 +9604,7 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 			Params: []string{"context_management"},
 		}}}}
 		upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, false)
-		if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+		if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 			t.Fatalf("filtered context_management = %s, want absent", got.Raw)
 		}
 	})
@@ -9377,13 +9621,13 @@ func TestClaudeExecutorPayloadOverrideDisabledThinking(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`)
 			upstreamBody := executeClaudeContextManagementRequest(t, &config.Config{}, payload, stream)
-			if got := gjson.GetBytes(upstreamBody, "thinking"); got.Exists() {
+			if got := ojson.GetBytes(upstreamBody, "thinking"); got.Exists() {
 				t.Fatalf("forced tool choice thinking = %s, want absent", got.Raw)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+			if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 				t.Fatalf("forced tool choice context_management = %s, want absent because Anthropic rejects it without thinking", got.Raw)
 			}
-			if got := gjson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
+			if got := ojson.GetBytes(upstreamBody, "tool_choice.type").String(); got != "any" {
 				t.Fatalf("forced tool_choice.type = %q, want any", got)
 			}
 		})
@@ -9411,10 +9655,10 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 				Params: map[string]any{"thinking.type": test.thinkingType},
 			}}}}
 			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, test.stream)
-			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != test.thinkingType {
+			if got := ojson.GetBytes(upstreamBody, "thinking.type").String(); got != test.thinkingType {
 				t.Fatalf("final upstream thinking.type = %q, want %q; body=%s", got, test.thinkingType, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management").Raw; got != "" {
+			if got := ojson.GetBytes(upstreamBody, "context_management").Raw; got != "" {
 				t.Fatalf("payload must not reinject context_management after enabling thinking: %s", upstreamBody)
 			}
 		})
@@ -9433,7 +9677,7 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 			}}}}
 			payload := []byte(`{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"},"context_management":{"edits":[{"type":"caller_owned"}]}}`)
 			upstreamBody := executeClaudeContextManagementRequest(t, cfg, payload, stream)
-			if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
+			if got := ojson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "caller_owned" {
 				t.Fatalf("caller context_management type = %q, want caller_owned; body=%s", got, upstreamBody)
 			}
 		})
@@ -9447,7 +9691,7 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 				},
 			}}}}
 			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, stream)
-			if got := gjson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
+			if got := ojson.GetBytes(upstreamBody, "context_management.edits.0.type").String(); got != "payload_rule" {
 				t.Fatalf("payload-rule context_management type = %q, want payload_rule; body=%s", got, upstreamBody)
 			}
 		})
@@ -9464,10 +9708,10 @@ func TestClaudeExecutorPayloadOverrideReenablesThinking(t *testing.T) {
 				}},
 			}}
 			upstreamBody := executeClaudeContextManagementRequest(t, cfg, basePayload, stream)
-			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
+			if got := ojson.GetBytes(upstreamBody, "thinking.type").String(); got != "enabled" {
 				t.Fatalf("final upstream thinking.type = %q, want enabled; body=%s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+			if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 				t.Fatalf("filtered context_management = %s after re-enabling, want absent; body=%s", got.Raw, upstreamBody)
 			}
 		})
@@ -9536,7 +9780,7 @@ func TestValidateClaudeCallerSystemBlocksAcceptsTextOnly(t *testing.T) {
 			if test.system != "" {
 				payload = `{"model":"claude-opus-5","system":` + test.system + `}`
 			}
-			if err := validateClaudeCallerSystemBlocks(gjson.Get(payload, "system")); err != nil {
+			if err := validateClaudeCallerSystemBlocks(ojson.Get(payload, "system")); err != nil {
 				t.Fatalf("validateClaudeCallerSystemBlocks() error = %v, want nil", err)
 			}
 		})
@@ -9576,7 +9820,7 @@ func TestValidateClaudeCallerSystemBlocksRejectsNonTextBlock(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateClaudeCallerSystemBlocks(gjson.Parse(test.system))
+			err := validateClaudeCallerSystemBlocks(ojson.Parse(test.system))
 			if err == nil {
 				t.Fatal("validateClaudeCallerSystemBlocks() error = nil, want rejection")
 			}
@@ -9631,7 +9875,7 @@ func TestApplyCloakingStrictModeIgnoresNonTextCallerSystemBlock(t *testing.T) {
 	if !cloaked {
 		t.Fatal("applyCloaking() cloaked = false, want true")
 	}
-	if got := len(gjson.GetBytes(out, "system").Array()); got != 2 {
+	if got := len(ojson.GetBytes(out, "system").Array()); got != 2 {
 		t.Fatalf("system blocks = %d, want the 2 Claude Code blocks", got)
 	}
 }
@@ -9717,11 +9961,11 @@ func TestClaudeExecutor_CacheTTLIsPairedWithExtendedCacheTTLBeta(t *testing.T) {
 				t.Fatalf("Execute() error = %v", errExecute)
 			}
 
-			gotTTL := gjson.GetBytes(seenBody, "system.1.cache_control.ttl").String()
+			gotTTL := ojson.GetBytes(seenBody, "system.1.cache_control.ttl").String()
 			if gotTTL != test.wantTTL {
 				t.Fatalf("system[1].cache_control.ttl = %q, want %q: %s", gotTTL, test.wantTTL, seenBody)
 			}
-			if got := gjson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
+			if got := ojson.GetBytes(seenBody, "system.1.cache_control.type").String(); got != "ephemeral" {
 				t.Fatalf("system[1].cache_control.type = %q, want ephemeral: %s", got, seenBody)
 			}
 			gotBeta := strings.Contains(seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta)
@@ -10122,7 +10366,7 @@ func TestClaudeExecutor_CloakModePrefersStoredPrevReqOverCallerFake(t *testing.T
 	if len(seenBodies) < 2 {
 		t.Fatalf("expected at least 2 requests, got %d", len(seenBodies))
 	}
-	turn2System := gjson.GetBytes(seenBodies[1], "system.0.text").String()
+	turn2System := ojson.GetBytes(seenBodies[1], "system.0.text").String()
 	if !strings.Contains(turn2System, "cc_prev_req=req_real_upstream_001") {
 		t.Fatalf("CPA in cloak mode must use real storedPrevReq req_real_upstream_001, got: %s", turn2System)
 	}
@@ -10161,7 +10405,7 @@ func TestClaudeExecutor_ChatCompletionsDefaultMaxTokensAndPayloadDefaultRule(t *
 		if errExec != nil {
 			t.Fatalf("Execute() error = %v", errExec)
 		}
-		if got := gjson.GetBytes(seenBody, "max_tokens").Int(); got != 128000 {
+		if got := ojson.GetBytes(seenBody, "max_tokens").Int(); got != 128000 {
 			t.Fatalf("Execute max_tokens = %d, want 128000; body=%s", got, seenBody)
 		}
 	})
@@ -10188,7 +10432,7 @@ func TestClaudeExecutor_ChatCompletionsDefaultMaxTokensAndPayloadDefaultRule(t *
 		if errExec != nil {
 			t.Fatalf("Execute() omitted error = %v", errExec)
 		}
-		if got := gjson.GetBytes(seenBody, "max_tokens").Int(); got != 16384 {
+		if got := ojson.GetBytes(seenBody, "max_tokens").Int(); got != 16384 {
 			t.Fatalf("Execute omitted max_tokens = %d, want payload.default 16384; body=%s", got, seenBody)
 		}
 
@@ -10209,7 +10453,7 @@ func TestClaudeExecutor_ChatCompletionsDefaultMaxTokensAndPayloadDefaultRule(t *
 				t.Fatalf("ExecuteStream() chunk error = %v", chunk.Err)
 			}
 		}
-		if got := gjson.GetBytes(seenBody, "max_tokens").Int(); got != 16384 {
+		if got := ojson.GetBytes(seenBody, "max_tokens").Int(); got != 16384 {
 			t.Fatalf("ExecuteStream omitted max_tokens = %d, want payload.default 16384; body=%s", got, seenBody)
 		}
 
@@ -10264,7 +10508,7 @@ func TestClaudeExecutor_ChatCompletionsDefaultMaxTokensAndPayloadDefaultRule(t *
 			if errCase != nil {
 				t.Fatalf("%s: Execute() error = %v", pc.name, errCase)
 			}
-			if got := gjson.GetBytes(seenBody, "max_tokens").Int(); got != pc.wantLimit {
+			if got := ojson.GetBytes(seenBody, "max_tokens").Int(); got != pc.wantLimit {
 				t.Fatalf("%s: max_tokens = %d, want %d; body=%s", pc.name, got, pc.wantLimit, seenBody)
 			}
 		}
@@ -10344,7 +10588,7 @@ func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock(t *testing.T) {
 	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
 		t.Run(model, func(t *testing.T) {
 			seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
-			if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
+			if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
 				t.Fatalf("thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
 			}
 			if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
@@ -10359,7 +10603,7 @@ func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock(t *testing.T) {
 
 func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream(t *testing.T) {
 	seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", true, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
-	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
+	if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
 		t.Fatalf("stream thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
 	}
 	if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
@@ -10369,7 +10613,7 @@ func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlockOnStream(t *testi
 
 func TestClaudeExecutor_PreservedThinkingInjectionSkipsNonPreservedModel(t *testing.T) {
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-opus-5", preservedThinkingReplayPayload("claude-opus-5"))
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("non-preserved-thinking model must not gain block_binding: %s", seenBody)
 	}
 }
@@ -10390,7 +10634,7 @@ func TestClaudeExecutor_PreservedThinkingRequiresSignedBlock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", []byte(tc.payload))
-			if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+			if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 				t.Fatalf("request without replayed signed thinking must not gain block_binding: %s", seenBody)
 			}
 		})
@@ -10415,10 +10659,10 @@ func TestClaudeExecutor_PreservedThinkingOmittedThinkingSynthesizesAdaptiveBindi
 			t.Run(model+"_"+tc.name, func(t *testing.T) {
 				payload := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[` + tc.block + `,{"type":"text","text":"Answer"}]},{"role":"user","content":"continue"}]}`)
 				seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", false, model, payload)
-				if got := gjson.GetBytes(seenBody, "thinking.type").String(); got != "adaptive" {
+				if got := ojson.GetBytes(seenBody, "thinking.type").String(); got != "adaptive" {
 					t.Fatalf("thinking.type = %q, want adaptive; body=%s", got, seenBody)
 				}
-				if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
+				if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
 					t.Fatalf("thinking.block_binding.prefix_mismatch_behavior = %q, want drop_block; body=%s", got, seenBody)
 				}
 				if betas := seenHeaders.Get("Anthropic-Beta"); !strings.Contains(betas, claudeThinkingBindingBeta) {
@@ -10432,7 +10676,7 @@ func TestClaudeExecutor_PreservedThinkingOmittedThinkingSynthesizesAdaptiveBindi
 func TestClaudeExecutor_PreservedThinkingTypelessThinkingObjectUntouched(t *testing.T) {
 	payload := []byte(`{"model":"claude-haiku-5-5","thinking":{},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-	if gjson.GetBytes(seenBody, "thinking.type").Exists() || gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.type").Exists() || ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("thinking object without type must stay untouched: %s", seenBody)
 	}
 }
@@ -10465,7 +10709,7 @@ func TestClaudeExecutor_PreservedThinkingForcedToolChoiceKeepsThinkingOff(t *tes
 		t.Run(tc.name, func(t *testing.T) {
 			payload := []byte(`{"model":"claude-haiku-5-5",` + tc.thinking + `"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"tool_choice":` + tc.toolChoice + `,"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 			seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-			if gjson.GetBytes(seenBody, "thinking").Exists() {
+			if ojson.GetBytes(seenBody, "thinking").Exists() {
 				t.Fatalf("forced tool_choice must keep thinking off: %s", seenBody)
 			}
 		})
@@ -10475,7 +10719,7 @@ func TestClaudeExecutor_PreservedThinkingForcedToolChoiceKeepsThinkingOff(t *tes
 func TestClaudeExecutor_PreservedThinkingInjectionKeepsCallerError(t *testing.T) {
 	payload := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"error"}},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
+	if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
 		t.Fatalf("caller prefix_mismatch_behavior = %q, want error preserved; body=%s", got, seenBody)
 	}
 }
@@ -10488,7 +10732,7 @@ func TestClaudeExecutor_PayloadOverrideWinsOverPreservedThinkingInjection(t *tes
 		}},
 	}}
 	seenBody, _ := runClaudeExecutorCapture(t, cfg, "", false, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
-	if got := gjson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
+	if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "error" {
 		t.Fatalf("payload override must be the final barrier, got %q; body=%s", got, seenBody)
 	}
 }
@@ -10496,7 +10740,7 @@ func TestClaudeExecutor_PayloadOverrideWinsOverPreservedThinkingInjection(t *tes
 func TestClaudeExecutor_PreservedThinkingInjectionSkipsDisabledHaikuThinking(t *testing.T) {
 	payload := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-haiku-5-5", payload)
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("block_binding with disabled thinking is rejected upstream on haiku-5-5: %s", seenBody)
 	}
 }
@@ -10504,14 +10748,14 @@ func TestClaudeExecutor_PreservedThinkingInjectionSkipsDisabledHaikuThinking(t *
 func TestClaudeExecutor_PreservedThinkingInjectionSkipsBetweenToolsSonnetThinking(t *testing.T) {
 	payload := []byte(`{"model":"claude-sonnet-5-5","thinking":{"type":"between_tools"},"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"thinking","thinking":"earlier","signature":"` + preservedThinkingTestSignature + `"}]},{"role":"user","content":"continue"}]}`)
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-sonnet-5-5", payload)
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("block_binding with between_tools thinking is rejected upstream on sonnet-5-5: %s", seenBody)
 	}
 }
 
 func TestClaudeExecutor_PreservedThinkingInjectionSkipsMythosModel(t *testing.T) {
 	seenBody, _ := runClaudeExecutorCapture(t, nil, "", false, "claude-mythos-5-1", preservedThinkingReplayPayload("claude-mythos-5-1"))
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("mythos-5-1 does not run the prefix check and must not gain block_binding: %s", seenBody)
 	}
 }
@@ -10524,7 +10768,7 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 		}},
 	}}
 	seenBody, _ := runClaudeExecutorCapture(t, cfg, "", false, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
-	if gjson.GetBytes(seenBody, "thinking.block_binding").Exists() {
+	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
 	}
 }
