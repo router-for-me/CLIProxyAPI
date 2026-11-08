@@ -31,16 +31,17 @@ type CodexTokenData struct {
 
 // CodexSIWCTokenData holds the OAuth token information obtained from OpenAI's Sign in with ChatGPT (SIWC) flow.
 type CodexSIWCTokenData struct {
-	AccessToken  string   `json:"access_token"`
-	RefreshToken string   `json:"refresh_token"`
-	IDToken      string   `json:"id_token,omitempty"`
-	ClientID     string   `json:"client_id"`
-	Scope        string   `json:"scope,omitempty"`
-	Scopes       []string `json:"scopes,omitempty"`
-	Expire       string   `json:"expired"`
-	ExpiresAt    string   `json:"expires_at,omitempty"`
-	LastRefresh  string   `json:"last_refresh"`
-	DeviceID     string   `json:"device_id,omitempty"`
+	AccessToken       string   `json:"access_token"`
+	RefreshToken      string   `json:"refresh_token"`
+	IDToken           string   `json:"id_token,omitempty"`
+	ClientID          string   `json:"client_id"`
+	Scope             string   `json:"scope,omitempty"`
+	Scopes            []string `json:"scopes,omitempty"`
+	Expire            string   `json:"expired"`
+	ExpiresAt         string   `json:"expires_at,omitempty"`
+	EarliestRefreshAt any      `json:"earliest_refresh_at,omitempty"`
+	LastRefresh       string   `json:"last_refresh"`
+	DeviceID          string   `json:"device_id,omitempty"`
 }
 
 // ToMap converts CodexSIWCTokenData into a map suitable for credential metadata persistence.
@@ -57,6 +58,9 @@ func (d *CodexSIWCTokenData) ToMap() map[string]any {
 	}
 	if d.ExpiresAt != "" {
 		out["expires_at"] = d.ExpiresAt
+	}
+	if d.EarliestRefreshAt != nil {
+		out["earliest_refresh_at"] = d.EarliestRefreshAt
 	}
 	if d.IDToken != "" {
 		out["id_token"] = d.IDToken

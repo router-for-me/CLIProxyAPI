@@ -74,17 +74,10 @@ func codexIsImagesEndpointPath(path string) bool {
 }
 
 func (e *CodexExecutor) resolveGPTImage2BaseModel() string {
-	if e == nil || e.cfg == nil {
+	if e == nil {
 		return codexOpenAIImagesMainModel
 	}
-	model := strings.TrimSpace(e.cfg.GPTImage2BaseModel)
-	if model == "" {
-		return codexOpenAIImagesMainModel
-	}
-	if strings.HasPrefix(strings.ToLower(model), "gpt-") {
-		return model
-	}
-	return codexOpenAIImagesMainModel
+	return resolveCodexGPTImage2BaseModel(e.cfg)
 }
 
 func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -166,6 +159,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
 		reporter.ObserveResponseModel(eventData)
+		if errEvent, _, ok := codexTerminalFailureErrWithCooling(eventData, e.modelLevelCooling()); ok {
+			err = errEvent
+			return resp, err
+		}
 		switch ojson.GetBytesNoCopy(eventData, "type").String() {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -299,6 +296,12 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			}
 			eventData := bytes.TrimSpace(line[len(dataTag):])
 			reporter.ObserveResponseModel(eventData)
+			if errEvent, _, ok := codexTerminalFailureErrWithCooling(eventData, e.modelLevelCooling()); ok {
+				helps.RecordAPIResponseError(ctx, e.cfg, errEvent)
+				reporter.PublishFailure(ctx, errEvent)
+				sendError(errEvent)
+				return
+			}
 			switch ojson.GetBytesNoCopy(eventData, "type").String() {
 			case "response.output_item.done":
 				collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)

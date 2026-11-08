@@ -236,6 +236,12 @@ func (e *DevinExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, req
 // Execute performs non-streaming execution against the Devin backend.
 func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "devin"); errExpand != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeDevinResponsesCompaction(ctx, auth, req, opts)
+	}
 	targetModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetModel, auth)
@@ -326,6 +332,12 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 // ExecuteStream performs streaming execution against the Devin backend.
 func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "devin"); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeDevinResponsesCompactionStream(ctx, auth, req, opts)
+	}
 	targetModel := thinking.ParseSuffix(req.Model).ModelName
 
 	reporter := helps.NewExecutorUsageReporter(ctx, e, targetModel, auth)
