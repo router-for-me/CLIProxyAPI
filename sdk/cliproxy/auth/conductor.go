@@ -108,6 +108,13 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+// CandidateFilter is an optional selector capability used by native session
+// affinity before cache lookup. It must return a subset of the supplied accounts.
+// Errors abort selection; excluded accounts cannot be reused by affinity.
+type CandidateFilter interface {
+	FilterCandidates(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) ([]*Auth, error)
+}
+
 type PluginScheduler interface {
 	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
 }

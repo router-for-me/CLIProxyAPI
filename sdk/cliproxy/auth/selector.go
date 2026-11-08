@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -983,6 +984,34 @@ func sessionAffinityTransientAuthIDsFromContext(ctx context.Context) map[string]
 	return authIDs
 }
 
+// withoutFilteredTransientAuthIDs drops accounts a CandidateFilter excluded, so
+// quota-only affinity rebinds away from them instead of preserving the binding.
+func withoutFilteredTransientAuthIDs(ctx context.Context, auths, filtered []*Auth) context.Context {
+	transient := sessionAffinityTransientAuthIDsFromContext(ctx)
+	if len(transient) == 0 {
+		return ctx
+	}
+	kept := make(map[string]struct{}, len(filtered))
+	for _, auth := range filtered {
+		if auth != nil {
+			kept[auth.ID] = struct{}{}
+		}
+	}
+	remaining := make(map[string]struct{}, len(transient))
+	for authID := range transient {
+		remaining[authID] = struct{}{}
+	}
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if _, ok := kept[auth.ID]; !ok {
+			delete(remaining, auth.ID)
+		}
+	}
+	return context.WithValue(ctx, sessionAffinityTransientAuthIDsKey{}, remaining)
+}
+
 func shouldRebindSessionAffinityOnError(err *Error) bool {
 	if err == nil || shouldSkipCredentialCooldown(err) {
 		return false
@@ -1153,6 +1182,16 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
 func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	if filter, ok := s.fallback.(CandidateFilter); ok {
+		// Clone so an in-place filter cannot hide which accounts it excluded.
+		filtered, errFilter := filter.FilterCandidates(ctx, provider, model, opts, slices.Clone(auths))
+		if errFilter != nil {
+			return nil, errFilter
+		}
+		ctx = withoutFilteredTransientAuthIDs(ctx, auths, filtered)
+		auths = filtered
+	}
+
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
