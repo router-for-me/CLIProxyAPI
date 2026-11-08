@@ -1,13 +1,20 @@
 package api
 
 import (
+	"bufio"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -37,6 +44,19 @@ var corsExposedResponseHeaders = []string{
 
 var corsExposedResponseHeadersJoined = strings.Join(corsExposedResponseHeaders, ", ")
 
+// corsAllowedRequestHeaders lists the request headers browser clients may
+// send to the API. The Fetch standard treats Authorization as a CORS
+// non-wildcard request-header name, so it must be named explicitly: a
+// wildcard does not cover it when a browser enforces that rule.
+var corsAllowedRequestHeaders = []string{
+	"Authorization",
+	"Content-Type",
+	"X-Api-Key",
+	"X-Goog-Api-Key",
+	"Anthropic-Version",
+	"Anthropic-Beta",
+}
+
 const (
 	exampleAPIKeyManagementPath = "/management.html"
 	exampleAPIKeyManagementURL  = "/management.html?safe-mode=configure"
@@ -53,15 +73,254 @@ func (s *Server) maxRequestBodyBytes() int64 {
 	return cfg.MaxRequestBodyBytes
 }
 
+type requestBodyTracker struct {
+	io.ReadCloser
+	contentLength int64
+	bytesRead     int64
+	sawEOF        bool
+}
+
+func (t *requestBodyTracker) Read(p []byte) (int, error) {
+	if t == nil || t.ReadCloser == nil {
+		return 0, io.EOF
+	}
+	n, errRead := t.ReadCloser.Read(p)
+	if n > 0 {
+		t.bytesRead += int64(n)
+	}
+	if errors.Is(errRead, io.EOF) {
+		t.sawEOF = true
+	}
+	return n, errRead
+}
+
+func (t *requestBodyTracker) isComplete() bool {
+	if t == nil {
+		return true
+	}
+	return t.sawEOF || (t.contentLength >= 0 && t.bytesRead >= t.contentLength)
+}
+
+type unconsumedBodyHTTPResponseWriter struct {
+	http.ResponseWriter
+	tracker     *requestBodyTracker
+	status      int
+	wroteHeader bool
+	hijacked    bool
+	closed      bool
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) Unwrap() http.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) WriteHeader(code int) {
+	w.status = code
+	w.closeIfBodyUnconsumed(code)
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
+		w.closeIfBodyUnconsumed(w.status)
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) WriteString(s string) (int, error) {
+	if !w.wroteHeader {
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
+		w.closeIfBodyUnconsumed(w.status)
+		w.wroteHeader = true
+	}
+	return io.WriteString(w.ResponseWriter, s)
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	conn, rw, errHijack := hijacker.Hijack()
+	if errHijack == nil {
+		w.hijacked = true
+	}
+	return conn, rw, errHijack
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) CloseNotify() <-chan bool {
+	if notifier, ok := w.ResponseWriter.(http.CloseNotifier); ok {
+		return notifier.CloseNotify()
+	}
+	return nil
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+func (w *unconsumedBodyHTTPResponseWriter) closeIfBodyUnconsumed(status int) {
+	if w == nil || w.closed || w.hijacked || status < http.StatusOK {
+		return
+	}
+	if w.tracker != nil && w.tracker.isComplete() {
+		return
+	}
+	w.closed = true
+	if !w.wroteHeader {
+		w.ResponseWriter.Header().Set("Connection", "close")
+	}
+	_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Unix(1, 0))
+}
+
+func wrapUnconsumedRequestBodyHandler(next http.Handler) http.Handler {
+	if next == nil {
+		return nil
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r == nil || r.Body == nil || r.Body == http.NoBody || (r.ContentLength == 0 && len(r.TransferEncoding) == 0) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		tracker, ok := r.Body.(*requestBodyTracker)
+		if !ok {
+			tracker = &requestBodyTracker{
+				ReadCloser:    r.Body,
+				contentLength: r.ContentLength,
+			}
+			r.Body = tracker
+		}
+		wrappedWriter := &unconsumedBodyHTTPResponseWriter{
+			ResponseWriter: w,
+			tracker:        tracker,
+		}
+		defer func() {
+			status := wrappedWriter.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			wrappedWriter.closeIfBodyUnconsumed(status)
+		}()
+		next.ServeHTTP(wrappedWriter, r)
+	})
+}
+
+type unconsumedBodyCloseWriter struct {
+	gin.ResponseWriter
+	tracker  *requestBodyTracker
+	hijacked bool
+	closed   bool
+}
+
+func (w *unconsumedBodyCloseWriter) Unwrap() http.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
+}
+
+func (w *unconsumedBodyCloseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, errHijack := w.ResponseWriter.Hijack()
+	if errHijack == nil {
+		w.hijacked = true
+	}
+	return conn, rw, errHijack
+}
+
+func (w *unconsumedBodyCloseWriter) WriteHeader(code int) {
+	w.closeIfBodyUnconsumed(code)
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *unconsumedBodyCloseWriter) WriteHeaderNow() {
+	w.closeIfBodyUnconsumed(w.Status())
+	w.ResponseWriter.WriteHeaderNow()
+}
+
+func (w *unconsumedBodyCloseWriter) Write(data []byte) (int, error) {
+	w.closeIfBodyUnconsumed(w.Status())
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *unconsumedBodyCloseWriter) WriteString(data string) (int, error) {
+	w.closeIfBodyUnconsumed(w.Status())
+	return w.ResponseWriter.WriteString(data)
+}
+
+func (w *unconsumedBodyCloseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *unconsumedBodyCloseWriter) FlushError() error {
+	w.closeIfBodyUnconsumed(w.Status())
+	return httpwire.FlushResponse(w.ResponseWriter)
+}
+
+func (w *unconsumedBodyCloseWriter) closeIfBodyUnconsumed(status int) {
+	if w == nil || w.closed || w.hijacked || status < http.StatusOK {
+		return
+	}
+	if w.tracker != nil && w.tracker.isComplete() {
+		return
+	}
+	w.closed = true
+	if !w.ResponseWriter.Written() {
+		w.ResponseWriter.Header().Set("Connection", "close")
+	}
+	_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Unix(1, 0))
+}
+
 func (s *Server) maxRequestBodyBytesMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c == nil || c.Request == nil {
+			c.Next()
+			return
+		}
+		if c.Request.Body != nil && c.Request.Body != http.NoBody && (c.Request.ContentLength != 0 || len(c.Request.TransferEncoding) > 0) {
+			tracker, ok := c.Request.Body.(*requestBodyTracker)
+			if !ok {
+				tracker = &requestBodyTracker{
+					ReadCloser:    c.Request.Body,
+					contentLength: c.Request.ContentLength,
+				}
+				c.Request.Body = tracker
+			}
+			closeWriter := &unconsumedBodyCloseWriter{
+				ResponseWriter: c.Writer,
+				tracker:        tracker,
+			}
+			c.Writer = closeWriter
+			defer func() {
+				closeWriter.closeIfBodyUnconsumed(c.Writer.Status())
+			}()
+		}
 		maxBytes := s.maxRequestBodyBytes()
-		if maxBytes <= 0 || c == nil || c.Request == nil {
+		if maxBytes <= 0 {
 			c.Next()
 			return
 		}
 		c.Set(handlers.MaxRequestBodyBytesContextKey, maxBytes)
 		if c.Request.ContentLength > maxBytes {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
 				"error": "http: request body too large",
 			})
@@ -90,6 +349,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		client := home.Current()
 		if client == nil || !client.HeartbeatOK() {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
@@ -122,6 +382,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		closeUnconsumedRequestOnAbort(c)
 		c.Header("X-CPA-SAFE-MODE", "example-api-key")
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"error":   "unsafe_example_api_key",
@@ -171,16 +432,50 @@ func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
+		c.Header("Access-Control-Allow-Headers", corsAllowHeadersValue(c.Request))
 		c.Header("Access-Control-Expose-Headers", corsExposedResponseHeadersJoined)
 
 		if c.Request.Method == "OPTIONS" {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
 
 		c.Next()
 	}
+}
+
+// corsAllowHeadersValue builds the Access-Control-Allow-Headers value for a
+// request. It always names the known API request headers explicitly and, for
+// preflight requests, also echoes the headers the client asked about, so no
+// allowed header depends on the wildcard that strict non-wildcard rules
+// reject for Authorization. Echoing requested headers preserves the previous
+// wildcard behavior for arbitrary custom client headers without widening
+// the allowed origins or enabling credentials.
+func corsAllowHeadersValue(req *http.Request) string {
+	allowed := make([]string, 0, len(corsAllowedRequestHeaders))
+	seen := make(map[string]struct{}, len(corsAllowedRequestHeaders))
+	appendHeader := func(name string) {
+		name = http.CanonicalHeaderKey(strings.TrimSpace(name))
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		allowed = append(allowed, name)
+	}
+	for _, name := range corsAllowedRequestHeaders {
+		appendHeader(name)
+	}
+	if req != nil && req.Method == http.MethodOptions {
+		for _, name := range strings.Split(req.Header.Get("Access-Control-Request-Headers"), ",") {
+			appendHeader(name)
+		}
+	}
+	return strings.Join(allowed, ", ")
 }
 
 // AuthMiddleware returns a Gin middleware handler that authenticates requests
@@ -194,9 +489,23 @@ func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc 
 	return accessAuthMiddleware(manager, true)
 }
 
+func closeUnconsumedRequestOnAbort(c *gin.Context) {
+	if c == nil || c.Request == nil {
+		return
+	}
+	if c.Request.ContentLength != 0 || len(c.Request.TransferEncoding) > 0 {
+		c.Header("Connection", "close")
+		_ = http.NewResponseController(c.Writer).SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
 func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
@@ -214,10 +523,15 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 				c.Request = c.Request.WithContext(reqCtx)
 			}
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
 
+		closeUnconsumedRequestOnAbort(c)
 		statusCode := err.HTTPStatusCode()
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
@@ -253,6 +567,7 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 			return
 		}
 		if errAuthenticate != nil {
+			closeUnconsumedRequestOnAbort(c)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{
 				"message": errAuthenticate.Error(),
 				"type":    "invalid_request_error",
@@ -277,6 +592,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		c.Request = c.Request.WithContext(reqCtx)
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
+		middleware.CaptureAuthenticatedRequestBody(c)
+		if c.IsAborted() {
+			return
+		}
 		c.Next()
 	}
 }

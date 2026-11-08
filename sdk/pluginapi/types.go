@@ -78,10 +78,21 @@ type Capabilities struct {
 	ModelProvider ModelProvider
 	// AuthProvider lets the host parse, login, poll, and refresh plugin provider auths.
 	AuthProvider AuthProvider
+	// AuthProviders lets a plugin register multiple provider auth entries (for example,
+	// multi-portal vendors sharing the same plugin). When non-empty, each entry is exposed
+	// under its own identifier alongside AuthProvider.
+	AuthProviders []AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
 	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
 	FrontendAuthProviderExclusive bool
+	// FrontendAuthProviderOmitBody opts out of receiving FrontendAuthRequest.Body and
+	// FrontendAuthRequest.DecodedBody in FrontendAuthProvider.Authenticate. It is honored
+	// only on schema version 7+; the host then skips reading, decoding, and cloning the
+	// request body during authentication.
+	FrontendAuthProviderOmitBody bool
+	// FrontendAuthOmitBody is an alias for FrontendAuthProviderOmitBody.
+	FrontendAuthOmitBody bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
 	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
@@ -112,6 +123,28 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestInterceptorOmitBodyBefore opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestBeforeAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyBefore bool
+	// RequestInterceptorOmitBodyAfter opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestAfterAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyAfter bool
+	// RequestBodyPatcherBefore scans raw request bodies in the before-auth phase and
+	// returns localized byte-range edits via request.patch_body_before (schema v8+).
+	RequestBodyPatcherBefore RequestBodyPatcher
+	// RequestBodyPatcherAfter scans raw request bodies in the after-auth phase and
+	// returns localized byte-range edits via request.patch_body_after (schema v8+).
+	RequestBodyPatcherAfter RequestBodyPatcher
+	// RequestInterceptorPatchBodyBefore opts into raw request body delivery and byte-range
+	// patching in the before-auth phase via request.patch_body_before. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyBefore bool
+	// RequestInterceptorPatchBodyAfter opts into raw request body delivery and byte-range
+	// patching in the after-auth phase via request.patch_body_after. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
@@ -284,6 +317,30 @@ type AuthProvider interface {
 	RefreshAuth(context.Context, AuthRefreshRequest) (AuthRefreshResponse, error)
 }
 
+// MultiAuthProvider is an optional extension implemented by an AuthProvider
+// that handles multiple provider identifiers (for example, multi-portal vendors).
+type MultiAuthProvider interface {
+	AuthProvider
+	Identifiers() []string
+}
+
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry struct {
+	// Identifier is the provider key used for login and callback routing.
+	Identifier string `json:"identifier"`
+	// Name is the user-facing display label for this entry; falls back to Metadata.Name when empty.
+	Name string `json:"name,omitempty"`
+	// Logo is the display asset reference for this entry; falls back to Metadata.Logo when empty.
+	Logo string `json:"logo,omitempty"`
+}
+
+// AuthProviderEntries is an optional extension implemented by an AuthProvider
+// that publishes per-entry display metadata (name and logo).
+type AuthProviderEntries interface {
+	AuthProvider
+	AuthEntries() []AuthProviderEntry
+}
+
 // AuthLoginStartRequest asks a plugin to start a provider login flow.
 type AuthLoginStartRequest struct {
 	// Provider is the provider key for the login flow.
@@ -387,6 +444,16 @@ type ModelRegistrar interface {
 type ModelRegistrationRequest struct {
 	// Plugin is the metadata of the plugin being registered.
 	Plugin Metadata
+	// MultiProviderModels reports whether the host supports ModelRegistrationResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
+}
+
+// ProviderModels pairs a provider key with the models registered for it.
+type ProviderModels struct {
+	// Provider is the provider key associated with the returned models.
+	Provider string `json:"provider,omitempty"`
+	// Models is the complete set of plugin-provided models for Provider.
+	Models []ModelInfo `json:"models,omitempty"`
 }
 
 // ModelRegistrationResponse returns provider and model metadata to register.
@@ -395,6 +462,12 @@ type ModelRegistrationResponse struct {
 	Provider string
 	// Models is the complete set of plugin-provided models.
 	Models []ModelInfo
+	// Registrations registers model sets for multiple providers in one call.
+	// When non-empty, each entry is registered under its own Provider for catalog
+	// and per-auth model discovery (plugins that also declare an Executor still
+	// bind that executor to the first registered provider); when empty, Provider
+	// and Models behave as a single registration.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
@@ -410,6 +483,8 @@ type StaticModelRequest struct {
 	Plugin Metadata
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
+	// MultiProviderModels reports whether the host supports ModelResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
 }
 
 // AuthModelRequest carries auth context for provider model discovery.
@@ -438,6 +513,9 @@ type ModelResponse struct {
 	Provider string
 	// Models is the complete set of discovered provider models.
 	Models []ModelInfo
+	// Registrations registers static model sets for multiple providers in one call.
+	// Used by StaticModels when non-empty; ignored by ModelsForAuth.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 	// AuthUpdate contains updated auth data from model discovery when needed.
 	AuthUpdate AuthData
 }
@@ -484,6 +562,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SelectionIDMetadataKey is the metadata key carrying the per-selection identifier in SchedulerOptions.Metadata.
+	SelectionIDMetadataKey = "selection_id"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -710,6 +790,10 @@ type HostModelExecutionRequest struct {
 	ProxyURL string `json:"proxy_url,omitempty"`
 	// Path optionally specifies or overrides the request path (e.g. "/v1/images/generations" or "/v1/images/edits").
 	Path string `json:"path,omitempty"`
+	// CallerScope optionally carries the opaque caller scope handle from an intercepted
+	// request so the host execution resolves the same caller-scoped session and alias state
+	// without exposing the downstream client API key.
+	CallerScope string `json:"caller_scope,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -1134,6 +1218,9 @@ type WebSocketResponseObserver interface {
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
 const StreamChunkHeaderInitIndex = -1
 
+// CallerScopeMetadataKey is the metadata key carrying the opaque downstream caller scope handle.
+const CallerScopeMetadataKey = "caller_scope"
+
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
 	// FromFormat is the source protocol format.
@@ -1186,6 +1273,9 @@ type RequestInterceptRequest struct {
 	Headers http.Header
 	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestInterceptResponse.Body.
 	Body []byte
+	// CallerScope carries an opaque, irreversible handle identifying the downstream caller
+	// when available (mirrors Metadata[CallerScopeMetadataKey]).
+	CallerScope string
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
 }
@@ -1198,6 +1288,10 @@ type RequestInterceptResponse struct {
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.
 	Body []byte
+	// BodyEdits applies localized byte-range replacements to the current request body when Body is empty.
+	BodyEdits []RequestBodyEdit `json:"body_edits,omitempty"`
+	// Edits is an alias for BodyEdits.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
 	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
@@ -1208,6 +1302,31 @@ type RequestInterceptResponse struct {
 	ResponseHeaders http.Header
 	// ResponseBody contains the downstream response body used when Terminate is true.
 	ResponseBody []byte
+}
+
+// RequestBodyPatcher scans a raw request body and returns localized byte-range edits
+// without JSON/Base64 request body wrapping.
+type RequestBodyPatcher interface {
+	PatchRequestBody(context.Context, []byte) (RequestBodyPatchResponse, error)
+}
+
+// RequestBodyEdit describes a 0-based [Start:End] byte-range replacement in a UTF-8 JSON request body.
+type RequestBodyEdit struct {
+	// Start is the inclusive 0-based start byte offset in the input body.
+	Start int `json:"start"`
+	// End is the exclusive 0-based end byte offset in the input body.
+	End int `json:"end"`
+	// Replacement is the UTF-8 replacement text spliced into [Start:End].
+	Replacement string `json:"replacement,omitempty"`
+	// ReplacementBytes optionally carries raw replacement bytes when non-empty.
+	ReplacementBytes []byte `json:"replacement_bytes,omitempty"`
+}
+
+// RequestBodyPatchResponse returns localized byte-range edits for a request body.
+type RequestBodyPatchResponse struct {
+	// Edits lists byte-range replacements relative to the input body received by this plugin.
+	// When empty, the host reuses the input body without copying.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 }
 
 // RequestCompletionOutcome identifies how an intercepted request ended.
@@ -1527,6 +1646,8 @@ type UsageRecord struct {
 	RequestID string
 	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
 	TraceID string
+	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
+	SelectionID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.

@@ -3,7 +3,7 @@ package auth
 import (
 	"bytes"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 	"strings"
 	"testing"
 
@@ -223,7 +223,7 @@ func TestNormalizeGluedSSEEvents_SplitsValidGlueOnly(t *testing.T) {
 	for _, line := range bytes.Split(inside, []byte("\n")) {
 		if bytes.HasPrefix(line, []byte("data:")) {
 			_, jd, ok := extractSSEDataLine(line)
-			if !ok || !gjson.ValidBytes(jd) {
+			if !ok || !ojson.ValidBytes(jd) {
 				t.Fatalf("baseline invalid")
 			}
 		}
@@ -231,7 +231,7 @@ func TestNormalizeGluedSSEEvents_SplitsValidGlueOnly(t *testing.T) {
 	for _, line := range bytes.Split([]byte(gotInside), []byte("\n")) {
 		if bytes.HasPrefix(line, []byte("data:")) {
 			_, jd, ok := extractSSEDataLine(line)
-			if !ok || !gjson.ValidBytes(jd) {
+			if !ok || !ojson.ValidBytes(jd) {
 				t.Fatalf("corrupted JSON after normalize: %q", gotInside)
 			}
 		}
@@ -251,7 +251,7 @@ func TestNormalizeGluedSSEEvents_SplitsCodexDataGlueOnly(t *testing.T) {
 		for _, line := range bytes.Split([]byte(gotInside), []byte("\n")) {
 			if bytes.HasPrefix(line, []byte("data:")) {
 				_, jd, ok := extractSSEDataLine(line)
-				if !ok || !gjson.ValidBytes(jd) {
+				if !ok || !ojson.ValidBytes(jd) {
 					t.Fatalf("corrupted JSON: %q", gotInside)
 				}
 			}
@@ -270,10 +270,10 @@ func parseResponsesWSDataEventTypes(payload []byte) []string {
 		if bytes.HasPrefix(line, []byte("data:")) {
 			line = bytes.TrimSpace(line[len("data:"):])
 		}
-		if len(line) == 0 || !gjson.ValidBytes(line) {
+		if len(line) == 0 || !ojson.ValidBytes(line) {
 			continue
 		}
-		types = append(types, gjson.GetBytes(line, "type").String())
+		types = append(types, ojson.GetBytesNoCopy(line, "type").String())
 	}
 	return types
 }

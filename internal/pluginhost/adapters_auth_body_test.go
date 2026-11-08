@@ -193,3 +193,224 @@ func TestFrontendAuthRequestDecodedBodyOverRPC(t *testing.T) {
 		t.Fatalf("old plugin type failed on %s: %v", raw, errUnmarshal)
 	}
 }
+
+type countingAuthBodyReader struct {
+	reader    io.Reader
+	readBytes int
+}
+
+func (r *countingAuthBodyReader) Read(p []byte) (int, error) {
+	n, errRead := r.reader.Read(p)
+	r.readBytes += n
+	return n, errRead
+}
+
+type omitBodyFrontendAuthProvider struct {
+	frontendAuthProviderFunc
+}
+
+func (omitBodyFrontendAuthProvider) FrontendAuthProviderWantsOmitBody() bool {
+	return true
+}
+
+func TestAccessAdapterFrontendAuthOmitBodySkipsReadingAndDecodingBody(t *testing.T) {
+	const (
+		omitKey   = "plugin:auth-omit:quota"
+		aliasKey  = "plugin:auth-alias:quota"
+		bodyKey   = "plugin:auth-body:quota"
+		legacyKey = "plugin:auth-legacy:quota"
+	)
+	for _, key := range []string{omitKey, aliasKey, bodyKey, legacyKey} {
+		sdkaccess.UnregisterProvider(key)
+		defer sdkaccess.UnregisterProvider(key)
+	}
+
+	var omitSeen, aliasSeen, bodySeen, legacySeen pluginapi.FrontendAuthRequest
+	var omitCalls, aliasCalls, bodyCalls, legacyCalls int
+	newProvider := func(got *pluginapi.FrontendAuthRequest, calls *int) frontendAuthProviderFunc {
+		return frontendAuthProviderFunc{
+			identifier: "quota",
+			authenticate: func(_ context.Context, req pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error) {
+				*calls++
+				*got = req
+				return pluginapi.FrontendAuthResponse{Authenticated: true, Principal: "user-1"}, nil
+			},
+		}
+	}
+
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-omit",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionFrontendAuthOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					FrontendAuthProvider:         newProvider(&omitSeen, &omitCalls),
+					FrontendAuthProviderOmitBody: true,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "auth-alias",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionFrontendAuthOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					FrontendAuthProvider: newProvider(&aliasSeen, &aliasCalls),
+					FrontendAuthOmitBody: true,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "auth-body",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersionFrontendAuthOmitBody,
+				Capabilities: pluginapi.Capabilities{
+					FrontendAuthProvider: newProvider(&bodySeen, &bodyCalls),
+				},
+			},
+		},
+		capabilityRecord{
+			id: "auth-legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 6,
+				Capabilities: pluginapi.Capabilities{
+					FrontendAuthProvider:         newProvider(&legacySeen, &legacyCalls),
+					FrontendAuthProviderOmitBody: true,
+					FrontendAuthOmitBody:         true,
+				},
+			},
+		},
+	)
+	host.RegisterFrontendAuthProviders()
+
+	findProvider := func(t *testing.T, key string) sdkaccess.Provider {
+		t.Helper()
+		for _, candidate := range sdkaccess.RegisteredProviders() {
+			if candidate.Identifier() == key {
+				return candidate
+			}
+		}
+		t.Fatalf("provider %q was not registered", key)
+		return nil
+	}
+
+	plain := []byte(`{"model":"gpt-5","input":"large payload"}`)
+	compressed := zstdCompress(t, plain)
+
+	for _, tc := range []struct {
+		name string
+		key  string
+		seen *pluginapi.FrontendAuthRequest
+		call *int
+	}{
+		{name: "FrontendAuthProviderOmitBody", key: omitKey, seen: &omitSeen, call: &omitCalls},
+		{name: "FrontendAuthOmitBody", key: aliasKey, seen: &aliasSeen, call: &aliasCalls},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			savedSlots := authDecodeSlots
+			authDecodeSlots = make(chan struct{}, 1)
+			authDecodeSlots <- struct{}{}
+			defer func() { authDecodeSlots = savedSlots }()
+
+			provider := findProvider(t, tc.key)
+			counter := &countingAuthBodyReader{reader: bytes.NewReader(compressed)}
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses?stream=true", io.NopCloser(counter))
+			req.Header.Set("Authorization", "Bearer sk-test")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "zstd")
+
+			res, authErr := provider.Authenticate(context.Background(), req)
+			if authErr != nil {
+				t.Fatalf("Authenticate() error = %v, want nil", authErr)
+			}
+			if res == nil || res.Principal != "user-1" {
+				t.Fatalf("Authenticate() result = %#v, want principal user-1", res)
+			}
+			if *tc.call != 1 {
+				t.Fatalf("Authenticate() calls = %d, want 1", *tc.call)
+			}
+			if counter.readBytes != 0 {
+				t.Fatalf("bytes read from r.Body during Authenticate = %d, want 0", counter.readBytes)
+			}
+			if tc.seen.Body != nil || tc.seen.DecodedBody != nil {
+				t.Fatalf("seen Body=%q DecodedBody=%q, want both nil", tc.seen.Body, tc.seen.DecodedBody)
+			}
+			if tc.seen.Headers.Get("Authorization") != "Bearer sk-test" || tc.seen.Query.Get("stream") != "true" {
+				t.Fatalf("seen headers/query = %v / %v, want preserved metadata", tc.seen.Headers, tc.seen.Query)
+			}
+			rest, errReadAll := io.ReadAll(req.Body)
+			if errReadAll != nil || !bytes.Equal(rest, compressed) {
+				t.Fatalf("downstream body = %q (err=%v), want untouched compressed payload", rest, errReadAll)
+			}
+			if counter.readBytes != len(compressed) {
+				t.Fatalf("bytes read after downstream ReadAll = %d, want %d", counter.readBytes, len(compressed))
+			}
+
+			// A failing body reader must not cause Authenticate to fail when omitBody is active.
+			failReq, errNewReq := http.NewRequest(http.MethodPost, "http://example.test/v1/responses", failingReadCloser{})
+			if errNewReq != nil {
+				t.Fatalf("NewRequest() error = %v", errNewReq)
+			}
+			if _, authErrFail := provider.Authenticate(context.Background(), failReq); authErrFail != nil {
+				t.Fatalf("Authenticate() with failing body reader error = %v, want nil", authErrFail)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		key  string
+		seen *pluginapi.FrontendAuthRequest
+		call *int
+	}{
+		{name: "schema 7 without opt-out", key: bodyKey, seen: &bodySeen, call: &bodyCalls},
+		{name: "schema 6 legacy ignores opt-out", key: legacyKey, seen: &legacySeen, call: &legacyCalls},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := findProvider(t, tc.key)
+			counter := &countingAuthBodyReader{reader: bytes.NewReader(compressed)}
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", io.NopCloser(counter))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Content-Encoding", "zstd")
+
+			if _, authErr := provider.Authenticate(context.Background(), req); authErr != nil {
+				t.Fatalf("Authenticate() error = %v, want nil", authErr)
+			}
+			if *tc.call != 1 {
+				t.Fatalf("Authenticate() calls = %d, want 1", *tc.call)
+			}
+			if counter.readBytes != len(compressed) {
+				t.Fatalf("bytes read = %d, want %d", counter.readBytes, len(compressed))
+			}
+			if !bytes.Equal(tc.seen.Body, compressed) || !bytes.Equal(tc.seen.DecodedBody, plain) {
+				t.Fatalf("seen Body=%q DecodedBody=%q, want preserved", tc.seen.Body, tc.seen.DecodedBody)
+			}
+		})
+	}
+}
+
+func TestFrontendAuthRequestBodySkipsCloneForRPCProvider(t *testing.T) {
+	body := []byte("original-request-body")
+
+	rpcProvider := rpcFrontendAuthProvider{rpcPluginAdapter: &rpcPluginAdapter{client: &capturePluginClient{}}}
+	gotRPC := frontendAuthRequestBody(rpcProvider, body)
+	if len(gotRPC) != len(body) || &gotRPC[0] != &body[0] {
+		t.Fatal("frontendAuthRequestBody cloned body for rpcFrontendAuthProvider, want shared backing slice")
+	}
+
+	inProcProvider := frontendAuthProviderFunc{identifier: "in-proc"}
+	gotInProc := frontendAuthRequestBody(inProcProvider, body)
+	if !bytes.Equal(gotInProc, body) {
+		t.Fatalf("frontendAuthRequestBody(inProc) = %q, want %q", gotInProc, body)
+	}
+	if &gotInProc[0] == &body[0] {
+		t.Fatal("frontendAuthRequestBody did not clone body for in-process provider")
+	}
+	gotInProc[0] = 'X'
+	if body[0] != 'o' {
+		t.Fatalf("mutating in-process request body mutated original buffer: %q", body)
+	}
+
+	if gotNil := frontendAuthRequestBody(rpcProvider, nil); gotNil != nil {
+		t.Fatalf("frontendAuthRequestBody(nil) = %v, want nil", gotNil)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"sync"
 	"time"
 
@@ -284,7 +285,18 @@ func (c *Client) probeClusterLatency(ctx context.Context, address string) (time.
 	options.TLSConfig = tlsConfig
 	options.ReadTimeout, options.WriteTimeout, options.MaxRetries = -1, -1, -1
 	options.PoolSize = 1
-	options.Dialer = redis.NewDialer(options)
+	baseDialer := redis.NewDialer(options)
+	options.Dialer = func(dialCtx context.Context, network, dialAddress string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, dialAddress)
+		if errDial != nil {
+			return nil, errDial
+		}
+		if ctx.Err() != nil {
+			_ = closeUnderlyingTransport(conn)
+			return nil, context.Cause(ctx)
+		}
+		return newPluginSyncCancelableConn(ctx, conn), nil
+	}
 	probe := redis.NewClient(options)
 	stopCancel := context.AfterFunc(ctx, func() { _ = probe.Close() })
 	defer func() {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -150,10 +150,10 @@ func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 			if !json.Valid([]byte(body)) {
 				t.Fatalf("error body is not valid JSON: %s", body)
 			}
-			if got := gjson.Get(body, "error.code").String(); got != "model_not_found" {
+			if got := ojson.Get(body, "error.code").String(); got != "model_not_found" {
 				t.Fatalf("error code = %q, want model_not_found; the caller controlled the body: %s", got, body)
 			}
-			if got, want := gjson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
+			if got, want := ojson.Get(body, "error.message").String(), "unknown provider for model "+model; got != want {
 				t.Fatalf("error message = %q, want %q", got, want)
 			}
 		})
@@ -173,6 +173,12 @@ func TestGetRequestDetails_ImageModelReturns503(t *testing.T) {
 		"codex/gpt-image-2.5-sunburst",
 		"gpt-image-2.5",
 		"codex/gpt-image-2.5",
+		"gpt-image-2.6-flare",
+		"codex/gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
+		"codex/gpt-image-2.6-sunburst",
+		"gpt-image-2.6",
+		"codex/gpt-image-2.6",
 		"grok-imagine-image",
 		"xai/grok-imagine-image",
 		"grok-imagine-image-quality",
@@ -213,6 +219,12 @@ func TestValidateImageOnlyModel_AllowsImageEndpoints(t *testing.T) {
 		"codex/gpt-image-2.5-sunburst",
 		"gpt-image-2.5",
 		"codex/gpt-image-2.5",
+		"gpt-image-2.6-flare",
+		"codex/gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
+		"codex/gpt-image-2.6-sunburst",
+		"gpt-image-2.6",
+		"codex/gpt-image-2.6",
 		"grok-imagine-image",
 		"xai/grok-imagine-image",
 		"grok-imagine-image-quality",
@@ -248,6 +260,12 @@ func TestIsOpenAIImageOnlyModel(t *testing.T) {
 		{model: "codex/gpt-image-2.5-sunburst", want: true},
 		{model: "gpt-image-2.5", want: true},
 		{model: "codex/gpt-image-2.5", want: true},
+		{model: "gpt-image-2.6-flare", want: true},
+		{model: "codex/gpt-image-2.6-flare", want: true},
+		{model: "gpt-image-2.6-sunburst", want: true},
+		{model: "codex/gpt-image-2.6-sunburst", want: true},
+		{model: "gpt-image-2.6", want: true},
+		{model: "codex/gpt-image-2.6", want: true},
 		{model: "grok-imagine-image", want: true},
 		{model: "xai/grok-imagine-image", want: true},
 		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
@@ -276,6 +294,9 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 		"gpt-image-2.5-flare",
 		"gpt-image-2.5-sunburst",
 		"gpt-image-2.5",
+		"gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
+		"gpt-image-2.6",
 		"grok-imagine-image",
 		"grok-imagine-image-quality",
 		"xai/grok-imagine-image-quality",

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -129,12 +130,330 @@ type thinkingAdapter struct {
 	applier  pluginapi.ThinkingApplier
 }
 
-func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record) {
-	if a == nil {
+const (
+	defaultMaxPendingPluginUsageRecords = 4096
+	maxPluginUsageReplayAttempts        = 2
+)
+
+type pendingPluginUsageRecord struct {
+	ctx      context.Context
+	record   pluginapi.UsageRecord
+	attempts int
+}
+
+type pluginUsageState struct {
+	mu               sync.Mutex
+	cond             *sync.Cond
+	inFlight         int
+	quiescing        bool
+	replaying        bool
+	asyncDraining    bool
+	closed           bool
+	quiesceWaiters   int
+	waitingProducers int
+	pending          []pendingPluginUsageRecord
+}
+
+func (h *Host) usageStateForPlugin(pluginID string) *pluginUsageState {
+	pluginID = strings.TrimSpace(pluginID)
+	if h == nil || pluginID == "" {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.usageStates == nil {
+		h.usageStates = make(map[string]*pluginUsageState)
+	}
+	state := h.usageStates[pluginID]
+	if state == nil {
+		state = &pluginUsageState{}
+		state.cond = sync.NewCond(&state.mu)
+		h.usageStates[pluginID] = state
+	}
+	return state
+}
+
+func (h *Host) pendingUsageLimit() int {
+	if h == nil {
+		return defaultMaxPendingPluginUsageRecords
+	}
+	h.mu.Lock()
+	limit := h.maxPendingUsageRecords
+	h.mu.Unlock()
+	if limit <= 0 {
+		return defaultMaxPendingPluginUsageRecords
+	}
+	return limit
+}
+
+func contextDone(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Host) beginUsageReplacement(ctx context.Context, pluginID string) bool {
+	state := h.usageStateForPlugin(pluginID)
+	if state == nil {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.mu.Lock()
+	waitHook := h.usageDrainWaitHook
+	h.mu.Unlock()
+
+	state.mu.Lock()
+	state.closed = false
+	state.quiescing = true
+	if state.inFlight == 0 && !state.asyncDraining {
+		state.mu.Unlock()
+		return !contextDone(ctx)
+	}
+	stopWake := context.AfterFunc(ctx, func() {
+		state.mu.Lock()
+		state.cond.Broadcast()
+		state.mu.Unlock()
+	})
+	defer stopWake()
+	notifiedWait := false
+	for (state.inFlight > 0 || state.asyncDraining) && !contextDone(ctx) {
+		if !notifiedWait && waitHook != nil {
+			notifiedWait = true
+			waitHook(pluginID)
+		}
+		state.cond.Wait()
+	}
+	ok := state.inFlight == 0 && !state.asyncDraining && !contextDone(ctx)
+	state.mu.Unlock()
+	return ok
+}
+
+func (h *Host) finishUsageReplacement(pluginID string) {
+	state := h.usageStateForPlugin(pluginID)
+	if state == nil || h.pluginNeedsUsageRecovery(pluginID) {
 		return
 	}
-	plugin := a.host.currentUsagePlugin(a.pluginID)
-	if plugin == nil {
+	state.mu.Lock()
+	if !state.quiescing {
+		state.mu.Unlock()
+		return
+	}
+	state.quiescing = false
+	state.replaying = true
+	remainingSync := len(state.pending) + state.quiesceWaiters
+	for remainingSync > 0 {
+		if state.closed {
+			state.pending = nil
+			state.quiescing = false
+			state.replaying = false
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		if len(state.pending) == 0 {
+			if state.quiesceWaiters > 0 {
+				state.cond.Broadcast()
+				state.cond.Wait()
+				continue
+			}
+			break
+		}
+		plugin := h.currentUsagePlugin(pluginID)
+		if plugin == nil {
+			if h.pluginNeedsUsageRecovery(pluginID) {
+				state.quiescing = true
+			} else {
+				state.pending = nil
+			}
+			state.replaying = false
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		item := state.pending[0]
+		state.pending[0] = pendingPluginUsageRecord{}
+		state.pending = state.pending[1:]
+		remainingSync--
+		state.cond.Broadcast()
+
+		state.inFlight++
+		state.mu.Unlock()
+
+		errDeliver := h.invokeUsagePlugin(item.ctx, pluginID, plugin, item.record)
+
+		state.mu.Lock()
+		state.inFlight--
+		if state.inFlight == 0 {
+			state.cond.Broadcast()
+		}
+		if errDeliver != nil && !state.closed {
+			if state.quiescing || h.pluginNeedsUsageRecovery(pluginID) {
+				state.pending = append([]pendingPluginUsageRecord{item}, state.pending...)
+				state.quiescing = true
+				state.replaying = false
+				state.cond.Broadcast()
+				state.mu.Unlock()
+				return
+			}
+			item.attempts++
+			if item.attempts < maxPluginUsageReplayAttempts && h.currentUsagePlugin(pluginID) != nil {
+				state.pending = append([]pendingPluginUsageRecord{item}, state.pending...)
+				break
+			}
+		}
+	}
+
+	if state.closed {
+		state.pending = nil
+		state.quiescing = false
+		state.replaying = false
+		state.cond.Broadcast()
+		state.mu.Unlock()
+		return
+	}
+	if len(state.pending) == 0 && state.waitingProducers == 0 {
+		state.replaying = false
+		state.cond.Broadcast()
+		state.mu.Unlock()
+		return
+	}
+	if !state.asyncDraining {
+		state.asyncDraining = true
+		go h.drainPostReplayUsage(pluginID, state)
+	}
+	state.mu.Unlock()
+}
+
+func (h *Host) drainPostReplayUsage(pluginID string, state *pluginUsageState) {
+	if h == nil || state == nil {
+		return
+	}
+	state.mu.Lock()
+	for {
+		if state.closed || state.quiescing {
+			state.asyncDraining = false
+			if state.closed {
+				state.pending = nil
+				state.replaying = false
+			}
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		if len(state.pending) == 0 {
+			if state.waitingProducers > 0 {
+				state.cond.Broadcast()
+				state.cond.Wait()
+				continue
+			}
+			state.replaying = false
+			state.asyncDraining = false
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		plugin := h.currentUsagePlugin(pluginID)
+		if plugin == nil {
+			if h.pluginNeedsUsageRecovery(pluginID) {
+				state.quiescing = true
+			} else {
+				state.pending = nil
+			}
+			state.replaying = false
+			state.asyncDraining = false
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		item := state.pending[0]
+		state.pending[0] = pendingPluginUsageRecord{}
+		state.pending = state.pending[1:]
+		state.cond.Broadcast()
+
+		state.inFlight++
+		state.mu.Unlock()
+
+		errDeliver := h.invokeUsagePlugin(item.ctx, pluginID, plugin, item.record)
+
+		state.mu.Lock()
+		state.inFlight--
+		if state.inFlight == 0 {
+			state.cond.Broadcast()
+		}
+		if errDeliver != nil && !state.closed {
+			if state.quiescing || h.pluginNeedsUsageRecovery(pluginID) {
+				state.pending = append([]pendingPluginUsageRecord{item}, state.pending...)
+				state.quiescing = true
+				state.replaying = false
+				state.asyncDraining = false
+				state.cond.Broadcast()
+				state.mu.Unlock()
+				return
+			}
+			item.attempts++
+			if item.attempts < maxPluginUsageReplayAttempts && h.currentUsagePlugin(pluginID) != nil {
+				state.pending = append([]pendingPluginUsageRecord{item}, state.pending...)
+			}
+		}
+	}
+}
+
+func (h *Host) clearUsageReplacement(pluginID string) {
+	pluginID = strings.TrimSpace(pluginID)
+	if h == nil || pluginID == "" {
+		return
+	}
+	h.mu.Lock()
+	state := h.usageStates[pluginID]
+	delete(h.usageStates, pluginID)
+	h.mu.Unlock()
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.closed = true
+	state.pending = nil
+	state.quiescing = false
+	state.replaying = false
+	state.cond.Broadcast()
+	state.mu.Unlock()
+}
+
+func (h *Host) clearAllUsageReplacements() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	states := make([]*pluginUsageState, 0, len(h.usageStates))
+	for _, state := range h.usageStates {
+		if state != nil {
+			states = append(states, state)
+		}
+	}
+	h.usageStates = make(map[string]*pluginUsageState)
+	h.mu.Unlock()
+	for _, state := range states {
+		state.mu.Lock()
+		state.closed = true
+		state.pending = nil
+		state.quiescing = false
+		state.replaying = false
+		state.cond.Broadcast()
+		state.mu.Unlock()
+	}
+}
+
+func (h *Host) dispatchPluginUsageRecord(ctx context.Context, pluginID string, record pluginapi.UsageRecord) {
+	state := h.usageStateForPlugin(pluginID)
+	if state == nil {
 		return
 	}
 	if ctx == nil {
@@ -142,11 +461,104 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	} else {
 		ctx = context.WithoutCancel(ctx)
 	}
+	limit := h.pendingUsageLimit()
+	h.mu.Lock()
+	backpressureHook := h.usageBackpressureWaitHook
+	h.mu.Unlock()
+
+	state.mu.Lock()
+	if state.closed {
+		state.mu.Unlock()
+		return
+	}
+	if state.quiescing || state.replaying || len(state.pending) > 0 {
+		quiesceWaiter := state.quiescing
+		if quiesceWaiter {
+			state.quiesceWaiters++
+		}
+		state.waitingProducers++
+		notifiedBackpressure := false
+		for !state.closed && (state.quiescing || state.replaying || len(state.pending) > 0) && len(state.pending) >= limit {
+			if !notifiedBackpressure && backpressureHook != nil {
+				notifiedBackpressure = true
+				backpressureHook(pluginID)
+			}
+			state.cond.Wait()
+		}
+		if quiesceWaiter {
+			state.quiesceWaiters--
+		}
+		state.waitingProducers--
+		if state.closed {
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		if state.quiescing || state.replaying || len(state.pending) > 0 {
+			state.pending = append(state.pending, pendingPluginUsageRecord{
+				ctx:    ctx,
+				record: record,
+			})
+			state.cond.Broadcast()
+			state.mu.Unlock()
+			return
+		}
+		state.cond.Broadcast()
+	}
+
+	plugin := h.currentUsagePlugin(pluginID)
+	if plugin == nil {
+		state.mu.Unlock()
+		return
+	}
+	state.inFlight++
+	state.mu.Unlock()
+
+	var errDeliver error
+	defer func() {
+		state.mu.Lock()
+		if errDeliver != nil && !state.closed && (state.quiescing || state.replaying) {
+			state.pending = append([]pendingPluginUsageRecord{{
+				ctx:    ctx,
+				record: record,
+			}}, state.pending...)
+		}
+		state.inFlight--
+		if state.inFlight == 0 {
+			state.cond.Broadcast()
+		}
+		state.mu.Unlock()
+	}()
+
+	errDeliver = h.invokeUsagePlugin(ctx, pluginID, plugin, record)
+}
+
+func (h *Host) invokeUsagePlugin(ctx context.Context, pluginID string, plugin pluginapi.UsagePlugin, record pluginapi.UsageRecord) (err error) {
+	if h == nil || plugin == nil {
+		return nil
+	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
+			h.fusePlugin(pluginID, "UsagePlugin.HandleUsage", recovered)
+			err = nil
 		}
 	}()
+	if rpcAdapter, ok := plugin.(*rpcPluginAdapter); ok {
+		return rpcAdapter.deliverUsage(ctx, record)
+	}
+	plugin.HandleUsage(ctx, record)
+	return nil
+}
+
+func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record) {
+	if a == nil || a.host == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
 	sessionID := strings.TrimSpace(record.SessionID)
 	parentSessionID := strings.TrimSpace(record.ParentSessionID)
 	if sessionID == "" {
@@ -167,6 +579,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if traceID == "" {
 		traceID = strings.TrimSpace(logging.GetRequestID(ctx))
 	}
+	selectionID := strings.TrimSpace(record.SelectionID)
+	if selectionID == "" {
+		selectionID = strings.TrimSpace(coreusage.SelectionIDFromContext(ctx))
+	}
 	accessProvider := strings.TrimSpace(record.AccessProvider)
 	if accessProvider == "" {
 		accessProvider = strings.TrimSpace(coreusage.AccessProviderFromContext(ctx))
@@ -183,9 +599,10 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if apiKey == "" {
 		apiKey = strings.TrimSpace(coreusage.APIKeyFromContext(ctx))
 	}
-	plugin.HandleUsage(ctx, pluginapi.UsageRecord{
+	a.host.dispatchPluginUsageRecord(ctx, a.pluginID, pluginapi.UsageRecord{
 		RequestID:            requestID,
 		TraceID:              traceID,
+		SelectionID:          selectionID,
 		Provider:             record.Provider,
 		BaseURL:              record.BaseURL,
 		ExecutorType:         record.ExecutorType,

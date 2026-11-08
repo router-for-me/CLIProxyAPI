@@ -504,12 +504,29 @@ func (h *Handler) authIDForPath(path string) string {
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
+	return h.registerAuthFromFileWithID(ctx, path, data, "")
+}
+
+func (h *Handler) registerAuthFromFileWithID(ctx context.Context, path string, data []byte, preferredID string) error {
 	if h.authManager == nil {
 		return nil
 	}
 	auth, err := h.buildAuthFromFileData(path, data)
 	if err != nil {
 		return err
+	}
+	if trimmedID := strings.TrimSpace(preferredID); trimmedID != "" && auth != nil && auth.ID != trimmedID {
+		auth.ID = trimmedID
+		if existing, ok := h.authManager.GetByID(trimmedID); ok && existing != nil {
+			auth.CreatedAt = existing.CreatedAt
+			if !coreauth.CredentialsChanged(existing, auth) {
+				if auth.LastRefreshedAt.IsZero() {
+					auth.LastRefreshedAt = existing.LastRefreshedAt
+				}
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+			}
+			auth.Runtime = existing.Runtime
+		}
 	}
 	return h.upsertAuthRecord(ctx, auth)
 }
@@ -587,10 +604,12 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	if h != nil && h.authManager != nil {
 		if existing, ok := h.authManager.GetByID(authID); ok {
 			auth.CreatedAt = existing.CreatedAt
-			if !hasLastRefresh {
-				auth.LastRefreshedAt = existing.LastRefreshedAt
+			if !coreauth.CredentialsChanged(existing, auth) {
+				if !hasLastRefresh {
+					auth.LastRefreshedAt = existing.LastRefreshedAt
+				}
+				auth.NextRefreshAfter = existing.NextRefreshAfter
 			}
-			auth.NextRefreshAfter = existing.NextRefreshAfter
 			auth.Runtime = existing.Runtime
 		}
 	}

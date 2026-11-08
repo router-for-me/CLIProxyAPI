@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -1249,5 +1251,107 @@ func TestExecuteModelAllowsImageModel_Issue6196(t *testing.T) {
 	_, streamOpts := executor.captured()
 	if gotPath := streamOpts.Metadata[coreexecutor.RequestPathMetadataKey]; gotPath != "/v1/images/edits" {
 		t.Fatalf("captured stream request path = %v, want /v1/images/edits", gotPath)
+	}
+}
+
+func TestExecuteModelReplaysInterceptedCallerScopeWithoutGinContext(t *testing.T) {
+	model := "claude-sonnet-4-5"
+	requestBody := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"keep cache warm"}]}`)
+	executor := &modelExecutionCaptureExecutor{
+		provider: "claude",
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{Payload: []byte(`{"id":"msg_1","type":"message"}`)}, nil
+		},
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"message_stop\"}\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	var beforeInterceptReq, afterInterceptReq pluginapi.RequestInterceptRequest
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			beforeInterceptReq = req
+			return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}
+		},
+		interceptRequestAfterAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			afterInterceptReq = req
+			return pluginapi.RequestInterceptResponse{Headers: req.Headers, Body: req.Body}
+		},
+	})
+
+	rawAPIKey := "sk-downstream-pi-secret"
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ginCtx.Set("userApiKey", rawAPIKey)
+	httpCtx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(httpCtx, "claude", model, requestBody, "")
+	for range dataChan {
+	}
+	if errMsg := <-errChan; errMsg != nil {
+		t.Fatalf("ExecuteStreamWithAuthManager() error = %+v", errMsg)
+	}
+
+	_, originalOpts := executor.captured()
+	originalCallerScope, _ := originalOpts.Metadata[coreexecutor.CallerScopeMetadataKey].(string)
+	originalDerivedSession, _ := originalOpts.Metadata[coreexecutor.DerivedSessionIDMetadataKey].(string)
+	if originalCallerScope == "" || originalCallerScope == rawAPIKey {
+		t.Fatalf("originalCallerScope = %q, want non-empty hashed scope", originalCallerScope)
+	}
+	if originalDerivedSession == "" {
+		t.Fatal("originalDerivedSession is empty")
+	}
+	if beforeInterceptReq.CallerScope != originalCallerScope || afterInterceptReq.CallerScope != originalCallerScope {
+		t.Fatalf("intercept CallerScope = (%q, %q), want %q", beforeInterceptReq.CallerScope, afterInterceptReq.CallerScope, originalCallerScope)
+	}
+	if beforeInterceptReq.Metadata[pluginapi.CallerScopeMetadataKey] != originalCallerScope || afterInterceptReq.Metadata[pluginapi.CallerScopeMetadataKey] != originalCallerScope {
+		t.Fatalf("intercept Metadata[caller_scope] = (%v, %v), want %q", beforeInterceptReq.Metadata[pluginapi.CallerScopeMetadataKey], afterInterceptReq.Metadata[pluginapi.CallerScopeMetadataKey], originalCallerScope)
+	}
+
+	// Replay via ExecuteModelStream on context.Background() (no gin.Context), passing CallerScope from intercept.
+	replayStream, errReplayStream := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol:           "claude",
+		ExitProtocol:            "claude",
+		Model:                   model,
+		Stream:                  true,
+		Body:                    requestBody,
+		CallerScope:             afterInterceptReq.CallerScope,
+		SkipInterceptorPluginID: "replay-plugin",
+	})
+	if errReplayStream != nil {
+		t.Fatalf("ExecuteModelStream(replay) error = %+v", errReplayStream)
+	}
+	for range replayStream.Chunks {
+	}
+	_, replayStreamOpts := executor.captured()
+	if got := replayStreamOpts.Metadata[coreexecutor.CallerScopeMetadataKey]; got != originalCallerScope {
+		t.Fatalf("replay stream CallerScopeMetadataKey = %v, want %q", got, originalCallerScope)
+	}
+	if got := replayStreamOpts.Metadata[coreexecutor.DerivedSessionIDMetadataKey]; got != originalDerivedSession {
+		t.Fatalf("replay stream DerivedSessionIDMetadataKey = %v, want %q", got, originalDerivedSession)
+	}
+
+	// Replay via ExecuteModel on context.Background() (no gin.Context), passing CallerScope from intercept.
+	if _, errReplayExec := handler.ExecuteModel(context.Background(), ModelExecutionRequest{
+		EntryProtocol:           "claude",
+		ExitProtocol:            "claude",
+		Model:                   model,
+		Body:                    requestBody,
+		CallerScope:             afterInterceptReq.CallerScope,
+		SkipInterceptorPluginID: "replay-plugin",
+	}); errReplayExec != nil {
+		t.Fatalf("ExecuteModel(replay) error = %+v", errReplayExec)
+	}
+	_, replayExecOpts := executor.captured()
+	if got := replayExecOpts.Metadata[coreexecutor.CallerScopeMetadataKey]; got != originalCallerScope {
+		t.Fatalf("replay execute CallerScopeMetadataKey = %v, want %q", got, originalCallerScope)
+	}
+	if got := replayExecOpts.Metadata[coreexecutor.DerivedSessionIDMetadataKey]; got != originalDerivedSession {
+		t.Fatalf("replay execute DerivedSessionIDMetadataKey = %v, want %q", got, originalDerivedSession)
 	}
 }

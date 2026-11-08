@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func tcHash(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
@@ -126,6 +126,7 @@ func TestCodexChatToolMetadataEquivalence(t *testing.T) {
 		tcRequest(3),
 		[]byte(`{"messages":[],"tools":{"type":"function","function":{"name":"apply_patch"}}}`),
 		[]byte(`{"messages":[],"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`),
+		[]byte(`{"messages":[],"tools":[{"type":"custom","custom":{"name":"apply_patch","format":{"type":"grammar","grammar":{"syntax":"lark","definition":"start: patch"}}}}]}`),
 		[]byte(`{"messages":[],"tools":[{"type":"function","function":{"name":"apply_patch"}},{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`),
 		[]byte(`{"messages":[],"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}]}`),
 		[]byte(`{"messages":[],"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}]}`),
@@ -150,7 +151,7 @@ func TestCodexChatToolMetadataEquivalence(t *testing.T) {
 			}
 		}
 		for _, itemJSON := range items {
-			item := gjson.ParseBytes([]byte(itemJSON))
+			item := util.ParseGJSONBytesNoCopy([]byte(itemJSON))
 			if got, want := metadata.isCustomPatch(req, item), isOriginalCustomPatch(req, item); got != want {
 				t.Errorf("req %d isCustomPatch(%s) = %v, want %v", ri, itemJSON, got, want)
 			}

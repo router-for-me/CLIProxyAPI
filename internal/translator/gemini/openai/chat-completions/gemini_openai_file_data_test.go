@@ -3,14 +3,14 @@ package chat_completions
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIRequestToGeminiNormalizesFileDataURL(t *testing.T) {
 	input := []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}}]}]}`)
 
 	out, _ := ConvertOpenAIRequestToGemini("gemini-2.5-pro", input, false)
-	inlineData := gjson.GetBytes(out, "contents.0.parts.0.inlineData")
+	inlineData := ojson.GetBytesNoCopy(out, "contents.0.parts.0.inlineData")
 	if got := inlineData.Get("mime_type").String(); got != "application/pdf" {
 		t.Fatalf("inlineData.mime_type = %q, want application/pdf. Output: %s", got, out)
 	}

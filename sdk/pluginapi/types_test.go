@@ -191,13 +191,15 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		ForcedProvider: "gemini",
 		AuthID:         "exact-auth-123",
 		ProxyURL:       "socks5://127.0.0.1:1080",
+		Path:           "/v1/messages",
+		CallerScope:    "opaque-caller-scope-123",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
 		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
 	}
 	requestJSON := string(rawRequest)
-	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url"} {
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url", "path", "caller_scope"} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
 		}
@@ -216,7 +218,9 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		decodedRequest.Alt != request.Alt ||
 		decodedRequest.ForcedProvider != request.ForcedProvider ||
 		decodedRequest.AuthID != request.AuthID ||
-		decodedRequest.ProxyURL != request.ProxyURL {
+		decodedRequest.ProxyURL != request.ProxyURL ||
+		decodedRequest.Path != request.Path ||
+		decodedRequest.CallerScope != request.CallerScope {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
@@ -845,16 +849,23 @@ func TestUsageRecordResponseModelServiceTierAndStream(t *testing.T) {
 
 func TestUsageRecordRequestIDAndTraceID(t *testing.T) {
 	record := UsageRecord{
-		RequestID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
-		TraceID:   "00000001",
-		Provider:  "codex",
-		Model:     "gpt-5.6-luna",
+		RequestID:   "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:     "00000001",
+		SelectionID: "7e57d004-2b97-4e7a-b45f-5387367791cd",
+		Provider:    "codex",
+		Model:       "gpt-5.6-luna",
 	}
 	if record.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
 		t.Fatalf("UsageRecord.RequestID = %q, want %q", record.RequestID, "b5db448b-3d6d-495c-9c71-f925b68926cb")
 	}
 	if record.TraceID != "00000001" {
 		t.Fatalf("UsageRecord.TraceID = %q, want %q", record.TraceID, "00000001")
+	}
+	if record.SelectionID != "7e57d004-2b97-4e7a-b45f-5387367791cd" {
+		t.Fatalf("UsageRecord.SelectionID = %q, want %q", record.SelectionID, "7e57d004-2b97-4e7a-b45f-5387367791cd")
+	}
+	if SelectionIDMetadataKey != "selection_id" {
+		t.Fatalf("SelectionIDMetadataKey = %q, want selection_id", SelectionIDMetadataKey)
 	}
 }
 

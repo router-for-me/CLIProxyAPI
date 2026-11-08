@@ -3,11 +3,13 @@ package thinking_test
 import (
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
 	codexclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/claude"
-	"github.com/tidwall/gjson"
+	openaiclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/claude"
 )
 
 func TestApplyThinking_ClaudeStandaloneEffort(t *testing.T) {
@@ -37,7 +39,7 @@ func TestApplyThinking_ClaudeStandaloneEffort(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("ApplyThinking returned error: %v", errApply)
 			}
-			if got := gjson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
+			if got := ojson.GetBytes(out, "reasoning_effort").String(); got != tt.wantEffort {
 				t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, tt.wantEffort, out)
 			}
 		})
@@ -80,7 +82,7 @@ func TestClaudeStandaloneEffortPreservesNativeThinkingDefault(t *testing.T) {
 			if errApply != nil {
 				t.Fatalf("ApplyThinkingWithModelInfo with suffix returned error: %v", errApply)
 			}
-			if !gjson.GetBytes(out, "thinking.type").Exists() {
+			if !ojson.GetBytes(out, "thinking.type").Exists() {
 				t.Fatalf("explicit suffix must still configure thinking; body=%s", out)
 			}
 		})
@@ -128,8 +130,64 @@ func TestClaudeToCodexStandaloneEffort(t *testing.T) {
 				if errApply != nil {
 					t.Fatalf("bound=%v: ApplyThinking returned error: %v", bound, errApply)
 				}
-				if got := gjson.GetBytes(out, "reasoning.effort").String(); got != tt.wantEffort {
+				if got := ojson.GetBytes(out, "reasoning.effort").String(); got != tt.wantEffort {
 					t.Fatalf("bound=%v: reasoning.effort = %q, want %q; body=%s", bound, got, tt.wantEffort, out)
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeToOpenAIStandaloneEffort(t *testing.T) {
+	tests := []struct {
+		name            string
+		fields          string
+		suffix          string
+		wantBoundEffort string
+		wantUnbound     string
+	}{
+		{name: "standalone high", fields: `,"output_config":{"effort":"high"}`, wantBoundEffort: "high", wantUnbound: "high"},
+		{name: "standalone low", fields: `,"output_config":{"effort":"low"}`, wantBoundEffort: "low", wantUnbound: "low"},
+		{name: "normalized high", fields: `,"output_config":{"effort":" HIGH "}`, wantBoundEffort: "high", wantUnbound: "high"},
+		{name: "adaptive high", fields: `,"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}`, wantBoundEffort: "high", wantUnbound: "high"},
+		{name: "enabled budget high", fields: `,"thinking":{"type":"enabled","budget_tokens":16000}`, wantBoundEffort: "high", wantUnbound: "high"},
+		{name: "budget precedes effort", fields: `,"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}`, wantBoundEffort: "medium", wantUnbound: "medium"},
+		{name: "disabled precedes effort", fields: `,"thinking":{"type":"disabled"},"output_config":{"effort":"high"}`, wantBoundEffort: "low", wantUnbound: "none"},
+		{name: "suffix precedes standalone effort", fields: `,"output_config":{"effort":"high"}`, suffix: "(low)", wantBoundEffort: "low", wantUnbound: "low"},
+		{name: "suffix precedes disabled", fields: `,"thinking":{"type":"disabled"},"output_config":{"effort":"low"}`, suffix: "(high)", wantBoundEffort: "high", wantUnbound: "high"},
+		{name: "missing effort omits field", wantBoundEffort: "", wantUnbound: ""},
+		{name: "blank effort omits field", fields: `,"output_config":{"effort":"   "}`, wantBoundEffort: "", wantUnbound: ""},
+		{name: "non-string effort omits field", fields: `,"output_config":{"effort":123}`, wantBoundEffort: "", wantUnbound: ""},
+	}
+	info := &registry.ModelInfo{
+		ID: "custom-openai",
+		Thinking: &registry.ThinkingSupport{
+			Levels: []string{"low", "medium", "high", "xhigh"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := []byte(`{"model":"custom-openai","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`[:len(`{"model":"custom-openai","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)-1] + tt.fields + `}`)
+			translated, errTranslate := openaiclaude.ConvertClaudeRequestToOpenAI("custom-openai", source, false)
+			if errTranslate != nil {
+				t.Fatalf("ConvertClaudeRequestToOpenAI returned error: %v", errTranslate)
+			}
+			for _, bound := range []bool{false, true} {
+				var out []byte
+				var errApply error
+				want := tt.wantUnbound
+				if bound {
+					want = tt.wantBoundEffort
+					out, errApply = thinking.ApplyThinkingWithModelInfo(translated, source, "custom-openai"+tt.suffix, "claude", "openai", "openai", info)
+				} else {
+					out, errApply = thinking.ApplyThinkingWithSourceAndSummary(translated, source, "custom-openai"+tt.suffix, "claude", "openai", "openai", thinking.SummaryConfig{})
+				}
+				if errApply != nil {
+					t.Fatalf("bound=%v: ApplyThinking returned error: %v", bound, errApply)
+				}
+				effort := ojson.GetBytes(out, "reasoning_effort")
+				if effort.String() != want || (want == "" && effort.Exists()) {
+					t.Fatalf("bound=%v: reasoning_effort = %s, want %q; body=%s", bound, effort.Raw, want, out)
 				}
 			}
 		})

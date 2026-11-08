@@ -71,14 +71,25 @@ func defaultPluginLoader() pluginLoader {
 }
 
 func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
-	loadPath, errShadow := shadowCopyPlugin(file)
+	loadPath, releaseGuard, errShadow := acquireShadowPluginLoad(file)
 	if errShadow != nil {
 		return nil, errShadow
 	}
 	dll, errLoad := syscall.LoadDLL(loadPath)
+	releaseGuard()
 	if errLoad != nil {
-		removeShadowPlugin(loadPath)
-		return nil, errLoad
+		if fallbackPath, releaseFallbackGuard, errFallback := acquireShadowPluginFallbackLoad(file, loadPath); errFallback == nil {
+			fallbackDLL, errFallbackLoad := syscall.LoadDLL(fallbackPath)
+			releaseFallbackGuard()
+			if errFallbackLoad == nil {
+				dll = fallbackDLL
+				loadPath = fallbackPath
+				errLoad = nil
+			}
+		}
+		if errLoad != nil {
+			return nil, errLoad
+		}
 	}
 	proc, errProc := dll.FindProc("cliproxy_plugin_init")
 	if errProc != nil {
