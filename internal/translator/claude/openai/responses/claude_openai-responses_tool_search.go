@@ -137,9 +137,11 @@ func convertResponsesToolSearchCallToClaude(item ojson.Result, claudeName string
 	_ = toolUseDoc.Set("name", claudeName)
 	arguments := item.Get("arguments")
 	if arguments.Type == ojson.String {
-		arguments = ojson.Parse(arguments.String())
+		if ojson.Valid(arguments.String()) {
+			arguments = ojson.Parse(arguments.String())
+		}
 	}
-	if arguments.IsObject() {
+	if arguments.IsObject() && ojson.Valid(arguments.Raw) {
 		_ = toolUseDoc.SetRawBytes("input", []byte(arguments.Raw))
 	}
 	return toolUseDoc.Bytes(), callID

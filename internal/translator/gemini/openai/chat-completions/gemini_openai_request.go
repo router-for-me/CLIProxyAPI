@@ -245,7 +245,14 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						}
 						partDoc := ojson.NewDocString(`{"functionCall":{"name":""}}`)
 						_ = partDoc.Set("functionCall.name", functionName)
-						_ = partDoc.SetRaw("functionCall.args", tc.Get("function.arguments").String())
+						argsStr := tc.Get("function.arguments").String()
+						if argsStr != "" && ojson.Valid(argsStr) {
+							_ = partDoc.SetRaw("functionCall.args", argsStr)
+						} else if argsStr != "" {
+							_ = partDoc.Set("functionCall.args.arguments", argsStr)
+						} else {
+							_ = partDoc.SetRaw("functionCall.args", "{}")
+						}
 						_ = partDoc.Set("thoughtSignature", openAIToolCallGeminiThoughtSignature(tc))
 						partItems = append(partItems, partDoc.Bytes())
 						toolCalls = append(toolCalls, assistantToolCall{
