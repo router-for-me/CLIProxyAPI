@@ -65,6 +65,9 @@ successful rotation. A transient refresh failure returns to the caller without
 inference and is reused during the host's refresh failure backoff. Later demand
 retries the refresh. Terminal grant rejection requires new credentials.
 Streaming refresh completes before the inference stream opens.
+The selected token must remain valid even if the policy changes to scheduled
+during refresh. A no-op refresh cannot clear rejection of an unchanged token.
+Refresh results must retain the selected credential's identity and provider.
 Public errors retain the refresh failure's status, code, and retry hint.
 The host redacts credential values, bearer tokens, URLs, and OAuth secrets from
 the message and does not expose the underlying raw error.
@@ -74,6 +77,8 @@ the message and does not expose the underlying raw error.
 Return the new token pair and accurate expiry in `Metadata`, `StorageJSON`, or
 both. When both contain a credential field, `Metadata` takes precedence.
 The host overlays the resulting metadata onto plugin storage before saving.
+Rotations replace obsolete token and expiry aliases, including nested SIWC
+fields, even when a concurrent update changes the refresh policy.
 The host persists the policy in the reserved `host_refresh_policy` property
 and restores it while parsing the saved file after restart.
 

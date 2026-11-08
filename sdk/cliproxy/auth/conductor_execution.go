@@ -1590,11 +1590,11 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
-	fresh, errFresh := m.EnsureAuthFresh(ctx, auth)
+	fresh, enteredLazy, errFresh := m.ensureAuthFresh(ctx, auth)
 	if errFresh != nil {
 		return auth, errFresh
 	}
-	if fresh.UsesLazyRefresh() {
+	if enteredLazy {
 		if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, fresh, m.selectionModelKeyForAuth(fresh, model), time.Now()); blocked {
 			return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential became unavailable", HTTPStatus: http.StatusServiceUnavailable}}
 		}

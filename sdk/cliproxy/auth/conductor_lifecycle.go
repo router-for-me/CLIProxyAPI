@@ -187,8 +187,8 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
-	if base != nil && updated != nil && updated.ID != base.ID {
-		return nil, fmt.Errorf("refresh result changed credential identity")
+	if base != nil && updated != nil && !refreshIdentityMatches(base, updated) {
+		return nil, fmt.Errorf("refresh result changed credential identity or provider")
 	}
 
 	if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
@@ -516,7 +516,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		}
 	} else {
-		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh && refreshRevalidatesUnchangedToken(base, auth))
 		applyPreservedRenewalState(existing, auth, mode, now)
 		// Refresh updates must retain their outcome rather than the pending job marker.
 		if mode != updateModeRefresh {
@@ -573,7 +573,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
 		probe := auth.Clone()
 		probe.CodexRefreshPatch = refreshPatchBeforeSave
-		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)
+		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh && refreshRevalidatesUnchangedToken(base, probe))
 		auth.RejectedAccessToken = probe.RejectedAccessToken
 		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
 	}

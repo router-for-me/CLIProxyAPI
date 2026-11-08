@@ -34,6 +34,12 @@ func MergePluginRefreshMetadata(inherited, stored, explicit map[string]any) map[
 			}
 		}
 		for key, value := range incoming {
+			if key == "siwc" {
+				if nested, ok := value.(map[string]any); ok {
+					current, _ := merged[key].(map[string]any)
+					value = MergePluginRefreshMetadata(current, nil, nested)
+				}
+			}
 			merged[key] = value
 		}
 	}
@@ -299,8 +305,12 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 							mergedSIWC[sk] = sv
 						}
 					}
-					for sk, sv := range siwcUpd {
-						mergedSIWC[sk] = sv
+					if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
+						mergedSIWC = MergePluginRefreshMetadata(mergedSIWC, nil, siwcUpd)
+					} else {
+						for sk, sv := range siwcUpd {
+							mergedSIWC[sk] = sv
+						}
 					}
 					merged.Metadata[k] = mergedSIWC
 				}

@@ -2462,6 +2462,9 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 	if errors.As(err, &existingAuthErr) && existingAuthErr != nil && isKnownSafeOAuthErrorCode(existingAuthErr.Code) {
 		code = strings.ToLower(strings.TrimSpace(existingAuthErr.Code))
 	}
+	if auth.UsesLazyRefresh() {
+		raw = redactLazyCredentialValues(auth, raw)
+	}
 	return &Error{
 		Code:       code,
 		Message:    sanitizeRenewalMessage(raw),

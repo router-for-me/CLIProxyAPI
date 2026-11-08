@@ -31,14 +31,21 @@ func preserveRefreshPolicy(data *pluginapi.AuthData, auth *coreauth.Auth) {
 
 func lazyRefreshMetadata(data *pluginapi.AuthData, auth *coreauth.Auth) {
 	preserveRefreshPolicy(data, auth)
-	if data.RefreshPolicy == nil || data.RefreshPolicy.Mode != pluginapi.AuthRefreshLazy {
+	if !auth.UsesLazyRefresh() && (data.RefreshPolicy == nil || data.RefreshPolicy.Mode != pluginapi.AuthRefreshLazy) {
 		return
+	}
+	if len(data.StorageJSON) == 0 {
+		data.StorageJSON = storageJSONFromAuth(auth)
 	}
 	var stored map[string]any
 	if len(data.StorageJSON) > 0 && json.Unmarshal(data.StorageJSON, &stored) != nil {
 		return
 	}
 	data.Metadata = coreauth.MergePluginRefreshMetadata(auth.Metadata, stored, data.Metadata)
+	normalized := coreauth.MergePluginRefreshMetadata(stored, nil, data.Metadata)
+	if raw, errMarshal := json.Marshal(normalized); errMarshal == nil {
+		data.StorageJSON = raw
+	}
 }
 
 func (h *Host) freshQuotaAuth(ctx context.Context, id, index string) (*coreauth.Auth, error) {

@@ -1237,7 +1237,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	return m.refreshAuthWithTrigger(ctx, id, failedAccessToken, registrationEpoch, refreshTriggerDefault)
 }
 
-func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64, trigger refreshTrigger) (*Auth, error) {
+func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64, trigger refreshTrigger) (result *Auth, resultErr error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -1278,6 +1278,13 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+	if auth.UsesLazyRefresh() || trigger == refreshTriggerDemand {
+		defer func() {
+			if resultErr != nil {
+				resultErr = safeLazyRefreshError(auth, resultErr)
+			}
+		}()
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		if resolver, okResolver := store.(interface {
@@ -1435,8 +1442,8 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	}
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
-	if err == nil && updated != nil && updated.ID != base.ID {
-		err = &Error{Code: "invalid_refresh_identity", Message: "plugin refresh changed credential identity", HTTPStatus: http.StatusServiceUnavailable}
+	if err == nil && updated != nil && !refreshIdentityMatches(base, updated) {
+		err = &Error{Code: "invalid_refresh_identity", Message: "plugin refresh changed credential identity or provider", HTTPStatus: http.StatusServiceUnavailable}
 	}
 
 	now := time.Now()
@@ -1480,7 +1487,11 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 			}
 		}
 	}
-	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
+	logErr := err
+	if err != nil && auth.UsesLazyRefresh() {
+		logErr = safeLazyRefreshError(auth, err)
+	}
+	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, logErr)
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
@@ -1705,7 +1716,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 			updated.NextRefreshAfter = exp
 		}
 	}
-	applyPreservedRejectedTokens(base, updated, true)
+	applyPreservedRejectedTokens(base, updated, refreshRevalidatesUnchangedToken(base, updated))
 	canServeWithAccessToken := !updated.RequiresSignIn || updated.HasValidAccessToken(now)
 	if canServeWithAccessToken && (updated.RejectedAccessToken == "" || authAccessToken(updated) != updated.RejectedAccessToken) {
 		updated.LastError = nil
@@ -1761,7 +1772,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
 	lock.clearLazyState()
-	if trigger == refreshTriggerDemand && saved.UsesLazyRefresh() && (!hasValidAccessTokenForRequest(ctx, saved, time.Now()) || lazyRefreshDueForRequest(ctx, saved, time.Now())) {
+	if trigger == refreshTriggerDemand && (!hasValidAccessTokenForRequest(ctx, saved, time.Now()) || lazyRefreshDueForRequest(ctx, saved, time.Now())) {
 		errFresh := &Error{Code: "refresh_not_fresh", Message: "plugin refresh did not return a fresh access token", HTTPStatus: http.StatusServiceUnavailable}
 		lock.recordLazyFailure(saved, errFresh)
 		return nil, errFresh

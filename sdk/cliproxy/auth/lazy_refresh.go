@@ -43,6 +43,16 @@ func hasValidAccessTokenForRequest(ctx context.Context, auth *Auth, now time.Tim
 	return !known || expiry.After(now)
 }
 
+func refreshIdentityMatches(base, updated *Auth) bool {
+	return base.ID == updated.ID &&
+		strings.EqualFold(strings.TrimSpace(base.Provider), strings.TrimSpace(updated.Provider)) &&
+		executorKeyFromAuth(base) == executorKeyFromAuth(updated)
+}
+
+func refreshRevalidatesUnchangedToken(base, updated *Auth) bool {
+	return !base.UsesLazyRefresh() && !updated.UsesLazyRefresh() || updated.CodexRefreshPatch != nil
+}
+
 type authFreshnessError struct{ error }
 
 func (e *authFreshnessError) Unwrap() error { return e.error }
@@ -70,36 +80,41 @@ type pendingLazyRefresh struct {
 // EnsureAuthFresh refreshes opted-in credentials before an authenticated operation.
 // It shares coordination and persistence with 401 recovery and explicit refresh.
 func (m *Manager) EnsureAuthFresh(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, error) {
+	fresh, _, err := m.ensureAuthFresh(ctx, auth, clientHeaders...)
+	return fresh, err
+}
+
+func (m *Manager) ensureAuthFresh(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, bool, error) {
 	if m == nil || auth == nil {
-		return auth, nil
+		return auth, false, nil
 	}
 	m.mu.RLock()
 	current := m.auths[auth.ID].Clone()
 	m.mu.RUnlock()
 	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() {
-		return auth, nil
+		return auth, false, nil
 	}
 	if current == nil || auth.RegistrationEpoch != 0 && current.RegistrationEpoch != auth.RegistrationEpoch ||
 		auth.Provider != "" && executorKeyFromAuth(current) != executorKeyFromAuth(auth) {
-		return auth, &authFreshnessError{errors.New("credential changed before lazy refresh")}
+		return auth, true, &authFreshnessError{errors.New("credential changed before lazy refresh")}
 	}
 	auth = current
 	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, clientHeaders...))
 	fresh, err := m.refreshAuthWithTrigger(ctx, auth.ID, "", auth.RegistrationEpoch, refreshTriggerDemand)
 	if err != nil {
-		return auth, &authFreshnessError{safeLazyRefreshError(auth, err)}
+		return auth, true, &authFreshnessError{err}
 	}
 	if fresh == nil || fresh.ID != auth.ID || fresh.RegistrationEpoch != auth.RegistrationEpoch || executorKeyFromAuth(fresh) != executorKeyFromAuth(auth) {
-		return auth, &authFreshnessError{errors.New("credential changed during lazy refresh")}
+		return auth, true, &authFreshnessError{errors.New("credential changed during lazy refresh")}
 	}
 	if fresh.Disabled || fresh.Status == StatusDisabled || hasUnauthorizedAuthFailure(fresh) ||
-		fresh.RequiresSignIn || fresh.UsesLazyRefresh() && !hasValidAccessTokenForRequest(ctx, fresh, time.Now()) {
-		return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is not fresh", HTTPStatus: http.StatusServiceUnavailable}}
+		fresh.RequiresSignIn || !hasValidAccessTokenForRequest(ctx, fresh, time.Now()) {
+		return auth, true, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is not fresh", HTTPStatus: http.StatusServiceUnavailable}}
 	}
-	if blocked, _, _ := isAuthBlockedForModel(fresh, "", time.Now()); blocked {
-		return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is unavailable", HTTPStatus: http.StatusServiceUnavailable}}
+	if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, fresh, "", time.Now()); blocked {
+		return auth, true, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is unavailable", HTTPStatus: http.StatusServiceUnavailable}}
 	}
-	return fresh, nil
+	return fresh, true, nil
 }
 
 func lazyPersistenceUnsupported(auth *Auth) bool {
@@ -117,6 +132,12 @@ func (e *safeLazyError) Unwrap() error              { return e.public }
 func (e *safeLazyError) StatusCode() int            { return e.public.StatusCode() }
 func (e *safeLazyError) ErrorCode() string          { return e.public.Code }
 func (e *safeLazyError) RetryAfter() *time.Duration { return e.retryAfter }
+func (e *safeLazyError) SafeResponseHeaders() http.Header {
+	if e.retryAfter == nil {
+		return nil
+	}
+	return safeRetryAfterHeader(*e.retryAfter)
+}
 
 func safeLazyRefreshError(auth *Auth, err error) error {
 	var persist *lazyPersistenceError
@@ -130,22 +151,25 @@ func safeLazyRefreshError(auth *Auth, err error) error {
 		return context.DeadlineExceeded
 	}
 	safe := resultErrorFromError(err)
-	safe.Message = sanitizeRenewalMessage(safe.Message)
-	safe.Code = sanitizeRenewalMessage(safe.Code)
-	for _, secret := range []string{authOuterAccessToken(auth), authRefreshToken(auth),
-		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
-		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")} {
-		if secret != "" {
-			safe.Message = strings.ReplaceAll(safe.Message, secret, "[redacted]")
-			safe.Code = strings.ReplaceAll(safe.Code, secret, "[redacted]")
-		}
-	}
+	safe.Message = sanitizeRenewalMessage(redactLazyCredentialValues(auth, safe.Message))
+	safe.Code = sanitizeRenewalMessage(redactLazyCredentialValues(auth, safe.Code))
 	var retry *time.Duration
 	if hint := retryAfterFromError(err); hint != nil {
 		value := *hint
 		retry = &value
 	}
 	return &safeLazyError{public: safe, retryAfter: retry}
+}
+
+func redactLazyCredentialValues(auth *Auth, text string) string {
+	for _, secret := range []string{authOuterAccessToken(auth), authRefreshToken(auth),
+		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
+		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")} {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+	}
+	return text
 }
 
 type refreshTrigger uint8
