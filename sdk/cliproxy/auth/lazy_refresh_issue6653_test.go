@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -228,8 +229,9 @@ func TestIssue6653LazyFailureBackoffAndRecovery(t *testing.T) {
 		}
 		for range 3 {
 			_, err := issue6653Execute(m)
-			if !errors.Is(err, marker) {
-				t.Fatalf("actual refresh error lost: %v", err)
+			var safe *Error
+			if !errors.As(err, &safe) || safe.Code != marker.Code || safe.HTTPStatus != marker.HTTPStatus || safe.Message != marker.Message || errors.Is(err, marker) {
+				t.Fatalf("safe refresh status/code/message or raw-cause isolation lost: %v", err)
 			}
 		}
 		if e.calls.Load() != 0 || e.refreshes.Load() != 1 {
@@ -439,7 +441,7 @@ func TestIssue6653LazyLatestSnapshotDuringRotation(t *testing.T) {
 type issue6653HTTPExecutor struct{ *issue6653Executor }
 
 func (e *issue6653HTTPExecutor) PrepareRequest(req *http.Request, a *Auth) error {
-	req.Header.Set("Authorization", "Bearer "+authAccessToken(a))
+	req.Header.Set("Authorization", "Bearer "+authAccessTokenForRequest(req.Context(), a, req.Header))
 	return nil
 }
 func (e *issue6653HTTPExecutor) HttpRequest(ctx context.Context, a *Auth, req *http.Request) (*http.Response, error) {
@@ -512,9 +514,18 @@ func TestIssue6653LazyRefreshCannotChangeIdentity(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(other.ID, e.Identifier(), []*registry.ModelInfo{{ID: "qa-model-6653"}})
 	defer reg.UnregisterClient(other.ID)
-	e.refreshFn = func(context.Context, *Auth) (*Auth, error) { return other.Clone(), nil }
+	before := other.Clone()
+	e.refreshFn = func(context.Context, *Auth) (*Auth, error) {
+		u := other.Clone()
+		u.Metadata["access_token"] = "qa-forbidden-B-mutation"
+		return u, nil
+	}
 	if fresh, err := m.EnsureAuthFresh(context.Background(), a); err == nil {
 		t.Fatalf("refresh for %s accepted different identity %s", a.ID, fresh.ID)
+	}
+	after, _ := m.GetByID(other.ID)
+	if !reflect.DeepEqual(before, after) || e.calls.Load() != 0 {
+		t.Fatal("identity rejection mutated B or dispatched inference")
 	}
 }
 

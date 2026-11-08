@@ -11,7 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -341,5 +344,94 @@ func TestIssue6653NativeQuotaBadIndexCannotBypassLazyAuth(t *testing.T) {
 	}
 	if err == nil && (quotas != 1 || refreshes != 1) {
 		t.Fatal("neither fail-closed nor fresh AuthID fallback")
+	}
+}
+
+func TestIssue6653NativeQuotaIdentifiersFetchAndReset(t *testing.T) {
+	h, p, r := issue6653NativeHost(t)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		t.Errorf("conflicting identifiers reached native upstream %s", r.URL.Path)
+	}))
+	defer upstream.Close()
+	m, _ := issue6653NativeManager(t, h, p, r, nil)
+	a := issue6653NativeRegister(t, h, m, "qa-lazy-id", upstream.URL, true)
+	other := issue6653NativeRegister(t, h, m, "qa-default-id", upstream.URL, false)
+	for _, disabled := range []bool{false, true} {
+		for _, index := range []string{"qa-unknown-index", other.Index} {
+			for _, reset := range []bool{false, true} {
+				t.Run(fmt.Sprintf("disabled=%v/index=%s/reset=%v", disabled, index, reset), func(t *testing.T) {
+					current, _ := m.GetByID(a.ID)
+					current.Disabled = disabled
+					if _, err := m.Update(context.Background(), current); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					if reset {
+						_, _, err = h.ResetQuota(context.Background(), pluginapi.QuotaResetRequest{Provider: a.Provider, AuthID: a.ID, AuthIndex: index, Metadata: map[string]any{"qa_upstream": upstream.URL, "access_token": "qa-old-access"}})
+					} else {
+						_, _, err = h.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: a.Provider, AuthID: a.ID, AuthIndex: index, Metadata: map[string]any{"qa_upstream": upstream.URL, "access_token": "qa-old-access"}})
+					}
+					if err == nil {
+						t.Fatal("conflicting lazy ID/index admitted")
+					}
+					if calls.Load() != 0 {
+						t.Fatal("native rotation/quota callback before identifier rejection")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestIssue6653NativeTerminalEnvelopeAndIdentity(t *testing.T) {
+	h, p, r := issue6653NativeHost(t)
+	for _, kind := range []string{"invalid_grant/400", "invalid_grant/0", "token_revoked/400", "token_revoked/0", "identity"} {
+		t.Run(kind, func(t *testing.T) {
+			var refreshes, operations atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path != "/refresh" {
+					operations.Add(1)
+					t.Errorf("failed renewal dispatched %s", req.URL.Path)
+					return
+				}
+				refreshes.Add(1)
+				d := ojson.NewDoc([]byte(`{}`))
+				if kind == "identity" {
+					_ = d.Set("qa_response_id", "qa-other-B")
+					_ = d.Set("access_token", "qa-forbidden-B-access")
+					_ = d.Set("refresh_token", "qa-forbidden-B-grant")
+				} else {
+					parts := strings.Split(kind, "/")
+					_ = d.Set("qa_terminal_code", parts[0])
+					if parts[1] == "400" {
+						_ = d.Set("qa_terminal_status", 400)
+					}
+				}
+				_, _ = w.Write(d.Bytes())
+			}))
+			defer upstream.Close()
+			m, _ := issue6653NativeManager(t, h, p, r, nil)
+			a := issue6653NativeRegister(t, h, m, "qa-envelope-A", upstream.URL, true)
+			b := issue6653NativeRegister(t, h, m, "qa-other-B", upstream.URL, true)
+			registry.GetGlobalRegistry().UnregisterClient(b.ID)
+			before := b.Clone()
+			for _, op := range []string{"buffered", "quota", "quota-reset"} {
+				if err := issue6653NativeOperation(m, h, a, op); err == nil {
+					t.Fatalf("%s accepted %s refresh", op, kind)
+				}
+			}
+			after, _ := m.GetByID(b.ID)
+			if !reflect.DeepEqual(before, after) || operations.Load() != 0 || refreshes.Load() != 1 {
+				t.Fatalf("identity/terminal failure mutated B or dispatched: refresh=%d operation=%d", refreshes.Load(), operations.Load())
+			}
+			if kind != "identity" {
+				latest, _ := m.GetByID(a.ID)
+				if !latest.RequiresSignIn || latest.RejectedRefreshToken == "" {
+					t.Fatal("loaded native terminal envelope treated as transient")
+				}
+			}
+		})
 	}
 }

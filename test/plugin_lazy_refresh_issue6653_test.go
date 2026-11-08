@@ -39,12 +39,17 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("native build %v\n%s", err, output)
 	}
-	for _, operation := range []string{"chat", "sse", "image", "count", "refresh-failure"} {
+	for _, operation := range []string{"chat", "sse", "image", "count", "refresh-failure", "secret-buffered", "secret-prestream"} {
 		t.Run(operation, func(t *testing.T) {
 			var refreshes, inferences atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/refresh" {
 					refreshes.Add(1)
+					if operation == "secret-buffered" || operation == "secret-prestream" {
+						w.WriteHeader(503)
+						_, _ = io.WriteString(w, "qa-old-access qa-old-refresh Bearer QA_BEARER_SECRET https://example.invalid/?secret=QA_URL_SECRET code=QA_CODE_SECRET")
+						return
+					}
 					if operation == "refresh-failure" {
 						w.WriteHeader(503)
 						_, _ = io.WriteString(w, "qa-http-refresh-failure")
@@ -126,7 +131,7 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 			defer server.Close()
 			path := "/v1/chat/completions"
 			body := `{"model":"qa-model-6653","messages":[{"role":"user","content":"qa"}]}`
-			if operation == "sse" {
+			if operation == "sse" || operation == "secret-prestream" {
 				body = `{"model":"qa-model-6653","stream":true,"messages":[{"role":"user","content":"qa"}]}`
 			}
 			if operation == "image" {
@@ -146,6 +151,15 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantStatus, wantInference := 200, int32(1)
+			if operation == "secret-buffered" || operation == "secret-prestream" {
+				wantStatus = 503
+				wantInference = 0
+				for _, marker := range []string{"qa-old-access", "qa-old-refresh", "QA_BEARER_SECRET", "QA_URL_SECRET", "QA_CODE_SECRET"} {
+					if strings.Contains(string(payload), marker) {
+						t.Errorf("dummy secret reached public error: %s", payload)
+					}
+				}
+			}
 			if operation == "refresh-failure" {
 				wantStatus = 503
 				wantInference = 0
