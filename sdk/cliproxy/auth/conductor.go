@@ -149,6 +149,12 @@ type PluginSchedulerContinuity interface {
 	EvaluateSchedulerContinuity(context.Context, pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error)
 }
 
+// PluginSchedulerQuotaSignals is an optional interface implemented by schedulers that opt
+// into receiving each candidate's passive quota snapshot.
+type PluginSchedulerQuotaSignals interface {
+	SchedulerWantsQuotaSignals() bool
+}
+
 type pluginSchedulerState interface {
 	HasScheduler() bool
 }

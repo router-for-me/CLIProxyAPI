@@ -256,6 +256,12 @@ func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.Sc
 	return h.inner.EvaluateSchedulerContinuity(ctx, req)
 }
 
+// SchedulerWantsQuotaSignals reports whether the active scheduler opted into receiving each
+// candidate's passive quota snapshot.
+func (h *Host) SchedulerWantsQuotaSignals() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsQuotaSignals()
+}
+
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.
 func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	if h == nil || h.inner == nil {

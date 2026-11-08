@@ -197,6 +197,7 @@ func registerRPCPluginWithOutcome(ctx context.Context, host *Host, id string, cl
 			adapter.schedulerPickCancel = true
 			plugin.Capabilities.SchedulerPickCancel = true
 		}
+		plugin.Capabilities.SchedulerQuotaSignals = resp.Capabilities.SchedulerQuotaSignals
 	}
 	if resp.Capabilities.SchedulerContinuity {
 		plugin.Capabilities.SchedulerContinuity = adapter
