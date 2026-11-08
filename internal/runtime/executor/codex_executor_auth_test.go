@@ -389,7 +389,7 @@ func TestCodexExecutorRefreshSelectiveAndDual(t *testing.T) {
 	proxyURL, outerCount, siwcCount, teardown := startDualCodexAndSIWCMockOAuthServer(t, idToken, &failSIWC)
 	defer teardown()
 
-	executor := NewCodexExecutor(&config.Config{})
+	executor := NewCodexExecutor(&config.Config{AuthDir: t.TempDir()})
 	now := time.Now()
 
 	// 1. Only SIWC needs refresh (outer expires in 5 days, SIWC expires in 2 minutes)
@@ -1115,7 +1115,7 @@ func TestCodexExecutorRefreshHomeModeRefreshesSIWCWhenOnlySIWCDue(t *testing.T) 
 	defer teardown()
 
 	now := time.Now().UTC()
-	cfg := &config.Config{}
+	cfg := &config.Config{AuthDir: t.TempDir()}
 	cfg.Home.Enabled = true
 	executor := NewCodexExecutor(cfg)
 

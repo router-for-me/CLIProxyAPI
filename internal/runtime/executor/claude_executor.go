@@ -447,6 +447,25 @@ func (e *ClaudeExecutor) applyNativeToolSearchFallback(ctx context.Context, auth
 	return ctx, req, opts
 }
 
+// pinResponsesSystemItemPlacement decides, before translation, whether the
+// Responses translator keeps mid-session system items in place as role=system
+// turns, which keeps the prompt-cache prefix of earlier turns stable. The turn
+// needs the cloaked Claude Code wire, which sends the mid-conversation system
+// beta, and a model that accepts it. Strict cloaking drops every caller system
+// instruction and rebuild_mid_system_message folds the turns into the system
+// field, so both keep the top-level path, as does an uncloaked request, which
+// forwards the caller's betas unchanged.
+func (e *ClaudeExecutor) pinResponsesSystemItemPlacement(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, upstreamModel string, policy claudeWirePolicy, settings claudeCloakSettings) context.Context {
+	if from != sdktranslator.FormatOpenAIResponse {
+		return ctx
+	}
+	inPlace := policy.Cloak &&
+		!settings.strictMode &&
+		!util.IsClaudeLegacySystemReminderModel(upstreamModel) &&
+		!rebuildMidSystemMessageEnabled(e.cfg, auth)
+	return responsesclaude.WithTopLevelSystemItems(ctx, !inPlace)
+}
+
 func (e *ClaudeExecutor) modelLevelCooling() bool {
 	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
 }

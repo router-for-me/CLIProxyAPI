@@ -107,15 +107,21 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 		return normalized, bytes.Clone(normalized), nil
 	}
 
+	// A request without previous_response_id that leaves the last response's tool
+	// calls unanswered cannot extend that response: appending it to the stale turn
+	// would send those function_call items without outputs. Treat it as a
+	// replacement transcript in every upstream mode (e.g. a client-side compaction
+	// summary that carries no compaction markers).
+	prev := strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "previous_response_id").String())
+	if prev == "" && !inputSatisfiesPendingToolCalls(nextInput, lastResponsePendingToolCallIDs) {
+		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		return normalized, bytes.Clone(normalized), nil
+	}
+
 	// Websocket v2 mode uses response.create with previous_response_id + incremental input.
 	// Do not expand it into a full input transcript; upstream expects the incremental payload.
 	if allowIncrementalInputWithPreviousResponseID {
-		prev := strings.TrimSpace(ojson.GetBytesNoCopy(rawJSON, "previous_response_id").String())
 		if prev == "" {
-			if !inputSatisfiesPendingToolCalls(nextInput, lastResponsePendingToolCallIDs) {
-				normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
-				return normalized, bytes.Clone(normalized), nil
-			}
 			prev = strings.TrimSpace(lastResponseID)
 		}
 		if prev != "" {
