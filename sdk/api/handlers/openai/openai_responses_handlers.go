@@ -935,7 +935,8 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexRequestPayload(c *gin.Context, p
 	doc := ojson.NewDoc(payload)
 	toolsChanged := h.prepareCodexMultiAgentV2ToolsDoc(c, doc)
 	orphanChanged := h.prepareCodexOrphanDelegationDoc(c, doc)
-	if len(payload) == 0 || (!toolsChanged && !orphanChanged) {
+	orphanToolOutputsChanged := sanitizeOrphanResponsesToolOutputsDoc(doc)
+	if len(payload) == 0 || (!toolsChanged && !orphanChanged && !orphanToolOutputsChanged) {
 		return payload
 	}
 	return doc.Bytes()
@@ -986,6 +987,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 
 	doc := ojson.NewDoc(rawJSON)
 	orphanChanged := h.prepareCodexOrphanDelegationDoc(c, doc)
+	orphanToolOutputsChanged := sanitizeOrphanResponsesToolOutputsDoc(doc)
 
 	streamResult := doc.Get("stream")
 	if streamResult.Type == ojson.True {
@@ -1002,7 +1004,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		_ = doc.Delete("stream")
 		streamDeleted = true
 	}
-	if orphanChanged || streamDeleted {
+	if orphanChanged || orphanToolOutputsChanged || streamDeleted {
 		rawJSON = doc.Bytes()
 	}
 
