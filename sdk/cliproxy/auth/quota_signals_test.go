@@ -774,3 +774,69 @@ func TestQuotaAccountIdentityIncludesProviderAccountFields(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaResetReceivedAtCountsOnlyReadableResets(t *testing.T) {
+	t.Parallel()
+
+	early := time.Unix(1790000000, 0)
+	late := early.Add(10 * time.Minute)
+	unix := strconv.FormatInt(early.Add(24*time.Hour).Unix(), 10)
+	received := map[string]time.Time{
+		"X-Codex-Primary-Reset-At":              late,
+		"X-Codex-Primary-Reset-After-Seconds":   late,
+		"X-Codex-Secondary-Reset-After-Seconds": early,
+		"Anthropic-Ratelimit-Unified-7d-Reset":  late,
+		"Anthropic-Ratelimit-Unified-Reset":     early,
+	}
+	receivedAt := func(name string) time.Time { return received[name] }
+
+	tests := []struct {
+		name    string
+		headers http.Header
+		want    time.Time
+	}{
+		{
+			name: "codex skips a longer window with an unreadable reset-at",
+			headers: http.Header{
+				"X-Codex-Primary-Window-Minutes":        []string{"20160"},
+				"X-Codex-Primary-Reset-At":              []string{"not-a-time"},
+				"X-Codex-Secondary-Window-Minutes":      []string{"10080"},
+				"X-Codex-Secondary-Reset-After-Seconds": []string{"3600"},
+			},
+			want: early,
+		},
+		{
+			name: "codex skips a longer window with a negative reset-after",
+			headers: http.Header{
+				"X-Codex-Primary-Window-Minutes":        []string{"20160"},
+				"X-Codex-Primary-Reset-After-Seconds":   []string{"-5"},
+				"X-Codex-Secondary-Window-Minutes":      []string{"10080"},
+				"X-Codex-Secondary-Reset-After-Seconds": []string{"3600"},
+			},
+			want: early,
+		},
+		{
+			name: "claude skips an unreadable 7d reset",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-7d-Reset": []string{"not-a-time"},
+				"Anthropic-Ratelimit-Unified-Reset":    []string{unix},
+			},
+			want: early,
+		},
+		{
+			name: "claude skips the overage billing boundary",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+				"Anthropic-Ratelimit-Unified-Reset":                []string{unix},
+				"Anthropic-Ratelimit-Unified-Overage-Reset":        []string{unix},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quotaResetReceivedAt(tt.headers, receivedAt); !got.Equal(tt.want) {
+				t.Fatalf("quotaResetReceivedAt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

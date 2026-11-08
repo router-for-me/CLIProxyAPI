@@ -144,8 +144,8 @@ func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) tim
 }
 
 // quotaResetReceivedAt returns when the reset value the selector will score
-// arrived, or the zero time when headers carry none. It chooses the window the
-// same way quotaWindowReset does. Snapshots are ordered by this time: an
+// arrived, or the zero time when headers carry none it can read. It chooses
+// the window and validates values the same way quotaWindowReset does. Snapshots are ordered by this time: an
 // attempt can merge other headers late, even another window's reset, while
 // still holding an older value for the scored window, and must not be taken
 // for a newer observation of it.
@@ -157,11 +157,11 @@ func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time
 	longest := int64(-1)
 	for _, prefix := range codexQuotaWindowPrefixes {
 		var windowReceived time.Time
-		for _, key := range []string{prefix + "Reset-At", prefix + "Reset-After-Seconds"} {
-			if strings.TrimSpace(headers.Get(key)) == "" {
-				continue
-			}
-			if received := receivedAt(key); received.After(windowReceived) {
+		if _, ok := parseResetTimestamp(headers.Get(prefix + "Reset-At")); ok {
+			windowReceived = receivedAt(prefix + "Reset-At")
+		}
+		if _, ok := parseResetAfterSeconds(headers.Get(prefix + "Reset-After-Seconds")); ok {
+			if received := receivedAt(prefix + "Reset-After-Seconds"); received.After(windowReceived) {
 				windowReceived = received
 			}
 		}
@@ -177,9 +177,17 @@ func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time
 	if longest >= 0 {
 		return scored
 	}
-	for _, key := range []string{"Anthropic-Ratelimit-Unified-7d-Reset", "Anthropic-Ratelimit-Unified-Reset"} {
-		if strings.TrimSpace(headers.Get(key)) != "" {
-			return receivedAt(key)
+	if _, ok := parseResetTimestamp(headers.Get("Anthropic-Ratelimit-Unified-7d-Reset")); ok {
+		return receivedAt("Anthropic-Ratelimit-Unified-7d-Reset")
+	}
+	const unifiedReset = "Anthropic-Ratelimit-Unified-Reset"
+	if parsed, ok := parseResetTimestamp(headers.Get(unifiedReset)); ok {
+		claims := map[string]string{
+			"Anthropic-Ratelimit-Unified-Representative-Claim": headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim"),
+			"Anthropic-Ratelimit-Unified-Overage-Reset":        headers.Get("Anthropic-Ratelimit-Unified-Overage-Reset"),
+		}
+		if received := receivedAt(unifiedReset); !claudeResetIsBillingBoundary(claims, parsed, received) {
+			return received
 		}
 	}
 	return scored

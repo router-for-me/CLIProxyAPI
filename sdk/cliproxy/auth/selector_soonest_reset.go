@@ -89,8 +89,13 @@ func (s *SoonestResetSelector) nextProbe(available []*Auth, now time.Time) *Auth
 			continue
 		}
 		// Key by account too, so an account swapped into the same auth ID is
-		// probed without waiting for the former account's interval.
-		key := candidate.ID + "\x00" + quotaAccountIdentity(candidate)
+		// probed without waiting for the former account's interval. Without an
+		// identity, the credential version marks a replaced login instead.
+		identity := quotaAccountIdentity(candidate)
+		if identity == "" {
+			identity = "version:" + strconv.FormatUint(candidate.CredentialVersion, 10)
+		}
+		key := candidate.ID + "\x00" + identity
 		if last, ok := s.probedAt[key]; ok && now.Sub(last) < soonestResetProbeInterval {
 			continue
 		}
@@ -168,8 +173,8 @@ func codexWindowResetAt(signals map[string]string, prefix string, observedAt tim
 	if observedAt.IsZero() {
 		return time.Time{}, false
 	}
-	after, err := strconv.ParseFloat(strings.TrimSpace(signals[prefix+"Reset-After-Seconds"]), 64)
-	if err != nil || after < 0 {
+	after, ok := parseResetAfterSeconds(signals[prefix+"Reset-After-Seconds"])
+	if !ok {
 		return time.Time{}, false
 	}
 	return observedAt.Add(time.Duration(after * float64(time.Second))), true
@@ -187,6 +192,15 @@ func claudeResetIsBillingBoundary(signals map[string]string, reset, observedAt t
 		}
 	}
 	return !observedAt.IsZero() && reset.Sub(observedAt) > 7*24*time.Hour+time.Hour
+}
+
+// parseResetAfterSeconds parses a relative reset value: a non-negative number.
+func parseResetAfterSeconds(raw string) (float64, bool) {
+	after, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || after < 0 {
+		return 0, false
+	}
+	return after, true
 }
 
 // parseResetTimestamp accepts the reset formats upstreams send: Unix seconds

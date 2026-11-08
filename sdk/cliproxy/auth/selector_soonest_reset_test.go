@@ -410,3 +410,30 @@ func TestSoonestResetSelectorProbeStateHoldsNoSecretsAndExpires(t *testing.T) {
 		t.Fatalf("expired probe entries kept: %v", selector.probedAt)
 	}
 }
+
+func TestSoonestResetSelectorPick_ProbesReplacedLoginWithoutIdentity(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1790000000, 0)
+	selector := &SoonestResetSelector{nowFunc: func() time.Time { return now }}
+	known := &Auth{ID: "a", Provider: "codex", Quota: codexWeeklySignals(now.Add(3 * 24 * time.Hour))}
+	pick := func(version uint64) string {
+		t.Helper()
+		auths := []*Auth{known, {ID: "b", Provider: "codex", CredentialVersion: version}}
+		got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		return got.ID
+	}
+
+	if got := pick(1); got != "b" {
+		t.Fatalf("first pick = %q, want b probed", got)
+	}
+	if got := pick(1); got != "a" {
+		t.Fatalf("repeat pick = %q, want a (b was probed this interval)", got)
+	}
+	if got := pick(2); got != "b" {
+		t.Fatalf("pick after login replacement = %q, want b probed again", got)
+	}
+}
