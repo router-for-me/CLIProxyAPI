@@ -3927,8 +3927,29 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
-	defer httpServer.Close()
+	// httptest.Server.Close does not wait for hijacked (websocket) handlers, and the
+	// request-logging middleware writes the forced error log for the revoked turn into
+	// the t.TempDir() auth dir only after that handler sees the client close. Track
+	// in-flight handlers so cleanup waits for that write before TempDir's RemoveAll.
+	var handlers sync.WaitGroup
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlers.Add(1)
+		defer handlers.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		httpServer.Close()
+		handlersDone := make(chan struct{})
+		go func() {
+			handlers.Wait()
+			close(handlersDone)
+		}()
+		select {
+		case <-handlersDone:
+		case <-time.After(5 * time.Second):
+			t.Error("websocket handler did not return after the client closed")
+		}
+	})
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
 	headers := http.Header{"Authorization": []string{"Bearer key-1"}}
