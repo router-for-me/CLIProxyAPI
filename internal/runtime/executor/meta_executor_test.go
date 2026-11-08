@@ -1,0 +1,2249 @@
+package executor
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	"github.com/google/uuid"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
+)
+
+func TestMetaExecutor_Identifier(t *testing.T) {
+	exec := NewMetaExecutor(&config.Config{})
+	if exec.Identifier() != "meta" {
+		t.Fatalf("expected 'meta', got '%s'", exec.Identifier())
+	}
+}
+
+func TestMetaExecutor_MetaCredsResolution(t *testing.T) {
+	t.Run("from attributes", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Attributes: map[string]string{
+				"api_key":  "attr-key",
+				"base_url": "https://custom.meta.com/v1",
+			},
+		}
+		baseURL, token := metaCreds(auth)
+		if baseURL != "https://custom.meta.com/v1" || token != "attr-key" {
+			t.Errorf("unexpected creds: base=%s, token=%s", baseURL, token)
+		}
+	})
+
+	t.Run("from metadata", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{
+			Metadata: map[string]any{
+				"access_token": "meta-oauth-token",
+			},
+		}
+		baseURL, token := metaCreds(auth)
+		if baseURL != "https://api.meta.ai/v1" || token != "meta-oauth-token" {
+			t.Errorf("unexpected creds: base=%s, token=%s", baseURL, token)
+		}
+	})
+
+	t.Run("no bleed to env or local auth", func(t *testing.T) {
+		t.Setenv("META_API_KEY", "env-secret-key")
+		tempDir := t.TempDir()
+		authPath := filepath.Join(tempDir, "auth.json")
+		content := `{"schema_version":1,"providers":{"meta":{"api_key":"local-muse-key","api_base_url":"https://api.meta.ai/v1"}}}`
+		_ = os.WriteFile(authPath, []byte(content), 0600)
+		t.Setenv("MUSE_AUTH_PATH", authPath)
+
+		// nil auth should NOT bleed to env or local file
+		baseURL, token := metaCreds(nil)
+		if token != "" {
+			t.Errorf("expected empty token for nil auth, got %s", token)
+		}
+		if baseURL != "https://api.meta.ai/v1" {
+			t.Errorf("expected default base URL, got %s", baseURL)
+		}
+
+		// empty auth should NOT bleed to env or local file
+		emptyAuth := &cliproxyauth.Auth{}
+		_, token = metaCreds(emptyAuth)
+		if token != "" {
+			t.Errorf("expected empty token for empty auth, got %s", token)
+		}
+	})
+}
+
+func TestMetaExecutor_ParseRetryAfter(t *testing.T) {
+	now := time.Now()
+	futureEpoch := now.Add(45 * time.Minute).Unix()
+
+	body := []byte(mapToJSON(map[string]any{
+		"error": map[string]any{
+			"code":      "rate_limit_exceeded",
+			"message":   "Subscription quota exhausted.",
+			"resets_at": futureEpoch,
+			"type":      "rate_limit_error",
+		},
+	}))
+
+	retryAfter := parseMetaRetryAfter(http.StatusTooManyRequests, body, now)
+	if retryAfter == nil {
+		t.Fatalf("expected non-nil retryAfter")
+	}
+	if *retryAfter < 40*time.Minute || *retryAfter > 50*time.Minute {
+		t.Errorf("unexpected retryAfter duration: %v", *retryAfter)
+	}
+
+	// Non-429 status returns nil
+	if got := parseMetaRetryAfter(http.StatusOK, body, now); got != nil {
+		t.Errorf("expected nil for 200 OK")
+	}
+
+	// Past epoch returns nil
+	pastBody := []byte(mapToJSON(map[string]any{
+		"error": map[string]any{
+			"resets_at": now.Add(-10 * time.Minute).Unix(),
+		},
+	}))
+	if got := parseMetaRetryAfter(http.StatusTooManyRequests, pastBody, now); got != nil {
+		t.Errorf("expected nil for past reset time")
+	}
+}
+
+func TestMetaExecutor_ExecuteSuccessAndRateLimit(t *testing.T) {
+	now := time.Now()
+	resetEpoch := now.Add(2 * time.Hour).Unix()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer valid-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+			return
+		}
+
+		if r.URL.Path == "/responses" {
+			// Check user agent
+			if ua := r.Header.Get("User-Agent"); ua != metaUserAgent() {
+				t.Errorf("expected User-Agent %s, got %s", metaUserAgent(), ua)
+			}
+			// Simulate 429 rate limit
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":      "rate_limit_exceeded",
+					"message":   "Subscription quota exhausted. Your usage window resets soon.",
+					"resets_at": resetEpoch,
+					"type":      "rate_limit_error",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{}
+	exec := NewMetaExecutor(cfg)
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "valid-token",
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}
+
+	_, err := exec.Execute(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatalf("expected error from 429 response")
+	}
+
+	var se statusErr
+	if errors.As(err, &se) {
+		if se.StatusCode() != http.StatusTooManyRequests {
+			t.Errorf("expected 429 status code, got %d", se.StatusCode())
+		}
+		if se.RetryAfter() == nil {
+			t.Fatalf("expected non-nil RetryAfter")
+		}
+		if *se.RetryAfter() < 1*time.Hour || *se.RetryAfter() > 3*time.Hour {
+			t.Errorf("unexpected RetryAfter: %v", *se.RetryAfter())
+		}
+	} else {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+
+	var scoped interface{ IsCredentialScoped() bool }
+	if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+		t.Fatalf("expected rate limit error to be credential scoped, got %T: %v", err, err)
+	}
+}
+
+func mapToJSON(m map[string]any) string {
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func writeMetaResponsesOK(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	payload, _ := json.Marshal(map[string]any{
+		"type": "response.completed",
+		"response": map[string]any{
+			"id":     "resp_1",
+			"object": "response",
+			"status": "completed",
+			"model":  "muse-spark-1.3",
+			"output": []map[string]any{
+				{
+					"type": "message",
+					"role": "assistant",
+					"content": []map[string]any{
+						{"type": "output_text", "text": text},
+					},
+				},
+			},
+			"usage": map[string]any{
+				"input_tokens":  1,
+				"output_tokens": 1,
+				"total_tokens":  2,
+			},
+		},
+	})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
+}
+
+func TestMetaExecutor_Refresh_RequiresManagerAcceptance(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "meta-test.json")
+	initialContent := `{"type":"meta","auth_kind":"oauth","access_token":"dca:initial-dca","dca_token":"dca:initial-dca","expired":"2020-01-01T00:00:00Z","request-retry":3}`
+	if err := os.WriteFile(authFilePath, []byte(initialContent), 0600); err != nil {
+		t.Fatalf("failed to write initial auth file: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key":        "LLM|persisted-minted-key",
+				"user_email":     "engineer@meta.com",
+				"user_full_name": "Meta Engineer",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	auth := &cliproxyauth.Auth{
+		ID:       "meta-test.json",
+		FileName: "meta-test.json",
+		Provider: "meta",
+		Attributes: map[string]string{
+			cliproxyauth.AttributePath: authFilePath,
+		},
+		Metadata: map[string]any{
+			"dca_token": "dca:initial-dca",
+			"expired":   "2020-01-01T00:00:00Z",
+		},
+	}
+
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(tempDir)
+	manager := cliproxyauth.NewManager(store, nil, nil)
+	auth.Metadata["request-retry"] = float64(3)
+	auth.Storage = &metaauth.MetaTokenStorage{AccessToken: "dca:initial-dca", DCAToken: "dca:initial-dca", Expired: "2020-01-01T00:00:00Z"}
+	auth, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), auth)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	exec := NewMetaExecutor(&config.Config{})
+	refreshed, err := exec.Refresh(context.Background(), auth.Clone())
+	if err != nil {
+		t.Fatalf("exec.Refresh error: %v", err)
+	}
+
+	if refreshed.Metadata["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected api_key LLM|persisted-minted-key in metadata, got %v", refreshed.Metadata["api_key"])
+	}
+	if refreshed.Attributes["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected api_key LLM|persisted-minted-key in attributes, got %v", refreshed.Attributes["api_key"])
+	}
+	if _, hasExpired := refreshed.Metadata["expired"]; hasExpired {
+		t.Errorf("expected expired to be removed from metadata after minting")
+	}
+
+	unchanged, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if string(unchanged) != initialContent {
+		t.Fatal("executor wrote candidate before manager acceptance")
+	}
+	live, _ := manager.GetByID(auth.ID)
+	if live.Storage.(*metaauth.MetaTokenStorage).AccessToken != "dca:initial-dca" {
+		t.Fatal("refresh mutated live token storage")
+	}
+	if _, err := manager.UpdateRefreshedAuth(context.Background(), auth, refreshed); err != nil {
+		t.Fatal(err)
+	}
+	// Verify durable file persistence on disk
+	diskBytes, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatalf("failed to read persisted file: %v", errRead)
+	}
+	var diskData map[string]any
+	if errJSON := json.Unmarshal(diskBytes, &diskData); errJSON != nil {
+		t.Fatalf("failed to parse persisted JSON: %v", errJSON)
+	}
+	if diskData["api_key"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected persisted api_key LLM|persisted-minted-key, got %v", diskData["api_key"])
+	}
+	if diskData["access_token"] != "LLM|persisted-minted-key" {
+		t.Errorf("expected persisted access_token LLM|persisted-minted-key, got %v", diskData["access_token"])
+	}
+	// Verify existing properties preserved
+	if diskData["request_retry"] != float64(3) {
+		t.Errorf("expected preserved request-retry: 3, got %v", diskData["request_retry"])
+	}
+}
+
+func TestMetaExecutor_PrepareConcurrentAccounts(t *testing.T) {
+	var count1, count2 int64
+
+	serverStarted := make(chan struct{})
+	releaseServer := make(chan struct{})
+	var startOnce sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			dca := req["dca_token"]
+			w.Header().Set("Content-Type", "application/json")
+			if dca == "dca:acct1" {
+				atomic.AddInt64(&count1, 1)
+				startOnce.Do(func() { close(serverStarted) })
+				<-releaseServer
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"api_key":    "LLM|key-acct1",
+					"user_email": "acct1@meta.com",
+				})
+				return
+			}
+			if dca == "dca:acct2" {
+				atomic.AddInt64(&count2, 1)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"api_key":    "LLM|key-acct2",
+					"user_email": "acct2@meta.com",
+				})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	exec := NewMetaExecutor(&config.Config{})
+
+	// 10 concurrent refreshes for account 1
+	var wg sync.WaitGroup
+	auth1 := &cliproxyauth.Auth{
+		ID:       "meta-acct1",
+		Provider: "meta",
+		Metadata: map[string]any{"dca_token": "dca:acct1"},
+	}
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), auth1); err != nil {
+		t.Fatal(err)
+	}
+	const goroutines = 10
+	var entryWg sync.WaitGroup
+	entryWg.Add(goroutines)
+	ready := make(chan struct{})
+	var inFlight sync.WaitGroup
+	inFlight.Add(goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			entryWg.Done()
+			<-ready
+			inFlight.Done()
+			res, err := manager.PrepareRequestAuth(context.Background(), exec, auth1.Clone())
+			if err != nil {
+				t.Errorf("Refresh acct1 error: %v", err)
+			}
+			if res != nil && res.Metadata["api_key"] != "LLM|key-acct1" {
+				t.Errorf("expected LLM|key-acct1, got %v", res.Metadata["api_key"])
+			}
+		}()
+	}
+
+	// Release all goroutines simultaneously.
+	entryWg.Wait()
+	close(ready)
+
+	// Wait until the singleflight mint request has arrived at the server.
+	<-serverStarted
+	inFlight.Wait()
+
+	// A second account must complete while the first account's mint is blocked.
+	auth2 := &cliproxyauth.Auth{ID: "meta-acct2", Provider: "meta", Metadata: map[string]any{"dca_token": "dca:acct2"}}
+	if _, err := manager.Register(context.Background(), auth2); err != nil {
+		t.Fatal(err)
+	}
+	res2, err2 := manager.PrepareRequestAuth(context.Background(), exec, auth2.Clone())
+	close(releaseServer)
+	wg.Wait()
+
+	if totalMint1 := atomic.LoadInt64(&count1); totalMint1 != 1 {
+		t.Errorf("expected exactly 1 singleflight mint request for acct1, got %d", totalMint1)
+	}
+
+	if err2 != nil {
+		t.Fatalf("Refresh acct2 error: %v", err2)
+	}
+	if res2.Metadata["api_key"] != "LLM|key-acct2" {
+		t.Errorf("expected LLM|key-acct2, got %v", res2.Metadata["api_key"])
+	}
+	if totalMint2 := atomic.LoadInt64(&count2); totalMint2 != 1 {
+		t.Errorf("expected 1 mint request for acct2, got %d", totalMint2)
+	}
+}
+
+func TestMetaExecutor_Execute_DCARecovery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/key" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"api_key": "LLM|auto-recovered-key",
+			})
+			return
+		}
+		if r.URL.Path == "/responses" {
+			if r.Header.Get("Authorization") != "Bearer LLM|auto-recovered-key" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			writeMetaResponsesOK(w, "hello world")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+
+	cfg := &config.Config{}
+	exec := NewMetaExecutor(cfg)
+
+	// Auth has ONLY a DCA token
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:execute-recover-me",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute with DCA-only auth error: %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Errorf("expected non-empty payload, got empty")
+	}
+	if auth.Metadata["api_key"] != "LLM|auto-recovered-key" {
+		t.Errorf("expected auth to be enriched with minted api_key, got %v", auth.Metadata["api_key"])
+	}
+}
+
+func TestMetaExecutorManagerRecoversUnauthorizedKey(t *testing.T) {
+	var mints atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/key" {
+			mints.Add(1)
+			_, _ = w.Write([]byte(`{"api_key":"LLM|replacement"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer LLM|replacement" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"key revoked"}}`))
+			return
+		}
+		writeMetaResponsesOK(w, "recovered")
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(NewMetaExecutor(&config.Config{}))
+	auth := &cliproxyauth.Auth{ID: "meta-401-recovery", Provider: "meta", Metadata: map[string]any{"access_token": "LLM|revoked", "api_key": "LLM|revoked", "dca_token": "dca:valid", "auth_kind": "oauth"}, Attributes: map[string]string{"base_url": server.URL}}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	req := cliproxyexecutor.Request{Model: "muse-spark-1.3", Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`)}
+	_, err := manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("401 recovery failed: %v", err)
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count = %d, want 1", mints.Load())
+	}
+}
+
+func TestMetaExecutorRefreshUsesMintedBaseURL(t *testing.T) {
+	for _, tc := range []struct{ name, minted, want string }{
+		{"custom", " https://regional.meta.example/v1 ", "https://regional.meta.example/v1"},
+		{"omitted", "", "https://previous.meta.example/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"api_key": "LLM|replacement", "base_url": tc.minted})
+			}))
+			defer server.Close()
+			t.Setenv("META_MINT_URL", server.URL)
+			path := filepath.Join(t.TempDir(), "meta.json")
+			auth := &cliproxyauth.Auth{Provider: "meta", Metadata: map[string]any{"dca_token": "dca:test", "base_url": "https://previous.meta.example/v1"}, Attributes: map[string]string{"base_url": "https://previous.meta.example/v1", cliproxyauth.AttributePath: path}}
+			updated, err := NewMetaExecutor(nil).Refresh(context.Background(), auth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := metaCreds(updated); got != tc.want {
+				t.Errorf("request base URL = %q, want %q", got, tc.want)
+			}
+			if updated.Metadata["base_url"] != tc.want {
+				t.Errorf("candidate base URL = %v, want %q", updated.Metadata["base_url"], tc.want)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("refresh created a file: %v", err)
+			}
+
+		})
+	}
+}
+
+func TestMetaExecutor_ExecuteStreamRateLimit(t *testing.T) {
+	now := time.Now()
+	resetEpoch := now.Add(2 * time.Hour).Unix()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(mapToJSON(map[string]any{
+			"error": map[string]any{
+				"code":      "rate_limit_exceeded",
+				"message":   "Subscription quota exhausted. Please try again later.",
+				"resets_at": resetEpoch,
+				"type":      "rate_limit_error",
+			},
+		})))
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	_, err := exec.ExecuteStream(context.Background(), auth, req, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected error from 429 streaming response")
+	}
+
+	var se statusErr
+	if !errors.As(err, &se) {
+		t.Fatalf("expected statusErr, got %T: %v", err, err)
+	}
+	if se.StatusCode() != http.StatusTooManyRequests {
+		t.Errorf("expected 429 status code, got %d", se.StatusCode())
+	}
+	if se.RetryAfter() == nil {
+		t.Fatalf("expected non-nil RetryAfter")
+	}
+
+	var scoped interface{ IsCredentialScoped() bool }
+	if !errors.As(err, &scoped) || !scoped.IsCredentialScoped() {
+		t.Fatalf("expected streaming rate limit error to be credential scoped, got %T: %v", err, err)
+	}
+}
+
+func TestMetaExecutor_RequestAuthPreparer(t *testing.T) {
+	var mints atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/key" {
+			mints.Add(1)
+			_, _ = w.Write([]byte(`{"api_key":"LLM|prepared-key"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer LLM|prepared-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
+			return
+		}
+		writeMetaResponsesOK(w, "hello")
+	}))
+	defer server.Close()
+
+	t.Setenv("META_MINT_URL", server.URL+"/key")
+	exec := NewMetaExecutor(&config.Config{})
+
+	authWithKey := &cliproxyauth.Auth{Provider: "meta", Attributes: map[string]string{"api_key": "exists"}}
+	if exec.ShouldPrepareRequestAuth(authWithKey) {
+		t.Errorf("ShouldPrepareRequestAuth should be false when api_key is present")
+	}
+
+	authNoDCA := &cliproxyauth.Auth{Provider: "meta"}
+	if exec.ShouldPrepareRequestAuth(authNoDCA) {
+		t.Errorf("ShouldPrepareRequestAuth should be false when dca_token is missing")
+	}
+
+	authConfigDCA := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":                    "dca:invalid-for-config",
+			cliproxyauth.AttributeSource: "config:meta[0]",
+		},
+	}
+	if exec.ShouldPrepareRequestAuth(authConfigDCA) {
+		t.Errorf("ShouldPrepareRequestAuth should be false for config API key auths")
+	}
+
+	authDCAOnly := &cliproxyauth.Auth{
+		ID:       "meta-prep-test.json",
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:valid",
+			"auth_kind": "oauth",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+	if !exec.ShouldPrepareRequestAuth(authDCAOnly) {
+		t.Errorf("ShouldPrepareRequestAuth should be true when only dca_token is present")
+	}
+
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(t.TempDir())
+	manager := cliproxyauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(exec)
+	if _, err := manager.Register(context.Background(), authDCAOnly); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authDCAOnly.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authDCAOnly.ID) })
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	resp, err := manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("execute failed: %v", err)
+	}
+	if string(resp.Payload) == "" {
+		t.Errorf("expected non-empty response payload")
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count = %d, want 1", mints.Load())
+	}
+
+	stored, ok := manager.GetByID(authDCAOnly.ID)
+	if !ok || stored == nil {
+		t.Fatalf("stored auth not found in manager")
+	}
+	if key, _ := stored.Metadata["api_key"].(string); key != "LLM|prepared-key" {
+		t.Errorf("expected stored api_key 'LLM|prepared-key', got %q", key)
+	}
+
+	reloaded, err := store.List(context.Background())
+	if err != nil || len(reloaded) != 1 {
+		t.Fatalf("reload auth: %v, records=%d", err, len(reloaded))
+	}
+	if reloaded[0].Metadata["api_key"] != "LLM|prepared-key" {
+		t.Fatal("minted key was not persisted for restart")
+	}
+
+	_, err = manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("second execute failed: %v", err)
+	}
+	if mints.Load() != 1 {
+		t.Fatalf("mint count after second request = %d, want 1", mints.Load())
+	}
+}
+
+func TestMetaMintRejectsRemovedOrReloadedCredential(t *testing.T) {
+	for _, prepare := range []bool{false, true} {
+		for _, action := range []string{"remove", "reload"} {
+			name := action + "/refresh"
+			if prepare {
+				name = action + "/prepare"
+			}
+			t.Run(name, func(t *testing.T) {
+				started := make(chan struct{})
+				release := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					close(started)
+					<-release
+					_, _ = w.Write([]byte(`{"api_key":"LLM|obsolete"}`))
+				}))
+				defer server.Close()
+				var releaseOnce sync.Once
+				defer releaseOnce.Do(func() { close(release) })
+				t.Setenv("META_MINT_URL", server.URL)
+				dir := t.TempDir()
+				store := sdkauth.NewFileTokenStore()
+				store.SetBaseDir(dir)
+				manager := cliproxyauth.NewManager(store, nil, nil)
+				storage := &metaauth.MetaTokenStorage{AccessToken: "dca:initial", DCAToken: "dca:initial"}
+				auth, err := manager.Register(context.Background(), &cliproxyauth.Auth{ID: "meta-lifecycle.json", Provider: "meta", Storage: storage, Metadata: map[string]any{"type": "meta", "access_token": "dca:initial", "dca_token": "dca:initial"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec := NewMetaExecutor(nil)
+				done := make(chan error, 1)
+				go func() {
+					if prepare {
+						_, err := manager.PrepareRequestAuth(context.Background(), exec, auth.Clone())
+						done <- err
+						return
+					}
+					updated, err := exec.Refresh(context.Background(), auth.Clone())
+					if err == nil {
+						_, err = manager.UpdateRefreshedAuth(context.Background(), auth, updated)
+					}
+					done <- err
+				}()
+				<-started
+				path := filepath.Join(dir, auth.ID)
+				if action == "remove" {
+					manager.Remove(context.Background(), auth.ID)
+					if err := store.Delete(context.Background(), auth.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					_, err := manager.Register(context.Background(), &cliproxyauth.Auth{ID: auth.ID, Provider: "meta", Metadata: map[string]any{"type": "meta", "api_key": "LLM|reloaded", "access_token": "LLM|reloaded", "dca_token": "dca:reloaded"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				releaseOnce.Do(func() { close(release) })
+				err = <-done
+				if (prepare || action == "reload") && err == nil {
+					t.Fatal("obsolete mint was accepted")
+				}
+				if storage.AccessToken != "dca:initial" {
+					t.Fatal("obsolete mint changed shared login storage")
+				}
+				raw, errRead := os.ReadFile(path)
+				if action == "remove" {
+					if !os.IsNotExist(errRead) {
+						t.Fatalf("removed auth was recreated: %s, %v", raw, errRead)
+					}
+					if _, ok := manager.GetByID(auth.ID); ok {
+						t.Fatal("removed auth was reinstalled")
+					}
+				} else {
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					var saved map[string]any
+					if err := json.Unmarshal(raw, &saved); err != nil {
+						t.Fatal(err)
+					}
+					if saved["api_key"] != "LLM|reloaded" {
+						t.Fatalf("obsolete mint overwrote reload: %s", raw)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestMetaExecutor_ExecuteShapesResponsesRequest(t *testing.T) {
+	var gotPath string
+	var gotAuth string
+	var gotUA string
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotUA = r.Header.Get("User-Agent")
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want /responses", gotPath)
+	}
+	if gotAuth != "Bearer meta-token" {
+		t.Fatalf("Authorization = %q, want Bearer meta-token", gotAuth)
+	}
+	if gotUA != metaUserAgent() {
+		t.Fatalf("User-Agent = %q, want %q", gotUA, metaUserAgent())
+	}
+	if ojson.GetBytes(gotBody, "messages").Exists() {
+		t.Fatalf("request still uses chat completions messages: %s", gotBody)
+	}
+	if !ojson.GetBytes(gotBody, "input").Exists() {
+		t.Fatalf("request missing responses input: %s", gotBody)
+	}
+	if !ojson.GetBytes(gotBody, "stream").Bool() {
+		t.Fatalf("stream = false, want true")
+	}
+	if ojson.GetBytes(gotBody, "model").String() != "muse-spark-1.3" {
+		t.Fatalf("model = %q, want muse-spark-1.3", ojson.GetBytes(gotBody, "model").String())
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty translated payload")
+	}
+}
+
+func TestMetaExecutor_ExecuteStreamUsesResponses(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		writeMetaResponsesOK(w, "streamed")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	if gotPath != "/responses" {
+		t.Fatalf("path = %q, want /responses", gotPath)
+	}
+	if result == nil {
+		t.Fatal("expected stream result")
+	}
+	gotChunk := false
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) > 0 {
+			gotChunk = true
+		}
+	}
+	if !gotChunk {
+		t.Fatal("expected at least one stream payload chunk")
+	}
+}
+
+func TestMetaExecutor_PreservesPreviousResponseID(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	_, err := NewMetaExecutor(&config.Config{}).Execute(context.Background(), &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "meta-token", "base_url": server.URL},
+	}, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","input":"hello","previous_response_id":"resp_prev"}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := ojson.GetBytes(gotBody, "previous_response_id").String(); got != "resp_prev" {
+		t.Fatalf("previous_response_id = %q, want resp_prev", got)
+	}
+}
+
+func TestMetaExecutor_CompactNotSupported(t *testing.T) {
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "meta-token", "base_url": "https://api.meta.ai/v1"}}
+	req := cliproxyexecutor.Request{Model: "muse-spark-1.3", Payload: []byte(`{"model":"muse-spark-1.3"}`)}
+	opts := cliproxyexecutor.Options{Alt: "responses/compact", SourceFormat: sdktranslator.FromString("openai-response")}
+
+	_, err := exec.Execute(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatal("expected compact execute error")
+	}
+	var se statusErr
+	if !errors.As(err, &se) || se.StatusCode() != http.StatusNotImplemented {
+		t.Fatalf("Execute compact error = %v, want 501 statusErr", err)
+	}
+
+	_, err = exec.ExecuteStream(context.Background(), auth, req, opts)
+	if err == nil {
+		t.Fatal("expected compact stream error")
+	}
+	if !errors.As(err, &se) || se.StatusCode() != http.StatusNotImplemented {
+		t.Fatalf("ExecuteStream compact error = %v, want 501 statusErr", err)
+	}
+}
+
+func TestMetaExecutor_ExecuteNonStreamMultiEventSSE_RecordsModelAndWarnsOnSubstitution(t *testing.T) {
+	multiEventSSE := "event: response.output_item.added\n" +
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"item_0\",\"type\":\"message\",\"role\":\"assistant\"}}\n\n" +
+		"event: response.output_item.done\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"item_0\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"substituted-meta-model\",\"usage\":{\"total_tokens\":10}}}\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(multiEventSSE))
+	}))
+	defer server.Close()
+
+	const alias = "meta-multi-event-sse-test"
+	capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+	})
+
+	hook := new(logtest.Hook)
+	log.StandardLogger().AddHook(hook)
+	t.Cleanup(func() {
+		log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	})
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+	resp, err := exec.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("expected non-empty translated payload")
+	}
+
+	record := capture.await(t)
+	if record.Model != "muse-spark-1.3" {
+		t.Fatalf("record.Model = %q, want muse-spark-1.3", record.Model)
+	}
+	if record.ResponseModel != "substituted-meta-model" {
+		t.Fatalf("record.ResponseModel = %q, want substituted-meta-model", record.ResponseModel)
+	}
+
+	var foundWarning bool
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "upstream served model") && strings.Contains(entry.Message, "substituted-meta-model") {
+			foundWarning = true
+			break
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("expected substitution warning in logs for substituted-meta-model")
+	}
+}
+
+func TestMetaExecutor_PrepareRequest_ClientIdHeader_Issue6117(t *testing.T) {
+	exec := NewMetaExecutor(&config.Config{})
+	req, errReq := http.NewRequest(http.MethodPost, "https://api.meta.ai/responses", nil)
+	if errReq != nil {
+		t.Fatal(errReq)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key": "test-key",
+		},
+	}
+	if errPrepare := exec.PrepareRequest(req, auth); errPrepare != nil {
+		t.Fatal(errPrepare)
+	}
+	if got := req.Header.Get("X-Client-Id"); got != metaClientSurface {
+		t.Errorf("X-Client-Id = %q, want %q", got, metaClientSurface)
+	}
+	if got := req.Header.Get("User-Agent"); !strings.Contains(got, "muse-build/"+metaClientVersion) {
+		t.Errorf("User-Agent = %q, want muse-build/%s", got, metaClientVersion)
+	}
+	if _, exists := req.Header["X-Client-Id:"]; exists {
+		t.Errorf("X-Client-Id: with trailing colon must not exist in headers")
+	}
+	if got := req.Header.Get("X-Tbh-Contributor-Mode"); got != "" {
+		t.Errorf("X-Tbh-Contributor-Mode = %q, want empty", got)
+	}
+}
+
+func TestMetaExecutor_ApplyMetaAPIHeaders_ClientIdHeader_Issue6117(t *testing.T) {
+	req, errReq := http.NewRequest(http.MethodPost, "https://api.meta.ai/responses", nil)
+	if errReq != nil {
+		t.Fatal(errReq)
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key": "test-key",
+		},
+	}
+	applyMetaAPIHeaders(req, auth, "test-key", true, nil)
+	if got := req.Header.Get("X-Client-Id"); got != metaClientSurface {
+		t.Errorf("applyMetaAPIHeaders: X-Client-Id = %q, want %q", got, metaClientSurface)
+	}
+	sessionID := req.Header.Get("X-Tbh-Session-Id")
+	if _, errParse := uuid.Parse(sessionID); errParse != nil {
+		t.Errorf("X-Tbh-Session-Id = %q, want a UUID", sessionID)
+	}
+	for _, name := range []string{"X-Meta-Ai-Gateway-Session-Id", "X-Tbh-Thread-Id", "X-Tbh-Root-Session-Id"} {
+		if got := req.Header.Get(name); got != sessionID {
+			t.Errorf("%s = %q, want %q", name, got, sessionID)
+		}
+	}
+	if got := req.Header.Get("X-Tbh-Agent-Role"); got != "main" {
+		t.Errorf("X-Tbh-Agent-Role = %q, want main", got)
+	}
+	if got := req.Header.Get("X-Tbh-Contributor-Mode"); got != "" {
+		t.Errorf("X-Tbh-Contributor-Mode = %q, want empty", got)
+	}
+
+	contributorReq, errContributorReq := http.NewRequest(http.MethodPost, "https://api.meta.ai/responses", nil)
+	if errContributorReq != nil {
+		t.Fatal(errContributorReq)
+	}
+	contributorReq.Header.Set("X-Tbh-Session-Id", sessionID)
+	applyMetaAPIHeaders(contributorReq, auth, "test-key", true, nil, "muse-wonder-1.0-contributor")
+	if got := contributorReq.Header.Get("X-Tbh-Contributor-Mode"); got != "1" {
+		t.Errorf("contributor model X-Tbh-Contributor-Mode = %q, want 1", got)
+	}
+}
+
+func TestMetaExecutor_ContributorModeHeader_Issue7272(t *testing.T) {
+	var capturedHeaders []http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedHeaders = append(capturedHeaders, r.Header.Clone())
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	cases := []struct {
+		name            string
+		model           string
+		wantContributor string
+	}{
+		{
+			name:            "plain muse-wonder-1.0 omits contributor header",
+			model:           "muse-wonder-1.0",
+			wantContributor: "",
+		},
+		{
+			name:            "plain muse-wonder-full-1.0 omits contributor header",
+			model:           "muse-wonder-full-1.0",
+			wantContributor: "",
+		},
+		{
+			name:            "plain muse-spark-1.3 omits contributor header",
+			model:           "muse-spark-1.3",
+			wantContributor: "",
+		},
+		{
+			name:            "contributor muse-wonder-1.0-contributor sets header",
+			model:           "muse-wonder-1.0-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor muse-wonder-full-1.0-contributor sets header",
+			model:           "muse-wonder-full-1.0-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor muse-spark-1.3-contributor sets header",
+			model:           "muse-spark-1.3-contributor",
+			wantContributor: "1",
+		},
+		{
+			name:            "contributor model with thinking suffix sets header",
+			model:           "muse-wonder-1.0-contributor(high)",
+			wantContributor: "1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run("Execute/"+tc.name, func(t *testing.T) {
+			before := len(capturedHeaders)
+			payload := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, tc.model))
+			_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   tc.model,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai"),
+			})
+			if errExec != nil {
+				t.Fatalf("Execute(%q) error = %v", tc.model, errExec)
+			}
+			if len(capturedHeaders) != before+1 {
+				t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+			}
+			hdr := capturedHeaders[len(capturedHeaders)-1]
+			if got := hdr.Get("X-Tbh-Contributor-Mode"); got != tc.wantContributor {
+				t.Errorf("Execute(%q): X-Tbh-Contributor-Mode = %q, want %q", tc.model, got, tc.wantContributor)
+			}
+			if tc.wantContributor == "" && len(hdr.Values("X-Tbh-Contributor-Mode")) != 0 {
+				t.Errorf("Execute(%q): expected X-Tbh-Contributor-Mode header to be absent, got %v", tc.model, hdr.Values("X-Tbh-Contributor-Mode"))
+			}
+		})
+
+		t.Run("ExecuteStream/"+tc.name, func(t *testing.T) {
+			before := len(capturedHeaders)
+			payload := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, tc.model))
+			streamRes, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   tc.model,
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("openai"),
+				Stream:       true,
+			})
+			if errStream != nil {
+				t.Fatalf("ExecuteStream(%q) error = %v", tc.model, errStream)
+			}
+			for chunk := range streamRes.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("ExecuteStream(%q) chunk error = %v", tc.model, chunk.Err)
+				}
+			}
+			if len(capturedHeaders) != before+1 {
+				t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+			}
+			hdr := capturedHeaders[len(capturedHeaders)-1]
+			if got := hdr.Get("X-Tbh-Contributor-Mode"); got != tc.wantContributor {
+				t.Errorf("ExecuteStream(%q): X-Tbh-Contributor-Mode = %q, want %q", tc.model, got, tc.wantContributor)
+			}
+			if tc.wantContributor == "" && len(hdr.Values("X-Tbh-Contributor-Mode")) != 0 {
+				t.Errorf("ExecuteStream(%q): expected X-Tbh-Contributor-Mode header to be absent, got %v", tc.model, hdr.Values("X-Tbh-Contributor-Mode"))
+			}
+		})
+	}
+
+	t.Run("payload override model determines contributor header", func(t *testing.T) {
+		overrideExec := NewMetaExecutor(&config.Config{
+			Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: []config.PayloadModelRule{{Name: "muse-wonder-1.0", Protocol: "meta"}},
+						Params: map[string]any{"model": "muse-wonder-1.0-contributor"},
+					},
+					{
+						Models: []config.PayloadModelRule{{Name: "muse-wonder-1.0-contributor", Protocol: "meta"}},
+						Params: map[string]any{"model": "muse-wonder-1.0"},
+					},
+				},
+			},
+		})
+
+		before := len(capturedHeaders)
+		_, errToContrib := overrideExec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-wonder-1.0",
+			Payload: []byte(`{"model":"muse-wonder-1.0","messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+		})
+		if errToContrib != nil {
+			t.Fatalf("Execute(override to contributor) error = %v", errToContrib)
+		}
+		if len(capturedHeaders) != before+1 {
+			t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+		}
+		if got := capturedHeaders[len(capturedHeaders)-1].Get("X-Tbh-Contributor-Mode"); got != "1" {
+			t.Errorf("override to contributor: X-Tbh-Contributor-Mode = %q, want 1", got)
+		}
+
+		before = len(capturedHeaders)
+		_, errToPlain := overrideExec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-wonder-1.0-contributor",
+			Payload: []byte(`{"model":"muse-wonder-1.0-contributor","messages":[{"role":"user","content":"hello"}]}`),
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString("openai"),
+		})
+		if errToPlain != nil {
+			t.Fatalf("Execute(override to plain) error = %v", errToPlain)
+		}
+		if len(capturedHeaders) != before+1 {
+			t.Fatalf("captured %d requests, want %d", len(capturedHeaders), before+1)
+		}
+		if vals := capturedHeaders[len(capturedHeaders)-1].Values("X-Tbh-Contributor-Mode"); len(vals) != 0 {
+			t.Errorf("override to plain: expected X-Tbh-Contributor-Mode absent, got %v", vals)
+		}
+	})
+}
+
+func TestMetaExecutor_Execute_SendsClientIdHeader_Issue6117(t *testing.T) {
+	var capturedClientId string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedClientId = r.Header.Get("X-Client-Id")
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+	_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+	if capturedClientId != metaClientSurface {
+		t.Errorf("Execute: captured X-Client-Id = %q, want %q", capturedClientId, metaClientSurface)
+	}
+}
+
+func TestMetaExecutor_Refresh_PreservesSubscriptionMetadata_Issue6117(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"api_key":            "LLM|minted-sub",
+			"subs_tier_name":     "High Usage",
+			"subs_tier_id":       "high_usage",
+			"is_subs_active":     true,
+			"has_payment_method": true,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token": "dca:test-sub",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+	refreshed, errRefresh := NewMetaExecutor(nil).Refresh(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("Refresh() error = %v", errRefresh)
+	}
+	for key, want := range map[string]any{
+		"subs_tier_name":     "High Usage",
+		"subs_tier_id":       "high_usage",
+		"is_subs_active":     true,
+		"has_payment_method": true,
+	} {
+		got, ok := refreshed.Metadata[key]
+		if !ok || got != want {
+			t.Errorf("refreshed.Metadata[%q] = %v (present=%t), want %v", key, got, ok, want)
+		}
+	}
+}
+
+func TestMetaExecutor_Refresh_ClearsStaleSubscriptionMetadata_Issue6117(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"api_key":            "LLM|minted-sub",
+			"subs_tier_name":     "",
+			"subs_tier_id":       "",
+			"is_subs_active":     false,
+			"has_payment_method": false,
+		})
+	}))
+	defer server.Close()
+	t.Setenv("META_MINT_URL", server.URL)
+
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Metadata: map[string]any{
+			"dca_token":      "dca:test-sub",
+			"subs_tier_name": "Old Tier",
+			"subs_tier_id":   "old_tier",
+			"is_subs_active": true,
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+	refreshed, errRefresh := NewMetaExecutor(nil).Refresh(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("Refresh() error = %v", errRefresh)
+	}
+	if tier, ok := refreshed.Metadata["subs_tier_name"]; ok && tier != "" {
+		t.Errorf("expected subs_tier_name to be cleared, got %v", tier)
+	}
+	if tierID, ok := refreshed.Metadata["subs_tier_id"]; ok && tierID != "" {
+		t.Errorf("expected subs_tier_id to be cleared, got %v", tierID)
+	}
+	if active, ok := refreshed.Metadata["is_subs_active"].(bool); !ok || active {
+		t.Errorf("expected is_subs_active to be false, got %v", active)
+	}
+}
+
+func TestMetaExecutor_NotFoundCooldown_Shortened_Issue6117(t *testing.T) {
+	previous := cliproxyauth.QuotaCooldownDisabledForAuth(nil)
+	cliproxyauth.SetQuotaCooldownDisabled(false)
+	t.Cleanup(func() { cliproxyauth.SetQuotaCooldownDisabled(previous) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"model not found"}}`))
+	}))
+	defer server.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(NewMetaExecutor(&config.Config{}))
+	auth := &cliproxyauth.Auth{
+		ID:       "meta-404-test",
+		Provider: "meta",
+		Metadata: map[string]any{
+			"api_key":   "LLM|test",
+			"auth_kind": "oauth",
+		},
+		Attributes: map[string]string{
+			"base_url": server.URL,
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "meta", []*registry.ModelInfo{{ID: "muse-spark-1.3"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: []byte(`{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	_, _ = manager.Execute(context.Background(), []string{"meta"}, req, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+	})
+
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to be registered")
+	}
+	state := updated.ModelStates["muse-spark-1.3"]
+	if state == nil || !state.Unavailable {
+		t.Fatalf("expected model state to be unavailable, got %#v", state)
+	}
+	remaining := time.Until(state.NextRetryAfter)
+	if remaining < 4*time.Minute || remaining > 6*time.Minute {
+		t.Fatalf("expected short ~5m cooldown for Meta 404, got remaining=%v", remaining)
+	}
+}
+
+func TestMetaExecutor_Execute_StripsSearchContentTypesFromWebSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3-contributor",
+		"input": [{"role": "user", "content": "search something"}],
+		"tools": [
+			{"type": "function", "name": "lookup", "parameters": {"type": "object"}},
+			{"type": "web_search", "external_web_access": true, "search_content_types": ["text", "image"]}
+		]
+	}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3-contributor",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	tools := ojson.GetBytes(gotBody, "tools").Array()
+	var foundWebSearch bool
+	for _, tool := range tools {
+		if tool.Get("type").String() == "web_search" {
+			foundWebSearch = true
+			if tool.Get("search_content_types").Exists() {
+				t.Fatalf("web_search tool still contains search_content_types: %s", gotBody)
+			}
+		}
+	}
+	if !foundWebSearch {
+		t.Fatalf("web_search tool missing from forwarded body: %s", gotBody)
+	}
+}
+
+func TestMetaExecutor_ExecuteStream_StripsSearchContentTypesFromWebSearch(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			http.Error(w, errRead.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeMetaResponsesOK(w, "stream-ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3-contributor",
+		"input": [{"role": "user", "content": "search something"}],
+		"tools": [
+			{"type": "web_search", "external_web_access": true, "search_content_types": ["text", "image"]}
+		]
+	}`)
+
+	streamResult, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3-contributor",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	// Consume stream chunks
+	for range streamResult.Chunks {
+	}
+
+	tools := ojson.GetBytes(gotBody, "tools").Array()
+	var foundWebSearch bool
+	for _, tool := range tools {
+		if tool.Get("type").String() == "web_search" {
+			foundWebSearch = true
+			if tool.Get("search_content_types").Exists() {
+				t.Fatalf("web_search tool still contains search_content_types in stream request: %s", gotBody)
+			}
+		}
+	}
+	if !foundWebSearch {
+		t.Fatalf("web_search tool missing from forwarded stream body: %s", gotBody)
+	}
+}
+
+func TestMetaExecutor_NormalizesToolFieldsForCodexUserAgent(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`))
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+
+	payload := []byte(`{
+		"model": "muse-spark-1.3",
+		"input": [
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "functions__exec_command",
+						"parameters": {
+							"type": "object",
+							"properties": {
+								"yield_time_ms": {"type": "number"}
+							}
+						}
+					}
+				]
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"name": "exec_command",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"cmd": {"type": "string"},
+						"yield_time_ms": {"type": "number"},
+						"max_output_tokens": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "write_stdin",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"session_id": {"type": "number"},
+						"yield_time_ms": {"type": "number"},
+						"max_output_tokens": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "sleep",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"duration_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "wait_agent",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "wait",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"yield_time_ms": {"type": "number"},
+						"max_tokens": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "tool_search",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"limit": {"type": "number"}
+					}
+				}
+			},
+			{
+				"type": "function",
+				"name": "test_sync_tool",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"sleep_before_ms": {"type": "number"},
+						"sleep_after_ms": {"type": "number"},
+						"participants": {"type": "number"},
+						"timeout_ms": {"type": "number"}
+					}
+				}
+			}
+		]
+	}`)
+
+	// 1. With non-Codex User-Agent, tool types must remain unchanged (number).
+	gotBody = nil
+	_, errExecNonCodex := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"curl/8.7.1"}},
+	})
+	if errExecNonCodex != nil {
+		t.Fatalf("Execute(non-codex) error = %v", errExecNonCodex)
+	}
+	if gotType := ojson.GetBytes(gotBody, "tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("expected non-Codex UA to preserve number, got %q", gotType)
+	}
+
+	// 2. With nil headers, tool types must remain unchanged (number).
+	gotBody = nil
+	_, errExecNilHeaders := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+	})
+	if errExecNilHeaders != nil {
+		t.Fatalf("Execute(nil headers) error = %v", errExecNilHeaders)
+	}
+	if gotType := ojson.GetBytes(gotBody, "tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+		t.Fatalf("expected nil headers to preserve number, got %q", gotType)
+	}
+
+	// 3. With Codex User-Agent, specified fields must be normalized to integer.
+	gotBody = nil
+	_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	toolMap := make(map[string]ojson.Result)
+	for _, tool := range ojson.GetBytes(gotBody, "tools").Array() {
+		toolMap[tool.Get("name").String()] = tool
+	}
+
+	expected := map[string][]string{
+		"exec_command":   {"yield_time_ms", "max_output_tokens", "timeout_ms"},
+		"write_stdin":    {"session_id", "yield_time_ms", "max_output_tokens"},
+		"sleep":          {"duration_ms"},
+		"wait_agent":     {"timeout_ms"},
+		"wait":           {"yield_time_ms", "max_tokens"},
+		"tool_search":    {"limit"},
+		"test_sync_tool": {"sleep_before_ms", "sleep_after_ms", "participants", "timeout_ms"},
+	}
+
+	for toolName, fields := range expected {
+		tool, ok := toolMap[toolName]
+		if !ok {
+			t.Fatalf("missing tool: %s", toolName)
+		}
+		for _, field := range fields {
+			if got := tool.Get("parameters.properties." + field + ".type").String(); got != "integer" {
+				t.Errorf("tool %s field %s type = %q, want integer", toolName, field, got)
+			}
+		}
+	}
+
+	// Verify input[].additional_tools is also normalized to integer
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta Execute additional_tools yield_time_ms type = %q, want integer", gotType)
+	}
+
+	// 4. Test ExecuteStream: verify both tools and additional_tools are normalized to integer
+	gotBody = nil
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Headers:      http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}},
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream tools exec_command yield_time_ms type = %q, want integer", gotType)
+	}
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "integer" {
+		t.Fatalf("Meta stream additional_tools yield_time_ms type = %q, want integer", gotType)
+	}
+}
+
+func TestMetaApplyPatchResponsesExecutor(t *testing.T) {
+	testApplyPatchResponsesExecutor(t, "meta", NewMetaExecutor(&config.Config{}), "muse-spark-1.3")
+}
+
+func TestMetaExecutor_Execute_PreservesMuseReasoningEncryptedContent_Issue6450(t *testing.T) {
+	var gotBody []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var errRead error
+		gotBody, errRead = io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	// Shape-valid synthetic Meta envelope (observed header + 1 KiB bucket),
+	// so this exercises the positively recognized Meta branch end to end
+	// rather than the unknown-format fallback. No captured value is embedded.
+	museEncryptedContent := "Q-PaDgE"
+	for len(museEncryptedContent) < 1426 {
+		museEncryptedContent += "A"
+	}
+	reqPayload := []byte(`{"model":"muse-spark-1.3","store":false,"input":[` +
+		`{"id":"rs_1","type":"reasoning","encrypted_content":"` + museEncryptedContent + `","content":[{"type":"reasoning_text","text":"thinking step"}],"summary":[]},` +
+		`{"id":"rs_claude","type":"reasoning","encrypted_content":"` + testClaudeCAISSample + `","summary":[]},` +
+		`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}` +
+		`]}`)
+
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if gotEC := ojson.GetBytes(gotBody, "input.0.encrypted_content").String(); gotEC != museEncryptedContent {
+		t.Fatalf("encrypted_content = %q, want %q; body=%s", gotEC, museEncryptedContent, gotBody)
+	}
+	if gotID := ojson.GetBytes(gotBody, "input.0.id").String(); gotID != "rs_1" {
+		t.Fatalf("reasoning id = %q, want rs_1; body=%s", gotID, gotBody)
+	}
+	assertEmptyReasoningContent(t, gotBody, "input.0.content")
+	if gotSummary := ojson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "thinking step" {
+		t.Fatalf("summary = %q, want 'thinking step'; body=%s", gotSummary, gotBody)
+	}
+	// Verify Claude signature stripped and id dropped when store=false
+	if ojson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
+		t.Fatalf("Claude signature should be stripped: %s", gotBody)
+	}
+	if ojson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("Claude reasoning id should be dropped: %s", gotBody)
+	}
+
+	gotBody = nil
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.3",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("codex"),
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for range streamResult.Chunks {
+	}
+	if gotEC := ojson.GetBytes(gotBody, "input.0.encrypted_content").String(); gotEC != museEncryptedContent {
+		t.Fatalf("stream encrypted_content = %q, want %q; body=%s", gotEC, museEncryptedContent, gotBody)
+	}
+	if gotID := ojson.GetBytes(gotBody, "input.0.id").String(); gotID != "rs_1" {
+		t.Fatalf("stream reasoning id = %q, want rs_1; body=%s", gotID, gotBody)
+	}
+	assertEmptyReasoningContent(t, gotBody, "input.0.content")
+	if gotSummary := ojson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "thinking step" {
+		t.Fatalf("stream summary = %q, want 'thinking step'; body=%s", gotSummary, gotBody)
+	}
+	if ojson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
+		t.Fatalf("stream Claude signature should be stripped: %s", gotBody)
+	}
+	if ojson.GetBytes(gotBody, "input.1.id").Exists() {
+		t.Fatalf("stream Claude reasoning id should be dropped: %s", gotBody)
+	}
+}
+
+func TestMetaExecutor_FiltersSubscriptionUsageGlobally(t *testing.T) {
+	const subscriptionUsageSSE = "event: response.subscription_usage\n" +
+		"data: {\"subscription\":{\"tier\":\"1234567890123456\",\"weekly\":{\"resets_at\":1792368000,\"used_percent\":80},\"window\":{\"resets_at\":1792272519,\"used_percent\":10,\"window_duration_mins\":300}},\"type\":\"response.subscription_usage\"}\n\n"
+	const createdSSE = "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"muse-spark-1.3\"}}\n\n"
+	const deltaSSE = "event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n"
+	const completedSSE = "event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"muse-spark-1.3\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n"
+
+	upstreamStream := subscriptionUsageSSE + createdSSE + deltaSSE + subscriptionUsageSSE + completedSSE + subscriptionUsageSSE
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, upstreamStream)
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	formats := []struct {
+		format  string
+		payload string
+	}{
+		{
+			format:  "openai-response",
+			payload: `{"model":"muse-spark-1.3","input":"hello"}`,
+		},
+		{
+			format:  "codex",
+			payload: `{"model":"muse-spark-1.3","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
+		},
+		{
+			format:  "openai",
+			payload: `{"model":"muse-spark-1.3","messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			format:  "claude",
+			payload: `{"model":"muse-spark-1.3","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			format:  "gemini",
+			payload: `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+		},
+	}
+
+	for _, tc := range formats {
+		t.Run("stream/"+tc.format, func(t *testing.T) {
+			streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "muse-spark-1.3",
+				Payload: []byte(tc.payload),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString(tc.format),
+				Stream:       true,
+			})
+			if errStream != nil {
+				t.Fatalf("ExecuteStream(%s) error = %v", tc.format, errStream)
+			}
+
+			var combined strings.Builder
+			for chunk := range streamResult.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("ExecuteStream(%s) chunk error = %v", tc.format, chunk.Err)
+				}
+				combined.Write(chunk.Payload)
+				combined.WriteByte('\n')
+			}
+
+			got := combined.String()
+			if strings.Contains(got, "subscription_usage") || strings.Contains(got, "1234567890123456") {
+				t.Fatalf("ExecuteStream(%s) leaked subscription_usage event:\n%s", tc.format, got)
+			}
+			if !strings.Contains(got, "hello") {
+				t.Fatalf("ExecuteStream(%s) missing normal response content:\n%s", tc.format, got)
+			}
+		})
+
+		t.Run("nonstream/"+tc.format, func(t *testing.T) {
+			resp, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "muse-spark-1.3",
+				Payload: []byte(tc.payload),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString(tc.format),
+			})
+			if errExec != nil {
+				t.Fatalf("Execute(%s) error = %v", tc.format, errExec)
+			}
+
+			got := string(resp.Payload)
+			if strings.Contains(got, "subscription_usage") || strings.Contains(got, "1234567890123456") {
+				t.Fatalf("Execute(%s) leaked subscription_usage event:\n%s", tc.format, got)
+			}
+			if !strings.Contains(got, "hello") {
+				t.Fatalf("Execute(%s) missing normal response content:\n%s", tc.format, got)
+			}
+		})
+	}
+}
+
+func TestMetaExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T) {
+	var seenBodies [][]byte
+	var returnIncomplete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read upstream body: %v", errRead)
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		seenBodies = append(seenBodies, body)
+		for idx, item := range ojson.GetBytes(body, "input").Array() {
+			switch item.Get("type").String() {
+			case "compaction_trigger", "compaction":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":null,"message":"` + "`" + fmt.Sprintf("input[%d]", idx) + "`" + ` did not match any supported type","param":"` + fmt.Sprintf("input[%d]", idx) + `","type":"invalid_request_error"}}`))
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		if returnIncomplete {
+			_, _ = io.WriteString(w, "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_meta_inc\",\"object\":\"response\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"model\":\"muse-wonder-1.0\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Partial truncated summary.\"}]}],\"usage\":{\"input_tokens\":15,\"output_tokens\":5,\"total_tokens\":20}}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_meta_sum\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"muse-wonder-1.0\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Summary retaining CPA_COMPACTION_MARKER_42.\"}]}],\"usage\":{\"input_tokens\":15,\"output_tokens\":5,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n")
+	}))
+	defer server.Close()
+
+	exec := NewMetaExecutor(&config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "muse-wonder-1.0"}},
+				Params: map[string]any{
+					"max_output_tokens": 2048,
+				},
+			}},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	triggerPayload := []byte(`{
+		"model": "muse-wonder-1.0",
+		"stream": true,
+		"store": false,
+		"reasoning": {"effort": "low"},
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "Remember the exact test marker CPA_COMPACTION_MARKER_42."}]
+			},
+			{"type": "compaction_trigger"}
+		]
+	}`)
+
+	streamResult, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream(compaction_trigger) error = %v", errStream)
+	}
+
+	var streamBuf bytes.Buffer
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamBuf.Write(chunk.Payload)
+	}
+
+	completed := claudeCompactionCompletedResponse(t, streamBuf.String())
+	outputItems := completed.Get("response.output").Array()
+	if len(outputItems) != 1 || outputItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in stream response, got: %s", completed.Raw)
+	}
+	capsule := outputItems[0].Get("encrypted_content").String()
+	if !strings.HasPrefix(capsule, "cpa-ag-compact-v1:") {
+		t.Fatalf("expected CPA compaction capsule prefix, got %q", capsule)
+	}
+	if gotCached := completed.Get("response.usage.input_tokens_details.cached_tokens").Int(); gotCached != 3 {
+		t.Fatalf("cached_tokens = %d, want 3", gotCached)
+	}
+
+	nonStreamResp, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errExec != nil {
+		t.Fatalf("Execute(compaction_trigger) error = %v", errExec)
+	}
+	nonStreamItems := ojson.GetBytes(nonStreamResp.Payload, "output").Array()
+	if len(nonStreamItems) != 1 || nonStreamItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in non-stream response, got: %s", nonStreamResp.Payload)
+	}
+
+	replayPayload := []byte(fmt.Sprintf(`{
+		"model": "muse-wonder-1.0",
+		"stream": true,
+		"input": [
+			{"type": "compaction", "encrypted_content": "foreign-opaque-token"},
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What is the exact test marker? Reply with only the marker."}]}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+
+	contStream, errCont := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: replayPayload,
+	})
+	if errCont != nil {
+		t.Fatalf("ExecuteStream(replay) error = %v", errCont)
+	}
+	for chunk := range contStream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("continuation stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	lastSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(lastSeen, []byte("Summary retaining CPA_COMPACTION_MARKER_42.")) {
+		t.Fatalf("expected expanded summary in continuation upstream request, got: %s", lastSeen)
+	}
+	if bytes.Contains(lastSeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("expected foreign compaction item to be dropped, got: %s", lastSeen)
+	}
+
+	if _, errNonStreamReplay := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: replayPayload,
+	}); errNonStreamReplay != nil {
+		t.Fatalf("Execute(replay) error = %v", errNonStreamReplay)
+	}
+	nonStreamReplaySeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(nonStreamReplaySeen, []byte("Summary retaining CPA_COMPACTION_MARKER_42.")) || bytes.Contains(nonStreamReplaySeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("unexpected non-stream replay upstream body: %s", nonStreamReplaySeen)
+	}
+
+	strippedTriggerPayload := []byte(`{"model":"muse-wonder-1.0","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember the exact test marker CPA_COMPACTION_MARKER_42."}]}]}`)
+	origOnlyResp, errOrigOnly := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: strippedTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errOrigOnly != nil {
+		t.Fatalf("Execute(OriginalRequest-only trigger) error = %v", errOrigOnly)
+	}
+	if got := ojson.GetBytes(origOnlyResp.Payload, "output.0.type").String(); got != "compaction" {
+		t.Fatalf("OriginalRequest-only trigger output[0].type = %q, want compaction", got)
+	}
+
+	corruptedPayload := []byte(`{
+		"model": "muse-wonder-1.0",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "encrypted_content": "cpa-ag-compact-v1:not-valid"},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+		]
+	}`)
+	_, errCorrupt := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: corruptedPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: corruptedPayload,
+	})
+	if errCorrupt == nil {
+		t.Fatal("expected error for corrupted compaction capsule, got nil")
+	}
+	assertStatusErr(t, errCorrupt, http.StatusBadRequest)
+
+	secondTriggerPayload := []byte(fmt.Sprintf(`{
+		"model": "muse-wonder-1.0",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Second phase work."}]},
+			{"type": "compaction_trigger"}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+	secondResp, errSecond := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: secondTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: secondTriggerPayload,
+	})
+	if errSecond != nil {
+		t.Fatalf("Execute(second compaction_trigger) error = %v", errSecond)
+	}
+	if got := len(ojson.GetBytes(secondResp.Payload, "output").Array()); got != 1 {
+		t.Fatalf("second compaction output len = %d, want 1", got)
+	}
+	secondSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(secondSeen, []byte("Summary retaining CPA_COMPACTION_MARKER_42.")) {
+		t.Fatalf("expected first capsule summary in second compaction request, got: %s", secondSeen)
+	}
+	if got := ojson.GetBytes(secondSeen, "max_output_tokens").Int(); got != 2048 {
+		t.Fatalf("max_output_tokens = %d, want payload rule 2048; body=%s", got, secondSeen)
+	}
+
+	returnIncomplete = true
+	_, errIncExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncExec == nil {
+		t.Fatal("expected Execute(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncExec, http.StatusBadGateway)
+
+	_, errIncStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-wonder-1.0",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncStream == nil {
+		t.Fatal("expected ExecuteStream(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncStream, http.StatusBadGateway)
+}

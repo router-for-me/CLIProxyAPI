@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	internalpluginstore "github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	internalpluginstore "github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
 )
 
 const (
@@ -37,6 +37,7 @@ const (
 type Source = internalpluginstore.Source
 type Registry = internalpluginstore.Registry
 type Plugin = internalpluginstore.Plugin
+type PluginLocale = internalpluginstore.PluginLocale
 type Version = internalpluginstore.Version
 type Release = internalpluginstore.Release
 type ReleaseAsset = internalpluginstore.ReleaseAsset
@@ -91,6 +92,15 @@ func NewClientWithResolvedAuthExpiry(httpClient HTTPDoer, registryURL string, au
 	}}
 }
 
+// WithNetworkScope returns a copy with the given proxy/egress identity for shared
+// GitHub API cooldowns. Use the same scope for clients with the same egress and
+// credentials; an empty scope denotes direct connections. This does not configure
+// the HTTP transport, which must use the corresponding proxy/egress separately.
+func (c Client) WithNetworkScope(networkScope string) Client {
+	c.inner.NetworkScope = strings.TrimSpace(networkScope)
+	return c
+}
+
 func (c *Client) ClearAuth() {
 	if c == nil {
 		return
@@ -106,6 +116,10 @@ func DefaultSource() Source {
 
 func NormalizeSources(registryURLs []string) ([]Source, error) {
 	return internalpluginstore.NormalizeSources(registryURLs)
+}
+
+func NormalizePluginLocales(locales map[string]PluginLocale) map[string]PluginLocale {
+	return internalpluginstore.NormalizePluginLocales(locales)
 }
 
 func SourceID(registryURL string) string {

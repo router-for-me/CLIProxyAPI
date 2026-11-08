@@ -6,8 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
@@ -81,65 +80,147 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
+// Matches reports whether the text contains any of the configured sensitive words.
+func (m *SensitiveWordMatcher) Matches(text string) bool {
+	if m == nil || m.regex == nil {
+		return false
+	}
+	return m.regex.MatchString(text)
+}
+
+// ObfuscateText replaces all sensitive words in the text.
+func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
+	return m.obfuscateText(text)
+}
+
 // ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
 func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
-	if matcher == nil || matcher.regex == nil {
+	if matcher == nil || matcher.regex == nil || len(payload) == 0 {
 		return payload
 	}
-
-	// Obfuscate in system blocks
-	payload = obfuscateSystemBlocks(payload, matcher)
-
-	// Obfuscate in messages
-	payload = obfuscateMessages(payload, matcher)
-
-	return payload
+	doc := ojson.NewDoc(payload)
+	if !ObfuscateSensitiveWordsDoc(doc, matcher) {
+		return payload
+	}
+	return doc.Bytes()
 }
 
-// obfuscateSystemBlocks obfuscates sensitive words in system blocks.
-func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte {
-	system := gjson.GetBytes(payload, "system")
-	if !system.Exists() {
+// ObfuscateSensitiveWordsDoc processes doc in place and obfuscates sensitive words
+// in system blocks and message content.
+func ObfuscateSensitiveWordsDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
+	if matcher == nil || matcher.regex == nil || doc == nil || doc.Len() == 0 {
+		return false
+	}
+	modified := obfuscateSystemBlocksDoc(doc, matcher)
+	if obfuscateMessagesDoc(doc, matcher) {
+		modified = true
+	}
+	return modified
+}
+
+// ObfuscateSensitiveWordsInSystemInstruction obfuscates sensitive words in an Antigravity system instruction.
+func ObfuscateSensitiveWordsInSystemInstruction(payload []byte, matcher *SensitiveWordMatcher) []byte {
+	if matcher == nil || matcher.regex == nil || len(payload) == 0 {
 		return payload
 	}
+	doc := ojson.NewDoc(payload)
+	if !ObfuscateSensitiveWordsInSystemInstructionDoc(doc, matcher) {
+		return payload
+	}
+	return doc.Bytes()
+}
 
-	if system.IsArray() {
-		modified := false
-		system.ForEach(func(key, value gjson.Result) bool {
-			if value.Get("type").String() == "text" {
-				text := value.Get("text").String()
-				obfuscated := matcher.obfuscateText(text)
-				if obfuscated != text {
-					path := "system." + key.String() + ".text"
-					payload, _ = sjson.SetBytes(payload, path, obfuscated)
+// ObfuscateSensitiveWordsInSystemInstructionDoc obfuscates sensitive words in an Antigravity system instruction in place on doc.
+func ObfuscateSensitiveWordsInSystemInstructionDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
+	if matcher == nil || matcher.regex == nil || doc == nil || doc.Len() == 0 {
+		return false
+	}
+
+	modified := false
+	for _, path := range []string{"request.systemInstruction", "request.system_instruction"} {
+		instruction := doc.Get(path)
+		if !instruction.Exists() {
+			continue
+		}
+		if instruction.Type == ojson.String {
+			text := instruction.String()
+			if obfuscated := matcher.obfuscateText(text); obfuscated != text {
+				if errSet := doc.Set(path, obfuscated); errSet == nil {
+					modified = true
+				}
+			}
+			continue
+		}
+
+		parts := instruction.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		parts.ForEach(func(key, part ojson.Result) bool {
+			if part.Get("text").Type != ojson.String {
+				return true
+			}
+			text := part.Get("text").String()
+			if obfuscated := matcher.obfuscateText(text); obfuscated != text {
+				if errSet := doc.Set(path+".parts."+key.String()+".text", obfuscated); errSet == nil {
 					modified = true
 				}
 			}
 			return true
 		})
-		if modified {
-			return payload
-		}
-	} else if system.Type == gjson.String {
-		text := system.String()
-		obfuscated := matcher.obfuscateText(text)
-		if obfuscated != text {
-			payload, _ = sjson.SetBytes(payload, "system", obfuscated)
-		}
 	}
 
-	return payload
+	return modified
 }
 
-// obfuscateMessages obfuscates sensitive words in message content.
-func obfuscateMessages(payload []byte, matcher *SensitiveWordMatcher) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.Exists() || !messages.IsArray() {
-		return payload
+func obfuscateSystemBlocksDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
+	system := doc.Get("system")
+	if !system.Exists() {
+		return false
 	}
 
-	messages.ForEach(func(msgKey, msg gjson.Result) bool {
+	modified := false
+	if system.IsArray() {
+		system.ForEach(func(key, value ojson.Result) bool {
+			if value.Get("type").String() == "text" {
+				text := value.Get("text").String()
+				if strings.HasPrefix(text, "x-anthropic-billing-header:") {
+					return true
+				}
+				obfuscated := matcher.obfuscateText(text)
+				if obfuscated != text {
+					path := "system." + key.String() + ".text"
+					if errSet := doc.Set(path, obfuscated); errSet == nil {
+						modified = true
+					}
+				}
+			}
+			return true
+		})
+	} else if system.Type == ojson.String {
+		text := system.String()
+		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			obfuscated := matcher.obfuscateText(text)
+			if obfuscated != text {
+				if errSet := doc.Set("system", obfuscated); errSet == nil {
+					modified = true
+				}
+			}
+		}
+	}
+
+	return modified
+}
+
+func obfuscateMessagesDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
+	messages := doc.Get("messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false
+	}
+
+	modified := false
+	messages.ForEach(func(msgKey, msg ojson.Result) bool {
 		content := msg.Get("content")
 		if !content.Exists() {
 			return true
@@ -147,22 +228,24 @@ func obfuscateMessages(payload []byte, matcher *SensitiveWordMatcher) []byte {
 
 		msgPath := "messages." + msgKey.String()
 
-		if content.Type == gjson.String {
-			// Simple string content
+		if content.Type == ojson.String {
 			text := content.String()
 			obfuscated := matcher.obfuscateText(text)
 			if obfuscated != text {
-				payload, _ = sjson.SetBytes(payload, msgPath+".content", obfuscated)
+				if errSet := doc.Set(msgPath+".content", obfuscated); errSet == nil {
+					modified = true
+				}
 			}
 		} else if content.IsArray() {
-			// Array of content blocks
-			content.ForEach(func(blockKey, block gjson.Result) bool {
+			content.ForEach(func(blockKey, block ojson.Result) bool {
 				if block.Get("type").String() == "text" {
 					text := block.Get("text").String()
 					obfuscated := matcher.obfuscateText(text)
 					if obfuscated != text {
 						path := msgPath + ".content." + blockKey.String() + ".text"
-						payload, _ = sjson.SetBytes(payload, path, obfuscated)
+						if errSet := doc.Set(path, obfuscated); errSet == nil {
+							modified = true
+						}
 					}
 				}
 				return true
@@ -172,5 +255,5 @@ func obfuscateMessages(payload []byte, matcher *SensitiveWordMatcher) []byte {
 		return true
 	})
 
-	return payload
+	return modified
 }

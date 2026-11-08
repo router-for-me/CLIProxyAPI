@@ -6,14 +6,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,6 +32,7 @@ type modelRegistrationTask struct {
 	phase    int
 	category string
 	run      func(*openAICompatibilityRegistrationCache)
+	done     func()
 }
 
 type executorRegistrationOptions struct {
@@ -48,6 +49,16 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 	host.RegisterExecutors(manager, registry.GetGlobalRegistry())
 }
 
+// modelRegistrationTaskHook, if set, runs after auth-update commits and before
+// model registration workers start. Tests use it to prove registration no longer
+// holds authUpdateMu.
+var modelRegistrationTaskHook func()
+
+// modelRegistrationTaskPostRunHook, if set, runs synchronously inside model registration
+// tasks after completeModelRegistrationForAuthWithCache completes. Tests use it to inject
+// concurrent auth updates before batch registration finishes.
+var modelRegistrationTaskPostRunHook func(authID string)
+
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
 //
@@ -63,8 +74,8 @@ func (s *Service) registerPluginAuthParser() {
 		parser = s.pluginHost
 	}
 	sdkAuth.RegisterPluginAuthParser(parser)
-	if s != nil && s.watcher != nil {
-		s.watcher.SetPluginAuthParser(parser)
+	if watcher := s.currentWatcher(); watcher != nil {
+		watcher.SetPluginAuthParser(parser)
 	}
 }
 
@@ -157,6 +168,8 @@ func (s *Service) refreshPluginModelRegistrations(ctx context.Context) {
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
 		return
 	}
+	// Native capability probes publish and refresh their scheduler entries
+	// asynchronously; startup and config updates must not wait for network I/O.
 	s.registerModelsForAuthBatch(ctx, s.coreManager.List())
 }
 
@@ -164,6 +177,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 	if s == nil || s.coreManager == nil || len(auths) == 0 {
 		return
 	}
+	var registeredGen sync.Map
 	tasks := make([]modelRegistrationTask, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil {
@@ -174,11 +188,31 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),
 			run: func(compatCache *openAICompatibilityRegistrationCache) {
-				s.completeModelRegistrationForAuthWithCache(ctx, authForRegistration, compatCache)
+				gen := s.completeModelRegistrationForAuthWithCache(ctx, authForRegistration, compatCache)
+				registeredGen.Store(authForRegistration.ID, gen)
+				if modelRegistrationTaskPostRunHook != nil {
+					modelRegistrationTaskPostRunHook(authForRegistration.ID)
+				}
 			},
 		})
 	}
 	s.runModelRegistrationTasks(ctx, tasks)
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+
+	compatCache := s.newOpenAICompatibilityRegistrationCache()
+	for _, latest := range s.coreManager.List() {
+		if latest == nil || latest.ID == "" {
+			continue
+		}
+		lastGenVal, loaded := registeredGen.Load(latest.ID)
+		lastGen, _ := lastGenVal.(uint64)
+		if !loaded || latest.Generation != lastGen {
+			s.ensureExecutorsForAuthWithContext(ctx, latest, false)
+			s.completeModelRegistrationForAuthWithCache(ctx, latest, compatCache)
+		}
+	}
 }
 
 func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRegistrationTask) {
@@ -243,12 +277,20 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 			go func() {
 				defer wg.Done()
 				for task := range taskCh {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					task.run(compatCache)
+					func(task modelRegistrationTask) {
+						if task.done != nil {
+							defer task.done()
+						}
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						if modelRegistrationTaskHook != nil {
+							modelRegistrationTaskHook()
+						}
+						task.run(compatCache)
+					}(task)
 				}
 			}()
 		}
@@ -316,7 +358,17 @@ func (s *Service) registerModelRefreshCallback() {
 
 		providerSet := make(map[string]bool, len(changedProviders))
 		for _, p := range changedProviders {
-			providerSet[strings.ToLower(strings.TrimSpace(p))] = true
+			norm := strings.ToLower(strings.TrimSpace(p))
+			if norm != "" {
+				providerSet[norm] = true
+				switch norm {
+				case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
+					providerSet["kimi"] = true
+					providerSet["kimi-ai"] = true
+					providerSet["kimi.ai"] = true
+					providerSet["kimi.com"] = true
+				}
+			}
 		}
 
 		auths := s.coreManager.List()

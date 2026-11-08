@@ -1,6 +1,10 @@
 package helps
 
-import "github.com/tidwall/gjson"
+import (
+	"strings"
+
+	"github.com/MoeForge/moego/ojson"
+)
 
 var defaultClaudeBuiltinToolNames = []string{
 	"web_search",
@@ -17,20 +21,44 @@ func newClaudeBuiltinToolRegistry() map[string]bool {
 	return registry
 }
 
+// IsClaudeServerToolType reports whether a typed declaration is a recognized
+// Anthropic-operated tool. Client-defined type:"custom" declarations are not
+// server tools and must remain eligible for MCP aliasing.
+func IsClaudeServerToolType(toolType string) bool {
+	toolType = strings.ToLower(strings.TrimSpace(toolType))
+	for _, prefix := range []string{
+		"advisor_",
+		"agent_toolset_",
+		"bash_",
+		"code_execution_",
+		"computer_",
+		"memory_",
+		"text_editor_",
+		"tool_search_tool_",
+		"web_fetch_",
+		"web_search_",
+	} {
+		if strings.HasPrefix(toolType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func AugmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map[string]bool {
 	if registry == nil {
 		registry = newClaudeBuiltinToolRegistry()
 	}
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return registry
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("type").String() == "" {
+	tools.ForEach(func(_, tool ojson.Result) bool {
+		if !IsClaudeServerToolType(tool.Get("type").String()) {
 			return true
 		}
 		if name := tool.Get("name").String(); name != "" {
-			registry[name] = true
+			registry[strings.Clone(name)] = true
 		}
 		return true
 	})

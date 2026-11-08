@@ -2,8 +2,9 @@ package signature
 
 import (
 	"bytes"
-	"encoding/base64"
+	"crypto/sha256"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -248,6 +249,32 @@ func TestByteEntropyRatio_SingleByteReturnsZero(t *testing.T) {
 	}
 }
 
+func TestInspectGrokEncryptedContent_RouterSuffixed(t *testing.T) {
+	rawBytes := make([]byte, 135)
+	for i := range rawBytes {
+		rawBytes[i] = byte((i*73 + 19) & 0xff)
+	}
+	native := base64.RawStdEncoding.EncodeToString(rawBytes)
+	suffix := strings.Repeat("Ab3", 21)[:62]
+	routed := native + "." + suffix
+
+	info, err := InspectGrokEncryptedContent(routed)
+	if err != nil {
+		t.Fatalf("InspectGrokEncryptedContent(routed) error = %v", err)
+	}
+	if info.RouterSuffix != suffix || info.DecodedLen != len(rawBytes) {
+		t.Fatalf("info = %+v, want DecodedLen=%d RouterSuffix=%q", info, len(rawBytes), suffix)
+	}
+	if !IsRecognizedReasoningSignature(routed) {
+		t.Fatal("IsRecognizedReasoningSignature(routed Grok) = false, want true")
+	}
+	for _, bad := range []string{native + ".", native + ".bad-dash", native + ".a.b"} {
+		if _, err := InspectGrokEncryptedContent(bad); err == nil {
+			t.Fatalf("InspectGrokEncryptedContent(%q) unexpectedly succeeded", bad)
+		}
+	}
+}
+
 func testGeminiThoughtSignatureEnvelope() string {
 	payload := []byte{0x01, 0x0c}
 	for i := 0; i < 97; i++ {
@@ -332,4 +359,86 @@ func grokEncryptedContentSamplesPath() (string, bool) {
 		return path, false
 	}
 	return path, true
+}
+
+func TestSignatureProviderFromModelName_Grok(t *testing.T) {
+	for _, model := range []string{"grok-4.5", "grok-4.5-build", "grok-composer-2.5-fast", "grok-code-fast-1"} {
+		t.Run(model, func(t *testing.T) {
+			if got := SignatureProviderFromModelName(model); got != SignatureProviderGrok {
+				t.Errorf("SignatureProviderFromModelName(%q) = %q, want %q", model, got, SignatureProviderGrok)
+			}
+		})
+	}
+}
+
+// TestDetectSignatureProvider_NeverClassifiesGrok pins the contract that xAI is
+// a target-only family. Its ciphertext carries no envelope, no version byte and
+// no fixed length, so a positive detection rule would necessarily also claim
+// unrelated opaque payloads. Callers establish an xAI target from provenance and
+// then use InspectGrokEncryptedContent as a replay-safety check.
+func TestDetectSignatureProvider_NeverClassifiesGrok(t *testing.T) {
+	path, ok := grokEncryptedContentSamplesPath()
+	if !ok {
+		t.Skip("grok encrypted_content corpus missing; run docs/native-prompt-capture/scripts/harvest-grok-encrypted-content.sh")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read grok corpus: %v", err)
+	}
+	var samples []string
+	if err := json.Unmarshal(raw, &samples); err != nil {
+		var wrapped struct {
+			Samples []string `json:"samples"`
+		}
+		if err := json.Unmarshal(raw, &wrapped); err != nil {
+			t.Fatalf("parse grok corpus: %v", err)
+		}
+		samples = wrapped.Samples
+	}
+	if len(samples) == 0 {
+		t.Skip("grok encrypted_content corpus is empty")
+	}
+	for _, sig := range samples {
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Fatalf("DetectSignatureProvider = %q, want %q for native encrypted_content", got, SignatureProviderUnknown)
+		}
+	}
+}
+
+// TestDecideSignatureCompatibility_GrokDropsBlock contrasts with the Kimi
+// policy: xAI decrypts the blob and answers 400 for foreign or mutated input, so
+// an incompatible block cannot survive by shedding just its signature.
+func TestDecideSignatureCompatibility_GrokDropsBlock(t *testing.T) {
+	decision := DecideSignatureCompatibility(SignatureProviderGrok, observedFable5Sample, SignatureBlockKindUnknown)
+	if decision.Compatible {
+		t.Fatalf("Claude signature reported compatible with a Grok target")
+	}
+	if decision.Action != SignatureActionDropBlock {
+		t.Errorf("Action = %q, want %q", decision.Action, SignatureActionDropBlock)
+	}
+}
+
+func TestInspectGrokEncryptedContent_AcceptsPayloadStartingWithTinkPrefixByte(t *testing.T) {
+	// Uniform xAI ciphertext starts with 0x01 about once in 256 values; that
+	// alone must not make it look like a Gemini Vertex bare-Tink signature.
+	for seed := 0; seed < 4096; seed++ {
+		buf := make([]byte, 0, 256)
+		for i := 0; len(buf) < 256; i++ {
+			sum := sha256.Sum256([]byte{byte(seed), byte(seed >> 8), byte(i)})
+			buf = append(buf, sum[:]...)
+		}
+		buf = buf[:256]
+		if buf[0] != 0x01 {
+			continue
+		}
+		sig := base64.RawStdEncoding.EncodeToString(buf)
+		if _, err := InspectGrokEncryptedContent(sig); err != nil {
+			t.Fatalf("seed %d: Grok payload starting with 0x01 rejected: %v", seed, err)
+		}
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Fatalf("seed %d: DetectSignatureProvider = %q, want unknown", seed, got)
+		}
+		return
+	}
+	t.Fatal("no synthetic payload starting with 0x01 found")
 }

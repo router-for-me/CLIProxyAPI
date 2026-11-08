@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -740,6 +740,7 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 	fields := pluginConfigFields([]pluginapi.ConfigField{{
 		Name:        `<img src=x onerror=alert(1)>`,
 		Type:        pluginapi.ConfigFieldTypeEnum,
+		Default:     "safe & sound",
 		EnumValues:  []string{`<fast>`, `safe & sound`},
 		Description: `"quoted" 'single' <b>mode</b>`,
 	}})
@@ -751,6 +752,45 @@ func TestPluginDisplayFieldsEscapeHTML(t *testing.T) {
 	}
 	if fields[0].EnumValues[0] != html.EscapeString(`<fast>`) || fields[0].EnumValues[1] != html.EscapeString(`safe & sound`) {
 		t.Fatalf("enum values = %#v, want escaped values", fields[0].EnumValues)
+	}
+	if fields[0].Default != html.EscapeString(`safe & sound`) {
+		t.Fatalf("field default = %#v, want escaped default", fields[0].Default)
+	}
+
+	nested := pluginConfigFields([]pluginapi.ConfigField{
+		{
+			Name: "scalar",
+			Type: pluginapi.ConfigFieldTypeInteger,
+			Default: map[string]any{
+				"tier":    `<img src=x onerror=alert(1)>`,
+				"options": []any{`<b>x</b>`, float64(2), true, nil},
+			},
+		},
+		{
+			Name:    "count",
+			Type:    pluginapi.ConfigFieldTypeInteger,
+			Default: float64(3),
+		},
+	})
+	if len(nested) != 2 {
+		t.Fatalf("nested fields len = %d, want 2", len(nested))
+	}
+	nestedDefault, ok := nested[0].Default.(map[string]any)
+	if !ok {
+		t.Fatalf("nested default type = %T, want map[string]any", nested[0].Default)
+	}
+	if nestedDefault["tier"] != html.EscapeString(`<img src=x onerror=alert(1)>`) {
+		t.Fatalf("nested default tier = %#v, want escaped", nestedDefault["tier"])
+	}
+	options, ok := nestedDefault["options"].([]any)
+	if !ok || len(options) != 4 {
+		t.Fatalf("nested options = %#v, want []any with 4 items", nestedDefault["options"])
+	}
+	if options[0] != html.EscapeString(`<b>x</b>`) || options[1] != float64(2) || options[2] != true || options[3] != nil {
+		t.Fatalf("nested options = %#v, want escaped string and preserved non-strings", options)
+	}
+	if nested[1].Default != float64(3) {
+		t.Fatalf("numeric default = %#v, want preserved", nested[1].Default)
 	}
 	if fields[0].Description != html.EscapeString(`"quoted" 'single' <b>mode</b>`) {
 		t.Fatalf("description = %q, want escaped", fields[0].Description)

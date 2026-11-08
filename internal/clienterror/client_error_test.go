@@ -1,0 +1,390 @@
+package clienterror
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"testing"
+)
+
+type statusError struct {
+	status int
+	body   string
+}
+
+func (e statusError) Error() string   { return e.body }
+func (e statusError) StatusCode() int { return e.status }
+
+type responseBodyError struct {
+	status int
+	body   string
+}
+
+func (e responseBodyError) Error() string        { return "upstream request failed" }
+func (e responseBodyError) StatusCode() int      { return e.status }
+func (e responseBodyError) ResponseBody() []byte { return []byte(e.body) }
+
+func TestHTTPStatusFromError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "nil", err: nil, want: 0},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+		{name: "context canceled", err: context.Canceled, want: StatusClientClosedRequest},
+		{name: "context deadline exceeded", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "url error wraps deadline",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.DeadlineExceeded},
+			want: http.StatusGatewayTimeout,
+		},
+		{
+			name: "fmt wrap canceled",
+			err:  fmt.Errorf("upstream: %w", context.Canceled),
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "explicit status code wins",
+			err:  statusError{status: http.StatusTooManyRequests, body: "rate limited"},
+			want: http.StatusTooManyRequests,
+		},
+		{
+			name: "explicit status wins over canceled unwrap",
+			err: statusAndUnwrapError{
+				status: http.StatusTooManyRequests,
+				body:   "rate limited",
+				cause:  context.Canceled,
+			},
+			want: http.StatusTooManyRequests,
+		},
+		{
+			name: "zero status code falls through to canceled unwrap",
+			err: statusAndUnwrapError{
+				status: 0,
+				body:   "canceled",
+				cause:  context.Canceled,
+			},
+			want: StatusClientClosedRequest,
+		},
+		{
+			name: "zero status code without unwrap stays unknown",
+			err:  statusError{status: 0, body: context.Canceled.Error()},
+			want: 0,
+		},
+		{
+			name: "wrapped status code via errors.As",
+			err:  fmt.Errorf("execute failed: %w", statusError{status: http.StatusUnauthorized, body: "unauthorized"}),
+			want: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HTTPStatusFromError(tc.err); got != tc.want {
+				t.Fatalf("HTTPStatusFromError() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	if got := HTTPStatusFromErrorOr(errors.New("boom"), http.StatusBadGateway); got != http.StatusBadGateway {
+		t.Fatalf("HTTPStatusFromErrorOr(plain) = %d, want %d", got, http.StatusBadGateway)
+	}
+	if got := HTTPStatusFromErrorOr(context.Canceled, http.StatusBadGateway); got != StatusClientClosedRequest {
+		t.Fatalf("HTTPStatusFromErrorOr(canceled) = %d, want %d", got, StatusClientClosedRequest)
+	}
+}
+
+func TestGeminiFilterBlockMessage(t *testing.T) {
+	filterFrame := []byte(`{"response": {"candidates": [{"content": {"parts": [{"text": "This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`)
+	msg, blocked := GeminiFilterBlockMessage(filterFrame)
+	if !blocked || msg == "" {
+		t.Fatalf("GeminiFilterBlockMessage(filterFrame) = (%q, %v), want non-empty true", msg, blocked)
+	}
+
+	normalModelFrame := []byte(`{"response": {"candidates": [{"content": {"role": "model", "parts": [{"text": "This request was blocked by Gemini's filters. You can read more at https://policies.google.com/terms/generative-ai/use-policy."}]}}], "usageMetadata": {"promptTokenCount": 10}, "modelVersion": "gemini-4-argon-b", "responseId": "resp-1"}}`)
+	if gotMsg, gotBlocked := GeminiFilterBlockMessage(normalModelFrame); gotBlocked {
+		t.Fatalf("GeminiFilterBlockMessage(normalModelFrame) = (%q, true), want false when role/metadata present", gotMsg)
+	}
+
+	renamedUsageFrame := []byte(`{"response": {"candidates": [{"content": {"parts": [{"text": "This request was blocked by Gemini's filters. You can read more at https://policies.google.com/terms/generative-ai/use-policy."}]}}], "cpaUsageMetadata": {"promptTokenCount": 10}}}`)
+	if gotMsg, gotBlocked := GeminiFilterBlockMessage(renamedUsageFrame); gotBlocked {
+		t.Fatalf("GeminiFilterBlockMessage(renamedUsageFrame) = (%q, true), want false when cpaUsageMetadata present", gotMsg)
+	}
+}
+
+func TestClaudePolicyRefusalMessage(t *testing.T) {
+	deltaFrame := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback."},"container":null},"usage":{"input_tokens":4,"output_tokens":0}}`)
+	msg, blocked := ClaudePolicyRefusalMessage(deltaFrame)
+	if !blocked || msg == "" {
+		t.Fatalf("ClaudePolicyRefusalMessage(deltaFrame) = (%q, %v), want non-empty true", msg, blocked)
+	}
+	if !IsRequestFault(http.StatusBadGateway, errors.New(msg)) {
+		t.Fatalf("IsRequestFault() = false for %q, want true", msg)
+	}
+
+	plainRefusalWithoutDetails := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":2}}`)
+	if gotMsg, gotBlocked := ClaudePolicyRefusalMessage(plainRefusalWithoutDetails); gotBlocked {
+		t.Fatalf("ClaudePolicyRefusalMessage(plainRefusalWithoutDetails) = (%q, true), want false when stop_details absent", gotMsg)
+	}
+
+	sparseRefusal := []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal"}},"usage":{"output_tokens":0}}`)
+	sparseMsg, sparseBlocked := ClaudePolicyRefusalMessage(sparseRefusal)
+	if !sparseBlocked || sparseMsg == "" {
+		t.Fatalf("ClaudePolicyRefusalMessage(sparseRefusal) = (%q, %v), want non-empty true", sparseMsg, sparseBlocked)
+	}
+	if !IsClaudePolicyRefusalError(errors.New(sparseMsg)) {
+		t.Fatalf("IsClaudePolicyRefusalError(%q) = false, want true", sparseMsg)
+	}
+	if !IsRequestFault(http.StatusBadGateway, errors.New(sparseMsg)) {
+		t.Fatalf("IsRequestFault() = false for sparse refusal %q, want true", sparseMsg)
+	}
+}
+
+type statusAndUnwrapError struct {
+	status int
+	body   string
+	cause  error
+}
+
+func (e statusAndUnwrapError) Error() string { return e.body }
+func (e statusAndUnwrapError) StatusCode() int {
+	return e.status
+}
+func (e statusAndUnwrapError) Unwrap() error { return e.cause }
+
+func TestIsRequestFaultStructuredIdentifiers(t *testing.T) {
+	for _, code := range []string{
+		"cyber_policy",
+		"context_length_exceeded",
+		"message_too_big",
+		"string_above_max_length",
+		"invalid_prompt",
+		"invalid_value",
+		"unsupported_value",
+		"invalid_request_error",
+		"previous_response_not_found",
+	} {
+		t.Run("code/"+code, func(t *testing.T) {
+			err := errors.New(`{"error":{"code":"` + code + `"}}`)
+			if !IsRequestFault(http.StatusBadGateway, err) {
+				t.Fatalf("code %q was not classified as a request fault", code)
+			}
+		})
+	}
+
+	for _, errType := range []string{
+		"invalid_request",
+		"invalid_request_error",
+		"bad_request_error",
+		"invalid_prompt",
+	} {
+		t.Run("type/"+errType, func(t *testing.T) {
+			err := errors.New(`{"error":{"type":"` + errType + `"}}`)
+			if !IsRequestFault(http.StatusBadGateway, err) {
+				t.Fatalf("type %q was not classified as a request fault", errType)
+			}
+		})
+	}
+}
+
+func TestIsRequestFault(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{name: "bad request status", status: http.StatusBadRequest, err: errors.New("bad request"), want: true},
+		{name: "conflict status", status: http.StatusConflict, err: errors.New("conflict"), want: true},
+		{name: "entity too large status", status: http.StatusRequestEntityTooLarge, err: errors.New("too large"), want: true},
+		{name: "unprocessable status", status: http.StatusUnprocessableEntity, err: errors.New("unprocessable"), want: true},
+		{
+			name:   "cyber policy behind bad gateway",
+			status: http.StatusBadGateway,
+			err:    errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
+			want:   true,
+		},
+		{
+			name:   "gemini filter block frame message",
+			status: http.StatusBadGateway,
+			err:    errors.New("This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."),
+			want:   true,
+		},
+		{
+			name:   "context length behind internal error",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`{"response":{"error":{"type":"server_error","code":"context_length_exceeded"}}}`),
+			want:   true,
+		},
+		{
+			name:   "invalid request type behind bad gateway",
+			status: http.StatusBadGateway,
+			err:    errors.New(`{"body":{"error":{"type":"invalid_request","message":"invalid"}}}`),
+			want:   true,
+		},
+		{
+			name: "status from error",
+			err:  statusError{status: http.StatusConflict, body: "conflict"},
+			want: true,
+		},
+		{
+			// Verbatim upstream text: plain text, not JSON, so it can only be matched
+			// by message.
+			name:   "item not persisted with store=false",
+			status: http.StatusNotFound,
+			err:    errors.New("Item with id 'rs_0b5f3eb6f51f175c0169ca74e4a85881998539920821603a74' not found. Items are not persisted when `store` is set to false. Try again with `store` set to true, or remove this item from your input."),
+			want:   true,
+		},
+		{
+			name:   "Claude missing thread state",
+			status: http.StatusNotFound,
+			err:    errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."}}`),
+			want:   true,
+		},
+		{
+			name:   "Claude missing thread state plain text",
+			status: http.StatusNotFound,
+			err:    errors.New("No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."),
+			want:   true,
+		},
+		{
+			name: "Claude missing thread state in response body",
+			err: responseBodyError{
+				status: http.StatusNotFound,
+				body:   `{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`,
+			},
+			want: true,
+		},
+		{
+			// An upstream internal error is not a request fault: it must stay eligible
+			// for credential rotation and (credential, model) cooldown.
+			name:   "upstream unknown internal error",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`{"error":{"code":500,"message":"Internal error encountered.","status":"UNKNOWN"}}`),
+		},
+		{name: "plain not found", status: http.StatusNotFound, err: errors.New("model not found")},
+		{name: "generic Claude not found", status: http.StatusNotFound, err: errors.New(`{"error":{"type":"not_found_error","message":"Not Found"}}`)},
+		{name: "Claude missing thread on server error", status: http.StatusInternalServerError, err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`)},
+		{name: "unauthorized", status: http.StatusUnauthorized, err: errors.New("invalid token")},
+		{
+			name:   "deepseek authentication failure is credential failure",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`{"error":{"code":"invalid_request_error","message":"Authentication Fails, Your api key: ****heck is invalid","param":null,"type":"authentication_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "deepseek insufficient balance is payment failure",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"message":"Insufficient Balance","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "anthropic credit balance too low is payment failure",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`),
+			want:   false,
+		},
+		{
+			name: "anthropic credit balance too low in response body is payment failure",
+			err: responseBodyError{
+				status: http.StatusBadRequest,
+				body:   `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`,
+			},
+			want: false,
+		},
+		{
+			name:   "anthropic ordinary invalid_request_error remains request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"messages: at least one message is required"}}`),
+			want:   true,
+		},
+		{
+			name:   "structured model_not_found is not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`),
+			want:   false,
+		},
+		{
+			name:   "rate limit status overrides generic request error code",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"message":"Rate Limit Reached","type":"unknown_error","param":null,"code":"invalid_request_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "devin MCP configuration issue is request fault",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue."),
+			want:   true,
+		},
+		{
+			name: "devin MCP configuration issue from statusError",
+			err: statusError{
+				status: http.StatusForbidden,
+				body:   "devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.",
+			},
+			want: true,
+		},
+		{
+			name:   "devin content policy rejection is request fault",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): Your request was blocked by our content policy. Please remove sensitive or unsafe content from your prompt, memories, and other settings and try again."),
+			want:   true,
+		},
+		{
+			name:   "devin account model access permission_denied remains credential failure",
+			status: http.StatusForbidden,
+			err:    errors.New("devin upstream error (permission_denied): model access is not allowed for this account"),
+			want:   false,
+		},
+		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
+		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
+		{name: "invalid JSON body", status: http.StatusBadGateway, err: errors.New(`{"error":`)},
+		{name: "nil", status: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsRequestFault(tc.status, tc.err); got != tc.want {
+				t.Fatalf("IsRequestFault(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsClientCancellation(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{name: "status 499", status: StatusClientClosedRequest, want: true},
+		{name: "context canceled error", status: 0, err: context.Canceled, want: true},
+		{name: "fmt wrapped context canceled", status: 0, err: fmt.Errorf("read: %w", context.Canceled), want: true},
+		{name: "context canceled string in error", status: 0, err: errors.New("upstream failed: context canceled"), want: true},
+		{name: "client closed request string in error", status: 0, err: errors.New("client closed request"), want: true},
+		{name: "statusCoder with 499", status: 0, err: statusError{status: StatusClientClosedRequest, body: "aborted"}, want: true},
+		{name: "status 200 without error", status: http.StatusOK, err: nil, want: false},
+		{name: "status 400 bad request", status: http.StatusBadRequest, err: errors.New("bad request"), want: false},
+		{name: "status 429 rate limit", status: http.StatusTooManyRequests, err: errors.New("rate limited"), want: false},
+		{name: "status 500 internal error", status: http.StatusInternalServerError, err: errors.New("internal error"), want: false},
+		{name: "plain unrelated error", status: 0, err: errors.New("connection reset by peer"), want: false},
+		{name: "nil error and 0 status", status: 0, err: nil, want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsClientCancellation(tc.status, tc.err); got != tc.want {
+				t.Fatalf("IsClientCancellation(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}

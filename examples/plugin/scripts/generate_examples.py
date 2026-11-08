@@ -254,6 +254,7 @@ import "C"
 
 import (
 \t"encoding/json"
+\t"errors"
 \t"net/http"
 \t"time"
 \t"unsafe"
@@ -268,8 +269,9 @@ type envelope struct {{
 }}
 
 type envelopeError struct {{
-\tCode    string `json:"code"`
-\tMessage string `json:"message"`
+\tCode       string `json:"code"`
+\tMessage    string `json:"message"`
+\tHTTPStatus int    `json:"http_status,omitempty"`
 }}
 
 func main() {{}}
@@ -299,7 +301,13 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 \t}}
 \traw, errHandle := handleMethod(C.GoString(method))
 \tif errHandle != nil {{
-\t\twriteResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+\t\tstatus := 0
+\t\ttype statusCoder interface{{ StatusCode() int }}
+\t\tvar sc statusCoder
+\t\tif errors.As(errHandle, &sc) && sc != nil {{
+\t\t\tstatus = sc.StatusCode()
+\t\t}}
+\t\twriteResponse(response, errorEnvelope("plugin_error", errHandle.Error(), status))
 \t\treturn 1
 \t}}
 \twriteResponse(response, raw)
@@ -333,8 +341,12 @@ func okEnvelopeJSON(result string) ([]byte, error) {{
 \treturn json.Marshal(envelope{{OK: true, Result: json.RawMessage(result)}})
 }}
 
-func errorEnvelope(code, message string) []byte {{
-\traw, _ := json.Marshal(envelope{{OK: false, Error: &envelopeError{{Code: code, Message: message}}}})
+func errorEnvelope(code, message string, httpStatus ...int) []byte {{
+\tstatus := 0
+\tif len(httpStatus) > 0 {{
+\t\tstatus = httpStatus[0]
+\t}}
+\traw, _ := json.Marshal(envelope{{OK: false, Error: &envelopeError{{Code: code, Message: message, HTTPStatus: status}}}})
 \treturn raw
 }}
 

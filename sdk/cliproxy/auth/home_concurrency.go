@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 const (
@@ -237,12 +237,28 @@ func decodeHomeDispatchError(raw []byte) error {
 	switch strings.ToLower(code) {
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
+	case "model_cooldown":
+		result.HTTPStatus = http.StatusTooManyRequests
+		cooldownErr := &homeDispatchRetryAfterError{cause: result}
+		if detail.RetryAfterMS > 0 {
+			cooldownErr.retryAfter = time.Duration(detail.RetryAfterMS) * time.Millisecond
+		}
+		if detail.RequestRetry != nil && *detail.RequestRetry >= 0 {
+			cooldownErr.requestRetry = *detail.RequestRetry
+			cooldownErr.hasRequestRetry = true
+		}
+		return cooldownErr
 	case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":
 		result.HTTPStatus = http.StatusUnauthorized
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
 		return newHomeConcurrencyBusyError(result, time.Duration(detail.RetryAfterMS)*time.Millisecond)
-	case "concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
+	case "user_credits_insufficient":
+		result.HTTPStatus = http.StatusPaymentRequired
+	case "user_period_limit_exceeded":
+		result.HTTPStatus = http.StatusTooManyRequests
+	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "home_unavailable",
+		"concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
 	}
 	return result
@@ -262,13 +278,51 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for CPA's concrete Home busy error.
+// SafeResponseHeaders returns trusted response headers only for concrete
+// retry/cooldown errors.
 func SafeResponseHeaders(err error) http.Header {
-	var busy *HomeConcurrencyBusyError
-	if !errors.As(err, &busy) || busy == nil {
+	// An exhausted Home round owns the aggregated multi-credential deadline;
+	// a per-attempt trusted annotation deeper in the chain must not replace it.
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) && exhausted != nil {
+		// A nil aggregate means immediate or no aggregate hint; the last
+		// attempt's positive hint must not replace that decision.
+		if retryAfter := exhausted.RetryAfter(); retryAfter != nil {
+			return safeRetryAfterHeader(*retryAfter)
+		}
 		return nil
 	}
-	return busy.SafeResponseHeaders()
+	var trusted *trustedRetryAfterError
+	if errors.As(err, &trusted) && trusted != nil {
+		return trusted.SafeResponseHeaders()
+	}
+	var busy *HomeConcurrencyBusyError
+	if errors.As(err, &busy) && busy != nil {
+		return busy.SafeResponseHeaders()
+	}
+	var cooldown *homeDispatchRetryAfterError
+	if errors.As(err, &cooldown) && cooldown != nil {
+		retryAfter := cooldown.RetryAfter()
+		if retryAfter == nil {
+			return nil
+		}
+		return safeRetryAfterHeader(*retryAfter)
+	}
+	var modelCooldown *modelCooldownError
+	if errors.As(err, &modelCooldown) && modelCooldown != nil {
+		return modelCooldown.Headers()
+	}
+	var unavailable *authUnavailableError
+	if errors.As(err, &unavailable) && unavailable != nil {
+		return unavailable.Headers()
+	}
+	var safeHeaderProvider interface{ SafeResponseHeaders() http.Header }
+	if errors.As(err, &safeHeaderProvider) && safeHeaderProvider != nil {
+		if value := safeHeaderProvider.SafeResponseHeaders().Get("Retry-After"); value != "" {
+			return http.Header{"Retry-After": []string{value}}
+		}
+	}
+	return nil
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {

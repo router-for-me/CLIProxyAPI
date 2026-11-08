@@ -1,19 +1,25 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
+	"github.com/gin-gonic/gin"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -47,6 +53,12 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
 type Auth struct {
 	// ID uniquely identifies the auth record across restarts.
 	ID string `json:"id"`
+	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
+	RegistrationEpoch uint64 `json:"registration_epoch,omitempty"`
+	// CredentialVersion tracks monotonic credential replacements for secret material.
+	CredentialVersion uint64 `json:"credential_version,omitempty"`
+	// Generation tracks monotonic mutations to resolve scheduler/reconcile snapshot races.
+	Generation uint64 `json:"generation,omitempty"`
 	// Index is a stable runtime identifier derived from auth metadata (not persisted).
 	Index string `json:"-"`
 	// Provider is the upstream provider key (e.g. "gemini", "claude").
@@ -57,6 +69,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
+	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
 	Label string `json:"label,omitempty"`
 	// Status is the lifecycle status managed by the AuthManager.
@@ -69,6 +83,10 @@ type Auth struct {
 	Unavailable bool `json:"unavailable"`
 	// ProxyURL overrides the global proxy setting for this auth if provided.
 	ProxyURL string `json:"proxy_url,omitempty"`
+	// ProxyConnectionPool carries the connection-pool block of this api-key
+	// credential. Nil means no pooling, which is the default. Pools are per
+	// credential, so an override here never shares connections with another auth.
+	ProxyConnectionPool *ProxyConnectionPoolOverride `json:"proxy_connection_pool,omitempty"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).
@@ -85,6 +103,8 @@ type Auth struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
+	// RefreshFailures tracks consecutive refresh failures for exponential backoff (in-memory only).
+	RefreshFailures int `json:"-"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
@@ -93,11 +113,163 @@ type Auth struct {
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
+	// RejectedAccessToken tracks the access token rejected by upstream 401 until a refresh succeeds.
+	RejectedAccessToken string `json:"-"`
+	// RejectedSIWCAccessToken tracks the nested SIWC access token rejected by upstream 401 until replaced.
+	RejectedSIWCAccessToken string `json:"-"`
+	// RejectedRefreshToken tracks the outer refresh token rejected as terminal until replaced.
+	RejectedRefreshToken string `json:"-"`
+	// RejectedSIWCRefreshToken tracks the nested SIWC refresh token rejected as terminal until replaced.
+	RejectedSIWCRefreshToken string `json:"-"`
+	// RenewalWarnedRefreshToken tracks the rejected refresh token that already emitted a terminal warning/event.
+	RenewalWarnedRefreshToken string `json:"-"`
+	// RequiresSignIn flags that automatic credential renewal failed with a terminal grant rejection.
+	RequiresSignIn bool `json:"-"`
+	// RefreshError stores the sanitized last refresh failure without being overwritten by request execution results.
+	RefreshError *Error `json:"-"`
+	// RenewalEventAt records when the deduplicated terminal renewal failure event was first observed for the current grant.
+	RenewalEventAt time.Time `json:"-"`
+	// AdoptedAt records when the current credential version was adopted into runtime state.
+	AdoptedAt time.Time `json:"-"`
+	// AdoptedGrantHash records the fingerprint of the credential grant when it was adopted into runtime state,
+	// preserved across upstream automatic refresh rotations and reset when the credential grant is externally replaced.
+	AdoptedGrantHash string `json:"-"`
+	// InferenceVerified reports whether the current credential version completed a real inference response.
+	InferenceVerified bool `json:"-"`
+	// LastInferenceVerifiedAt records when the current credential version last completed an inference response.
+	LastInferenceVerifiedAt time.Time `json:"-"`
+	// RenewalVerified reports whether the current credential version completed an automatic/proactive refresh cycle.
+	RenewalVerified bool `json:"-"`
+	// LastRenewalVerifiedAt records when the current credential version last completed a token refresh.
+	LastRenewalVerifiedAt time.Time `json:"-"`
+
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current auth-level cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// fileSnapshotPath and fileSnapshotDigest bind an unversioned file-synthesized
+	// Auth snapshot to the source file path and SHA-256 byte digest it observed.
+	// Cleared when committed to a Manager so runtime clones are not treated as
+	// unversioned file snapshots.
+	fileSnapshotPath   string `json:"-"`
+	fileSnapshotDigest string `json:"-"`
+}
+
+var readAuthSnapshotFileFunc = os.ReadFile
+
+func canonicalAuthFileDigest(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
+	var parsed any
+	if errDecode := decoder.Decode(&parsed); errDecode == nil {
+		var trailing any
+		if errTrailing := decoder.Decode(&trailing); errTrailing == io.EOF {
+			if canonical, errMarshal := json.Marshal(parsed); errMarshal == nil {
+				sum := sha256.Sum256(canonical)
+				return hex.EncodeToString(sum[:])
+			}
+		}
+	}
+	sum := sha256.Sum256(trimmed)
+	return hex.EncodeToString(sum[:])
+}
+
+// BindFileSnapshot binds an unversioned file-synthesized Auth snapshot to the
+// source file path and canonical SHA-256 digest of the bytes from which it was parsed.
+func (a *Auth) BindFileSnapshot(path string, data []byte) {
+	if a == nil || len(data) == 0 {
+		return
+	}
+	digest := canonicalAuthFileDigest(data)
+	if digest == "" {
+		return
+	}
+	a.fileSnapshotPath = strings.TrimSpace(path)
+	a.fileSnapshotDigest = digest
+}
+
+const invalidatedFileSnapshotDigest = "invalidated"
+
+// ClearFileSnapshot removes any unversioned file-observation binding once the
+// Auth is committed to runtime state or normalized for comparison.
+func (a *Auth) ClearFileSnapshot() {
+	if a == nil {
+		return
+	}
+	a.fileSnapshotPath = ""
+	a.fileSnapshotDigest = ""
+}
+
+// InvalidateFileSnapshot marks an unversioned file snapshot as discarded so a
+// subsequent re-read of identical or reformatted file content is not suppressed.
+func (a *Auth) InvalidateFileSnapshot() {
+	if !a.HasFileSnapshot() {
+		return
+	}
+	a.fileSnapshotDigest = invalidatedFileSnapshotDigest
+}
+
+// HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
+// snapshot bound to a specific file observation digest.
+func (a *Auth) HasFileSnapshot() bool {
+	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
+}
+
+// FileSnapshotPath returns the backing file path bound to this file snapshot.
+func (a *Auth) FileSnapshotPath() string {
+	if a == nil {
+		return ""
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	return path
+}
+
+// SameFileSnapshot reports whether two unversioned file snapshots observed the
+// same canonical file content.
+func (a *Auth) SameFileSnapshot(other *Auth) bool {
+	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	if a.fileSnapshotDigest == invalidatedFileSnapshotDigest || other.fileSnapshotDigest == invalidatedFileSnapshotDigest {
+		return false
+	}
+	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
+}
+
+// FileSnapshotMatchesDisk reports whether the backing file on disk still
+// exists, is readable, and matches the canonical digest observed when this
+// snapshot was synthesized.
+func (a *Auth) FileSnapshotMatchesDisk() bool {
+	if !a.HasFileSnapshot() {
+		return true
+	}
+	path := a.FileSnapshotPath()
+	if path == "" {
+		return false
+	}
+	data, errRead := readAuthSnapshotFileFunc(path)
+	if errRead != nil || len(data) == 0 {
+		return false
+	}
+	return canonicalAuthFileDigest(data) == a.fileSnapshotDigest
 }
 
 const (
@@ -174,6 +346,27 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// ObservedAt is the time the current Signals snapshot was observed.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// Signals stores bounded, provider-specific quota watermark values observed
+	// from upstream response headers or websocket quota events. It is a snapshot
+	// of one upstream response, not an accumulation across responses, so an
+	// expired watermark cannot linger after the response that produced it.
+	// Cooldown transitions must use applyCooldownFields so they cannot replace
+	// this snapshot.
+	Signals map[string]string `json:"signals,omitempty"`
+}
+
+// Clone returns an independent copy of the quota state.
+func (q QuotaState) Clone() QuotaState {
+	copyQuota := q
+	if len(q.Signals) > 0 {
+		copyQuota.Signals = make(map[string]string, len(q.Signals))
+		for key, value := range q.Signals {
+			copyQuota.Signals[key] = value
+		}
+	}
+	return copyQuota
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -192,6 +385,28 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+	// cooldownRecordedSeq is the execution sequence watermark captured when
+	// the current model cooldown was recorded. Successes from executions
+	// stamped at or below it were dispatched before the cooldown existed and
+	// must not clear it. Runtime only: zero after restart so restored
+	// cooldowns can still be cleared by any success.
+	cooldownRecordedSeq uint64 `json:"-"`
+	// credentialQuotaShadow holds this model's independent (own-failure)
+	// cooldown layer while the outer fields present the auth-level
+	// credential quota propagated over it, so quota restoration can drop
+	// only the propagated layer and reinstate precisely what the model's
+	// own failures justify (issue #6690). It is nil when no independent
+	// live block exists beneath an outer credential_quota label. Persisted
+	// via CooldownStateRecord.IndependentState (unexported fields are
+	// invisible to JSON, so the record owns the serialized form).
+	credentialQuotaShadow *ModelState `toml:"credential_quota_shadow,omitempty"`
+	// credentialQuotaPropagated marks that credential-quota propagation has
+	// already wrapped this state, distinguishing "no independent block"
+	// from "not yet propagated" so repeated propagation never mistakes its
+	// own earlier layer for an independent block. Persisted via
+	// CooldownStateRecord.CredentialQuotaPropagated across restarts,
+	// including for shadow-less reporting models.
+	credentialQuotaPropagated bool `toml:"credential_quota_propagated,omitempty"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -264,19 +479,28 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
-	if len(a.Attributes) > 0 {
+	copyAuth.Quota = a.Quota.Clone()
+	if a.LastError != nil {
+		copyErr := *a.LastError
+		copyAuth.LastError = &copyErr
+	}
+	if a.RefreshError != nil {
+		copyErr := *a.RefreshError
+		copyAuth.RefreshError = &copyErr
+	}
+	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
 		for key, value := range a.Attributes {
 			copyAuth.Attributes[key] = value
 		}
 	}
-	if len(a.Metadata) > 0 {
-		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
+	if a.ProxyConnectionPool != nil {
+		copyAuth.ProxyConnectionPool = a.ProxyConnectionPool.Clone()
 	}
-	if len(a.ModelStates) > 0 {
+	if a.Metadata != nil {
+		copyAuth.Metadata = cloneMetadataMap(a.Metadata)
+	}
+	if a.ModelStates != nil {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
 		for key, state := range a.ModelStates {
 			copyAuth.ModelStates[key] = state.Clone()
@@ -286,6 +510,73 @@ func (a *Auth) Clone() *Auth {
 	return &copyAuth
 }
 
+// ProxyConnectionPoolOverride holds the per-api-key connection-pool settings.
+// Omitted fields fall back to the pool defaults (300s idle, 2 idle per host).
+type ProxyConnectionPoolOverride struct {
+	Enabled             *bool  `json:"enabled,omitempty"`
+	IdleConnTimeout     string `json:"idle-conn-timeout,omitempty"`
+	MaxIdleConnsPerHost *int   `json:"max-idle-conns-per-host,omitempty"`
+}
+
+// Clone deep copies the override so auth snapshots never share mutable state.
+func (o *ProxyConnectionPoolOverride) seedKey() string {
+	if o == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("pool:")
+	if o.Enabled != nil {
+		b.WriteString(strconv.FormatBool(*o.Enabled))
+	}
+	b.WriteByte(0)
+	b.WriteString(strings.TrimSpace(o.IdleConnTimeout))
+	b.WriteByte(0)
+	if o.MaxIdleConnsPerHost != nil {
+		b.WriteString(strconv.Itoa(*o.MaxIdleConnsPerHost))
+	}
+	return b.String()
+}
+
+func (o *ProxyConnectionPoolOverride) Clone() *ProxyConnectionPoolOverride {
+	if o == nil {
+		return nil
+	}
+	out := &ProxyConnectionPoolOverride{IdleConnTimeout: o.IdleConnTimeout}
+	if o.Enabled != nil {
+		enabled := *o.Enabled
+		out.Enabled = &enabled
+	}
+	if o.MaxIdleConnsPerHost != nil {
+		maxIdle := *o.MaxIdleConnsPerHost
+		out.MaxIdleConnsPerHost = &maxIdle
+	}
+	return out
+}
+
+func cloneMetadataMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]any, len(src))
+	for key, value := range src {
+		switch typed := value.(type) {
+		case map[string]any:
+			dst[key] = cloneMetadataMap(typed)
+		case []string:
+			s := make([]string, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		case []any:
+			s := make([]any, len(typed))
+			copy(s, typed)
+			dst[key] = s
+		default:
+			dst[key] = value
+		}
+	}
+	return dst
+}
+
 func stableAuthIndex(seed string) string {
 	seed = strings.TrimSpace(seed)
 	if seed == "" {
@@ -293,6 +584,52 @@ func stableAuthIndex(seed string) string {
 	}
 	sum := sha256.Sum256([]byte(seed))
 	return hex.EncodeToString(sum[:8])
+}
+
+// OAuthGrantFingerprint computes a SHA-256 fingerprint of an OAuth grant's tokens and account identity.
+func OAuthGrantFingerprint(accessToken, refreshToken, email, accountID string) string {
+	accessToken = strings.TrimSpace(accessToken)
+	refreshToken = strings.TrimSpace(refreshToken)
+	email = strings.ToLower(strings.TrimSpace(email))
+	accountID = strings.ToLower(strings.TrimSpace(accountID))
+	if accessToken == "" && refreshToken == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(accessToken + "\x00" + refreshToken + "\x00" + email + "\x00" + accountID))
+	return hex.EncodeToString(sum[:])
+}
+
+// AuthGrantFingerprint computes a SHA-256 fingerprint of the credential's token grant and account identity.
+func AuthGrantFingerprint(a *Auth) string {
+	if a == nil {
+		return ""
+	}
+	accessToken := authOuterAccessToken(a)
+	if accessToken == "" {
+		accessToken = authAccessToken(a)
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "api_key")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["api_key"])
+	}
+	if accessToken == "" {
+		accessToken = authMetadataString(a, "session_token")
+	}
+	if accessToken == "" && a.Attributes != nil {
+		accessToken = strings.TrimSpace(a.Attributes["session_token"])
+	}
+	refreshToken := authRefreshToken(a)
+	email := authMetadataString(a, "email")
+	if email == "" && a.Attributes != nil {
+		email = strings.TrimSpace(a.Attributes["email"])
+	}
+	accountID := authMetadataString(a, "account_id")
+	if accountID == "" && a.Attributes != nil {
+		accountID = strings.TrimSpace(a.Attributes["account_id"])
+	}
+	return OAuthGrantFingerprint(accessToken, refreshToken, email, accountID)
 }
 
 func (a *Auth) indexSeed() string {
@@ -365,10 +702,16 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "xai-api-key"
 		case strings.EqualFold(provider, "claude"):
 			apiPrefix = "claude-api-key"
+		case strings.EqualFold(provider, "meta"):
+			apiPrefix = "meta-api-key"
 		}
 	}
 	if apiPrefix != "" {
-		return apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
+		seed := apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
+		if poolSeed := a.ProxyConnectionPool.seedKey(); poolSeed != "" {
+			seed += "\x00" + poolSeed
+		}
+		return seed
 	}
 
 	if id := strings.TrimSpace(a.ID); id != "" {
@@ -406,6 +749,29 @@ func (m *ModelState) Clone() *ModelState {
 		return nil
 	}
 	copyState := *m
+	copyState.Quota = m.Quota.Clone()
+	if m.LastError != nil {
+		copyState.LastError = &Error{
+			Code:       m.LastError.Code,
+			Message:    m.LastError.Message,
+			Retryable:  m.LastError.Retryable,
+			HTTPStatus: m.LastError.HTTPStatus,
+		}
+	}
+	if m.credentialQuotaShadow != nil {
+		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
+	}
+	return &copyState
+}
+
+// cloneShallow copies a shadow state one level deep; shadows never nest.
+func (m *ModelState) cloneShallow() *ModelState {
+	if m == nil {
+		return nil
+	}
+	copyState := *m
+	copyState.Quota = m.Quota.Clone()
+	copyState.credentialQuotaShadow = nil
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,
@@ -431,28 +797,20 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
-// DisableCoolingOverride returns the auth scoped disable_cooling override when present.
+// DisableCoolingOverride returns the auth-scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
-//
-// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
-// as "not set" so the global disable-cooling flag can still take effect.
+// The second return value distinguishes explicit false from an absent override.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
-			if !parsed {
-				return false, false
-			}
 			return parsed, true
 		}
 	}
@@ -476,8 +834,9 @@ func (a *Auth) ToolPrefixDisabled() bool {
 	return false
 }
 
-// RequestRetryOverride returns the auth-file scoped request_retry override when present.
+// RequestRetryOverride returns the auth-scoped request_retry override when present.
 // The value is read from metadata key "request_retry" (or legacy "request-retry").
+// A negative value is treated as unset and falls back to the global request-retry.
 func (a *Auth) RequestRetryOverride() (int, bool) {
 	if a == nil || a.Metadata == nil {
 		return 0, false
@@ -485,7 +844,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request_retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}
@@ -493,7 +852,7 @@ func (a *Auth) RequestRetryOverride() (int, bool) {
 	if val, ok := a.Metadata["request-retry"]; ok {
 		if parsed, okParse := parseIntAny(val); okParse {
 			if parsed < 0 {
-				parsed = 0
+				return 0, false
 			}
 			return parsed, true
 		}
@@ -572,6 +931,14 @@ func (a *Auth) AccountInfo() (string, string) {
 					return "oauth", email
 				}
 			}
+			if sa, ok := a.Metadata["service_account"].(map[string]any); ok {
+				if v, okEmail := sa["client_email"].(string); okEmail {
+					email := strings.TrimSpace(v)
+					if email != "" {
+						return "oauth", email
+					}
+				}
+			}
 		}
 		return "oauth", ""
 	case AuthKindAPIKey:
@@ -584,17 +951,552 @@ func (a *Auth) AccountInfo() (string, string) {
 	}
 }
 
-// ExpirationTime attempts to extract the credential expiration timestamp from metadata.
-// It inspects common keys such as "expired", "expire", "expires_at", and also
-// nested "token" objects to remain compatible with legacy auth file formats.
-func (a *Auth) ExpirationTime() (time.Time, bool) {
+// IsCodexUseSIWC reports whether a Codex auth record is configured to use its nested "siwc" section.
+func IsCodexUseSIWC(a *Auth) bool {
+	if a == nil {
+		return false
+	}
+	enabled := false
+	if len(a.Attributes) > 0 {
+		if raw := strings.TrimSpace(a.Attributes["use_siwc"]); raw != "" {
+			if parsed, ok := parseBoolAny(raw); ok {
+				enabled = parsed
+			}
+		}
+	}
+	if !enabled && a.Metadata != nil {
+		if parsed, ok := parseBoolAny(a.Metadata["use_siwc"]); ok {
+			enabled = parsed
+		}
+	}
+	return enabled
+}
+
+// IsCodexClientUserAgent reports whether userAgent identifies a Codex client.
+func IsCodexClientUserAgent(userAgent string) bool {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	if ua == "" {
+		return false
+	}
+	return strings.Contains(ua, "codex-desktop") ||
+		strings.Contains(ua, "codex desktop") ||
+		strings.Contains(ua, "codex-rs") ||
+		strings.Contains(ua, "codex_cli_rs") ||
+		strings.Contains(ua, "codex-tui") ||
+		strings.Contains(ua, "codex_exec")
+}
+
+func headerValueFromHTTPHeader(headers http.Header, name string) string {
+	if headers == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+type codexClientRequestContextKey struct{}
+
+// WithCodexClientRequest stores the resolved Codex client detection flag in ctx
+// so asynchronous post-request paths do not read a reused gin.Context.
+func WithCodexClientRequest(ctx context.Context, isCodexClient bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexClientRequestContextKey{}, isCodexClient)
+}
+
+// IsCodexClientRequest reports whether the request originates from a Codex client.
+func IsCodexClientRequest(ctx context.Context, clientHeaders ...http.Header) bool {
+	for _, headers := range clientHeaders {
+		if IsCodexClientUserAgent(headerValueFromHTTPHeader(headers, "User-Agent")) {
+			return true
+		}
+	}
+	if ctx != nil {
+		if isCodex, ok := ctx.Value(codexClientRequestContextKey{}).(bool); ok {
+			return isCodex
+		}
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if IsCodexClientUserAgent(headerValueFromHTTPHeader(ginCtx.Request.Header, "User-Agent")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsCodexUseSIWCForRequest reports whether a request should use the nested SIWC credential section.
+// Requests from Codex clients ignore use_siwc and always use non-SIWC credentials.
+func IsCodexUseSIWCForRequest(ctx context.Context, a *Auth, clientHeaders ...http.Header) bool {
+	if !IsCodexUseSIWC(a) {
+		return false
+	}
+	if IsCodexClientRequest(ctx, clientHeaders...) {
+		return false
+	}
+	return true
+}
+
+// OuterExpirationTime extracts the outer credential expiration timestamp, ignoring the nested "siwc" section.
+func (a *Auth) OuterExpirationTime() (time.Time, bool) {
 	if a == nil {
 		return time.Time{}, false
+	}
+	tokenStr := authOuterAccessToken(a)
+	if tokenStr != "" && a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if tokenStr != "" {
+		if jwtExp, ok := parseJWTExp(tokenStr); ok {
+			return jwtExp, true
+		}
 	}
 	if ts, ok := expirationFromMap(a.Metadata); ok {
 		return ts, true
 	}
 	return time.Time{}, false
+}
+
+// ExpirationTime attempts to extract the active credential expiration timestamp from metadata.
+// When use_siwc is enabled on a Codex credential, the active SIWC section expiration is returned.
+func (a *Auth) ExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) {
+		siwcToken := authSIWCTokenField(a, "access_token")
+		if a.isSIWCAccessTokenRejected(siwcToken) {
+			return time.Unix(0, 0), true
+		}
+		return a.SIWCExpirationTime()
+	}
+	return a.OuterExpirationTime()
+}
+
+// CodexOuterRefreshLead is the conservative proactive refresh lead time before
+// the nominal 10-day Codex OAuth JWT expiration, refreshing tokens well ahead
+// of early upstream access-token invalidation.
+const CodexOuterRefreshLead = 96 * time.Hour
+
+// CodexSIWCRefreshLead is the minimum remaining validity required before refreshing
+// a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
+const CodexSIWCRefreshLead = 5 * time.Minute
+
+// SIWCEarliestRefreshTime returns the server's lower bound for SIWC token renewal.
+func (a *Auth) SIWCEarliestRefreshTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwc, _ := a.Metadata["siwc"].(map[string]any)
+	return lookupMetadataTime(siwc, "earliest_refresh_at")
+}
+
+// SIWCStatus represents the read-only validity state of a Codex SIWC credential.
+type SIWCStatus string
+
+const (
+	SIWCStatusOff     SIWCStatus = "off"
+	SIWCStatusValid   SIWCStatus = "valid"
+	SIWCStatusInvalid SIWCStatus = "invalid"
+)
+
+// SIWCRealExpirationTime extracts the real (unbuffered) expiration timestamp for the nested
+// "siwc" access token. It reads "expires_at" (saved from OAuth expires_in) or the JWT "exp"
+// claim of "access_token", without using the margin-deducted "expired" field.
+func (a *Auth) SIWCRealExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := lookupMetadataTime(siwcMap, "expires_at", "expiresAt"); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if expiresIn, okExpiresIn := parseRelativeExpirySeconds(siwcMap); okExpiresIn {
+		if ts, okTs := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh", "timestamp", "issued_at", "issuedAt"); okTs && !ts.IsZero() {
+			return ts.Add(time.Duration(expiresIn) * time.Second), true
+		}
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func (a *Auth) isSIWCAccessTokenRejected(siwcToken string) bool {
+	if a == nil {
+		return false
+	}
+	siwcToken = strings.TrimSpace(siwcToken)
+	if siwcToken == "" {
+		return false
+	}
+	return (a.RejectedSIWCAccessToken != "" && a.RejectedSIWCAccessToken == siwcToken) ||
+		(a.RejectedAccessToken != "" && a.RejectedAccessToken == siwcToken)
+}
+
+// CodexSIWCStatus evaluates the local SIWC credential status ("off", "valid", or "invalid")
+// at the given time without triggering any refresh or upstream request.
+func (a *Auth) CodexSIWCStatus(now time.Time) SIWCStatus {
+	if a == nil || !IsCodexUseSIWC(a) {
+		return SIWCStatusOff
+	}
+	siwcToken := authSIWCTokenField(a, "access_token")
+	if siwcToken == "" {
+		return SIWCStatusInvalid
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	realExp, okExp := a.SIWCRealExpirationTime()
+	if !okExp || realExp.IsZero() || !realExp.After(now) {
+		return SIWCStatusInvalid
+	}
+	if a.isSIWCAccessTokenRejected(siwcToken) {
+		return SIWCStatusInvalid
+	}
+	return SIWCStatusValid
+}
+
+// SIWCExpirationTime extracts the expiration timestamp from the nested "siwc" metadata section.
+func (a *Auth) SIWCExpirationTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false
+	}
+	if ts, okExp := expirationFromMap(siwcMap); okExp && !ts.IsZero() {
+		return ts, true
+	}
+	if rawToken, okTok := siwcMap["access_token"].(string); okTok && strings.TrimSpace(rawToken) != "" {
+		if jwtExp, okJWT := parseJWTExp(rawToken); okJWT && !jwtExp.IsZero() {
+			return jwtExp, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CodexOuterNeedsRefresh evaluates the outer credential refresh due time and whether it needs refresh at now.
+func CodexOuterNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil {
+		return time.Time{}, false, false
+	}
+	if authRefreshToken(a) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	if a.RejectedRefreshToken != "" && authRefreshToken(a) == a.RejectedRefreshToken {
+		if expiry, hasExpiry := a.OuterExpirationTime(); hasExpiry && !expiry.IsZero() {
+			if expiry.After(now) {
+				return expiry, true, false
+			}
+			if IsCodexUseSIWC(a) {
+				return time.Time{}, false, false
+			}
+			return now, true, true
+		}
+		return time.Time{}, false, false
+	}
+
+	outerToken := authOuterAccessToken(a)
+	if outerToken == "" || (a.RejectedAccessToken != "" && a.RejectedAccessToken == outerToken) {
+		return now, true, true
+	}
+
+	var lastRefresh time.Time
+	if ts, ok := authLastRefreshTimestamp(a); ok && !ts.IsZero() {
+		lastRefresh = ts
+	} else {
+		lastRefresh = a.LastRefreshedAt
+	}
+	expiry, hasExpiry := a.OuterExpirationTime()
+
+	if pref := authPreferredInterval(a); pref > 0 {
+		candidates := make([]time.Time, 0, 2)
+		if hasExpiry && !expiry.IsZero() {
+			candidates = append(candidates, expiry.Add(-pref))
+		}
+		if lastRefresh.IsZero() {
+			return now, true, true
+		}
+		candidates = append(candidates, lastRefresh.Add(pref))
+		next := candidates[0]
+		for _, candidate := range candidates[1:] {
+			if candidate.Before(next) {
+				next = candidate
+			}
+		}
+		if !next.After(now) {
+			return now, true, true
+		}
+		return next, true, false
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
+	if provider == "" {
+		provider = strings.ToLower(authMetadataString(a, "type"))
+	}
+	lead := ProviderRefreshLead(provider, a.Runtime)
+	if lead == nil && provider == "codex" {
+		d := CodexOuterRefreshLead
+		lead = &d
+	}
+	if lead == nil {
+		return time.Time{}, false, false
+	}
+	if *lead <= 0 {
+		if hasExpiry && !expiry.IsZero() {
+			if !expiry.After(now) {
+				return now, true, true
+			}
+			return expiry, true, false
+		}
+		return time.Time{}, false, false
+	}
+	if hasExpiry && !expiry.IsZero() {
+		due := expiry.Add(-*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	if !lastRefresh.IsZero() {
+		due := lastRefresh.Add(*lead)
+		if !due.After(now) {
+			return now, true, true
+		}
+		return due, true, false
+	}
+	return now, true, true
+}
+
+// CodexSIWCNeedsRefresh evaluates the nested "siwc" credential section refresh due time and whether it needs refresh at now.
+func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh bool, needsRefresh bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false, false
+	}
+	siwcMap, ok := a.Metadata["siwc"].(map[string]any)
+	if !ok || len(siwcMap) == 0 {
+		return time.Time{}, false, false
+	}
+	refreshToken, _ := siwcMap["refresh_token"].(string)
+	clientID, _ := siwcMap["client_id"].(string)
+	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(clientID) == "" {
+		return time.Time{}, false, false
+	}
+	hasRefresh = true
+
+	if a.RejectedSIWCRefreshToken != "" && strings.TrimSpace(refreshToken) == a.RejectedSIWCRefreshToken {
+		if expiry, hasExpiry := a.SIWCExpirationTime(); hasExpiry && !expiry.IsZero() {
+			if expiry.After(now) {
+				return expiry, true, false
+			}
+			if !IsCodexUseSIWC(a) {
+				return time.Time{}, false, false
+			}
+			return now, true, true
+		}
+		return time.Time{}, false, false
+	}
+
+	siwcToken, _ := siwcMap["access_token"].(string)
+	siwcToken = strings.TrimSpace(siwcToken)
+	due := now
+	if siwcToken != "" && !a.isSIWCAccessTokenRejected(siwcToken) {
+		// The legacy expired field already includes a margin; prefer the real expiry.
+		expiry, hasExpiry := a.SIWCRealExpirationTime()
+		if !hasExpiry {
+			expiry, hasExpiry = a.SIWCExpirationTime()
+		}
+		if hasExpiry && !expiry.IsZero() {
+			due = expiry.Add(-CodexSIWCRefreshLead)
+		} else if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+			due = lastRefresh.Add(CodexSIWCRefreshLead)
+		}
+	}
+	if earliest, okEarliest := a.SIWCEarliestRefreshTime(); okEarliest && earliest.After(due) {
+		due = earliest
+	}
+	if !due.After(now) {
+		return now, true, true
+	}
+	return due, true, false
+}
+
+// OuterAccessTokenExpirationTime returns the expiration time of the outer access_token,
+// ignoring the nested "siwc" section.
+func (a *Auth) OuterAccessTokenExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	tokenStr := authOuterAccessToken(a)
+	if tokenStr == "" {
+		return time.Time{}, false
+	}
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
+	}
+	if jwtExp, ok := parseJWTExp(tokenStr); ok {
+		return jwtExp, true
+	}
+	return a.OuterExpirationTime()
+}
+
+// AccessTokenExpirationTimeForRequest returns the expiration time of the access_token
+// selected for the request context and client headers.
+func (a *Auth) AccessTokenExpirationTimeForRequest(ctx context.Context, clientHeaders ...http.Header) (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) && !IsCodexUseSIWCForRequest(ctx, a, clientHeaders...) {
+		return a.OuterAccessTokenExpirationTime()
+	}
+	return a.AccessTokenExpirationTime()
+}
+
+// AccessTokenExpirationTime returns the expiration time of the specific access_token.
+// If the access_token is a JWT, its exp claim takes strict precedence.
+func (a *Auth) AccessTokenExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	tokenStr := authAccessToken(a)
+	if tokenStr == "" {
+		return time.Time{}, false
+	}
+	if (a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr) || (IsCodexUseSIWC(a) && a.isSIWCAccessTokenRejected(tokenStr)) {
+		return time.Unix(0, 0), true
+	}
+	if jwtExp, ok := parseJWTExp(tokenStr); ok {
+		return jwtExp, true
+	}
+	if IsCodexUseSIWC(a) {
+		if realExp, ok := a.SIWCRealExpirationTime(); ok && !realExp.IsZero() {
+			return realExp, true
+		}
+	}
+	return a.ExpirationTime()
+}
+
+// HasValidAccessToken returns whether the auth has a non-empty access token that is unexpired at the given time.
+func (a *Auth) HasValidAccessToken(now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	tokenStr := authAccessToken(a)
+	if tokenStr == "" {
+		return false
+	}
+	if exp, ok := a.AccessTokenExpirationTime(); ok {
+		return exp.After(now)
+	}
+	return true
+}
+
+const (
+	RenewalStateSignInRequired        = "sign_in_required"
+	RenewalStateExpiredSignInRequired = "expired_sign_in_required"
+	RenewalStateRetryScheduled        = "retry_scheduled"
+	RenewalStateRenewalVerified       = "renewal_verified"
+	RenewalStateAwaitingFirstRenewal  = "awaiting_first_renewal"
+
+	RecoveryStageSignInRequired    = "sign_in_required"
+	RecoveryStageCredentialSaved   = "credential_saved"
+	RecoveryStageQuotaBlocked      = "quota_blocked"
+	RecoveryStageRenewalVerified   = "renewal_verified"
+	RecoveryStageInferenceVerified = "inference_verified"
+	RecoveryStageLoaded            = "loaded"
+)
+
+// RenewalStateAt returns the structured renewal lifecycle state at the given time.
+func (a *Auth) RenewalStateAt(now time.Time) string {
+	if a == nil {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if a.RequiresSignIn {
+		if !a.HasValidAccessToken(now) || hasUnauthorizedAuthFailure(a) {
+			return RenewalStateExpiredSignInRequired
+		}
+		return RenewalStateSignInRequired
+	}
+	if a.RefreshError != nil {
+		return RenewalStateRetryScheduled
+	}
+	if a.RenewalVerified {
+		return RenewalStateRenewalVerified
+	}
+	return RenewalStateAwaitingFirstRenewal
+}
+
+// RecoveryStageAt returns the structured post-login / runtime adoption and verification stage at the given time.
+func (a *Auth) RecoveryStageAt(now time.Time) string {
+	if a == nil {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if a.RequiresSignIn {
+		return RecoveryStageSignInRequired
+	}
+	if a.hasActiveQuotaBlock(now) {
+		return RecoveryStageQuotaBlocked
+	}
+	if a.RenewalVerified {
+		return RecoveryStageRenewalVerified
+	}
+	if a.InferenceVerified {
+		return RecoveryStageInferenceVerified
+	}
+	return RecoveryStageLoaded
+}
+
+func (a *Auth) hasActiveQuotaBlock(now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	if a.Quota.Exceeded && !a.Quota.NextRecoverAt.IsZero() && a.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	if a.Unavailable && !a.NextRetryAfter.IsZero() && a.NextRetryAfter.After(now) &&
+		a.LastError != nil && a.LastError.HTTPStatus == http.StatusTooManyRequests {
+		return true
+	}
+	for _, ms := range a.ModelStates {
+		if ms == nil {
+			continue
+		}
+		if ms.Quota.Exceeded && !ms.Quota.NextRecoverAt.IsZero() && ms.Quota.NextRecoverAt.After(now) {
+			return true
+		}
+		if ms.Unavailable && !ms.NextRetryAfter.IsZero() && ms.NextRetryAfter.After(now) &&
+			ms.LastError != nil && ms.LastError.HTTPStatus == http.StatusTooManyRequests {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -625,6 +1527,11 @@ func expirationFromMap(meta map[string]any) (time.Time, bool) {
 			}
 		}
 	}
+	if expiresIn, okExpiresIn := parseRelativeExpirySeconds(meta); okExpiresIn {
+		if timestamp, okTimestamp := parseRelativeExpiryTimestamp(meta); okTimestamp {
+			return timestamp.Add(time.Duration(expiresIn) * time.Second), true
+		}
+	}
 	for _, nestedKey := range []string{"token", "Token"} {
 		if nested, ok := meta[nestedKey]; ok {
 			switch val := nested.(type) {
@@ -646,6 +1553,87 @@ func expirationFromMap(meta map[string]any) (time.Time, bool) {
 	return time.Time{}, false
 }
 
+// parseJWTExp extracts the "exp" claim timestamp from a JWT token string without signature verification.
+func parseJWTExp(token string) (time.Time, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return time.Time{}, false
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payloadSegment := parts[1]
+	var (
+		payloadBytes []byte
+		errDecode    error
+	)
+	switch len(payloadSegment) % 4 {
+	case 2:
+		payloadBytes, errDecode = base64.URLEncoding.DecodeString(payloadSegment + "==")
+	case 3:
+		payloadBytes, errDecode = base64.URLEncoding.DecodeString(payloadSegment + "=")
+	default:
+		payloadBytes, errDecode = base64.URLEncoding.DecodeString(payloadSegment)
+	}
+	if errDecode != nil {
+		payloadBytes, errDecode = base64.RawURLEncoding.DecodeString(payloadSegment)
+		if errDecode != nil {
+			return time.Time{}, false
+		}
+	}
+	var claims struct {
+		Exp any `json:"exp"`
+	}
+	if errJSON := json.Unmarshal(payloadBytes, &claims); errJSON != nil {
+		return time.Time{}, false
+	}
+	if claims.Exp == nil {
+		return time.Time{}, false
+	}
+	switch expVal := claims.Exp.(type) {
+	case float64:
+		if expVal > 0 {
+			return normaliseUnix(int64(expVal)), true
+		}
+	case int64:
+		if expVal > 0 {
+			return normaliseUnix(expVal), true
+		}
+	case int:
+		if expVal > 0 {
+			return normaliseUnix(int64(expVal)), true
+		}
+	case string:
+		if sec, errParse := strconv.ParseInt(strings.TrimSpace(expVal), 10, 64); errParse == nil && sec > 0 {
+			return normaliseUnix(sec), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseRelativeExpirySeconds(meta map[string]any) (int, bool) {
+	for _, key := range []string{"expires_in", "expiresIn"} {
+		if value, ok := meta[key]; ok {
+			if seconds, okSeconds := parseIntAny(value); okSeconds && seconds > 0 {
+				return seconds, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseRelativeExpiryTimestamp(meta map[string]any) (time.Time, bool) {
+	for _, key := range []string{"timestamp", "issued_at", "issuedAt"} {
+		if value, ok := meta[key]; ok {
+			if timestamp, okTimestamp := parseTimeValue(value); okTimestamp && !timestamp.IsZero() {
+				return timestamp, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
 func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if runtime != nil {
@@ -658,11 +1646,15 @@ func ProviderRefreshLead(provider string, runtime any) *time.Duration {
 	refreshLeadMu.RLock()
 	factory := refreshLeadFactories[provider]
 	refreshLeadMu.RUnlock()
-	if factory == nil {
+	if factory != nil {
+		if lead := factory(); lead != nil && *lead > 0 {
+			return lead
+		}
 		return nil
 	}
-	if lead := factory(); lead != nil && *lead > 0 {
-		return lead
+	if provider == "codex" {
+		d := CodexOuterRefreshLead
+		return &d
 	}
 	return nil
 }
@@ -690,6 +1682,10 @@ func parseTimeValue(v any) (time.Time, bool) {
 			return normaliseUnix(unix), true
 		}
 	case float64:
+		return normaliseUnix(int64(value)), true
+	case int:
+		return normaliseUnix(int64(value)), true
+	case int32:
 		return normaliseUnix(int64(value)), true
 	case int64:
 		return normaliseUnix(value), true

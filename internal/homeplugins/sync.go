@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -803,21 +803,27 @@ func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
 var newPluginStoreClient = func(cfg *config.Config) sdkpluginstore.Client {
 	client := &http.Client{}
 	var storeAuth []sdkpluginstore.AuthConfig
-	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
-		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(cfg.ProxyURL)}, client)
-	}
+	var proxyURL string
 	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 		storeAuth = cfg.Plugins.StoreAuth
 	}
-	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth)
+	if proxyURL != "" {
+		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: proxyURL}, client)
+	}
+	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth).WithNetworkScope(proxyURL)
 }
 
 var newResolvedPluginStoreClient = func(cfg *config.Config, auth []sdkpluginstore.ResolvedAuthConfig, expiresAt time.Time) sdkpluginstore.Client {
 	client := &http.Client{}
-	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
-		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(cfg.ProxyURL)}, client)
+	var proxyURL string
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
-	return sdkpluginstore.NewClientWithResolvedAuthExpiry(client, "", auth, expiresAt)
+	if proxyURL != "" {
+		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: proxyURL}, client)
+	}
+	return sdkpluginstore.NewClientWithResolvedAuthExpiry(client, "", auth, expiresAt).WithNetworkScope(proxyURL)
 }
 
 func pluginConfigEnabled(item config.PluginInstanceConfig) bool {

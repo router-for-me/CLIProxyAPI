@@ -13,9 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type fixtureHomeDispatcher struct {
@@ -381,6 +381,37 @@ func TestHomeBusyErrorMaps429AndRetryAfter(t *testing.T) {
 	retryError, ok := errBusy.(interface{ RetryAfter() *time.Duration })
 	if !ok || retryError.RetryAfter() == nil || *retryError.RetryAfter() != 750*time.Millisecond {
 		t.Fatalf("retry after = %v", retryError.RetryAfter())
+	}
+}
+
+func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
+	for _, code := range []string{"auth_not_found", "auth_unavailable"} {
+		t.Run(code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"no auth available"}}`, code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != code || authErr.HTTPStatus != http.StatusServiceUnavailable {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want 503", code, errDispatch)
+			}
+		})
+	}
+}
+
+func TestHomeUserBillingAndPeriodLimitErrors(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantStatus int
+	}{
+		{code: "user_credits_insufficient", wantStatus: http.StatusPaymentRequired},
+		{code: "user_period_limit_exceeded", wantStatus: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"limit hit"}}`, tt.code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != tt.code || authErr.HTTPStatus != tt.wantStatus {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want %d", tt.code, errDispatch, tt.wantStatus)
+			}
+		})
 	}
 }
 

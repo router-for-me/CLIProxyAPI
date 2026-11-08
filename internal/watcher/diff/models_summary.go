@@ -3,10 +3,11 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 type GeminiModelsSummary struct {
@@ -41,7 +42,11 @@ func SummarizeGeminiModels(models []config.GeminiModel) GeminiModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + thinkingHashSuffix(model.Thinking))
+			isCompat := "false"
+			if model.IsCompat {
+				isCompat = "true"
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|is-compat=" + isCompat + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return GeminiModelsSummary{
@@ -62,7 +67,11 @@ func SummarizeClaudeModels(models []config.ClaudeModel) ClaudeModelsSummary {
 			if name == "" && alias == "" {
 				continue
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + thinkingHashSuffix(model.Thinking))
+			isCompat := "false"
+			if model.IsCompat {
+				isCompat = "true"
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|is-compat=" + isCompat + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return ClaudeModelsSummary{
@@ -87,7 +96,11 @@ func SummarizeCodexModels(models []config.CodexModel) CodexModelsSummary {
 			if model.ForceMapping {
 				forceMapping = "true"
 			}
-			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping + thinkingHashSuffix(model.Thinking))
+			isCompat := "false"
+			if model.IsCompat {
+				isCompat = "true"
+			}
+			out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|" + strings.TrimSpace(model.DisplayName) + "|force-mapping=" + forceMapping + "|is-compat=" + isCompat + thinkingHashSuffix(model.Thinking))
 		}
 	})
 	return CodexModelsSummary{
@@ -111,7 +124,11 @@ func SummarizeVertexModels(models []config.VertexCompatModel) VertexModelsSummar
 		if alias != "" {
 			name = alias
 		}
-		names = append(names, name+"|"+strings.TrimSpace(model.DisplayName)+thinkingHashSuffix(model.Thinking))
+		key := name + "|" + strings.TrimSpace(model.DisplayName)
+		if model.OpenAPI != nil {
+			key += fmt.Sprintf("|openapi=%t", *model.OpenAPI)
+		}
+		names = append(names, key+thinkingHashSuffix(model.Thinking))
 	}
 	if len(names) == 0 {
 		return VertexModelsSummary{}

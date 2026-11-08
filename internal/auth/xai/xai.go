@@ -2,7 +2,6 @@ package xai
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,15 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
 
 // XAIAuth performs xAI OAuth discovery, device-code login, and refresh.
 type XAIAuth struct {
-	httpClient *http.Client
+	httpClient      *http.Client
+	minPollInterval time.Duration
 }
 
 var xaiRefreshGroup singleflight.Group
@@ -211,9 +212,16 @@ func (a *XAIAuth) PollForToken(ctx context.Context, deviceCode *DeviceCodeRespon
 		tokenEndpoint = discovery.TokenEndpoint
 	}
 
+	minInterval := defaultPollInterval
+	if a != nil && a.minPollInterval > 0 {
+		minInterval = a.minPollInterval
+	}
+
 	interval := time.Duration(deviceCode.Interval) * time.Second
-	if interval < defaultPollInterval {
-		interval = defaultPollInterval
+	if a != nil && a.minPollInterval > 0 && deviceCode.Interval <= 0 {
+		interval = a.minPollInterval
+	} else if interval < minInterval {
+		interval = minInterval
 	}
 
 	deadline := time.Now().Add(MaxPollDuration)
@@ -301,7 +309,11 @@ func (a *XAIAuth) exchangeDeviceCode(ctx context.Context, tokenEndpoint, deviceC
 		case "authorization_pending":
 			return nil, nil, interval, true
 		case "slow_down":
-			nextInterval := interval + defaultPollInterval
+			step := defaultPollInterval
+			if a != nil && a.minPollInterval > 0 {
+				step = a.minPollInterval
+			}
+			nextInterval := interval + step
 			return nil, nil, nextInterval, true
 		case "expired_token":
 			return nil, fmt.Errorf("xai device code expired"), interval, false
@@ -454,9 +466,8 @@ func parseJWTIdentity(token string) (email string, subject string) {
 	if len(parts) < 2 {
 		return "", ""
 	}
-	payload := parts[1]
-	payload += strings.Repeat("=", (4-len(payload)%4)%4)
-	raw, err := base64.URLEncoding.DecodeString(payload)
+	payload := strings.TrimRight(parts[1], "=")
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
 		return "", ""
 	}

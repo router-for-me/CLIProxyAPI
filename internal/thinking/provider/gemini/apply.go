@@ -1,30 +1,17 @@
 // Package gemini implements thinking configuration for Gemini models.
-//
-// Gemini models have two formats:
-//   - Gemini 2.5: Uses thinkingBudget (numeric)
-//   - Gemini 3.x: Uses thinkingLevel (string: minimal/low/medium/high)
-//     or thinkingBudget=-1 for auto/dynamic mode
-//
-// Output format is determined by ThinkingConfig.Mode and ThinkingSupport.Levels:
-//   - ModeAuto: Always uses thinkingBudget=-1 (both Gemini 2.5 and 3.x)
-//   - len(Levels) > 0: Uses thinkingLevel (Gemini 3.x discrete levels)
-//   - len(Levels) == 0: Uses thinkingBudget (Gemini 2.5)
 package gemini
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // Applier applies thinking configuration for Gemini models.
-//
-// Gemini-specific behavior:
-//   - Gemini 2.5: thinkingBudget format, flash series supports ZeroAllowed
-//   - Gemini 3.x: thinkingLevel format, disable by removing thinkingConfig when zero is allowed
-//   - Use ThinkingSupport.Levels to decide output format
 type Applier struct{}
+
+var _ thinking.ProviderDocApplier = (*Applier)(nil)
 
 // NewApplier creates a new Gemini thinking applier.
 func NewApplier() *Applier {
@@ -36,169 +23,123 @@ func init() {
 }
 
 // Apply applies thinking configuration to Gemini request body.
-//
-// Expected output format (Gemini 2.5):
-//
-//	{
-//	  "generationConfig": {
-//	    "thinkingConfig": {
-//	      "thinkingBudget": 8192,
-//	      "includeThoughts": true
-//	    }
-//	  }
-//	}
-//
-// Expected output format (Gemini 3.x):
-//
-//	{
-//	  "generationConfig": {
-//	    "thinkingConfig": {
-//	      "thinkingLevel": "high",
-//	      "includeThoughts": true
-//	    }
-//	  }
-//	}
 func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+	if !thinking.IsUserDefinedModel(modelInfo) && modelInfo.Thinking == nil {
+		return body, nil
+	}
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+		return body, nil
+	}
+	if len(body) == 0 || !ojson.ValidBytes(body) {
+		body = []byte("{}")
+	}
+	doc := ojson.NewDoc(body)
+	if errApply := a.ApplyDoc(doc, config, modelInfo); errApply != nil {
+		return body, errApply
+	}
+	return doc.Bytes(), nil
+}
+
+// ApplyDoc applies thinking configuration onto doc in place.
+func (a *Applier) ApplyDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) error {
+	if doc == nil {
+		return nil
+	}
 	if thinking.IsUserDefinedModel(modelInfo) {
-		return a.applyCompatible(body, config)
+		return a.applyCompatibleDoc(doc, config)
 	}
 	if modelInfo.Thinking == nil {
-		return body, nil
+		return nil
 	}
-
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
+		return nil
 	}
 
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		body = []byte(`{}`)
-	}
-
-	// Choose format based on config.Mode and model capabilities:
-	// - ModeLevel: use Level format (validation will reject unsupported levels)
-	// - ModeNone: use Level format if model has Levels, else Budget format
-	// - ModeBudget/ModeAuto: use Budget format
 	switch config.Mode {
 	case thinking.ModeLevel:
-		return a.applyLevelFormat(body, config)
+		return a.applyLevelFormatDoc(doc, config)
 	case thinking.ModeNone:
-		// ModeNone: route based on model capability (has Levels or not)
 		if len(modelInfo.Thinking.Levels) > 0 {
-			return a.applyLevelFormat(body, config)
+			return a.applyLevelFormatDoc(doc, config)
 		}
-		return a.applyBudgetFormat(body, config)
+		return a.applyBudgetFormatDoc(doc, config)
 	default:
-		return a.applyBudgetFormat(body, config)
+		return a.applyBudgetFormatDoc(doc, config)
 	}
 }
 
-func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
+func (a *Applier) applyCompatibleDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
+		return nil
 	}
-
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		body = []byte(`{}`)
-	}
-
 	if config.Mode == thinking.ModeAuto {
-		return a.applyBudgetFormat(body, config)
+		return a.applyBudgetFormatDoc(doc, config)
 	}
-
 	if config.Mode == thinking.ModeLevel || (config.Mode == thinking.ModeNone && config.Level != "") {
-		return a.applyLevelFormat(body, config)
+		return a.applyLevelFormatDoc(doc, config)
 	}
-
-	return a.applyBudgetFormat(body, config)
+	return a.applyBudgetFormatDoc(doc, config)
 }
 
-func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// ModeNone semantics:
-	//   - ModeNone + Budget=0: remove thinkingConfig to disable thinking
-	//   - ModeNone + Budget>0: forced to think but hide output (includeThoughts=false)
-	// ValidateConfig sets config.Level to the lowest level when ModeNone + Budget > 0.
-
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingBudget")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_budget")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_level")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.include_thoughts")
+func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
+	includeThoughts, hasIncludeThoughts := extractGeminiIncludeThoughtsDoc(doc)
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinkingBudget")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_budget")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_level")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.includeThoughts")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
 		if config.Budget == 0 && config.Level == "" {
-			result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig")
-			return result, nil
+			_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig")
+			return nil
 		}
-		result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", false)
 		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+			_ = doc.Set("generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
 		}
-		return result, nil
+		if hasIncludeThoughts {
+			_ = doc.Set("generationConfig.thinkingConfig.includeThoughts", includeThoughts)
+		}
+		return nil
 	}
 
-	// Only handle ModeLevel - budget conversion should be done by upper layer
 	if config.Mode != thinking.ModeLevel {
-		return body, nil
+		return nil
 	}
 
-	level := string(config.Level)
-	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingLevel", level)
-
-	// Respect user's explicit includeThoughts setting from original body; default to true if not set
-	// Support both camelCase and snake_case variants
-	includeThoughts := true
-	if inc := gjson.GetBytes(body, "generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-	} else if inc := gjson.GetBytes(body, "generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
+	_ = doc.Set("generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+	if hasIncludeThoughts {
+		_ = doc.Set("generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	}
-	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
+	return nil
 }
 
-func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "generationConfig.thinkingConfig.thinkingLevel")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_level")
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.thinking_budget")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = sjson.DeleteBytes(result, "generationConfig.thinkingConfig.include_thoughts")
+func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig) error {
+	includeThoughts, hasIncludeThoughts := extractGeminiIncludeThoughtsDoc(doc)
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinkingLevel")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_level")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.thinking_budget")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.includeThoughts")
+	_ = util.DeleteJSONDocIfExists(doc, "generationConfig.thinkingConfig.include_thoughts")
 
-	budget := config.Budget
-
-	// For ModeNone, always set includeThoughts to false regardless of user setting.
-	// This ensures that when user requests budget=0 (disable thinking output),
-	// the includeThoughts is correctly set to false even if budget is clamped to min.
-	if config.Mode == thinking.ModeNone {
-		result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingBudget", budget)
-		result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", false)
-		return result, nil
+	_ = doc.Set("generationConfig.thinkingConfig.thinkingBudget", config.Budget)
+	if hasIncludeThoughts {
+		_ = doc.Set("generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	}
+	return nil
+}
 
-	// Determine includeThoughts: respect user's explicit setting from original body if provided
-	// Support both camelCase and snake_case variants
-	var includeThoughts bool
-	var userSetIncludeThoughts bool
-	if inc := gjson.GetBytes(body, "generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
-	} else if inc := gjson.GetBytes(body, "generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
-	}
-
-	if !userSetIncludeThoughts {
-		// No explicit setting, use default logic based on mode
-		switch config.Mode {
-		case thinking.ModeAuto:
-			includeThoughts = true
-		default:
-			includeThoughts = budget > 0
+func extractGeminiIncludeThoughtsDoc(doc *ojson.Doc) (bool, bool) {
+	for _, path := range []string{
+		"generationConfig.thinkingConfig.includeThoughts",
+		"generationConfig.thinkingConfig.include_thoughts",
+	} {
+		switch value := doc.Get(path); value.Type {
+		case ojson.True:
+			return true, true
+		case ojson.False:
+			return false, true
 		}
 	}
-
-	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.thinkingBudget", budget)
-	result, _ = sjson.SetBytes(result, "generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
+	return false, false
 }

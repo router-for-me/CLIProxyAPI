@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {
@@ -81,7 +81,7 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 		{
 			name: "gemini key disable cooling",
 			geminiKeys: []config.GeminiKey{
-				{APIKey: "test-key-123", Prefix: "team-a", DisableCooling: true},
+				{APIKey: "test-key-123", Prefix: "team-a", DisableCooling: boolPointer(true)},
 			},
 			wantLen: 1,
 			validate: func(t *testing.T, auths []*coreauth.Auth) {
@@ -227,8 +227,10 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 					APIKey:                  "sk-ant-api-xxx",
 					Prefix:                  "main",
 					BaseURL:                 "https://api.anthropic.com",
-					DisableCooling:          true,
+					DisableCooling:          boolPointer(true),
 					RebuildMidSystemMessage: true,
+					NativeToolSearch:        true,
+					FingerprintProfile:      "claude-code-cli",
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -269,8 +271,28 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
 		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
 	}
+	if got := auths[0].Attributes["fingerprint_profile"]; got != "claude-code-cli" {
+		t.Errorf("expected fingerprint_profile=claude-code-cli, got %s", got)
+	}
+	if got := auths[0].Attributes["native_tool_search"]; got != "true" {
+		t.Errorf("expected native_tool_search=true, got %s", got)
+	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
+	}
+}
+
+func TestConfigSynthesizer_ClaudeKeys_NativeToolSearchDefaultOff(t *testing.T) {
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com"}}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("synthesize: auths=%d err=%v", len(auths), err)
+	}
+	if value, exists := auths[0].Attributes["native_tool_search"]; exists {
+		t.Fatalf("native_tool_search = %q, want absent by default", value)
 	}
 }
 
@@ -306,12 +328,14 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
 				{
-					APIKey:         "codex-key-123",
-					Prefix:         "dev",
-					BaseURL:        "https://api.openai.com",
-					ProxyURL:       "http://proxy.local",
-					Websockets:     true,
-					DisableCooling: true,
+					APIKey:               "codex-key-123",
+					Prefix:               "dev",
+					BaseURL:              "https://api.openai.com",
+					ProxyURL:             "http://proxy.local",
+					Websockets:           true,
+					AlphaSearch:          true,
+					DisableCooling:       boolPointer(true),
+					DisableCodexCloaking: boolPointer(true),
 				},
 			},
 		},
@@ -339,6 +363,12 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	if auths[0].Attributes["websockets"] != "true" {
 		t.Errorf("expected websockets=true, got %s", auths[0].Attributes["websockets"])
 	}
+	if auths[0].Attributes[coreauth.AttributeCodexAlphaSearch] != "true" {
+		t.Errorf("expected codex_alpha_search=true, got %s", auths[0].Attributes[coreauth.AttributeCodexAlphaSearch])
+	}
+	if auths[0].Attributes[coreauth.AttributeCodexDisableCloaking] != "true" {
+		t.Errorf("expected codex_disable_cloaking=true, got %s", auths[0].Attributes[coreauth.AttributeCodexDisableCloaking])
+	}
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling=true, got %v", auths[0].Metadata["disable_cooling"])
 	}
@@ -354,7 +384,8 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 				BaseURL:        "https://api.x.ai/v1",
 				ProxyURL:       "http://proxy.local",
 				Websockets:     true,
-				DisableCooling: true,
+				AlphaSearch:    true,
+				DisableCooling: boolPointer(true),
 				Headers:        map[string]string{"X-Custom": "value"},
 				Models:         []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
 			}},
@@ -380,6 +411,9 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	if auth.Attributes["websockets"] != "true" {
 		t.Fatalf("websockets = %q, want true", auth.Attributes["websockets"])
 	}
+	if _, exists := auth.Attributes[coreauth.AttributeCodexAlphaSearch]; exists {
+		t.Fatal("xAI auth unexpectedly contains codex_alpha_search")
+	}
 	if auth.Attributes["base_url"] != "https://api.x.ai/v1" {
 		t.Fatalf("base_url = %q, want https://api.x.ai/v1", auth.Attributes["base_url"])
 	}
@@ -397,13 +431,188 @@ func TestConfigSynthesizer_XAIKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_MetaKeys(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	disableCooling := true
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			MetaKey: []config.MetaKey{
+				{
+					APIKey:         "meta-secret",
+					BaseURL:        "https://api.meta.ai/v1",
+					ProxyURL:       "http://proxy.local",
+					DisableCooling: &disableCooling,
+					Models: []config.CodexModel{
+						{Name: "muse-spark-1.3", Alias: "muse-spark-1.3"},
+					},
+					Headers: map[string]string{"X-Custom": "value"},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if auth.Provider != "meta" {
+		t.Fatalf("provider = %q, want meta", auth.Provider)
+	}
+	if auth.Label != "meta-apikey" {
+		t.Fatalf("label = %q, want meta-apikey", auth.Label)
+	}
+	if auth.Attributes["base_url"] != "https://api.meta.ai/v1" {
+		t.Fatalf("base_url = %q, want https://api.meta.ai/v1", auth.Attributes["base_url"])
+	}
+	if auth.Attributes["header:X-Custom"] != "value" {
+		t.Fatalf("custom header = %q, want value", auth.Attributes["header:X-Custom"])
+	}
+	if auth.ProxyURL != "http://proxy.local" {
+		t.Fatalf("proxy URL = %q, want http://proxy.local", auth.ProxyURL)
+	}
+}
+
+func TestConfigSynthesizer_XAIKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			XAIKey: []config.CodexKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-xai.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-xai-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-xai.example.com" {
+		t.Fatalf("expected base_url=https://custom-xai.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+}
+
+func TestConfigSynthesizer_ClaudeKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-claude.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-claude-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-claude.example.com" {
+		t.Fatalf("expected base_url=https://custom-claude.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+}
+
+func TestConfigSynthesizer_GeminiKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-gemini.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-interactions.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-gemini.example.com" {
+		t.Fatalf("expected base_url=https://custom-gemini.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
+	if auths[1].Attributes["base_url"] != "https://custom-interactions.example.com" {
+		t.Fatalf("expected base_url=https://custom-interactions.example.com, got %s", auths[1].Attributes["base_url"])
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
 		Config: &config.Config{
 			CodexKey: []config.CodexKey{
-				{APIKey: ""},   // empty, should be skipped
-				{APIKey: "  "}, // whitespace, should be skipped
+				{APIKey: ""},   // empty key without base URL, should be skipped
+				{APIKey: "  "}, // whitespace key without base URL, should be skipped
 				{APIKey: "valid-key", Headers: map[string]string{"Authorization": "Bearer xyz"}},
 			},
 		},
@@ -421,6 +630,50 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	if auths[0].Attributes["header:Authorization"] != "Bearer xyz" {
 		t.Errorf("expected header:Authorization=Bearer xyz, got %s", auths[0].Attributes["header:Authorization"])
 	}
+	if _, exists := auths[0].Attributes[coreauth.AttributeCodexAlphaSearch]; exists {
+		t.Fatal("default alpha-search=false unexpectedly generated codex_alpha_search")
+	}
+}
+
+func TestConfigSynthesizer_CodexKeys_AllowsEmptyAPIKeyWithBaseURL(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{
+					APIKey:  "",
+					BaseURL: "https://custom-codex.example.com",
+					Headers: map[string]string{"Custom-Auth": "secret"},
+				},
+				{
+					APIKey:  "   ",
+					BaseURL: "https://custom-codex-2.example.com",
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths for empty API keys with base URL, got %d", len(auths))
+	}
+	if auths[0].Attributes["base_url"] != "https://custom-codex.example.com" {
+		t.Fatalf("expected base_url=https://custom-codex.example.com, got %s", auths[0].Attributes["base_url"])
+	}
+	if auths[0].Attributes["header:Custom-Auth"] != "secret" {
+		t.Fatalf("expected header:Custom-Auth=secret, got %s", auths[0].Attributes["header:Custom-Auth"])
+	}
+	if auths[0].Attributes["auth_kind"] != "apikey" {
+		t.Fatalf("expected auth_kind=apikey, got %s", auths[0].Attributes["auth_kind"])
+	}
+	if _, exists := auths[0].Attributes["api_key"]; exists {
+		t.Fatalf("expected no api_key attribute for empty key, got %s", auths[0].Attributes["api_key"])
+	}
 }
 
 func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
@@ -435,7 +688,7 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 				{
 					Name:           "CustomProvider",
 					BaseURL:        "https://custom.api.com",
-					DisableCooling: true,
+					DisableCooling: boolPointer(true),
 					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 						{APIKey: "key-1"},
 						{APIKey: "key-2"},
@@ -907,6 +1160,9 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 			XAIKey: []config.XAIKey{
 				{APIKey: "xai-key"},
 			},
+			MetaKey: []config.MetaKey{
+				{APIKey: "meta-key", BaseURL: "https://api.meta.ai/v1"},
+			},
 			OpenAICompatibility: []config.OpenAICompatibility{
 				{Name: "compat", BaseURL: "https://compat.api"},
 			},
@@ -922,8 +1178,8 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(auths) != 6 {
-		t.Fatalf("expected 6 auths, got %d", len(auths))
+	if len(auths) != 7 {
+		t.Fatalf("expected 7 auths, got %d", len(auths))
 	}
 
 	providers := make(map[string]bool)
@@ -931,10 +1187,311 @@ func TestConfigSynthesizer_AllProviders(t *testing.T) {
 		providers[a.Provider] = true
 	}
 
-	expected := []string{"gemini", "claude", "codex", "xai", "openai-compatible-compat", "vertex"}
+	expected := []string{"gemini", "claude", "codex", "xai", "meta", "openai-compatible-compat", "vertex"}
 	for _, p := range expected {
 		if !providers[p] {
 			t.Errorf("expected provider %s not found", p)
 		}
+	}
+}
+
+func TestConfigSynthesizer_RequestRetry(t *testing.T) {
+	zero := 0
+	positive := 2
+	negative := -1
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "gemini-zero", RequestRetry: &zero},
+				{APIKey: "gemini-positive", RequestRetry: &positive},
+				{APIKey: "gemini-negative", RequestRetry: &negative},
+				{APIKey: "gemini-unset"},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{APIKey: "interactions-zero", RequestRetry: &zero},
+			},
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "claude-positive", RequestRetry: &positive},
+			},
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-zero", RequestRetry: &zero},
+			},
+			XAIKey: []config.XAIKey{
+				{APIKey: "xai-positive", RequestRetry: &positive},
+			},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:         "compat",
+					BaseURL:      "https://compat.api",
+					RequestRetry: &zero,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "compat-key"},
+					},
+				},
+			},
+			VertexCompatAPIKey: []config.VertexCompatKey{
+				{APIKey: "vertex-positive", BaseURL: "https://vertex.api", RequestRetry: &positive},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+
+	want := map[string]any{
+		"gemini-zero":       0,
+		"gemini-positive":   2,
+		"gemini-negative":   nil,
+		"gemini-unset":      nil,
+		"interactions-zero": 0,
+		"claude-positive":   2,
+		"codex-zero":        0,
+		"xai-positive":      2,
+		"compat-key":        0,
+		"vertex-positive":   2,
+	}
+	got := make(map[string]any, len(auths))
+	for _, auth := range auths {
+		key := auth.Attributes["api_key"]
+		if auth.Metadata == nil {
+			got[key] = nil
+			continue
+		}
+		if value, exists := auth.Metadata["request_retry"]; exists {
+			got[key] = value
+			continue
+		}
+		got[key] = nil
+	}
+	for key, expected := range want {
+		actual, exists := got[key]
+		if !exists {
+			t.Fatalf("missing synthesized auth for %s", key)
+		}
+		if actual != expected {
+			t.Fatalf("%s request_retry = %v, want %v", key, actual, expected)
+		}
+	}
+}
+
+func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	rules := []config.RequestScopedErrorRule{
+		{
+			Status: 400,
+			Match:  []string{"maximum_context_length"},
+			Action: "stop",
+		},
+	}
+
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey: []config.GeminiKey{
+				{APIKey: "gemini-key", RequestScopedErrors: rules},
+			},
+			InteractionsKey: []config.GeminiKey{
+				{APIKey: "interactions-key", RequestScopedErrors: rules},
+			},
+			ClaudeKey: []config.ClaudeKey{
+				{APIKey: "claude-key", RequestScopedErrors: rules},
+			},
+			CodexKey: []config.CodexKey{
+				{APIKey: "codex-key", BaseURL: "https://codex.api", RequestScopedErrors: rules},
+			},
+			XAIKey: []config.CodexKey{
+				{APIKey: "xai-key", BaseURL: "https://xai.api", RequestScopedErrors: rules},
+			},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name:                "compat",
+					BaseURL:             "https://compat.api",
+					RequestScopedErrors: rules,
+					APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+						{APIKey: "compat-key"},
+					},
+				},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, errSynthesize := synth.Synthesize(ctx)
+	if errSynthesize != nil {
+		t.Fatalf("Synthesize() error = %v", errSynthesize)
+	}
+
+	for _, auth := range auths {
+		if auth.Metadata == nil {
+			t.Fatalf("auth %s has nil metadata", auth.ID)
+		}
+		val, exists := auth.Metadata["request_scoped_errors"]
+		if !exists {
+			t.Fatalf("auth %s missing request_scoped_errors in metadata", auth.ID)
+		}
+		extracted, ok := val.([]config.RequestScopedErrorRule)
+		if !ok || len(extracted) != 1 || extracted[0].Action != "stop" {
+			t.Fatalf("auth %s unexpected request_scoped_errors: %#v", auth.ID, val)
+		}
+	}
+}
+
+// TestConfigSynthesizer_ConnectionPoolOverride pins the per-credential pool opt-in:
+// the override declared on an API-key entry must reach the auth record so the
+// generic proxy client can pool just that credential.
+func TestConfigSynthesizer_ConnectionPoolOverride(t *testing.T) {
+	enabled := true
+	maxIdle := 4
+	cfg := &config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:   "ollama-key",
+			BaseURL:  "https://ollama.com/v1",
+			ProxyURL: "direct",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{
+				Enabled:             &enabled,
+				IdleConnTimeout:     "300s",
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		}},
+		ClaudeKey: []config.ClaudeKey{{APIKey: "claude-key", BaseURL: "https://api.anthropic.com"}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var codexAuth, claudeAuth *coreauth.Auth
+	for _, a := range auths {
+		switch {
+		case a.Provider == "codex":
+			codexAuth = a
+		case a.Provider == "claude":
+			claudeAuth = a
+		}
+	}
+	if codexAuth == nil || claudeAuth == nil {
+		t.Fatalf("missing synthesised auths: codex=%v claude=%v", codexAuth, claudeAuth)
+	}
+	pool := codexAuth.ProxyConnectionPool
+	if pool == nil {
+		t.Fatal("codex override did not reach the auth record")
+	}
+	if pool.Enabled == nil || !*pool.Enabled || pool.IdleConnTimeout != "300s" || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("unexpected override: %+v", pool)
+	}
+	if claudeAuth.ProxyConnectionPool != nil {
+		t.Fatal("entry without a connection-pool block must stay unpooled")
+	}
+	// The override must be copied, never aliased to live config values.
+	*pool.Enabled = false
+	if !enabled {
+		t.Fatal("auth override aliases the config pointer")
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompatConnectionPoolMerge pins field-level inheritance
+// for OpenAI-compatible keys: a per-key block only replaces the fields it sets.
+func TestConfigSynthesizer_OpenAICompatConnectionPoolMerge(t *testing.T) {
+	groupEnabled := true
+	groupMax := 2
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "compat",
+			BaseURL: "https://compat.example.com",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{
+				Enabled:             &groupEnabled,
+				IdleConnTimeout:     "300s",
+				MaxIdleConnsPerHost: &groupMax,
+			},
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "inherits"},
+				{APIKey: "partial", ConnectionPool: &config.ProxyConnectionPoolConfig{IdleConnTimeout: "60s"}},
+			},
+		}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byKey := map[string]*coreauth.ProxyConnectionPoolOverride{}
+	for _, a := range auths {
+		byKey[a.Attributes["api_key"]] = a.ProxyConnectionPool
+	}
+	inherits := byKey["inherits"]
+	if inherits == nil || inherits.Enabled == nil || !*inherits.Enabled || inherits.IdleConnTimeout != "300s" {
+		t.Fatalf("key without an override must inherit the group block: %+v", inherits)
+	}
+	if inherits.MaxIdleConnsPerHost == nil || *inherits.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("inheriting key lost max-idle: %+v", inherits)
+	}
+	partial := byKey["partial"]
+	if partial == nil || partial.Enabled == nil || !*partial.Enabled {
+		t.Fatalf("partial override must keep the group's enabled value: %+v", partial)
+	}
+	if partial.IdleConnTimeout != "60s" {
+		t.Fatalf("partial override idle = %q, want 60s", partial.IdleConnTimeout)
+	}
+	if partial.MaxIdleConnsPerHost == nil || *partial.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("partial override must inherit max-idle-conns-per-host: %+v", partial)
+	}
+}
+
+// TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn pins that writing the block
+// without fields requests the pool defaults. Dropping it during synthesis disabled
+// pooling for `connection-pool: {}` and for keys inheriting an empty group block.
+func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:         "empty-block",
+		BaseURL:        "https://ollama.com/v1",
+		ProxyURL:       "direct",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auths = %d, want 1", len(auths))
+	}
+	if auths[0].ProxyConnectionPool == nil {
+		t.Fatal("an empty connection-pool block is still an opt-in and must reach the auth record")
+	}
+	if enabled := auths[0].ProxyConnectionPool.Enabled; enabled != nil {
+		t.Fatalf("empty block must leave enabled unset (defaults to on), got %v", *enabled)
+	}
+
+	// An OpenAI-compatible provider with no API keys still synthesizes one auth
+	// record (e.g. a local Ollama/vLLM daemon) and must inherit the group pool block.
+	keyless := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:           "local-ollama",
+		BaseURL:        "http://127.0.0.1:11434/v1",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	keylessAuths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      keyless,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keylessAuths) != 1 || keylessAuths[0].ProxyConnectionPool == nil {
+		t.Fatalf("keyless OpenAI-compatible entry lost its group connection-pool block: %+v", keylessAuths)
 	}
 }

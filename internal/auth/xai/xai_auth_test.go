@@ -2,7 +2,6 @@ package xai
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -116,11 +116,12 @@ func TestPollForTokenExchangesDeviceCode(t *testing.T) {
 	defer server.Close()
 
 	auth := NewXAIAuth(nil)
+	auth.minPollInterval = time.Millisecond
 	tokenData, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
 		DeviceCode:    "device-abc",
 		UserCode:      "ABCD-1234",
 		ExpiresIn:     60,
-		Interval:      1,
+		Interval:      0,
 		TokenEndpoint: server.URL,
 	})
 	if err != nil {
@@ -187,11 +188,12 @@ func TestPollForTokenSlowDownContinuesPolling(t *testing.T) {
 	defer server.Close()
 
 	auth := NewXAIAuth(nil)
+	auth.minPollInterval = time.Millisecond
 	tokenData, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
 		DeviceCode:    "device-abc",
 		UserCode:      "ABCD-1234",
 		ExpiresIn:     60,
-		Interval:      5,
+		Interval:      0,
 		TokenEndpoint: server.URL,
 	})
 	if err != nil {
@@ -320,8 +322,18 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 }
 
+func TestXAIAuthDefaultPollInterval(t *testing.T) {
+	auth := NewXAIAuth(nil)
+	if auth.minPollInterval != 0 {
+		t.Fatalf("auth.minPollInterval = %v, want 0 (defaults to %v in production)", auth.minPollInterval, defaultPollInterval)
+	}
+	if defaultPollInterval != 5*time.Second {
+		t.Fatalf("defaultPollInterval = %v, want 5s", defaultPollInterval)
+	}
+}
+
 func fakeJWTWithEmail(email, subject string) string {
-	header := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"email":"` + email + `","sub":"` + subject + `"}`))
 	return header + "." + payload + ".sig"
 }

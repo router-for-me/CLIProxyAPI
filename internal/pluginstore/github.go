@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/httpfetch"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpfetch"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,15 +23,19 @@ const maxPluginStoreArtifactAttempts = 3
 type HTTPDoer = httpfetch.Doer
 
 type Client struct {
-	HTTPClient  HTTPDoer
-	RegistryURL string
-	UserAgent   string
+	HTTPClient HTTPDoer
+	// NetworkScope distinguishes request state for different proxy/egress configurations.
+	NetworkScope string
+	RateLimiter  *GitHubRateLimiter
+	RegistryURL  string
+	UserAgent    string
 	// AcceleratorBase, when set, rewrites GitHub resource URLs as base + original URL
 	// (web download accelerator). It is independent from HTTPClient proxy transport.
 	AcceleratorBase       string
 	Auth                  []AuthConfig
 	ResolvedAuth          []ResolvedAuthConfig
 	ResolvedAuthExpiresAt time.Time
+	preparedAuth          *preparedPluginStoreAuth
 }
 
 type Release struct {
@@ -143,7 +147,11 @@ func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
 	if item, ok := matchingResolvedAuthConfig(c.ResolvedAuth, apiURL, RequestKindArtifact); ok {
 		return resolvedAuthConfigured(item)
 	}
-	return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
+	if _, ok := matchingAuthConfig(c.Auth, apiURL, RequestKindArtifact); ok {
+		return AuthConfigured(c.Auth, apiURL, RequestKindArtifact)
+	}
+	_, authenticated, errAuth := c.authHeaders(apiURL, RequestKindArtifact)
+	return errAuth == nil && authenticated
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
@@ -171,7 +179,11 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 
 func (c Client) getOnce(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
 	currentURL := strings.TrimSpace(requestURL)
+	limiter := c.githubRateLimiter()
 	for redirects := 0; ; redirects++ {
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
 		// Accelerators are for downloadable GitHub artifact resources
 		// (releases/raw/CDN). Never rewrite registry, metadata, or API
 		// requests: public accelerators share egress IPs and frequently
@@ -183,27 +195,27 @@ func (c Client) getOnce(ctx context.Context, requestURL string, accept string, k
 			}
 			currentURL = rewritten
 		}
-		if errURL := validatePluginStoreRequestURL(c.Auth, currentURL, kind); errURL != nil {
-			return nil, errURL
-		}
-		if errExpiry := validateResolvedAuthExpiry(c.ResolvedAuth, c.ResolvedAuthExpiresAt, time.Now().UTC(), currentURL, kind); errExpiry != nil {
-			return nil, errExpiry
-		}
-		headers := http.Header{
-			"Accept":     []string{accept},
-			"User-Agent": []string{c.userAgent()},
-		}
-		authenticated, errAuth := applyPluginStoreAuthForClient(headers, c.ResolvedAuth, c.Auth, currentURL, kind)
+		headers, authenticated, errAuth := c.authHeaders(currentURL, kind)
 		if errAuth != nil {
 			return nil, errAuth
 		}
-		host := ""
+		rateKey := githubRateLimitKey(currentURL, c.NetworkScope, headers, authenticated)
+		if errLimit := limiter.check(rateKey); errLimit != nil {
+			return nil, errLimit
+		}
+		if headers.Get("Accept") == "" {
+			headers.Set("Accept", accept)
+		}
+		if headers.Get("User-Agent") == "" {
+			headers.Set("User-Agent", c.userAgent())
+		}
+		acceleratorHost := ""
 		if parsedURL, errParse := url.Parse(currentURL); errParse == nil {
-			host = parsedURL.Host
+			acceleratorHost = parsedURL.Host
 		}
 		log.WithFields(log.Fields{
 			"kind":          kind,
-			"host":          host,
+			"host":          acceleratorHost,
 			"accelerated":   strings.TrimSpace(c.AcceleratorBase) != "" && strings.HasPrefix(currentURL, strings.TrimSpace(c.AcceleratorBase)),
 			"authenticated": authenticated,
 			"redirect":      redirects,
@@ -221,6 +233,7 @@ func (c Client) getOnce(ctx context.Context, requestURL string, accept string, k
 			return nil, errDo
 		}
 		if pluginStoreRedirectStatus(resp.StatusCode) {
+			_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
 			nextURL, errRedirect := pluginStoreRedirectURL(resp, currentURL)
 			if errClose := resp.Body.Close(); errClose != nil {
 				log.WithError(errClose).Debug("failed to close plugin store redirect body")
@@ -234,24 +247,18 @@ func (c Client) getOnce(ctx context.Context, requestURL string, accept string, k
 			currentURL = nextURL
 			continue
 		}
-		return readPluginStoreResponse(resp, maxSize, authenticated)
+		return readPluginStoreResponse(resp, maxSize, authenticated, limiter, rateKey)
 	}
 }
 
 func retryablePluginStoreArtifactError(err error) bool {
 	// Only DeadlineExceeded is immediately fatal; context.Canceled from
 	// mid-read interruptions should still be retried because get() already
-	// checks ctx.Err() before entering the retry loop — if the outer context
-	// were actually canceled, get() would have returned before calling us.
+	// checks ctx.Err() before entering the retry loop.
 	if err == nil || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	// Match the underlying cause rather than the wrapped prefix: real network
-	// errors surface as "read response: read tcp 10.0.0.1:1->10.0.0.2:443: read:
-	// connection reset by peer", which does not contain the literal
-	// "read response: connection reset" substring. Match the cause tokens so
-	// transient interrupted reads are retried regardless of the wrapping.
 	return strings.Contains(message, "unexpected eof") ||
 		strings.Contains(message, "connection reset") ||
 		strings.Contains(message, "context canceled")
@@ -327,19 +334,30 @@ func pluginStoreRedirectURL(resp *http.Response, requestURL string) (string, err
 	return next.String(), nil
 }
 
-func readPluginStoreResponse(resp *http.Response, maxSize int64, authenticated bool) ([]byte, error) {
+func readPluginStoreResponse(resp *http.Response, maxSize int64, authenticated bool, limiter *GitHubRateLimiter, rateKey string) ([]byte, error) {
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.WithError(errClose).Debug("failed to close plugin store response body")
 		}
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		if authenticated {
+		// Apply header-based limits before reading a potentially slow body.
+		if errLimit := limiter.observe(rateKey, resp.StatusCode, resp.Header, nil); errLimit != nil {
+			return nil, errLimit
+		}
+		if authenticated && (rateKey == "" || resp.StatusCode != http.StatusForbidden) {
 			return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if errLimit := limiter.observe(rateKey, resp.StatusCode, resp.Header, body); errLimit != nil {
+			return nil, errLimit
+		}
+		if authenticated {
+			return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
 	reader := io.Reader(resp.Body)
 	if maxSize > 0 {
 		reader = io.LimitReader(resp.Body, maxSize+1)

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -12,6 +12,42 @@ func TestCloneForRuntimeNil(t *testing.T) {
 	var cfg *Config
 	if got := cfg.CloneForRuntime(); got != nil {
 		t.Fatalf("CloneForRuntime() = %#v, want nil", got)
+	}
+}
+
+func TestParseConfigBytes_AntigravitySensitiveWords(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
+  sensitive-words:
+    - "API"
+    - "proxy"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	want := []string{"API", "proxy"}
+	if !reflect.DeepEqual(cfg.Antigravity.SensitiveWords, want) {
+		t.Fatalf("Antigravity.SensitiveWords = %#v, want %#v", cfg.Antigravity.SensitiveWords, want)
+	}
+}
+
+func TestParseConfigBytes_AntigravityConnectionPool(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`antigravity:
+  connection-pool:
+    enabled: false
+    idle-conn-timeout: "15s"
+    max-idle-conns-per-host: 4
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Antigravity.ConnectionPool.Enabled == nil || *cfg.Antigravity.ConnectionPool.Enabled != false {
+		t.Fatalf("Enabled = %v, want false", cfg.Antigravity.ConnectionPool.Enabled)
+	}
+	if cfg.Antigravity.ConnectionPool.IdleConnTimeout != "15s" {
+		t.Fatalf("IdleConnTimeout = %q, want 15s", cfg.Antigravity.ConnectionPool.IdleConnTimeout)
+	}
+	if cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost == nil || *cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("MaxIdleConnsPerHost = %v, want 4", cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost)
 	}
 }
 
@@ -96,8 +132,9 @@ func sampleCloneRuntimeConfig() *Config {
 		SDKConfig: SDKConfig{
 			APIKeys: []string{"client-key"},
 			Streaming: StreamingConfig{
-				KeepAliveSeconds: 3,
-				BootstrapRetries: 2,
+				KeepAliveSeconds:      3,
+				BootstrapRetries:      2,
+				SendKeepAliveBeforeFT: true,
 			},
 		},
 		Home: HomeConfig{
@@ -306,4 +343,26 @@ func keyForPath(key reflect.Value) string {
 		return key.String()
 	}
 	return key.Type().String()
+}
+
+func TestParseConfigBytes_ProxyConnectionPool(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("api-keys:\n  codex:\n    - name: pool-group\n      base-url: https://ollama.com/v1\n      connection-pool:\n        enabled: true\n        idle-conn-timeout: 15s\n        max-idle-conns-per-host: 4\n      keys:\n        - api-key: pool-key\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CodexKey) != 1 {
+		t.Fatalf("codex entries = %d, want 1", len(cfg.CodexKey))
+	}
+	pool := cfg.CodexKey[0].ConnectionPool
+	if pool == nil || pool.Enabled == nil || !*pool.Enabled || pool.IdleConnTimeout != "15s" || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("unexpected pool config: %+v", pool)
+	}
+	clone := cfg.CloneForRuntime()
+	if clone.CodexKey[0].ConnectionPool == pool {
+		t.Fatal("clone shares the pool block")
+	}
+	*clone.CodexKey[0].ConnectionPool.Enabled = false
+	if !*cfg.CodexKey[0].ConnectionPool.Enabled {
+		t.Fatal("clone shares enabled pointer")
+	}
 }

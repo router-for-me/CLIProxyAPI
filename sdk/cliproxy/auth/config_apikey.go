@@ -8,8 +8,5 @@ func IsConfigAPIKeyAuth(auth *Auth) bool {
 	if auth.AuthKind() != AuthKindAPIKey {
 		return false
 	}
-	if auth.AuthSourceKind() != AuthSourceConfig {
-		return false
-	}
-	return authAttribute(auth, AttributeAPIKey) != ""
+	return auth.AuthSourceKind() == AuthSourceConfig
 }

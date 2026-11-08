@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -28,6 +28,26 @@ type TokenResponse struct {
 // userInfo represents Google user profile
 type userInfo struct {
 	Email string `json:"email"`
+}
+
+// HTTPStatusError represents an HTTP error response with status code.
+type HTTPStatusError struct {
+	StatusCodeValue int
+	Message         string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func (e *HTTPStatusError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCodeValue
 }
 
 // AntigravityAuth handles Antigravity OAuth authentication
@@ -165,10 +185,11 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 			return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
 		}
 		body := strings.TrimSpace(string(bodyBytes))
-		if body == "" {
-			return nil, fmt.Errorf("antigravity token exchange: request failed: status %d", resp.StatusCode)
+		msg := fmt.Sprintf("antigravity token exchange: request failed: status %d", resp.StatusCode)
+		if body != "" {
+			msg = fmt.Sprintf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
 		}
-		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
+		return nil, &HTTPStatusError{StatusCodeValue: resp.StatusCode, Message: msg}
 	}
 
 	var token TokenResponse
@@ -207,10 +228,11 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 			return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
 		}
 		body := strings.TrimSpace(string(bodyBytes))
-		if body == "" {
-			return "", fmt.Errorf("antigravity userinfo: request failed: status %d", resp.StatusCode)
+		msg := fmt.Sprintf("antigravity userinfo: request failed: status %d", resp.StatusCode)
+		if body != "" {
+			msg = fmt.Sprintf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
 		}
-		return "", fmt.Errorf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
+		return "", &HTTPStatusError{StatusCodeValue: resp.StatusCode, Message: msg}
 	}
 	var info userInfo
 	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
@@ -235,13 +257,12 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("marshal request body: %w", errMarshal)
 	}
 
-	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", APIEndpoint, APIVersion)
+	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", DailyAPIEndpoint, APIVersion)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 
@@ -261,7 +282,10 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return "", &HTTPStatusError{
+			StatusCodeValue: resp.StatusCode,
+			Message:         fmt.Sprintf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes))),
+		}
 	}
 
 	var loadResp map[string]any
@@ -371,7 +395,10 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		if len(responseErr) > 200 {
 			responseErr = responseErr[:200]
 		}
-		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
+		return "", &HTTPStatusError{
+			StatusCodeValue: resp.StatusCode,
+			Message:         fmt.Sprintf("http %d: %s", resp.StatusCode, responseErr),
+		}
 	}
 
 	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)

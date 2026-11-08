@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
 
 type fakeAntigravityReasoningReplayKVClient struct {
@@ -259,6 +259,12 @@ func TestAntigravityReasoningReplayUnrelatedEvictionDoesNotBlockAbsentSnapshot(t
 	if !CacheAntigravityReasoningReplayItems(model, "older-live-entry", [][]byte{liveItem}) {
 		t.Fatal("live entry write failed")
 	}
+	antigravityReasoningReplayMu.Lock()
+	if entry, ok := antigravityReasoningReplayEntries[antigravityReasoningReplayCacheKey(model, "older-live-entry")]; ok {
+		entry.Timestamp = time.Now().Add(-time.Minute)
+		antigravityReasoningReplayEntries[antigravityReasoningReplayCacheKey(model, "older-live-entry")] = entry
+	}
+	antigravityReasoningReplayMu.Unlock()
 	_, snapshot, found, errGet := GetAntigravityReasoningReplayItemsWithSnapshotRequired(context.Background(), model, "untouched-absent-session")
 	if errGet != nil || found {
 		t.Fatalf("initial absent snapshot = found %v, err %v", found, errGet)
@@ -501,7 +507,7 @@ func TestAntigravityReasoningReplayHomeWritesRemainLegacyArrayReadable(t *testin
 	if errUnmarshal := json.Unmarshal(raw, &legacyItems); errUnmarshal != nil {
 		t.Fatalf("new Home value is not readable as legacy [][]byte: %v", errUnmarshal)
 	}
-	if len(legacyItems) != 2 || gjson.GetBytes(legacyItems[0], "type").String() != antigravityReasoningReplayGenerationItemType || !bytes.Contains(legacyItems[1], []byte("legacy-readable-signature")) {
+	if len(legacyItems) != 2 || ojson.GetBytes(legacyItems[0], "type").String() != antigravityReasoningReplayGenerationItemType || !bytes.Contains(legacyItems[1], []byte("legacy-readable-signature")) {
 		t.Fatalf("legacy-readable Home array malformed: %q", legacyItems)
 	}
 }

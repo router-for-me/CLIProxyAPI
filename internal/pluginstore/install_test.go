@@ -843,8 +843,10 @@ func TestDownloadArtifactDoesNotRetryCanceledContext(t *testing.T) {
 	if !errors.Is(errDownload, context.Canceled) {
 		t.Fatalf("DownloadArtifact() error = %v, want context canceled", errDownload)
 	}
-	if client.calls != 1 {
-		t.Fatalf("HTTP calls = %d, want 1", client.calls)
+	// v8 checks the request context before issuing the request, so an already
+	// canceled context must not produce any HTTP attempt.
+	if client.calls != 0 {
+		t.Fatalf("HTTP calls = %d, want 0", client.calls)
 	}
 }
 

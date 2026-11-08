@@ -3,10 +3,12 @@ package home
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -106,5 +108,39 @@ func TestKVBestEffortWriteSwallowsErrorAndRedactsLog(t *testing.T) {
 	}
 	if strings.Contains(logText, "secret-key") || strings.Contains(logText, "secret-value") {
 		t.Fatalf("log leaked key or value: %q", logText)
+	}
+}
+
+func TestCurrentKVClientBridgesLocalBoltStoreAndPrioritizesHome(t *testing.T) {
+	ClearCurrent()
+	_ = kvstore.ShutdownLocal()
+	t.Cleanup(func() {
+		ClearCurrent()
+		_ = kvstore.ShutdownLocal()
+	})
+
+	dbPath := filepath.Join(t.TempDir(), "bridge.db")
+	if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
+		t.Fatalf("kvstore.ConfigureLocal(true, %q) error = %v", dbPath, errCfg)
+	}
+
+	client, kvMode, errClient := CurrentKVClient()
+	if errClient != nil || !kvMode || client == nil {
+		t.Fatalf("CurrentKVClient() with local enabled = (%v, %v, %v), want (*BoltStore, true, nil)", client, kvMode, errClient)
+	}
+	if _, ok := client.(*kvstore.BoltStore); !ok {
+		t.Fatalf("CurrentKVClient() type = %T, want *kvstore.BoltStore", client)
+	}
+
+	// When Home is active, CurrentKVClient must return the Home client even while local bbolt is enabled.
+	homeClient, _ := newRedisCommandTestClient(t, func(args []string) string {
+		return "+OK\r\n"
+	})
+	homeClient.heartbeatOK.Store(true)
+	SetCurrent(homeClient)
+
+	activeClient, activeMode, errActive := CurrentKVClient()
+	if errActive != nil || !activeMode || activeClient != homeClient {
+		t.Fatalf("CurrentKVClient() with active Home = (%v, %v, %v), want (%v, true, nil)", activeClient, activeMode, errActive, homeClient)
 	}
 }

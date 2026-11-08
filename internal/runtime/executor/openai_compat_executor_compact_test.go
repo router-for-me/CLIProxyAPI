@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -10,13 +11,17 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
@@ -31,11 +36,21 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}))
 	defer server.Close()
 
-	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": server.URL + "/v1",
-		"api_key":  "test",
-	}}
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
 	payload := []byte(`{"model":"gpt-5.1-codex-max","input":[{"role":"user","content":"hi"}]}`)
 	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-5.1-codex-max",
@@ -51,11 +66,14 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	if gotPath != "/v1/responses/compact" {
 		t.Fatalf("path = %q, want %q", gotPath, "/v1/responses/compact")
 	}
-	if !gjson.GetBytes(gotBody, "input").Exists() {
+	if !ojson.GetBytes(gotBody, "input").Exists() {
 		t.Fatalf("expected input in body")
 	}
-	if gjson.GetBytes(gotBody, "messages").Exists() {
+	if ojson.GetBytes(gotBody, "messages").Exists() {
 		t.Fatalf("unexpected messages in body")
+	}
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+		t.Fatalf("unexpected prompt_cache_key in responses compact body: %s", string(gotBody))
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
@@ -101,8 +119,442 @@ func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T)
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
+	if got := ojson.GetBytes(gotBody, "reasoning_effort").String(); got != "low" {
 		t.Fatalf("reasoning_effort = %q, want %q; body=%s", got, "low", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorApplyPromptCacheKey(t *testing.T) {
+	tests := []struct {
+		name        string
+		support     bool
+		from        string
+		payload     string
+		metadata    map[string]any
+		wantKey     string
+		wantPresent bool
+	}{
+		{
+			name:        "disabled",
+			support:     false,
+			from:        "claude",
+			payload:     `{"model":"gpt-5.6","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`,
+			wantPresent: false,
+		},
+		{
+			name:        "derived",
+			support:     true,
+			from:        "claude",
+			payload:     `{"model":"gpt-5.6","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`,
+			wantPresent: true,
+		},
+		{
+			name:    "explicit caller key wins",
+			support: true,
+			from:    "claude",
+			payload: `{"model":"gpt-5.6","prompt_cache_key":"caller-key","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`,
+			wantKey: "caller-key",
+		},
+		{
+			name:        "non Claude source without identity",
+			support:     true,
+			from:        "openai",
+			payload:     `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`,
+			wantPresent: false,
+		},
+		{
+			name:        "OpenAI",
+			support:     true,
+			from:        "openai",
+			payload:     `{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:openai"},
+			wantPresent: true,
+		},
+		{
+			name:        "OpenAI responses",
+			support:     true,
+			from:        "openai-response",
+			payload:     `{"model":"gpt-5.6","input":"hello"}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:responses"},
+			wantPresent: true,
+		},
+		{
+			name:        "Gemini",
+			support:     true,
+			from:        "gemini",
+			payload:     `{"model":"gemini-3","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:gemini"},
+			wantPresent: true,
+		},
+		{
+			name:        "Interactions",
+			support:     true,
+			from:        "interactions",
+			payload:     `{"model":"gpt-5.6","input":"hello"}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:interactions"},
+			wantPresent: true,
+		},
+		{
+			name:        "Codex",
+			support:     true,
+			from:        "codex",
+			payload:     `{"model":"gpt-5.6","input":"hello"}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:codex"},
+			wantPresent: true,
+		},
+		{
+			name:        "Antigravity",
+			support:     true,
+			from:        "antigravity",
+			payload:     `{"model":"gpt-5.6","input":"hello"}`,
+			metadata:    map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:antigravity"},
+			wantPresent: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{{
+					Name:                  "compat",
+					SupportPromptCacheKey: test.support,
+				}},
+			})
+			auth := &cliproxyauth.Auth{
+				Provider: "openai-compatibility",
+				Attributes: map[string]string{
+					"compat_name":  "compat",
+					"provider_key": "compat",
+				},
+			}
+			translated, errApply := executor.applyPromptCacheKey(
+				context.Background(),
+				auth,
+				sdktranslator.FromString(test.from),
+				"gpt-5.6",
+				cliproxyexecutor.Request{Model: "gpt-5.6", Payload: []byte(test.payload)},
+				cliproxyexecutor.Options{Metadata: test.metadata},
+				[]byte(`{"model":"gpt-5.6","messages":[]}`),
+			)
+			if errApply != nil {
+				t.Fatalf("applyPromptCacheKey error: %v", errApply)
+			}
+			gotKey := ojson.GetBytes(translated, "prompt_cache_key").String()
+			if test.wantKey != "" {
+				if gotKey != test.wantKey {
+					t.Fatalf("prompt_cache_key = %q, want %q", gotKey, test.wantKey)
+				}
+				return
+			}
+			if present := gotKey != ""; present != test.wantPresent {
+				t.Fatalf("prompt_cache_key present = %t, want %t; body=%s", present, test.wantPresent, string(translated))
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyCallerValueWinsPayloadOverride(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	for _, test := range []struct {
+		name            string
+		payload         []byte
+		originalRequest []byte
+		want            string
+	}{
+		{
+			name:    "request payload",
+			payload: []byte(`{"model":"gpt-5.6","prompt_cache_key":"caller-key"}`),
+			want:    "caller-key",
+		},
+		{
+			name:            "original request",
+			originalRequest: []byte(`{"model":"gpt-5.6","prompt_cache_key":"caller-key"}`),
+			want:            "caller-key",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			translated, errApply := executor.applyPromptCacheKey(
+				context.Background(),
+				auth,
+				sdktranslator.FromString("openai"),
+				"gpt-5.6",
+				cliproxyexecutor.Request{Model: "gpt-5.6", Payload: test.payload},
+				cliproxyexecutor.Options{OriginalRequest: test.originalRequest},
+				[]byte(`{"model":"gpt-5.6","prompt_cache_key":"payload-override"}`),
+			)
+			if errApply != nil {
+				t.Fatalf("applyPromptCacheKey error: %v", errApply)
+			}
+			if got := ojson.GetBytes(translated, "prompt_cache_key").String(); got != test.want {
+				t.Fatalf("prompt_cache_key = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyIsModelAndProtocolScoped(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	metadata := map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "execution-session"}
+	derive := func(t *testing.T, model string, from string) string {
+		t.Helper()
+		translated, errApply := executor.applyPromptCacheKey(
+			context.Background(),
+			auth,
+			sdktranslator.FromString(from),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)},
+			cliproxyexecutor.Options{Metadata: metadata},
+			[]byte(`{"model":"`+model+`","messages":[]}`),
+		)
+		if errApply != nil {
+			t.Fatalf("applyPromptCacheKey error: %v", errApply)
+		}
+		return ojson.GetBytes(translated, "prompt_cache_key").String()
+	}
+
+	baseKey := derive(t, "gpt-5.6", "openai")
+	if baseKey == "" {
+		t.Fatal("base prompt_cache_key is empty")
+	}
+	if modelKey := derive(t, "gpt-5.5", "openai"); modelKey == baseKey {
+		t.Fatalf("different model reused prompt_cache_key %q", baseKey)
+	}
+	if protocolKey := derive(t, "gpt-5.6", "openai-response"); protocolKey == baseKey {
+		t.Fatalf("different protocol reused prompt_cache_key %q", baseKey)
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyUsesConfigIndex(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "duplicate", SupportPromptCacheKey: false},
+			{Name: "duplicate", SupportPromptCacheKey: true},
+		},
+	})
+	payload := []byte(`{"model":"gpt-5.6","metadata":{"user_id":"{\"session_id\":\"cache-session\"}"}}`)
+	for _, test := range []struct {
+		name        string
+		configIndex string
+		wantPresent bool
+	}{
+		{name: "first config", configIndex: "0", wantPresent: false},
+		{name: "second config", configIndex: "1", wantPresent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{
+				Provider: "openai-compatibility",
+				Attributes: map[string]string{
+					"compat_name":  "duplicate",
+					"provider_key": "duplicate",
+					"config_index": test.configIndex,
+					"source":       "config:duplicate[0]",
+				},
+			}
+			translated, errApply := executor.applyPromptCacheKey(
+				context.Background(),
+				auth,
+				sdktranslator.FromString("claude"),
+				"gpt-5.6",
+				cliproxyexecutor.Request{Model: "gpt-5.6", Payload: payload},
+				cliproxyexecutor.Options{},
+				[]byte(`{"model":"gpt-5.6","messages":[]}`),
+			)
+			if errApply != nil {
+				t.Fatalf("applyPromptCacheKey error: %v", errApply)
+			}
+			gotPresent := ojson.GetBytes(translated, "prompt_cache_key").String() != ""
+			if gotPresent != test.wantPresent {
+				t.Fatalf("prompt_cache_key present = %t, want %t; body=%s", gotPresent, test.wantPresent, string(translated))
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyIgnoresConfigIndexForNonConfigAuth(t *testing.T) {
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "duplicate", SupportPromptCacheKey: false},
+			{Name: "duplicate", SupportPromptCacheKey: true},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"compat_name":  "duplicate",
+			"provider_key": "duplicate",
+			"config_index": "1",
+		},
+	}
+	translated, errApply := executor.applyPromptCacheKey(
+		context.Background(),
+		auth,
+		sdktranslator.FromString("openai"),
+		"gpt-5.6",
+		cliproxyexecutor.Request{Model: "gpt-5.6", Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)},
+		cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:non-config"}},
+		[]byte(`{"model":"gpt-5.6","messages":[]}`),
+	)
+	if errApply != nil {
+		t.Fatalf("applyPromptCacheKey error: %v", errApply)
+	}
+	if ojson.GetBytes(translated, "prompt_cache_key").Exists() {
+		t.Fatalf("unexpected prompt_cache_key for non-config auth: %s", string(translated))
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyExecute(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	_, errExecute := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:openai"},
+	})
+	if errExecute != nil {
+		t.Fatalf("Execute error: %v", errExecute)
+	}
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+		t.Fatalf("prompt_cache_key is missing from upstream body: %s", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyExecuteStream(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:openai-stream"},
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+	if gotKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); gotKey == "" {
+		t.Fatalf("prompt_cache_key is missing from upstream stream body: %s", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorPromptCacheKeyStreamCompactSkipped(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
+	result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6",
+		Payload: []byte(`{"model":"gpt-5.6","messages":[{"role":"user","content":"hello"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Alt:          "responses/compact",
+		Stream:       true,
+		Metadata:     map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:compact-stream"},
+	})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+	}
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+		t.Fatalf("unexpected prompt_cache_key in streaming compact body: %s", string(gotBody))
 	}
 }
 
@@ -120,11 +572,21 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	}))
 	defer server.Close()
 
-	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"base_url": server.URL + "/v1",
-		"api_key":  "test",
-	}}
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:                  "compat",
+			SupportPromptCacheKey: true,
+		}},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "compat",
+			"provider_key": "compat",
+		},
+	}
 	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "upstream-image",
 		Payload: []byte(`{"model":"compat-image","prompt":"draw"}`),
@@ -147,10 +609,13 @@ func TestOpenAICompatExecutorImagesGenerationsPassthrough(t *testing.T) {
 	if gotContentType != "application/json" {
 		t.Fatalf("content type = %q, want application/json", gotContentType)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
+	if ojson.GetBytes(gotBody, "prompt_cache_key").Exists() {
+		t.Fatalf("unexpected prompt_cache_key in image body: %s", string(gotBody))
+	}
+	if got := ojson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
 		t.Fatalf("response payload = %s", string(resp.Payload))
 	}
 }
@@ -207,10 +672,10 @@ func TestOpenAICompatExecutorImagesGenerationsStreamsUpstream(t *testing.T) {
 	if gotAccept != "text/event-stream" {
 		t.Fatalf("accept = %q, want text/event-stream", gotAccept)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, string(gotBody))
 	}
-	if !gjson.GetBytes(gotBody, "stream").Bool() {
+	if !ojson.GetBytes(gotBody, "stream").Bool() {
 		t.Fatalf("stream flag missing from upstream body: %s", string(gotBody))
 	}
 	if !strings.Contains(streamed.String(), "event: image_generation.partial") || !strings.Contains(streamed.String(), "data: [DONE]") {
@@ -438,7 +903,776 @@ func TestOpenAICompatExecutorStreamSkipsKeepAliveUntilDataLine(t *testing.T) {
 		}
 		got.Write(chunk.Payload)
 	}
-	if gjson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
+	if ojson.Get(got.String(), "choices.0.delta.content").String() != "hello" {
 		t.Fatalf("stream payload = %s", got.String())
 	}
+}
+
+func TestOpenAICompatExecutorResponsesStreamFailsOnEOFWithoutDone(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	request := []byte(`{"model":"deepseek-v4-flash","input":"hi","stream":true}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamed strings.Builder
+	var streamErr error
+	for chunk := range result.Chunks {
+		streamed.Write(chunk.Payload)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if !strings.Contains(streamed.String(), "response.output_text.delta") {
+		t.Fatalf("stream did not forward partial assistant output: %q", streamed.String())
+	}
+	if strings.Contains(streamed.String(), "response.completed") {
+		t.Fatalf("clean EOF without [DONE] was finalized as response.completed: %q", streamed.String())
+	}
+	if streamErr == nil {
+		t.Fatal("clean EOF without [DONE] did not produce a terminal stream error")
+	}
+	statusErr, ok := streamErr.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("stream error status = %v, want %d", streamErr, http.StatusBadGateway)
+	}
+	if !strings.Contains(streamErr.Error(), "closed before [DONE]") {
+		t.Fatalf("stream error does not explain the missing terminal marker: %v", streamErr)
+	}
+	truncatedErr, okTruncated := streamErr.(cliproxyexecutor.StreamTruncatedError)
+	if !okTruncated || !truncatedErr.IsStreamTruncated() {
+		t.Fatalf("stream error = %T (%v), want IsStreamTruncated() = true", streamErr, streamErr)
+	}
+}
+
+func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
+	const provider = "openai-compatible-minimax"
+	const model = "MiniMax-M3"
+	const partialChunk = `data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"MiniMax-M3","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"
+
+	cases := []struct {
+		name              string
+		status            int
+		body              string
+		requests          int
+		wantCalls         int32
+		wantCooled        int
+		wantLastErrorText string
+		forbidAuthUnavail bool
+	}{
+		{
+			name:              "partial_stream_without_done_across_requests",
+			status:            http.StatusOK,
+			body:              partialChunk,
+			requests:          4,
+			wantCalls:         4,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "empty_200_stream_without_done",
+			status:            http.StatusOK,
+			body:              "",
+			requests:          1,
+			wantCalls:         1,
+			wantCooled:        0,
+			wantLastErrorText: "upstream stream closed before [DONE]",
+			forbidAuthUnavail: true,
+		},
+		{
+			name:              "real_http_502_control",
+			status:            http.StatusBadGateway,
+			body:              `{"error":{"message":"mock upstream gateway failure","type":"server_error"}}`,
+			requests:          2,
+			wantCalls:         3,
+			wantCooled:        3,
+			wantLastErrorText: "auth_unavailable: no auth available",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{}
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 0)
+			manager.RegisterExecutor(NewOpenAICompatExecutor(provider, cfg))
+
+			for i := 0; i < 3; i++ {
+				id := fmt.Sprintf("minimax-compat-%s-%d", tc.name, i)
+				registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+				_, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
+					ID:       id,
+					Provider: provider,
+					Status:   cliproxyauth.StatusActive,
+					Attributes: map[string]string{
+						"api_key":      fmt.Sprintf("minimax-key-%d", i),
+						"base_url":     server.URL + "/v1",
+						"compat_name":  "minimax",
+						"provider_key": provider,
+					},
+				})
+				if errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+			}
+
+			requestPayload := []byte(`{"model":"MiniMax-M3","input":"hi","stream":true}`)
+			var lastObservedErr error
+			for reqIdx := 0; reqIdx < tc.requests; reqIdx++ {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				result, errStream := manager.ExecuteStream(ctx, []string{provider}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: requestPayload,
+				}, cliproxyexecutor.Options{
+					SourceFormat:    sdktranslator.FormatOpenAIResponse,
+					ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+					OriginalRequest: requestPayload,
+					Stream:          true,
+				})
+				observedErr := errStream
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							observedErr = chunk.Err
+						}
+					}
+				}
+				cancel()
+				if observedErr == nil {
+					t.Fatalf("request %d succeeded unexpectedly", reqIdx+1)
+				}
+				lastObservedErr = observedErr
+			}
+
+			cooled := 0
+			for _, auth := range manager.List() {
+				if state := auth.ModelStates[model]; state != nil && state.Unavailable && state.NextRetryAfter.After(time.Now()) {
+					cooled++
+				}
+			}
+
+			if calls.Load() != tc.wantCalls {
+				t.Errorf("upstream calls = %d, want %d", calls.Load(), tc.wantCalls)
+			}
+			if cooled != tc.wantCooled {
+				t.Errorf("cooled credentials = %d, want %d", cooled, tc.wantCooled)
+			}
+			if lastObservedErr == nil || !strings.Contains(lastObservedErr.Error(), tc.wantLastErrorText) {
+				t.Errorf("last error = %v, want substring %q", lastObservedErr, tc.wantLastErrorText)
+			}
+			if tc.forbidAuthUnavail && lastObservedErr != nil && strings.Contains(lastObservedErr.Error(), "auth_unavailable") {
+				t.Errorf("last error unexpectedly degraded to auth_unavailable: %v", lastObservedErr)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorResponsesStreamPreservesUpstreamDataError(t *testing.T) {
+	for _, withDone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("with_done=%t", withDone), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"))
+				_, _ = w.Write([]byte(`data: {"error":{"type":"server_error","code":"upstream_failed","message":"upstream failed"}}` + "\n\n"))
+				if withDone {
+					_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				}
+			}))
+			defer server.Close()
+
+			executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL + "/v1",
+				"api_key":  "test",
+			}}
+			request := []byte(`{"model":"deepseek-v4-flash","input":"hi","stream":true}`)
+			result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "deepseek-v4-flash",
+				Payload: request,
+			}, cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAIResponse,
+				ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+				OriginalRequest: request,
+				Stream:          true,
+			})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+
+			var streamed strings.Builder
+			var streamErr error
+			for chunk := range result.Chunks {
+				streamed.Write(chunk.Payload)
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if strings.Contains(streamed.String(), "response.completed") {
+				t.Fatalf("upstream data error was finalized as response.completed: %q", streamed.String())
+			}
+			if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream failed") {
+				t.Fatalf("terminal stream error = %v, want original upstream failure", streamErr)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorResponsesStreamPreservesNamedErrorEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte("event: error\n"))
+		_, _ = w.Write([]byte(`data: {"code":"upstream_failed",` + "\n"))
+		_, _ = w.Write([]byte(`data: "message":"upstream failed"}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	request := []byte(`{"model":"deepseek-v4-flash","input":"hi","stream":true}`)
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamed strings.Builder
+	var streamErr error
+	for chunk := range result.Chunks {
+		streamed.Write(chunk.Payload)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if strings.Contains(streamed.String(), "response.completed") {
+		t.Fatalf("named upstream error event was finalized as response.completed: %q", streamed.String())
+	}
+	if streamErr == nil || !strings.Contains(streamErr.Error(), "upstream failed") {
+		t.Fatalf("terminal stream error = %v, want named upstream failure", streamErr)
+	}
+}
+
+func TestOpenAICompatExecutorResponsesStreamHandlesAdditionalErrorShapes(t *testing.T) {
+	tests := []struct {
+		name    string
+		lines   []string
+		wantErr string
+	}{
+		{
+			name: "response failed payload",
+			lines: []string{
+				`data: {"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_failed","message":"response failed upstream"}}}` + "\n\n",
+				"data: [DONE]\n\n",
+			},
+			wantErr: "response failed upstream",
+		},
+		{
+			name: "data before named error",
+			lines: []string{
+				`data: {"detail":"data before event failure"}` + "\n",
+				"event: error\n\n",
+				"data: [DONE]\n\n",
+			},
+			wantErr: "data before event failure",
+		},
+		{
+			name: "done after incomplete error data",
+			lines: []string{
+				"event: error\n",
+				`data: {"message":"incomplete upstream failure"` + "\n",
+				"data: [DONE]\n\n",
+			},
+			wantErr: "incomplete data before [DONE]",
+		},
+		{
+			name: "done immediately after error event",
+			lines: []string{
+				"event: error\n",
+				"data: [DONE]\n\n",
+			},
+			wantErr: "error event ended before [DONE]",
+		},
+		{
+			name: "incomplete data cannot cross frame boundary",
+			lines: []string{
+				"data: {\n\n",
+				`data: "id":"chatcmpl_2","object":"chat.completion.chunk","choices":[]}` + "\n\n",
+				"data: [DONE]\n\n",
+			},
+			wantErr: "incomplete SSE data frame",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}]}` + "\n\n"))
+				for _, line := range tc.lines {
+					_, _ = w.Write([]byte(line))
+				}
+			}))
+			defer server.Close()
+
+			executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL + "/v1", "api_key": "test"}}
+			request := []byte(`{"model":"deepseek-v4-flash","input":"hi","stream":true}`)
+			result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "deepseek-v4-flash", Payload: request}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request, Stream: true,
+			})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+
+			var streamed strings.Builder
+			var streamErr error
+			for chunk := range result.Chunks {
+				streamed.Write(chunk.Payload)
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+			}
+			if strings.Contains(streamed.String(), "response.completed") {
+				t.Fatalf("upstream error was finalized as response.completed: %q", streamed.String())
+			}
+			if streamErr == nil || !strings.Contains(streamErr.Error(), tc.wantErr) {
+				t.Fatalf("terminal stream error = %v, want %q", streamErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestOpenAICompatExecutorStreamDropsChunksAfterDone(t *testing.T) {
+	// Some OpenAI-compatible upstreams (e.g. OpenCode zen) append non-spec
+	// metadata after data: [DONE]. Those trailing events must not be forwarded,
+	// otherwise clients that treat every pre-[DONE] data line as a chat chunk
+	// fail to deserialize (e.g. missing required "id").
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(`data: {"id":"c1a4ba22","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"id":"c1a4ba22","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[],"cost":"0"}` + "\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash-free",
+		Payload: []byte(`{"model":"deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var payloads []string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		if len(chunk.Payload) == 0 {
+			continue
+		}
+		payloads = append(payloads, string(chunk.Payload))
+	}
+	if len(payloads) != 2 {
+		t.Fatalf("got %d payloads %v, want 2 (content + finish; no post-DONE cost chunk)", len(payloads), payloads)
+	}
+	for _, p := range payloads {
+		if strings.Contains(p, `"cost"`) {
+			t.Fatalf("post-DONE cost chunk was forwarded: %s", p)
+		}
+		if !ojson.Get(p, "id").Exists() {
+			t.Fatalf("chunk missing id: %s", p)
+		}
+	}
+	if ojson.Get(payloads[0], "choices.0.delta.content").String() != "hi" {
+		t.Fatalf("first chunk = %s", payloads[0])
+	}
+	if ojson.Get(payloads[1], "choices.0.delta.content").String() != "" || ojson.Get(payloads[1], "choices.0.finish_reason").String() != "stop" {
+		t.Fatalf("second chunk = %s", payloads[1])
+	}
+}
+
+func TestOpenAICompatExecutor_ResponsesCompactionTriggerAndReplay_Issue7248(t *testing.T) {
+	var seenPaths []string
+	var seenBodies [][]byte
+	var returnIncomplete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read upstream body: %v", errRead)
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		seenPaths = append(seenPaths, r.URL.Path)
+		seenBodies = append(seenBodies, body)
+
+		if r.URL.Path == "/v1/responses/compact" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"resp_cmp_native","object":"response.compaction","status":"completed","output":[{"id":"cmp_native","type":"compaction","status":"completed","encrypted_content":"gAAAA_native"}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}`)
+			return
+		}
+
+		if returnIncomplete {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"chatcmpl_inc","object":"chat.completion","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"thinking","content":"Partial truncated summary."},"finish_reason":"length"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}`)
+			return
+		}
+
+		if ojson.GetBytes(body, "stream").Bool() {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w,
+				`data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Checking context..."},"finish_reason":null}]}`+"\n\n"+
+					`data: {"id":"chatcmpl_stream","object":"chat.completion.chunk","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"delta":{"content":"COBALT-731"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`+"\n\n"+
+					"data: [DONE]\n\n",
+			)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl_sum","object":"chat.completion","created":1773896263,"model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"Summarizing session context.","content":"Summary retaining COBALT-731."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}}`)
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "cline-pass/deepseek-v4.1-flash", Protocol: "openai"}},
+				Params: map[string]any{
+					"max_tokens": 2048,
+				},
+			}},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url": server.URL + "/v1",
+			"api_key":  "test-cline-key",
+		},
+	}
+
+	triggerPayload := []byte(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": true,
+		"input": [
+			{
+				"type": "additional_tools",
+				"tools": [
+					{
+						"type": "function",
+						"name": "exec_command",
+						"description": "Execute a shell command",
+						"parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}
+					}
+				]
+			},
+			{
+				"type": "message",
+				"role": "user",
+				"content": [{"type": "input_text", "text": "Remember our synthetic project marker COBALT-731 and reply with ACK."}]
+			},
+			{"type": "compaction_trigger"}
+		]
+	}`)
+
+	streamResult, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream(compaction_trigger) error = %v", errStream)
+	}
+
+	var streamBuf bytes.Buffer
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		streamBuf.Write(chunk.Payload)
+	}
+
+	completed := claudeCompactionCompletedResponse(t, streamBuf.String())
+	outputItems := completed.Get("response.output").Array()
+	if len(outputItems) != 1 || outputItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in stream response, got: %s", completed.Raw)
+	}
+	capsule := outputItems[0].Get("encrypted_content").String()
+	if !strings.HasPrefix(capsule, "cpa-ag-compact-v1:") {
+		t.Fatalf("expected CPA compaction capsule prefix, got %q", capsule)
+	}
+	if gotCached := completed.Get("response.usage.input_tokens_details.cached_tokens").Int(); gotCached != 4 {
+		t.Fatalf("cached_tokens = %d, want 4", gotCached)
+	}
+	if gotReasoning := completed.Get("response.usage.output_tokens_details.reasoning_tokens").Int(); gotReasoning != 2 {
+		t.Fatalf("reasoning_tokens = %d, want 2", gotReasoning)
+	}
+	firstSeen := seenBodies[0]
+	if ojson.GetBytes(firstSeen, "stream").Bool() {
+		t.Fatalf("expected non-stream summary request upstream, got: %s", firstSeen)
+	}
+	if ojson.GetBytes(firstSeen, "tools").Exists() {
+		t.Fatalf("expected tools (including additional_tools) to be stripped from summary request, got: %s", firstSeen)
+	}
+
+	nonStreamResp, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errExec != nil {
+		t.Fatalf("Execute(compaction_trigger) error = %v", errExec)
+	}
+	nonStreamItems := ojson.GetBytes(nonStreamResp.Payload, "output").Array()
+	if len(nonStreamItems) != 1 || nonStreamItems[0].Get("type").String() != "compaction" {
+		t.Fatalf("expected single compaction item in non-stream response, got: %s", nonStreamResp.Payload)
+	}
+
+	replayPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": true,
+		"input": [
+			{"type": "compaction", "encrypted_content": "foreign-opaque-token"},
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What is the project marker?"}]}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+
+	contStream, errCont := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: replayPayload,
+	})
+	if errCont != nil {
+		t.Fatalf("ExecuteStream(replay) error = %v", errCont)
+	}
+	for chunk := range contStream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("continuation stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	lastSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(lastSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected expanded summary in continuation upstream request, got: %s", lastSeen)
+	}
+	if bytes.Contains(lastSeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("expected foreign compaction item to be dropped, got: %s", lastSeen)
+	}
+
+	if _, errNonStreamReplay := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: replayPayload,
+	}); errNonStreamReplay != nil {
+		t.Fatalf("Execute(replay) error = %v", errNonStreamReplay)
+	}
+	nonStreamReplaySeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(nonStreamReplaySeen, []byte("Summary retaining COBALT-731.")) || bytes.Contains(nonStreamReplaySeen, []byte("foreign-opaque-token")) {
+		t.Fatalf("unexpected non-stream replay upstream body: %s", nonStreamReplaySeen)
+	}
+
+	if _, errCountTokens := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: replayPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: replayPayload,
+	}); errCountTokens != nil {
+		t.Fatalf("CountTokens(replay) error = %v", errCountTokens)
+	}
+
+	strippedTriggerPayload := []byte(`{"model":"cline-pass/deepseek-v4.1-flash","stream":false,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember our synthetic project marker COBALT-731 and reply with ACK."}]}]}`)
+	origOnlyResp, errOrigOnly := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: strippedTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errOrigOnly != nil {
+		t.Fatalf("Execute(OriginalRequest-only trigger) error = %v", errOrigOnly)
+	}
+	if got := ojson.GetBytes(origOnlyResp.Payload, "output.0.type").String(); got != "compaction" {
+		t.Fatalf("OriginalRequest-only trigger output[0].type = %q, want compaction", got)
+	}
+
+	corruptedPayload := []byte(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "encrypted_content": "cpa-ag-compact-v1:not-valid"},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]}
+		]
+	}`)
+	_, errCorrupt := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: corruptedPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: corruptedPayload,
+	})
+	if errCorrupt == nil {
+		t.Fatal("expected error for corrupted compaction capsule, got nil")
+	}
+	assertStatusErr(t, errCorrupt, http.StatusBadRequest)
+
+	secondTriggerPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"stream": false,
+		"input": [
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Second phase work."}]},
+			{"type": "compaction_trigger"}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+	secondResp, errSecond := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: secondTriggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: secondTriggerPayload,
+	})
+	if errSecond != nil {
+		t.Fatalf("Execute(second compaction_trigger) error = %v", errSecond)
+	}
+	if got := len(ojson.GetBytes(secondResp.Payload, "output").Array()); got != 1 {
+		t.Fatalf("second compaction output len = %d, want 1", got)
+	}
+	secondSeen := seenBodies[len(seenBodies)-1]
+	if !bytes.Contains(secondSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected first capsule summary in second compaction request, got: %s", secondSeen)
+	}
+	if got := ojson.GetBytes(secondSeen, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want payload rule 2048; body=%s", got, secondSeen)
+	}
+
+	compactPassthroughPayload := []byte(fmt.Sprintf(`{
+		"model": "cline-pass/deepseek-v4.1-flash",
+		"input": [
+			{"type": "compaction", "encrypted_content": "foreign-native-token"},
+			{"type": "compaction", "id": %q, "encrypted_content": %q},
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Compact again."}]}
+		]
+	}`, outputItems[0].Get("id").String(), capsule))
+	if _, errCompactEndpoint := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: compactPassthroughPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Alt:          "responses/compact",
+	}); errCompactEndpoint != nil {
+		t.Fatalf("Execute(responses/compact) error = %v", errCompactEndpoint)
+	}
+	compactSeen := seenBodies[len(seenBodies)-1]
+	if seenPaths[len(seenPaths)-1] != "/v1/responses/compact" {
+		t.Fatalf("responses/compact path = %q, want /v1/responses/compact", seenPaths[len(seenPaths)-1])
+	}
+	if !bytes.Contains(compactSeen, []byte("Summary retaining COBALT-731.")) {
+		t.Fatalf("expected CPA capsule expanded on /responses/compact passthrough, got: %s", compactSeen)
+	}
+	if !bytes.Contains(compactSeen, []byte("foreign-native-token")) {
+		t.Fatalf("expected foreign compaction item preserved on /responses/compact passthrough, got: %s", compactSeen)
+	}
+
+	returnIncomplete = true
+	_, errIncExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncExec == nil {
+		t.Fatal("expected Execute(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncExec, http.StatusBadGateway)
+
+	_, errIncStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4.1-flash",
+		Payload: triggerPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		Stream:          true,
+		OriginalRequest: triggerPayload,
+	})
+	if errIncStream == nil {
+		t.Fatal("expected ExecuteStream(compaction_trigger) to fail on incomplete summary, got nil")
+	}
+	assertStatusErr(t, errIncStream, http.StatusBadGateway)
 }

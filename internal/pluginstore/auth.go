@@ -1,13 +1,15 @@
 package pluginstore
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 )
 
 const (
@@ -228,6 +230,10 @@ func applyPluginStoreAuthForClient(headers http.Header, resolved []ResolvedAuthC
 	}
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
+		if token := githubauth.TokenForURL(requestURL); token != "" {
+			headers.Set("Authorization", "Bearer "+token)
+			return true, nil
+		}
 		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
@@ -317,10 +323,7 @@ func validatePluginStoreRequestURL(auth []AuthConfig, requestURL string, kind st
 	}
 	// Artifact downloads may carry ephemeral signed query parameters such as
 	// GitHub release CDN ?token=... values, so sensitive query keys are only
-	// checked for non-artifact (registry/metadata) requests. Declared URLs are
-	// also independently validated via hasSensitiveQueryParameter at parse time,
-	// but applying the check here again covers runtime redirect targets so
-	// long-lived secrets never reach the wire for registry/metadata requests.
+	// checked for non-artifact (registry/metadata) requests.
 	if kind != RequestKindArtifact {
 		if hasSensitiveQueryParameter(parsed) {
 			return fmt.Errorf("plugin store url contains sensitive query parameter")
