@@ -335,6 +335,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
 	}
+	if mode == updateModeRefresh && base != nil && !refreshIdentityMatches(base, existing) {
+		m.mu.Unlock()
+		return nil, false, false, fmt.Errorf("credential provider changed during refresh")
+	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
 		if auth.CodexRefreshPatch == nil || !auth.CodexRefreshPatch.CanApplyTo(existing.Metadata) {
@@ -552,6 +556,13 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	if mode == updateModeRefresh && base.UsesLazyRefresh() && m.store != nil && lazyPersistenceUnsupported(auth) {
+		m.mu.Unlock()
+		return nil, false, false, &lazyPersistenceError{
+			auth: auth.Clone(),
+			err:  fmt.Errorf("lazy refresh requires a persistable physical credential"),
+		}
+	}
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		if mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh()) {
 			m.mu.Unlock()

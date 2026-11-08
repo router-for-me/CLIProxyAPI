@@ -478,13 +478,12 @@ func authHasRefreshCredential(auth *Auth) bool {
 		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
 }
 
-// CredentialsChanged reports whether authentication credentials (tokens or API keys)
-// differ between two Auth records.
+// CredentialsChanged reports whether credential content or provider binding differs.
 func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
 	}
-	if secretGrantChanged(existing, incoming) {
+	if !refreshBindingMatches(existing, incoming) || secretGrantChanged(existing, incoming) {
 		return true
 	}
 	existingUseSIWC, existingHasUseSIWC := parseBoolAny(existing.Metadata["use_siwc"])
@@ -554,7 +553,7 @@ func isSIWCRefreshFailure(err error) bool {
 	return strings.Contains(lower, "siwc") || strings.Contains(lower, "openai oauth token request failed")
 }
 
-func recordRejectedRefreshTokens(auth *Auth, err error) {
+func recordRejectedRefreshTokens(auth, attempted *Auth, err error) {
 	if auth == nil {
 		return
 	}
@@ -567,10 +566,10 @@ func recordRejectedRefreshTokens(auth *Auth, err error) {
 	if errors.As(err, &partErr) && partErr != nil {
 		outerErr := partErr.OuterRefreshError()
 		siwcErr := partErr.SIWCRefreshError()
-		if outerErr != nil && isTerminalRefreshError(auth, outerErr) && outerRT != "" {
+		if outerErr != nil && isTerminalRefreshError(attempted, outerErr) && outerRT != "" {
 			auth.RejectedRefreshToken = outerRT
 		}
-		if siwcErr != nil && isTerminalRefreshError(auth, siwcErr) && siwcRT != "" {
+		if siwcErr != nil && isTerminalRefreshError(attempted, siwcErr) && siwcRT != "" {
 			auth.RejectedSIWCRefreshToken = siwcRT
 		}
 		return
@@ -1456,7 +1455,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	if err != nil && errors.Is(err, context.Canceled) && !codex.IsRefreshOutcomeUnknown(err) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
+		if current := m.auths[id]; current != nil && refreshIdentityMatches(base, current) {
 			if current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(now) {
 				current.NextRefreshAfter = now.Add(time.Second)
 			}
@@ -1500,7 +1499,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		shouldUnschedule := false
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current)) {
+			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current) || !refreshIdentityMatches(base, current)) {
 				m.mu.Unlock()
 				return nil, err
 			}
@@ -1508,8 +1507,8 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 				m.mu.Unlock()
 				return nil, err
 			}
-			terminalRefresh := isTerminalRefreshError(current, err) || current.UsesLazyRefresh() && isInvalidGrantError(err)
-			sanitizedRefreshErr := sanitizeRenewalError(current, err)
+			terminalRefresh := isTerminalRefreshError(base, err) || base.UsesLazyRefresh() && isInvalidGrantError(err)
+			sanitizedRefreshErr := sanitizeRenewalError(base, err)
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			if wasTerminalUnauthorized {
 				current.Generation++
@@ -1521,7 +1520,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 				current.RefreshError = sanitizedRefreshErr
 				if terminalRefresh || isInvalidGrantError(err) {
 					current.RequiresSignIn = true
-					recordRejectedRefreshTokens(current, err)
+					recordRejectedRefreshTokens(current, base, err)
 					if current.RenewalEventAt.IsZero() {
 						current.RenewalEventAt = now
 					}
@@ -1539,12 +1538,15 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 			current.Generation++
 			current.UpdatedAt = now
 			current.LastError = refreshErrorFromError(err)
+			if base.UsesLazyRefresh() {
+				current.LastError = cloneError(sanitizedRefreshErr)
+			}
 			if terminalRefresh {
 				current.RefreshError = sanitizedRefreshErr
 				current.RequiresSignIn = true
 				current.RenewalVerified = false
 				current.LastRenewalVerifiedAt = time.Time{}
-				recordRejectedRefreshTokens(current, err)
+				recordRejectedRefreshTokens(current, base, err)
 				if current.RenewalEventAt.IsZero() {
 					current.RenewalEventAt = now
 				}

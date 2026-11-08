@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,8 +45,11 @@ func hasValidAccessTokenForRequest(ctx context.Context, auth *Auth, now time.Tim
 }
 
 func refreshIdentityMatches(base, updated *Auth) bool {
-	return base.ID == updated.ID &&
-		strings.EqualFold(strings.TrimSpace(base.Provider), strings.TrimSpace(updated.Provider)) &&
+	return base.ID == updated.ID && refreshBindingMatches(base, updated)
+}
+
+func refreshBindingMatches(base, updated *Auth) bool {
+	return strings.EqualFold(strings.TrimSpace(base.Provider), strings.TrimSpace(updated.Provider)) &&
 		executorKeyFromAuth(base) == executorKeyFromAuth(updated)
 }
 
@@ -162,9 +166,11 @@ func safeLazyRefreshError(auth *Auth, err error) error {
 }
 
 func redactLazyCredentialValues(auth *Auth, text string) string {
-	for _, secret := range []string{authOuterAccessToken(auth), authRefreshToken(auth),
+	secrets := []string{authOuterAccessToken(auth), authRefreshToken(auth),
 		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
-		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")} {
+		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")}
+	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	for _, secret := range secrets {
 		if secret != "" {
 			text = strings.ReplaceAll(text, secret, "[redacted]")
 		}
@@ -214,7 +220,8 @@ func (m *Manager) retryLazyPersistence(ctx context.Context, lock *authRefreshLoc
 		return current, nil
 	}
 	if pending.base.RegistrationEpoch != current.RegistrationEpoch ||
-		pending.base.CredentialVersion != current.CredentialVersion || CredentialsChanged(pending.base, current) {
+		pending.base.CredentialVersion != current.CredentialVersion || CredentialsChanged(pending.base, current) ||
+		!refreshIdentityMatches(pending.base, current) {
 		lock.clearLazyState()
 		return current, nil
 	}
