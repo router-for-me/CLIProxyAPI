@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -21,16 +22,13 @@ func TestRPCCapabilitiesSchedulerQuotaSignals(t *testing.T) {
 	if caps.SchedulerQuotaSignals {
 		t.Fatal("SchedulerQuotaSignals = true by default, want false")
 	}
+	// The RPC layer serializes capabilities with encoding/json; read the wire form with ojson.
 	raw, errMarshal := json.Marshal(caps)
 	if errMarshal != nil {
 		t.Fatalf("Marshal() error = %v", errMarshal)
 	}
-	var decoded map[string]any
-	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
-		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
-	}
-	if _, present := decoded["scheduler_quota_signals"]; present {
-		t.Fatalf("scheduler_quota_signals = %#v, want omitted", decoded["scheduler_quota_signals"])
+	if field := ojson.GetBytes(raw, "scheduler_quota_signals"); field.Exists() {
+		t.Fatalf("scheduler_quota_signals = %s, want omitted", field.Raw)
 	}
 
 	caps = rpcCapabilitiesFromPlugin(pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
@@ -40,11 +38,12 @@ func TestRPCCapabilitiesSchedulerQuotaSignals(t *testing.T) {
 	if !caps.SchedulerQuotaSignals {
 		t.Fatal("SchedulerQuotaSignals = false, want true")
 	}
-	raw, _ = json.Marshal(caps)
-	decoded = nil
-	_ = json.Unmarshal(raw, &decoded)
-	if decoded["scheduler_quota_signals"] != true {
-		t.Fatalf("scheduler_quota_signals = %#v, want true", decoded["scheduler_quota_signals"])
+	raw, errMarshal = json.Marshal(caps)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if field := ojson.GetBytes(raw, "scheduler_quota_signals"); field.Raw != "true" {
+		t.Fatalf("scheduler_quota_signals = %q, want true", field.Raw)
 	}
 
 	// Without a scheduler the flag is meaningless and must not be advertised.
