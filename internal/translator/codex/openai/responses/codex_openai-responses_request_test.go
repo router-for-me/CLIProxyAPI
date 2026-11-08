@@ -1098,3 +1098,50 @@ func TestConvertOpenAIResponsesRequestToCodexParallelToolCalls(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToCodexSanitizesOrphanToolOutputs(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"step-5-preview",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]},
+			{"type":"function_call_output","id":"fco_1","name":"codex_apps_open_page","output":"{\"page_id\":null}"},
+			{"type":"custom_tool_call_output","id":"fco_2","name":"custom_ctx","output":[{"type":"input_text","text":"part one"},{"type":"input_text","text":"part two"}]},
+			{"type":"function_call","call_id":"call_ok","name":"shell","arguments":""},
+			{"type":"function_call_output","call_id":"call_ok","output":"ok"},
+			{"type":"function_call_output","call_id":" ","output":"blank id"}
+		]
+	}`)
+
+	output, errConvert := ConvertOpenAIResponsesRequestToCodex("step-5-preview", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertOpenAIResponsesRequestToCodex returned error: %v", errConvert)
+	}
+
+	for _, index := range []int{1, 2, 5} {
+		itemType := ojson.GetBytesNoCopy(output, "input."+strconv.Itoa(index)+".type").String()
+		if itemType != "message" {
+			t.Fatalf("input.%d.type = %q, want message; output: %s", index, itemType, string(output))
+		}
+		role := ojson.GetBytesNoCopy(output, "input."+strconv.Itoa(index)+".role").String()
+		if role != "user" {
+			t.Fatalf("input.%d.role = %q, want user", index, role)
+		}
+	}
+
+	if text := ojson.GetBytesNoCopy(output, "input.1.content.0.text").String(); !strings.Contains(text, "codex_apps_open_page") || !strings.Contains(text, `{"page_id":null}`) {
+		t.Fatalf("orphan output text was not preserved: %q", text)
+	}
+	if text := ojson.GetBytesNoCopy(output, "input.2.content.0.text").String(); !strings.Contains(text, "part one") || !strings.Contains(text, "part two") {
+		t.Fatalf("orphan output array text was not preserved: %q", text)
+	}
+
+	if itemType := ojson.GetBytesNoCopy(output, "input.4.type").String(); itemType != "function_call_output" {
+		t.Fatalf("paired tool output was rewritten to %q; output: %s", itemType, string(output))
+	}
+	if callID := ojson.GetBytesNoCopy(output, "input.4.call_id").String(); callID != "call_ok" {
+		t.Fatalf("paired tool output call_id = %q, want call_ok", callID)
+	}
+	if arguments := ojson.GetBytesNoCopy(output, "input.3.arguments").String(); arguments != "{}" {
+		t.Fatalf("empty function arguments were not normalized: %q; output: %s", arguments, string(output))
+	}
+}

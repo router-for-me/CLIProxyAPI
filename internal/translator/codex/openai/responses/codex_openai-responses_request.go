@@ -73,12 +73,98 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
 	inputResult = convertSystemRoleToDeveloperDoc(inputResult, ensureDoc)
 	normalizeCodexBuiltinToolsDoc(rawJSON, ensureDoc)
-	normalizeEmptyFunctionCallArgumentsDoc(inputResult, ensureDoc)
+	inputResult = normalizeEmptyFunctionCallArgumentsDoc(inputResult, ensureDoc)
+	sanitizeOrphanResponsesToolOutputsDoc(inputResult, ensureDoc)
 
 	if doc != nil {
 		return doc.Bytes(), nil
 	}
 	return rawJSON, nil
+}
+
+// sanitizeOrphanResponsesToolOutputsDoc converts tool output items that do not
+// carry an explicit call ID into plain user messages. Codex Desktop injects
+// app-context items such as codex_apps_open_page as function_call_output items
+// without call_id; strict Responses upstreams reject them with
+// "responses function_call_output call_id is required".
+func sanitizeOrphanResponsesToolOutputsDoc(inputResult ojson.Result, ensureDoc func() *ojson.Doc) {
+	if !inputResult.IsArray() {
+		return
+	}
+	inputItems := inputResult.Array()
+	if len(inputItems) == 0 {
+		return
+	}
+
+	changed := false
+	rebuiltInput := make([][]byte, 0, len(inputItems))
+	for _, item := range inputItems {
+		itemRaw := []byte(item.Raw)
+		itemType := item.Get("type").String()
+		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			if !responsesToolOutputHasCallID(item) {
+				itemRaw = responsesOrphanToolOutputMessage(item)
+				changed = true
+			}
+		}
+		rebuiltInput = append(rebuiltInput, itemRaw)
+	}
+	if !changed {
+		return
+	}
+	_ = ensureDoc().SetRawBytes("input", translatorcommon.JoinRawArray(rebuiltInput))
+}
+
+// responsesToolOutputHasCallID reports whether a tool output item carries the
+// explicit call ID field required by strict Responses upstreams. The generic
+// item id is deliberately ignored because upstreams do not treat it as a call
+// ID reference.
+func responsesToolOutputHasCallID(item ojson.Result) bool {
+	for _, path := range []string{"call_id", "tool_call_id", "callId"} {
+		if value := item.Get(path); value.Exists() && strings.TrimSpace(value.String()) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// responsesOrphanToolOutputMessage folds an orphan tool output into a user
+// message so the tool result survives without violating the Responses schema.
+func responsesOrphanToolOutputMessage(item ojson.Result) []byte {
+	name := strings.TrimSpace(item.Get("name").String())
+	if name == "" {
+		name = "tool"
+	}
+	outputText := responsesOrphanToolOutputText(item.Get("output"))
+	if strings.TrimSpace(outputText) == "" {
+		outputText = "(empty)"
+	}
+
+	messageDoc := ojson.NewDocString(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+	_ = messageDoc.Set("content.0.text", "Tool output from "+name+":\n"+outputText)
+	return messageDoc.Bytes()
+}
+
+func responsesOrphanToolOutputText(output ojson.Result) string {
+	if !output.Exists() {
+		return ""
+	}
+	if output.Type == ojson.String {
+		return output.String()
+	}
+	if output.IsArray() {
+		parts := make([]string, 0, len(output.Array()))
+		for _, part := range output.Array() {
+			switch part.Get("type").String() {
+			case "text", "input_text", "output_text":
+				parts = append(parts, part.Get("text").String())
+			default:
+				parts = append(parts, part.Raw)
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return output.Raw
 }
 
 // normalizeEmptyFunctionCallArgumentsDoc rewrites blank string arguments on
@@ -88,13 +174,13 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 // are touched: non-empty strings (even invalid JSON) pass through unchanged
 // so other errors keep their original shape, and custom_tool_call items use
 // the separate input field and are never affected.
-func normalizeEmptyFunctionCallArgumentsDoc(inputResult ojson.Result, ensureDoc func() *ojson.Doc) {
+func normalizeEmptyFunctionCallArgumentsDoc(inputResult ojson.Result, ensureDoc func() *ojson.Doc) ojson.Result {
 	if !inputResult.IsArray() {
-		return
+		return inputResult
 	}
 	items := inputResult.Array()
 	if len(items) == 0 {
-		return
+		return inputResult
 	}
 	changed := false
 	rebuilt := make([][]byte, 0, len(items))
@@ -111,9 +197,11 @@ func normalizeEmptyFunctionCallArgumentsDoc(inputResult ojson.Result, ensureDoc 
 		rebuilt = append(rebuilt, itemRaw)
 	}
 	if !changed {
-		return
+		return inputResult
 	}
-	_ = ensureDoc().SetRawBytes("input", translatorcommon.JoinRawArray(rebuilt))
+	joined := translatorcommon.JoinRawArray(rebuilt)
+	_ = ensureDoc().SetRawBytes("input", joined)
+	return util.ParseGJSONBytesNoCopy(joined)
 }
 
 func setCodexRequiredBoolDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, path string, value bool) {
