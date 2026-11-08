@@ -639,7 +639,8 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 	// Credential-level exclusions take priority over the global oauth-excluded-models config.
 	if activeAuth.Attributes != nil {
 		if val, ok := activeAuth.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			activeExcluded = strings.Split(val, ",")
+			credExcluded := strings.Split(val, ",")
+			activeExcluded = append(activeExcluded, credExcluded...)
 		}
 	}
 	if ctx != nil && ctx.Err() != nil {

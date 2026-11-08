@@ -121,7 +121,7 @@ func (f modelRegistrationFence) publishUnregister(s *Service, authID string) boo
 
 func (f modelRegistrationFence) publishIfCurrent(s *Service, authID string, publish func() bool) bool {
 	publishWithConfig := func() bool {
-		if s != nil && !f.disabled && f.authKind != coreauth.AuthKindAPIKey && strings.TrimSpace(f.attributes["excluded_models"]) == "" {
+		if s != nil && !f.disabled && f.authKind != coreauth.AuthKindAPIKey {
 			s.cfgMu.RLock()
 			defer s.cfgMu.RUnlock()
 			// Match the watcher's normalization so no-op and unrelated reloads do not

@@ -77,7 +77,8 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	// otherwise the current global config applies, so global changes take effect without rewriting credentials.
 	if a.Attributes != nil {
 		if val, ok := a.Attributes["excluded_models"]; ok && strings.TrimSpace(val) != "" {
-			excluded = strings.Split(val, ",")
+			credExcluded := strings.Split(val, ",")
+			excluded = append(excluded, credExcluded...)
 		}
 	}
 	if handled, published := s.tryRegisterPluginModelsForAuthWithConfigFenced(ctx, cfg, a, fence, provider, authKind, excluded); handled {

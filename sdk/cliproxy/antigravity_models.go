@@ -518,7 +518,8 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 	models = applyAntigravityFetchedModelCapabilities(models, hints)
 	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
 	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
-		excluded = strings.Split(value, ",")
+		credExcluded := strings.Split(value, ",")
+		excluded = append(excluded, credExcluded...)
 	}
 	models = applyExcludedModels(models, excluded)
 	models = applyOAuthModelAliasForAuth(cfg, "antigravity", auth.AuthKind(), auth.Attributes, models)

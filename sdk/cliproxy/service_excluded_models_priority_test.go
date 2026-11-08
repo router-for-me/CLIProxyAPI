@@ -72,9 +72,9 @@ func TestCodexExcludedModelsCredentialPriorityAfterPatchAndReload(t *testing.T) 
 		}
 	}
 	patch(`["` + credentialModel + `"]`)
-	check("immediate credential override", true, false)
+	check("immediate credential override", false, false)
 	sync(load(`{"type":"codex","excluded_models":["` + credentialModel + `"]}`))
-	check("reloaded credential override", true, false)
+	check("reloaded credential override", false, false)
 	patch(`[]`)
 	check("immediate empty fallback", false, true)
 	inherited := load(`{"type":"codex","excluded_models":[]}`)
