@@ -6,8 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 // A symlink whose target does not exist yet (a pre-provisioned auth link) stays a
@@ -305,9 +309,10 @@ func TestWriteFileKeepsSetgidBit(t *testing.T) {
 }
 
 // After an atomic exchange the temp path holds the previous content (an old
-// credential). If it cannot be removed, the save must say so instead of
-// reporting a clean success.
-func TestReplaceFileReportsPreviousContentLeftBehind(t *testing.T) {
+// credential). If it cannot be removed, the save still succeeds (callers treat an
+// error as "not written" and would roll back the new content) but warns with the
+// leftover path.
+func TestReplaceFileWarnsPreviousContentLeftBehind(t *testing.T) {
 	if !exchangeAvailable() {
 		t.Skip("no atomic exchange on this platform")
 	}
@@ -322,16 +327,27 @@ func TestReplaceFileReportsPreviousContentLeftBehind(t *testing.T) {
 		leftover = name
 		return syscall.EACCES
 	}
+	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(previousHooks) })
+	hook := logtest.NewGlobal()
 
-	err := ReplaceFile(path, []byte("new-token"), 0o600)
-	if !errors.Is(err, syscall.EACCES) {
-		t.Fatalf("ReplaceFile() error = %v, want the failed removal reported", err)
+	if err := ReplaceFile(path, []byte("new-token"), 0o600); err != nil {
+		t.Fatalf("ReplaceFile() error = %v, want nil: the replacement went through", err)
 	}
 	if got, _ := os.ReadFile(path); string(got) != "new-token" {
 		t.Fatalf("content = %q, want the replacement to have gone through", got)
 	}
 	if got, _ := os.ReadFile(leftover); string(got) != "old-token" {
 		t.Fatalf("leftover %s holds %q, want the previous content", leftover, got)
+	}
+	warned := false
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == log.WarnLevel && strings.Contains(entry.Message, leftover) {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("no warning naming %s; entries = %v", leftover, hook.AllEntries())
 	}
 	if err := os.Remove(leftover); err != nil {
 		t.Fatalf("clean up leftover: %v", err)

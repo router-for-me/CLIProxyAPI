@@ -206,9 +206,11 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 		case errSwap == nil:
 			committed = true
 			// tmpPath now holds the previous content, an old credential for an auth
-			// file. If it cannot be removed, say so: the save itself went through.
+			// file. If it cannot be removed, warn rather than fail the save: it went
+			// through, and callers treat an error as "not written" and would roll
+			// back or reject the new content.
 			if errRemove := removeFile(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
-				return fmt.Errorf("atomicfile: replaced %s, but could not remove its previous content at %s: %w", target, tmpPath, errRemove)
+				log.WithError(errRemove).Warnf("atomicfile: replaced %s, but could not remove its previous content at %s; remove it by hand", target, tmpPath)
 			}
 			return nil
 		case errors.Is(errSwap, os.ErrNotExist):
