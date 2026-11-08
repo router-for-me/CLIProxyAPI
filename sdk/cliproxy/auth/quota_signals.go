@@ -48,6 +48,11 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	if observedAt.IsZero() {
 		observedAt = time.Now()
 	}
+	// Concurrent requests may complete in the reverse order of header receipt.
+	// Equal timestamps are duplicates, not evidence of a quota change.
+	if !q.ObservedAt.IsZero() && !observedAt.After(q.ObservedAt) {
+		return false
+	}
 	q.Signals = next
 	q.ObservedAt = observedAt
 	return true
