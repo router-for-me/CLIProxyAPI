@@ -437,3 +437,26 @@ func TestSoonestResetSelectorPick_ProbesReplacedLoginWithoutIdentity(t *testing.
 		t.Fatalf("pick after login replacement = %q, want b probed again", got)
 	}
 }
+
+func TestParseResetValuesRejectMalformedNumbers(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{"", "abc", "-5", "NaN", "+Inf", "-Inf", "1e30"} {
+		if got, ok := parseResetAfterSeconds(raw); ok {
+			t.Errorf("parseResetAfterSeconds(%q) = %v, want rejected", raw, got)
+		}
+	}
+	for _, raw := range []string{"0", "3600", "1.5"} {
+		if _, ok := parseResetAfterSeconds(raw); !ok {
+			t.Errorf("parseResetAfterSeconds(%q) rejected, want accepted", raw)
+		}
+	}
+	for _, raw := range []string{"", "abc", "0", "-1", "NaN", "+Inf", "-Inf", "1e30"} {
+		if got, ok := parseResetTimestamp(raw); ok {
+			t.Errorf("parseResetTimestamp(%q) = %v, want rejected", raw, got)
+		}
+	}
+	if _, ok := parseResetTimestamp("1790000000"); !ok {
+		t.Error("parseResetTimestamp rejected a valid Unix time")
+	}
+}

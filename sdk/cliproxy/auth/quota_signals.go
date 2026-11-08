@@ -109,7 +109,8 @@ func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers h
 // (-Reset-At) and relative (-Reset-After-Seconds) reset values when they were
 // received at different times. A websocket frame can update only one of them
 // while the holder keeps the other from an earlier frame, which may describe
-// the previous window. headers is not modified.
+// the previous window. A newer value that cannot be read supersedes nothing.
+// headers is not modified.
 func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) time.Time) http.Header {
 	if len(headers) == 0 || receivedAt == nil {
 		return headers
@@ -130,15 +131,21 @@ func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) tim
 		if relativeAt.Equal(absoluteAt) {
 			continue
 		}
+		// Only a readable newer value can supersede the older one.
+		superseded := key
+		if relativeAt.After(absoluteAt) {
+			superseded = absoluteKey
+			if _, ok := parseResetAfterSeconds(headers.Get(key)); !ok {
+				continue
+			}
+		} else if _, ok := parseResetTimestamp(headers.Get(absoluteKey)); !ok {
+			continue
+		}
 		if !cloned {
 			result = headers.Clone()
 			cloned = true
 		}
-		if relativeAt.After(absoluteAt) {
-			delete(result, absoluteKey)
-		} else {
-			delete(result, key)
-		}
+		delete(result, superseded)
 	}
 	return result
 }

@@ -852,3 +852,43 @@ func TestQuotaResetReceivedAtCountsOnlyReadableResets(t *testing.T) {
 		})
 	}
 }
+
+func TestDropSupersededResetHeadersKeepsOlderValueWhenNewerIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	const absolute, relative = "X-Codex-Primary-Reset-At", "X-Codex-Primary-Reset-After-Seconds"
+	early := time.Unix(1790000000, 0)
+	late := early.Add(time.Minute)
+
+	tests := []struct {
+		name         string
+		absolute     string
+		relative     string
+		absoluteAt   time.Time
+		relativeAt   time.Time
+		wantAbsolute bool
+		wantRelative bool
+	}{
+		{name: "readable newer relative replaces absolute", absolute: "1790003600", relative: "60", absoluteAt: early, relativeAt: late, wantRelative: true},
+		{name: "readable newer absolute replaces relative", absolute: "1790003600", relative: "60", absoluteAt: late, relativeAt: early, wantAbsolute: true},
+		{name: "negative newer relative keeps both", absolute: "1790003600", relative: "-5", absoluteAt: early, relativeAt: late, wantAbsolute: true, wantRelative: true},
+		{name: "unreadable newer absolute keeps both", absolute: "not-a-time", relative: "60", absoluteAt: late, relativeAt: early, wantAbsolute: true, wantRelative: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{absolute: []string{tt.absolute}, relative: []string{tt.relative}}
+			got := dropSupersededResetHeaders(headers, func(name string) time.Time {
+				if name == absolute {
+					return tt.absoluteAt
+				}
+				return tt.relativeAt
+			})
+			if _, ok := got[absolute]; ok != tt.wantAbsolute {
+				t.Fatalf("absolute kept = %v, want %v", ok, tt.wantAbsolute)
+			}
+			if _, ok := got[relative]; ok != tt.wantRelative {
+				t.Fatalf("relative kept = %v, want %v", ok, tt.wantRelative)
+			}
+		})
+	}
+}

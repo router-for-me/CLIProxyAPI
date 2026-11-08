@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,13 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+)
+
+const (
+	// maxResetAfterSeconds is the longest relative reset a time.Duration can hold.
+	maxResetAfterSeconds = float64(math.MaxInt64) / float64(time.Second)
+	// maxResetUnixSeconds is the end of year 9999, past any real reset.
+	maxResetUnixSeconds = 253402300799
 )
 
 // soonestResetProbeInterval bounds how often a credential without any quota
@@ -194,10 +202,11 @@ func claudeResetIsBillingBoundary(signals map[string]string, reset, observedAt t
 	return !observedAt.IsZero() && reset.Sub(observedAt) > 7*24*time.Hour+time.Hour
 }
 
-// parseResetAfterSeconds parses a relative reset value: a non-negative number.
+// parseResetAfterSeconds parses a relative reset value: a finite, non-negative
+// number of seconds that fits in a time.Duration.
 func parseResetAfterSeconds(raw string) (float64, bool) {
 	after, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil || after < 0 {
+	if err != nil || math.IsNaN(after) || after < 0 || after > maxResetAfterSeconds {
 		return 0, false
 	}
 	return after, true
@@ -211,7 +220,7 @@ func parseResetTimestamp(raw string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if seconds, err := strconv.ParseFloat(raw, 64); err == nil {
-		if seconds <= 0 {
+		if math.IsNaN(seconds) || seconds <= 0 || seconds > maxResetUnixSeconds {
 			return time.Time{}, false
 		}
 		whole := int64(seconds)
