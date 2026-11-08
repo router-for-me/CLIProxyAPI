@@ -117,6 +117,9 @@ func TestResponsesWebsocketHomeSelectedAuthCallbackPinsAndReusesFirstSelection(t
 	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
 	manager.RegisterExecutor(executor)
 	registry.GetGlobalRegistry().RegisterClient("home-responses-websocket-auth", "codex", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("home-responses-websocket-auth")
+	})
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	h := NewOpenAIResponsesAPIHandler(base)
