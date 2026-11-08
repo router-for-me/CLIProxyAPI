@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -67,6 +68,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	incomingHeaders, claudeCodeDetection := detectIncomingClaudeCodeRequest(ctx, opts.Headers, originalPayload, false, e.cfg)
 	wirePolicy, wireSettings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, claudeCodeDetection.Confirmed)
 	confirmedClaudeCode := isEffectiveConfirmedClaudeCode(claudeCodeDetection, wirePolicy)
+	ctx = e.pinResponsesSystemItemPlacement(ctx, auth, from, upstreamModel, wirePolicy, wireSettings)
 	claudeSessionID := ""
 	if fp.ProfileClaudeCodeCLI {
 		claudeSessionID = helps.ClaudeAgentSessionUUIDForRequest(incomingHeaders, originalPayload, req.Payload, confirmedClaudeCode, opts.Metadata, req.Metadata)
@@ -373,10 +375,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		}
 		lines := bytes.Split(data, []byte("\n"))
 		var eventBuf bytes.Buffer
+		var upstreamMessageID string
+		var upstreamStreamErr error
+		upstreamCompleted := false
 		for i, line := range lines {
 			eventBuf.Write(line)
 			eventBuf.WriteByte('\n')
 			if len(bytes.TrimSpace(line)) == 0 {
+				observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
 				streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
 				eventBuf.Reset()
 			}
@@ -392,8 +398,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			lines[i] = restoredLine
 		}
 		if eventBuf.Len() > 0 {
+			observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
 			streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
 			eventBuf.Reset()
+		}
+		if upstreamStreamErr != nil {
+			upstreamStreamErr = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, upstreamStreamErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, upstreamStreamErr)
+			streamUsage.PublishFailure(ctx, reporter, upstreamStreamErr)
+			return resp, upstreamStreamErr
 		}
 		data = bytes.Join(lines, []byte("\n"))
 	} else {
@@ -407,6 +420,12 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			errRestore = fmt.Errorf("restore Claude OAuth tool name from response: %w", errRestore)
 			helps.RecordAPIResponseError(ctx, e.cfg, errRestore)
 			return resp, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errRestore)
+		}
+		if refusalMsg, blocked := clienterror.ClaudePolicyRefusalMessage(data); blocked {
+			errRefusal := wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, statusErr{code: http.StatusBadRequest, msg: refusalMsg})
+			helps.RecordAPIResponseError(ctx, e.cfg, errRefusal)
+			reporter.PublishFailureWithDetail(ctx, helps.ParseClaudeUsage(data), errRefusal)
+			return resp, errRefusal
 		}
 	}
 	data = e.restoreResponseModel(data, req.Model)

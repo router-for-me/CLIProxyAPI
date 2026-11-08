@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -122,9 +123,12 @@ type ClaudeConfig struct {
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
-	// this many days, independently of continuity expiry and credential
-	// switches. A nil value (unset) defaults to 7 days; an explicit 0 keeps
-	// the continuity-scoped pin (1h lifetime).
+	// this many days in in-memory mode (server.kv-store.disabled: true without
+	// Home), independently of continuity expiry and credential switches. A nil
+	// value (unset) defaults to 7 days; an explicit 0 keeps the
+	// continuity-scoped pin (1h lifetime). When a KV store (local bbolt or Home
+	// KV) is active, session date pins are persisted permanently and
+	// session-date-pin-days is ignored.
 	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
 }
 
@@ -425,6 +429,47 @@ type DiscoveryInterfacesConfig struct {
 	Exclude []string `yaml:"exclude" json:"exclude"`
 }
 
+// KVStoreConfig holds configuration for the local persistent bbolt KV store.
+type KVStoreConfig struct {
+	// Disabled turns off the local bbolt KV store when true (fallback to in-memory).
+	// Defaults to false (bbolt enabled by default in non-Home mode).
+	Disabled bool `yaml:"disabled" json:"disabled"`
+
+	// Path is the file system path to the bbolt database file.
+	// When empty, it defaults to "<auth-dir>/kv.db".
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+// EffectivePath returns the trimmed Path or DefaultKVStorePath ("kv.db") when empty.
+func (c KVStoreConfig) EffectivePath() string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	return DefaultKVStorePath
+}
+
+// EffectivePathForAuthDir returns the trimmed Path when explicitly configured,
+// or joins the given authDir (falling back to DefaultAuthDir when authDir is empty)
+// with DefaultKVStorePath ("<auth-dir>/kv.db").
+func (c KVStoreConfig) EffectivePathForAuthDir(authDir string) string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	baseDir := strings.TrimSpace(authDir)
+	if baseDir == "" {
+		baseDir = DefaultAuthDir
+	}
+	return filepath.Join(baseDir, DefaultKVStorePath)
+}
+
+// EffectiveKVStorePath returns the configured KVStore.Path or "<auth-dir>/kv.db" when empty.
+func (cfg *Config) EffectiveKVStorePath() string {
+	if cfg == nil {
+		return filepath.Join(DefaultAuthDir, DefaultKVStorePath)
+	}
+	return cfg.KVStore.EffectivePathForAuthDir(cfg.AuthDir)
+}
+
 // DiscoveryConfig controls local network mDNS / DNS-SD service advertising.
 type DiscoveryConfig struct {
 	// Enabled toggles mDNS service advertising on the local network (default: false).
@@ -515,6 +560,8 @@ type RoutingConfig struct {
 	//   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
 	//     request only while keeping the session bound to its original credential; quota and
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+	//   - "never": never move or fail over an established session to another credential;
+	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 }

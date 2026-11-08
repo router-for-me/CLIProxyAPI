@@ -40,14 +40,16 @@ type PostgresStoreConfig struct {
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
 // while mirroring data to a local workspace so existing file-based workflows continue to operate.
 type PostgresStore struct {
-	db            *sql.DB
-	cfg           PostgresStoreConfig
-	spoolRoot     string
-	configPath    string
-	authDir       string
-	cooldownStore *postgresCooldownStateStore
-	mu            sync.Mutex
-	persistAuthFn func(ctx context.Context, relID string, data []byte) error
+	db                 *sql.DB
+	cfg                PostgresStoreConfig
+	spoolRoot          string
+	configPath         string
+	authDir            string
+	cooldownStore      *postgresCooldownStateStore
+	mu                 sync.Mutex
+	persistAuthFn      func(ctx context.Context, relID string, data []byte) error
+	refreshSchemaMu    sync.Mutex
+	refreshSchemaReady bool
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -163,7 +165,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	`, cooldownTable)); err != nil {
 		return fmt.Errorf("postgres store: create cooldown table: %w", err)
 	}
-	return nil
+	return s.ensureRefreshSchema(ctx)
 }
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.

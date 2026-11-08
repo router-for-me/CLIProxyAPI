@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -334,6 +335,10 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			var streamState claudeSSEStreamState
 			streamState.trailingNewlines = 2
 			streamState.ObserveChunk(chunk)
+			if streamState.policyRefusalErr != nil && !streamState.loggedTerminalError {
+				h.LoggingAPIResponseError(c, streamState.policyRefusalErr)
+				streamState.loggedTerminalError = true
+			}
 			if len(chunk) > 0 {
 				_, _ = c.Writer.Write(chunk)
 				flusher.Flush()
@@ -349,13 +354,15 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 }
 
 type claudeSSEStreamState struct {
-	sawErrorEvent      bool
-	sawMessageStop     bool
-	sawBareMessageJSON bool
-	trailingNewlines   int
-	currentEvent       string
-	eventData          [][]byte
-	lineBuf            bytes.Buffer
+	sawErrorEvent       bool
+	sawMessageStop      bool
+	sawBareMessageJSON  bool
+	loggedTerminalError bool
+	policyRefusalErr    *interfaces.ErrorMessage
+	trailingNewlines    int
+	currentEvent        string
+	eventData           [][]byte
+	lineBuf             bytes.Buffer
 }
 
 func (s *claudeSSEStreamState) ObserveChunk(chunk []byte) {
@@ -429,6 +436,14 @@ func (s *claudeSSEStreamState) observeLine(line []byte) {
 }
 
 func (s *claudeSSEStreamState) observeJSONPayload(payload []byte, hasDataPrefix bool) {
+	if s.policyRefusalErr == nil {
+		if refusalMsg, blocked := clienterror.ClaudePolicyRefusalMessage(payload); blocked {
+			s.policyRefusalErr = &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadRequest,
+				Error:      errors.New(refusalMsg),
+			}
+		}
+	}
 	root := util.ParseGJSONBytesNoCopy(payload)
 	switch root.Get("type").String() {
 	case "message_stop":
@@ -482,6 +497,10 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 				return
 			}
 			state.ObserveChunk(chunk)
+			if state.policyRefusalErr != nil && !state.loggedTerminalError {
+				h.LoggingAPIResponseError(c, state.policyRefusalErr)
+				state.loggedTerminalError = true
+			}
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -489,7 +508,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			if errMsg == nil {
 				return
 			}
-			if state.sawErrorEvent {
+			if !state.loggedTerminalError {
+				h.LoggingAPIResponseError(c, errMsg)
+				state.loggedTerminalError = true
+			}
+			if state.sawErrorEvent || (state.sawMessageStop && clienterror.IsClaudePolicyRefusalError(errMsg.Error)) {
 				state.ensureSSEEventBoundary(c.Writer)
 				return
 			}
@@ -533,6 +556,14 @@ type claudeErrorResponse struct {
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+	var retryAfter string
+	if msg != nil && msg.Error != nil {
+		retryAfter = coreauth.SafeResponseHeaders(msg.Error).Get("Retry-After")
+	}
+	return h.toClaudeErrorWithRetryAfter(msg, retryAfter)
+}
+
+func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.ErrorMessage, retryAfter string) claudeErrorResponse {
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if msg != nil {
@@ -547,6 +578,18 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
+	if status == http.StatusTooManyRequests && msg != nil && msg.Error != nil {
+		var cooldown interface{ IsModelCooldown() bool }
+		if errors.As(msg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
+			if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
+				delay := retryAfter + "s"
+				if seconds <= (1<<63-1)/int64(time.Second) {
+					delay = (time.Duration(seconds) * time.Second).String()
+				}
+				message += " (reset after " + delay + ")"
+			}
+		}
+	}
 	response := claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{
@@ -592,8 +635,11 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		_, _ = c.Writer.Write(body)
 		return
 	}
+	var retryAfter string
 	if msg != nil && msg.Error != nil {
-		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+		safeHeaders := coreauth.SafeResponseHeaders(msg.Error)
+		retryAfter = safeHeaders.Get("Retry-After")
+		for _, value := range safeHeaders.Values("Retry-After") {
 			c.Writer.Header().Add("Retry-After", value)
 		}
 	}
@@ -614,7 +660,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeError(msg))
+	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
 	}

@@ -249,75 +249,29 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 		// Handle reasoning content delta
 		for _, reasoningText := range collectOpenAIObjectReasoningTexts(delta) {
-			if reasoningText == "" {
-				continue
-			}
-			if param.OpenToolCallIndex != -1 {
-				if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "thinking" {
-					param.InterleavedContentChunks[n-1].Text += reasoningText
-				} else {
-					param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
-						Type: "thinking",
-						Text: strings.Clone(reasoningText),
-					})
-				}
-			} else {
-				stopTextContentBlock(param, &results)
-				if !param.ThinkingContentBlockStarted {
-					if param.ThinkingContentBlockIndex == -1 {
-						param.ThinkingContentBlockIndex = param.NextContentBlockIndex
-						param.NextContentBlockIndex++
-					}
-					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
-					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-					contentBlockStartJSONBytes, _ = ojson.SetBytes(contentBlockStartJSONBytes, "index", param.ThinkingContentBlockIndex)
-					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-					param.ThinkingContentBlockStarted = true
-				}
-
-				thinkingDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
-				_ = thinkingDeltaDoc.Set("index", param.ThinkingContentBlockIndex)
-				_ = thinkingDeltaDoc.Set("delta.thinking", reasoningText)
-				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", thinkingDeltaDoc.Bytes(), 2))
-			}
+			emitStreamingThinkingDelta(param, reasoningText, &results)
 		}
 
 		// Handle content delta
-		if content := delta.Get("content"); content.Exists() && content.String() != "" {
-			if param.OpenToolCallIndex != -1 {
-				// Tool call content block is currently active on the wire.
-				// Buffer this text so content blocks remain strictly sequential.
-				if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "text" {
-					param.InterleavedContentChunks[n-1].Text += content.String()
-				} else {
-					param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
-						Type: "text",
-						Text: strings.Clone(content.String()),
-					})
-				}
-				param.ContentAccumulator.WriteString(content.String())
-			} else {
-				// Send content_block_start for text if not already sent
-				if !param.TextContentBlockStarted {
-					stopThinkingContentBlock(param, &results)
-					if param.TextContentBlockIndex == -1 {
-						param.TextContentBlockIndex = param.NextContentBlockIndex
-						param.NextContentBlockIndex++
+		if content := delta.Get("content"); content.Exists() {
+			if content.IsArray() {
+				content.ForEach(func(_, part ojson.Result) bool {
+					if part.Type == ojson.String {
+						emitStreamingTextDelta(param, part.String(), &results)
+						return true
 					}
-					contentBlockStartJSON := `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`
-					contentBlockStartJSONBytes := []byte(contentBlockStartJSON)
-					contentBlockStartJSONBytes, _ = ojson.SetBytes(contentBlockStartJSONBytes, "index", param.TextContentBlockIndex)
-					results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartJSONBytes, 2))
-					param.TextContentBlockStarted = true
-				}
-
-				contentDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
-				_ = contentDeltaDoc.Set("index", param.TextContentBlockIndex)
-				_ = contentDeltaDoc.Set("delta.text", content.String())
-				results = append(results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaDoc.Bytes(), 2))
-
-				// Accumulate content
-				param.ContentAccumulator.WriteString(content.String())
+					switch part.Get("type").String() {
+					case "thinking", "reasoning":
+						emitStreamingThinkingDelta(param, extractOpenAIContentPartThinkingText(part), &results)
+					case "text":
+						emitStreamingTextDelta(param, part.Get("text").String(), &results)
+					default:
+						emitStreamingTextDelta(param, part.String(), &results)
+					}
+					return true
+				})
+			} else if content.Type == ojson.String && content.String() != "" {
+				emitStreamingTextDelta(param, content.String(), &results)
 			}
 		}
 
@@ -486,23 +440,18 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		var contentBlocks [][]byte
 
 		for _, reasoningText := range collectOpenAIObjectReasoningTexts(choice.Get("message")) {
-			if reasoningText == "" {
+			if strings.TrimSpace(reasoningText) == "" {
 				continue
 			}
-			block := []byte(`{"type":"thinking","thinking":""}`)
-			block, _ = ojson.SetBytes(block, "thinking", reasoningText)
-			contentBlocks = append(contentBlocks, block)
+			blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
+			_ = blockDoc.Set("thinking", reasoningText)
+			contentBlocks = append(contentBlocks, blockDoc.Bytes())
 		}
 
-		// Handle text content
-		if content := choice.Get("message.content"); content.Exists() && content.String() != "" {
-			block := []byte(`{"type":"text","text":""}`)
-			block, _ = ojson.SetBytes(block, "text", content.String())
-			contentBlocks = append(contentBlocks, block)
-		}
+		hasToolCall := false
+		appendOpenAINonStreamingMessageContent(choice.Get("message.content"), nil, &contentBlocks, &hasToolCall)
 
 		// Handle tool calls
-		hasToolCall := false
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall ojson.Result) bool {
 				hasToolCall = true
@@ -599,6 +548,177 @@ func collectOpenAIObjectReasoningTexts(obj ojson.Result) []string {
 		}
 	}
 	return nil
+}
+
+func extractOpenAIContentPartThinkingText(part ojson.Result) string {
+	for _, field := range []string{"thinking", "reasoning", "reasoning_content", "text"} {
+		if texts := collectOpenAIReasoningTexts(part.Get(field)); len(texts) > 0 {
+			return strings.Join(texts, "")
+		}
+	}
+	return ""
+}
+
+func emitStreamingThinkingDelta(param *ConvertOpenAIResponseToAnthropicParams, reasoningText string, results *[][]byte) {
+	if reasoningText == "" {
+		return
+	}
+	// Anthropic rejects whitespace-only thinking blocks, so whitespace may only extend an open one.
+	if param.OpenToolCallIndex != -1 {
+		if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "thinking" {
+			param.InterleavedContentChunks[n-1].Text += reasoningText
+		} else if strings.TrimSpace(reasoningText) != "" {
+			param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
+				Type: "thinking",
+				Text: strings.Clone(reasoningText),
+			})
+		}
+		return
+	}
+	if !param.ThinkingContentBlockStarted && strings.TrimSpace(reasoningText) == "" {
+		return
+	}
+	stopTextContentBlock(param, results)
+	if !param.ThinkingContentBlockStarted {
+		if param.ThinkingContentBlockIndex == -1 {
+			param.ThinkingContentBlockIndex = param.NextContentBlockIndex
+			param.NextContentBlockIndex++
+		}
+		contentBlockStartDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`)
+		_ = contentBlockStartDoc.Set("index", param.ThinkingContentBlockIndex)
+		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartDoc.Bytes(), 2))
+		param.ThinkingContentBlockStarted = true
+	}
+
+	thinkingDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}}`)
+	_ = thinkingDeltaDoc.Set("index", param.ThinkingContentBlockIndex)
+	_ = thinkingDeltaDoc.Set("delta.thinking", reasoningText)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", thinkingDeltaDoc.Bytes(), 2))
+}
+
+func emitStreamingTextDelta(param *ConvertOpenAIResponseToAnthropicParams, text string, results *[][]byte) {
+	if text == "" {
+		return
+	}
+	if param.OpenToolCallIndex != -1 {
+		// Tool call content block is currently active on the wire.
+		// Buffer this text so content blocks remain strictly sequential.
+		if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "text" {
+			param.InterleavedContentChunks[n-1].Text += text
+		} else {
+			param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
+				Type: "text",
+				Text: strings.Clone(text),
+			})
+		}
+		param.ContentAccumulator.WriteString(text)
+		return
+	}
+	// Send content_block_start for text if not already sent
+	if !param.TextContentBlockStarted {
+		stopThinkingContentBlock(param, results)
+		if param.TextContentBlockIndex == -1 {
+			param.TextContentBlockIndex = param.NextContentBlockIndex
+			param.NextContentBlockIndex++
+		}
+		contentBlockStartDoc := ojson.NewDocString(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
+		_ = contentBlockStartDoc.Set("index", param.TextContentBlockIndex)
+		*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_start", contentBlockStartDoc.Bytes(), 2))
+		param.TextContentBlockStarted = true
+	}
+
+	contentDeltaDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
+	_ = contentDeltaDoc.Set("index", param.TextContentBlockIndex)
+	_ = contentDeltaDoc.Set("delta.text", text)
+	*results = append(*results, translatorcommon.AppendSSEEventBytes(nil, "content_block_delta", contentDeltaDoc.Bytes(), 2))
+
+	// Accumulate content
+	param.ContentAccumulator.WriteString(text)
+}
+
+func appendOpenAINonStreamingMessageContent(contentResult ojson.Result, toolNameMap map[string]string, blocks *[][]byte, hasToolCall *bool) {
+	if !contentResult.Exists() {
+		return
+	}
+	if contentResult.IsArray() {
+		var textBuilder strings.Builder
+		var thinkingBuilder strings.Builder
+
+		flushText := func() {
+			if textBuilder.Len() == 0 {
+				return
+			}
+			blockDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+			_ = blockDoc.Set("text", textBuilder.String())
+			*blocks = append(*blocks, blockDoc.Bytes())
+			textBuilder.Reset()
+		}
+
+		flushThinking := func() {
+			if thinkingBuilder.Len() == 0 {
+				return
+			}
+			blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
+			_ = blockDoc.Set("thinking", thinkingBuilder.String())
+			*blocks = append(*blocks, blockDoc.Bytes())
+			thinkingBuilder.Reset()
+		}
+
+		for _, item := range contentResult.Array() {
+			switch item.Get("type").String() {
+			case "text":
+				if text := item.Get("text").String(); text != "" {
+					flushThinking()
+					textBuilder.WriteString(text)
+				}
+			case "tool_calls":
+				flushThinking()
+				flushText()
+				toolCalls := item.Get("tool_calls")
+				if toolCalls.IsArray() {
+					toolCalls.ForEach(func(_, tc ojson.Result) bool {
+						*hasToolCall = true
+						toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
+						_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(tc.Get("id").String()))
+						_ = toolUseDoc.Set("name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
+
+						argsStr := util.FixJSON(tc.Get("function.arguments").String())
+						if argsStr != "" && ojson.Valid(argsStr) {
+							argsJSON := ojson.Parse(argsStr)
+							if argsJSON.IsObject() {
+								_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
+							} else {
+								_ = toolUseDoc.SetRaw("input", `{}`)
+							}
+						} else {
+							_ = toolUseDoc.SetRaw("input", `{}`)
+						}
+
+						*blocks = append(*blocks, toolUseDoc.Bytes())
+						return true
+					})
+				}
+			case "reasoning", "thinking":
+				if thinkingText := extractOpenAIContentPartThinkingText(item); thinkingBuilder.Len() > 0 || strings.TrimSpace(thinkingText) != "" {
+					flushText()
+					thinkingBuilder.WriteString(thinkingText)
+				}
+			default:
+				flushThinking()
+				flushText()
+			}
+		}
+
+		flushThinking()
+		flushText()
+	} else if contentResult.Type == ojson.String {
+		textContent := contentResult.String()
+		if textContent != "" {
+			blockDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+			_ = blockDoc.Set("text", textContent)
+			*blocks = append(*blocks, blockDoc.Bytes())
+		}
+	}
 }
 
 func collectOpenAIReasoningTexts(node ojson.Result) []string {
@@ -851,94 +971,16 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 		finishReason = choice.Get("finish_reason").String()
 
 		if message := choice.Get("message"); message.Exists() {
-			if contentResult := message.Get("content"); contentResult.Exists() {
-				if contentResult.IsArray() {
-					var textBuilder strings.Builder
-					var thinkingBuilder strings.Builder
-
-					flushText := func() {
-						if textBuilder.Len() == 0 {
-							return
-						}
-						block := []byte(`{"type":"text","text":""}`)
-						block, _ = ojson.SetBytes(block, "text", textBuilder.String())
-						blocks = append(blocks, block)
-						textBuilder.Reset()
-					}
-
-					flushThinking := func() {
-						if thinkingBuilder.Len() == 0 {
-							return
-						}
-						block := []byte(`{"type":"thinking","thinking":""}`)
-						block, _ = ojson.SetBytes(block, "thinking", thinkingBuilder.String())
-						blocks = append(blocks, block)
-						thinkingBuilder.Reset()
-					}
-
-					for _, item := range contentResult.Array() {
-						switch item.Get("type").String() {
-						case "text":
-							flushThinking()
-							textBuilder.WriteString(item.Get("text").String())
-						case "tool_calls":
-							flushThinking()
-							flushText()
-							toolCalls := item.Get("tool_calls")
-							if toolCalls.IsArray() {
-								toolCalls.ForEach(func(_, tc ojson.Result) bool {
-									hasToolCall = true
-									toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
-									_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(tc.Get("id").String()))
-									_ = toolUseDoc.Set("name", util.MapToolName(toolNameMap, tc.Get("function.name").String()))
-
-									argsStr := util.FixJSON(tc.Get("function.arguments").String())
-									if argsStr != "" && ojson.Valid(argsStr) {
-										argsJSON := ojson.Parse(argsStr)
-										if argsJSON.IsObject() {
-											_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
-										} else {
-											_ = toolUseDoc.SetRaw("input", `{}`)
-										}
-									} else {
-										_ = toolUseDoc.SetRaw("input", `{}`)
-									}
-
-									blocks = append(blocks, toolUseDoc.Bytes())
-									return true
-								})
-							}
-						case "reasoning":
-							flushText()
-							if thinking := item.Get("text"); thinking.Exists() {
-								thinkingBuilder.WriteString(thinking.String())
-							}
-						default:
-							flushThinking()
-							flushText()
-						}
-					}
-
-					flushThinking()
-					flushText()
-				} else if contentResult.Type == ojson.String {
-					textContent := contentResult.String()
-					if textContent != "" {
-						block := []byte(`{"type":"text","text":""}`)
-						block, _ = ojson.SetBytes(block, "text", textContent)
-						blocks = append(blocks, block)
-					}
-				}
-			}
-
 			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
-				if reasoningText == "" {
+				if strings.TrimSpace(reasoningText) == "" {
 					continue
 				}
-				block := []byte(`{"type":"thinking","thinking":""}`)
-				block, _ = ojson.SetBytes(block, "thinking", reasoningText)
-				blocks = append(blocks, block)
+				blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
+				_ = blockDoc.Set("thinking", reasoningText)
+				blocks = append(blocks, blockDoc.Bytes())
 			}
+
+			appendOpenAINonStreamingMessageContent(message.Get("content"), toolNameMap, &blocks, &hasToolCall)
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 				toolCalls.ForEach(func(_, toolCall ojson.Result) bool {

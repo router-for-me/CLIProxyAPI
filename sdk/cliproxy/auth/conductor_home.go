@@ -281,8 +281,16 @@ func isHomeRequestRetryExceededError(err error) bool {
 	return strings.EqualFold(strings.TrimSpace(authErr.Code), homeRequestRetryExceededErrorCode)
 }
 
+func isSessionAffinityRetryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "session_auth_retry"
+}
+
 func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
-	if lastErr == nil || isRequestStopError(errPick) {
+	if lastErr == nil || isRequestStopError(errPick) || isSessionAffinityRetryError(errPick) {
 		return false
 	}
 	if !homeMode {
@@ -435,19 +443,30 @@ func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
 }
 
 func homeDispatchHeaders(ctx context.Context, headers http.Header) http.Header {
-	apiKey, ok := homeQueryCredentialFromContext(ctx)
-	if !ok {
-		return headers
+	var out http.Header
+	ensureCloned := func() {
+		if out != nil {
+			return
+		}
+		out = headers.Clone()
+		if out == nil {
+			out = http.Header{}
+		}
 	}
-	out := headers.Clone()
-	if out == nil {
-		out = http.Header{}
+	if IsCodexClientRequest(ctx, headers) && !IsCodexClientUserAgent(headerValueFromHTTPHeader(headers, "User-Agent")) {
+		ensureCloned()
+		out.Set("User-Agent", "codex_cli_rs")
 	}
-	if out.Get("Authorization") != "" || out.Get("X-Goog-Api-Key") != "" || out.Get("X-Api-Key") != "" {
+	if apiKey, ok := homeQueryCredentialFromContext(ctx); ok {
+		ensureCloned()
+		if out.Get("Authorization") == "" && out.Get("X-Goog-Api-Key") == "" && out.Get("X-Api-Key") == "" {
+			out.Set("X-Goog-Api-Key", apiKey)
+		}
+	}
+	if out != nil {
 		return out
 	}
-	out.Set("X-Goog-Api-Key", apiKey)
-	return out
+	return headers
 }
 
 func homeQueryCredentialFromContext(ctx context.Context) (string, bool) {
@@ -932,6 +951,37 @@ func (m *Manager) homeRuntimeAuthByID(sessionID string, authID string) (*Auth, P
 	return auth.Clone(), executor, logicalProvider, true
 }
 
+func (m *Manager) hasAlternativeHomeTargetForModel(ctx context.Context, model string, opts cliproxyexecutor.Options, excludedAuthID string) bool {
+	if m == nil || !m.HomeEnabled() {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	probeOpts := opts
+	probeOpts.Metadata = cloneRequestMetadata(opts.Metadata)
+	delete(probeOpts.Metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+	delete(probeOpts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	delete(probeOpts.Metadata, cliproxyexecutor.SelectedAuthCallbackMetadataKey)
+	delete(probeOpts.Metadata, cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey)
+	probeOpts = withHomeRetryRound(probeOpts, 0)
+	probeOpts = withHomeAuthCount(probeOpts, 2)
+	if excludedAuthID != "" {
+		probeOpts = withHomeExcludedAuthIDs(probeOpts, map[string]struct{}{excludedAuthID: {}})
+	}
+	selection, errSelection := m.pickHomeDispatchSelection(ctx, model, probeOpts)
+	if errSelection != nil || selection == nil {
+		return false
+	}
+	selectionAuth := selection.CloneAuth()
+	_ = m.endHomeSelectionBeforeRedispatch(ctx, selection, "replay_target_probe")
+	if selectionAuth == nil {
+		return false
+	}
+	candidateID := strings.TrimSpace(selectionAuth.ID)
+	return candidateID != "" && candidateID != excludedAuthID
+}
+
 func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	if m == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -986,8 +1036,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	}
 	if sessionID := homeExecutionSessionIDFromMetadata(opts.Metadata); sessionID != "" {
 		if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) && pinnedAuthID != "" {
-			if _, ok := m.GetExecutionSessionAuthByID(sessionID, pinnedAuthID); ok {
-				return nil, &cliproxyexecutor.UpstreamWebsocketTurnError{FullContextRequired: true}
+			if _, excluded := excludedAuthIDs[pinnedAuthID]; !excluded {
+				if _, ok := m.GetExecutionSessionAuthByID(sessionID, pinnedAuthID); ok {
+					return nil, &cliproxyexecutor.UpstreamWebsocketTurnError{FullContextRequired: true}
+				}
 			}
 		}
 		if pinnedAuthID != "" {
@@ -1296,8 +1348,18 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	selectionModel := authSelectionModelFromOptions(opts, routeModel)
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
+	if affinity, ok := m.selector.(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
+		if boundAuthID, okBound := affinity.boundAuthForRequest([]string{"antigravity"}, selectionModel, opts); okBound {
+			if pinnedAuthID != "" && pinnedAuthID != boundAuthID {
+				m.mu.RUnlock()
+				return nil, nil
+			}
+			pinnedAuthID = boundAuthID
+		}
+	}
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 			continue

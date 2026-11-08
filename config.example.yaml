@@ -90,6 +90,13 @@ server:
     #   exclude: []                     # Additional interface patterns to exclude
     # auth-required: true               # Advertise auth=1 (credentials required)
 
+  # Local persistent KV store settings (bbolt). Ignored when Home mode is enabled.
+  kv-store:
+    # Disable local bbolt KV persistence and fall back to in-memory maps (default: false).
+    disabled: false
+    # File path for the bbolt database (default: "<auth-dir>/kv.db" when empty).
+    path: ""
+
 # Management API settings
 management:
   # Whether to allow remote (non-localhost) management access.
@@ -195,6 +202,8 @@ routing:
   #   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
   #     request only while keeping the session bound to its original credential; quota and auth
   #     errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+  #   - "never": never move or fail over an established session to another credential;
+  #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
 
@@ -470,9 +479,12 @@ upstream:
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
 
-    # Days to retain the cloaked currentDate pin per session, so an idle gap or a credential
+    # Days to retain the cloaked currentDate pin per session in in-memory mode
+    # (server.kv-store.disabled: true without Home), so an idle gap or a credential
     # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
     # prompt cache. Default 7; an explicit 0 keeps the continuity-scoped pin (1h lifetime).
+    # When a KV store (local bbolt or Home KV) is active, session date pins are persisted
+    # permanently and session-date-pin-days is ignored.
     session-date-pin-days: 7
 
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
@@ -1203,6 +1215,8 @@ multimedia:
   # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
   # - "chat": disable image_generation injection on non-images endpoints, but keep /v1/images/generations and /v1/images/edits enabled.
   # - "passthrough": never inject or strip image_generation on non-images endpoints (forward the client payload unchanged); behaves like "chat" on /v1/images/* endpoints.
+  # Native Codex Responses-Lite routes reject forced hosted image_generation with HTTP 400; use the Images API instead.
+  # Explicit "passthrough" keeps forwarding these requests without capability validation.
   disable-image-generation: false
 
   # Base model used by the legacy hosted image_generation tool path when a Codex image request is not proxied directly through the Image API.

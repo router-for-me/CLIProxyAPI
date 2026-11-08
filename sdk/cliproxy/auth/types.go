@@ -1094,6 +1094,15 @@ const CodexOuterRefreshLead = 96 * time.Hour
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
 const CodexSIWCRefreshLead = 5 * time.Minute
 
+// SIWCEarliestRefreshTime returns the server's lower bound for SIWC token renewal.
+func (a *Auth) SIWCEarliestRefreshTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwc, _ := a.Metadata["siwc"].(map[string]any)
+	return lookupMetadataTime(siwc, "earliest_refresh_at")
+}
+
 // SIWCStatus represents the read-only validity state of a Codex SIWC credential.
 type SIWCStatus string
 
@@ -1311,28 +1320,57 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 
 	siwcToken, _ := siwcMap["access_token"].(string)
 	siwcToken = strings.TrimSpace(siwcToken)
-	if siwcToken == "" {
+	due := now
+	if siwcToken != "" && !a.isSIWCAccessTokenRejected(siwcToken) {
+		// The legacy expired field already includes a margin; prefer the real expiry.
+		expiry, hasExpiry := a.SIWCRealExpirationTime()
+		if !hasExpiry {
+			expiry, hasExpiry = a.SIWCExpirationTime()
+		}
+		if hasExpiry && !expiry.IsZero() {
+			due = expiry.Add(-CodexSIWCRefreshLead)
+		} else if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+			due = lastRefresh.Add(CodexSIWCRefreshLead)
+		}
+	}
+	if earliest, okEarliest := a.SIWCEarliestRefreshTime(); okEarliest && earliest.After(due) {
+		due = earliest
+	}
+	if !due.After(now) {
 		return now, true, true
 	}
-	if a.isSIWCAccessTokenRejected(siwcToken) {
-		return now, true, true
+	return due, true, false
+}
+
+// OuterAccessTokenExpirationTime returns the expiration time of the outer access_token,
+// ignoring the nested "siwc" section.
+func (a *Auth) OuterAccessTokenExpirationTime() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
 	}
-	expiry, hasExpiry := a.SIWCExpirationTime()
-	if hasExpiry && !expiry.IsZero() {
-		due := expiry.Add(-CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
+	tokenStr := authOuterAccessToken(a)
+	if tokenStr == "" {
+		return time.Time{}, false
 	}
-	if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
-		due := lastRefresh.Add(CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
+	if a.RejectedAccessToken != "" && a.RejectedAccessToken == tokenStr {
+		return time.Unix(0, 0), true
 	}
-	return now, true, true
+	if jwtExp, ok := parseJWTExp(tokenStr); ok {
+		return jwtExp, true
+	}
+	return a.OuterExpirationTime()
+}
+
+// AccessTokenExpirationTimeForRequest returns the expiration time of the access_token
+// selected for the request context and client headers.
+func (a *Auth) AccessTokenExpirationTimeForRequest(ctx context.Context, clientHeaders ...http.Header) (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, false
+	}
+	if IsCodexUseSIWC(a) && !IsCodexUseSIWCForRequest(ctx, a, clientHeaders...) {
+		return a.OuterAccessTokenExpirationTime()
+	}
+	return a.AccessTokenExpirationTime()
 }
 
 // AccessTokenExpirationTime returns the expiration time of the specific access_token.

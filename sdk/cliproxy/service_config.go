@@ -94,8 +94,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
-	if state.sessionAffinity && strings.EqualFold(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn), coreauth.SessionAffinityRebindOnQuota) {
-		state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
+	if state.sessionAffinity {
+		switch strings.ToLower(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn)) {
+		case coreauth.SessionAffinityRebindOnQuota:
+			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
+		case coreauth.SessionAffinityRebindOnNever:
+			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnNever
+		}
 	}
 	return state
 }
@@ -209,6 +214,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
+	if s.kvStoreManaged.Load() {
+		s.applyKVStoreConfig(cfg)
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
@@ -356,4 +364,5 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
+	cfg.KVStore.Disabled = true
 }
