@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -333,16 +334,50 @@ func TestJournalAggregateSingleFlightAndLastReaderCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := make(chan struct{})
-	stopped := make(chan struct{})
+	// Work that has not acquired a slot is dropped when its last reader leaves.
+	for i := 0; i < aggregateSlots; i++ {
+		j.slots <- struct{}{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
+	ran := make(chan struct{}, 1)
 	go func() {
-		_, err := j.aggregate(ctx, "canceled", func(ctx context.Context) (any, int, error) {
+		_, err := j.aggregate(ctx, "queued", func(context.Context) (any, int, error) {
+			ran <- struct{}{}
+			return 1, 1, nil
+		})
+		result <- err
+	}()
+	for {
+		j.cacheMu.Lock()
+		queued := j.flights["queued"] != nil
+		j.cacheMu.Unlock()
+		if queued {
+			break
+		}
+		runtime.Gosched()
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	for i := 0; i < aggregateSlots; i++ {
+		<-j.slots
+	}
+	select {
+	case <-ran:
+		t.Fatal("abandoned queued aggregate still ran")
+	default:
+	}
+	// Work already running outlives its reader and lands in the cache.
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel = context.WithCancel(context.Background())
+	go func() {
+		_, err := j.aggregate(ctx, "running", func(context.Context) (any, int, error) {
 			close(started)
-			<-ctx.Done()
-			close(stopped)
-			return nil, 0, ctx.Err()
+			<-release
+			return "done", 1, nil
 		})
 		result <- err
 	}()
@@ -351,7 +386,14 @@ func TestJournalAggregateSingleFlightAndLastReaderCancellation(t *testing.T) {
 	if err := <-result; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	<-stopped
+	close(release)
+	value, err := j.aggregate(context.Background(), "running", func(context.Context) (any, int, error) {
+		t.Fatal("recomputed instead of sharing the finished result")
+		return nil, 0, nil
+	})
+	if err != nil || value != "done" {
+		t.Fatalf("value=%v err=%v", value, err)
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
@@ -365,7 +407,54 @@ func TestJournalAggregateSingleFlightAndLastReaderCancellation(t *testing.T) {
 	wg.Wait()
 	j.cacheMu.Lock()
 	defer j.cacheMu.Unlock()
-	if len(j.cache) != 1 {
-		t.Fatalf("identical aggregates not cached: %d", len(j.cache))
+	summaries := 0
+	for key := range j.cache {
+		if strings.HasPrefix(key, "summary:") {
+			summaries++
+		}
+	}
+	if summaries != 1 {
+		t.Fatalf("identical aggregates not cached: %d", summaries)
+	}
+}
+
+// Requests waiting for an aggregate slot must not hold database connections:
+// with every slot busy, more waiting lists than the pool has connections still
+// finish once the slots free up.
+func TestJournalListsWaitingForSlotsDoNotExhaustConnections(t *testing.T) {
+	s := openJournalTest(t, "")
+	appendUsageEvent(t, s, UsageEvent{ID: "a", TraceID: "a", At: balancedFixtureAt, Consumer: "bob", Model: "gpt-5"})
+	j, err := s.queryJournal(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < aggregateSlots; i++ {
+		j.slots <- struct{}{}
+	}
+	const waiting = 24
+	var wg sync.WaitGroup
+	errs := make(chan error, waiting)
+	for i := 0; i < waiting; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, err := s.UsageContext(context.Background(), Filter{Consumer: fmt.Sprintf("user-%d", i), PageSize: 10})
+			errs <- err
+		}(i)
+	}
+	// Give the requests time to queue, then prove the pool is still usable.
+	time.Sleep(100 * time.Millisecond)
+	if err := j.db.QueryRow("SELECT 1").Scan(new(int)); err != nil {
+		t.Fatalf("pool exhausted by queued lists: %v", err)
+	}
+	for i := 0; i < aggregateSlots; i++ {
+		<-j.slots
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

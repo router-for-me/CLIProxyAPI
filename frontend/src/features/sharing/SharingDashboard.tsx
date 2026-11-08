@@ -46,7 +46,12 @@ export function SharingDashboard() {
       ]);
       return { channels, marketplace, keys };
     }, []),
-    { keepPreviousData: false, headerRefresh: false, dataKey: username }
+    {
+      keepPreviousData: false,
+      headerRefresh: false,
+      dataKey: username,
+      cacheKey: `dashboard-light:${username}`,
+    }
   );
   const {
     data: summaries,
@@ -65,7 +70,12 @@ export function SharingDashboard() {
       },
       [username]
     ),
-    { keepPreviousData: false, headerRefresh: false, dataKey: username }
+    {
+      keepPreviousData: false,
+      headerRefresh: false,
+      dataKey: username,
+      cacheKey: `dashboard-summaries:${username}`,
+    }
   );
   const {
     data: performance,

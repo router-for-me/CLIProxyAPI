@@ -2,8 +2,10 @@ package api
 
 import (
 	"compress/gzip"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
@@ -151,16 +153,22 @@ func (w *gzipResponseWriter) WriteHeader(code int) {
 // accepts gzip. Scope it to management route groups only; proxy and streaming
 // routes must stay uncompressed.
 func jsonGzipMiddleware() gin.HandlerFunc {
+	// A gzip writer carries several hundred KB of state; reusing them keeps
+	// bursts of small management requests from churning the garbage collector.
+	pool := sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
 	return func(c *gin.Context) {
 		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
 			c.Next()
 			return
 		}
-		gz := gzip.NewWriter(c.Writer)
+		gz := pool.Get().(*gzip.Writer)
+		gz.Reset(c.Writer)
 		defer func() {
 			if err := gz.Close(); err != nil {
 				log.WithError(err).Debug("failed to close gzip writer")
 			}
+			gz.Reset(io.Discard)
+			pool.Put(gz)
 		}()
 		c.Writer = &gzipResponseWriter{ResponseWriter: c.Writer, writer: gz}
 		c.Header("Content-Encoding", "gzip")

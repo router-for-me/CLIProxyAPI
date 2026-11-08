@@ -65,8 +65,18 @@ CREATE INDEX IF NOT EXISTS usage_sort_tokens ON events(total DESC, at DESC, sour
 CREATE INDEX IF NOT EXISTS usage_sort_latency ON events(latency DESC, at DESC, source, position) WHERE kind=1;
 DROP INDEX IF EXISTS usage_summary;
 DROP INDEX IF EXISTS usage_summary_v2;
-CREATE INDEX IF NOT EXISTS usage_summary_v3 ON events(day,consumer,owner,channel,model,trace,failed,superseded,known,input,output,reasoning,cache_read,cache_create,total,latency,ttft,hour,at,channel_id,credential_id,key_id,model_lower,serving_lower,provider,status,stream,endpoint,effort) WHERE kind=1;
+DROP INDEX IF EXISTS usage_summary_v3;
+DROP INDEX IF EXISTS usage_visible;
+DROP INDEX IF EXISTS usage_visible_key;
+DROP INDEX IF EXISTS usage_visible_channel;
+CREATE INDEX IF NOT EXISTS usage_cover_v4 ON events(day,consumer,owner,channel,model,credential_id,provider,status,stream,endpoint,effort,balanced,failed,superseded,known,channel_id,key_id,hour,at,trace,input,output,reasoning,cache_read,cache_create,total,latency,ttft,model_lower,serving_lower) WHERE kind=1;
 `
+
+// coverIndex is the covering index behind every statistic. Its leading columns
+// are the grouping dimensions in GROUP BY order, so statistics stream through
+// the index in a single pass without a temp b-tree or table lookups; the
+// remaining columns exist only so filters and sums never touch the table.
+const coverIndex = "events INDEXED BY usage_cover_v4"
 
 const insertEventSQL = `INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
@@ -102,6 +112,7 @@ type journalIndex struct {
 	cacheMu  sync.Mutex
 	cache    map[string]journalCacheEntry
 	flights  map[string]*journalFlight
+	slots    chan struct{}
 	weight   int
 	verified map[string]os.FileInfo
 }
@@ -128,7 +139,7 @@ func (s *Store) startJournal() (*journalIndex, error) {
 	}
 	if s.index == nil {
 		ctx, cancel := context.WithCancel(context.Background())
-		index := &journalIndex{store: s, ctx: ctx, cancel: cancel, ready: make(chan struct{}), cache: map[string]journalCacheEntry{}, flights: map[string]*journalFlight{}, verified: map[string]os.FileInfo{}}
+		index := &journalIndex{store: s, ctx: ctx, cancel: cancel, ready: make(chan struct{}), cache: map[string]journalCacheEntry{}, flights: map[string]*journalFlight{}, slots: make(chan struct{}, aggregateSlots), verified: map[string]os.FileInfo{}}
 		s.index = index
 		go func() {
 			defer close(index.ready)
@@ -149,6 +160,9 @@ func (s *Store) startJournal() (*journalIndex, error) {
 			}
 			if index.initErr == nil {
 				_, index.initErr = index.db.ExecContext(index.ctx, journalIndexes)
+			}
+			if index.initErr == nil {
+				index.optimize()
 			}
 		}()
 	}
@@ -216,7 +230,10 @@ func (j *journalIndex) open() error {
 	}
 	uri := &url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(path), "/")}
 	values := url.Values{}
-	for _, pragma := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "synchronous(NORMAL)", "cache_size(-65536)", "temp_store(MEMORY)", "journal_size_limit(16777216)"} {
+	// Readers share one memory mapping of the index instead of each connection
+	// copying pages into a private cache, which keeps the footprint small on
+	// low-memory hosts and speeds up full index scans.
+	for _, pragma := range []string{"journal_mode(WAL)", "busy_timeout(5000)", "synchronous(NORMAL)", "cache_size(-16384)", "mmap_size(536870912)", "temp_store(MEMORY)", "journal_size_limit(16777216)"} {
 		values.Add("_pragma", pragma)
 	}
 	uri.RawQuery = values.Encode()
@@ -254,6 +271,15 @@ func (j *journalIndex) resetOutdatedSchema() error {
 	log.Info("multi-user: rebuilding journal query index for a new schema")
 	_, err := j.db.ExecContext(j.ctx, "DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS sources;")
 	return err
+}
+
+// optimize refreshes planner statistics with a bounded sample so selective
+// filters can skip over the leading day column of the covering index. A
+// failure only costs query speed, never correctness.
+func (j *journalIndex) optimize() {
+	if _, err := j.db.ExecContext(j.ctx, "PRAGMA analysis_limit=1000; PRAGMA optimize;"); err != nil && j.ctx.Err() == nil {
+		log.WithError(err).Warn("multi-user: journal index optimize failed")
+	}
 }
 
 // snapshot holds the append lock only long enough to establish complete-record boundaries.

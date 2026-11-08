@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,12 +23,20 @@ type journalCacheEntry struct {
 }
 
 type journalFlight struct {
-	done   chan struct{}
-	cancel context.CancelFunc
-	users  int
-	value  any
-	err    error
+	done    chan struct{}
+	cancel  context.CancelFunc
+	users   int
+	started bool
+	value   any
+	err     error
 }
+
+// aggregateSlots bounds how many full-index scans run at once. Each scan is
+// CPU bound, so more than a couple only make every request slower on a small
+// host; extra requests wait their turn and share identical results.
+const aggregateSlots = 2
+
+var errAggregateAbandoned = errors.New("aggregate abandoned before it started")
 
 // aggregateTTL is how long a stale analytics entry may still be served. Usage
 // appends continuously, so a strict version check would drop every entry on
@@ -42,7 +51,10 @@ func aggregateStaleOK(key string) bool {
 		strings.HasPrefix(key, "facets:")
 }
 
-// aggregate shares identical reads and cancels the SQL work when its last reader leaves.
+// aggregate shares identical reads and bounds how many run at once. Work that
+// has not started is dropped when its last reader leaves; work already running
+// finishes and is cached, so a reader who navigates away and back (or retries
+// after a client timeout) is served from the cache instead of paying again.
 func (j *journalIndex) aggregate(ctx context.Context, key string, compute func(context.Context) (any, int, error)) (any, error) {
 	j.cacheMu.Lock()
 	// The cache key stays unversioned so an entry written under an older journal
@@ -62,10 +74,31 @@ func (j *journalIndex) aggregate(ctx context.Context, key string, compute func(c
 		// claim freshness.
 		version := j.version
 		go func() {
-			value, weight, err := compute(shared)
+			var value any
+			var weight int
+			var err error
+			if strings.HasPrefix(key, "count:") {
+				// A count is far cheaper than the statistics scans; queueing it
+				// behind them would stall page loads for no CPU benefit.
+				j.cacheMu.Lock()
+				flight.started = true
+				j.cacheMu.Unlock()
+				value, weight, err = compute(j.ctx)
+			} else {
+				select {
+				case j.slots <- struct{}{}:
+					j.cacheMu.Lock()
+					flight.started = true
+					j.cacheMu.Unlock()
+					value, weight, err = compute(j.ctx)
+					<-j.slots
+				case <-shared.Done():
+					err = errAggregateAbandoned
+				}
+			}
 			j.cacheMu.Lock()
 			flight.value, flight.err = value, err
-			if err == nil && shared.Err() == nil && weight <= 32768 {
+			if err == nil && j.ctx.Err() == nil && weight <= 32768 {
 				if len(j.cache) >= 32 || j.weight+weight > 32768 {
 					j.cache = map[string]journalCacheEntry{}
 					j.weight = 0
@@ -86,7 +119,7 @@ func (j *journalIndex) aggregate(ctx context.Context, key string, compute func(c
 	defer func() {
 		j.cacheMu.Lock()
 		flight.users--
-		if flight.users == 0 {
+		if flight.users == 0 && !flight.started {
 			flight.cancel()
 			if j.flights[key] == flight {
 				delete(j.flights, key)
@@ -111,9 +144,17 @@ func journalWhere(kind int, f Filter) (string, []any) {
 	}
 	if !f.From.IsZero() {
 		add("at>=?", f.From.UTC().Format(journalTimeFormat))
+		if kind == 1 {
+			// Redundant with the exact bound, but lets the planner seek the
+			// leading day column of the covering index instead of scanning it.
+			add("day>=?", f.From.UTC().Format("2006-01-02"))
+		}
 	}
 	if !f.To.IsZero() {
 		add("at<?", f.To.UTC().Format(journalTimeFormat))
+		if kind == 1 {
+			add("day<=?", f.To.UTC().Format("2006-01-02"))
+		}
 	}
 	if kind == 1 || kind == 2 {
 		for _, field := range []struct{ name, value string }{{"consumer", f.Consumer}, {"key_id", f.KeyID}} {
@@ -273,15 +314,33 @@ func collapsesAttempts(f Filter) bool {
 
 func journalPage[T any](ctx context.Context, j *journalIndex, kind int, filter Filter, event func(journalEntry) *T) ([]T, int, error) {
 	where, args := journalWhere(kind, filter)
+	// The total depends on the filter only, so paging through one result set
+	// counts once and later pages reuse it. Unlike statistics it is never
+	// served stale: any journal write invalidates it, so a list always includes
+	// what was just recorded.
+	countKey := filter
+	countKey.Page, countKey.PageSize, countKey.Sort = 0, 0, ""
+	rawKey, err := json.Marshal(countKey)
+	if err != nil {
+		return nil, 0, err
+	}
+	counted, err := j.aggregate(ctx, "count:"+strconv.Itoa(kind)+":"+string(rawKey), func(ctx context.Context) (any, int, error) {
+		var total int
+		errCount := j.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE "+where, args...).Scan(&total)
+		return total, 1, errCount
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	count := counted.(int)
+	// The count waits for an aggregate slot while holding no connection; the
+	// page transaction opens only afterwards so waiting requests can never
+	// exhaust the connection pool that the running count needs.
 	tx, err := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var count int
-	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE "+where, args...).Scan(&count); err != nil {
-		return nil, 0, err
-	}
 	start, end := pageBounds(filter, count)
 	args = append(args, end-start, start)
 	rows, err := tx.QueryContext(ctx, "SELECT source, position, length FROM events WHERE "+where+" ORDER BY "+journalOrder(kind, filter.Sort)+" LIMIT ? OFFSET ?", args...)
@@ -490,7 +549,7 @@ func (s *Store) SummaryResultContext(ctx context.Context, filter Filter) (Summar
 		where, args := journalWhere(1, filter)
 		// The covering index avoids a random table read per event, even when
 		// an account or time filter happens to match nearly the whole history.
-		from := "events INDEXED BY usage_summary_v3"
+		from := coverIndex
 		tx, errBegin := j.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 		if errBegin != nil {
 			return nil, 0, errBegin
@@ -604,304 +663,6 @@ const overviewGroupColumns = `COUNT(*), COALESCE(SUM(failed),0),
  COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN ttft ELSE 0 END),0),
  COALESCE(SUM(CASE WHEN failed=0 AND ttft>0 THEN 1 ELSE 0 END),0)`
 
-func overviewRowDest(sum *Summary) []any {
-	return summaryDest(sum)[1:]
-}
-
-func (s *Store) OverviewContext(ctx context.Context, filter Filter) (UsageOverview, error) {
-	j, err := s.queryJournal(ctx)
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	filter.Page, filter.PageSize, filter.Sort = 0, 0, ""
-	key, err := json.Marshal(filter)
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	value, err := j.aggregate(ctx, "overview:"+string(key), func(ctx context.Context) (any, int, error) {
-		result := UsageOverview{
-			Buckets: []SummaryBucket{},
-			Rank:    map[string][]OverviewRankRow{"model": {}, "consumer": {}, "credential": {}},
-			Models:  []string{},
-			Facets:  UsageFacets{Providers: []string{}, Endpoints: []string{}, Statuses: []int{}, Efforts: []string{}},
-		}
-		// One sequential read of the covering index produces every statistic.
-		// SQL narrows by kind, time, identity, resource and outcome only; the
-		// model match and the six attribute predicates run in Go so a single
-		// pass yields totals, ranks, candidates and facets that can each
-		// ignore their own applied filter.
-		sqlFilter := filter
-		sqlFilter.Model = ""
-		sqlFilter.Provider = ""
-		sqlFilter.Stream = ""
-		sqlFilter.Status = ""
-		sqlFilter.Endpoint = ""
-		sqlFilter.Effort = ""
-		sqlFilter.Balanced = ""
-		where, args := journalWhere(1, sqlFilter)
-		if collapsesAttempts(sqlFilter) {
-			// Stats must still see superseded rows: they count as failovers,
-			// not as executions.
-			where = strings.Replace(where, "superseded=0", "1=1", 1)
-		}
-		const projection = "day, hour, consumer, owner, channel_id, credential_id, key_id, channel, model, trace, " +
-			"failed, superseded, known, input, output, reasoning, cache_read, cache_create, total, latency, ttft, " +
-			"provider, status, stream, endpoint, effort, balanced"
-		rows, errQuery := j.db.QueryContext(ctx,
-			"SELECT "+projection+" FROM events INDEXED BY usage_summary_v3 WHERE "+where, args...)
-		if errQuery != nil {
-			return nil, 0, errQuery
-		}
-		defer func() { _ = rows.Close() }()
-
-		hourly := !filter.From.IsZero() && !filter.To.IsZero() && filter.To.Sub(filter.From) <= 48*time.Hour
-		buckets := map[int64]*SummaryBucket{}
-		ranks := map[string]map[string]*Summary{"model": {}, "consumer": {}, "credential": {}}
-		rankLabel := map[string]map[string]string{"model": {}, "consumer": {}, "credential": {}}
-		traces := map[string]bool{}
-		models := map[string]bool{}
-		modelCalls := map[string]int64{}
-		providers := map[string]bool{}
-		endpoints := map[string]bool{}
-		statuses := map[int]bool{}
-		efforts := map[string]bool{}
-
-		matchesAttrs := func(provider, endpoint string, status int64, stream, balanced bool, effort, skip string) bool {
-			if skip != "provider" && filter.Provider != "" && providerBase(provider) != filter.Provider {
-				return false
-			}
-			if skip != "stream" && filter.Stream != "" && stream != (filter.Stream == "stream") {
-				return false
-			}
-			if skip != "status" && filter.Status != "" {
-				low, high, ok := statusRange(filter.Status)
-				if !ok || status < int64(low) || status > int64(high) {
-					return false
-				}
-			}
-			if skip != "endpoint" && filter.Endpoint != "" && endpoint != filter.Endpoint {
-				return false
-			}
-			if skip != "effort" && filter.Effort != "" && effort != effortValue(filter.Effort) {
-				return false
-			}
-			if skip != "balanced" && filter.Balanced != "" && balanced != (filter.Balanced == "yes") {
-				return false
-			}
-			return true
-		}
-		matchModel := func(model, channel string) bool {
-			return filter.Model == "" || matchModelQuery(UsageEvent{Model: model, Channel: channel}, filter.Model)
-		}
-		addRank := func(dimension, key, label string, failed, known bool, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft int64) {
-			if key == "" {
-				key = label
-			}
-			sum := ranks[dimension][key]
-			if sum == nil {
-				sum = &Summary{}
-				ranks[dimension][key] = sum
-				rankLabel[dimension][key] = label
-			}
-			sum.Executions++
-			if failed {
-				sum.Failures++
-			} else {
-				if latency > 0 {
-					sum.LatencyMS += latency
-					sum.LatencyCount++
-				}
-				if ttft > 0 {
-					sum.TTFTMS += ttft
-					sum.TTFTCount++
-				}
-			}
-			if !known {
-				sum.UnknownTokenRecords++
-			}
-			sum.InputTokens += input
-			sum.OutputTokens += output
-			sum.ReasoningTokens += reasoning
-			sum.CacheReadTokens += cacheRead
-			sum.CacheCreationTokens += cacheCreate
-			sum.TotalTokens += total
-		}
-		addBucket := func(start int64, failed bool, input, output, total int64) {
-			b := buckets[start]
-			if b == nil {
-				b = &SummaryBucket{Start: start}
-				buckets[start] = b
-			}
-			b.Calls++
-			b.Executions = b.Calls
-			if failed {
-				b.Failures++
-			}
-			b.TotalTokens += total
-			b.InputTokens += input
-			b.OutputTokens += output
-		}
-
-		for rows.Next() {
-			var day string
-			var hour int64
-			var consumer, owner, channelID, credentialID, _keyID, channel, model, trace string
-			var failed, superseded, known bool
-			var input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft int64
-			var provider string
-			var status int64
-			var stream bool
-			var endpoint, effort string
-			var balanced bool
-			if errScan := rows.Scan(&day, &hour, &consumer, &owner, &channelID, &credentialID, &_keyID, &channel, &model, &trace,
-				&failed, &superseded, &known, &input, &output, &reasoning, &cacheRead, &cacheCreate, &total, &latency, &ttft,
-				&provider, &status, &stream, &endpoint, &effort, &balanced); errScan != nil {
-				return nil, 0, errScan
-			}
-			attrsOK := matchesAttrs(provider, endpoint, status, stream, balanced, effort, "")
-			statsMatch := attrsOK && matchModel(model, channel)
-			if statsMatch && superseded {
-				result.Total.Failovers++
-			}
-			if statsMatch && !superseded {
-				t := &result.Total
-				t.Executions++
-				if !traces[trace] {
-					traces[trace] = true
-					t.Calls++
-				}
-				if failed {
-					t.Failures++
-				} else {
-					if latency > 0 {
-						t.LatencyMS += latency
-						t.LatencyCount++
-					}
-					if ttft > 0 {
-						t.TTFTMS += ttft
-						t.TTFTCount++
-					}
-				}
-				if !known {
-					t.UnknownTokenRecords++
-				}
-				t.InputTokens += input
-				t.OutputTokens += output
-				t.ReasoningTokens += reasoning
-				t.CacheReadTokens += cacheRead
-				t.CacheCreationTokens += cacheCreate
-				t.TotalTokens += total
-				addRank("model", model, model, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
-				addRank("consumer", consumer, consumer, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
-				addRank("credential", credentialID, channel, failed, known, input, output, reasoning, cacheRead, cacheCreate, total, latency, ttft)
-				if hourly {
-					addBucket(hour, failed, input, output, total)
-				} else {
-					dayTime, _ := time.Parse(journalTimeFormat, day+"T00:00:00.000000000Z")
-					addBucket(dayTime.Unix(), failed, input, output, total)
-				}
-			}
-			if attrsOK && model != "" {
-				models[model] = true
-				modelCalls[model]++
-				if channel != "" && !strings.HasPrefix(model, channel+"/") {
-					serving := channel + "/" + model
-					models[serving] = true
-					modelCalls[serving]++
-				}
-			}
-			if v := providerBase(provider); v != "" && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "provider") {
-				providers[v] = true
-			}
-			if endpoint != "" && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "endpoint") {
-				endpoints[endpoint] = true
-			}
-			if status > 0 && matchesAttrs(provider, endpoint, status, stream, balanced, effort, "status") {
-				statuses[int(status)] = true
-			}
-			if matchesAttrs(provider, endpoint, status, stream, balanced, effort, "effort") {
-				efforts[effort] = true
-			}
-		}
-		if errRows := rows.Err(); errRows != nil {
-			return nil, 0, errRows
-		}
-
-		starts := make([]int64, 0, len(buckets))
-		for start := range buckets {
-			starts = append(starts, start)
-		}
-		sort.Slice(starts, func(i, k int) bool { return starts[i] < starts[k] })
-		for _, start := range starts {
-			result.Buckets = append(result.Buckets, *buckets[start])
-		}
-		for dimension, byKey := range ranks {
-			rows2 := make([]OverviewRankRow, 0, len(byKey))
-			for key, sum := range byKey {
-				rows2 = append(rows2, OverviewRankRow{Key: key, Label: rankLabel[dimension][key], Value: *sum})
-			}
-			sort.Slice(rows2, func(i, k int) bool {
-				if rows2[i].Value.TotalTokens != rows2[k].Value.TotalTokens {
-					return rows2[i].Value.TotalTokens > rows2[k].Value.TotalTokens
-				}
-				if rows2[i].Value.Executions != rows2[k].Value.Executions {
-					return rows2[i].Value.Executions > rows2[k].Value.Executions
-				}
-				return rows2[i].Label < rows2[k].Label
-			})
-			if len(rows2) > overviewRankLimit {
-				rows2 = rows2[:overviewRankLimit]
-			}
-			result.Rank[dimension] = rows2
-		}
-		for m := range models {
-			result.Models = append(result.Models, m)
-		}
-		// Huge upstream catalogs (10k+ model IDs) must not become a response
-		// payload or an unbounded dropdown; the overview keeps the most-used
-		// IDs, and a rare ID still resolves via the list's substring match.
-		const overviewModelLimit = 512
-		sort.Slice(result.Models, func(i, k int) bool {
-			if modelCalls[result.Models[i]] != modelCalls[result.Models[k]] {
-				return modelCalls[result.Models[i]] > modelCalls[result.Models[k]]
-			}
-			return result.Models[i] < result.Models[k]
-		})
-		if len(result.Models) > overviewModelLimit {
-			result.Models = result.Models[:overviewModelLimit]
-		}
-		for v := range providers {
-			result.Facets.Providers = append(result.Facets.Providers, v)
-		}
-		sort.Strings(result.Facets.Providers)
-		for v := range endpoints {
-			result.Facets.Endpoints = append(result.Facets.Endpoints, v)
-		}
-		sort.Strings(result.Facets.Endpoints)
-		for v := range statuses {
-			result.Facets.Statuses = append(result.Facets.Statuses, v)
-		}
-		sort.Ints(result.Facets.Statuses)
-		for v := range efforts {
-			if v == "" {
-				v = "none"
-			}
-			result.Facets.Efforts = append(result.Facets.Efforts, v)
-		}
-		sort.Strings(result.Facets.Efforts)
-
-		weight := 1 + len(result.Buckets) + len(result.Models)
-		for _, rows := range result.Rank {
-			weight += len(rows)
-		}
-		weight += len(result.Facets.Providers) + len(result.Facets.Endpoints) + len(result.Facets.Statuses) + len(result.Facets.Efforts)
-		return result, weight, nil
-	})
-	if err != nil {
-		return UsageOverview{}, err
-	}
-	return value.(UsageOverview), nil
-}
 func (s *Store) ModelPerformanceContext(ctx context.Context, now time.Time) (map[string]*ModelPerformance, error) {
 	j, err := s.queryJournal(ctx)
 	if err != nil {

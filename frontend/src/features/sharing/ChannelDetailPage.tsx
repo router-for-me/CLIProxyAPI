@@ -789,10 +789,18 @@ export function ChannelDetailPage() {
     useCallback((signal: AbortSignal) => sharingApi.summary({ channel_id: id ?? '' }, signal), [id]),
     { keepPreviousData: false, headerRefresh: false, dataKey: id }
   );
+  // After an edit only the channel and credential data is awaited: it answers
+  // in milliseconds and is what the user just changed. The log-derived
+  // statistics can take seconds on a large history, so they refresh in the
+  // background instead of keeping save buttons spinning.
   const refresh = useCallback(async () => {
+    void refreshStats();
+    await refreshCore();
+  }, [refreshCore, refreshStats]);
+  const refreshAll = useCallback(async () => {
     await Promise.all([refreshCore(), refreshStats()]);
   }, [refreshCore, refreshStats]);
-  useHeaderRefresh(refresh);
+  useHeaderRefresh(refreshAll);
 
   const channel = data?.channels.find((item) => item.id === id);
   const credentials = (data?.credentials ?? []).filter((file) => file.kind !== 'provider');

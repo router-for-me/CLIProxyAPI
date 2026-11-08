@@ -157,7 +157,9 @@ The frontend build produces its original single-file `dist/index.html` and copie
 it to `internal/multiuser/panel/management.html` for Go embedding. Rebuild the
 frontend before building Go after UI changes. Never edit the generated bundle.
 Multi-user mode serves this bundled frontend rather than downloading an upstream
-asset that does not have account integration. Single-user mode preserves the
+asset that does not have account integration. It is sent as Brotli (gzip while
+Brotli is still being prepared at startup) with an ETag, so a revisit costs a 304
+and a first visit over a slow link transfers about 0.8 MB. Single-user mode preserves the
 original downloaded management panel. No existing local asset is overwritten.
 
 Administrators retain the original provider, quota, config and diagnostic pages.
@@ -351,6 +353,8 @@ only after the atomic file replacement succeeds; authentication reads do not wai
 for that disk I/O. Run only one proxy instance against a data directory.
 
 `journal-index.sqlite` is a rebuildable query index, not a second source of truth.
+Its covering index lists the grouping columns first (`usage_cover_v4`), so a layout
+change only rebuilds that index, not the imported rows.
 An index from an older column layout is dropped and reimported automatically.
 It uses the pure-Go SQLite driver and WAL on a local filesystem. The first startup
 imports existing history in background batches; subsequent starts resume committed
@@ -368,7 +372,13 @@ bounded, data-versioned aggregate caches (at most 32 results and 32,768 groups o
 buckets). Analytics keys (`overview:`, `summary:`, `facets:`) may additionally
 serve a slightly stale result for up to 10 s so continuous writes do not force
 every statistics query to rescan; list and attempt queries always read current
-data. No history is sampled and request/retry and Token accounting stay unchanged.
+data. A list's total is counted once per filter and reused while paging until the
+journal changes. At most two statistics scans run at once; requests beyond that
+wait without holding a database connection, and a scan that has started always
+finishes and is cached, even if its requester navigated away. The console keeps
+the last result of each usage/dashboard request and shows it immediately on
+revisit while refreshing in the background; saving a channel or credential waits
+only for the channel data, not for the statistics. No history is sampled and request/retry and Token accounting stay unchanged.
 
 The index and its `-wal`/`-shm` sidecars are not required in backups. To rebuild the
 index, stop the proxy, remove only those derived files, and restart; never remove
@@ -413,7 +423,7 @@ The account API base is `/v8/hub`. Protected endpoints accept
 | `/oauth/session` | DELETE | Cancel a pending OAuth flow. |
 | `/users`, `/users/:username` | GET / PATCH | All-member directory / admin `role` or `disabled` changes only. |
 | `/invites`, `/invites/:id` | GET, POST / DELETE | Administrator invitation issue/list/revoke. |
-| `/usage`, `/usage/overview`, `/usage/summary`, `/usage/facets`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/overview` is the bounded page payload (`total`, adaptive `buckets`, per-dimension `rank` Top-50, `models`, `facets`) computed over covering index `usage_summary_v3`; `/usage/summary` additionally returns every `day × consumer × owner × channel × model` group; `/usage/attempts?trace=` lists every attempt of one request. |
+| `/usage`, `/usage/overview`, `/usage/summary`, `/usage/facets`, `/usage/attempts`, `/calls`, `/audit` | GET | All-member persistent usage and operation history; `/usage/overview` is the bounded page payload (`total`, adaptive `buckets`, per-dimension `rank` Top-50, `models`, `facets`) computed in one streaming pass over covering index `usage_cover_v4`; `/usage/summary` additionally returns every `day × consumer × owner × channel × model` group; `/usage/attempts?trace=` lists every attempt of one request. |
 
 Quota lookup never requires credential export permission. The server resolves Kimi's
 `.com`/`.ai` usage host from the live credential and substitutes Meta's persisted

@@ -249,7 +249,12 @@ export function UsagePage() {
     ),
     // Within one scope the previous figures stay on screen (dimmed) while a new
     // filter loads, so the layout never collapses; a scope switch drops them.
-    { keepPreviousData: false, headerRefresh: false, dataKey: `${scope}:${me}` }
+    {
+      keepPreviousData: false,
+      headerRefresh: false,
+      dataKey: `${scope}:${me}`,
+      cacheKey: `usage-overview:${me}:${overviewQuery}`,
+    }
   );
   const {
     data: usage,
@@ -267,7 +272,12 @@ export function UsagePage() {
     ),
     // Pagination keeps the current rows; a filter change clears them so no
     // out-of-filter rows are ever shown.
-    { keepPreviousData: false, headerRefresh: false, dataKey: filterQuery }
+    {
+      keepPreviousData: false,
+      headerRefresh: false,
+      dataKey: filterQuery,
+      cacheKey: `usage-list:${me}:${filterQuery}:${page}:${pageSize}`,
+    }
   );
   useEffect(() => {
     const next = normalizePaginationParams(params, !loading && !error ? usage?.total : undefined);
@@ -279,7 +289,12 @@ export function UsagePage() {
       const response = await sharingCredentials.list(signal);
       return response.files as SharedCredential[];
     }, []),
-    { keepPreviousData: true, headerRefresh: false, dataKey: 'credentials' }
+    {
+      keepPreviousData: true,
+      headerRefresh: false,
+      dataKey: 'credentials',
+      cacheKey: `credentials:${me}`,
+    }
   );
   const credentialInfo = useMemo(
     () =>

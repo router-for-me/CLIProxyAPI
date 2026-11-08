@@ -24,12 +24,46 @@ export const duration = (ms: number) =>
 
 export type SharingDataLoader<T> = (signal: AbortSignal) => Promise<T>;
 
+// Last successful result per cacheKey. Returning to a page (or paging back)
+// paints the previous figures at once while a fresh request runs, so a slow
+// uplink shows content instead of skeletons. Entries die with the connection
+// (login switch, key change) and are bounded to the most recent few.
+const CACHE_LIMIT = 48;
+const resultCache = new Map<string, { data: unknown; connection: number }>();
+
+const readCache = <T>(cacheKey: string | undefined): T | null => {
+  if (!cacheKey) return null;
+  const hit = resultCache.get(cacheKey);
+  if (!hit || hit.connection !== apiClient.getConnectionRevision()) return null;
+  return hit.data as T;
+};
+
+export const writeSharingDataCache = (
+  cacheKey: string | undefined,
+  data: unknown,
+  connection = apiClient.getConnectionRevision()
+) => {
+  if (!cacheKey || connection !== apiClient.getConnectionRevision()) return;
+  resultCache.delete(cacheKey);
+  resultCache.set(cacheKey, { data, connection });
+  while (resultCache.size > CACHE_LIMIT) {
+    const oldest = resultCache.keys().next().value;
+    if (oldest === undefined) break;
+    resultCache.delete(oldest);
+  }
+};
+
+export function clearSharingDataCache() {
+  resultCache.clear();
+}
+
 export function useSharingData<T>(
   loader: SharingDataLoader<T>,
   {
     keepPreviousData = true,
     headerRefresh = true,
     dataKey,
+    cacheKey,
   }: {
     keepPreviousData?: boolean;
     headerRefresh?: boolean;
@@ -37,6 +71,9 @@ export function useSharingData<T>(
      * but this key does not (e.g. pagination within the same filter scope);
      * changing the key (scope/filter/account) drops the stale data. */
     dataKey?: string;
+    /** Identifies the exact request (account, filters, page). A cached result
+     * for it is shown immediately and revalidated in the background. */
+    cacheKey?: string;
   } = {}
 ) {
   const [state, setState] = useState<{
@@ -45,7 +82,7 @@ export function useSharingData<T>(
     data: T | null;
     error: string;
     loading: boolean;
-  }>({ loader, dataKey, data: null, error: '', loading: true });
+  }>(() => ({ loader, dataKey, data: readCache<T>(cacheKey), error: '', loading: true }));
   const revision = useRef(0);
   const inflight = useRef<AbortController | null>(null);
   const refresh = useCallback(async () => {
@@ -58,21 +95,26 @@ export function useSharingData<T>(
     inflight.current = controller;
     const isCurrent = () =>
       id === revision.current && connection === apiClient.getConnectionRevision();
+    const cached = readCache<T>(cacheKey);
     setState((current) => ({
       loader,
       dataKey,
       data:
-        keepPreviousData ||
+        cached ??
+        (keepPreviousData ||
         current.loader === loader ||
         (dataKey !== undefined && current.dataKey === dataKey)
           ? current.data
-          : null,
+          : null),
       error: '',
       loading: true,
     }));
     try {
       const data = await loader(controller.signal);
-      if (isCurrent()) setState({ loader, dataKey, data, error: '', loading: false });
+      if (isCurrent()) {
+        writeSharingDataCache(cacheKey, data, connection);
+        setState({ loader, dataKey, data, error: '', loading: false });
+      }
     } catch (error) {
       // Aborted loaders are always superseded or unmounted; stay silent.
       if (controller.signal.aborted || !isCurrent()) return;
@@ -84,7 +126,7 @@ export function useSharingData<T>(
     } finally {
       if (inflight.current === controller) inflight.current = null;
     }
-  }, [loader, keepPreviousData, dataKey]);
+  }, [loader, keepPreviousData, dataKey, cacheKey]);
   useEffect(() => {
     const scope = revision;
     const pending = inflight;
@@ -99,7 +141,7 @@ export function useSharingData<T>(
   const matchesKey = dataKey !== undefined && state.dataKey === dataKey;
   const matches = keepPreviousData || matchesLoader || matchesKey;
   return {
-    data: matches ? state.data : null,
+    data: matches ? state.data : readCache<T>(cacheKey),
     loading: !matchesLoader || state.loading,
     error: matchesLoader ? state.error : '',
     refresh,
