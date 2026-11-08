@@ -187,6 +187,9 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
+		ctx = WithoutSkipPersist(ctx)
+	}
 	return m.updateInternal(ctx, base, updated, updateModeRefresh)
 }
 
@@ -546,6 +549,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+		if mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh()) {
+			m.mu.Unlock()
+			return nil, false, false, &lazyPersistenceError{auth: auth.Clone(), err: errPersist}
+		}
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
 			m.mu.Unlock()

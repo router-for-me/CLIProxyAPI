@@ -1142,6 +1142,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	lazyRefreshMetadata(&data, auth)
 	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
@@ -1177,6 +1178,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		}
 		data.Attributes = attributes
 	}
+	preserveRefreshPolicy(&data, auth)
 	preserveAuthOAuthProviderMetadata(&data, auth, explicitPortalHint)
 	preserveFileAuthPriority(&data, auth)
 	preserveAuthDisabledState(&data, auth)

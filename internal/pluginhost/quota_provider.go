@@ -411,6 +411,19 @@ func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, prov
 			}
 		}
 	}
+	fresh, errFresh := h.freshQuotaAuth(ctx, req.AuthID, req.AuthIndex)
+	if errFresh != nil {
+		return resp, true, errFresh
+	}
+	if fresh != nil {
+		authRecord = fresh
+		req.AuthID = fresh.ID
+		req.Provider = fresh.Provider
+		req.StorageJSON = storageJSONFromAuth(fresh)
+		req.Metadata = cloneAnyMap(fresh.Metadata)
+		req.Attributes = cloneStringMap(fresh.Attributes)
+		req.HTTPClient = h.newHTTPClient(fresh, req.Provider)
+	}
 	if req.HTTPClient == nil {
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
@@ -454,6 +467,19 @@ func (h *Host) callQuotaReset(ctx context.Context, record capabilityRecord, prov
 				req.Attributes = auth.Attributes
 			}
 		}
+	}
+	fresh, errFresh := h.freshQuotaAuth(ctx, req.AuthID, req.AuthIndex)
+	if errFresh != nil {
+		return resp, true, errFresh
+	}
+	if fresh != nil {
+		authRecord = fresh
+		req.AuthID = fresh.ID
+		req.Provider = fresh.Provider
+		req.StorageJSON = storageJSONFromAuth(fresh)
+		req.Metadata = cloneAnyMap(fresh.Metadata)
+		req.Attributes = cloneStringMap(fresh.Attributes)
+		req.HTTPClient = h.newHTTPClient(fresh, req.Provider)
 	}
 	if req.HTTPClient == nil {
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)

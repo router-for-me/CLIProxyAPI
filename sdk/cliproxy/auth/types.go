@@ -51,6 +51,7 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
+	RefreshPolicy *RefreshPolicy `json:"refresh_policy,omitempty"`
 	// ID uniquely identifies the auth record across restarts.
 	ID string `json:"id"`
 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
@@ -479,6 +480,10 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
+	if a.RefreshPolicy != nil {
+		policy := *a.RefreshPolicy
+		copyAuth.RefreshPolicy = &policy
+	}
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
 		copyErr := *a.LastError

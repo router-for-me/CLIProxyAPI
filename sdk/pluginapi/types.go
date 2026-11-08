@@ -258,8 +258,27 @@ type ModelAlias struct {
 	Alias string
 }
 
+// AuthRefreshPolicy controls host-managed refresh for a plugin credential.
+// Omission retains the provider's existing scheduled refresh behavior.
+type AuthRefreshPolicy struct {
+	Mode string `json:"mode"`
+	// ExpiryMarginSeconds is inclusive, from zero to 3600 seconds.
+	ExpiryMarginSeconds int64 `json:"expiry_margin_seconds,omitempty"`
+}
+
+const (
+	AuthRefreshLazy      = "lazy"
+	AuthRefreshScheduled = "scheduled"
+)
+
+func (p AuthRefreshPolicy) Valid() bool {
+	return (p.Mode == AuthRefreshLazy || p.Mode == AuthRefreshScheduled) && p.ExpiryMarginSeconds >= 0 && p.ExpiryMarginSeconds <= 3600
+}
+
 // AuthData describes a plugin provider auth record exchanged with the host.
 type AuthData struct {
+	// RefreshPolicy opts this credential into managed request-time refresh.
+	RefreshPolicy *AuthRefreshPolicy `json:",omitempty"`
 	// Provider is the provider key associated with the auth.
 	Provider string
 	// ID is the stable host auth identifier.

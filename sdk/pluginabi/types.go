@@ -34,7 +34,8 @@ const (
 	// Version 10 lets a plugin expose multiple OAuth/auth provider identifiers and
 	// per-entry display metadata via auth.identifier (identifiers/entries) or
 	// Capabilities.AuthProviders / MultiAuthProvider / AuthProviderEntries.
-	SchemaVersion uint32 = 10
+	// Version 11 adds per-credential host-managed lazy token refresh.
+	SchemaVersion uint32 = 11
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3

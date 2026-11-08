@@ -101,7 +101,7 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 				continue
 			}
 			if l.manager.beginRefreshJob(ctx, job) {
-				_, _ = l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+				_, _ = l.manager.refreshAuthWithTrigger(ctx, job.id, "", job.registrationEpoch, refreshTriggerBackground)
 			}
 			l.manager.finishRefreshJob(job, time.Time{}, false)
 		}
@@ -402,7 +402,7 @@ func (m *Manager) nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Du
 }
 
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
-	if auth == nil {
+	if auth == nil || auth.UsesLazyRefresh() {
 		return time.Time{}, false
 	}
 	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {

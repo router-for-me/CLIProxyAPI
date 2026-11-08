@@ -438,7 +438,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 }
 
 func authDataHasValue(data pluginapi.AuthData) bool {
-	return strings.TrimSpace(data.Provider) != "" ||
+	return data.RefreshPolicy != nil || strings.TrimSpace(data.Provider) != "" ||
 		strings.TrimSpace(data.ID) != "" ||
 		strings.TrimSpace(data.FileName) != "" ||
 		strings.TrimSpace(data.Label) != "" ||
@@ -498,6 +498,7 @@ func authDataWithDefaults(data pluginapi.AuthData, auth *coreauth.Auth) pluginap
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
+	preserveRefreshPolicy(&data, auth)
 	if data.NextRefreshAfter.IsZero() {
 		data.NextRefreshAfter = auth.NextRefreshAfter
 	}

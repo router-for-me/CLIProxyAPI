@@ -227,6 +227,10 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	}
 
 	merged := current.Clone()
+	if updated.RefreshPolicy != nil && (base == nil || reflect.DeepEqual(base.RefreshPolicy, current.RefreshPolicy)) {
+		policy := *updated.RefreshPolicy
+		merged.RefreshPolicy = &policy
+	}
 	if merged.Metadata == nil {
 		merged.Metadata = make(map[string]any)
 	}

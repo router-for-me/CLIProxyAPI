@@ -632,6 +632,13 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 	multiEntry := h.recordHasMultipleAuthProviders(record)
 	auths = make([]*coreauth.Auth, 0, len(datas))
 	for _, data := range datas {
+		if data.RefreshPolicy == nil {
+			policy, errPolicy := storedRefreshPolicy(req.RawJSON)
+			if errPolicy != nil {
+				return nil, true, errPolicy
+			}
+			data.RefreshPolicy = policy
+		}
 		if strings.TrimSpace(data.Provider) == "" {
 			data.Provider = req.Provider
 		}
@@ -991,6 +998,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		return nil, true, errRefresh
 	}
 	data := pluginResp.Auth
+	lazyRefreshMetadata(&data, auth)
 	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
@@ -1026,6 +1034,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		}
 		data.Attributes = attributes
 	}
+	preserveRefreshPolicy(&data, auth)
 	preserveAuthOAuthProviderMetadata(&data, auth, explicitPortalHint)
 	preserveFileAuthPriority(&data, auth)
 	preserveAuthDisabledState(&data, auth)
@@ -1277,9 +1286,27 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	if provider == "" {
 		return nil
 	}
+	policy := data.RefreshPolicy
+	if policy == nil {
+		var errPolicy error
+		policy, errPolicy = storedRefreshPolicy(data.StorageJSON)
+		if errPolicy != nil {
+			return nil
+		}
+	}
+	if policy != nil {
+		if !policy.Valid() {
+			return nil
+		}
+		copyPolicy := *policy
+		policy = &copyPolicy
+	}
 	metadata := cloneAnyMap(data.Metadata)
 	if metadata == nil {
 		metadata = make(map[string]any)
+	}
+	if policy != nil {
+		metadata["host_refresh_policy"] = map[string]any{"mode": policy.Mode, "expiry_margin_seconds": policy.ExpiryMarginSeconds}
 	}
 	if provider != "" {
 		metadata["type"] = provider
@@ -1318,6 +1345,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
+		RefreshPolicy:    policy,
 		Provider:         provider,
 		ID:               id,
 		FileName:         fileName,

@@ -133,7 +133,7 @@ func (m *Manager) codexAutoRefreshUnavailable(a *Auth, now time.Time) bool {
 }
 
 func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
-	if a == nil || m.codexAutoRefreshUnavailable(a, now) {
+	if a == nil || a.UsesLazyRefresh() || m.codexAutoRefreshUnavailable(a, now) {
 		return false
 	}
 	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
@@ -362,7 +362,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if auth == nil || auth.UsesLazyRefresh() || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -393,7 +393,7 @@ func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	auth := m.auths[job.id]
-	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch {
+	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.UsesLazyRefresh() || auth.RegistrationEpoch != job.registrationEpoch {
 		return false
 	}
 	job.running = true
@@ -419,7 +419,12 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 }
 
 type authRefreshLock struct {
-	mu sync.Mutex
+	mu             sync.Mutex
+	pending        *pendingLazyRefresh
+	failure        error
+	retryAt        time.Time
+	failureEpoch   uint64
+	failureVersion uint64
 }
 
 func authOuterAccessToken(auth *Auth) string {
@@ -1229,6 +1234,10 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 }
 
 func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
+	return m.refreshAuthWithTrigger(ctx, id, failedAccessToken, registrationEpoch, refreshTriggerDefault)
+}
+
+func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64, trigger refreshTrigger) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -1285,6 +1294,39 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	if trigger == refreshTriggerBackground && auth.UsesLazyRefresh() {
+		return auth, nil
+	}
+	if lock.pending != nil {
+		var errPersist error
+		auth, errPersist = m.retryLazyPersistence(ctx, lock, auth)
+		if errPersist != nil {
+			return nil, errPersist
+		}
+	}
+	if trigger == refreshTriggerDemand {
+		if auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth) || auth.RequiresSignIn {
+			return nil, &Error{Code: "auth_unavailable", Message: "credential is unavailable", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		if !auth.UsesLazyRefresh() {
+			return auth, nil
+		}
+		if !lazyRefreshDue(auth, time.Now()) {
+			return auth, nil
+		}
+		if !lazyRefreshEligible(auth) {
+			return nil, &Error{Code: "auth_unavailable", Message: "credential cannot refresh", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		if lock.failure != nil && lock.failureEpoch == auth.RegistrationEpoch && lock.failureVersion == auth.CredentialVersion && time.Now().Before(lock.retryAt) {
+			return nil, lock.failure
+		}
+		if blocked, _, _ := isAuthBlockedForModel(auth, "", time.Now()); blocked {
+			return nil, &Error{Code: "auth_unavailable", Message: "credential is unavailable", HTTPStatus: http.StatusServiceUnavailable}
+		}
 	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
@@ -1387,6 +1429,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
+	if auth.UsesLazyRefresh() && err != nil && !isTerminalRefreshError(auth, err) && !isInvalidGrantError(err) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			lock.recordLazyFailure(auth, err)
+		}
+		return nil, err
+	}
 	if err != nil && errors.Is(err, context.Canceled) && !codex.IsRefreshOutcomeUnknown(err) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		m.mu.Lock()
@@ -1438,7 +1486,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				m.mu.Unlock()
 				return nil, err
 			}
-			terminalRefresh := isTerminalRefreshError(current, err)
+			terminalRefresh := isTerminalRefreshError(current, err) || current.UsesLazyRefresh() && isInvalidGrantError(err)
 			sanitizedRefreshErr := sanitizeRenewalError(current, err)
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			if wasTerminalUnauthorized {
@@ -1678,6 +1726,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	// Commit its result with context values intact; keep epoch checks and save ordering.
 	saved, errUpdate := m.UpdateRefreshedAuth(context.WithoutCancel(ctx), base, updated)
 	if errUpdate != nil {
+		var persist *lazyPersistenceError
+		if errors.As(errUpdate, &persist) {
+			lock.pending = &pendingLazyRefresh{base: base.Clone(), updated: persist.auth}
+		}
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
 		return nil, errUpdate
@@ -1696,6 +1748,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	if targetAuth != nil && len(projections) > 0 {
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
+	}
+	lock.clearLazyState()
+	if trigger == refreshTriggerDemand && saved.UsesLazyRefresh() && (!saved.HasValidAccessToken(time.Now()) || lazyRefreshDue(saved, time.Now())) {
+		errFresh := &Error{Code: "refresh_not_fresh", Message: "plugin refresh did not return a fresh access token", HTTPStatus: http.StatusServiceUnavailable}
+		lock.recordLazyFailure(saved, errFresh)
+		return nil, errFresh
 	}
 	return saved.Clone(), nil
 }
