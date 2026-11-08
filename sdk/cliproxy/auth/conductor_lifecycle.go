@@ -187,6 +187,10 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	if base != nil && updated != nil && updated.ID != base.ID {
+		return nil, fmt.Errorf("refresh result changed credential identity")
+	}
+
 	if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
 		ctx = WithoutSkipPersist(ctx)
 	}
@@ -831,6 +835,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
+	}
+	if auth.UsesLazyRefresh() && lazyPersistenceUnsupported(auth) {
+		return fmt.Errorf("lazy refresh requires a persistable physical credential")
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil

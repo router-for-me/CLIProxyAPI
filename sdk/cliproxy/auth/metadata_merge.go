@@ -8,6 +8,38 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
+// MergePluginRefreshMetadata applies storage and explicit metadata to inherited auth data.
+func MergePluginRefreshMetadata(inherited, stored, explicit map[string]any) map[string]any {
+	merged := cloneMetadataMap(inherited)
+	if merged == nil {
+		merged = make(map[string]any)
+	}
+	for _, incoming := range []map[string]any{stored, explicit} {
+		for _, aliases := range [][]string{{"access_token", "accessToken"}, {"refresh_token", "refreshToken"}, {"id_token", "idToken"}} {
+			for _, key := range aliases {
+				if _, present := incoming[key]; present {
+					for _, alias := range aliases {
+						delete(merged, alias)
+					}
+					break
+				}
+			}
+		}
+		if _, hasExpiry := expirationFromMap(incoming); hasExpiry {
+			for _, key := range expireKeys {
+				delete(merged, key)
+			}
+			for _, key := range []string{"expires_in", "expiresIn", "timestamp", "issued_at", "issuedAt", "token", "Token"} {
+				delete(merged, key)
+			}
+		}
+		for key, value := range incoming {
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
 // IsAuthTokenPayloadKey returns true if key is a credential or token lifecycle field
 // that should not overwrite newly acquired OAuth credentials during metadata merge.
 func IsAuthTokenPayloadKey(key string) bool {

@@ -1590,16 +1590,16 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
-	if auth.UsesLazyRefresh() {
-		fresh, errFresh := m.EnsureAuthFresh(ctx, auth)
-		if errFresh != nil {
-			return auth, errFresh
-		}
+	fresh, errFresh := m.EnsureAuthFresh(ctx, auth)
+	if errFresh != nil {
+		return auth, errFresh
+	}
+	if fresh.UsesLazyRefresh() {
 		if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, fresh, m.selectionModelKeyForAuth(fresh, model), time.Now()); blocked {
 			return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential became unavailable", HTTPStatus: http.StatusServiceUnavailable}}
 		}
-		auth = fresh
 	}
+	auth = fresh
 	preparer, ok := executor.(RequestAuthPreparer)
 	if !ok {
 		return auth, nil
@@ -2080,7 +2080,7 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	if a == nil || exec == nil {
 		return nil
 	}
-	fresh, errFresh := m.EnsureAuthFresh(req.Context(), a)
+	fresh, errFresh := m.EnsureAuthFresh(req.Context(), a, req.Header)
 	if errFresh != nil {
 		return errFresh
 	}
@@ -2105,7 +2105,7 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
 	}
-	fresh, errFresh := m.EnsureAuthFresh(ctx, auth)
+	fresh, errFresh := m.EnsureAuthFresh(ctx, auth, req.Header)
 	if errFresh != nil {
 		return errFresh
 	}
@@ -2162,7 +2162,7 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
-	fresh, errFresh := m.EnsureAuthFresh(ctx, auth)
+	fresh, errFresh := m.EnsureAuthFresh(ctx, auth, req.Header)
 	if errFresh != nil {
 		return nil, errFresh
 	}

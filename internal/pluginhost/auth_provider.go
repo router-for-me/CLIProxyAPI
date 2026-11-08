@@ -1231,8 +1231,12 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 			out = make(map[string]any)
 		}
 	}
-	for key, value := range metadata {
-		out[key] = value
+	if policy, _ := metadata["host_refresh_policy"].(map[string]any); policy["mode"] == pluginapi.AuthRefreshLazy {
+		out = coreauth.MergePluginRefreshMetadata(out, nil, metadata)
+	} else {
+		for key, value := range metadata {
+			out[key] = value
+		}
 	}
 	provider = normalizeProviderID(provider)
 	if provider != "" {

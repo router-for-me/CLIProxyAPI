@@ -2378,6 +2378,12 @@ func isTerminalRefreshError(auth *Auth, err error) bool {
 		return isTerminalRefreshError(auth, partErr.OuterRefreshError()) ||
 			isTerminalRefreshError(auth, partErr.SIWCRefreshError())
 	}
+	if auth.UsesLazyRefresh() {
+		code := strings.ToLower(strings.TrimSpace(errorCodeFromError(err)))
+		if code == "invalid_grant" || isTerminalRefreshGrantMessage(code) {
+			return true
+		}
+	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && isTerminalRefreshGrantMessage(authErr.Code) {
 		return true
@@ -2442,6 +2448,16 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 	}
 	terminal := isTerminalRefreshError(auth, err)
 	code := terminalRefreshErrorCode(raw, statusCode)
+	if auth.UsesLazyRefresh() {
+		structuredCode := strings.ToLower(strings.TrimSpace(errorCodeFromError(err)))
+		if isKnownSafeOAuthErrorCode(structuredCode) {
+			code = structuredCode
+		}
+		if terminal && statusCode == 0 {
+			statusCode = http.StatusBadRequest
+		}
+	}
+
 	var existingAuthErr *Error
 	if errors.As(err, &existingAuthErr) && existingAuthErr != nil && isKnownSafeOAuthErrorCode(existingAuthErr.Code) {
 		code = strings.ToLower(strings.TrimSpace(existingAuthErr.Code))

@@ -1315,7 +1315,11 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		if !auth.UsesLazyRefresh() {
 			return auth, nil
 		}
-		if !lazyRefreshDue(auth, time.Now()) {
+		if store != nil && lazyPersistenceUnsupported(auth) {
+			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: "lazy refresh requires a persistable physical credential", HTTPStatus: http.StatusServiceUnavailable}
+		}
+
+		if !lazyRefreshDueForRequest(ctx, auth, time.Now()) {
 			return auth, nil
 		}
 		if !lazyRefreshEligible(auth) {
@@ -1426,8 +1430,15 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		return nil, &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
 	}
 
+	if auth.UsesLazyRefresh() && store != nil && lazyPersistenceUnsupported(auth) {
+		return nil, &Error{Code: "lazy_refresh_not_persistable", Message: "lazy refresh requires a persistable physical credential", HTTPStatus: http.StatusServiceUnavailable}
+	}
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
+	if err == nil && updated != nil && updated.ID != base.ID {
+		err = &Error{Code: "invalid_refresh_identity", Message: "plugin refresh changed credential identity", HTTPStatus: http.StatusServiceUnavailable}
+	}
+
 	now := time.Now()
 	if auth.UsesLazyRefresh() && err != nil && !isTerminalRefreshError(auth, err) && !isInvalidGrantError(err) {
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
@@ -1750,7 +1761,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
 	lock.clearLazyState()
-	if trigger == refreshTriggerDemand && saved.UsesLazyRefresh() && (!saved.HasValidAccessToken(time.Now()) || lazyRefreshDue(saved, time.Now())) {
+	if trigger == refreshTriggerDemand && saved.UsesLazyRefresh() && (!hasValidAccessTokenForRequest(ctx, saved, time.Now()) || lazyRefreshDueForRequest(ctx, saved, time.Now())) {
 		errFresh := &Error{Code: "refresh_not_fresh", Message: "plugin refresh did not return a fresh access token", HTTPStatus: http.StatusServiceUnavailable}
 		lock.recordLazyFailure(saved, errFresh)
 		return nil, errFresh

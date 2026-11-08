@@ -31,26 +31,14 @@ func preserveRefreshPolicy(data *pluginapi.AuthData, auth *coreauth.Auth) {
 
 func lazyRefreshMetadata(data *pluginapi.AuthData, auth *coreauth.Auth) {
 	preserveRefreshPolicy(data, auth)
-	if data.RefreshPolicy == nil || data.RefreshPolicy.Mode != pluginapi.AuthRefreshLazy || len(data.StorageJSON) == 0 {
+	if data.RefreshPolicy == nil || data.RefreshPolicy.Mode != pluginapi.AuthRefreshLazy {
 		return
 	}
 	var stored map[string]any
-	if errDecode := json.Unmarshal(data.StorageJSON, &stored); errDecode != nil {
+	if len(data.StorageJSON) > 0 && json.Unmarshal(data.StorageJSON, &stored) != nil {
 		return
 	}
-	metadata := cloneAnyMap(auth.Metadata)
-	if metadata == nil {
-		metadata = make(map[string]any)
-	}
-	for key, value := range stored {
-		if coreauth.IsAuthTokenPayloadKey(key) || key == "expires_at" || key == "expiresAt" || key == "expiry" {
-			metadata[key] = value
-		}
-	}
-	for key, value := range data.Metadata {
-		metadata[key] = value
-	}
-	data.Metadata = metadata
+	data.Metadata = coreauth.MergePluginRefreshMetadata(auth.Metadata, stored, data.Metadata)
 }
 
 func (h *Host) freshQuotaAuth(ctx context.Context, id, index string) (*coreauth.Auth, error) {
@@ -58,15 +46,19 @@ func (h *Host) freshQuotaAuth(ctx context.Context, id, index string) (*coreauth.
 	if manager == nil {
 		return nil, nil
 	}
-	var auth *coreauth.Auth
+	var byID, byIndex *coreauth.Auth
+	if id != "" {
+		byID, _ = manager.GetByID(id)
+	}
 	if index != "" {
-		var errLookup error
-		auth, errLookup = h.authByIndex(index)
-		if errLookup != nil {
-			return nil, nil
+		byIndex, _ = h.authByIndex(index)
+		if byID.UsesLazyRefresh() && (byIndex == nil || byIndex.ID != byID.ID) {
+			return nil, fmt.Errorf("quota auth ID and index do not match")
 		}
-	} else if id != "" {
-		auth, _ = manager.GetByID(id)
+	}
+	auth := byID
+	if index != "" {
+		auth = byIndex
 	}
 	if auth == nil || !auth.UsesLazyRefresh() {
 		return nil, nil

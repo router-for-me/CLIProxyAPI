@@ -65,6 +65,9 @@ successful rotation. A transient refresh failure returns to the caller without
 inference and is reused during the host's refresh failure backoff. Later demand
 retries the refresh. Terminal grant rejection requires new credentials.
 Streaming refresh completes before the inference stream opens.
+Public errors retain the refresh failure's status, code, and retry hint.
+The host redacts credential values, bearer tokens, URLs, and OAuth secrets from
+the message and does not expose the underlying raw error.
 
 ## Persistence
 
@@ -83,3 +86,7 @@ rotation is not restart-safe. SDK managers without a store remain in-memory.
 
 This policy applies to host-managed local credentials. Home retains its separate
 credential ownership and dispatch lifecycle.
+With a configured store, virtual records expanded from multi-auth files,
+runtime-only records, and config API-key records cannot opt into lazy rotation.
+Their persistence belongs to another source owner. The host rejects those
+credentials before rotation instead of treating a skipped save as durable.

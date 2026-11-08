@@ -3,8 +3,8 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -24,11 +24,23 @@ func lazyRefreshEligible(a *Auth) bool {
 }
 
 func lazyRefreshDue(a *Auth, now time.Time) bool {
+	return lazyRefreshDueForRequest(nil, a, now)
+}
+
+func lazyRefreshDueForRequest(ctx context.Context, a *Auth, now time.Time) bool {
 	if !a.UsesLazyRefresh() {
 		return false
 	}
-	expiry, known := a.AccessTokenExpirationTime()
-	return authAccessToken(a) == "" || known && !expiry.After(now.Add(time.Duration(a.RefreshPolicy.ExpiryMarginSeconds)*time.Second))
+	expiry, known := a.AccessTokenExpirationTimeForRequest(ctx)
+	return authAccessTokenForRequest(ctx, a) == "" || known && !expiry.After(now.Add(time.Duration(a.RefreshPolicy.ExpiryMarginSeconds)*time.Second))
+}
+
+func hasValidAccessTokenForRequest(ctx context.Context, auth *Auth, now time.Time) bool {
+	if authAccessTokenForRequest(ctx, auth) == "" {
+		return false
+	}
+	expiry, known := auth.AccessTokenExpirationTimeForRequest(ctx)
+	return !known || expiry.After(now)
 }
 
 type authFreshnessError struct{ error }
@@ -45,7 +57,9 @@ type lazyPersistenceError struct {
 	err  error
 }
 
-func (e *lazyPersistenceError) Error() string { return fmt.Sprintf("persist lazy refresh: %v", e.err) }
+func (e *lazyPersistenceError) Error() string {
+	return "failed to persist refreshed credential"
+}
 func (e *lazyPersistenceError) Unwrap() error { return e.err }
 
 type pendingLazyRefresh struct {
@@ -55,25 +69,83 @@ type pendingLazyRefresh struct {
 
 // EnsureAuthFresh refreshes opted-in credentials before an authenticated operation.
 // It shares coordination and persistence with 401 recovery and explicit refresh.
-func (m *Manager) EnsureAuthFresh(ctx context.Context, auth *Auth) (*Auth, error) {
-	if auth == nil || !auth.UsesLazyRefresh() {
+func (m *Manager) EnsureAuthFresh(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, error) {
+	if m == nil || auth == nil {
 		return auth, nil
 	}
+	m.mu.RLock()
+	current := m.auths[auth.ID].Clone()
+	m.mu.RUnlock()
+	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() {
+		return auth, nil
+	}
+	if current == nil || auth.RegistrationEpoch != 0 && current.RegistrationEpoch != auth.RegistrationEpoch ||
+		auth.Provider != "" && executorKeyFromAuth(current) != executorKeyFromAuth(auth) {
+		return auth, &authFreshnessError{errors.New("credential changed before lazy refresh")}
+	}
+	auth = current
+	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, clientHeaders...))
 	fresh, err := m.refreshAuthWithTrigger(ctx, auth.ID, "", auth.RegistrationEpoch, refreshTriggerDemand)
 	if err != nil {
-		return auth, &authFreshnessError{err}
+		return auth, &authFreshnessError{safeLazyRefreshError(auth, err)}
 	}
-	if fresh == nil || fresh.RegistrationEpoch != auth.RegistrationEpoch || executorKeyFromAuth(fresh) != executorKeyFromAuth(auth) {
+	if fresh == nil || fresh.ID != auth.ID || fresh.RegistrationEpoch != auth.RegistrationEpoch || executorKeyFromAuth(fresh) != executorKeyFromAuth(auth) {
 		return auth, &authFreshnessError{errors.New("credential changed during lazy refresh")}
 	}
 	if fresh.Disabled || fresh.Status == StatusDisabled || hasUnauthorizedAuthFailure(fresh) ||
-		fresh.RequiresSignIn || fresh.UsesLazyRefresh() && !fresh.HasValidAccessToken(time.Now()) {
+		fresh.RequiresSignIn || fresh.UsesLazyRefresh() && !hasValidAccessTokenForRequest(ctx, fresh, time.Now()) {
 		return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is not fresh", HTTPStatus: http.StatusServiceUnavailable}}
 	}
 	if blocked, _, _ := isAuthBlockedForModel(fresh, "", time.Now()); blocked {
 		return auth, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "credential is unavailable", HTTPStatus: http.StatusServiceUnavailable}}
 	}
 	return fresh, nil
+}
+
+func lazyPersistenceUnsupported(auth *Auth) bool {
+	return IsPluginVirtualAuth(auth) || IsConfigAPIKeyAuth(auth) ||
+		strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
+}
+
+type safeLazyError struct {
+	public     *Error
+	retryAfter *time.Duration
+}
+
+func (e *safeLazyError) Error() string              { return e.public.Error() }
+func (e *safeLazyError) Unwrap() error              { return e.public }
+func (e *safeLazyError) StatusCode() int            { return e.public.StatusCode() }
+func (e *safeLazyError) ErrorCode() string          { return e.public.Code }
+func (e *safeLazyError) RetryAfter() *time.Duration { return e.retryAfter }
+
+func safeLazyRefreshError(auth *Auth, err error) error {
+	var persist *lazyPersistenceError
+	if errors.As(err, &persist) {
+		return &Error{Code: "refresh_persistence_failed", Message: "failed to persist refreshed credential", HTTPStatus: http.StatusServiceUnavailable}
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	safe := resultErrorFromError(err)
+	safe.Message = sanitizeRenewalMessage(safe.Message)
+	safe.Code = sanitizeRenewalMessage(safe.Code)
+	for _, secret := range []string{authOuterAccessToken(auth), authRefreshToken(auth),
+		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
+		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")} {
+		if secret != "" {
+			safe.Message = strings.ReplaceAll(safe.Message, secret, "[redacted]")
+			safe.Code = strings.ReplaceAll(safe.Code, secret, "[redacted]")
+		}
+	}
+	var retry *time.Duration
+	if hint := retryAfterFromError(err); hint != nil {
+		value := *hint
+		retry = &value
+	}
+	return &safeLazyError{public: safe, retryAfter: retry}
 }
 
 type refreshTrigger uint8
@@ -93,7 +165,7 @@ func (l *authRefreshLock) clearLazyState() {
 }
 
 func (l *authRefreshLock) recordLazyFailure(auth *Auth, err error) {
-	l.failure = err
+	l.failure = safeLazyRefreshError(auth, err)
 	l.retryAt = time.Now().Add(refreshFailureBackoff)
 	l.failureEpoch = auth.RegistrationEpoch
 	l.failureVersion = auth.CredentialVersion
