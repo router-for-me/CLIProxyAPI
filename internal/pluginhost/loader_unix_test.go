@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -536,5 +538,94 @@ func TestLimitedProbeBufferCapsRetainedOutputWithoutBlocking(t *testing.T) {
 	}
 	if got := buf.String(); got != "0123456789abcdef" {
 		t.Fatalf("String() = %q, want %q", got, "0123456789abcdef")
+	}
+}
+
+func TestFinishPluginProbeStderrPreservesBufferedDiagnostics(t *testing.T) {
+	reader, writer, errPipe := os.Pipe()
+	if errPipe != nil {
+		t.Fatal(errPipe)
+	}
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	const diagnostic = "SIGILL: illegal instruction\n"
+	if _, errWrite := io.WriteString(writer, diagnostic); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	// Model a child that has already exited, with diagnostics still queued
+	// in the kernel pipe rather than consumed by the drain goroutine.
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	buffer := newLimitedProbeBuffer(maxPluginProbeOutputBytes)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(buffer, reader)
+	}()
+	finishPluginProbeStderr(reader, done)
+	if got := buffer.String(); got != diagnostic {
+		t.Fatalf("drained diagnostic = %q, want %q", got, diagnostic)
+	}
+	if !isCacheablePluginProbeFailure(errors.New("exit status 2"), buffer.String()) {
+		t.Fatal("drained SIGILL evidence must remain cacheable")
+	}
+	if got := describePluginProbeFailure(errors.New("exit status 2"), buffer.String()); !strings.Contains(got, "terminated by SIGILL") {
+		t.Fatalf("diagnostic = %q, want SIGILL classification", got)
+	}
+}
+
+func TestFinishPluginProbeStderrBoundsInheritedWriter(t *testing.T) {
+	reader, writer, errPipe := os.Pipe()
+	if errPipe != nil {
+		t.Fatal(errPipe)
+	}
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	buffer := newLimitedProbeBuffer(maxPluginProbeOutputBytes)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = io.Copy(buffer, reader)
+	}()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		finishPluginProbeStderr(reader, done)
+	}()
+	// Keep writer open until cleanup, as an inherited descendant would.
+	// Completion must not depend on EOF from that descendant.
+	select {
+	case <-finished:
+	case <-time.After(5 * pluginProbeStderrDrainTimeout):
+		t.Fatal("stderr drain blocked on an inherited writer")
+	}
+	if got := buffer.String(); got != "" {
+		t.Fatalf("empty pipe diagnostics = %q", got)
+	}
+	if isCacheablePluginProbeFailure(errors.New("exit status 2"), buffer.String()) {
+		t.Fatal("exit status alone must not be cached as a plugin crash")
+	}
+}
+
+func TestFinishPluginProbeStderrCompletesAtEOF(t *testing.T) {
+	reader, writer, errPipe := os.Pipe()
+	if errPipe != nil {
+		t.Fatal(errPipe)
+	}
+	t.Cleanup(func() { _ = reader.Close(); _ = writer.Close() })
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	readResult := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, errRead := io.Copy(io.Discard, reader)
+		readResult <- errRead
+	}()
+	finishPluginProbeStderr(reader, done)
+	// EOF completes without waiting for the deadline or closing a reader
+	// out from under the drain goroutine. No elapsed-time assertion is needed.
+	if errRead := <-readResult; errRead != nil {
+		t.Fatalf("empty exited child drain = %v, want clean EOF", errRead)
 	}
 }

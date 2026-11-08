@@ -127,16 +127,18 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 const (
-	pluginDlopenProbeEnv       = "CLIPROXY_PLUGIN_DLOPEN_PROBE"
-	pluginDlopenProbeStatusEnv = "CLIPROXY_PLUGIN_DLOPEN_PROBE_STATUS"
-	probeStatusStarted         = "started"
-	probeStatusLoaded          = "loaded"
-	probeStatusDlopenNull      = "dlopen_null"
-	maxPluginProbeOutputBytes  = 64 * 1024
+	pluginDlopenProbeEnv          = "CLIPROXY_PLUGIN_DLOPEN_PROBE"
+	pluginDlopenProbeStatusEnv    = "CLIPROXY_PLUGIN_DLOPEN_PROBE_STATUS"
+	probeStatusStarted            = "started"
+	probeStatusLoaded             = "loaded"
+	probeStatusDlopenNull         = "dlopen_null"
+	maxPluginProbeOutputBytes     = 64 * 1024
+	pluginProbeStderrDrainTimeout = time.Second
 )
 
 var (
@@ -484,9 +486,9 @@ func probePluginLibrary(sourcePath, loadPath string) error {
 	}()
 
 	// Use an explicit os.Pipe (*os.File) for Stderr so os/exec does not spawn
-	// its own uncancelable pipe-drain goroutine. Closing stderrReader as soon
-	// as cmd.Wait() returns ensures a grandchild process that inherited Stderr
-	// neither blocks Wait() nor writes unbounded data to disk.
+	// its own uncancelable pipe-drain goroutine. After cmd.Wait(), drain pending
+	// diagnostics with an absolute deadline so inherited grandchild writers
+	// cannot block completion. Retained output remains bounded in memory.
 	stderrReader, stderrWriter, errPipe := os.Pipe()
 	if errPipe != nil {
 		return fmt.Errorf("dlopen %s: create preflight probe pipe: %w", sourcePath, errPipe)
@@ -514,8 +516,7 @@ func probePluginLibrary(sourcePath, loadPath string) error {
 		return fmt.Errorf("dlopen %s: preflight probe failed: %w", sourcePath, errStart)
 	}
 	errRun := cmd.Wait()
-	_ = stderrReader.Close()
-	<-stderrDone
+	finishPluginProbeStderr(stderrReader, stderrDone)
 
 	statusBytes, _ := os.ReadFile(statusPath)
 	statusText := strings.TrimSpace(string(statusBytes))
@@ -545,6 +546,21 @@ func probePluginLibrary(sourcePath, loadPath string) error {
 		probedPluginShadows.Store(cacheKey, detail)
 	}
 	return fmt.Errorf("dlopen %s: %s", sourcePath, detail)
+}
+
+// finishPluginProbeStderr preserves diagnostics already written before the
+// probe exited. Closing the reader immediately after Wait can discard unread
+// pipe bytes, losing the signal evidence needed for diagnostics and caching.
+func finishPluginProbeStderr(reader *os.File, done <-chan struct{}) {
+	// Normal children close their last writer at exit, so draining reaches EOF
+	// immediately. The absolute deadline also bounds a descendant that keeps
+	// writing; it must not be extended each time more output arrives.
+	if errDeadline := reader.SetReadDeadline(time.Now().Add(pluginProbeStderrDrainTimeout)); errDeadline != nil {
+		// Fail closed if this platform cannot interrupt a blocked pipe read.
+		_ = reader.Close()
+	}
+	<-done
+	_ = reader.Close()
 }
 
 func isCacheablePluginProbeFailure(errRun error, stderrText string) bool {
