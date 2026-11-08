@@ -59,6 +59,10 @@ func (e rpcError) Error() string {
 	return e.message
 }
 
+func (e rpcError) ErrorCode() string {
+	return e.Code
+}
+
 func (e rpcError) StatusCode() int {
 	return e.statusCode
 }

@@ -4,7 +4,7 @@ import "reflect"
 
 var codexSIWCCredentialKeys = []string{
 	"access_token", "refresh_token", "id_token", "client_id", "device_id",
-	"expired", "expires_at", "last_refresh", "scope", "scopes",
+	"expired", "expires_at", "earliest_refresh_at", "last_refresh", "scope", "scopes",
 }
 
 // CredentialRefreshPatch is an immutable, partition-specific refresh result.
@@ -119,9 +119,11 @@ func applyCredentialFields(disk, before, after map[string]any) {
 			disk[key] = value
 		}
 	}
-	if _, hadExpiresAt := before["expires_at"]; hadExpiresAt {
-		if _, hasExpiresAt := after["expires_at"]; !hasExpiresAt {
-			delete(disk, "expires_at")
+	for _, key := range []string{"expires_at", "earliest_refresh_at"} {
+		if _, had := before[key]; had {
+			if _, has := after[key]; !has {
+				delete(disk, key)
+			}
 		}
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
@@ -110,7 +111,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	}
 
 	// Generate random state parameter
-	state, err := misc.GenerateRandomState()
+	state, err := claude.GenerateState()
 	if err != nil {
 		log.Errorf("Failed to generate state parameter: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
@@ -1568,10 +1569,12 @@ func pluginLoginPollAuthsWithProvider(host *pluginhost.Host, provider string, re
 			authData.Provider = trimmedSessionProvider
 		}
 		effectivePortal := trimmedSessionProvider
+		hasExplicitHint := false
 		for _, key := range []string{"oauth_provider", "portal"} {
 			if authData.Attributes != nil {
 				if v := strings.ToLower(strings.TrimSpace(authData.Attributes[key])); v != "" {
 					effectivePortal = v
+					hasExplicitHint = true
 					break
 				}
 			}
@@ -1579,24 +1582,34 @@ func pluginLoginPollAuthsWithProvider(host *pluginhost.Host, provider string, re
 				if raw, ok := authData.Metadata[key].(string); ok {
 					if v := strings.ToLower(strings.TrimSpace(raw)); v != "" {
 						effectivePortal = v
+						hasExplicitHint = true
 						break
 					}
 				}
 			}
 		}
-		if effectivePortal != "" && !strings.EqualFold(strings.TrimSpace(authData.Provider), effectivePortal) {
+		if !hasExplicitHint && ojson.ValidBytes(authData.StorageJSON) {
+			for _, key := range []string{"oauth_provider", "portal"} {
+				value := ojson.GetBytes(authData.StorageJSON, key)
+				if value.Type == ojson.String {
+					if hint := strings.ToLower(strings.TrimSpace(value.String())); hint != "" {
+						effectivePortal = hint
+						hasExplicitHint = true
+						break
+					}
+				}
+			}
+		}
+		isMultiEntry := host.HasMultipleAuthProviders(effectivePortal) || host.HasMultipleAuthProviders(authData.Provider)
+		if effectivePortal != "" && (!strings.EqualFold(strings.TrimSpace(authData.Provider), effectivePortal) || hasExplicitHint || isMultiEntry) {
 			if authData.Metadata == nil {
 				authData.Metadata = make(map[string]any)
 			}
-			if _, exists := authData.Metadata["oauth_provider"]; !exists {
-				authData.Metadata["oauth_provider"] = effectivePortal
-			}
+			authData.Metadata["oauth_provider"] = effectivePortal
 			if authData.Attributes == nil {
 				authData.Attributes = make(map[string]string)
 			}
-			if strings.TrimSpace(authData.Attributes["oauth_provider"]) == "" {
-				authData.Attributes["oauth_provider"] = effectivePortal
-			}
+			authData.Attributes["oauth_provider"] = effectivePortal
 		}
 		record := host.AuthDataToCoreAuth(authData, "", "")
 		if record == nil {
