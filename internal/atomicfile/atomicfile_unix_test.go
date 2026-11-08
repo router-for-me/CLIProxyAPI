@@ -320,12 +320,20 @@ func TestReplaceFileWarnsPreviousContentLeftBehind(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old-token"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	original := removeFile
-	t.Cleanup(func() { removeFile = original })
+	originalRemove, originalExchange := removeFile, exchange
+	t.Cleanup(func() { removeFile, exchange = originalRemove, originalExchange })
 	var leftover string
 	removeFile = func(name string) error {
 		leftover = name
 		return syscall.EACCES
+	}
+	// exchangeAvailable reports OS support only; a filesystem (some NFS, CIFS
+	// or FUSE mounts) can still refuse the swap, and ReplaceFile then commits
+	// through its plain rename, leaving no previous content behind.
+	var errSwap error
+	exchange = func(from, to string) error {
+		errSwap = originalExchange(from, to)
+		return errSwap
 	}
 	previousHooks := log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
 	t.Cleanup(func() { log.StandardLogger().ReplaceHooks(previousHooks) })
@@ -333,6 +341,12 @@ func TestReplaceFileWarnsPreviousContentLeftBehind(t *testing.T) {
 
 	if err := ReplaceFile(path, []byte("new-token"), 0o600); err != nil {
 		t.Fatalf("ReplaceFile() error = %v, want nil: the replacement went through", err)
+	}
+	if errSwap != nil {
+		if !exchangeUnsupported(errSwap) {
+			t.Fatalf("exchange error = %v, want success or an unsupported-exchange error", errSwap)
+		}
+		t.Skip("the test directory's filesystem refused the atomic exchange")
 	}
 	if got, _ := os.ReadFile(path); string(got) != "new-token" {
 		t.Fatalf("content = %q, want the replacement to have gone through", got)
