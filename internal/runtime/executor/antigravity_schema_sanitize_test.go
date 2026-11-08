@@ -2,13 +2,15 @@ package executor
 
 import (
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
 	antigravitychat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/openai/chat-completions"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 const sanitizeTestPayload = `{
@@ -56,22 +58,22 @@ func TestSanitizeAntigravityRequestSchemasPreservesHistory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := sanitizeAntigravityRequestSchemas(sanitizeTestPayload, tc.useAntigravitySchema)
 
-			before := gjson.Get(sanitizeTestPayload, "request.contents")
-			after := gjson.Get(got, "request.contents")
+			before := ojson.Get(sanitizeTestPayload, "request.contents")
+			after := ojson.Get(got, "request.contents")
 			if before.Raw != after.Raw {
 				t.Errorf("conversation history was mutated.\nbefore: %s\nafter:  %s", before.Raw, after.Raw)
 			}
 
-			todo := gjson.Get(got, `request.contents.0.parts.0.functionCall.args.todoList`)
+			todo := ojson.Get(got, `request.contents.0.parts.0.functionCall.args.todoList`)
 			for i, item := range todo.Array() {
 				if !item.Get("title").Exists() {
 					t.Errorf("todoList[%d] lost its title: %s", i, item.Raw)
 				}
 			}
 
-			args := gjson.Get(got, `request.contents.1.parts.0.functionCall.args`)
+			args := ojson.Get(got, `request.contents.1.parts.0.functionCall.args`)
 			for _, key := range []string{"format", "default", "pattern", "const", "deprecated", "examples", "additionalProperties", "x-custom"} {
-				if !args.Get(gjson.Escape(key)).Exists() {
+				if !args.Get(ojson.Escape(key)).Exists() {
 					t.Errorf("argument key %q was stripped from history: %s", key, args.Raw)
 				}
 			}
@@ -88,12 +90,12 @@ func TestSanitizeAntigravityRequestSchemasStillCleansSchemas(t *testing.T) {
 	got := sanitizeAntigravityRequestSchemas(sanitizeTestPayload, false)
 
 	decl := "request.tools.0.functionDeclarations.0"
-	if gjson.Get(got, decl+".parametersJsonSchema").Exists() {
-		t.Errorf("parametersJsonSchema was not renamed: %s", gjson.Get(got, decl).Raw)
+	if ojson.Get(got, decl+".parametersJsonSchema").Exists() {
+		t.Errorf("parametersJsonSchema was not renamed: %s", ojson.Get(got, decl).Raw)
 	}
-	schema := gjson.Get(got, decl+".parameters")
+	schema := ojson.Get(got, decl+".parameters")
 	if !schema.Exists() {
-		t.Fatalf("parameters missing after sanitization: %s", gjson.Get(got, decl).Raw)
+		t.Fatalf("parameters missing after sanitization: %s", ojson.Get(got, decl).Raw)
 	}
 
 	items := schema.Get("properties.todoList.items")
@@ -122,7 +124,7 @@ func TestSanitizeAntigravityRequestSchemasCleansResultSchemas(t *testing.T) {
 	}]}]}}`
 
 	got := sanitizeAntigravityRequestSchemas(payload, false)
-	decl := gjson.Get(got, "request.tools.0.functionDeclarations.0")
+	decl := ojson.Get(got, "request.tools.0.functionDeclarations.0")
 
 	for _, unsupported := range []string{`parameters.\$id`, `response.\$comment`, `responseJsonSchema.\$id`} {
 		if decl.Get(unsupported).Exists() {
@@ -175,7 +177,7 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 
 				check := func(path string) {
 					t.Helper()
-					node := gjson.Get(got, path)
+					node := ojson.Get(got, path)
 					if !node.Exists() {
 						t.Errorf("%s disappeared: %s", path, got)
 						return
@@ -189,7 +191,7 @@ func TestAntigravitySchemaPathsCoverEverySchemaLocation(t *testing.T) {
 					// Only the camelCase alias is renamed onto parameters, matching whole-payload
 					// cleaning. Every other spelling is cleaned where the client put it.
 					if k == "parametersJsonSchema" {
-						if gjson.Get(got, base+k).Exists() {
+						if ojson.Get(got, base+k).Exists() {
 							t.Errorf("%s should have been renamed onto parameters: %s", k, got)
 						}
 						continue
@@ -224,8 +226,8 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 		for name, schema := range shapes {
 			doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` + schema + `}]}]}}`
 			whole := util.CleanJSONSchemaForAntigravityTool(doc, useAntigravitySchema)
-			want := gjson.Get(whole, schemaPath).Raw
-			got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, useAntigravitySchema), schemaPath).Raw
+			want := ojson.Get(whole, schemaPath).Raw
+			got := ojson.Get(sanitizeAntigravityRequestSchemas(doc, useAntigravitySchema), schemaPath).Raw
 			if want != got {
 				t.Errorf("%s (antigravity=%v) diverged from whole-payload cleaning.\nwant: %s\ngot:  %s",
 					name, useAntigravitySchema, want, got)
@@ -235,7 +237,7 @@ func TestSanitizeAntigravityRequestSchemasMatchesWholePayloadCleaning(t *testing
 
 	// Explicitly pin the placeholder, so the equivalence above cannot pass by both sides dropping it.
 	doc := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parameters":` + shapes["optionalOnly"] + `}]}]}}`
-	got := gjson.Get(sanitizeAntigravityRequestSchemas(doc, true), schemaPath)
+	got := ojson.Get(sanitizeAntigravityRequestSchemas(doc, true), schemaPath)
 	if req := got.Get("required").Array(); len(req) != 1 || req[0].String() != "_" {
 		t.Errorf("Claude VALIDATED placeholder missing for an optional-only schema: %s", got.Raw)
 	}
@@ -251,12 +253,12 @@ func TestSanitizeAntigravityRequestSchemasKeepsResponseSchemasPlaceholderFree(t 
 	}}`
 
 	got := sanitizeAntigravityRequestSchemas(payload, true)
-	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	toolSchema := ojson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 	if required := toolSchema.Get("required.0").String(); required != "_" {
 		t.Fatalf("tool schema lost VALIDATED placeholder, required[0] = %q: %s", required, got)
 	}
 
-	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	responseSchema := ojson.Get(got, "request.generationConfig.responseSchema")
 	for _, path := range []string{
 		"required",
 		"properties._",
@@ -297,7 +299,7 @@ func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t 
 	}}`
 
 	got := sanitizeAntigravityRequestSchemas(payload, true)
-	responseSchema := gjson.Get(got, "request.generationConfig.responseSchema")
+	responseSchema := ojson.Get(got, "request.generationConfig.responseSchema")
 	action := responseSchema.Get("properties.action")
 	if action.Get("anyOf").Exists() || action.Get("type").String() != "object" || !action.Get("nullable").Bool() {
 		t.Errorf("response anyOf was not projected to nullable object: %s", responseSchema.Raw)
@@ -307,12 +309,12 @@ func TestSanitizeAntigravityRequestSchemasProjectsUnionsAndPreservesEnumTypes(t 
 		t.Errorf("response enum type = %q, want number: %s", gotType, responseSchema.Raw)
 	}
 	for _, enumValue := range conviction.Get("enum").Array() {
-		if enumValue.Type != gjson.String {
+		if enumValue.Type != ojson.String {
 			t.Errorf("response enum value is not a string: %s", conviction.Raw)
 		}
 	}
 
-	toolSchema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+	toolSchema := ojson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 	if toolSchema.Get("properties.choice.anyOf").Exists() {
 		t.Errorf("tool nullable single-branch anyOf union was not flattened: %s", toolSchema.Raw)
 	}
@@ -348,12 +350,12 @@ func TestSanitizeAntigravityToolSchemasKeepNativeTypeAndNullableOnBothPaths(t *t
 
 	for _, requirePlaceholder := range []bool{false, true} {
 		got := sanitizeAntigravityRequestSchemas(payload, requirePlaceholder)
-		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		schema := ojson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 		if schema.Get("properties.level.type").String() != "number" {
 			t.Fatalf("placeholder=%v changed numeric tool argument type: %s", requirePlaceholder, schema.Raw)
 		}
 		for _, member := range schema.Get("properties.level.enum").Array() {
-			if member.Type != gjson.String {
+			if member.Type != ojson.String {
 				t.Fatalf("placeholder=%v left non-string proto enum: %s", requirePlaceholder, schema.Raw)
 			}
 		}
@@ -372,7 +374,7 @@ func TestAntigravityBuildRequestKeepsJSONObjectMimeOnly(t *testing.T) {
 		t.Fatal(errMarshal)
 	}
 
-	generationConfig := gjson.GetBytes(encoded, "request.generationConfig")
+	generationConfig := ojson.GetBytes(encoded, "request.generationConfig")
 	if got := generationConfig.Get("responseMimeType").String(); got != "application/json" {
 		t.Fatalf("responseMimeType = %q, want application/json: %s", got, encoded)
 	}
@@ -397,7 +399,7 @@ func TestAntigravityBuildRequestPreservesGenerationResponseSchemaMetadata(t *tes
 				t.Fatal(errMarshal)
 			}
 
-			schema := gjson.GetBytes(encoded, "request.generationConfig.responseSchema")
+			schema := ojson.GetBytes(encoded, "request.generationConfig.responseSchema")
 			if !schema.Get("nullable").Bool() || !schema.Get("properties._.nullable").Bool() {
 				t.Fatalf("response schema nullable metadata was removed: %s", schema.Raw)
 			}
@@ -431,11 +433,11 @@ func TestAntigravityBuildRequestSanitizesSnakeCaseGenerationResponseSchemas(t *t
 			base := "request.generationConfig."
 			// The upstream API accepts either spelling, so the field must stay where the client put
 			// it. Only the unsupported keywords inside it are what upstream rejects.
-			schema := gjson.GetBytes(encoded, base+testCase.alias)
+			schema := ojson.GetBytes(encoded, base+testCase.alias)
 			if !schema.Exists() {
 				t.Fatalf("snake_case response schema was renamed or dropped: %s", encoded)
 			}
-			if gjson.GetBytes(encoded, base+testCase.canonical).Exists() {
+			if ojson.GetBytes(encoded, base+testCase.canonical).Exists() {
 				t.Fatalf("cleaning must not add a second spelling: %s", encoded)
 			}
 			if schema.Get(`\$id`).Exists() {
@@ -461,7 +463,7 @@ func TestSanitizeAntigravityRequestSchemasCleansBothSpellingsInPlace(t *testing.
 		"request.generationConfig.responseSchema":  "canonical",
 		"request.generationConfig.response_schema": "alias",
 	} {
-		schema := gjson.Get(got, path)
+		schema := ojson.Get(got, path)
 		if !schema.Exists() {
 			t.Errorf("%s was dropped: %s", path, got)
 			continue
@@ -496,7 +498,7 @@ func TestSanitizeAntigravityRequestSchemasIsIdempotent(t *testing.T) {
 	base := "request.tools.0.functionDeclarations.0.parameters.properties."
 	for _, prop := range []string{"withDesc", "bare", "compound"} {
 		descPath := base + prop + ".description"
-		first, second := gjson.Get(once, descPath).String(), gjson.Get(twice, descPath).String()
+		first, second := ojson.Get(once, descPath).String(), ojson.Get(twice, descPath).String()
 		if first != second {
 			t.Errorf("%s: cleaning is not idempotent.\nonce:  %s\ntwice: %s", prop, first, second)
 		}
@@ -570,13 +572,13 @@ func TestSanitizeAntigravityRequestSchemasKeepsPropertyNamesInHistory(t *testing
 	for _, useAntigravitySchema := range []bool{false, true} {
 		got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
 
-		before := gjson.Get(payload, "request.contents")
-		after := gjson.Get(got, "request.contents")
+		before := ojson.Get(payload, "request.contents")
+		after := ojson.Get(got, "request.contents")
 		if before.Raw != after.Raw {
 			t.Errorf("antigravity=%v: history was mutated.\nbefore: %s\nafter:  %s", useAntigravitySchema, before.Raw, after.Raw)
 		}
 
-		schema := gjson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
+		schema := ojson.Get(got, "request.tools.0.functionDeclarations.0.parameters")
 		if !schema.Get("properties.propertyNames").Exists() {
 			t.Errorf("antigravity=%v: property named propertyNames was removed: %s", useAntigravitySchema, schema.Raw)
 		}
@@ -605,11 +607,11 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 				}
 
 				for _, path := range []string{"request.tools", "request.generationConfig"} {
-					if node := gjson.GetBytes(encoded, path); strings.Contains(node.Raw, `"propertyNames"`) {
+					if node := ojson.GetBytes(encoded, path); strings.Contains(node.Raw, `"propertyNames"`) {
 						t.Errorf("%s still carries propertyNames: %s", path, node.Raw)
 					}
 				}
-				args := gjson.GetBytes(encoded, "request.contents.0.parts.0.functionCall.args")
+				args := ojson.GetBytes(encoded, "request.contents.0.parts.0.functionCall.args")
 				if args.Get("propertyNames").String() != "keep-me" {
 					t.Errorf("functionCall argument named propertyNames was rewritten: %s", args.Raw)
 				}
@@ -631,7 +633,7 @@ func TestSanitizeAntigravityRequestSchemasStripsEncryptedMetadata(t *testing.T) 
 			if strings.Contains(got, `"encrypted"`) {
 				t.Errorf("declContainer=%s antigravity=%v: 'encrypted' marker survived sanitization: %s", declContainer, useAntigravitySchema, got)
 			}
-			schema := gjson.Get(got, "request.tools.0."+declContainer+".0.parameters")
+			schema := ojson.Get(got, "request.tools.0."+declContainer+".0.parameters")
 			if !schema.Get("properties.key.type").Exists() || schema.Get("properties.key.type").String() != "string" {
 				t.Errorf("declContainer=%s antigravity=%v: key property was corrupted: %s", declContainer, useAntigravitySchema, schema.Raw)
 			}
@@ -675,7 +677,7 @@ func TestSanitizeAntigravityRequestSchemasNormalizesTrueBooleanSubschemas(t *tes
 
 	for _, useAntigravitySchema := range []bool{false, true} {
 		got := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
-		decl := gjson.Get(got, "request.tools.0.functionDeclarations.0")
+		decl := ojson.Get(got, "request.tools.0.functionDeclarations.0")
 		params := decl.Get("parameters")
 		if !params.Exists() {
 			t.Fatalf("parameters missing in sanitized declaration: %s", decl.Raw)
@@ -686,23 +688,23 @@ func TestSanitizeAntigravityRequestSchemasNormalizesTrueBooleanSubschemas(t *tes
 			if !val.Exists() {
 				t.Errorf("useAntigravitySchema=%v: property %s missing: %s", useAntigravitySchema, prop, params.Raw)
 			}
-			if val.Type != gjson.JSON || val.Raw != "{}" {
+			if val.Type != ojson.JSON || val.Raw != "{}" {
 				t.Errorf("useAntigravitySchema=%v: property %s should be {}, got %s", useAntigravitySchema, prop, val.Raw)
 			}
 		}
 
 		// Check false is preserved
-		if val := params.Get("properties.disabled"); val.Type != gjson.False {
+		if val := params.Get("properties.disabled"); val.Type != ojson.False {
 			t.Errorf("useAntigravitySchema=%v: disabled should be false, got %s", useAntigravitySchema, val.Raw)
 		}
 
 		// Check nested property
-		if val := params.Get("properties.metadata.properties.nested_flag"); val.Type != gjson.JSON || val.Raw != "{}" {
+		if val := params.Get("properties.metadata.properties.nested_flag"); val.Type != ojson.JSON || val.Raw != "{}" {
 			t.Errorf("useAntigravitySchema=%v: nested_flag should be {}, got %s", useAntigravitySchema, val.Raw)
 		}
 
 		// Check items: true -> items: {}
-		if val := params.Get("properties.tags.items"); val.Type != gjson.JSON || val.Raw != "{}" {
+		if val := params.Get("properties.tags.items"); val.Type != ojson.JSON || val.Raw != "{}" {
 			t.Errorf("useAntigravitySchema=%v: tags.items should be {}, got %s", useAntigravitySchema, val.Raw)
 		}
 
@@ -733,14 +735,14 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 		`"required":["value"]` +
 		`}}]}]}}`)
 
-	declParams := func(t *testing.T, modelName string) gjson.Result {
+	declParams := func(t *testing.T, modelName string) ojson.Result {
 		t.Helper()
 		body := buildRequestBodyFromRawPayload(t, modelName, payload)
 		encoded, errMarshal := json.Marshal(body)
 		if errMarshal != nil {
 			t.Fatal(errMarshal)
 		}
-		decl := gjson.GetBytes(encoded, "request.tools.0.functionDeclarations.0")
+		decl := ojson.GetBytes(encoded, "request.tools.0.functionDeclarations.0")
 		if !decl.Exists() {
 			t.Fatalf("model %s: function declaration missing: %s", modelName, encoded)
 		}
@@ -803,7 +805,7 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 		if errMarshal != nil {
 			t.Fatal(errMarshal)
 		}
-		gotDecl := gjson.GetBytes(encoded, "request.tools.0.functionDeclarations.0")
+		gotDecl := ojson.GetBytes(encoded, "request.tools.0.functionDeclarations.0")
 		params := gotDecl.Get("parameters")
 		if params.Get("properties.item.anyOf").Exists() || params.Get("properties.item.type").String() != "object" || !params.Get("properties.item.properties.image").Exists() {
 			t.Fatalf("claude parameter schema union was not flattened: %s", params.Raw)
@@ -832,7 +834,7 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 		if errConv != nil {
 			t.Fatalf("convert error: %v", errConv)
 		}
-		translatedValue := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0.parametersJsonSchema.properties.value")
+		translatedValue := ojson.GetBytes(translated, "request.tools.0.functionDeclarations.0.parametersJsonSchema.properties.value")
 		if len(translatedValue.Get("anyOf").Array()) != 2 || !translatedValue.Get("nullable").Bool() {
 			t.Fatalf("translator must preserve the union and set nullable:true: %s", translatedValue.Raw)
 		}
@@ -842,7 +844,7 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 		if errMarshal != nil {
 			t.Fatal(errMarshal)
 		}
-		finalValue := gjson.GetBytes(encoded, "request.tools.0.functionDeclarations.0.parameters.properties.value")
+		finalValue := ojson.GetBytes(encoded, "request.tools.0.functionDeclarations.0.parameters.properties.value")
 		if finalValue.Get("anyOf").Exists() || finalValue.Get("type").String() != "string" {
 			t.Fatalf("executor must flatten the union for Claude: %s", finalValue.Raw)
 		}
@@ -858,7 +860,7 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 			if errConv != nil {
 				t.Fatalf("model %s: convert error: %v", modelName, errConv)
 			}
-			translatedParams := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0.parametersJsonSchema")
+			translatedParams := ojson.GetBytes(translated, "request.tools.0.functionDeclarations.0.parametersJsonSchema")
 			if got := len(translatedParams.Get("properties.item.anyOf").Array()); got != 3 {
 				t.Fatalf("model %s: translator anyOf branch count = %d, want 3 (flattening belongs to the executor, not the translator): %s", modelName, got, translatedParams.Raw)
 			}
@@ -871,7 +873,7 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 			if errMarshal != nil {
 				t.Fatal(errMarshal)
 			}
-			finalParams := gjson.GetBytes(encoded, "request.tools.0.functionDeclarations.0.parameters")
+			finalParams := ojson.GetBytes(encoded, "request.tools.0.functionDeclarations.0.parameters")
 			if !finalParams.Exists() {
 				t.Fatalf("model %s: final parameters missing: %s", modelName, encoded)
 			}
@@ -903,4 +905,96 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 			}
 		}
 	})
+}
+
+// TestSanitizeAntigravityRequestSchemasScalesLinearlyWithDeclarations is the
+// regression test for the quadratic tool sanitizing reported in Issue 6714:
+// sanitizing must not rewrite the whole tools document once per function
+// declaration. The allocation bound is asserted directly in the test (not via
+// a benchmark) so a return to per-declaration document rewrites fails loudly.
+func TestSanitizeAntigravityRequestSchemasScalesLinearlyWithDeclarations(t *testing.T) {
+	const declCount = 256
+
+	var input, want strings.Builder
+	input.WriteString(`{"request":{"tools":[{"functionDeclarations":[`)
+	want.WriteString(`{"request":{"tools":[{"functionDeclarations":[`)
+	for i := 0; i < declCount; i++ {
+		if i > 0 {
+			input.WriteByte(',')
+			want.WriteByte(',')
+		}
+		// parametersJsonSchema forces the rename onto parameters and $id forces
+		// a cleaner rewrite of the schema. The padded description sits on the
+		// declaration, outside the schema, so whole-document copies must pay for
+		// it while per-declaration edits do not; the bound below then measures
+		// document-rewrite cost only, not the cleaner's per-schema cost (Issue 6713).
+		fmt.Fprintf(&input, `{"name":"tool_%d","description":"%s","parametersJsonSchema":{"type":"object","$id":"drop","properties":{"q":{"type":"string"}}}}`, i, strings.Repeat("x", 4096))
+		// The schema has no required properties, so the Claude VALIDATED
+		// placeholder is inserted even on the Gemini path (antigravity=true).
+		fmt.Fprintf(&want, `{"name":"tool_%d","description":"%s","parameters":{"type":"object","properties":{"q":{"type":"string"},"_":{"type":"boolean"}},"required":["_"]}}`, i, strings.Repeat("x", 4096))
+	}
+	input.WriteString(`]}]}}`)
+	want.WriteString(`]}]}}`)
+
+	payload := input.String()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got := sanitizeAntigravityRequestSchemasForModel(payload, true, false)
+	runtime.ReadMemStats(&after)
+
+	if got != want.String() {
+		t.Fatalf("sanitized tools diverged from the expected bytes\nfirst declaration want: %s\nfirst declaration got:  %s",
+			ojson.Get(want.String(), "request.tools.0.functionDeclarations.0").Raw,
+			ojson.Get(got, "request.tools.0.functionDeclarations.0").Raw)
+	}
+
+	// Whole-document work is bounded by a constant number of passes: extracting
+	// request.tools, rebuilding it, and writing it back. Everything beyond a
+	// small multiple of the payload size means per-declaration document rewrites
+	// are back; the pre-fix implementation allocated O(declCount x payload).
+	const allowedCopies = 32
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > uint64(allowedCopies*len(payload)) {
+		t.Fatalf("sanitizing %d declarations allocated %d bytes for a %d byte payload, want at most %d (cost must be linear in the tools size, not per declaration)",
+			declCount, allocated, len(payload), allowedCopies*len(payload))
+	}
+}
+
+// TestSanitizeAntigravityRequestSchemasPreservesToolArrayWhitespace pins the
+// byte-equivalence claim of the per-declaration rewrite: rebuilding the tools
+// and declarations arrays must keep the whitespace around array elements, so
+// a pretty-printed payload only changes inside the cleaned declarations. The
+// expected value is the input with only the affected schema bytes replaced,
+// exactly what the previous whole-document sjson edits produced.
+func TestSanitizeAntigravityRequestSchemasPreservesToolArrayWhitespace(t *testing.T) {
+	input := "{\n" +
+		"  \"request\": {\n" +
+		"    \"tools\": [\n" +
+		"      {\"functionDeclarations\": [\n" +
+		"        {\"name\": \"a\", \"parametersJsonSchema\": {\"type\": \"object\", \"$id\": \"drop\", \"properties\": {\"q\": {\"type\": \"string\"}}}} ,\n" +
+		"        {\"name\": \"b\", \"parameters\": {\"type\": \"object\", \"required\": [\"q\"], \"properties\": {\"q\": {\"type\": \"string\"}}}} ,\n" +
+		"        {\"name\": \"c\"}\n" +
+		"      ]} ,\n" +
+		"      {\"googleSearch\": {}}\n" +
+		"    ]\n" +
+		"  }\n" +
+		"}\n"
+
+	// Declaration a is renamed and cleaned in place (sjson compacts the
+	// replacement gaps inside the edited node, as the whole-document edits
+	// did). Declaration b is already clean, and declarations b and c and
+	// the googleSearch tool are untouched, so every other byte (including the
+	// whitespace around commas and brackets) must survive verbatim. The odd
+	// "}} ," separator is the declaration's own closing bytes, one space of
+	// inter-element whitespace, the comma, and the newline.
+	want := strings.Replace(input,
+		`{"name": "a", "parametersJsonSchema": {"type": "object", "$id": "drop", "properties": {"q": {"type": "string"}}}}`,
+		`{"name": "a","parameters":{"type": "object", "properties": {"q": {"type": "string"},"_":{"type":"boolean"}},"required":["_"]}}`, 1)
+	if want == input {
+		t.Fatal("test fixture is broken: declaration a was not replaced in the expected value")
+	}
+
+	if got := sanitizeAntigravityRequestSchemasForModel(input, true, false); got != want {
+		t.Fatalf("pretty-printed tools lost whitespace outside the cleaned declaration\nwant:\n%s\ngot:\n%s", want, got)
+	}
 }

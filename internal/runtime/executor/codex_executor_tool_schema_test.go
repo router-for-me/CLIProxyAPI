@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // Issue #5551: Tool schema with 13-branch oneOf causes ChatGPT Codex upstream
@@ -97,13 +97,13 @@ func TestCodexExecutorSimplifiesComplexOneOfToolSchema(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
-	tools := gjson.GetBytes(gotBody, "tools").Array()
+	tools := ojson.GetBytes(gotBody, "tools").Array()
 	if len(tools) == 0 {
 		t.Fatalf("expected tools in upstream payload, got: %s", gotBody)
 	}
 
 	// Find tool t1
-	var t1Tool gjson.Result
+	var t1Tool ojson.Result
 	for _, tool := range tools {
 		if tool.Get("name").String() == "t1" {
 			t1Tool = tool
@@ -502,8 +502,8 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 		t.Fatalf("Execute(non-codex) error = %v", errExecuteNonCodex)
 	}
 
-	toolMapNonCodex := make(map[string]gjson.Result)
-	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+	toolMapNonCodex := make(map[string]ojson.Result)
+	for _, tool := range ojson.GetBytes(gotBody, "tools").Array() {
 		toolMapNonCodex[tool.Get("name").String()] = tool
 	}
 	if gotType := toolMapNonCodex["exec_command"].Get("parameters.properties.yield_time_ms.type").String(); gotType != "number" {
@@ -524,8 +524,8 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 		t.Fatalf("Execute(codex) error = %v", errExecuteCodex)
 	}
 
-	toolMap := make(map[string]gjson.Result)
-	for _, tool := range gjson.GetBytes(gotBody, "tools").Array() {
+	toolMap := make(map[string]ojson.Result)
+	for _, tool := range ojson.GetBytes(gotBody, "tools").Array() {
 		toolMap[tool.Get("name").String()] = tool
 	}
 
@@ -559,15 +559,15 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 	}
 
 	// Namespace collaboration tool wait_agent must retain number (Issue #6244)
-	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
 		t.Fatalf("collaboration.wait_agent timeout_ms type = %q, want number", gotType)
 	}
 
 	// input[].additional_tools must retain number
-	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
 		t.Fatalf("input additional_tools yield_time_ms type = %q, want number", gotType)
 	}
-	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
 		t.Fatalf("input additional_tools collaboration.wait_agent timeout_ms type = %q, want number", gotType)
 	}
 
@@ -585,13 +585,13 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 	}
 	for range streamRes.Chunks {
 	}
-	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP stream exec_command yield_time_ms type = %q, want number", gotType)
 	}
-	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP stream collaboration.wait_agent timeout_ms type = %q, want number", gotType)
 	}
-	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP stream input additional_tools yield_time_ms type = %q, want number", gotType)
 	}
 
@@ -608,13 +608,13 @@ func TestCodexExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAgent(t *test
 	if errCompact != nil {
 		t.Fatalf("ExecuteCompact(codex) error = %v", errCompact)
 	}
-	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP compact exec_command yield_time_ms type = %q, want number", gotType)
 	}
-	if gotType := gjson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP compact collaboration.wait_agent timeout_ms type = %q, want number", gotType)
 	}
-	if gotType := gjson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
+	if gotType := ojson.GetBytes(gotBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); gotType != "number" {
 		t.Fatalf("HTTP compact input additional_tools yield_time_ms type = %q, want number", gotType)
 	}
 }
@@ -752,16 +752,16 @@ func TestCodexWebsocketsExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAge
 
 	select {
 	case payload := <-capturedPayload:
-		if got := gjson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("WS stream exec_command yield_time_ms type = %q, want number", got)
 		}
-		if got := gjson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
 			t.Fatalf("WS stream collaboration.wait_agent timeout_ms type = %q, want number", got)
 		}
-		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("WS stream input additional_tools yield_time_ms type = %q, want number", got)
 		}
-		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
 			t.Fatalf("WS stream input additional_tools collaboration.wait_agent timeout_ms type = %q, want number", got)
 		}
 	case <-time.After(5 * time.Second):
@@ -775,13 +775,13 @@ func TestCodexWebsocketsExecutor_DoesNotNormalizeToolIntegerTypesForCodexUserAge
 	}
 	select {
 	case payload := <-capturedPayload:
-		if got := gjson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("WS non-stream exec_command yield_time_ms type = %q, want number", got)
 		}
-		if got := gjson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
 			t.Fatalf("WS non-stream collaboration.wait_agent timeout_ms type = %q, want number", got)
 		}
-		if got := gjson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(payload, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("WS non-stream input additional_tools yield_time_ms type = %q, want number", got)
 		}
 	case <-time.After(5 * time.Second):
@@ -884,13 +884,13 @@ func TestCodexWebsocketsExecutor_UpgradeFallbackToHTTP_PreservesNumber(t *testin
 	}
 	for range streamRes.Chunks {
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
 		t.Fatalf("stream fallback tools exec_command yield_time_ms type = %q, want number", got)
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
 		t.Fatalf("stream fallback collaboration.wait_agent timeout_ms type = %q, want number", got)
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 		t.Fatalf("stream fallback input additional_tools yield_time_ms type = %q, want number", got)
 	}
 
@@ -900,13 +900,13 @@ func TestCodexWebsocketsExecutor_UpgradeFallbackToHTTP_PreservesNumber(t *testin
 	if errNonStream != nil {
 		t.Fatalf("Execute fallback error = %v", errNonStream)
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "tools.#(name==\"exec_command\").parameters.properties.yield_time_ms.type").String(); got != "number" {
 		t.Fatalf("non-stream fallback tools exec_command yield_time_ms type = %q, want number", got)
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "tools.#(name==\"collaboration\").tools.0.parameters.properties.timeout_ms.type").String(); got != "number" {
 		t.Fatalf("non-stream fallback collaboration.wait_agent timeout_ms type = %q, want number", got)
 	}
-	if got := gjson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(httpCapturedBody, "input.#(type==\"additional_tools\").tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 		t.Fatalf("non-stream fallback input additional_tools yield_time_ms type = %q, want number", got)
 	}
 }
@@ -965,10 +965,10 @@ func TestOpenAICompatExecutor_NormalizesToolIntegerTypesForCodexUserAgent_NonCod
 		t.Fatalf("Execute() error = %v", errExec)
 	}
 
-	if got := gjson.GetBytes(gotBody, "tools.0.function.parameters.properties.yield_time_ms.type").String(); got != "integer" {
+	if got := ojson.GetBytes(gotBody, "tools.0.function.parameters.properties.yield_time_ms.type").String(); got != "integer" {
 		t.Fatalf("expected non-Codex executor to normalize yield_time_ms to integer, got: %s (body=%s)", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "tools.0.function.parameters.properties.timeout_ms.type").String(); got != "integer" {
+	if got := ojson.GetBytes(gotBody, "tools.0.function.parameters.properties.timeout_ms.type").String(); got != "integer" {
 		t.Fatalf("expected non-Codex executor to normalize timeout_ms to integer, got: %s (body=%s)", got, string(gotBody))
 	}
 }

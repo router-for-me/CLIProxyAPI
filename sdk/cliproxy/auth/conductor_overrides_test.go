@@ -436,6 +436,7 @@ type authFallbackExecutor struct {
 	streamFirstErrors map[string]error
 	streamTailErrors  map[string]error
 	countTokenErrors  map[string]error
+	onCountTokens     func(auth *Auth)
 }
 
 func (e *authFallbackExecutor) Identifier() string {
@@ -481,7 +482,11 @@ func (e *authFallbackExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, er
 func (e *authFallbackExecutor) CountTokens(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.mu.Lock()
 	err := e.countTokenErrors[auth.ID]
+	onCount := e.onCountTokens
 	e.mu.Unlock()
+	if onCount != nil {
+		onCount(auth)
+	}
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -1701,6 +1706,112 @@ func TestManager_DeepSeekInsufficientBalanceRotatesCredentialAndRebindsSession(t
 	}
 }
 
+func TestManager_AnthropicCreditBalanceTooLowRotatesCredentialAndRebindsSession(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(2, 30*time.Second, 0)
+	affinity := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Hour,
+	})
+	defer affinity.Stop()
+	m.SetSelector(affinity)
+
+	const provider = "claude"
+	const model = "claude-sonnet-4-6"
+	const creditBalanceLowBody = `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
+
+	executor := &authFallbackExecutor{
+		id: provider,
+		executeErrors: map[string]error{
+			"aa-empty-anthropic-key": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    creditBalanceLowBody,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	depletedAuth := &Auth{ID: "aa-empty-anthropic-key", Provider: provider}
+	availableAuth := &Auth{ID: "bb-claude-oauth", Provider: provider}
+
+	reg := registry.GetGlobalRegistry()
+	models := []*registry.ModelInfo{{ID: model}}
+	reg.RegisterClient(depletedAuth.ID, provider, models)
+	reg.RegisterClient(availableAuth.ID, provider, models)
+	t.Cleanup(func() {
+		reg.UnregisterClient(depletedAuth.ID)
+		reg.UnregisterClient(availableAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), depletedAuth); errRegister != nil {
+		t.Fatalf("register depleted auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), availableAuth); errRegister != nil {
+		t.Fatalf("register available auth: %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "anthropic-credit-balance-low",
+	}}
+	beforeExecute := time.Now()
+	resp, errExecute := m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		opts,
+	)
+	if errExecute != nil {
+		t.Fatalf("expected fallback to the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != availableAuth.ID {
+		t.Fatalf("served by %q, want %q", got, availableAuth.ID)
+	}
+
+	resp, errExecute = m.Execute(
+		context.Background(),
+		[]string{provider},
+		cliproxyexecutor.Request{Model: model},
+		opts,
+	)
+	if errExecute != nil {
+		t.Fatalf("expected rebound session to use the next credential, got error: %v", errExecute)
+	}
+	if got := string(resp.Payload); got != availableAuth.ID {
+		t.Fatalf("rebound session served by %q, want %q", got, availableAuth.ID)
+	}
+	wantCalls := []string{depletedAuth.ID, availableAuth.ID, availableAuth.ID}
+	if calls := executor.ExecuteCalls(); !slices.Equal(calls, wantCalls) {
+		t.Fatalf("credential calls = %v, want %v", calls, wantCalls)
+	}
+
+	updatedDepleted, ok := m.GetByID(depletedAuth.ID)
+	if !ok || updatedDepleted == nil {
+		t.Fatal("expected depleted auth to remain registered")
+	}
+	state := updatedDepleted.ModelStates[model]
+	if state == nil {
+		t.Fatal("expected the depleted credential to be cooled down for the model")
+	}
+	if !state.Unavailable {
+		t.Fatal("expected the depleted credential to be unavailable for the model")
+	}
+	if state.NextRetryAfter.Before(beforeExecute.Add(29 * time.Minute)) {
+		t.Fatalf("cooldown expires at %v, want approximately 30 minutes", state.NextRetryAfter)
+	}
+
+	authLevel := &Auth{ID: "cc-auth-level-credit-low", Provider: provider}
+	applyAuthFailureState(authLevel, &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    creditBalanceLowBody,
+	}, nil, beforeExecute, false)
+	if authLevel.StatusMessage != "payment_required" {
+		t.Fatalf("auth StatusMessage = %q, want %q", authLevel.StatusMessage, "payment_required")
+	}
+	if authLevel.NextRetryAfter.Before(beforeExecute.Add(29 * time.Minute)) {
+		t.Fatalf("auth cooldown expires at %v, want approximately 30 minutes", authLevel.NextRetryAfter)
+	}
+}
+
 func TestManager_DeepSeekCredentialFailuresRotateCredential(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1961,6 +2072,108 @@ func TestManager_ExecuteCount_GenericRouteNotFoundDoesNotSuspendModel(t *testing
 	}
 }
 
+func TestManager_ExecuteCount_NotImplementedDoesNotSuspendModelOrExtendCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	hook := &resultCaptureHook{}
+	m := NewManager(nil, nil, hook)
+	executor := &authFallbackExecutor{
+		id: "kiro",
+		countTokenErrors: map[string]error{
+			"kiro-count-501-auth": &Error{
+				Code:       "not_implemented",
+				HTTPStatus: http.StatusNotImplemented,
+				Message:    "count-tokens/http-request are not implemented yet",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-5.5"
+	auth := &Auth{ID: "kiro-count-501-auth", Provider: "kiro"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, errCount := m.ExecuteCount(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errCount == nil {
+			t.Fatalf("attempt %d: expected count_tokens 501 error", attempt)
+		}
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatal("expected auth to remain registered")
+	}
+	if updated.Failed != 2 {
+		t.Fatalf("failed request count = %d, want 2", updated.Failed)
+	}
+	results := hook.Results()
+	if len(results) != 2 || results[0].Success || results[0].Error == nil || results[0].Error.HTTPStatus != http.StatusNotImplemented || results[0].Error.Code != "not_implemented" {
+		t.Fatalf("recorded results = %#v, want two failed 501 not_implemented results", results)
+	}
+	if updated.Unavailable {
+		t.Fatal("expected count_tokens 501 to keep auth available")
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("expected count_tokens 501 to avoid model cooldown state, got %#v", state)
+	}
+	if count := reg.GetModelCount(model); count != 1 {
+		t.Fatalf("available model count = %d, want 1", count)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute after count_tokens 501: %v", errExecute)
+	}
+	if string(resp.Payload) != auth.ID {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), auth.ID)
+	}
+
+	// Simulate a short inference cooldown landing while an ExecuteCount 501 is in flight,
+	// and verify ExecuteCount does not extend the 5s inference cooldown to 1m.
+	var deadlineBefore time.Time
+	executor.mu.Lock()
+	executor.onCountTokens = func(selected *Auth) {
+		shortRetry := 5 * time.Second
+		m.MarkResult(context.Background(), Result{
+			AuthID:     selected.ID,
+			Provider:   selected.Provider,
+			Model:      model,
+			RouteModel: model,
+			Success:    false,
+			RetryAfter: &shortRetry,
+			Error: &Error{
+				HTTPStatus: http.StatusInternalServerError,
+				Message:    "upstream 500",
+			},
+		})
+		cooledBefore, _ := m.GetByID(selected.ID)
+		if cooledBefore != nil && cooledBefore.ModelStates[model] != nil {
+			deadlineBefore = cooledBefore.ModelStates[model].NextRetryAfter
+		}
+	}
+	executor.mu.Unlock()
+
+	if _, errCount := m.ExecuteCount(context.Background(), []string{"kiro"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errCount == nil {
+		t.Fatal("expected count_tokens 501 error during active cooldown check")
+	}
+	if deadlineBefore.IsZero() {
+		t.Fatal("expected active model cooldown deadline to be recorded")
+	}
+	cooledAfter, _ := m.GetByID(auth.ID)
+	stateAfter := cooledAfter.ModelStates[model]
+	if stateAfter == nil || !stateAfter.NextRetryAfter.Equal(deadlineBefore) {
+		t.Fatalf("count_tokens 501 modified existing inference cooldown deadline: got %v, want %v", stateAfter, deadlineBefore)
+	}
+}
+
 func TestManager_ExecuteCount_ExplicitModelNotFoundSuspendsModel(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -2169,6 +2382,46 @@ func TestIsCountTokensEndpointNotFoundError(t *testing.T) {
 		{
 			name: "non 404",
 			err:  &Error{HTTPStatus: http.StatusInternalServerError, Message: "404 page not found"},
+			want: false,
+		},
+		{
+			name: "501 not implemented with code",
+			err:  &Error{Code: "not_implemented", HTTPStatus: http.StatusNotImplemented, Message: "count-tokens/http-request are not implemented yet"},
+			want: true,
+		},
+		{
+			name: "plain 501 not implemented",
+			err:  &Error{HTTPStatus: http.StatusNotImplemented, Message: "501 Not Implemented"},
+			want: true,
+		},
+		{
+			name: "typed not_implemented without status",
+			err:  &Error{Code: "not_implemented", Message: "CountTokens not implemented"},
+			want: true,
+		},
+		{
+			name: "typed count_tokens_unsupported",
+			err:  &Error{Code: "count_tokens_unsupported", HTTPStatus: http.StatusNotImplemented, Message: "count_tokens endpoint is not available for Kiro"},
+			want: true,
+		},
+		{
+			name: "stdlib ErrUnsupported",
+			err:  fmt.Errorf("count_tokens: %w", errors.ErrUnsupported),
+			want: true,
+		},
+		{
+			name: "501 with explicit model_not_found code",
+			err:  &Error{Code: "model_not_found", HTTPStatus: http.StatusNotImplemented, Message: "model claude-missing was not found"},
+			want: false,
+		},
+		{
+			name: "401 unauthorized with not_implemented code",
+			err:  &Error{Code: "not_implemented", HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
+			want: false,
+		},
+		{
+			name: "429 rate limit with not_implemented code",
+			err:  &Error{Code: "not_implemented", HTTPStatus: http.StatusTooManyRequests, Message: "rate limit"},
 			want: false,
 		},
 	}
@@ -2484,5 +2737,81 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 	}
 	if state := updatedFail.ModelStates[model]; state == nil || !state.Unavailable || state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected real 401 authentication error to set model cooldown state, got %#v", state)
+	}
+}
+
+func TestManager_Execute_DevinMCPConfigurationIssue403_DoesNotRetryOrCooldown(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 30*time.Second, 0)
+
+	mcpErr := &Error{
+		HTTPStatus: http.StatusForbidden,
+		Message:    "devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.",
+	}
+	executor := &authFallbackExecutor{
+		id: "devin",
+		executeErrors: map[string]error{
+			"auth-devin-1": mcpErr,
+			"auth-devin-2": mcpErr,
+		},
+		streamFirstErrors: map[string]error{
+			"auth-devin-1": mcpErr,
+			"auth-devin-2": mcpErr,
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "devin/claude-opus-5-5"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{"auth-devin-1", "auth-devin-2"} {
+		auth := &Auth{
+			ID:       id,
+			Provider: "devin",
+			Status:   StatusActive,
+		}
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "devin", []*registry.ModelInfo{{ID: model}})
+		cleanupID := id
+		t.Cleanup(func() { reg.UnregisterClient(cleanupID) })
+	}
+
+	_, errExec := m.Execute(context.Background(), []string{"devin"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("expected Execute error")
+	}
+	if statusCodeFromError(errExec) != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", statusCodeFromError(errExec), http.StatusForbidden)
+	}
+	if gotCalls := len(executor.executeCalls); gotCalls != 1 {
+		t.Fatalf("upstream execute attempts = %d (%v), want 1 (must not retry deterministic request fault)", gotCalls, executor.executeCalls)
+	}
+
+	_, errStream := m.ExecuteStream(context.Background(), []string{"devin"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errStream == nil {
+		t.Fatal("expected ExecuteStream error")
+	}
+	if statusCodeFromError(errStream) != http.StatusForbidden {
+		t.Fatalf("stream status = %d, want %d", statusCodeFromError(errStream), http.StatusForbidden)
+	}
+	if gotStreamCalls := len(executor.streamCalls); gotStreamCalls != 1 {
+		t.Fatalf("upstream stream attempts = %d (%v), want 1 (must not retry deterministic request fault)", gotStreamCalls, executor.streamCalls)
+	}
+	for _, id := range []string{"auth-devin-1", "auth-devin-2"} {
+		updated, ok := m.GetByID(id)
+		if !ok || updated == nil {
+			t.Fatalf("expected %s to exist", id)
+		}
+		if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+			t.Fatalf("%s unexpectedly cooled down at auth level: unavailable=%v nextRetryAfter=%v", id, updated.Unavailable, updated.NextRetryAfter)
+		}
+		if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+			t.Fatalf("%s unexpectedly cooled down at model level: %#v", id, state)
+		}
 	}
 }

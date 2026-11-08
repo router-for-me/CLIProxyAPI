@@ -12,7 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T) {
+func TestRegisterModelsForAuth_CredentialExcludedModelsOverrideGlobal(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{
 			OAuthExcludedModels: map[string][]string{

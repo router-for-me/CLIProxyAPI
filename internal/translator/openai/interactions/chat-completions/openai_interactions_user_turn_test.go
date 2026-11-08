@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -66,7 +66,7 @@ func TestConvertOpenAIRequestToInteractions_RefusesAnyEmptiedUserTurn(t *testing
 			if got, want := err.Error(), "unsupported content part: "+tc.wantType; got != want {
 				t.Fatalf("error text = %q, want %q", got, want)
 			}
-			if !gjson.ValidBytes(body) {
+			if !ojson.ValidBytes(body) {
 				t.Fatalf("body is not JSON: %q", body)
 			}
 
@@ -85,7 +85,7 @@ func TestConvertOpenAIRequestToInteractions_KeepsTurnWithTextBesideAttachment(t 
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "input.2.content.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(body, "input.2.content.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", body)
 	}
 }
@@ -106,7 +106,7 @@ func TestConvertOpenAIRequestToInteractions_InlineFileAndAudioAfterHistoryStayBy
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
-			part := gjson.GetBytes(body, "input.2.content.0")
+			part := ojson.GetBytesNoCopy(body, "input.2.content.0")
 			if part.Get("type").String() != tc.wantType || part.Get("data").String() != tc.wantData {
 				t.Fatalf("part = %s, body = %s", part.Raw, body)
 			}
@@ -120,14 +120,14 @@ func TestConvertOpenAIRequestToInteractions_FileURLStaysAFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "input.0.content.0.file_url").String(); got != "https://example.test/a.pdf" {
+	if got := ojson.GetBytesNoCopy(body, "input.0.content.0.file_url").String(); got != "https://example.test/a.pdf" {
 		t.Fatalf("file url was lost: %s", body)
 	}
 }
 
 func TestConvertOpenAIRequestToInteractions_ExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":[` + userTurnFileID + `]}]}`)
-	if body, _ := ConvertOpenAIRequestToInteractions("gemini-3.5-flash", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertOpenAIRequestToInteractions("gemini-3.5-flash", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }

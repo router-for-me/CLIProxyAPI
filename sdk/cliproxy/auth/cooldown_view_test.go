@@ -126,6 +126,7 @@ func TestCooldownSnapshotForAuthReasons(t *testing.T) {
 		{name: "invalid grant", err: &Error{HTTPStatus: 400, Message: "invalid_grant"}, reason: "invalid_grant", status: 400},
 		{name: "unauthorized", err: &Error{HTTPStatus: 401}, reason: "unauthorized", status: 401},
 		{name: "payment", err: &Error{HTTPStatus: 402}, reason: "payment_required", status: 402},
+		{name: "anthropic credit balance too low", err: &Error{HTTPStatus: 400, Message: `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`}, reason: "payment_required", status: 400},
 		{name: "forbidden", err: &Error{HTTPStatus: 403}, reason: "payment_required", status: 403},
 		{name: "not found", err: &Error{HTTPStatus: 404}, reason: "not_found", status: 404},
 		{name: "gateway not challenge", err: &Error{HTTPStatus: 520, Message: "cloudflare challenge"}, reason: "transient_error", status: 520},

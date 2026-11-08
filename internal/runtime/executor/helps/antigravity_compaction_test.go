@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func TestAntigravityCompactionSealAndUnseal(t *testing.T) {
@@ -69,6 +70,7 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 		"tool_choice": "auto",
 		"previous_response_id": "resp-old",
 		"input": [
+			{"type": "additional_tools", "tools": [{"type": "function", "name": "exec_command"}]},
 			{"type": "message", "role": "user", "content": "hi"},
 			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]},
 			{"type": "compaction_trigger"}
@@ -80,20 +82,20 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	if !json.Valid(prepared) {
 		t.Fatalf("prepared payload is not valid JSON: %s", string(prepared))
 	}
-	if gjson.GetBytes(prepared, "stream").Bool() {
+	if ojson.GetBytes(prepared, "stream").Bool() {
 		t.Fatal("expected stream to be false")
 	}
-	if gjson.GetBytes(prepared, "tools").Exists() {
+	if ojson.GetBytes(prepared, "tools").Exists() {
 		t.Fatal("expected tools to be removed")
 	}
-	if gjson.GetBytes(prepared, "tool_choice").Exists() {
+	if ojson.GetBytes(prepared, "tool_choice").Exists() {
 		t.Fatal("expected tool_choice to be removed")
 	}
-	if gjson.GetBytes(prepared, "previous_response_id").Exists() {
+	if ojson.GetBytes(prepared, "previous_response_id").Exists() {
 		t.Fatal("expected previous_response_id to be removed")
 	}
 
-	input := gjson.GetBytes(prepared, "input").Array()
+	input := ojson.GetBytes(prepared, "input").Array()
 	if len(input) != 3 {
 		t.Fatalf("expected 3 items in input, got %d", len(input))
 	}
@@ -101,6 +103,9 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	for _, item := range input {
 		if item.Get("type").String() == "compaction_trigger" {
 			t.Fatal("compaction_trigger must be removed from summary payload")
+		}
+		if item.Get("type").String() == "additional_tools" {
+			t.Fatal("additional_tools must be removed from summary payload")
 		}
 	}
 
@@ -121,7 +126,7 @@ func TestPrepareAntigravityCompactionSummaryPayload_StringInputWithControlChars(
 		t.Fatalf("prepared output with control chars must be valid JSON, got: %s", string(prepared))
 	}
 
-	input := gjson.GetBytes(prepared, "input").Array()
+	input := ojson.GetBytes(prepared, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("expected 2 items in input for string input, got %d", len(input))
 	}
@@ -159,7 +164,7 @@ func TestExpandAntigravityCompactionCapsules(t *testing.T) {
 		t.Fatalf("expanded payload is not valid JSON: %s", string(expanded))
 	}
 
-	input := gjson.GetBytes(expanded, "input").Array()
+	input := ojson.GetBytes(expanded, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(input))
 	}
@@ -246,5 +251,110 @@ func TestBuildAntigravityCompactionResponseAndChunks_ValidJSON(t *testing.T) {
 		if dataLine == "" || !json.Valid([]byte(dataLine)) {
 			t.Fatalf("chunk[%d] data payload is not valid JSON: %q", i, dataLine)
 		}
+	}
+}
+
+func TestExpandResponsesCompactionCapsulesAndBuildFromSummary(t *testing.T) {
+	summaryPayload := []byte(`{
+		"id": "resp_sum",
+		"object": "response",
+		"status": "completed",
+		"output": [
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "text", "text": "Summary with text part."}]
+			}
+		],
+		"usage": {
+			"input_tokens": 20,
+			"output_tokens": 8,
+			"total_tokens": 28,
+			"input_tokens_details": {"cached_tokens": 5},
+			"output_tokens_details": {"reasoning_tokens": 2}
+		}
+	}`)
+
+	compactionResp, errBuild := BuildResponsesCompactionResponseFromSummary("kimi-k3", summaryPayload)
+	if errBuild != nil {
+		t.Fatalf("BuildResponsesCompactionResponseFromSummary failed: %v", errBuild)
+	}
+	if got := ojson.GetBytes(compactionResp, "usage.input_tokens_details.cached_tokens").Int(); got != 5 {
+		t.Fatalf("cached_tokens = %d, want 5", got)
+	}
+	if got := ojson.GetBytes(compactionResp, "usage.output_tokens_details.reasoning_tokens").Int(); got != 2 {
+		t.Fatalf("reasoning_tokens = %d, want 2", got)
+	}
+
+	chunks, errChunks := BuildResponsesCompactionStreamChunksFromResponse("kimi-k3", compactionResp)
+	if errChunks != nil {
+		t.Fatalf("BuildResponsesCompactionStreamChunksFromResponse failed: %v", errChunks)
+	}
+	if len(chunks) != 5 {
+		t.Fatalf("len(chunks) = %d, want 5", len(chunks))
+	}
+
+	capsule := ojson.GetBytes(compactionResp, "output.0.encrypted_content").String()
+	rawReq := []byte(`{"input":[{"type":"compaction","encrypted_content":"foreign"},{"type":"compaction","encrypted_content":"` + capsule + `"},{"type":"compaction_trigger"}]}`)
+	req := cliproxyexecutor.Request{Payload: rawReq}
+	opts := cliproxyexecutor.Options{OriginalRequest: rawReq}
+	if !HasResponsesCompactionTriggerRequest(req, opts) {
+		t.Fatal("expected HasResponsesCompactionTriggerRequest to be true")
+	}
+	if errExpand := ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+		t.Fatalf("ExpandResponsesCompactionCapsules failed: %v", errExpand)
+	}
+	items := ojson.GetBytes(req.Payload, "input").Array()
+	if len(items) != 2 || items[0].Get("role").String() != "developer" || !strings.Contains(items[0].Get("content.0.text").String(), "Summary with text part.") {
+		t.Fatalf("unexpected expanded input: %s", req.Payload)
+	}
+
+	incompletePayload := []byte(`{
+		"id": "resp_inc",
+		"object": "response",
+		"status": "incomplete",
+		"incomplete_details": {"reason": "max_output_tokens"},
+		"output": [
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Truncated summary"}]
+			}
+		]
+	}`)
+	if _, errInc := BuildResponsesCompactionResponseFromSummary("kimi-k3", incompletePayload); errInc == nil {
+		t.Fatal("expected error for incomplete summary response, got nil")
+	}
+}
+
+func TestExpandRecognizedResponsesCompactionCapsules_PreservesForeign(t *testing.T) {
+	capsule, errSeal := SealAntigravityCompaction("Sealed CPA summary.", "claude-sonnet-4-6")
+	if errSeal != nil {
+		t.Fatalf("SealAntigravityCompaction failed: %v", errSeal)
+	}
+
+	rawReq := []byte(`{"input":[{"id":"cmp_ag_compact_1","type":"compaction","encrypted_content":"` + capsule + `"},{"id":"cmp_openai_1","type":"compaction","encrypted_content":"gAAAAABopenai-native"},{"type":"message","role":"user","content":"next"}]}`)
+	req := cliproxyexecutor.Request{Payload: rawReq}
+	opts := cliproxyexecutor.Options{OriginalRequest: rawReq}
+	if errExpand := ExpandRecognizedResponsesCompactionCapsules(&req, &opts); errExpand != nil {
+		t.Fatalf("ExpandRecognizedResponsesCompactionCapsules failed: %v", errExpand)
+	}
+	for _, target := range [][]byte{req.Payload, opts.OriginalRequest} {
+		items := ojson.GetBytes(target, "input").Array()
+		if len(items) != 3 {
+			t.Fatalf("input len = %d, want 3; payload=%s", len(items), target)
+		}
+		if items[0].Get("type").String() != "message" || items[0].Get("role").String() != "developer" || !strings.Contains(items[0].Get("content.0.text").String(), "Sealed CPA summary.") {
+			t.Fatalf("items[0] not expanded: %s", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "compaction" || items[1].Get("encrypted_content").String() != "gAAAAABopenai-native" {
+			t.Fatalf("native compaction item not preserved at items[1]: %s", items[1].Raw)
+		}
+	}
+
+	badReq := cliproxyexecutor.Request{Payload: []byte(`{"input":[{"id":"cmp_ag_compact_1","type":"compaction","encrypted_content":"cpa-ag-compact-v1:invalid"}]}`)}
+	badOpts := cliproxyexecutor.Options{}
+	if errBad := ExpandRecognizedResponsesCompactionCapsules(&badReq, &badOpts); errBad == nil {
+		t.Fatal("expected error for corrupted CPA compaction capsule, got nil")
 	}
 }

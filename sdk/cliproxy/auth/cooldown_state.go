@@ -27,6 +27,13 @@ type CooldownStateRecord struct {
 	Quota          QuotaState `json:"quota,omitempty"`
 	LastError      *Error     `json:"last_error,omitempty"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+	// IndependentState preserves a model's own cooldown beneath an
+	// auth-level credential-quota layer so a restart cannot lose the
+	// distinction and quota restoration keeps reinstate-exactly semantics.
+	IndependentState *ModelState `json:"independent_state,omitempty"`
+	// CredentialQuotaPropagated preserves wrap provenance for models that
+	// carry no independent layer (e.g. the reporting model itself).
+	CredentialQuotaPropagated bool `json:"credential_quota_propagated,omitempty"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.
@@ -276,7 +283,7 @@ func (s *FileCooldownStateStore) statePath(record CooldownStateRecord) (string, 
 func (s *FileCooldownStateStore) stateRelativePath(record CooldownStateRecord) string {
 	authFile := strings.TrimSpace(record.AuthFile)
 	if authFile != "" {
-		if filepath.IsAbs(authFile) && strings.TrimSpace(s.authDir) != "" {
+		if strings.TrimSpace(s.authDir) != "" {
 			if rel, errRel := filepath.Rel(s.authDir, authFile); errRel == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
 				return cdsPathForRel(rel)
 			}

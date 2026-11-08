@@ -68,6 +68,70 @@ func TestGetAvailableModelsClaudeIncludesTokenLimits(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsGeminiIncludesTokenLimits(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "gemini", []*ModelInfo{
+		{
+			ID:                  "gemini-3.8-flash",
+			Name:                "models/gemini-3.8-flash",
+			DisplayName:         "Gemini 3.8 Flash",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 65536,
+		},
+		{
+			ID:               "gemini-2.5-pro",
+			Name:             "models/gemini-2.5-pro",
+			DisplayName:      "Gemini 2.5 Pro",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+		},
+		{
+			ID:   "gemini-no-limits",
+			Name: "models/gemini-no-limits",
+		},
+	})
+
+	models := r.GetAvailableModels("gemini")
+	byName := make(map[string]map[string]any, len(models))
+	for _, m := range models {
+		name, _ := m["name"].(string)
+		byName[name] = m
+	}
+
+	fromContext, ok := byName["models/gemini-3.8-flash"]
+	if !ok {
+		t.Fatalf("expected models/gemini-3.8-flash in available models, got %v", byName)
+	}
+	if got := fromContext["inputTokenLimit"]; got != 1048576 {
+		t.Fatalf("gemini-3.8-flash inputTokenLimit = %v, want 1048576", got)
+	}
+	if got := fromContext["outputTokenLimit"]; got != 65536 {
+		t.Fatalf("gemini-3.8-flash outputTokenLimit = %v, want 65536", got)
+	}
+
+	fromExplicit, ok := byName["models/gemini-2.5-pro"]
+	if !ok {
+		t.Fatalf("expected models/gemini-2.5-pro in available models, got %v", byName)
+	}
+	if got := fromExplicit["inputTokenLimit"]; got != 1048576 {
+		t.Fatalf("gemini-2.5-pro inputTokenLimit = %v, want 1048576", got)
+	}
+	if got := fromExplicit["outputTokenLimit"]; got != 65536 {
+		t.Fatalf("gemini-2.5-pro outputTokenLimit = %v, want 65536", got)
+	}
+
+	noLimits, ok := byName["models/gemini-no-limits"]
+	if !ok {
+		t.Fatalf("expected models/gemini-no-limits in available models, got %v", byName)
+	}
+	if _, exists := noLimits["inputTokenLimit"]; exists {
+		t.Fatalf("expected inputTokenLimit to be omitted when unknown, got %v", noLimits)
+	}
+	if _, exists := noLimits["outputTokenLimit"]; exists {
+		t.Fatalf("expected outputTokenLimit to be omitted when unknown, got %v", noLimits)
+	}
+}
+
 func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One"}})

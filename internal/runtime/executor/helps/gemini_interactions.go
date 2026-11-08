@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -26,36 +26,116 @@ const (
 // - `function_call` (FunctionCallStep) requires `id` and rejects `call_id`
 // - `function_result` (FunctionResultStep) requires `call_id` and rejects `id`
 // - other steps and content parts do not support `id`
-func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte) []byte {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+//
+// allowVertexBareTink must be true only for the Vertex AI Interactions endpoint;
+// other endpoints reject Vertex bare-Tink thought signatures, so those thought
+// steps are dropped like any other incompatible signature.
+func SanitizeGeminiInteractionsUnsupportedInputIDs(body []byte, allowVertexBareTink bool) []byte {
+	if len(body) == 0 {
 		return body
 	}
-	for i, item := range input.Array() {
+	doc := ojson.NewDoc(body)
+	if !SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc, allowVertexBareTink) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+// SanitizeGeminiInteractionsUnsupportedInputIDsDoc aligns input step IDs with the
+// official Gemini Interactions API schema in place on doc.
+func SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc *ojson.Doc, allowVertexBareTink bool) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() {
+		return false
+	}
+	items := input.Array()
+	dropped := make(map[int]bool)
+	changed := false
+	for idx, item := range items {
+		stepPath := fmt.Sprintf("input.%d", idx)
 		stepType := item.Get("type").String()
+		if stepType == "thought" {
+			sig := strings.TrimSpace(item.Get("signature").String())
+			if sig == "" {
+				sig = strings.TrimSpace(item.Get("thought_signature").String())
+			}
+			if sig == "" {
+				sig = strings.TrimSpace(item.Get("thoughtSignature").String())
+			}
+			normalizedSig, ok := signature.CompatibleSignatureForProviderBlock(
+				signature.SignatureProviderGemini,
+				sig,
+				signature.SignatureBlockKindGeminiModelPart,
+			)
+			if !allowVertexBareTink && ok && signature.IsGeminiVertexBareTinkSignature(normalizedSig) {
+				ok = false
+			}
+			if !ok || normalizedSig == "" || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalizedSig)) {
+				// Official Gemini Interactions API rejects thought steps without a
+				// valid Gemini signature (or with foreign/corrupt base64 signatures
+				// or "content" arrays).
+				dropped[idx] = true
+				changed = true
+				continue
+			}
+			if normalizedSig != item.Get("signature").String() {
+				if errSet := doc.Set(stepPath+".signature", normalizedSig); errSet == nil {
+					changed = true
+				}
+			}
+			for _, unsupportedField := range []string{"id", "content", "text", "thought_signature", "thoughtSignature"} {
+				if item.Get(unsupportedField).Exists() {
+					if errDel := doc.Delete(stepPath + "." + unsupportedField); errDel == nil {
+						changed = true
+					}
+				}
+			}
+			continue
+		}
 		if stepType == "function_call" {
 			if !item.Get("id").Exists() && item.Get("call_id").Exists() {
-				body, _ = sjson.SetBytes(body, fmt.Sprintf("input.%d.id", i), item.Get("call_id").String())
+				if errSet := doc.Set(stepPath+".id", item.Get("call_id").String()); errSet == nil {
+					changed = true
+				}
 			}
 			if item.Get("call_id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.call_id", i))
+				if errDel := doc.Delete(stepPath + ".call_id"); errDel == nil {
+					changed = true
+				}
 			}
-		} else {
-			if item.Get("id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.id", i))
+		} else if item.Get("id").Exists() {
+			if errDel := doc.Delete(stepPath + ".id"); errDel == nil {
+				changed = true
 			}
 		}
 		content := item.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-		for j, part := range content.Array() {
-			if part.Get("id").Exists() {
-				body, _ = sjson.DeleteBytes(body, fmt.Sprintf("input.%d.content.%d.id", i, j))
+		if content.IsArray() {
+			for j, part := range content.Array() {
+				if part.Get("id").Exists() {
+					if errDel := doc.Delete(fmt.Sprintf("%s.content.%d.id", stepPath, j)); errDel == nil {
+						changed = true
+					}
+				}
 			}
 		}
 	}
-	return body
+	if !changed {
+		return false
+	}
+	if len(dropped) > 0 {
+		updatedItems := doc.Get("input").Array()
+		kept := make([][]byte, 0, len(updatedItems)-len(dropped))
+		for idx, item := range updatedItems {
+			if !dropped[idx] {
+				kept = append(kept, []byte(item.Raw))
+			}
+		}
+		return doc.SetRawBytes("input", JoinRawJSONArray(kept)) == nil
+	}
+	return true
 }
 
 // TranslateGeminiInteractionsRequestBody translates a request payload to FormatInteractions.
@@ -109,6 +189,15 @@ func ApplyGeminiInteractionsThinking(body []byte, req cliproxyexecutor.Request, 
 		fromFormat = sdktranslator.FormatInteractions.String()
 	}
 	return ApplyRequestThinking(body, req, opts, fromFormat, sdktranslator.FormatInteractions.String(), "gemini")
+}
+
+// ApplyGeminiInteractionsThinkingDoc applies thinking/reasoning configuration to doc in place.
+func ApplyGeminiInteractionsThinkingDoc(doc *ojson.Doc, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
+	fromFormat := opts.SourceFormat.String()
+	if strings.TrimSpace(fromFormat) == "" {
+		fromFormat = sdktranslator.FormatInteractions.String()
+	}
+	return ApplyRequestThinkingDoc(doc, req, opts, fromFormat, sdktranslator.FormatInteractions.String(), "gemini")
 }
 
 // ApplyGeminiInteractionsRevisionHeader sets the default Api-Revision header on outgoing HTTP requests.

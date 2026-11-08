@@ -68,6 +68,48 @@ func TestParseRegistryNormalizesPluginFields(t *testing.T) {
 	}
 }
 
+func TestParseRegistryNormalizesPluginLocales(t *testing.T) {
+	t.Parallel()
+
+	registry, errParse := ParseRegistry([]byte(`{
+		"schema_version": 1,
+		"plugins": [{
+			"id": "sample-provider",
+			"name": "Sample Provider",
+			"description": "Adds sample provider support.",
+			"author": "author-name",
+			"repository": "https://github.com/author-name/cliproxy-sample-provider-plugin",
+			"locales": {
+				" zh_cn ": {
+					"description": " 增加示例提供商支持。 "
+				},
+				"ja": {
+					"description": " サンプルプロバイダーを追加します。 "
+				},
+				"empty": {
+					"description": "   "
+				}
+			}
+		}]
+	}`))
+	if errParse != nil {
+		t.Fatalf("ParseRegistry() error = %v", errParse)
+	}
+	plugin, ok := registry.PluginByID("sample-provider")
+	if !ok {
+		t.Fatal("PluginByID(sample-provider) missing")
+	}
+	if len(plugin.Locales) != 2 {
+		t.Fatalf("plugin locales len = %d, want 2: %#v", len(plugin.Locales), plugin.Locales)
+	}
+	if plugin.Locales["zh-CN"].Description != "增加示例提供商支持。" {
+		t.Fatalf("zh-CN locale = %#v, want trimmed description", plugin.Locales["zh-CN"])
+	}
+	if plugin.Locales["ja"].Description != "サンプルプロバイダーを追加します。" {
+		t.Fatalf("ja locale = %#v, want trimmed description", plugin.Locales["ja"])
+	}
+}
+
 func TestValidateRegistryAllowsMissingVersion(t *testing.T) {
 	t.Parallel()
 

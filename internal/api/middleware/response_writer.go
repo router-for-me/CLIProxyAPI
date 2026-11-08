@@ -4,9 +4,11 @@
 package middleware
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -45,9 +47,13 @@ type ResponseWriterWrapper struct {
 	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
 	logger              logging.RequestLogger      // logger is the instance of the request logger service.
 	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
+	ginContext          *gin.Context               // ginContext holds the Gin request context for mid-stream error inspection.
 	statusCode          int                        // statusCode stores the HTTP status code of the response.
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
+	hijacked            bool                       // hijacked reports whether the underlying connection was hijacked.
+	panicked            bool                       // panicked records whether a handler panicked (even after committing a 2xx response).
+	finalized           bool                       // finalized prevents post-Finalize writes (e.g. outer recovery) from reopening stream writers.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
 }
 
@@ -61,6 +67,21 @@ type ResponseWriterWrapper struct {
 //
 // Returns:
 //   - A pointer to a new ResponseWriterWrapper.
+func (w *ResponseWriterWrapper) Unwrap() http.ResponseWriter {
+	if w == nil {
+		return nil
+	}
+	return w.ResponseWriter
+}
+
+func (w *ResponseWriterWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	conn, rw, errHijack := w.ResponseWriter.Hijack()
+	if errHijack == nil {
+		w.hijacked = true
+	}
+	return conn, rw, errHijack
+}
+
 func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger, requestInfo *RequestInfo) *ResponseWriterWrapper {
 	return &ResponseWriterWrapper{
 		ResponseWriter: w,
@@ -77,6 +98,7 @@ func NewResponseWriterWrapper(w gin.ResponseWriter, logger logging.RequestLogger
 // CRITICAL: This method prioritizes writing to the client to ensure zero latency,
 // handling logging operations subsequently.
 func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
+	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	// Ensure headers are captured before first write
 	// This is critical because Write() may trigger WriteHeader() internally
 	w.ensureHeadersCaptured()
@@ -110,6 +132,38 @@ func (w *ResponseWriterWrapper) FlushError() error {
 	return httpwire.FlushResponse(w.ResponseWriter)
 }
 
+func (w *ResponseWriterWrapper) effectiveStatusCode() int {
+	status := w.statusCode
+	if status == 0 {
+		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
+			status = statusWriter.Status()
+		} else {
+			status = http.StatusOK
+		}
+	}
+	return status
+}
+
+func (w *ResponseWriterWrapper) hasUnconsumedRequestBody() bool {
+	if w == nil || w.requestInfo == nil {
+		return false
+	}
+	if len(w.requestInfo.Body) > 0 {
+		return false
+	}
+	if w.requestInfo.deferredBodyCapture != nil {
+		return !w.requestInfo.deferredBodyCapture.isComplete()
+	}
+	return false
+}
+
+func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCode int) {
+	if !w.hijacked && statusCode >= http.StatusOK && w.hasUnconsumedRequestBody() {
+		w.ResponseWriter.Header().Set("Connection", "close")
+		_ = http.NewResponseController(w.ResponseWriter).SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
@@ -117,12 +171,10 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 	if !w.logOnErrorOnly {
 		return false
 	}
-	status := w.statusCode
-	if status == 0 {
-		if statusWriter, ok := w.ResponseWriter.(interface{ Status() int }); ok && statusWriter != nil {
-			status = statusWriter.Status()
-		} else {
-			status = http.StatusOK
+	status := w.effectiveStatusCode()
+	if status < http.StatusBadRequest {
+		if apiErrStatus := actionableAPIResponseErrorStatus(extractAPIResponseErrors(w.ginContext)); apiErrStatus >= http.StatusBadRequest {
+			status = apiErrStatus
 		}
 	}
 	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
@@ -132,6 +184,7 @@ func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
 // Some handlers (and fmt/io helpers) write via io.StringWriter; without this override, those writes
 // bypass Write() and would be missing from request logs.
 func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
+	w.closeConnectionIfRequestBodyUnconsumed(w.effectiveStatusCode())
 	w.ensureHeadersCaptured()
 
 	// CRITICAL: Write to client first (zero latency)
@@ -160,35 +213,47 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 // It captures the status code, detects if the response is streaming based on the Content-Type header,
 // and initializes the appropriate logging mechanism (standard or streaming).
 func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
+	if w.ResponseWriter.Written() {
+		if statusCode >= http.StatusBadRequest && statusCode != clienterror.StatusClientClosedRequest {
+			w.panicked = true
+		}
+		return
+	}
 	w.statusCode = statusCode
+	w.closeConnectionIfRequestBodyUnconsumed(statusCode)
 
 	// Capture response headers using the new method
 	w.captureCurrentHeaders()
 
 	// Detect streaming based on Content-Type
 	contentType := w.ResponseWriter.Header().Get("Content-Type")
-	w.isStreaming = w.detectStreaming(contentType)
+	w.isStreaming = w.detectStreaming(contentType) || w.streamWriter != nil
 
-	// If streaming, initialize streaming log writer
-	if w.isStreaming && w.logger.IsEnabled() {
-		streamWriter, err := w.logger.LogStreamingRequest(
-			w.requestInfo.URL,
-			w.requestInfo.Method,
-			w.requestInfo.Headers,
-			w.requestInfo.Body,
-			w.requestInfo.RequestID,
-		)
-		if err == nil {
-			w.streamWriter = streamWriter
-			w.chunkChannel = make(chan []byte, 100) // Buffered channel for async writes
-			doneChan := make(chan struct{})
-			w.streamDone = doneChan
+	// If streaming, initialize streaming log writer once and refresh uncommitted status updates.
+	if !w.finalized && w.isStreaming && w.logger != nil && w.logger.IsEnabled() {
+		if w.streamWriter == nil {
+			streamWriter, err := w.logger.LogStreamingRequest(
+				w.requestInfo.URL,
+				w.requestInfo.Method,
+				w.requestInfo.Headers,
+				w.currentCapturedRequestBody(),
+				w.requestInfo.RequestID,
+			)
+			if err == nil {
+				chunkChan := make(chan []byte, 100) // Buffered channel for async writes
+				doneChan := make(chan struct{})
+				w.streamWriter = streamWriter
+				w.chunkChannel = chunkChan
+				w.streamDone = doneChan
 
-			// Start async chunk processor
-			go w.processStreamingChunks(doneChan)
+				// Start async chunk processor with captured locals so Finalize clearing fields cannot race.
+				go w.processStreamingChunks(doneChan, chunkChan, streamWriter)
 
-			// Write status immediately
-			_ = streamWriter.WriteStatus(statusCode, w.headers)
+				// Write status immediately
+				_ = streamWriter.WriteStatus(statusCode, w.headers)
+			}
+		} else {
+			_ = w.streamWriter.WriteStatus(statusCode, w.headers)
 		}
 	}
 
@@ -237,29 +302,54 @@ func (w *ResponseWriterWrapper) detectStreaming(contentType string) bool {
 	}
 
 	// Only fall back to request payload hints when Content-Type is not set yet.
-	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
-		return bytes.Contains(w.requestInfo.Body, []byte(`"stream": true`)) ||
-			bytes.Contains(w.requestInfo.Body, []byte(`"stream":true`))
+	if body := w.currentCapturedRequestBody(); len(body) > 0 {
+		return bytes.Contains(body, []byte(`"stream": true`)) ||
+			bytes.Contains(body, []byte(`"stream":true`))
 	}
 
 	return false
 }
 
+func (w *ResponseWriterWrapper) currentCapturedRequestBody() []byte {
+	if w == nil || w.requestInfo == nil {
+		return nil
+	}
+	if len(w.requestInfo.Body) > 0 {
+		return w.requestInfo.Body
+	}
+	if w.requestInfo.deferredBodyCapture == nil || w.requestInfo.deferredBodyCapture.bytesRead == 0 {
+		return nil
+	}
+	body, _, errRead := w.requestInfo.deferredBodyCapture.Bytes()
+	if errRead != nil || len(body) == 0 {
+		return nil
+	}
+	encoding := ""
+	for key, values := range w.requestInfo.Headers {
+		if strings.EqualFold(key, "Content-Encoding") && len(values) > 0 {
+			encoding = values[0]
+			break
+		}
+	}
+	w.requestInfo.Body = decodeCapturedRequestBodyForLogWithLimit(body, encoding, maxDeferredErrorRequestBodyBytes)
+	return w.requestInfo.Body
+}
+
 // processStreamingChunks runs in a separate goroutine to process response chunks from the chunkChannel.
 // It asynchronously writes each chunk to the streaming log writer.
-func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
+func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}, chunkChan <-chan []byte, streamWriter logging.StreamingLogWriter) {
 	if done == nil {
 		return
 	}
 
 	defer close(done)
 
-	if w.streamWriter == nil || w.chunkChannel == nil {
+	if streamWriter == nil || chunkChan == nil {
 		return
 	}
 
-	for chunk := range w.chunkChannel {
-		w.streamWriter.WriteChunkAsync(chunk)
+	for chunk := range chunkChan {
+		streamWriter.WriteChunkAsync(chunk)
 	}
 }
 
@@ -268,6 +358,10 @@ func (w *ResponseWriterWrapper) processStreamingChunks(done chan struct{}) {
 // For non-streaming responses, it logs the complete request and response details,
 // including any API-specific request/response data stored in the Gin context.
 func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
+	if w == nil || w.finalized {
+		return nil
+	}
+	w.finalized = true
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
 	}
@@ -291,8 +385,13 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			slicesAPIResponseError = apiErrors
 		}
 	}
+	if finalStatusCode < http.StatusBadRequest {
+		if errStatus := actionableAPIResponseErrorStatus(slicesAPIResponseError); errStatus >= http.StatusBadRequest {
+			finalStatusCode = errStatus
+		}
+	}
 
-	hasAPIError := hasActionableError(c, finalStatusCode, slicesAPIResponseError)
+	hasAPIError := w.panicked || hasActionableError(c, finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
 	websocketTimelineSource := w.extractWebsocketTimelineSource(c)
 	apiRequestSource := w.extractAPIRequestSource(c)
@@ -363,6 +462,12 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		}
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
+		}
+		if finalStatusCode >= http.StatusBadRequest {
+			_ = w.streamWriter.WriteStatus(finalStatusCode, nil)
+		}
+		if len(slicesAPIResponseError) > 0 {
+			_ = w.streamWriter.WriteAPIResponseErrors(slicesAPIResponseError)
 		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
@@ -743,6 +848,34 @@ func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
 		}
 	}
 	return false
+}
+
+func extractAPIResponseErrors(c *gin.Context) []*interfaces.ErrorMessage {
+	if c == nil {
+		return nil
+	}
+	if apiResponseError, exists := c.Get("API_RESPONSE_ERROR"); exists {
+		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
+			return apiErrors
+		}
+	}
+	return nil
+}
+
+func actionableAPIResponseErrorStatus(apiErrors []*interfaces.ErrorMessage) int {
+	for i := len(apiErrors) - 1; i >= 0; i-- {
+		errMsg := apiErrors[i]
+		if isClientCancellationErrorMessage(errMsg) {
+			continue
+		}
+		if errMsg.StatusCode >= http.StatusBadRequest && errMsg.StatusCode != clienterror.StatusClientClosedRequest {
+			return errMsg.StatusCode
+		}
+		if status := clienterror.HTTPStatusFromError(errMsg.Error); status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest {
+			return status
+		}
+	}
+	return 0
 }
 
 func isContextCanceled(c *gin.Context) bool {

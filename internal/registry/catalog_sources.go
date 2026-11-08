@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,14 +21,25 @@ const embeddedCatalogSource = "embed"
 // Cancellation saves work; the generation check also protects against readers
 // that finish after cancellation (including local file reads).
 type catalogUpdater struct {
-	mu         sync.Mutex
-	source     string
-	generation uint64
-	cancel     context.CancelFunc
-	ctx        context.Context
-	parentDone <-chan struct{}
-	fetch      func(context.Context, string) ([]byte, error)
-	publish    func([]byte) ([]string, error)
+	mu              sync.Mutex
+	source          string
+	generation      uint64
+	requestSeq      uint64
+	publishedSeq    uint64
+	cancel          context.CancelFunc
+	ctx             context.Context
+	parentDone      <-chan struct{}
+	fetch           func(context.Context, string) ([]byte, error)
+	fetchWithSource func(context.Context, string) ([]byte, string, error)
+	publish         func([]byte) ([]string, error)
+}
+
+func (u *catalogUpdater) fetchCatalog(ctx context.Context, source string) ([]byte, string, error) {
+	if u.fetchWithSource != nil {
+		return u.fetchWithSource(ctx, source)
+	}
+	data, err := u.fetch(ctx, source)
+	return data, source, err
 }
 
 func (u *catalogUpdater) configure(ctx context.Context, source string) {
@@ -40,6 +52,7 @@ func (u *catalogUpdater) configure(ctx context.Context, source string) {
 		u.cancel()
 	}
 	u.generation++
+	u.publishedSeq = 0
 	u.source = source
 	refreshCtx, cancel := context.WithCancel(ctx)
 	u.cancel = cancel
@@ -67,8 +80,32 @@ func (u *catalogUpdater) configure(ctx context.Context, source string) {
 	}()
 }
 
+// CatalogSourceStatus reports the outcome of refreshing a single model catalog.
+type CatalogSourceStatus struct {
+	Source           string   `json:"source"`
+	Refreshed        bool     `json:"refreshed"`
+	Skipped          bool     `json:"skipped,omitempty"`
+	ChangedProviders []string `json:"changed_providers,omitempty"`
+	Error            string   `json:"error,omitempty"`
+}
+
+// CatalogRefreshResult reports the outcome of an on-demand model catalog refresh.
+type CatalogRefreshResult struct {
+	Catalog          string                         `json:"catalog"`
+	CodexCatalog     string                         `json:"codex_catalog"`
+	DevinCatalog     string                         `json:"devin_catalog"`
+	Sources          CatalogSources                 `json:"sources"`
+	Catalogs         map[string]CatalogSourceStatus `json:"catalogs"`
+	ChangedProviders []string                       `json:"changed_providers"`
+}
+
 func (u *catalogUpdater) refresh(ctx context.Context, source string, generation uint64) {
-	data, errFetch := u.fetch(ctx, source)
+	u.mu.Lock()
+	u.requestSeq++
+	seq := u.requestSeq
+	u.mu.Unlock()
+
+	data, _, errFetch := u.fetchCatalog(ctx, source)
 	if errFetch != nil {
 		if ctx.Err() == nil {
 			log.Warn("model catalog refresh failed; keeping last valid catalog")
@@ -76,17 +113,129 @@ func (u *catalogUpdater) refresh(ctx context.Context, source string, generation 
 		return
 	}
 	u.mu.Lock()
-	if generation != u.generation || ctx.Err() != nil {
+	if generation != u.generation || seq <= u.publishedSeq || ctx.Err() != nil {
 		u.mu.Unlock()
 		return
 	}
 	changed, errPublish := u.publish(data)
+	if errPublish == nil {
+		u.publishedSeq = seq
+	}
 	u.mu.Unlock()
 	if errPublish != nil {
 		log.Warn("model catalog rejected; keeping last valid catalog")
 		return
 	}
 	notifyModelRefresh(changed)
+}
+
+func (u *catalogUpdater) refreshOnDemand(ctx context.Context, fallbackSource string, defaultURLs []string) (CatalogSourceStatus, error) {
+	u.mu.Lock()
+	source := u.source
+	updaterActive := u.cancel != nil && u.ctx != nil && u.ctx.Err() == nil
+	if !updaterActive {
+		if u.ctx != nil || source == "" {
+			source = fallbackSource
+		}
+	}
+	generation := u.generation
+	var watchCtx context.Context
+	if updaterActive {
+		watchCtx = u.ctx
+	}
+
+	displaySource := source
+	if displaySource == "" && len(defaultURLs) > 0 {
+		displaySource = defaultURLs[0]
+	}
+	if source == "disabled" || source == embeddedCatalogSource {
+		u.mu.Unlock()
+		return CatalogSourceStatus{
+			Source:  displaySource,
+			Skipped: true,
+		}, nil
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errCtx := ctx.Err(); errCtx != nil {
+		u.mu.Unlock()
+		return CatalogSourceStatus{
+			Source: displaySource,
+			Error:  errCtx.Error(),
+		}, errCtx
+	}
+	u.requestSeq++
+	seq := u.requestSeq
+	u.mu.Unlock()
+
+	fetchCtx := ctx
+	if watchCtx != nil {
+		var cancelFetch context.CancelFunc
+		fetchCtx, cancelFetch = context.WithCancel(ctx)
+		stopWatch := context.AfterFunc(watchCtx, cancelFetch)
+		defer func() {
+			stopWatch()
+			cancelFetch()
+		}()
+	}
+
+	data, resolvedSource, errFetch := u.fetchCatalog(fetchCtx, source)
+	if resolvedSource != "" {
+		displaySource = resolvedSource
+	}
+	if errFetch != nil {
+		if fetchCtx.Err() == nil {
+			log.Warn("model catalog refresh failed; keeping last valid catalog")
+		}
+		return CatalogSourceStatus{
+			Source: displaySource,
+			Error:  errFetch.Error(),
+		}, errFetch
+	}
+
+	u.mu.Lock()
+	if generation != u.generation {
+		u.mu.Unlock()
+		errStale := fmt.Errorf("model catalog source changed during refresh")
+		return CatalogSourceStatus{
+			Source: displaySource,
+			Error:  errStale.Error(),
+		}, errStale
+	}
+	if errCtx := fetchCtx.Err(); errCtx != nil {
+		u.mu.Unlock()
+		return CatalogSourceStatus{
+			Source: displaySource,
+			Error:  errCtx.Error(),
+		}, errCtx
+	}
+	if seq <= u.publishedSeq {
+		u.mu.Unlock()
+		return CatalogSourceStatus{
+			Source:    displaySource,
+			Refreshed: true,
+		}, nil
+	}
+	changed, errPublish := u.publish(data)
+	if errPublish == nil {
+		u.publishedSeq = seq
+	}
+	u.mu.Unlock()
+	if errPublish != nil {
+		log.Warn("model catalog rejected; keeping last valid catalog")
+		return CatalogSourceStatus{
+			Source: displaySource,
+			Error:  errPublish.Error(),
+		}, errPublish
+	}
+	notifyModelRefresh(changed)
+	return CatalogSourceStatus{
+		Source:           displaySource,
+		Refreshed:        true,
+		ChangedProviders: changed,
+	}, nil
 }
 
 func readCatalogSource(ctx context.Context, source string) ([]byte, error) {
@@ -129,10 +278,10 @@ func readCatalogSource(ctx context.Context, source string) ([]byte, error) {
 	return data, nil
 }
 
-func catalogFetcher(embedded []byte, urls []string, validate func([]byte) error) func(context.Context, string) ([]byte, error) {
-	return func(ctx context.Context, source string) ([]byte, error) {
+func catalogFetcherWithSource(embedded []byte, urls []string, validate func([]byte) error) func(context.Context, string) ([]byte, string, error) {
+	return func(ctx context.Context, source string) ([]byte, string, error) {
 		if source == embeddedCatalogSource {
-			return embedded, nil
+			return embedded, embeddedCatalogSource, nil
 		}
 		sources := urls
 		if source != "" {
@@ -141,13 +290,25 @@ func catalogFetcher(embedded []byte, urls []string, validate func([]byte) error)
 		for _, candidate := range sources {
 			data, errRead := readCatalogSource(ctx, candidate)
 			if errRead == nil && validate(data) == nil {
-				return data, nil
+				return data, candidate, nil
 			}
 			if ctx.Err() != nil {
 				break
 			}
 		}
-		return nil, fmt.Errorf("no valid model catalog source")
+		var fallbackCandidate string
+		if len(sources) > 0 {
+			fallbackCandidate = sources[0]
+		}
+		return nil, fallbackCandidate, fmt.Errorf("no valid model catalog source")
+	}
+}
+
+func catalogFetcher(embedded []byte, urls []string, validate func([]byte) error) func(context.Context, string) ([]byte, error) {
+	fetchWithSource := catalogFetcherWithSource(embedded, urls, validate)
+	return func(ctx context.Context, source string) ([]byte, error) {
+		data, _, err := fetchWithSource(ctx, source)
+		return data, err
 	}
 }
 
@@ -178,19 +339,29 @@ func publishCatalogBytes(data []byte) ([]string, error) {
 	return changed, nil
 }
 
+func dynamicCatalogFetcherWithSource(embedded []byte, urls *[]string, validate func([]byte) error) func(context.Context, string) ([]byte, string, error) {
+	return func(ctx context.Context, source string) ([]byte, string, error) {
+		var currentURLs []string
+		if urls != nil {
+			currentURLs = *urls
+		}
+		return catalogFetcherWithSource(embedded, currentURLs, validate)(ctx, source)
+	}
+}
+
 var generalCatalogUpdater = &catalogUpdater{
-	fetch:   catalogFetcher(embeddedModelsJSON, modelsURLs, validateCatalogBytes),
-	publish: publishCatalogBytes,
+	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedModelsJSON, &modelsURLs, validateCatalogBytes),
+	publish:         publishCatalogBytes,
 }
 var codexCatalogUpdater = &catalogUpdater{
-	fetch: catalogFetcher(embeddedCodexClientModelsJSON, codexClientModelsURLs, ValidateCodexClientModelsJSON),
+	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedCodexClientModelsJSON, &codexClientModelsURLs, ValidateCodexClientModelsJSON),
 	publish: func(data []byte) ([]string, error) {
 		_, errLoad := loadCodexClientModelsFromBytes(data, "catalog")
 		return nil, errLoad
 	},
 }
 var devinCatalogUpdater = &catalogUpdater{
-	fetch: catalogFetcher(embeddedDevinModelsJSON, devinModelsURLs, validateDevinCatalogBytes),
+	fetchWithSource: dynamicCatalogFetcherWithSource(embeddedDevinModelsJSON, &devinModelsURLs, validateDevinCatalogBytes),
 	publish: func(data []byte) ([]string, error) {
 		changed, errLoad := loadDevinModelsFromBytes(data, "catalog")
 		if errLoad == nil && changed {
@@ -202,8 +373,10 @@ var devinCatalogUpdater = &catalogUpdater{
 
 var catalogRuntime struct {
 	sync.Mutex
-	ctx   context.Context
-	local bool
+	ctx     context.Context
+	local   bool
+	sources CatalogSources
+	home    bool
 }
 
 // SetLocalModelCatalogs sets the process default before the service starts.
@@ -219,6 +392,8 @@ func StartModelCatalogUpdaters(ctx context.Context, sources CatalogSources, home
 	catalogRuntime.Lock()
 	defer catalogRuntime.Unlock()
 	catalogRuntime.ctx = ctx
+	catalogRuntime.sources = sources
+	catalogRuntime.home = home
 	configureCatalogs(ctx, sources, catalogRuntime.local, home)
 }
 
@@ -227,9 +402,89 @@ func StartModelCatalogUpdaters(ctx context.Context, sources CatalogSources, home
 func UpdateModelCatalogSources(sources CatalogSources, home bool) {
 	catalogRuntime.Lock()
 	defer catalogRuntime.Unlock()
+	catalogRuntime.sources = sources
+	catalogRuntime.home = home
 	if catalogRuntime.ctx != nil && catalogRuntime.ctx.Err() == nil {
 		configureCatalogs(catalogRuntime.ctx, sources, catalogRuntime.local, home)
 	}
+}
+
+// RefreshModelCatalogs triggers an immediate on-demand refresh across all model catalog updaters.
+func RefreshModelCatalogs(ctx context.Context) (CatalogRefreshResult, error) {
+	catalogRuntime.Lock()
+	sources := catalogRuntime.sources
+	home := catalogRuntime.home
+	catalogRuntime.Unlock()
+	return RefreshModelCatalogsWithPolicy(ctx, sources, home)
+}
+
+// RefreshModelCatalogsWithPolicy triggers an immediate on-demand refresh using fallbackSources
+// and fallbackHome when process-wide catalog updaters have not been started.
+func RefreshModelCatalogsWithPolicy(ctx context.Context, fallbackSources CatalogSources, fallbackHome bool) (CatalogRefreshResult, error) {
+	if errValidate := fallbackSources.Validate(); errValidate != nil {
+		return CatalogRefreshResult{
+			Catalogs:         map[string]CatalogSourceStatus{},
+			ChangedProviders: []string{},
+		}, errValidate
+	}
+	catalogRuntime.Lock()
+	local := catalogRuntime.local
+	if catalogRuntime.ctx != nil && catalogRuntime.ctx.Err() == nil {
+		fallbackSources = catalogRuntime.sources
+		fallbackHome = catalogRuntime.home
+	}
+	catalogRuntime.Unlock()
+
+	effectiveFallback := effectiveCatalogSources(fallbackSources, local, fallbackHome)
+	var (
+		generalStatus CatalogSourceStatus
+		codexStatus   CatalogSourceStatus
+		devinStatus   CatalogSourceStatus
+		errGeneral    error
+		errCodex      error
+		errDevin      error
+		wg            sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		generalStatus, errGeneral = generalCatalogUpdater.refreshOnDemand(ctx, effectiveFallback.Catalog, modelsURLs)
+	}()
+	go func() {
+		defer wg.Done()
+		codexStatus, errCodex = codexCatalogUpdater.refreshOnDemand(ctx, effectiveFallback.CodexCatalog, codexClientModelsURLs)
+	}()
+	go func() {
+		defer wg.Done()
+		devinStatus, errDevin = devinCatalogUpdater.refreshOnDemand(ctx, effectiveFallback.DevinCatalog, devinModelsURLs)
+	}()
+	wg.Wait()
+
+	var changed []string
+	changed = mergeProviderNames(changed, generalStatus.ChangedProviders)
+	changed = mergeProviderNames(changed, codexStatus.ChangedProviders)
+	changed = mergeProviderNames(changed, devinStatus.ChangedProviders)
+	if changed == nil {
+		changed = []string{}
+	}
+
+	result := CatalogRefreshResult{
+		Catalog:      generalStatus.Source,
+		CodexCatalog: codexStatus.Source,
+		DevinCatalog: devinStatus.Source,
+		Sources: CatalogSources{
+			Catalog:      generalStatus.Source,
+			CodexCatalog: codexStatus.Source,
+			DevinCatalog: devinStatus.Source,
+		},
+		Catalogs: map[string]CatalogSourceStatus{
+			"catalog":       generalStatus,
+			"codex-catalog": codexStatus,
+			"devin-catalog": devinStatus,
+		},
+		ChangedProviders: changed,
+	}
+	return result, errors.Join(errGeneral, errCodex, errDevin)
 }
 
 func configureCatalogs(ctx context.Context, sources CatalogSources, local, home bool) {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -26,7 +27,6 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
-	"github.com/tidwall/gjson"
 	"golang.org/x/net/context"
 )
 
@@ -158,9 +158,19 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 	return payload
 }
 
-var streamingKeepAliveTickerFactory = func(interval time.Duration) (<-chan time.Time, func()) {
+var streamingKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
+var streamingKeepAliveTickerWithResetFactory func(interval time.Duration) (<-chan time.Time, func(), func())
+
+func defaultStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
 	ticker := time.NewTicker(interval)
-	return ticker.C, ticker.Stop
+	reset := func() {
+		ticker.Reset(interval)
+		select {
+		case <-ticker.C:
+		default:
+		}
+	}
+	return ticker.C, ticker.Stop, reset
 }
 
 // StreamingKeepAliveInterval returns the streaming keep-alive interval for this server (SSE heartbeats and WebSocket Ping frames).
@@ -182,13 +192,27 @@ func StreamingSendKeepAliveBeforeFT(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.Streaming.SendKeepAliveBeforeFT && StreamingKeepAliveInterval(cfg) > 0
 }
 
+// NewStreamingKeepAliveTickerWithReset returns a ticker channel, a stop function, and a reset function
+// for streaming keep-alives. When interval <= 0, it returns a nil channel and no-op functions.
+func NewStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
+	if interval <= 0 {
+		return nil, func() {}, func() {}
+	}
+	if streamingKeepAliveTickerWithResetFactory != nil {
+		return streamingKeepAliveTickerWithResetFactory(interval)
+	}
+	if streamingKeepAliveTickerFactory != nil {
+		keepAliveC, stop := streamingKeepAliveTickerFactory(interval)
+		return keepAliveC, stop, func() {}
+	}
+	return defaultStreamingKeepAliveTickerWithReset(interval)
+}
+
 // NewStreamingKeepAliveTicker returns a ticker channel and a stop function for streaming keep-alives.
 // When interval <= 0, it returns a nil channel and a no-op stop function.
 func NewStreamingKeepAliveTicker(interval time.Duration) (<-chan time.Time, func()) {
-	if interval <= 0 {
-		return nil, func() {}
-	}
-	return streamingKeepAliveTickerFactory(interval)
+	keepAliveC, stop, _ := NewStreamingKeepAliveTickerWithReset(interval)
+	return keepAliveC, stop
 }
 
 // NewPreFirstTokenKeepAliveTicker returns a ticker channel and a stop function for pre-first-token SSE keep-alives.
@@ -209,6 +233,18 @@ func SetStreamingKeepAliveTickerFactoryForTest(factory func(interval time.Durati
 	}
 	return func() {
 		streamingKeepAliveTickerFactory = prev
+	}
+}
+
+// SetStreamingKeepAliveTickerWithResetFactoryForTest overrides the keep-alive ticker-with-reset factory
+// for deterministic tests and returns a restore function.
+func SetStreamingKeepAliveTickerWithResetFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func(), func())) func() {
+	prev := streamingKeepAliveTickerWithResetFactory
+	if factory != nil {
+		streamingKeepAliveTickerWithResetFactory = factory
+	}
+	return func() {
+		streamingKeepAliveTickerWithResetFactory = prev
 	}
 }
 
@@ -278,6 +314,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if finalizedFormatCallback := finalizedResponseFormatCallbackFromContext(ctx); finalizedFormatCallback != nil {
+		meta[coreexecutor.FinalizedResponseFormatCallbackMetadataKey] = finalizedFormatCallback
 	}
 	if ginCtx != nil && !websocket.IsWebSocketUpgrade(ginCtx.Request) {
 		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
@@ -354,6 +393,28 @@ func requestCallerScope(ginCtx *gin.Context) string {
 	return coresession.CallerScope(fmt.Sprint(value))
 }
 
+func addCallerScopeMetadata(meta map[string]any, callerScope string) {
+	if meta == nil {
+		return
+	}
+	callerScope = strings.TrimSpace(callerScope)
+	if callerScope == "" {
+		return
+	}
+	meta[coreexecutor.CallerScopeMetadataKey] = callerScope
+}
+
+func callerScopeFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	value, ok := meta[coreexecutor.CallerScopeMetadataKey].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
 func addAuthSelectionModelMetadata(meta map[string]any, model string) {
 	if meta == nil {
 		return
@@ -381,11 +442,11 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		return
 	}
 	serviceTier := coreusage.AutoServiceTier
-	node := gjson.GetBytes(rawJSON, "service_tier")
+	node := ojson.GetBytesNoCopy(rawJSON, "service_tier")
 	if node.Exists() {
 		value := strings.TrimSpace(node.String())
 		if value != "" {
-			serviceTier = value
+			serviceTier = strings.Clone(value)
 		}
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
@@ -397,7 +458,7 @@ func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
 	}
 	// Missing or true means generation is enabled; only an explicit false disables generation.
 	generate := true
-	node := gjson.GetBytes(rawJSON, "generate")
+	node := ojson.GetBytesNoCopy(rawJSON, "generate")
 	if node.Exists() && node.IsBool() && !node.Bool() {
 		generate = false
 	}
@@ -627,6 +688,8 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		}()
 	}
 	newCtx = context.WithValue(newCtx, "gin", c)
+	newCtx = coreusage.CaptureIdentity(newCtx)
+	newCtx = coreauth.WithCodexClientRequest(newCtx, coreauth.IsCodexClientRequest(newCtx))
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
 		if c != nil {

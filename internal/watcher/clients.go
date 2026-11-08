@@ -7,7 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,20 +41,24 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Lock()
 		if w.currentAuths != nil {
 			filtered := make(map[string]*coreauth.Auth, len(w.currentAuths))
+			pendingReload := make(map[string]*coreauth.Auth)
 			for id, auth := range w.currentAuths {
 				if auth == nil {
 					continue
 				}
 				provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 				if _, match := matchProvider(provider, affectedOAuthProviders); match {
+					pendingReload[id] = auth
 					continue
 				}
 				filtered[id] = auth
 			}
 			w.currentAuths = filtered
+			w.pendingProviderReloadAuths = pendingReload
 			log.Debugf("applying oauth-excluded-models to providers %v", affectedOAuthProviders)
 		} else {
 			w.currentAuths = nil
+			w.pendingProviderReloadAuths = nil
 		}
 		w.clientsMutex.Unlock()
 	}
@@ -80,6 +87,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 			newAuthContents = make(map[string]*coreauth.Auth)
 		}
 		newFileAuthsByPath := make(map[string]map[string]*coreauth.Auth)
+		var incompleteRescanPaths map[string]struct{}
+		var incompleteRescanDir string
 
 		w.clientsMutex.RLock()
 		parser := w.pluginAuthParser
@@ -90,6 +99,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		} else if resolvedAuthDir != "" {
 			entries, errReadDir := os.ReadDir(resolvedAuthDir)
 			if errReadDir != nil {
+				if !errors.Is(errReadDir, fs.ErrNotExist) {
+					incompleteRescanDir = resolvedAuthDir
+				}
 				log.Errorf("failed to read auth directory for hash cache: %v", errReadDir)
 			} else {
 				for _, entry := range entries {
@@ -101,37 +113,97 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 						continue
 					}
 					fullPath := filepath.Join(resolvedAuthDir, name)
-					if data, errReadFile := os.ReadFile(fullPath); errReadFile == nil && len(data) > 0 {
-						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(fullPath)
-						newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons (debug only).
-						if cacheAuthContents {
-							var auth coreauth.Auth
-							if errParse := json.Unmarshal(data, &auth); errParse == nil {
-								newAuthContents[normalizedPath] = &auth
+					data, errReadFile := os.ReadFile(fullPath)
+					if errReadFile != nil {
+						if !errors.Is(errReadFile, fs.ErrNotExist) {
+							if incompleteRescanPaths == nil {
+								incompleteRescanPaths = make(map[string]struct{})
 							}
+							incompleteRescanPaths[w.normalizeAuthPath(fullPath)] = struct{}{}
 						}
-						ctx := &synthesizer.SynthesisContext{
-							Config:           cfg,
-							AuthDir:          resolvedAuthDir,
-							Now:              time.Now(),
-							IDGenerator:      synthesizer.NewStableIDGenerator(),
-							PluginAuthParser: parser,
+						continue
+					}
+					normalizedPath := w.normalizeAuthPath(fullPath)
+					if !json.Valid(data) {
+						if incompleteRescanPaths == nil {
+							incompleteRescanPaths = make(map[string]struct{})
 						}
-						generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
-						if errSynthesize != nil {
-							log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
-						} else if len(generated) > 0 {
-							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
-							}
+						incompleteRescanPaths[normalizedPath] = struct{}{}
+						continue
+					}
+					sum := sha256.Sum256(data)
+					newAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+					// Parse and cache auth content for future diff comparisons (debug only).
+					if cacheAuthContents {
+						var auth coreauth.Auth
+						if errParse := json.Unmarshal(data, &auth); errParse == nil {
+							newAuthContents[normalizedPath] = &auth
+						}
+					}
+					ctx := &synthesizer.SynthesisContext{
+						Config:           cfg,
+						AuthDir:          resolvedAuthDir,
+						Now:              time.Now(),
+						IDGenerator:      synthesizer.NewStableIDGenerator(),
+						PluginAuthParser: parser,
+					}
+					generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, fullPath, data)
+					if errSynthesize != nil {
+						log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
+					} else if len(generated) > 0 {
+						if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
+							newFileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
 						}
 					}
 				}
 			}
 		}
 		w.clientsMutex.Lock()
+		if incompleteRescanDir != "" {
+			markDirMemberIncomplete := func(trackedPath string) {
+				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
+					return
+				}
+				if incompleteRescanPaths == nil {
+					incompleteRescanPaths = make(map[string]struct{})
+				}
+				incompleteRescanPaths[trackedPath] = struct{}{}
+			}
+			for trackedPath := range w.lastAuthHashes {
+				markDirMemberIncomplete(trackedPath)
+			}
+			for trackedPath := range w.fileAuthsByPath {
+				markDirMemberIncomplete(trackedPath)
+			}
+		}
+		for normalizedPath := range incompleteRescanPaths {
+			if _, ok := w.lastAuthHashes[normalizedPath]; ok {
+				newAuthHashes[normalizedPath] = ""
+			}
+			if cacheAuthContents && w.lastAuthContents != nil {
+				if prevContent, ok := w.lastAuthContents[normalizedPath]; ok {
+					newAuthContents[normalizedPath] = prevContent
+				}
+			}
+			if prevAuths, ok := w.fileAuthsByPath[normalizedPath]; ok && len(prevAuths) > 0 {
+				newFileAuthsByPath[normalizedPath] = maps.Clone(prevAuths)
+			}
+		}
+		// Keep IDs that are still in currentAuths or pending provider reload indexed
+		// under their file path until refreshAuthState commits the new state.
+		for path, prevAuths := range w.fileAuthsByPath {
+			for id := range prevAuths {
+				_, stillCurrent := w.currentAuths[id]
+				_, pendingReload := w.pendingProviderReloadAuths[id]
+				if !stillCurrent && !pendingReload {
+					continue
+				}
+				if newFileAuthsByPath[path] == nil {
+					newFileAuthsByPath[path] = make(map[string]*coreauth.Auth)
+				}
+				newFileAuthsByPath[path][id] = nil
+			}
+		}
 		w.lastAuthHashes = newAuthHashes
 		w.lastAuthContents = newAuthContents
 		w.fileAuthsByPath = newFileAuthsByPath
@@ -167,6 +239,76 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	defer w.authRescanMu.Unlock()
 
 	w.addOrUpdateClientLocked(path)
+}
+
+func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || auth == nil || !auth.HasFileSnapshot() {
+		return
+	}
+	path := auth.FileSnapshotPath()
+	if path == "" {
+		return
+	}
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
+	w.clientsMutex.Lock()
+	existing := w.currentAuths[auth.ID]
+	if existing == nil || !existing.SameFileSnapshot(auth) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	normalized := w.invalidateAuthFileHashLocked(path)
+	if normalized == "" {
+		w.clientsMutex.Unlock()
+		return
+	}
+	existing.InvalidateFileSnapshot()
+	for id := range w.fileAuthsByPath[normalized] {
+		if sibling := w.currentAuths[id]; sibling != nil && sibling.SameFileSnapshot(auth) {
+			sibling.InvalidateFileSnapshot()
+		}
+	}
+	w.clientsMutex.Unlock()
+
+	w.addOrUpdateClientLocked(path)
+}
+
+func (w *Watcher) sameNormalizedAuthPath(pathA, pathB string) bool {
+	normA := w.normalizeAuthPath(pathA)
+	normB := w.normalizeAuthPath(pathB)
+	if normA == "" || normB == "" {
+		return false
+	}
+	if normA == normB {
+		return true
+	}
+	if absA, errAbsA := filepath.Abs(normA); errAbsA == nil {
+		normA = w.normalizeAuthPath(absA)
+	}
+	if absB, errAbsB := filepath.Abs(normB); errAbsB == nil {
+		normB = w.normalizeAuthPath(absB)
+	}
+	return normA != "" && normA == normB
+}
+
+func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return ""
+	}
+	if w.lastAuthHashes == nil {
+		w.lastAuthHashes = make(map[string]string)
+	}
+	w.lastAuthHashes[normalized] = ""
+	if abs, errAbs := filepath.Abs(normalized); errAbs == nil {
+		if normalizedAbs := w.normalizeAuthPath(abs); normalizedAbs != "" {
+			if _, known := w.lastAuthHashes[normalizedAbs]; known {
+				w.lastAuthHashes[normalizedAbs] = ""
+			}
+		}
+	}
+	return normalized
 }
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
@@ -316,6 +458,7 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 	}
 	updates := make([]AuthUpdate, 0, len(oldByID)+len(newByID))
 	for id, newAuth := range newByID {
+		delete(w.persistedAuthRevisions, id)
 		existing, ok := w.currentAuths[id]
 		if !ok {
 			w.currentAuths[id] = newAuth.Clone()
@@ -331,7 +474,11 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 		if _, stillExists := newByID[id]; stillExists {
 			continue
 		}
+		delete(w.persistedAuthRevisions, id)
 		delete(w.currentAuths, id)
+		if w.pendingProviderReloadAuths != nil {
+			delete(w.pendingProviderReloadAuths, id)
+		}
 		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
 	}
 	w.stampAuthUpdatesLocked(updates)

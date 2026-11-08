@@ -36,6 +36,11 @@ func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 				raw  string
 				want bool
 			}{
+				// The synthetic model is synthesized from the catalog's default
+				// template, which carries multi_agent_version="v2". Runtime code
+				// preserves that template value unless the opt-in rewrites it,
+				// so every case observes "v2"; tc.want asserts the published
+				// client setting after reload, not the catalog field.
 				{"omitted", "{}", false},
 				{"enabled", "client: {codex: {optimize-multi-agent-v2: true}}", true},
 				{"disabled", "client: {codex: {optimize-multi-agent-v2: false}}", false},
@@ -72,10 +77,9 @@ func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 						if entry["slug"] != modelID {
 							continue
 						}
-						var want any
-						if tc.want {
-							want = "v2"
-						}
+						// Synthesized from the default template: its v2 value is
+						// preserved regardless of the opt-in setting.
+						want := any("v2")
 						if value, present := entry["multi_agent_version"]; !present || value != want {
 							t.Fatalf("multi_agent_version = %#v (present %t), want %#v", value, present, want)
 						}

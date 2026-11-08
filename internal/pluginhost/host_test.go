@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -14,12 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func enabledPluginConfigs(ids ...string) map[string]config.PluginInstanceConfig {
@@ -477,10 +479,10 @@ func TestHostApplyConfigRegistersPluginThinkingApplier(t *testing.T) {
 	if errApply != nil {
 		t.Fatalf("ApplyThinking() error = %v", errApply)
 	}
-	if got := gjson.GetBytes(out, "thinking_budget").Int(); got != 10240 {
+	if got := ojson.GetBytesNoCopy(out, "thinking_budget").Int(); got != 10240 {
 		t.Fatalf("thinking_budget = %d, want 10240; body=%s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "plugin").String(); got != "plugin-thinking" {
+	if got := ojson.GetBytesNoCopy(out, "plugin").String(); got != "plugin-thinking" {
 		t.Fatalf("plugin = %q, want plugin-thinking; body=%s", got, string(out))
 	}
 }
@@ -1065,6 +1067,1082 @@ func TestHostApplyConfigFallsBackWhenQuiesceUnsupported(t *testing.T) {
 	}
 }
 
+func TestHostApplyConfigAbortsReplacementWhenQuiesceFails(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	var configMu sync.Mutex
+	var registeredConfig []byte
+	var rollbackConfig []byte
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		events.add("old." + method)
+		switch method {
+		case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+			var lifecycleRequest rpcLifecycleRequest
+			if errUnmarshal := json.Unmarshal(request, &lifecycleRequest); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			configMu.Lock()
+			if method == pluginabi.MethodPluginRegister {
+				registeredConfig = bytes.Clone(lifecycleRequest.ConfigYAML)
+			} else {
+				rollbackConfig = bytes.Clone(lifecycleRequest.ConfigYAML)
+			}
+			configMu.Unlock()
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCError("quiesce_failed", "sqlite connection busy"), nil
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("replacement." + method)
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	paths["2.0.0"] = writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"old." + pluginabi.MethodPluginReconfigure,
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("loader Open calls = %d, want 1 (replacement must not be opened)", loader.calls)
+	}
+	configMu.Lock()
+	gotRegisteredConfig := bytes.Clone(registeredConfig)
+	gotRollbackConfig := bytes.Clone(rollbackConfig)
+	configMu.Unlock()
+	if !bytes.Equal(gotRollbackConfig, gotRegisteredConfig) {
+		t.Fatalf("rollback config = %q, want original config %q", gotRollbackConfig, gotRegisteredConfig)
+	}
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not remain active after quiesce failure")
+	}
+	if h.pluginIdentityCurrent("alpha", paths["2.0.0"], "2.0.0") {
+		t.Fatal("replacement plugin unexpectedly became active after quiesce failure")
+	}
+	h.mu.Lock()
+	loadingCount := len(h.loading)
+	retiredCount := len(h.retired["alpha"])
+	h.mu.Unlock()
+	if loadingCount != 0 {
+		t.Fatalf("loading plugin count = %d, want 0", loadingCount)
+	}
+	if retiredCount != 0 {
+		t.Fatalf("retired plugin count = %d, want 0", retiredCount)
+	}
+}
+
+func TestHostApplyConfigCoordinatesUsageAcrossQuiesceAndReplacement(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	inFlightStarted := make(chan struct{})
+	releaseInFlight := make(chan struct{})
+	inFlightDone := make(chan struct{})
+	drainWaitEntered := make(chan struct{})
+	quiesceStarted := make(chan struct{})
+	replacementRegisterStarted := make(chan struct{})
+	releaseReplacementRegister := make(chan struct{})
+
+	var oldQuiesced atomic.Bool
+	var oldRejectedUsage atomic.Int32
+	var oldDelivered []string
+	var replacementDelivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			events.add("old." + method)
+			oldQuiesced.Store(true)
+			close(quiesceStarted)
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if oldQuiesced.Load() {
+				oldRejectedUsage.Add(1)
+				events.add("old.usage.rejected:" + rec.RequestID)
+				return marshalRPCError("quiesced", "database closed during quiesce"), nil
+			}
+			if rec.RequestID == "in-flight-before-quiesce" {
+				close(inFlightStarted)
+				<-releaseInFlight
+			}
+			deliveryMu.Lock()
+			oldDelivered = append(oldDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("old.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("replacement." + method)
+			close(replacementRegisterStarted)
+			<-releaseReplacementRegister
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			deliveryMu.Lock()
+			replacementDelivered = append(replacementDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("replacement.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	var drainWaitOnce sync.Once
+	h.usageDrainWaitHook = func(pluginID string) {
+		if pluginID == "alpha" {
+			drainWaitOnce.Do(func() { close(drainWaitEntered) })
+		}
+	}
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	staleOldPlugin := h.currentUsagePlugin("alpha")
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   staleOldPlugin,
+	}
+
+	go func() {
+		adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "in-flight-before-quiesce"})
+		close(inFlightDone)
+	}()
+	waitForHostTestSignal(t, inFlightStarted, "in-flight usage before quiesce")
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, drainWaitEntered, "usage drain wait before quiesce")
+	select {
+	case <-quiesceStarted:
+		t.Fatal("plugin.quiesce started before already-admitted usage call drained")
+	default:
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-during-drain"})
+
+	close(releaseInFlight)
+	waitForHostTestSignal(t, inFlightDone, "in-flight usage completion")
+	waitForHostTestSignal(t, quiesceStarted, "plugin quiesce start")
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration start")
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-1"})
+	staleOldPlugin.HandleUsage(context.Background(), pluginapi.UsageRecord{RequestID: "held-2-via-stale-ref"})
+
+	close(releaseReplacementRegister)
+	waitForHostTestSignal(t, applyDone, "replacement ApplyConfig completion")
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "post-reload-3"})
+
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiesced old plugin = %d, want 0 (events=%v)", got, events.snapshot())
+	}
+	deliveryMu.Lock()
+	gotOld := append([]string(nil), oldDelivered...)
+	gotReplacement := append([]string(nil), replacementDelivered...)
+	deliveryMu.Unlock()
+	if wantOld := []string{"in-flight-before-quiesce"}; !slices.Equal(gotOld, wantOld) {
+		t.Fatalf("old plugin delivered usage = %v, want %v", gotOld, wantOld)
+	}
+	if wantReplacement := []string{"held-during-drain", "held-1", "held-2-via-stale-ref", "post-reload-3"}; !slices.Equal(gotReplacement, wantReplacement) {
+		t.Fatalf("replacement plugin delivered usage = %v, want %v", gotReplacement, wantReplacement)
+	}
+}
+
+func TestHostApplyConfigReplaysHeldUsageToRestoredPluginWhenReplacementFails(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	replacementRegisterStarted := make(chan struct{})
+	releaseReplacementRegister := make(chan struct{})
+
+	var oldQuiesced atomic.Bool
+	var oldRejectedUsage atomic.Int32
+	var oldDelivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			events.add("old." + method)
+			oldQuiesced.Store(true)
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodPluginReconfigure:
+			events.add("old." + method)
+			oldQuiesced.Store(false)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if oldQuiesced.Load() {
+				oldRejectedUsage.Add(1)
+				events.add("old.usage.rejected:" + rec.RequestID)
+				return marshalRPCError("quiesced", "database closed during quiesce"), nil
+			}
+			deliveryMu.Lock()
+			oldDelivered = append(oldDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("old.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{
+		call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+			events.add("replacement." + method)
+			if method != pluginabi.MethodPluginRegister {
+				return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+			}
+			close(replacementRegisterStarted)
+			<-releaseReplacementRegister
+			return nil, fmt.Errorf("replacement registration failed")
+		},
+		shutdown: func() { events.add("replacement.shutdown") },
+	}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-rollback-1"})
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-rollback-2"})
+
+	close(releaseReplacementRegister)
+	waitForHostTestSignal(t, applyDone, "failed replacement ApplyConfig completion")
+
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiesced old plugin = %d, want 0 (events=%v)", got, events.snapshot())
+	}
+	deliveryMu.Lock()
+	gotOld := append([]string(nil), oldDelivered...)
+	deliveryMu.Unlock()
+	if wantOld := []string{"held-rollback-1", "held-rollback-2"}; !slices.Equal(gotOld, wantOld) {
+		t.Fatalf("restored old plugin delivered usage = %v, want %v (events=%v)", gotOld, wantOld, events.snapshot())
+	}
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old." + pluginabi.MethodPluginQuiesce,
+		"replacement." + pluginabi.MethodPluginRegister,
+		"replacement.shutdown",
+		"old." + pluginabi.MethodPluginReconfigure,
+		"old.usage.handle:held-rollback-1",
+		"old.usage.handle:held-rollback-2",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+}
+
+func TestHostApplyConfigReplaysHeldUsageWhenQuiesceFails(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	quiesceStarted := make(chan struct{})
+	releaseQuiesce := make(chan struct{})
+
+	var oldQuiescing atomic.Bool
+	var oldRejectedUsage atomic.Int32
+	var oldDelivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			events.add("old." + method)
+			oldQuiescing.Store(true)
+			close(quiesceStarted)
+			<-releaseQuiesce
+			return marshalRPCError("quiesce_failed", "failed to flush state"), nil
+		case pluginabi.MethodPluginReconfigure:
+			events.add("old." + method)
+			oldQuiescing.Store(false)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if oldQuiescing.Load() {
+				oldRejectedUsage.Add(1)
+				events.add("old.usage.rejected:" + rec.RequestID)
+				return marshalRPCError("quiesced", "database closed during quiesce"), nil
+			}
+			deliveryMu.Lock()
+			oldDelivered = append(oldDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("old.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("replacement." + method)
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+
+	backpressureEntered := make(chan struct{})
+	var backpressureOnce sync.Once
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	h.maxPendingUsageRecords = 1
+	h.usageBackpressureWaitHook = func(pluginID string) {
+		if pluginID == "alpha" {
+			backpressureOnce.Do(func() { close(backpressureEntered) })
+		}
+	}
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, quiesceStarted, "plugin quiesce start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-quiesce-fail-1"})
+
+	secondSubmitted := make(chan struct{})
+	go func() {
+		adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-quiesce-fail-2"})
+		close(secondSubmitted)
+	}()
+	waitForHostTestSignal(t, backpressureEntered, "usage backpressure wait")
+	select {
+	case <-secondSubmitted:
+		t.Fatal("second usage event bypassed bounded pending queue backpressure")
+	default:
+	}
+
+	close(releaseQuiesce)
+	waitForHostTestSignal(t, applyDone, "failed quiesce ApplyConfig completion")
+	waitForHostTestSignal(t, secondSubmitted, "backpressured usage submission completion")
+
+	if loader.calls != 1 {
+		t.Fatalf("loader Open calls = %d, want 1", loader.calls)
+	}
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiescing old plugin = %d, want 0 (events=%v)", got, events.snapshot())
+	}
+	deliveryMu.Lock()
+	gotOld := append([]string(nil), oldDelivered...)
+	deliveryMu.Unlock()
+	if wantOld := []string{"held-quiesce-fail-1", "held-quiesce-fail-2"}; !slices.Equal(gotOld, wantOld) {
+		t.Fatalf("restored old plugin delivered usage = %v, want %v", gotOld, wantOld)
+	}
+}
+
+func TestHostApplyConfigRetainsHeldUsageWhenRollbackFailsUntilRecovery(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	replacementRegisterStarted := make(chan struct{})
+	releaseReplacementRegister := make(chan struct{})
+
+	var oldQuiesced atomic.Bool
+	var allowReconfigure atomic.Bool
+	var oldRejectedUsage atomic.Int32
+	var oldDelivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			events.add("old." + method)
+			oldQuiesced.Store(true)
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodPluginReconfigure:
+			events.add("old." + method)
+			if !allowReconfigure.Load() {
+				return marshalRPCError("reconfigure_failed", "sqlite lock still busy"), nil
+			}
+			oldQuiesced.Store(false)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if oldQuiesced.Load() {
+				oldRejectedUsage.Add(1)
+				events.add("old.usage.rejected:" + rec.RequestID)
+				return marshalRPCError("quiesced", "database closed during quiesce"), nil
+			}
+			deliveryMu.Lock()
+			oldDelivered = append(oldDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("old.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{
+		call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+			events.add("replacement." + method)
+			if method != pluginabi.MethodPluginRegister {
+				return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+			}
+			close(replacementRegisterStarted)
+			<-releaseReplacementRegister
+			return nil, fmt.Errorf("replacement registration failed")
+		},
+		shutdown: func() { events.add("replacement.shutdown") },
+	}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-double-fail-1"})
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-double-fail-2"})
+
+	close(releaseReplacementRegister)
+	waitForHostTestSignal(t, applyDone, "failed replacement and failed rollback ApplyConfig")
+
+	if h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("quiesced old plugin remained active after rollback reconfigure failed")
+	}
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiesced old plugin after failed rollback = %d, want 0 (events=%v)", got, events.snapshot())
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-while-unrecovered-3"})
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiesced old plugin while unrecovered = %d, want 0", got)
+	}
+
+	allowReconfigure.Store(true)
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not become active after recovery reconfigure")
+	}
+	deliveryMu.Lock()
+	gotOld := append([]string(nil), oldDelivered...)
+	deliveryMu.Unlock()
+	if wantOld := []string{"held-double-fail-1", "held-double-fail-2", "held-while-unrecovered-3"}; !slices.Equal(gotOld, wantOld) {
+		t.Fatalf("recovered old plugin delivered usage = %v, want %v (events=%v)", gotOld, wantOld, events.snapshot())
+	}
+}
+
+func TestHostApplyConfigWaitsForBlockedQuiesceBeforeCanceledRollbackAndReplay(t *testing.T) {
+	events := &lifecycleEventRecorder{}
+	quiesceStarted := make(chan struct{})
+	releaseQuiesce := make(chan struct{})
+	reconfigureStarted := make(chan struct{})
+	var releaseQuiesceOnce sync.Once
+	t.Cleanup(func() {
+		releaseQuiesceOnce.Do(func() { close(releaseQuiesce) })
+	})
+
+	var oldQuiesced atomic.Bool
+	var oldRejectedUsage atomic.Int32
+	var oldDelivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			events.add("old.quiesce.start")
+			close(quiesceStarted)
+			<-releaseQuiesce
+			oldQuiesced.Store(true)
+			events.add("old.quiesce.finish")
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodPluginReconfigure:
+			var reconfigureOnce sync.Once
+			_ = reconfigureOnce
+			select {
+			case <-reconfigureStarted:
+			default:
+				close(reconfigureStarted)
+			}
+			oldQuiesced.Store(false)
+			events.add("old." + method)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if oldQuiesced.Load() {
+				oldRejectedUsage.Add(1)
+				events.add("old.usage.rejected:" + rec.RequestID)
+				return marshalRPCError("quiesced", "database closed during quiesce"), nil
+			}
+			deliveryMu.Lock()
+			oldDelivered = append(oldDelivered, rec.RequestID)
+			deliveryMu.Unlock()
+			events.add("old.usage.handle:" + rec.RequestID)
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		events.add("replacement." + method)
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, paths := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	baseCtx, cancel := context.WithCancel(context.Background())
+	cancelObserved := make(chan struct{})
+	var cancelObservedOnce sync.Once
+	ctx := &errObserveContext{
+		Context: baseCtx,
+		onCanceledErr: func() {
+			cancelObservedOnce.Do(func() { close(cancelObserved) })
+		},
+	}
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(ctx, versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, quiesceStarted, "plugin quiesce start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-during-canceled-quiesce"})
+	cancel()
+	waitForHostTestSignal(t, cancelObserved, "quiesce call observed context cancellation")
+
+	releaseQuiesceOnce.Do(func() { close(releaseQuiesce) })
+	waitForHostTestSignal(t, applyDone, "canceled quiesce ApplyConfig completion")
+
+	if !h.pluginIdentityCurrent("alpha", paths["1.0.0"], "1.0.0") {
+		t.Fatal("old plugin did not remain active after canceled quiesce rollback")
+	}
+	if got := oldRejectedUsage.Load(); got != 0 {
+		t.Fatalf("usage calls reaching quiesced old plugin = %d, want 0 (events=%v)", got, events.snapshot())
+	}
+	deliveryMu.Lock()
+	gotOld := append([]string(nil), oldDelivered...)
+	deliveryMu.Unlock()
+	if wantOld := []string{"held-during-canceled-quiesce"}; !slices.Equal(gotOld, wantOld) {
+		t.Fatalf("restored old plugin delivered usage = %v, want %v", gotOld, wantOld)
+	}
+	if got, want := events.snapshot(), []string{
+		"old." + pluginabi.MethodPluginRegister,
+		"old.quiesce.start",
+		"old.quiesce.finish",
+		"old." + pluginabi.MethodPluginReconfigure,
+		"old.usage.handle:held-during-canceled-quiesce",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+}
+
+func TestHostApplyConfigReplayDoesNotStarveUnderContinuousUsageTraffic(t *testing.T) {
+	replacementRegisterStarted := make(chan struct{})
+	releaseReplacementRegister := make(chan struct{})
+	heldReplayStarted := make(chan struct{})
+	releaseHeldReplay := make(chan struct{})
+	postReplayBlocked := make(chan struct{})
+	releasePostReplay := make(chan struct{})
+	postReplayDone := make(chan struct{})
+	var heldReplayOnce sync.Once
+	var postReplayOnce sync.Once
+	var postDoneOnce sync.Once
+
+	var delivered []string
+	var deliveryMu sync.Mutex
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			close(replacementRegisterStarted)
+			<-releaseReplacementRegister
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if rec.RequestID == "held-1" {
+				heldReplayOnce.Do(func() { close(heldReplayStarted) })
+				<-releaseHeldReplay
+			}
+			if rec.RequestID == "post-during-replay" {
+				postReplayOnce.Do(func() { close(postReplayBlocked) })
+				<-releasePostReplay
+			}
+			deliveryMu.Lock()
+			delivered = append(delivered, rec.RequestID)
+			deliveryMu.Unlock()
+			if rec.RequestID == "post-during-replay" {
+				postDoneOnce.Do(func() { close(postReplayDone) })
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	var releaseHeldOnce sync.Once
+	var releasePostOnce sync.Once
+	t.Cleanup(func() {
+		releaseHeldOnce.Do(func() { close(releaseHeldReplay) })
+		releasePostOnce.Do(func() { close(releasePostReplay) })
+	})
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-1"})
+
+	close(releaseReplacementRegister)
+	waitForHostTestSignal(t, heldReplayStarted, "held usage replay start")
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "post-during-replay"})
+
+	releaseHeldOnce.Do(func() { close(releaseHeldReplay) })
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion without waiting for post-replay usage")
+	waitForHostTestSignal(t, postReplayBlocked, "post-replay usage dispatch")
+	releasePostOnce.Do(func() { close(releasePostReplay) })
+	waitForHostTestSignal(t, postReplayDone, "post-replay usage delivery completion")
+
+	deliveryMu.Lock()
+	gotDelivered := append([]string(nil), delivered...)
+	deliveryMu.Unlock()
+	if wantDelivered := []string{"held-1", "post-during-replay"}; !slices.Equal(gotDelivered, wantDelivered) {
+		t.Fatalf("delivered usage = %v, want %v", gotDelivered, wantDelivered)
+	}
+}
+
+func TestHostApplyConfigRetriesFailedQuiesceOnSubsequentReplacement(t *testing.T) {
+	var quiesceCalls atomic.Int32
+	var replacementRegisters atomic.Int32
+	var failQuiesce atomic.Bool
+	var failReconfigure atomic.Bool
+	failQuiesce.Store(true)
+	failReconfigure.Store(true)
+
+	var deliveryMu sync.Mutex
+	delivered := make([]string, 0, 2)
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			quiesceCalls.Add(1)
+			if failQuiesce.Load() {
+				return marshalRPCError("quiesce_failed", "sqlite connection busy"), nil
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodPluginReconfigure:
+			if failReconfigure.Load() {
+				return marshalRPCError("reconfigure_failed", "sqlite lock still busy"), nil
+			}
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			deliveryMu.Lock()
+			delivered = append(delivered, "old:"+rec.RequestID)
+			deliveryMu.Unlock()
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			replacementRegisters.Add(1)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			deliveryMu.Lock()
+			delivered = append(delivered, "new:"+rec.RequestID)
+			deliveryMu.Unlock()
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "before"})
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	if gotQuiesce := quiesceCalls.Load(); gotQuiesce != 1 {
+		t.Fatalf("quiesce calls after first failed replacement = %d, want 1", gotQuiesce)
+	}
+	if gotRegisters := replacementRegisters.Load(); gotRegisters != 0 {
+		t.Fatalf("replacement register count after first failed replacement = %d, want 0", gotRegisters)
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-after-failed-quiesce"})
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	if gotQuiesce := quiesceCalls.Load(); gotQuiesce != 2 {
+		t.Fatalf("quiesce calls after second failed replacement = %d, want 2", gotQuiesce)
+	}
+	if gotRegisters := replacementRegisters.Load(); gotRegisters != 0 {
+		t.Fatalf("replacement register count after second failed replacement = %d, want 0 (replacement must not load while quiesce still fails)", gotRegisters)
+	}
+
+	failQuiesce.Store(false)
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	if gotQuiesce := quiesceCalls.Load(); gotQuiesce != 3 {
+		t.Fatalf("quiesce calls after third replacement = %d, want 3", gotQuiesce)
+	}
+	if gotRegisters := replacementRegisters.Load(); gotRegisters != 1 {
+		t.Fatalf("replacement register count after third replacement = %d, want 1", gotRegisters)
+	}
+
+	deliveryMu.Lock()
+	gotDelivered := append([]string(nil), delivered...)
+	deliveryMu.Unlock()
+	if wantDelivered := []string{"old:before", "new:held-after-failed-quiesce"}; !slices.Equal(gotDelivered, wantDelivered) {
+		t.Fatalf("delivered usage = %v, want %v", gotDelivered, wantDelivered)
+	}
+}
+
+func TestHostApplyConfigRecoversFromTransientUsageReplayErrorWithoutReapply(t *testing.T) {
+	replacementRegisterStarted := make(chan struct{})
+	releaseReplacementRegister := make(chan struct{})
+	heldReplayStarted := make(chan struct{})
+	releaseHeldReplay := make(chan struct{})
+	asyncErrorObserved := make(chan struct{})
+	allDelivered := make(chan struct{})
+	var heldReplayOnce sync.Once
+	var asyncErrorOnce sync.Once
+	var deliveredOnce sync.Once
+	var failFirstHeldAttempt atomic.Bool
+	var failFirstAsyncAttempt atomic.Bool
+	failFirstHeldAttempt.Store(true)
+	failFirstAsyncAttempt.Store(true)
+
+	var deliveryMu sync.Mutex
+	delivered := make([]string, 0, 3)
+
+	oldClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	replacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			close(replacementRegisterStarted)
+			<-releaseReplacementRegister
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodUsageHandle:
+			var rec pluginapi.UsageRecord
+			if errUnmarshal := json.Unmarshal(request, &rec); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if rec.RequestID == "held-1" {
+				heldReplayOnce.Do(func() { close(heldReplayStarted) })
+				<-releaseHeldReplay
+				if failFirstHeldAttempt.CompareAndSwap(true, false) {
+					return marshalRPCError("transient_error", "temporary sync replay failure"), nil
+				}
+			}
+			if rec.RequestID == "async-1" && failFirstAsyncAttempt.CompareAndSwap(true, false) {
+				asyncErrorOnce.Do(func() { close(asyncErrorObserved) })
+				return marshalRPCError("transient_error", "temporary write failure"), nil
+			}
+			deliveryMu.Lock()
+			delivered = append(delivered, rec.RequestID)
+			if len(delivered) == 3 {
+				deliveredOnce.Do(func() { close(allDelivered) })
+			}
+			deliveryMu.Unlock()
+			return marshalRPCResult(rpcEmptyResponse{})
+		default:
+			return nil, fmt.Errorf("unexpected replacement plugin method %s", method)
+		}
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, replacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	var releaseHeldOnce sync.Once
+	t.Cleanup(func() {
+		releaseHeldOnce.Do(func() { close(releaseHeldReplay) })
+	})
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	adapter := &usageAdapter{
+		host:     h,
+		pluginID: "alpha",
+		plugin:   h.currentUsagePlugin("alpha"),
+	}
+
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+	applyDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+		close(applyDone)
+	}()
+
+	waitForHostTestSignal(t, replacementRegisterStarted, "replacement registration start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "held-1"})
+	close(releaseReplacementRegister)
+
+	waitForHostTestSignal(t, heldReplayStarted, "held usage replay start")
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "async-1"})
+	releaseHeldOnce.Do(func() { close(releaseHeldReplay) })
+
+	waitForHostTestSignal(t, applyDone, "ApplyConfig completion")
+	waitForHostTestSignal(t, asyncErrorObserved, "first async replay transient error")
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{RequestID: "after-1"})
+	waitForHostTestSignal(t, allDelivered, "retry of async-1 and delivery of after-1 without re-applying config")
+
+	deliveryMu.Lock()
+	gotDelivered := append([]string(nil), delivered...)
+	deliveryMu.Unlock()
+	if wantDelivered := []string{"held-1", "async-1", "after-1"}; !slices.Equal(gotDelivered, wantDelivered) {
+		t.Fatalf("delivered usage = %v, want %v", gotDelivered, wantDelivered)
+	}
+}
+
+func TestHostApplyConfigWaitsForCanceledRecoveryReconfigureAndQuiescesAgainOnNextReplacement(t *testing.T) {
+	var quiesceCalls atomic.Int32
+	var reconfigureCalls atomic.Int32
+	var resourceOpen atomic.Bool
+	var overlapDetected atomic.Bool
+
+	recoveryReconfigureStarted := make(chan struct{})
+	releaseRecoveryReconfigure := make(chan struct{})
+	var recoveryStartedOnce sync.Once
+	var releaseRecoveryOnce sync.Once
+
+	oldClient := &lifecycleTestClient{call: func(ctx context.Context, method string, _ []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			resourceOpen.Store(true)
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		case pluginabi.MethodPluginQuiesce:
+			quiesceCalls.Add(1)
+			resourceOpen.Store(false)
+			return marshalRPCResult(rpcEmptyResponse{})
+		case pluginabi.MethodPluginReconfigure:
+			callNum := reconfigureCalls.Add(1)
+			resourceOpen.Store(true)
+			if callNum == 1 {
+				return marshalRPCError("reconfigure_failed", "failed after reopening db"), nil
+			}
+			recoveryStartedOnce.Do(func() { close(recoveryReconfigureStarted) })
+			<-releaseRecoveryReconfigure
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
+			}
+			return lifecycleRegistrationResult(validTestPlugin("alpha"))
+		default:
+			return nil, fmt.Errorf("unexpected old plugin method %s", method)
+		}
+	}}
+	failingReplacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		if method != pluginabi.MethodPluginRegister {
+			return nil, fmt.Errorf("unexpected failing replacement method %s", method)
+		}
+		return nil, fmt.Errorf("first replacement registration failed")
+	}}
+	workingReplacementClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		if method != pluginabi.MethodPluginRegister {
+			return nil, fmt.Errorf("unexpected working replacement method %s", method)
+		}
+		if resourceOpen.Load() {
+			overlapDetected.Store(true)
+		}
+		return lifecycleRegistrationResult(validTestPlugin("alpha"))
+	}}
+
+	loader := &sequencePluginLoader{clients: []pluginClient{oldClient, failingReplacementClient, workingReplacementClient}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+	t.Cleanup(func() {
+		releaseRecoveryOnce.Do(func() { close(releaseRecoveryReconfigure) })
+	})
+	pluginsDir, _ := makeVersionedPluginDir(t, "alpha", "1.0.0")
+
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+	writeVersionedPluginFile(t, pluginsDir, "alpha", "2.0.0")
+
+	// Attempt 1: quiesce succeeds, replacement fails, rollback reconfigure reopens resource and fails.
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	if got := quiesceCalls.Load(); got != 1 {
+		t.Fatalf("quiesce calls after first replacement = %d, want 1", got)
+	}
+	if !resourceOpen.Load() {
+		t.Fatal("expected rollback reconfigure to leave simulated resource open after partial failure")
+	}
+
+	// Attempt 2: same-path recovery reconfigure is canceled while blocked in native call.
+	recoveryCtx, cancelRecovery := context.WithCancel(context.Background())
+	recoveryDone := make(chan struct{})
+	go func() {
+		h.ApplyConfig(recoveryCtx, versionedPluginHostConfig(t, pluginsDir, "1.0.0"))
+		close(recoveryDone)
+	}()
+	waitForHostTestSignal(t, recoveryReconfigureStarted, "recovery reconfigure start")
+	cancelRecovery()
+
+	select {
+	case <-recoveryDone:
+		t.Fatal("ApplyConfig returned before canceled recovery reconfigure finished executing")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseRecoveryOnce.Do(func() { close(releaseRecoveryReconfigure) })
+	waitForHostTestSignal(t, recoveryDone, "canceled recovery ApplyConfig completion")
+
+	// Attempt 3: replacement must call quiesce again before loading workingReplacementClient.
+	h.ApplyConfig(context.Background(), versionedPluginHostConfig(t, pluginsDir, "2.0.0"))
+	if got := quiesceCalls.Load(); got != 2 {
+		t.Fatalf("quiesce calls after second replacement = %d, want 2", got)
+	}
+	if overlapDetected.Load() {
+		t.Fatal("replacement registered while old plugin still held reopened resource")
+	}
+}
+
 func TestHostCallQuiesceClassifiesErrors(t *testing.T) {
 	var out bytes.Buffer
 	originalOut := log.StandardLogger().Out
@@ -1490,8 +2568,59 @@ func TestRegisteredPluginsIncludesMetadataAndOAuthCapability(t *testing.T) {
 	if infos[0].OAuthProvider != "alpha" {
 		t.Fatalf("RegisteredPlugins()[0].OAuthProvider = %q, want alpha; infos=%#v", infos[0].OAuthProvider, infos)
 	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"alpha"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [alpha]; infos=%#v", infos[0].OAuthProviders, infos)
+	}
 	if infos[0].Metadata.Logo == "" || len(infos[0].Metadata.ConfigFields) != 1 {
 		t.Fatalf("RegisteredPlugins()[0].Metadata = %#v, want logo and config fields", infos[0].Metadata)
+	}
+}
+
+func TestRegisteredPluginsExposesMultipleOAuthProvidersViaRPC(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("zcode"),
+		reconfigureResult: validTestPlugin("zcode"),
+	}
+	authProv := fakeAuthProvider{
+		identifier:  "zcode-zai",
+		identifiers: []string{"zcode-zai", "zcode-bigmodel"},
+		startLogin: func(_ context.Context, req pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+			return pluginapi.AuthLoginStartResponse{
+				Provider: req.Provider,
+				URL:      "https://login.example/" + req.Provider,
+				State:    "state-" + req.Provider,
+			}, nil
+		},
+	}
+	plugin.registerResult.Capabilities.AuthProvider = authProv
+	plugin.reconfigureResult.Capabilities.AuthProvider = authProv
+	loader.lookups["zcode"] = newTestSymbolLookup(plugin)
+	h := NewForTest(loader)
+
+	h.ApplyConfig(context.Background(), &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "zcode"),
+			Configs: enabledPluginConfigs("zcode"),
+		},
+	})
+
+	infos := h.RegisteredPlugins()
+	if len(infos) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1; infos=%#v", len(infos), infos)
+	}
+	if !infos[0].SupportsOAuth || infos[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("RegisteredPlugins()[0] = %#v, want SupportsOAuth=true OAuthProvider=zcode-zai", infos[0])
+	}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, []string{"zcode-zai", "zcode-bigmodel"}) {
+		t.Fatalf("RegisteredPlugins()[0].OAuthProviders = %#v, want [zcode-zai zcode-bigmodel]", infos[0].OAuthProviders)
+	}
+	for _, portal := range []string{"zcode-zai", "zcode-bigmodel"} {
+		resp, handled, errStart := h.StartLogin(context.Background(), portal, "http://127.0.0.1:8317/callback")
+		if errStart != nil || !handled || resp.Provider != portal {
+			t.Fatalf("StartLogin(%q) = (%#v, %v, %v), want handled", portal, resp, handled, errStart)
+		}
 	}
 }
 
@@ -1695,6 +2824,8 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1714,10 +2845,9 @@ func TestHostCanceledInitializationDiscardsBlockedClient(t *testing.T) {
 	}
 
 	close(client.release)
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("blocked initialization client shutdown calls = %d, want 1", got)
 	}
@@ -1734,6 +2864,8 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 		registration: validTestPlugin("alpha"),
 	}
 	h := NewForTest(&blockingHostCallLoader{client: client})
+	cleanupDone := make(chan struct{})
+	h.loadCleanupDoneHook = func() { close(cleanupDone) }
 	cfg := &config.Config{Plugins: config.PluginsConfig{
 		Enabled: true,
 		Dir:     makePluginDir(t, "alpha"),
@@ -1754,10 +2886,9 @@ func TestHostCancellationUnderMutationLockDoesNotInsertLoadedPlugin(t *testing.T
 	h.mu.Unlock()
 	waitForHostTestSignal(t, applyDone, "canceled plugin apply")
 
-	deadline := time.Now().Add(time.Second)
-	for client.shutdown.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// Late cleanup shuts the client down first and drops the load token after;
+	// wait for the end of the cleanup, not for the shutdown alone.
+	waitForHostTestSignal(t, cleanupDone, "late load cleanup")
 	if got := client.shutdown.Load(); got != 1 {
 		t.Fatalf("late client shutdown calls = %d, want 1", got)
 	}
@@ -2067,6 +3198,19 @@ type cancelOnErrContext struct {
 	cancelAt int32
 	errCalls atomic.Int32
 	cancel   sync.Once
+}
+
+type errObserveContext struct {
+	context.Context
+	onCanceledErr func()
+}
+
+func (c *errObserveContext) Err() error {
+	err := c.Context.Err()
+	if err != nil && c.onCanceledErr != nil {
+		c.onCanceledErr()
+	}
+	return err
 }
 
 func (c *cancelOnErrContext) Done() <-chan struct{} {
