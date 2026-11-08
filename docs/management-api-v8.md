@@ -42,6 +42,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
+| `/config/routing/model-fallback` | Cross-model fallback chains; see [Model fallback chains](#model-fallback-chains). Invalid conditions or chains are rejected with `400`. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |
 
 For example, `PATCH /v8/management/config` with this body disables additional
@@ -63,6 +64,113 @@ The Home-owned revision fields
 `credentials.concurrency.lifecycle-config-revision`,
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
+
+### Model fallback chains
+
+`routing.model-fallback` retries a request with a different model, possibly from
+a different provider, when every credential of the requested model has failed.
+For example, `gpt-6-astra` (Codex) can fall back to `claude-opus-5-5` (Claude)
+when all Codex subscriptions are rate limited, without the client seeing the error.
+
+```yaml
+routing:
+  model-fallback:
+    enabled: true
+    max-hops: 2
+    on: [429, quota_exhausted, auth_unavailable, 529]
+    chains:
+      gpt-6-astra: [claude-opus-5-5]
+      coder: [claude-opus-5-5, gpt-6.1-terra]
+```
+
+The section is shared by the v8 and legacy layouts, so both read
+`routing.model-fallback`.
+
+#### Fields
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `enabled` | `false` | Turns model fallback on. |
+| `max-hops` | `2` | Maximum number of fallback models tried per request (at most `8`). |
+| `on` | `[429, quota_exhausted, auth_unavailable, 529]` | Failures that allow moving to the next model. |
+| `chains` | none | Requested model → ordered list of fallback models. |
+
+#### Conditions
+
+| Condition | Matches |
+| --- | --- |
+| `408`, `429`, `5xx` codes such as `529` | The final error has that HTTP status. |
+| `5xx` | Any 5xx status. |
+| `quota_exhausted` | A 429, an "all credentials are cooling down" error, or a 402 carrying a provider quota marker (`insufficient_quota`, `RESOURCE_EXHAUSTED`, `usage_limit`, `rate_limit`, `billing_hard_limit`, `quota`). |
+| `auth_unavailable` | No credential could be selected (`auth_not_found`, `auth_unavailable`, cooldown), or no provider currently serves the requested model. |
+
+Request faults such as 400, 401, 403, 404, 413, and 422 never trigger fallback,
+even when the body mentions quota. They are not accepted as conditions.
+An omitted `on` uses the defaults; `on: []` matches nothing.
+
+#### Chain matching
+
+- A chain key matches the requested model exactly (case-insensitive), then the
+  model name without its thinking suffix. A suffix such as `(high)` is carried
+  to targets that do not declare their own.
+- Chains are flat: the chain of a fallback model is not followed.
+- Duplicate targets and the requested model itself are skipped, so cycles are
+  harmless. `max-hops` caps the remaining targets.
+
+#### Behavior
+
+1. The requested model runs through the normal execution path first, including
+   the configured credential limits, retry rounds, and cooldown rules. Fallback
+   starts only after the auth manager gives up. Set `max-retry-credentials: 0`
+   to consider every credential; a nonzero cap remains authoritative.
+2. Only failures matching `on` move the request. Validation errors, interceptor
+   rejections, and plugin executor routes are final.
+3. Streaming requests can switch models only before the first byte is sent to
+   the client: on the initial `ExecuteStream` error or a bootstrap error raised
+   before the first deliverable chunk. A stream never changes model mid-response. Pre-first-token heartbeats are
+   deferred until bootstrap finishes when a fallback chain applies, since even
+   an SSE comment commits the response. The chain and conditions are pinned for
+   the lifetime of the request; reloads affect the next request.
+4. Each attempt resolves providers, plugin model routes, and request interceptors
+   for its own target model. Interceptors and lifecycle hooks see one request per
+   attempt; `requested_model` always holds the client-requested model.
+5. Usage records use the model that served the request as `model` and the
+   client-requested model as `alias`.
+6. When the whole chain fails, the requested model's error is returned, because
+   it carries its own retry timing. The exception is a requested model that never
+   reached an upstream (no credential or provider); then the fallback model's
+   upstream error is returned.
+7. Each hop is logged at info level with the source and target model, the reason,
+   and the request ID.
+8. Responses served by a fallback model include `X-CPA-Fallback-Model: <model>`.
+9. The configuration is hot reloaded with the rest of the config file.
+10. It applies to chat/completions, responses, messages, and token counting
+    endpoints. Image/speech streaming transports are excluded. It is disabled
+    while Home dispatch is enabled, because Home owns model routing, and for
+    executions that force a provider.
+
+#### Relation to shared OAuth aliases
+
+Sharing one `oauth.model-alias` across channels (for example `coder` on both
+Codex and Claude) already moves a request between providers by credential
+priority, but it switches on any credential failure and exposes one model name.
+Fallback chains use distinct models and explicit conditions, and they run only
+after the shared pool is exhausted, so both features can be combined.
+
+#### Management API
+
+The section is managed through the generic v8 configuration endpoints:
+
+```text
+GET    /v8/management/config/routing/model-fallback
+PUT    /v8/management/config/routing/model-fallback          {"enabled":true,"chains":{"gpt-6-astra":["claude-opus-5-5"]}}
+PUT    /v8/management/config/routing/model-fallback/enabled  true
+PUT    /v8/management/config/routing/model-fallback/on       [429,"quota_exhausted"]
+DELETE /v8/management/config/routing/model-fallback
+```
+
+A missing section returns `404`, which means fallback is disabled. Invalid values
+are rejected with `400` and leave the file unchanged.
 
 ### Codex multi-agent configuration migration
 

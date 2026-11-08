@@ -39,6 +39,9 @@ type SDKConfig struct {
 	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
 	CodexResponseSteering bool `yaml:"-" json:"-"`
 
+	// ModelFallback mirrors routing.model-fallback for API handlers.
+	ModelFallback ModelFallbackConfig `yaml:"-" json:"-"`
+
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
