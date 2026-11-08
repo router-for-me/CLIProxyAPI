@@ -117,6 +117,7 @@ jobs:
         shell: bash
         run: |
           python -m unittest discover -s scripts/pinable -p 'test_*runtime.py' -v
+          go test ./internal/discovery -run 'Test(MDNSQueryAddr6|ParseBrowsePacketInfo|WindowsBrowsePacketInfoLoopback)' -count=1
           go test ./cmd/server ./internal/cmd ./internal/api ./internal/api/handlers/management ./sdk/access ./sdk/cliproxy ./internal/watcher -run 'Test.*(Host|Runtime|Ephemeral|Parent|Version|SafeMode)' -count=1
       - name: Build pinned portable runtime (no catalog refresh)
         env:

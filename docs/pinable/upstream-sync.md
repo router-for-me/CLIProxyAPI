@@ -18,6 +18,17 @@ service, alongside the runtime access providers. Existing persistence, plugin
 metadata stripping, atomic reload, ephemeral key, parent supervision and
 shutdown acknowledgement regression suites remain enabled.
 
+Native validation found an upstream Windows browse regression: x/net does not
+provide control-message reception on Windows. A platform adapter now receives
+Windows packet-info through Go's WSARecvMsg support, preserving mandatory
+interface and destination validation. Native tests exercise both IPv4 and IPv6
+metadata reception. IPv6 multicast queries explicitly carry their interface
+scope, and failed query diagnostics retain every interface error. The existing
+packaged-executable smoke checks remain strict.
+
+The Home heartbeat failover test now synchronizes on subscription/readiness
+instead of assuming the reconnect jitter completes within one second.
+
 Merge this PR with a merge commit, not squash/rebase. Merging into main runs the
 existing six-platform runtime build and automatically publishes the stable
 runtime only after its validation gates pass. This synchronization branch does

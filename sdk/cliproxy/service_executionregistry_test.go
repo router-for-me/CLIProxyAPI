@@ -1434,6 +1434,10 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		scope.End("test cleanup")
+	})
 	if errBind := scope.Bind(func() error {
 		close(started)
 		<-release
@@ -1443,14 +1447,17 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 
 	close(loseFirst)
+	// Synchronize on the replacement subscription, not an assumed reconnect
+	// latency: heartbeat detection and the initial jittered retry may together
+	// exceed one second. The timer is only a deadlock watchdog, consistent
+	// with the other Home retry tests.
 	select {
 	case <-started:
 		t.Fatal("heartbeat failover started draining the blocking scope")
-	case <-time.After(50 * time.Millisecond):
-	}
-	select {
+	case <-serviceCtx.Done():
+		t.Fatal("heartbeat failover canceled the service run")
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(3 * homeSubscriberRetryInitial):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
@@ -1463,14 +1470,15 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	if nextRegistry := waitForServiceRegistry(t, service, time.Second); nextRegistry != registry {
 		t.Fatal("heartbeat failover replaced the registry containing the active scope")
 	}
+	// Reaching a ready replacement is the ordering barrier for checking
+	// that the original scope and service survived the whole failover.
 	select {
+	case <-started:
+		t.Fatal("heartbeat failover started draining the blocking scope")
 	case <-serviceCtx.Done():
 		t.Fatal("heartbeat failover canceled the service run")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
-
-	close(release)
-	scope.End("test cleanup")
 }
 
 func TestServiceShutdownDrainsDetachedRegistryDuringRetry(t *testing.T) {
