@@ -212,8 +212,8 @@ func rebaseRelativeQuotaHeaders(headers http.Header, observedAt time.Time, recei
 		if received.IsZero() || received.Equal(observedAt) {
 			continue
 		}
-		seconds, errParse := strconv.ParseFloat(strings.TrimSpace(values[len(values)-1]), 64)
-		if errParse != nil {
+		seconds, ok := parseResetAfterSeconds(values[len(values)-1])
+		if !ok {
 			continue
 		}
 		remaining := math.Max(0, seconds-observedAt.Sub(received).Seconds())

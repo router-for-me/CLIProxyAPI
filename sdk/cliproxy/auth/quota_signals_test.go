@@ -740,6 +740,18 @@ func TestRebaseRelativeQuotaHeaders(t *testing.T) {
 	}
 }
 
+func TestRebaseRelativeQuotaHeadersLeavesInvalidValuesAlone(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000600, 0)
+	headers := http.Header{"X-Codex-Secondary-Reset-After-Seconds": []string{"-5"}}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(string) time.Time { return observedAt.Add(-time.Minute) })
+	if v := got.Get("X-Codex-Secondary-Reset-After-Seconds"); v != "-5" {
+		t.Fatalf("reset-after = %q, want -5 (0 would read as a valid reset)", v)
+	}
+}
+
 func TestRebaseRelativeQuotaHeadersMovesLaterReceiptsForward(t *testing.T) {
 	t.Parallel()
 
