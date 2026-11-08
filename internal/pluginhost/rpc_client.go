@@ -164,6 +164,7 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
 		plugin.Capabilities.SchedulerAcrossPriorities = resp.Capabilities.SchedulerAcrossPriorities
+		plugin.Capabilities.SchedulerQuotaSignals = resp.Capabilities.SchedulerQuotaSignals
 	}
 	if resp.Capabilities.ModelRouter {
 		plugin.Capabilities.ModelRouter = adapter

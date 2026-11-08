@@ -54,6 +54,16 @@ func pluginSchedulerWantsAcrossPriorities(scheduler PluginScheduler) bool {
 	return false
 }
 
+func pluginSchedulerWantsQuotaSignals(scheduler PluginScheduler) bool {
+	if scheduler == nil {
+		return false
+	}
+	if opt, ok := scheduler.(PluginSchedulerQuotaSignals); ok && opt != nil {
+		return opt.SchedulerWantsQuotaSignals()
+	}
+	return false
+}
+
 func (m *Manager) snapshotPluginScheduler() (PluginScheduler, bool) {
 	if m == nil {
 		return nil, false
@@ -885,7 +895,7 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 	return out
 }
 
-func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+func schedulerAuthCandidates(auths []*Auth, includeQuota bool) []pluginapi.SchedulerAuthCandidate {
 	if len(auths) == 0 {
 		return nil
 	}
@@ -900,9 +910,22 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 			Priority:   authPriority(auth),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
+			Quota:      schedulerQuotaSnapshot(auth, includeQuota),
 		})
 	}
 	return out
+}
+
+// schedulerQuotaSnapshot copies the auth's passive credential-level quota observation for
+// schedulers that opted in. It returns nil when nothing has been observed.
+func schedulerQuotaSnapshot(auth *Auth, include bool) *pluginapi.SchedulerQuotaSnapshot {
+	if !include || auth == nil || len(auth.Quota.Signals) == 0 {
+		return nil
+	}
+	return &pluginapi.SchedulerQuotaSnapshot{
+		ObservedAt: auth.Quota.ObservedAt,
+		Signals:    maps.Clone(auth.Quota.Signals),
+	}
 }
 
 func schedulerProviders(provider string, providers []string) []string {
@@ -1021,7 +1044,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: schedulerAuthCandidates(candidates, pluginSchedulerWantsQuotaSignals(scheduler)),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {

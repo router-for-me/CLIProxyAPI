@@ -99,6 +99,9 @@ type Capabilities struct {
 	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
 	// credentials from the highest available priority tier.
 	SchedulerAcrossPriorities bool
+	// SchedulerQuotaSignals opts into receiving each candidate's passive quota snapshot in
+	// SchedulerAuthCandidate.Quota. When false (default), Quota is always nil.
+	SchedulerQuotaSignals bool
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
@@ -617,6 +620,24 @@ type SchedulerAuthCandidate struct {
 	Attributes map[string]string
 	// Metadata contains mutable host-managed auth metadata.
 	Metadata map[string]any
+	// Quota is the auth's most recent passive quota snapshot. It is populated only for
+	// schedulers that set Capabilities.SchedulerQuotaSignals, and only when the host has
+	// observed quota signals for the auth; otherwise it is nil.
+	Quota *SchedulerQuotaSnapshot
+}
+
+// SchedulerQuotaSnapshot is the passive quota observation the host keeps for an auth.
+//
+// Signals are the provider's quota headers from a single upstream response, keyed by
+// canonical header name: for example X-Codex-Primary-Used-Percent and
+// X-Codex-Secondary-Reset-At for Codex, or Anthropic-Ratelimit-Unified-7d-Utilization
+// and Anthropic-Ratelimit-Unified-7d-Reset for Claude. The host neither interprets nor
+// routes on these values; they are provided so a scheduler plugin can.
+type SchedulerQuotaSnapshot struct {
+	// ObservedAt is when the upstream response carrying Signals was observed.
+	ObservedAt time.Time
+	// Signals holds the observed quota headers. Callers must not modify it.
+	Signals map[string]string
 }
 
 // SchedulerPickResponse returns a scheduler plugin routing decision.
