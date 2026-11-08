@@ -163,6 +163,12 @@ func dispatch(method string, raw []byte) (any, error) {
 			_ = d.Set(key, value)
 		}
 		return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{Provider: provider, ID: id, Metadata: m, StorageJSON: d.Bytes()}}, nil
+	case "executor.http_request":
+		payload, err := callUpstream(metadata(raw, "Metadata."), "/direct", nil)
+		if err != nil {
+			return nil, err
+		}
+		return pluginapi.ExecutorHTTPResponse{StatusCode: 200, Body: payload}, nil
 	case "executor.execute", "executor.execute_stream", "executor.count_tokens":
 		m := metadata(raw, "AuthMetadata.")
 		path := "/chat"
