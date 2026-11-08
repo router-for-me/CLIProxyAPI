@@ -1066,6 +1066,41 @@ func TestConvertGeminiResponseToOpenAIResponses_DoneFinalizesStartedStreamExactl
 	}
 }
 
+func TestConvertGeminiResponseToOpenAIResponses_EmitsRawThoughtDeltasForCodexUI(t *testing.T) {
+	var param any
+	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"first thought","thought":true},{"text":"second thought","thought":true}]}}],"responseId":"raw-thought"}}`), &param)
+	out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", nil, nil, []byte("[DONE]"), &param)...)
+
+	var summary []string
+	var raw []string
+	rawDoneCount := 0
+	contentIndexes := make(map[int64]int)
+	for _, chunk := range out {
+		event, data := parseSSEEvent(t, chunk)
+		switch event {
+		case "response.reasoning_summary_text.delta":
+			summary = append(summary, data.Get("delta").String())
+		case "response.reasoning_text.delta":
+			raw = append(raw, data.Get("delta").String())
+			contentIndexes[data.Get("content_index").Int()]++
+		case "response.reasoning_text.done":
+			rawDoneCount++
+		}
+	}
+	if got, want := strings.Join(summary, ""), "first thoughtsecond thought"; got != want {
+		t.Fatalf("summary deltas = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(raw, ""), "first thoughtsecond thought"; got != want {
+		t.Fatalf("raw thought deltas = %q, want %q", got, want)
+	}
+	if len(contentIndexes) != 1 || contentIndexes[0] != 2 {
+		t.Fatalf("raw thought content indexes = %v, want content_index 0 twice", contentIndexes)
+	}
+	if rawDoneCount != 1 {
+		t.Fatalf("raw thought done count = %d, want 1", rawDoneCount)
+	}
+}
+
 func TestConvertGeminiResponseToOpenAIResponses_FinishReasonThenDoneDoesNotDuplicateCompletion(t *testing.T) {
 	var param any
 	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`), &param)

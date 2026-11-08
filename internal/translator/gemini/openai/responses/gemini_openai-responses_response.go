@@ -519,6 +519,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			_ = msgDoc.Set("output_index", st.ReasoningIndex)
 			_ = msgDoc.Set("delta", delta)
 			out = append(out, emitEvent("response.reasoning_summary_text.delta", msgDoc.Bytes()))
+			rawDoc := ojson.NewDocString(`{"type":"response.reasoning_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":""}`)
+			_ = rawDoc.Set("sequence_number", nextSeq())
+			_ = rawDoc.Set("item_id", st.ReasoningItemID)
+			_ = rawDoc.Set("output_index", st.ReasoningIndex)
+			_ = rawDoc.Set("delta", delta)
+			out = append(out, emitEvent("response.reasoning_text.delta", rawDoc.Bytes()))
 		}
 		st.ReasoningPendingDeltas = nil
 	}
@@ -532,6 +538,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 			return
 		}
 		full := st.ReasoningBuf.String()
+		rawDoneDoc := ojson.NewDocString(`{"type":"response.reasoning_text.done","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"text":""}`)
+		_ = rawDoneDoc.Set("sequence_number", nextSeq())
+		_ = rawDoneDoc.Set("item_id", st.ReasoningItemID)
+		_ = rawDoneDoc.Set("output_index", st.ReasoningIndex)
+		_ = rawDoneDoc.Set("text", full)
+		out = append(out, emitEvent("response.reasoning_text.done", rawDoneDoc.Bytes()))
 		textDoneDoc := ojson.NewDocString(`{"type":"response.reasoning_summary_text.done","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"text":""}`)
 		_ = textDoneDoc.Set("sequence_number", nextSeq())
 		_ = textDoneDoc.Set("item_id", st.ReasoningItemID)
@@ -552,6 +564,9 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		_ = itemDoneDoc.Set("output_index", st.ReasoningIndex)
 		_ = itemDoneDoc.Set("item.encrypted_content", reasoningEncryptedContent())
 		_ = itemDoneDoc.Set("item.summary.0.text", full)
+		rawContentJSON := ojson.NewDocString(`{"type":"reasoning_text","text":""}`)
+		_ = rawContentJSON.Set("text", full)
+		_ = itemDoneDoc.SetRawBytes("item.content", translatorcommon.JoinRawArray([][]byte{rawContentJSON.Bytes()}))
 		out = append(out, emitEvent("response.output_item.done", itemDoneDoc.Bytes()))
 
 		st.CompletedReasoning[st.ReasoningIndex] = geminiCompletedReasoningItem{
@@ -1111,6 +1126,12 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 						_ = msgDoc.Set("output_index", st.ReasoningIndex)
 						_ = msgDoc.Set("delta", t.String())
 						out = append(out, emitEvent("response.reasoning_summary_text.delta", msgDoc.Bytes()))
+						rawDoc := ojson.NewDocString(`{"type":"response.reasoning_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":""}`)
+						_ = rawDoc.Set("sequence_number", nextSeq())
+						_ = rawDoc.Set("item_id", st.ReasoningItemID)
+						_ = rawDoc.Set("output_index", st.ReasoningIndex)
+						_ = rawDoc.Set("delta", t.String())
+						out = append(out, emitEvent("response.reasoning_text.delta", rawDoc.Bytes()))
 					} else {
 						st.ReasoningPendingDeltas = append(st.ReasoningPendingDeltas, strings.Clone(t.String()))
 					}
@@ -2314,6 +2335,9 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				summaryJSON := []byte(`{"type":"summary_text","text":""}`)
 				summaryJSON, _ = ojson.SetBytes(summaryJSON, "text", reasoningOutput.text)
 				_ = itemDoc.SetRawBytes("summary", translatorcommon.JoinRawArray([][]byte{summaryJSON}))
+				rawContentJSON := ojson.NewDocString(`{"type":"reasoning_text","text":""}`)
+				_ = rawContentJSON.Set("text", reasoningOutput.text)
+				_ = itemDoc.SetRawBytes("content", translatorcommon.JoinRawArray([][]byte{rawContentJSON.Bytes()}))
 			}
 			appendOutput(itemDoc.Bytes())
 		case "message":
