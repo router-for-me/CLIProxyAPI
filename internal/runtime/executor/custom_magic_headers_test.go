@@ -75,6 +75,135 @@ func TestCustomMagicHeaders_OpenAICompat(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutor_UserAgentPassthroughAndDefault(t *testing.T) {
+	var gotUserAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserAgent = r.Header.Get("User-Agent")
+		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{Name: "compat"}},
+	})
+	baseAuth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url": server.URL,
+			"api_key":  "test-key",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-4o",
+		Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+	}
+
+	t.Run("Execute defaults to cli-proxy-openai-compat when downstream User-Agent is absent", func(t *testing.T) {
+		gotUserAgent = ""
+		_, err := executor.Execute(context.Background(), baseAuth, req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAI,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if gotUserAgent != "cli-proxy-openai-compat" {
+			t.Fatalf("User-Agent = %q, want cli-proxy-openai-compat", gotUserAgent)
+		}
+	})
+
+	t.Run("Execute forwards downstream User-Agent when present", func(t *testing.T) {
+		gotUserAgent = ""
+		_, err := executor.Execute(context.Background(), baseAuth, req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAI,
+			Headers:      http.Header{"User-Agent": []string{"downstream-compat-client/1.0"}},
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if gotUserAgent != "downstream-compat-client/1.0" {
+			t.Fatalf("User-Agent = %q, want downstream-compat-client/1.0", gotUserAgent)
+		}
+	})
+
+	t.Run("ExecuteStream forwards downstream User-Agent when present", func(t *testing.T) {
+		gotUserAgent = ""
+		streamRes, err := executor.ExecuteStream(context.Background(), baseAuth, req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAI,
+			Stream:       true,
+			Headers:      http.Header{"User-Agent": []string{"downstream-stream-client/1.0"}},
+		})
+		if err != nil {
+			t.Fatalf("ExecuteStream() error = %v", err)
+		}
+		for range streamRes.Chunks {
+		}
+		if gotUserAgent != "downstream-stream-client/1.0" {
+			t.Fatalf("User-Agent = %q, want downstream-stream-client/1.0", gotUserAgent)
+		}
+	})
+
+	t.Run("Execute images and ExecuteStream images forward downstream User-Agent", func(t *testing.T) {
+		imageReq := cliproxyexecutor.Request{
+			Model:   "gpt-image-1",
+			Payload: []byte(`{"model":"gpt-image-1","prompt":"draw a cat"}`),
+		}
+		gotUserAgent = ""
+		_, err := executor.Execute(context.Background(), baseAuth, imageReq, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString(openAICompatImageHandlerType),
+			Headers:      http.Header{"User-Agent": []string{"downstream-image-client/1.0"}},
+		})
+		if err != nil {
+			t.Fatalf("Execute(images) error = %v", err)
+		}
+		if gotUserAgent != "downstream-image-client/1.0" {
+			t.Fatalf("Execute(images) User-Agent = %q, want downstream-image-client/1.0", gotUserAgent)
+		}
+
+		gotUserAgent = ""
+		streamRes, err := executor.ExecuteStream(context.Background(), baseAuth, imageReq, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FromString(openAICompatImageHandlerType),
+			Stream:       true,
+			Headers:      http.Header{"User-Agent": []string{"downstream-image-stream-client/1.0"}},
+		})
+		if err != nil {
+			t.Fatalf("ExecuteStream(images) error = %v", err)
+		}
+		for range streamRes.Chunks {
+		}
+		if gotUserAgent != "downstream-image-stream-client/1.0" {
+			t.Fatalf("ExecuteStream(images) User-Agent = %q, want downstream-image-stream-client/1.0", gotUserAgent)
+		}
+	})
+
+	t.Run("configured header:User-Agent overrides downstream User-Agent", func(t *testing.T) {
+		gotUserAgent = ""
+		overrideAuth := &cliproxyauth.Auth{
+			Provider: "openai-compatibility",
+			Attributes: map[string]string{
+				"base_url":          server.URL,
+				"api_key":           "test-key",
+				"header:User-Agent": "configured-compat-ua/3.0",
+			},
+		}
+		_, err := executor.Execute(context.Background(), overrideAuth, req, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAI,
+			Headers:      http.Header{"User-Agent": []string{"downstream-compat-client/1.0"}},
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if gotUserAgent != "configured-compat-ua/3.0" {
+			t.Fatalf("User-Agent = %q, want configured-compat-ua/3.0", gotUserAgent)
+		}
+	})
+}
+
 func TestCustomMagicHeaders_Gemini(t *testing.T) {
 	var gotHeaders http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

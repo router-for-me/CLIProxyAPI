@@ -5,17 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func BenchmarkConvertClaudeRequestToCodexLargeHistory(b *testing.B) {
 	for _, turns := range []int{16, 64} {
 		b.Run(strconv.Itoa(turns)+"_turns", func(b *testing.B) {
 			request := largeClaudeRequest(turns, 32, 8*1024)
-			if !gjson.ValidBytes(request) {
+			if !ojson.ValidBytes(request) {
 				b.Fatal("benchmark generated an invalid Claude request")
 			}
-			if result, _ := ConvertClaudeRequestToCodex("gpt-5.4", request, false); !gjson.ValidBytes(result) {
+			if result, _ := ConvertClaudeRequestToCodex("gpt-5.4", request, false); !ojson.ValidBytes(result) {
 				b.Fatal("translator generated invalid Codex JSON")
 			}
 			b.ReportAllocs()
@@ -27,6 +27,41 @@ func BenchmarkConvertClaudeRequestToCodexLargeHistory(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkConvertClaudeRequestToCodexUnmappedModel(b *testing.B) {
+	for _, turns := range []int{100, 200, 400} {
+		body := unmappedModelThinkingHistory(turns)
+		b.Run(strconv.Itoa(turns)+"_turns", func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(body)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = ConvertClaudeRequestToCodex("my-deployment", body, false)
+			}
+		})
+	}
+}
+
+func unmappedModelThinkingHistory(turns int) []byte {
+	padding := strings.Repeat("x", 512)
+	var request strings.Builder
+	request.Grow(turns * 1024)
+	request.WriteString(`{"messages":[`)
+	for i := 0; i < turns; i++ {
+		if i > 0 {
+			request.WriteByte(',')
+		}
+		request.WriteString(`{"role":"user","content":"`)
+		request.WriteString(padding)
+		request.WriteString(`"},{"role":"assistant","content":[{"type":"thinking","thinking":"`)
+		request.WriteString(padding)
+		request.WriteString(`","signature":"x"},{"type":"text","text":"`)
+		request.WriteString(padding)
+		request.WriteString(`"}]}`)
+	}
+	request.WriteString(`],"model":"my-deployment"}`)
+	return []byte(request.String())
 }
 
 func largeClaudeRequest(turns, toolCount, payloadSize int) []byte {

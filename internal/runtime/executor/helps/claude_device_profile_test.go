@@ -191,6 +191,35 @@ func TestApplyClaudeLegacyDeviceHeadersAcceptsConfiguredMeasuredBaseline(t *test
 	}
 }
 
+func TestApplyClaudeLegacyDeviceHeadersKeepNewerVersionsUsesConfiguredBaseline(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+		UserAgent:      "claude-cli/2.2.0 (external, cli)",
+		PackageVersion: "0.95.0",
+		RuntimeVersion: "v26.4.0",
+		OS:             "MacOS",
+		Arch:           "arm64",
+	}}
+	incoming := claudeDeviceHeaders("claude-cli/2.2.5 (external, cli)")
+	incoming.Set("X-Stainless-Package-Version", "0.128.0")
+	incoming.Set("X-Stainless-Runtime-Version", "v26.5.0")
+
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, cfg, true, true)
+
+	if got := request.Header.Get("User-Agent"); got != "claude-cli/2.2.5 (external, cli)" {
+		t.Fatalf("User-Agent = %q, want claude-cli/2.2.5 (external, cli)", got)
+	}
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != "0.128.0" {
+		t.Fatalf("X-Stainless-Package-Version = %q, want 0.128.0", got)
+	}
+	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != "v26.5.0" {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want v26.5.0", got)
+	}
+}
+
 func TestResolveClaudeDeviceProfileRequiredHomeReadWithoutCandidate(t *testing.T) {
 	client := newFakeClaudeDeviceProfileKVClient()
 	auth := &cliproxyauth.Auth{ID: "auth-1"}
@@ -372,11 +401,52 @@ func TestResolveClaudeDeviceProfileSeparatesVSCodeAgentSDKFromCLI(t *testing.T) 
 		t.Fatalf("ResolveClaudeDeviceProfileRequired() VSCode error = %v", errVSCode)
 	}
 
+	sdkTSUA := "claude-cli/2.1.280 (external, sdk-ts, agent-sdk/0.3.220)"
+	sdkTSHeaders := claudeDeviceHeaders(sdkTSUA)
+	sdkTSHeaders.Set("X-Stainless-Package-Version", "0.112.1")
+	sdkTSHeaders.Set("X-Stainless-Runtime-Version", "v26.3.0")
+	sdkTSProfile, errSDKTS := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", sdkTSHeaders, nil)
+	if errSDKTS != nil {
+		t.Fatalf("ResolveClaudeDeviceProfileRequired() sdk-ts error = %v", errSDKTS)
+	}
+
+	cfg := &config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			NativeEntrypoints: []string{"t3-code", "custom-ide"},
+		},
+	}
+	t3CodeUA := "claude-cli/2.1.280 (external, t3-code, agent-sdk/0.3.276)"
+	t3CodeHeaders := claudeDeviceHeaders(t3CodeUA)
+	t3CodeHeaders.Set("X-Stainless-Package-Version", "0.112.1")
+	t3CodeHeaders.Set("X-Stainless-Runtime-Version", "v26.3.0")
+	t3CodeProfile, errT3Code := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", t3CodeHeaders, cfg)
+	if errT3Code != nil {
+		t.Fatalf("ResolveClaudeDeviceProfileRequired() t3-code error = %v", errT3Code)
+	}
+
+	customIDEUA := "claude-cli/2.1.280 (external, custom-ide, agent-sdk/0.3.276)"
+	customIDEHeaders := claudeDeviceHeaders(customIDEUA)
+	customIDEHeaders.Set("X-Stainless-Package-Version", "0.112.1")
+	customIDEHeaders.Set("X-Stainless-Runtime-Version", "v26.3.0")
+	customIDEProfile, errCustomIDE := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", customIDEHeaders, cfg)
+	if errCustomIDE != nil {
+		t.Fatalf("ResolveClaudeDeviceProfileRequired() custom-ide error = %v", errCustomIDE)
+	}
+
 	if cliProfile.UserAgent != "claude-cli/2.1.280 (external, cli)" {
 		t.Fatalf("CLI UserAgent = %q, want CLI profile", cliProfile.UserAgent)
 	}
 	if vscodeProfile.UserAgent != vscodeUA {
 		t.Fatalf("VSCode UserAgent = %q, want %q", vscodeProfile.UserAgent, vscodeUA)
+	}
+	if sdkTSProfile.UserAgent != sdkTSUA {
+		t.Fatalf("sdk-ts UserAgent = %q, want %q", sdkTSProfile.UserAgent, sdkTSUA)
+	}
+	if t3CodeProfile.UserAgent != t3CodeUA {
+		t.Fatalf("t3-code UserAgent = %q, want %q", t3CodeProfile.UserAgent, t3CodeUA)
+	}
+	if customIDEProfile.UserAgent != customIDEUA {
+		t.Fatalf("custom-ide UserAgent = %q, want %q", customIDEProfile.UserAgent, customIDEUA)
 	}
 
 	cliProfileAgain, errCLIAgain := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "api-key", cliHeaders, nil)

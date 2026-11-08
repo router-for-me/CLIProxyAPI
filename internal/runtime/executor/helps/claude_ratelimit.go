@@ -2,6 +2,7 @@ package helps
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/json"
 	"math"
 	"math/big"
 	"net/http"
@@ -75,11 +76,16 @@ func isOverageOrFableOnlyRejection(headers http.Header, unifiedStatus, status5h,
 	}
 
 	// When Anthropic evaluates an overage-only or 7d_oi claim, it often omits
-	// the 5h status header while 5h utilization is 0.00 (or vice versa).
-	// Require an explicit, valid non-negative utilization below 1.0 before
-	// treating the unmentioned window as healthy.
+	// the 5h status header (and omits 5h utilization entirely when the 5h window
+	// has no usage or does not exist on the account tier). Treat an omitted 5h
+	// utilization on a rejected response, or an explicit healthy 5h utilization
+	// below 1.0, as unexhausted when 7d is allowed.
 	if shared7dAllowed && status5h == "" {
 		if isClaudeUtilizationHealthy(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization")) {
+			return true
+		}
+		if unifiedStatus == "rejected" &&
+			!hasHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-5h-Utilization") {
 			return true
 		}
 	}
@@ -116,6 +122,106 @@ func isClaudeUtilizationHealthy(raw string) bool {
 		return false
 	}
 	return u >= 0 && u < 1.0
+}
+
+// claudeQuotaStatusHeaders are the Anthropic headers whose non-empty value, under any
+// casing or in any repeated entry, declares a quota window. An overage status declares
+// its own window, which keeps the conservative parser in charge.
+var claudeQuotaStatusHeaders = []string{
+	"Anthropic-Ratelimit-Unified-Status",
+	"Anthropic-Ratelimit-Unified-5h-Status",
+	"Anthropic-Ratelimit-Unified-7d-Status",
+	"Anthropic-Ratelimit-Unified-7d_oi-Status",
+	"Anthropic-Ratelimit-Unified-Overage-Status",
+}
+
+// ParseClaudeRateLimitResetForError is ParseClaudeRateLimitReset with one narrow,
+// body-aware exception. An explicit per-minute rate-limit error carries no quota
+// window, so an unclassified unified reset must not stretch its short Retry-After
+// into an hours-long cooldown. The exception applies only when the body is exactly
+// one complete per-minute message, no status header declares a quota window, and
+// Retry-After is a single unambiguous value usable by the downstream deadline
+// filter. Every other input keeps the conservative header-only result.
+func ParseClaudeRateLimitResetForError(headers http.Header, body []byte, now time.Time) *time.Duration {
+	if headers == nil || !claudeBodyIsExplicitPerMinuteRateLimit(body) || claudeHeadersHaveQuotaStatus(headers) {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	rawRetryAfter, ok := singleHeaderValueCaseInsensitive(headers, "Retry-After")
+	if !ok {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	retryAt, okRetry := parseRetryAfterHeader(rawRetryAfter, now)
+	if !okRetry || !retryAt.After(now) || retryAt.Sub(now) > maxClaudeRateLimitWindow {
+		return ParseClaudeRateLimitReset(headers, now)
+	}
+	// Only the unclassified unified reset can stretch the cooldown here: every
+	// window-specific reset is consulted solely when its window is rejected.
+	rateHeaders := headers.Clone()
+	for name := range rateHeaders {
+		if strings.EqualFold(name, "Anthropic-Ratelimit-Unified-Reset") {
+			delete(rateHeaders, name)
+		}
+	}
+	return ParseClaudeRateLimitReset(rateHeaders, now)
+}
+
+// claudeBodyIsExplicitPerMinuteRateLimit reports whether body is exactly one of the
+// complete per-minute rate-limit messages, ignoring case and surrounding whitespace.
+// Substring matching is unsafe here: a per-minute mention can also be negated or
+// accompany genuine quota exhaustion.
+func claudeBodyIsExplicitPerMinuteRateLimit(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(body, &envelope); errUnmarshal != nil || envelope.Error.Type != "rate_limit_error" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.Error.Message)) {
+	case "this request would exceed the requests per minute rate limit. please try again later.",
+		"this request would exceed the input tokens per minute rate limit. please try again later.",
+		"this request would exceed the output tokens per minute rate limit. please try again later.":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudeHeadersHaveQuotaStatus(headers http.Header) bool {
+	for _, name := range claudeQuotaStatusHeaders {
+		for key, values := range headers {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			for _, value := range values {
+				if strings.TrimSpace(value) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// singleHeaderValueCaseInsensitive returns the sole value of target. A repeated value
+// or a differently cased alias key is ambiguous even when the values agree, because a
+// canonical lookup could then consume a different value than the one validated.
+func singleHeaderValueCaseInsensitive(headers http.Header, target string) (string, bool) {
+	value := ""
+	found := false
+	for key, values := range headers {
+		if !strings.EqualFold(key, target) {
+			continue
+		}
+		if found || len(values) != 1 {
+			return "", false
+		}
+		found = true
+		value = values[0]
+	}
+	return value, found
 }
 
 // ParseClaudeRateLimitReset inspects Anthropic response headers for shared and Fable-specific
@@ -309,6 +415,18 @@ func getHeaderCaseInsensitive(h http.Header, target string) string {
 		}
 	}
 	return ""
+}
+
+func hasHeaderCaseInsensitive(h http.Header, target string) bool {
+	if h == nil {
+		return false
+	}
+	for k, v := range h {
+		if strings.EqualFold(k, target) && len(v) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func parseUnixOrTimestamp(raw string) (time.Time, bool) {

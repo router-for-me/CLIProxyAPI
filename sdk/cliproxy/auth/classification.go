@@ -125,6 +125,9 @@ func authHasOAuthMetadata(auth *Auth) bool {
 	if siwc, ok := auth.Metadata["siwc"].(map[string]any); ok && len(siwc) > 0 {
 		return true
 	}
+	if sa, ok := auth.Metadata["service_account"].(map[string]any); ok && len(sa) > 0 {
+		return true
+	}
 	return false
 }
 

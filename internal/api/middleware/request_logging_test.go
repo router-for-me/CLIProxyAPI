@@ -3,11 +3,15 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -111,14 +115,14 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:          "small known size json in error-only mode",
+			name:          "small known size json skipped for eager capture in error-only mode",
 			loggerEnabled: false,
 			req: &http.Request{
 				Body:          io.NopCloser(strings.NewReader("{}")),
 				ContentLength: 2,
 				Header:        http.Header{"Content-Type": []string{"application/json"}},
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name:          "large known size skipped in error-only mode",
@@ -538,6 +542,63 @@ func TestRequestLoggingMiddleware_ClientCancellationExclusion(t *testing.T) {
 		}
 	})
 
+	t.Run("mid-stream 400 API_RESPONSE_ERROR writes error log with Status 400 in both modes", func(t *testing.T) {
+		for _, requestLogEnabled := range []bool{false, true} {
+			logsDir := t.TempDir()
+			logger := logging.NewFileRequestLogger(requestLogEnabled, logsDir, "", 10)
+			cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: requestLogEnabled}}
+
+			router := gin.New()
+			router.Use(RequestLoggingMiddleware(logger))
+			router.POST("/v1beta/models/gemini-4-argon-high:streamGenerateContent", func(c *gin.Context) {
+				c.Header("Content-Type", "text/event-stream")
+				executorCtx := context.WithValue(context.Background(), "gin", c)
+				helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+					URL:    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+					Method: http.MethodPost,
+					Body:   []byte(`{"model":"gemini-4-argon-high"}`),
+				})
+				c.Writer.WriteHeader(http.StatusOK)
+				_, _ = c.Writer.Write([]byte("data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"thinking\"}]}}]}\n\n"))
+				c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+					{
+						StatusCode: http.StatusBadRequest,
+						Error:      errors.New("This request was blocked by Gemini's filters. You can read more about our policies here (https://policies.google.com/terms/generative-ai/use-policy)."),
+					},
+				})
+			})
+
+			req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon-high:streamGenerateContent?alt=sse", strings.NewReader(`{"contents":[]}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			router.ServeHTTP(resp, req)
+
+			entries, errRead := os.ReadDir(logsDir)
+			if errRead != nil {
+				t.Fatalf("read logs dir: %v", errRead)
+			}
+			var errorLogPath string
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+					errorLogPath = filepath.Join(logsDir, entry.Name())
+				}
+			}
+			if errorLogPath == "" {
+				t.Fatalf("requestLog=%v: expected error-*.log file, got entries=%v", requestLogEnabled, entries)
+			}
+			content, errReadFile := os.ReadFile(errorLogPath)
+			if errReadFile != nil {
+				t.Fatalf("read error log: %v", errReadFile)
+			}
+			if !bytes.Contains(content, []byte("=== API ERROR RESPONSE ===\nHTTP Status: 400")) {
+				t.Fatalf("requestLog=%v: missing API ERROR RESPONSE 400 in log:\n%s", requestLogEnabled, string(content))
+			}
+			if !bytes.Contains(content, []byte("=== RESPONSE ===\nStatus: 400\n")) {
+				t.Fatalf("requestLog=%v: expected RESPONSE Status: 400 in log:\n%s", requestLogEnabled, string(content))
+			}
+		}
+	})
+
 	t.Run("499 status logs standard request when request-log is true", func(t *testing.T) {
 		logsDir := t.TempDir()
 		logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
@@ -601,6 +662,7 @@ func TestManagementV8RequestsAreNotLogged(t *testing.T) {
 type spyRequestLogger struct {
 	lastLogRequestID       string
 	lastStreamingRequestID string
+	lastStreamWriter       *testStreamingLogWriter
 	underlying             logging.RequestLogger
 }
 
@@ -617,7 +679,9 @@ func (s *spyRequestLogger) LogStreamingRequest(url, method string, headers map[s
 	if s.underlying != nil {
 		return s.underlying.LogStreamingRequest(url, method, headers, body, requestID)
 	}
-	return &testStreamingLogWriter{}, nil
+	w := &testStreamingLogWriter{}
+	s.lastStreamWriter = w
+	return w, nil
 }
 
 func (s *spyRequestLogger) IsEnabled() bool {
@@ -712,5 +776,222 @@ func TestRequestLoggingMiddleware_StreamingPreservesFullUUIDForLogger(t *testing
 	}
 	if parsed.Version() != 7 {
 		t.Fatalf("streaming request ID version = %d, want 7", parsed.Version())
+	}
+}
+
+func TestRequestLoggingMiddleware_FinalizesStreamingWriterOnHandlerPanic(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	spy := &spyRequestLogger{}
+
+	router := gin.New()
+	router.Use(logging.GinLogrusRecovery())
+	router.Use(RequestLoggingMiddleware(spy))
+	router.POST("/v1/responses", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Writer.WriteHeader(http.StatusOK)
+		_, _ = c.Writer.Write([]byte("data: chunk\n\n"))
+		panic("handler boom")
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if spy.lastStreamWriter == nil {
+		t.Fatal("expected streaming log writer to be created before panic")
+	}
+	if !spy.lastStreamWriter.closed {
+		t.Fatal("expected streaming log writer to be closed when handler panics")
+	}
+
+	// Verify that a non-streaming handler panicking before writing a status is
+	// finalized as 500 so error-only request logging persists the error log.
+	logsDir := t.TempDir()
+	errorOnlyLogger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+	errorRouter := gin.New()
+	errorRouter.Use(logging.GinLogrusRecovery())
+	errorRouter.Use(RequestLoggingMiddleware(errorOnlyLogger))
+	errorRouter.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.Status(http.StatusOK)
+		panic("pre-status boom")
+	})
+	reqPreStatus := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+	reqPreStatus.Header.Set("Content-Type", "application/json")
+	respPreStatus := httptest.NewRecorder()
+	errorRouter.ServeHTTP(respPreStatus, reqPreStatus)
+	if respPreStatus.Code != http.StatusInternalServerError {
+		t.Fatalf("panic status = %d, want 500", respPreStatus.Code)
+	}
+	entries, errRead := os.ReadDir(logsDir)
+	if errRead != nil {
+		t.Fatalf("ReadDir logsDir: %v", errRead)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "error-") {
+		t.Fatalf("expected 1 error log file on pre-status panic, got %+v", entries)
+	}
+
+	// http.ErrAbortHandler must not stamp a synthetic 500 error log in error-only mode.
+	abortLogsDir := t.TempDir()
+	abortLogger := logging.NewFileRequestLogger(false, abortLogsDir, "", 10)
+	abortRouter := gin.New()
+	abortRouter.Use(RequestLoggingMiddleware(abortLogger))
+	abortRouter.POST("/v1/chat/completions", func(c *gin.Context) {
+		panic(http.ErrAbortHandler)
+	})
+	func() {
+		defer func() { _ = recover() }()
+		reqAbort := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4"}`))
+		reqAbort.Header.Set("Content-Type", "application/json")
+		abortRouter.ServeHTTP(httptest.NewRecorder(), reqAbort)
+	}()
+	abortEntries, errReadAbort := os.ReadDir(abortLogsDir)
+	if errReadAbort != nil {
+		t.Fatalf("ReadDir abortLogsDir: %v", errReadAbort)
+	}
+	if len(abortEntries) != 0 {
+		t.Fatalf("expected no error log for http.ErrAbortHandler, got %+v", abortEntries)
+	}
+}
+
+// streamingZstdBomb is a small zstd body (a stream frame with a 1 MiB window, as zstd makes from a pipe) that expands to
+// size bytes of zeros.
+func streamingZstdBomb(t *testing.T, size int) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	encoder, errNewWriter := zstd.NewWriter(&out, zstd.WithEncoderLevel(zstd.SpeedBestCompression), zstd.WithWindowSize(1<<20))
+	if errNewWriter != nil {
+		t.Fatal(errNewWriter)
+	}
+	chunk := make([]byte, 1<<20)
+	for written := 0; written < size; written += len(chunk) {
+		if _, errWrite := encoder.Write(chunk); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	return out.Bytes()
+}
+
+func captureOf(t *testing.T, body []byte, limit int64) (captured, restored []byte) {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Encoding", "zstd")
+	if limit != 0 {
+		c.Set("maxRequestBodyBytes", limit)
+	}
+	info, errCapture := captureRequestInfo(c, true)
+	if errCapture != nil {
+		t.Fatal(errCapture)
+	}
+	restored, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	return info.Body, restored
+}
+
+// A small zstd body that expands past the capture bound is decoded to at most the bound when no max-request-body-bytes is
+// configured (the capture runs before authentication), or to the configured limit when that is smaller; the request body is
+// restored for the handler either way. 40 MiB is enough to pass the 32 MiB bound without a heavy fixture.
+func TestCaptureRequestInfoBoundsZstdExpansionWithoutAConfiguredLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	bomb := streamingZstdBomb(t, 40<<20)
+	if int64(len(bomb)) > maxErrorOnlyCapturedRequestBodyBytes {
+		t.Fatalf("the probe body is %d bytes, over the 1 MiB capture bound", len(bomb))
+	}
+	marker := int64(len("\n[DECOMPRESSED REQUEST BODY TRUNCATED]"))
+	for _, c := range []struct{ limit, bound int64 }{{0, maxDeferredErrorRequestBodyBytes}, {-1, maxDeferredErrorRequestBodyBytes}, {1 << 40, maxDeferredErrorRequestBodyBytes}, {4096, 4096}} {
+		captured, restored := captureOf(t, bomb, c.limit)
+		if int64(len(captured)) > c.bound+marker || int64(len(captured)) < c.bound {
+			t.Fatalf("limit %d: captured %d bytes, want the bound %d plus the marker", c.limit, len(captured), c.bound)
+		}
+		if !bytes.HasSuffix(captured, []byte("[DECOMPRESSED REQUEST BODY TRUNCATED]")) {
+			t.Fatalf("limit %d: no truncation marker", c.limit)
+		}
+		if !bytes.Equal(restored, bomb) {
+			t.Fatalf("limit %d: the request body was not restored for the handler (%d bytes)", c.limit, len(restored))
+		}
+	}
+}
+
+// The classic bomb (one segment frame that declares its whole content as its window, 49 KB for 512 MiB) is not decoded at all: its
+// window is past the bound, so the raw bytes are logged and nothing large is allocated.
+func TestCaptureRequestInfoDoesNotDecodeASingleSegmentBomb(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	if errNewWriter != nil {
+		t.Fatal(errNewWriter)
+	}
+	bomb := encoder.EncodeAll(make([]byte, 64<<20), nil)
+	if int64(len(bomb)) > maxErrorOnlyCapturedRequestBodyBytes {
+		t.Fatalf("the probe body is %d bytes", len(bomb))
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	captured, restored := captureOf(t, bomb, 0)
+	runtime.ReadMemStats(&after)
+	if !bytes.Equal(captured, bomb) || !bytes.Equal(restored, bomb) {
+		t.Fatalf("the raw bytes must be logged and restored, captured %d restored %d", len(captured), len(restored))
+	}
+	if grown := after.TotalAlloc - before.TotalAlloc; grown > 16<<20 {
+		t.Fatalf("decoding a window-bomb allocated %d MiB", grown>>20)
+	}
+}
+
+// A frame that declares a window past the bound is not decoded: the raw bytes are logged and nothing large is allocated.
+func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
+	// `printf '{"model":"gpt-5"}' | zstd --long=24`-style frame declaring a 16 MiB window.
+	raw, errDecode := hex.DecodeString("28b52ffd0470b900007b226d6f64656c223a226770742d362e312d736f6c227d2a82afeb")
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	got := decodeCapturedRequestBodyForLogWithLimit(raw, "zstd", 1<<20)
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("an oversized window must leave the raw bytes, got %q", got)
+	}
+}
+
+func TestResponseWriterLogOnErrorOnlyZeroBufferUntilActionableError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+
+	logger := logging.NewFileRequestLogger(false, t.TempDir(), "", 10)
+	wrapper := NewResponseWriterWrapper(c.Writer, logger, &RequestInfo{
+		URL:    "/v1/messages",
+		Method: http.MethodPost,
+	})
+	wrapper.logOnErrorOnly = true
+	wrapper.ginContext = c
+
+	// Normal 200 OK writes (even 4 MiB) must not allocate/buffer any bytes when request-log is disabled.
+	largePayload := bytes.Repeat([]byte("a"), 4<<20) // 4 MiB
+	if _, err := wrapper.Write(largePayload); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if wrapper.body.Len() != 0 {
+		t.Fatalf("wrapper.body.Len() for 200 OK = %d, want 0", wrapper.body.Len())
+	}
+
+	// Once an actionable mid-stream error is recorded, subsequent error frame writes are buffered.
+	c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+		{
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New("claude refusal (cyber): blocked"),
+		},
+	})
+	const errFrame = "event: error\ndata: {\"type\":\"error\"}\n\n"
+	if _, err := wrapper.WriteString(errFrame); err != nil {
+		t.Fatalf("WriteString failed: %v", err)
+	}
+	if got := wrapper.body.String(); got != errFrame {
+		t.Fatalf("wrapper.body.String() = %q, want %q", got, errFrame)
 	}
 }

@@ -104,6 +104,12 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.CreatedAt.IsZero() {
 		auth.CreatedAt = now
 	}
+	if auth.AdoptedAt.IsZero() {
+		auth.AdoptedAt = now
+	}
+	if auth.AdoptedGrantHash == "" {
+		auth.AdoptedGrantHash = AuthGrantFingerprint(auth)
+	}
 	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -138,6 +144,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
+	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)
@@ -186,6 +193,53 @@ func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) 
 // Update replaces an existing auth entry and notifies hooks.
 func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return m.updateInternal(ctx, nil, auth, updateModeReplace)
+}
+
+// Modify loads the latest auth for id while holding the per-auth mutation gate,
+// applies edit to a clone of that auth, and commits the result through the
+// standard persistence and publication path. It returns (nil, false, nil) if
+// the auth is not present when the gate is acquired.
+func (m *Manager) Modify(ctx context.Context, id string, expectedEpoch uint64, edit func(*Auth) error) (*Auth, bool, error) {
+	id = strings.TrimSpace(id)
+	if m == nil || id == "" || edit == nil {
+		return nil, false, nil
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, id)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+
+	m.mu.RLock()
+	existing, ok := m.auths[id]
+	var current *Auth
+	var currentEpoch uint64
+	if ok && existing != nil {
+		current = existing.Clone()
+		currentEpoch = existing.RegistrationEpoch
+		if m.authEpochs != nil && m.authEpochs[id] > currentEpoch {
+			currentEpoch = m.authEpochs[id]
+		}
+	}
+	m.mu.RUnlock()
+	if current == nil {
+		return nil, false, nil
+	}
+	if expectedEpoch != 0 && expectedEpoch < currentEpoch {
+		return nil, false, fmt.Errorf("update auth %s: stale registration epoch %d < %d", id, expectedEpoch, currentEpoch)
+	}
+	if errEdit := edit(current); errEdit != nil {
+		return nil, false, errEdit
+	}
+	if expectedEpoch != 0 {
+		current.RegistrationEpoch = expectedEpoch
+	}
+	committedAuth, didCommit, persistCooldown, errUpdate := m.updateInternalLocked(ctx, nil, current, updateModeReplace)
+	releaseMutation()
+	if errUpdate == nil && didCommit && committedAuth != nil {
+		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
+	}
+	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
 }
 
 func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
@@ -241,6 +295,23 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return nil, false, false, fmt.Errorf("update auth: %w", errWeight)
 	}
+	isFileSnapshot := mode == updateModeReplace && auth.HasFileSnapshot()
+	if isFileSnapshot {
+		m.mu.RLock()
+		existing, ok := m.auths[auth.ID]
+		m.mu.RUnlock()
+		if !ok || existing == nil {
+			return nil, false, false, nil
+		}
+		// Validate file snapshot freshness under the per-auth mutation gate
+		// without holding m.mu across filesystem I/O.
+		if !auth.FileSnapshotMatchesDisk() {
+			m.mu.RLock()
+			current := m.auths[auth.ID].Clone()
+			m.mu.RUnlock()
+			return current, false, false, nil
+		}
+	}
 	m.mu.Lock()
 	existing, ok := m.auths[auth.ID]
 	if !ok || existing == nil {
@@ -270,6 +341,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if mode == updateModeRefresh {
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
+			if merged.Disabled || merged.Status == StatusDisabled {
+				merged.RefreshFailures = auth.RefreshFailures
+			}
 			auth = merged
 			NormalizeCredentialMetadata(auth.Metadata)
 		}
@@ -293,6 +367,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
 	}
+	if isFileSnapshot && auth.CreatedAt.IsZero() {
+		auth.CreatedAt = existing.CreatedAt
+	}
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
@@ -312,36 +389,143 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.CredentialVersion = existingVersion
 	}
 	cooldownStateChanged := false
+	now := time.Now()
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
+		if isFileSnapshot {
+			auth.ModelStates = existing.ModelStates
+			auth.LastRefreshedAt = existing.LastRefreshedAt
+			if !credChanged {
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				auth.RefreshFailures = existing.RefreshFailures
+			}
+		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
 		}
-		if credChanged || mode == updateModeRefresh {
-			auth.RejectedAccessToken = ""
-			if hasUnauthorizedAuthFailure(existing) || (auth.LastError != nil && isUnauthorizedError(auth.LastError)) {
-				auth.Unavailable = false
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
-				cooldownStateChanged = true
+		if isFileSnapshot || (credChanged && mode == updateModeReplace && existing.Quota.Exceeded && existing.Quota.NextRecoverAt.After(now) && !auth.Quota.NextRecoverAt.After(now)) {
+			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
+				auth.Status = existing.Status
 			}
-			resumed := clearUnauthorizedModelStates(auth, time.Now())
-			if len(resumed) > 0 {
-				cooldownStateChanged = true
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = existing.StatusMessage
 			}
-		} else {
-			auth.RejectedAccessToken = existing.RejectedAccessToken
-		}
-		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
 			auth.Unavailable = existing.Unavailable
 			auth.NextRetryAfter = existing.NextRetryAfter
+			if auth.LastError == nil && existing.LastError != nil {
+				auth.LastError = cloneError(existing.LastError)
+			}
+			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
+			auth.Quota = existing.Quota.Clone()
+			auth.Quota.ObservedAt = observation.ObservedAt
+			auth.Quota.Signals = observation.Signals
+			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+		}
+		if credChanged || mode == updateModeRefresh {
+			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			applyPreservedRenewalState(existing, auth, mode, now)
+			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
+				auth.RefreshFailures = 0
+				if credChanged && mode != updateModeRefresh && auth.NextRefreshAfter.Equal(existing.NextRefreshAfter) {
+					if authHasUnchangedRejectedRefreshToken(auth) {
+						if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+							auth.NextRefreshAfter = exp
+						} else {
+							auth.NextRefreshAfter = time.Time{}
+						}
+					} else {
+						auth.NextRefreshAfter = time.Time{}
+					}
+				}
+				canServeWithAccessToken := !auth.RequiresSignIn || auth.HasValidAccessToken(now)
+				isAuthOrGrantFailure := hasUnauthorizedAuthFailure(existing) ||
+					existing.RequiresSignIn ||
+					(existing.RefreshError != nil && isTerminalRefreshError(existing, existing.RefreshError)) ||
+					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError) || isTerminalRefreshError(auth, auth.LastError)))
+				if canServeWithAccessToken && !auth.Quota.NextRecoverAt.After(now) &&
+					(isAuthOrGrantFailure || (auth.Unavailable && !auth.NextRetryAfter.After(now))) {
+					auth.Unavailable = false
+					auth.NextRetryAfter = time.Time{}
+					auth.cooldownRecordedSeq = 0
+					auth.LastError = nil
+					auth.StatusMessage = ""
+					auth.Status = StatusActive
+					cooldownStateChanged = true
+				} else if canServeWithAccessToken && isAuthOrGrantFailure && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
+					auth.Unavailable = true
+					if !auth.NextRetryAfter.After(now) {
+						auth.NextRetryAfter = auth.Quota.NextRecoverAt
+					}
+					auth.LastError = nil
+					auth.StatusMessage = auth.Quota.Reason
+					cooldownStateChanged = true
+				}
+				if canServeWithAccessToken {
+					resumed := clearUnauthorizedModelStates(auth, now)
+					if len(resumed) > 0 {
+						cooldownStateChanged = true
+					}
+				} else if auth.RequiresSignIn && !auth.HasValidAccessToken(now) {
+					auth.Unavailable = true
+					auth.Status = StatusError
+					if auth.StatusMessage == "" {
+						if existing.StatusMessage != "" {
+							auth.StatusMessage = existing.StatusMessage
+						} else {
+							auth.StatusMessage = "unauthorized (refresh token invalid)"
+						}
+					}
+					if auth.LastError == nil {
+						if existing.LastError != nil {
+							auth.LastError = cloneError(existing.LastError)
+						} else if auth.RefreshError != nil {
+							auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, false, hasUnauthorizedAuthFailure(existing))
+							if auth.LastError.Code == "refresh_outcome_unknown" {
+								auth.StatusMessage = auth.LastError.Message
+							}
+						}
+					}
+				}
+			}
+		} else {
+			applyPreservedRejectedTokens(existing, auth, false)
+			applyPreservedRenewalState(existing, auth, mode, now)
+		}
+		// A refresh that confirms quota restoration (issue #6690) releases the
+		// credential-wide cooldown early; otherwise the active credential
+		// quota below is preserved exactly as before.
+		devinQuotaRestored := mode == updateModeRefresh && applyDevinQuotaRestoration(auth, existing, now)
+		if devinQuotaRestored {
+			cooldownStateChanged = true
+		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(now) {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			// Preserve cooldown fields; keep the newest observation snapshot.
+			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
 			auth.Quota = existing.Quota
+			auth.Quota.ObservedAt = observation.ObservedAt
+			auth.Quota.Signals = observation.Signals
+			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
 		}
+	} else {
+		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+		applyPreservedRenewalState(existing, auth, mode, now)
+		// Refresh updates must retain their outcome rather than the pending job marker.
+		if mode != updateModeRefresh {
+			if !credChanged {
+				auth.LastRefreshedAt = existing.LastRefreshedAt
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				auth.RefreshFailures = existing.RefreshFailures
+			} else if authHasUnchangedRejectedRefreshToken(auth) {
+				if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+					auth.NextRefreshAfter = exp
+				} else {
+					auth.NextRefreshAfter = time.Time{}
+				}
+			}
+		}
 	}
-	now := time.Now()
 	auth.UpdatedAt = now
 	cooldownStateChanged = normalizeModelStates(auth) || cooldownStateChanged
 	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
@@ -359,6 +543,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	// Save before publication, including the transactional Meta mint path.
 	// Runtime-only changes made during I/O are merged below, never overwritten.
 	existingBeforeSave := existing.Clone()
+	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
@@ -374,9 +559,50 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
+		probe := auth.Clone()
+		probe.CodexRefreshPatch = refreshPatchBeforeSave
+		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)
+		auth.RejectedAccessToken = probe.RejectedAccessToken
+		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
+	}
+	if existing.RequiresSignIn != existingBeforeSave.RequiresSignIn ||
+		!equalErrorPtr(existing.RefreshError, existingBeforeSave.RefreshError) ||
+		existing.RejectedRefreshToken != existingBeforeSave.RejectedRefreshToken ||
+		existing.RejectedSIWCRefreshToken != existingBeforeSave.RejectedSIWCRefreshToken ||
+		existing.RenewalWarnedRefreshToken != existingBeforeSave.RenewalWarnedRefreshToken ||
+		!existing.RenewalEventAt.Equal(existingBeforeSave.RenewalEventAt) ||
+		existing.InferenceVerified != existingBeforeSave.InferenceVerified ||
+		!existing.LastInferenceVerifiedAt.Equal(existingBeforeSave.LastInferenceVerifiedAt) ||
+		existing.RenewalVerified != existingBeforeSave.RenewalVerified ||
+		!existing.LastRenewalVerifiedAt.Equal(existingBeforeSave.LastRenewalVerifiedAt) {
+		probe := auth.Clone()
+		probe.CodexRefreshPatch = refreshPatchBeforeSave
+		applyPreservedRenewalState(existing, probe, mode, now)
+		auth.RequiresSignIn = probe.RequiresSignIn
+		auth.RefreshError = probe.RefreshError
+		auth.RejectedRefreshToken = probe.RejectedRefreshToken
+		auth.RejectedSIWCRefreshToken = probe.RejectedSIWCRefreshToken
+		auth.RenewalWarnedRefreshToken = probe.RenewalWarnedRefreshToken
+		auth.RenewalEventAt = probe.RenewalEventAt
+		auth.AdoptedAt = probe.AdoptedAt
+		auth.AdoptedGrantHash = probe.AdoptedGrantHash
+		auth.InferenceVerified = probe.InferenceVerified
+		auth.LastInferenceVerifiedAt = probe.LastInferenceVerifiedAt
+		auth.RenewalVerified = probe.RenewalVerified
+		auth.LastRenewalVerifiedAt = probe.LastRenewalVerifiedAt
+		if authHasUnchangedRejectedRefreshToken(auth) && !existingBeforeSave.RequiresSignIn {
+			if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.After(now) {
+				if auth.NextRefreshAfter.IsZero() || auth.NextRefreshAfter.Before(exp) {
+					auth.NextRefreshAfter = exp
+				}
+			}
+		}
+	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
 	}
+	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)
@@ -390,25 +616,52 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	return auth.Clone(), true, cooldownStateChanged, nil
 }
 
+func equalErrorPtr(a, b *Error) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Code == b.Code && a.Message == b.Message && a.Retryable == b.Retryable && a.HTTPStatus == b.HTTPStatus
+}
+
 // Remove deletes an auth from runtime state without persisting.
 // Disk and token-store deletion must be handled by the caller.
 func (m *Manager) Remove(ctx context.Context, id string) {
+	m.RemoveIf(ctx, id, nil)
+}
+
+// RemoveIf deletes an auth from runtime state while holding the per-auth
+// mutation gate when predicate is nil or returns true for the current auth.
+func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth) bool) bool {
 	if m == nil {
-		return
+		return false
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return
+		return false
 	}
-	_ = ctx
 	releaseMutation := m.lockAuthMutation(id)
 	defer releaseMutation()
+
+	if predicate != nil {
+		m.mu.RLock()
+		snapshot := m.auths[id]
+		if snapshot != nil {
+			snapshot = snapshot.Clone()
+		}
+		m.mu.RUnlock()
+		if !predicate(snapshot) {
+			return false
+		}
+	}
 
 	m.mu.Lock()
 	existing := m.auths[id]
 	if existing == nil {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	provider := strings.TrimSpace(existing.Provider)
 	delete(m.auths, id)
@@ -456,6 +709,7 @@ func (m *Manager) Remove(ctx context.Context, id string) {
 		}
 	}
 	m.persistCooldownStates(context.Background())
+	return true
 }
 
 func (m *Manager) invalidateSessionAffinity(authID string) {

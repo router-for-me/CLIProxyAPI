@@ -74,6 +74,9 @@ type Result struct {
 	RouteModel string
 	// Success marks whether the execution succeeded.
 	Success bool
+	// CompletedResponse reports that the upstream execution produced a completed
+	// generation response (as opposed to an incomplete stream or non-generation call).
+	CompletedResponse bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
@@ -86,6 +89,8 @@ type Result struct {
 	// observed watermark. Count-tokens requests reuse the credential but are not
 	// generation traffic; their response headers are not a generation snapshot.
 	SkipQuotaObservation bool
+	// AccessToken captures the active access token under which the request was executed.
+	AccessToken string
 	// CredentialVersion captures the credential version under which the request was executed.
 	CredentialVersion uint64
 	// RegistrationEpoch captures the registration epoch under which the request was executed.

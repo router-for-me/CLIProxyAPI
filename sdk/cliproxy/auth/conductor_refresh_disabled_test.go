@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -302,5 +304,153 @@ func TestRefreshAuthForRequest_RawFmtError_RecognizesInvalidGrant(t *testing.T) 
 	diff := current.NextRefreshAfter.Sub(now)
 	if diff < 50*time.Second || diff > 70*time.Second {
 		t.Fatalf("backoff diff = %v, want ~1m", diff)
+	}
+}
+
+func TestDisabledCodexRejectedRefreshTokenDoesNotSpin(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	lead := CodexOuterRefreshLead
+	setRefreshLeadFactory(t, "codex", func() *time.Duration { return &lead })
+
+	// Access token still valid for 66h, i.e. inside the 96h CodexOuterRefreshLead window.
+	exp := now.Add(66 * time.Hour)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix())))
+	accessToken := "eyJhbGciOiJub25lIn0." + payload + ".sig"
+
+	a := &Auth{
+		ID:       "codex-disabled.json",
+		FileName: "codex-disabled.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Disabled: true,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  accessToken,
+			"refresh_token": "rt",
+			"disabled":      true,
+		},
+	}
+	ex := &unauthorizedRefreshExecutor{
+		id: "codex",
+		refreshErr: errors.New(
+			`token refresh failed with status 401: {"error":{"message":"Could not validate your refresh token. Please try signing in again.","type":"invalid_request_error","code":"invalid_refresh_token"}}`,
+		),
+	}
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.RegisterExecutor(ex)
+	if _, errReg := m.Register(ctx, a); errReg != nil {
+		t.Fatalf("Register error: %v", errReg)
+	}
+
+	// 1. First refresh attempt fails terminally; NextRefreshAfter must be deferred to exp (not 5m backoff).
+	m.refreshAuth(ctx, a.ID)
+	got, _ := m.GetByID(a.ID)
+	if got == nil {
+		t.Fatal("auth not found after refreshAuth")
+	}
+	if !got.Disabled || got.Status != StatusDisabled || !got.Unavailable {
+		t.Fatalf("status = %s disabled=%v unavailable=%v, want disabled/unavailable", got.Status, got.Disabled, got.Unavailable)
+	}
+	if !got.RequiresSignIn || got.RejectedRefreshToken != "rt" {
+		t.Fatalf("RequiresSignIn=%v RejectedRefreshToken=%q, want true / \"rt\"", got.RequiresSignIn, got.RejectedRefreshToken)
+	}
+	if !got.NextRefreshAfter.Equal(exp) {
+		t.Fatalf("NextRefreshAfter = %v, want access token expiry %v", got.NextRefreshAfter, exp)
+	}
+
+	// 2. Even if NextRefreshAfter has elapsed while the access token is still valid inside the 96h lead window,
+	// a refresh job must restore NextRefreshAfter=exp and the scheduler must not spin or re-trigger before exp.
+	m.mu.Lock()
+	m.auths[a.ID].NextRefreshAfter = now.Add(-time.Second)
+	epoch := m.auths[a.ID].RegistrationEpoch
+	m.mu.Unlock()
+
+	job := m.markRefreshPending(nil, a.ID, epoch, now)
+	if job == nil {
+		t.Fatal("expected markRefreshPending to create job when NextRefreshAfter is in the past")
+	}
+	if !m.beginRefreshJob(ctx, job) {
+		t.Fatal("expected beginRefreshJob to succeed")
+	}
+	_, _ = m.refreshAuthForRequestAtEpoch(ctx, a.ID, "", epoch)
+	m.finishRefreshJob(job, time.Time{}, false)
+
+	afterJob, _ := m.GetByID(a.ID)
+	if !afterJob.NextRefreshAfter.Equal(exp) {
+		t.Fatalf("after job completion NextRefreshAfter = %v, want %v (must not be zeroed by finishRefreshJob)", afterJob.NextRefreshAfter, exp)
+	}
+	if ex.RefreshCalls() != 1 {
+		t.Fatalf("upstream RefreshCalls = %d, want 1", ex.RefreshCalls())
+	}
+
+	// 3. Even with NextRefreshAfter cleared, shouldRefresh must be false and nextRefreshCheckAt must defer to exp.
+	m.mu.Lock()
+	m.auths[a.ID].NextRefreshAfter = time.Time{}
+	gen0 := m.auths[a.ID].Generation
+	m.mu.Unlock()
+
+	m.mu.RLock()
+	cur := m.auths[a.ID]
+	shouldRef := m.shouldRefresh(cur, now)
+	nextAt, okNext := m.nextRefreshCheckAt(now, cur, refreshCheckInterval)
+	m.mu.RUnlock()
+	if shouldRef {
+		t.Fatal("shouldRefresh at now = true, want false for unchanged rejected refresh token with unexpired access token")
+	}
+	if !okNext || !nextAt.Equal(exp) {
+		t.Fatalf("nextRefreshCheckAt at now = (%v, %v), want (%v, true)", nextAt, okNext, exp)
+	}
+
+	loop := newAuthAutoRefreshLoop(m, refreshCheckInterval, 1)
+	loop.rebuild(now)
+	loop.handleDue(ctx, now)
+	if len(loop.jobs) != 0 {
+		t.Fatalf("loop queued %d jobs at now, want 0", len(loop.jobs))
+	}
+	afterLoop, _ := m.GetByID(a.ID)
+	if afterLoop.Generation != gen0 {
+		t.Fatalf("Generation bumped from %d to %d without due refresh", gen0, afterLoop.Generation)
+	}
+
+	// 4. Once the access token expires on the disabled credential, it must be unscheduled and retain StatusDisabled.
+	afterExp := exp.Add(time.Second)
+	m.mu.RLock()
+	cur = m.auths[a.ID]
+	shouldRefExpired := m.shouldRefresh(cur, afterExp)
+	_, okExpired := m.nextRefreshCheckAt(afterExp, cur, refreshCheckInterval)
+	m.mu.RUnlock()
+	if shouldRefExpired || okExpired {
+		t.Fatalf("at access token expiry for disabled credential: shouldRefresh=%v scheduled=%v, want false/false", shouldRefExpired, okExpired)
+	}
+
+	// 5. A disabled credential whose access token is already expired on the first terminal refresh failure
+	// must unschedule immediately with NextRefreshAfter=zero and keep StatusDisabled.
+	expPast := now.Add(-time.Hour)
+	expiredPayload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, expPast.Unix())))
+	expiredAccessToken := "eyJhbGciOiJub25lIn0." + expiredPayload + ".sig"
+	expiredDisabled := &Auth{
+		ID:       "codex-disabled-expired.json",
+		FileName: "codex-disabled-expired.json",
+		Provider: "codex",
+		Status:   StatusActive,
+		Disabled: true,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"access_token":  expiredAccessToken,
+			"refresh_token": "rt-expired",
+			"disabled":      true,
+		},
+	}
+	if _, errRegExp := m.Register(ctx, expiredDisabled); errRegExp != nil {
+		t.Fatalf("Register expiredDisabled error: %v", errRegExp)
+	}
+	m.refreshAuth(ctx, expiredDisabled.ID)
+	gotExp, _ := m.GetByID(expiredDisabled.ID)
+	if gotExp.Status != StatusDisabled || !gotExp.NextRefreshAfter.IsZero() {
+		t.Fatalf("expired disabled terminal refresh: Status=%s NextRefreshAfter=%v, want StatusDisabled and zero time", gotExp.Status, gotExp.NextRefreshAfter)
+	}
+	if _, ok := m.nextRefreshCheckAt(now, gotExp, refreshCheckInterval); ok {
+		t.Fatal("expired disabled credential with rejected refresh token must not be scheduled")
 	}
 }

@@ -1,3 +1,28 @@
+# 2026-11-08 synchronization target
+
+This synchronization integrates upstream `router-for-me/CLIProxyAPI` at
+`91e0dee827abf476f9f86246f68c500a112f7155` into fork main
+`f9e84579cb58dcdb5514bc913338b2825b88c52f`: 400 upstream commits while
+retaining all 46 fork-only commits. The upstream toolchain requirement is now
+Go 1.26.10; the module remains `/v8` and the Desktop host contract remains `1`.
+
+The four textual conflicts preserve both management handler field groups,
+retain semantic auth comparison while clearing new upstream runtime-only and
+file-snapshot fields, and adopt upstream's duplex-aware interrupt lifecycle.
+Terminal stream errors still close the local interrupt window before reaching
+the client. Upstream completion deactivation replaces the older fork-only
+completion hook and supports later turns on the same connection.
+
+Both `antigravityPersistPending` and `antigravityPersistActive` remain in the
+service, alongside the runtime access providers. Existing persistence, plugin
+metadata stripping, atomic reload, ephemeral key, parent supervision and
+shutdown acknowledgement regression suites remain enabled.
+
+Merge this PR with a merge commit, not squash/rebase. Merging into main runs the
+existing six-platform runtime build and automatically publishes the stable
+runtime only after its validation gates pass. This synchronization branch does
+not publish a release.
+
 # 2026-10-17 synchronization target
 
 This synchronization integrates upstream `router-for-me/CLIProxyAPI` at

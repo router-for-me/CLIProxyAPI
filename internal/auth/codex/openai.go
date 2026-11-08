@@ -38,6 +38,7 @@ type CodexSIWCTokenData struct {
 	Scope        string   `json:"scope,omitempty"`
 	Scopes       []string `json:"scopes,omitempty"`
 	Expire       string   `json:"expired"`
+	ExpiresAt    string   `json:"expires_at,omitempty"`
 	LastRefresh  string   `json:"last_refresh"`
 	DeviceID     string   `json:"device_id,omitempty"`
 }
@@ -53,6 +54,9 @@ func (d *CodexSIWCTokenData) ToMap() map[string]any {
 		"client_id":     d.ClientID,
 		"expired":       d.Expire,
 		"last_refresh":  d.LastRefresh,
+	}
+	if d.ExpiresAt != "" {
+		out["expires_at"] = d.ExpiresAt
 	}
 	if d.IDToken != "" {
 		out["id_token"] = d.IDToken

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
@@ -18,8 +19,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type codexReasoningReplayScope struct {
@@ -38,33 +37,55 @@ func applyCodexReasoningReplayCache(ctx context.Context, from sdktranslator.Form
 }
 
 func applyCodexReasoningReplayCacheRequired(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, codexReasoningReplayScope, error) {
-	scope := codexReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
+	doc := ojson.NewDoc(body)
+	scope, changed, errReplay := applyCodexReasoningReplayCacheRequiredDoc(ctx, from, req, opts, doc)
+	if errReplay != nil || !changed {
+		return body, scope, errReplay
+	}
+	return doc.Bytes(), scope, nil
+}
+
+func applyCodexReasoningReplayCacheRequiredDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (codexReasoningReplayScope, bool, error) {
+	scope := codexReasoningReplayScopeFromRequestDoc(ctx, from, req, opts, doc)
 	if !scope.valid() {
-		return body, scope, nil
+		return scope, false, nil
 	}
 	items, ok, errReplay := internalcache.GetCodexReasoningReplayItemsRequired(ctx, scope.modelName, scope.sessionKey)
 	if errReplay != nil || !ok {
-		return body, scope, errReplay
+		return scope, false, errReplay
 	}
-	updated, ok := insertCodexReasoningReplayTurns(body, items)
-	if !ok {
-		return body, scope, nil
-	}
-	return updated, scope, nil
+	changed := insertCodexReasoningReplayTurnsDoc(doc, items)
+	return scope, changed, nil
 }
 
 func codexReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) codexReasoningReplayScope {
 	if !codexReasoningReplayEnabledForSource(from) {
 		return codexReasoningReplayScope{}
 	}
-	modelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	modelName := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(body, "model").String()))
 	if modelName == "" {
 		modelName = thinking.ParseSuffix(req.Model).ModelName
 	}
-	inputItems := gjson.GetBytes(body, "input").Array()
+	inputItems := ojson.GetBytesNoCopy(body, "input").Array()
 	return codexReasoningReplayScope{
 		modelName:          modelName,
 		sessionKey:         codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+		requestFingerprint: codexReplayInputPrefixFingerprint(inputItems, len(inputItems)),
+	}
+}
+
+func codexReasoningReplayScopeFromRequestDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) codexReasoningReplayScope {
+	if !codexReasoningReplayEnabledForSource(from) || doc == nil {
+		return codexReasoningReplayScope{}
+	}
+	modelName := strings.Clone(strings.TrimSpace(doc.Get("model").String()))
+	if modelName == "" {
+		modelName = thinking.ParseSuffix(req.Model).ModelName
+	}
+	inputItems := doc.Get("input").Array()
+	return codexReasoningReplayScope{
+		modelName:          modelName,
+		sessionKey:         codexReasoningReplaySessionKeyDoc(ctx, from, req, opts, doc),
 		requestFingerprint: codexReplayInputPrefixFingerprint(inputItems, len(inputItems)),
 	}
 }
@@ -119,6 +140,59 @@ func codexReasoningReplaySessionKey(ctx context.Context, from sdktranslator.Form
 	return ""
 }
 
+func codexReasoningReplaySessionKeyDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
+		if sessionKey := codexClaudeCodeReplaySessionKey(ctx, req.Payload, opts.Headers); sessionKey != "" {
+			return sessionKey
+		}
+	}
+	if value := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return "execution:" + value
+	}
+	if value := metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); value != "" {
+		return "execution:" + value
+	}
+	if value := codexReasoningReplaySessionKeyFromDoc(doc); value != "" {
+		return value
+	}
+	if value := codexReasoningReplaySessionKeyFromPayload(req.Payload); value != "" {
+		return value
+	}
+	if value := codexReasoningReplaySessionKeyFromHeaders(opts.Headers); value != "" {
+		return value
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if value := codexReasoningReplaySessionKeyFromHeaders(ginCtx.Request.Header); value != "" {
+			return value
+		}
+	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
+		if apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx)); apiKey != "" {
+			return "prompt-cache:" + uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String()
+		}
+	}
+	return ""
+}
+
+func codexReasoningReplaySessionKeyFromDoc(doc *ojson.Doc) string {
+	if doc == nil || doc.Len() == 0 {
+		return ""
+	}
+	if promptCacheKey := strings.TrimSpace(doc.Get("prompt_cache_key").String()); promptCacheKey != "" {
+		return "prompt-cache:" + promptCacheKey
+	}
+	if windowID := strings.TrimSpace(doc.Get("client_metadata.x-codex-window-id").String()); windowID != "" {
+		return "window:" + windowID
+	}
+	if turnMetadata := strings.TrimSpace(doc.Get("client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
+		return codexReasoningReplaySessionKeyFromTurnMetadata(turnMetadata)
+	}
+	return ""
+}
+
 func metadataString(metadata map[string]any, key string) string {
 	if len(metadata) == 0 {
 		return ""
@@ -141,13 +215,13 @@ func codexReasoningReplaySessionKeyFromPayload(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
 	}
-	if promptCacheKey := strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_key").String()); promptCacheKey != "" {
+	if promptCacheKey := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "prompt_cache_key").String()); promptCacheKey != "" {
 		return "prompt-cache:" + promptCacheKey
 	}
-	if windowID := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-window-id").String()); windowID != "" {
+	if windowID := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "client_metadata.x-codex-window-id").String()); windowID != "" {
 		return "window:" + windowID
 	}
-	if turnMetadata := strings.TrimSpace(gjson.GetBytes(payload, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
+	if turnMetadata := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
 		return codexReasoningReplaySessionKeyFromTurnMetadata(turnMetadata)
 	}
 	return ""
@@ -177,17 +251,20 @@ func codexReasoningReplaySessionKeyFromHeaders(headers http.Header) string {
 }
 
 func codexReasoningReplaySessionKeyFromTurnMetadata(turnMetadata string) string {
-	if promptCacheKey := strings.TrimSpace(gjson.Get(turnMetadata, "prompt_cache_key").String()); promptCacheKey != "" {
+	if promptCacheKey := strings.TrimSpace(ojson.Get(turnMetadata, "prompt_cache_key").String()); promptCacheKey != "" {
 		return "prompt-cache:" + promptCacheKey
 	}
-	if windowID := strings.TrimSpace(gjson.Get(turnMetadata, "window_id").String()); windowID != "" {
+	if windowID := strings.TrimSpace(ojson.Get(turnMetadata, "window_id").String()); windowID != "" {
 		return "window:" + windowID
 	}
 	return ""
 }
 
 func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
-	input := gjson.GetBytes(body, "input")
+	return codexInputResultHasValidReasoningEncryptedContent(ojson.GetBytesNoCopy(body, "input"))
+}
+
+func codexInputResultHasValidReasoningEncryptedContent(input ojson.Result) bool {
 	if !input.IsArray() {
 		return false
 	}
@@ -196,10 +273,11 @@ func codexInputHasValidReasoningEncryptedContent(body []byte) bool {
 			continue
 		}
 		encryptedContent := item.Get("encrypted_content")
-		if encryptedContent.Type != gjson.String {
+		if encryptedContent.Type != ojson.String {
 			continue
 		}
-		if _, err := signature.InspectGPTReasoningSignature(encryptedContent.String()); err == nil {
+		rawSig := signature.SignaturePayloadWithoutProviderPrefix(encryptedContent.String())
+		if signature.IsValidGPTReasoningSignature(rawSig) || signature.IsValidMetaReasoningSignature(rawSig) || signature.IsValidGrokEncryptedContent(rawSig) {
 			return true
 		}
 	}
@@ -215,9 +293,20 @@ type codexReasoningReplayTurn struct {
 }
 
 func insertCodexReasoningReplayTurns(body []byte, replayItems [][]byte) ([]byte, bool) {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() || len(replayItems) == 0 {
+	doc := ojson.NewDoc(body)
+	if !insertCodexReasoningReplayTurnsDoc(doc, replayItems) {
 		return body, false
+	}
+	return doc.Bytes(), true
+}
+
+func insertCodexReasoningReplayTurnsDoc(doc *ojson.Doc, replayItems [][]byte) bool {
+	if doc == nil || len(replayItems) == 0 {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() {
+		return false
 	}
 	inputItems := input.Array()
 	turns := splitCodexReasoningReplayTurns(replayItems)
@@ -232,7 +321,7 @@ func insertCodexReasoningReplayTurns(body []byte, replayItems [][]byte) ([]byte,
 			continue
 		}
 		if !turn.marked {
-			items := filterCodexReasoningReplayItemsForInput(body, turn.items)
+			items := filterCodexReasoningReplayItemsForInputResult(input, turn.items)
 			if len(items) == 0 {
 				continue
 			}
@@ -260,7 +349,7 @@ func insertCodexReasoningReplayTurns(body []byte, replayItems [][]byte) ([]byte,
 		inserted = true
 	}
 	if !inserted {
-		return body, false
+		return false
 	}
 
 	items := make([]string, 0, len(inputItems)+len(replayItems))
@@ -273,11 +362,7 @@ func insertCodexReasoningReplayTurns(body []byte, replayItems [][]byte) ([]byte,
 	for _, replayItem := range insertions[len(inputItems)] {
 		items = append(items, string(replayItem))
 	}
-	updated, err := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(items, ",")+"]"))
-	if err != nil {
-		return body, false
-	}
-	return updated, true
+	return doc.SetRawBytes("input", []byte("["+strings.Join(items, ",")+"]")) == nil
 }
 
 func splitCodexReasoningReplayTurns(items [][]byte) []codexReasoningReplayTurn {
@@ -289,18 +374,18 @@ func splitCodexReasoningReplayTurns(items [][]byte) []codexReasoningReplayTurn {
 		}
 	}
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		if strings.TrimSpace(itemResult.Get("type").String()) == internalcache.CodexReasoningReplayTurnType {
 			appendCurrent()
 			current = codexReasoningReplayTurn{
 				marked:               true,
-				assistantFingerprint: strings.TrimSpace(itemResult.Get("assistant_fingerprint").String()),
-				requestFingerprint:   strings.TrimSpace(itemResult.Get("request_fingerprint").String()),
+				assistantFingerprint: strings.Clone(strings.TrimSpace(itemResult.Get("assistant_fingerprint").String())),
+				requestFingerprint:   strings.Clone(strings.TrimSpace(itemResult.Get("request_fingerprint").String())),
 			}
 			if callIDs := itemResult.Get("call_ids"); callIDs.IsArray() {
 				for _, callIDResult := range callIDs.Array() {
 					if callID := strings.TrimSpace(callIDResult.String()); callID != "" {
-						current.callIDs = append(current.callIDs, callID)
+						current.callIDs = append(current.callIDs, strings.Clone(callID))
 					}
 				}
 			}
@@ -312,7 +397,7 @@ func splitCodexReasoningReplayTurns(items [][]byte) []codexReasoningReplayTurn {
 	return turns
 }
 
-func codexReasoningReplayTurnAnchorIndex(inputItems []gjson.Result, turn codexReasoningReplayTurn, fallbackEnd int, used map[int]bool, prefixFingerprints *codexReplayPrefixFingerprints) (int, bool) {
+func codexReasoningReplayTurnAnchorIndex(inputItems []ojson.Result, turn codexReasoningReplayTurn, fallbackEnd int, used map[int]bool, prefixFingerprints *codexReplayPrefixFingerprints) (int, bool) {
 	searchEnd := fallbackEnd
 	if turn.requestFingerprint != "" {
 		searchEnd = len(inputItems) - 1
@@ -361,7 +446,21 @@ func codexReasoningReplayTurnAnchorIndex(inputItems []gjson.Result, turn codexRe
 	return 0, false
 }
 
-func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]byte) [][]byte {
+func canonicalCodexReasoningReplaySignatureKey(rawSignature string) string {
+	sig := signature.SignaturePayloadWithoutProviderPrefix(strings.TrimSpace(rawSignature))
+	if gptInfo, err := signature.InspectGPTReasoningSignature(sig); err == nil && gptInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, gptInfo.RouterSuffix)
+	}
+	if metaInfo, err := signature.InspectMetaReasoningSignature(sig); err == nil && metaInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, metaInfo.RouterSuffix)
+	}
+	if grokInfo, err := signature.InspectGrokEncryptedContent(sig); err == nil && grokInfo.RouterSuffix != "" {
+		return stripRouterSuffix(sig, grokInfo.RouterSuffix)
+	}
+	return sig
+}
+
+func filterCodexReasoningReplayTurnItems(inputItems []ojson.Result, items [][]byte) [][]byte {
 	existingReasoning := make(map[string]bool)
 	existingCalls := make(map[string]bool)
 	existingOutputs := make(map[string]bool)
@@ -369,7 +468,7 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
 		switch itemType {
 		case "reasoning":
-			if encryptedContent := strings.TrimSpace(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
+			if encryptedContent := canonicalCodexReasoningReplaySignatureKey(inputItem.Get("encrypted_content").String()); encryptedContent != "" {
 				existingReasoning[encryptedContent] = true
 			}
 		case "function_call_output", "custom_tool_call_output":
@@ -384,10 +483,10 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 
 	filtered := make([][]byte, 0, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "reasoning":
-			if existingReasoning[strings.TrimSpace(itemResult.Get("encrypted_content").String())] {
+			if existingReasoning[canonicalCodexReasoningReplaySignatureKey(itemResult.Get("encrypted_content").String())] {
 				continue
 			}
 		case "function_call", "custom_tool_call":
@@ -416,7 +515,7 @@ func filterCodexReasoningReplayTurnItems(inputItems []gjson.Result, items [][]by
 	return filtered
 }
 
-func codexReplayAssistantMessageFingerprint(item gjson.Result) string {
+func codexReplayAssistantMessageFingerprint(item ojson.Result) string {
 	itemType := strings.TrimSpace(item.Get("type").String())
 	if itemType != "" && itemType != "message" {
 		return ""
@@ -426,7 +525,7 @@ func codexReplayAssistantMessageFingerprint(item gjson.Result) string {
 	}
 	content := item.Get("content")
 	var builder strings.Builder
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		builder.WriteString(content.String())
 	} else if content.IsArray() {
 		for _, part := range content.Array() {
@@ -450,7 +549,7 @@ func codexReplayAssistantMessageFingerprint(item gjson.Result) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func codexReplayInputPrefixFingerprint(inputItems []gjson.Result, end int) string {
+func codexReplayInputPrefixFingerprint(inputItems []ojson.Result, end int) string {
 	if end < 0 || end > len(inputItems) {
 		return ""
 	}
@@ -467,13 +566,13 @@ func codexReplayInputPrefixFingerprint(inputItems []gjson.Result, end int) strin
 // turn; recomputing each prefix from scratch is O(n^2) hashing and stalled large
 // long-context requests for minutes before anything was sent upstream.
 type codexReplayPrefixFingerprints struct {
-	items  []gjson.Result
+	items  []ojson.Result
 	hasher hash.Hash
 	// sums[end] is the fingerprint of items[0:end]; extended lazily.
 	sums []string
 }
 
-func newCodexReplayPrefixFingerprints(items []gjson.Result) *codexReplayPrefixFingerprints {
+func newCodexReplayPrefixFingerprints(items []ojson.Result) *codexReplayPrefixFingerprints {
 	hasher := sha256.New()
 	return &codexReplayPrefixFingerprints{
 		items:  items,
@@ -498,12 +597,15 @@ func (f *codexReplayPrefixFingerprints) at(end int) string {
 }
 
 func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte {
-	input := gjson.GetBytes(body, "input")
+	return filterCodexReasoningReplayItemsForInputResult(ojson.GetBytesNoCopy(body, "input"), items)
+}
+
+func filterCodexReasoningReplayItemsForInputResult(input ojson.Result, items [][]byte) [][]byte {
 	if !input.IsArray() {
 		return nil
 	}
 
-	hasInputReasoning := codexInputHasValidReasoningEncryptedContent(body)
+	hasInputReasoning := codexInputResultHasValidReasoningEncryptedContent(input)
 	existingCalls := make(map[string]bool)
 	existingOutputs := make(map[string]bool)
 	for _, inputItem := range input.Array() {
@@ -523,7 +625,7 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 
 	filtered := make([][]byte, 0, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "reasoning":
 			if hasInputReasoning {
@@ -560,9 +662,20 @@ func filterCodexReasoningReplayItemsForInput(body []byte, items [][]byte) [][]by
 }
 
 func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte, bool) {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() || len(replayItems) == 0 {
+	doc := ojson.NewDoc(body)
+	if !insertCodexReasoningReplayItemsDoc(doc, replayItems) {
 		return body, false
+	}
+	return doc.Bytes(), true
+}
+
+func insertCodexReasoningReplayItemsDoc(doc *ojson.Doc, replayItems [][]byte) bool {
+	if doc == nil {
+		return false
+	}
+	input := doc.Get("input")
+	if !input.IsArray() || len(replayItems) == 0 {
+		return false
 	}
 	inputItems := input.Array()
 	insertIndex := codexReasoningReplayInsertIndex(inputItems, replayItems)
@@ -581,17 +694,13 @@ func insertCodexReasoningReplayItems(body []byte, replayItems [][]byte) ([]byte,
 			items = append(items, string(replayItem))
 		}
 	}
-	updated, err := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(items, ",")+"]"))
-	if err != nil {
-		return body, false
-	}
-	return updated, true
+	return doc.SetRawBytes("input", []byte("["+strings.Join(items, ",")+"]")) == nil
 }
 
-func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]byte) int {
+func codexReasoningReplayInsertIndex(inputItems []ojson.Result, replayItems [][]byte) int {
 	replayCallIDs := make(map[string]bool)
 	for _, replayItem := range replayItems {
-		itemResult := gjson.ParseBytes(replayItem)
+		itemResult := util.ParseGJSONBytesNoCopy(replayItem)
 		itemType := strings.TrimSpace(itemResult.Get("type").String())
 		if itemType != "function_call" && itemType != "custom_tool_call" {
 			continue
@@ -626,7 +735,7 @@ func codexReasoningReplayInsertIndex(inputItems []gjson.Result, replayItems [][]
 	return len(inputItems)
 }
 
-func codexAlignReasoningReplayToolCallIDs(inputItems []gjson.Result, replayItems [][]byte) [][]byte {
+func codexAlignReasoningReplayToolCallIDs(inputItems []ojson.Result, replayItems [][]byte) [][]byte {
 	outputCallIDs := codexReplayOutputCallIDs(inputItems)
 	if len(outputCallIDs) == 0 {
 		return replayItems
@@ -634,7 +743,7 @@ func codexAlignReasoningReplayToolCallIDs(inputItems []gjson.Result, replayItems
 
 	aligned := make([][]byte, 0, len(replayItems))
 	for _, replayItem := range replayItems {
-		itemResult := gjson.ParseBytes(replayItem)
+		itemResult := util.ParseGJSONBytesNoCopy(replayItem)
 		itemType := strings.TrimSpace(itemResult.Get("type").String())
 		if itemType != "function_call" && itemType != "custom_tool_call" {
 			aligned = append(aligned, replayItem)
@@ -654,7 +763,7 @@ func codexAlignReasoningReplayToolCallIDs(inputItems []gjson.Result, replayItems
 			continue
 		}
 
-		updated, err := sjson.SetBytes(replayItem, "call_id", outputCallID)
+		updated, err := ojson.SetBytes(replayItem, "call_id", outputCallID)
 		if err != nil {
 			aligned = append(aligned, replayItem)
 			continue
@@ -664,7 +773,7 @@ func codexAlignReasoningReplayToolCallIDs(inputItems []gjson.Result, replayItems
 	return aligned
 }
 
-func codexReplayOutputCallIDs(inputItems []gjson.Result) map[string]string {
+func codexReplayOutputCallIDs(inputItems []ojson.Result) map[string]string {
 	outputCallIDs := make(map[string]string)
 	for _, inputItem := range inputItems {
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
@@ -682,7 +791,7 @@ func codexReplayOutputCallIDs(inputItems []gjson.Result) map[string]string {
 	return outputCallIDs
 }
 
-func shouldInsertCodexReasoningReplayBefore(item gjson.Result) bool {
+func shouldInsertCodexReasoningReplayBefore(item ojson.Result) bool {
 	role, ok := codexReplayMessageRole(item)
 	if !ok {
 		return true
@@ -695,7 +804,7 @@ func shouldInsertCodexReasoningReplayBefore(item gjson.Result) bool {
 	}
 }
 
-func codexReplayMessageRole(item gjson.Result) (string, bool) {
+func codexReplayMessageRole(item ojson.Result) (string, bool) {
 	itemType := strings.TrimSpace(item.Get("type").String())
 	role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
 	if role == "" || (itemType != "" && itemType != "message") {
@@ -704,7 +813,7 @@ func codexReplayMessageRole(item gjson.Result) (string, bool) {
 	return role, true
 }
 
-func codexReplayToolCallKeys(item gjson.Result) []string {
+func codexReplayToolCallKeys(item ojson.Result) []string {
 	itemType := strings.TrimSpace(item.Get("type").String())
 	if itemType != "function_call" && itemType != "custom_tool_call" {
 		return nil
@@ -761,7 +870,7 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 	if !scope.valid() {
 		return
 	}
-	output := gjson.GetBytes(completedData, "response.output")
+	output := ojson.GetBytesNoCopy(completedData, "response.output")
 	if !output.IsArray() {
 		return
 	}
@@ -775,7 +884,7 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 		case "function_call", "custom_tool_call":
 			replayItems = append(replayItems, []byte(item.Raw))
 			if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
-				callIDs = append(callIDs, callID)
+				callIDs = append(callIDs, strings.Clone(callID))
 			}
 		case "message":
 			if fingerprint := codexReplayAssistantMessageFingerprint(item); fingerprint != "" {
@@ -797,19 +906,19 @@ func cacheCodexReasoningReplayFromCompleted(scope codexReasoningReplayScope, com
 		_, _ = hasher.Write([]byte("\x00item\x00"))
 		_, _ = hasher.Write(item)
 	}
-	marker := []byte(`{"type":"` + internalcache.CodexReasoningReplayTurnType + `"}`)
-	marker, _ = sjson.SetBytes(marker, "id", hex.EncodeToString(hasher.Sum(nil)))
+	markerDoc := ojson.NewDoc([]byte(`{"type":"` + internalcache.CodexReasoningReplayTurnType + `"}`))
+	_ = markerDoc.Set("id", hex.EncodeToString(hasher.Sum(nil)))
 	if assistantFingerprint != "" {
-		marker, _ = sjson.SetBytes(marker, "assistant_fingerprint", assistantFingerprint)
+		_ = markerDoc.Set("assistant_fingerprint", assistantFingerprint)
 	}
 	if scope.requestFingerprint != "" {
-		marker, _ = sjson.SetBytes(marker, "request_fingerprint", scope.requestFingerprint)
+		_ = markerDoc.Set("request_fingerprint", scope.requestFingerprint)
 	}
 	for _, callID := range callIDs {
-		marker, _ = sjson.SetBytes(marker, "call_ids.-1", callID)
+		_ = markerDoc.Set("call_ids.-1", callID)
 	}
 	items := make([][]byte, 0, len(replayItems)+1)
-	items = append(items, marker)
+	items = append(items, markerDoc.Bytes())
 	items = append(items, replayItems...)
 	internalcache.AppendCodexReasoningReplayItemsBestEffort(context.Background(), scope.modelName, scope.sessionKey, items)
 }

@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
@@ -45,6 +46,10 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// proxyPoolPublisher scopes connection-pool fencing to this service, so a reload
+	// here never retires config snapshots served by another service.
+	proxyPoolPublisher uint64
+
 	// configPath is the path to the configuration file.
 	configPath string
 
@@ -71,6 +76,9 @@ type Service struct {
 
 	// discoveryManager manages local network mDNS / DNS-SD service advertising.
 	discoveryManager *discoveryAdvertiserManager
+
+	// kvStoreManaged tracks whether this service instance owns local KVStore lifecycle.
+	kvStoreManaged atomic.Bool
 
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error

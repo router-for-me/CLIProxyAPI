@@ -266,3 +266,79 @@ func TestBuildOpenAIResponsesStreamErrorChunkRequestTimeoutIsServerError(t *test
 		t.Fatalf("failed.response.error.type = %v, want %q", got, "server_error")
 	}
 }
+
+func TestBuildOpenAIResponsesStreamChunksMapAnthropicPromptTooLongToContextLengthExceeded(t *testing.T) {
+	errText := `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`
+
+	chunk := BuildOpenAIResponsesStreamErrorChunk(http.StatusBadRequest, errText, 0)
+	var payload struct {
+		Type  string         `json:"type"`
+		Error map[string]any `json:"error"`
+	}
+	if errUnmarshal := json.Unmarshal(chunk, &payload); errUnmarshal != nil {
+		t.Fatalf("unmarshal error chunk: %v", errUnmarshal)
+	}
+	if got := payload.Error["code"]; got != "context_length_exceeded" {
+		t.Fatalf("error.code = %v, want %q; raw=%s", got, "context_length_exceeded", string(chunk))
+	}
+	if got := payload.Error["type"]; got != "invalid_request_error" {
+		t.Fatalf("error.type = %v, want %q", got, "invalid_request_error")
+	}
+	if got := payload.Error["message"]; got != "prompt is too long: 210000 tokens > 200000 maximum" {
+		t.Fatalf("error.message = %v", got)
+	}
+
+	failedChunk := BuildOpenAIResponsesStreamFailedChunk(http.StatusBadRequest, errText, 0)
+	var failedPayload struct {
+		Type     string `json:"type"`
+		Response struct {
+			Status string         `json:"status"`
+			Error  map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if errUnmarshal := json.Unmarshal(failedChunk, &failedPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal failed chunk: %v", errUnmarshal)
+	}
+	if got := failedPayload.Response.Error["code"]; got != "context_length_exceeded" {
+		t.Fatalf("failed.response.error.code = %v, want %q; raw=%s", got, "context_length_exceeded", string(failedChunk))
+	}
+	if got := failedPayload.Response.Error["type"]; got != "invalid_request_error" {
+		t.Fatalf("failed.response.error.type = %v, want %q", got, "invalid_request_error")
+	}
+
+	// Existing code must be preserved.
+	withCode := BuildOpenAIResponsesStreamFailedChunk(
+		http.StatusBadRequest,
+		`{"type":"error","error":{"type":"invalid_request_error","code":"custom_code","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`,
+		0,
+	)
+	var withCodePayload struct {
+		Response struct {
+			Error map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if errUnmarshal := json.Unmarshal(withCode, &withCodePayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal withCode chunk: %v", errUnmarshal)
+	}
+	if got := withCodePayload.Response.Error["code"]; got != "custom_code" {
+		t.Fatalf("failed.response.error.code with existing code = %v, want %q", got, "custom_code")
+	}
+
+	// Unrelated invalid_request_error without a code remains unchanged.
+	otherErr := BuildOpenAIResponsesStreamFailedChunk(
+		http.StatusBadRequest,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content: Field required"}}`,
+		0,
+	)
+	var otherPayload struct {
+		Response struct {
+			Error map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if errUnmarshal := json.Unmarshal(otherErr, &otherPayload); errUnmarshal != nil {
+		t.Fatalf("unmarshal otherErr chunk: %v", errUnmarshal)
+	}
+	if _, hasCode := otherPayload.Response.Error["code"]; hasCode {
+		t.Fatalf("unrelated invalid_request_error unexpectedly gained code: %v", otherPayload.Response.Error)
+	}
+}

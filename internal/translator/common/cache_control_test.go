@@ -4,68 +4,68 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestAttachCacheControl_CopiesObject(t *testing.T) {
-	src := gjson.Parse(`{"text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}`)
+	src := ojson.Parse(`{"text":"hi","cache_control":{"type":"ephemeral","ttl":"5m"}}`)
 	dst := []byte(`{"type":"text","text":"hi"}`)
 
 	out := AttachCacheControl(dst, src)
-	if got := gjson.GetBytes(out, "cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytesNoCopy(out, "cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("cache_control.type = %q, want ephemeral; out=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "cache_control.ttl").String(); got != "5m" {
+	if got := ojson.GetBytesNoCopy(out, "cache_control.ttl").String(); got != "5m" {
 		t.Fatalf("cache_control.ttl = %q, want 5m; out=%s", got, out)
 	}
 }
 
 func TestAttachCacheControl_IgnoresMissing(t *testing.T) {
-	src := gjson.Parse(`{"text":"hi"}`)
+	src := ojson.Parse(`{"text":"hi"}`)
 	dst := []byte(`{"type":"text","text":"hi"}`)
 
 	out := AttachCacheControl(dst, src)
-	if gjson.GetBytes(out, "cache_control").Exists() {
+	if ojson.GetBytesNoCopy(out, "cache_control").Exists() {
 		t.Fatalf("cache_control should be absent; out=%s", out)
 	}
 }
 
 func TestAttachMessageCacheControl_PromotesStringContent(t *testing.T) {
-	src := gjson.Parse(`{"role":"user","content":"hi","cache_control":{"type":"ephemeral"}}`)
+	src := ojson.Parse(`{"role":"user","content":"hi","cache_control":{"type":"ephemeral"}}`)
 	msg := []byte(`{"role":"user","content":"hi"}`)
 
 	out := AttachMessageCacheControl(msg, src)
-	if got := gjson.GetBytes(out, "content.0.type").String(); got != "text" {
+	if got := ojson.GetBytesNoCopy(out, "content.0.type").String(); got != "text" {
 		t.Fatalf("content.0.type = %q, want text; out=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "content.0.text").String(); got != "hi" {
+	if got := ojson.GetBytesNoCopy(out, "content.0.text").String(); got != "hi" {
 		t.Fatalf("content.0.text = %q, want hi; out=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytesNoCopy(out, "content.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("content.0.cache_control.type = %q, want ephemeral; out=%s", got, out)
 	}
 }
 
 func TestAttachMessageCacheControl_SkipsWhenLastPartHasCacheControl(t *testing.T) {
-	src := gjson.Parse(`{"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
+	src := ojson.Parse(`{"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
 	msg := []byte(`{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}`)
 
 	out := AttachMessageCacheControl(msg, src)
-	if gjson.GetBytes(out, "content.0.cache_control.ttl").Exists() {
+	if ojson.GetBytesNoCopy(out, "content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control should win; out=%s", out)
 	}
 }
 
 func TestAttachToolMessageCacheControl_HoistsPartLevel(t *testing.T) {
-	src := gjson.Parse(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
+	src := ojson.Parse(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":{"type":"ephemeral"}}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`)
 	msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"4"}]}]}`)
 
 	out := AttachToolMessageCacheControl(msg, src)
-	if got := gjson.GetBytes(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+	if got := ojson.GetBytesNoCopy(out, "content.0.cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("tool_result cache_control.type = %q, want ephemeral; out=%s", got, out)
 	}
 	// Part-level does not carry ttl, so ttl should be absent
-	if gjson.GetBytes(out, "content.0.cache_control.ttl").Exists() {
+	if ojson.GetBytesNoCopy(out, "content.0.cache_control.ttl").Exists() {
 		t.Fatalf("part-level should take precedence over message-level; out=%s", out)
 	}
 }
@@ -83,14 +83,14 @@ func TestAttachToolMessageCacheControl_InvalidPartDoesNotBlockMessageLevel(t *te
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			src := gjson.Parse(fmt.Sprintf(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":%s}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`, tc.partCCJSON))
+			src := ojson.Parse(fmt.Sprintf(`{"role":"tool","content":[{"type":"text","text":"4","cache_control":%s}],"cache_control":{"type":"ephemeral","ttl":"1h"}}`, tc.partCCJSON))
 			msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"4"}]}]}`)
 
 			out := AttachToolMessageCacheControl(msg, src)
-			if got := gjson.GetBytes(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+			if got := ojson.GetBytesNoCopy(out, "content.0.cache_control.type").String(); got != "ephemeral" {
 				t.Fatalf("[%s] expected message-level ephemeral to win; got %q; out=%s", tc.name, got, out)
 			}
-			if got := gjson.GetBytes(out, "content.0.cache_control.ttl").String(); got != "1h" {
+			if got := ojson.GetBytesNoCopy(out, "content.0.cache_control.ttl").String(); got != "1h" {
 				t.Fatalf("[%s] expected message-level ttl=1h; got %q; out=%s", tc.name, got, out)
 			}
 		})
@@ -98,11 +98,39 @@ func TestAttachToolMessageCacheControl_InvalidPartDoesNotBlockMessageLevel(t *te
 }
 
 func TestAttachToolMessageCacheControl_NoToolResultLeavesMessageUntouched(t *testing.T) {
-	src := gjson.Parse(`{"role":"tool","cache_control":{"type":"ephemeral"}}`)
+	src := ojson.Parse(`{"role":"tool","cache_control":{"type":"ephemeral"}}`)
 	msg := []byte(`{"role":"user","content":[{"type":"text","text":"just text"}]}`)
 
 	out := AttachToolMessageCacheControl(msg, src)
-	if gjson.GetBytes(out, "content.0.cache_control").Exists() {
+	if ojson.GetBytesNoCopy(out, "content.0.cache_control").Exists() {
 		t.Fatalf("expected text block to not receive cache_control; out=%s", out)
 	}
+}
+
+func TestAttachMessageCacheControl_SkipsEmptyAndWhitespaceTextBlocks(t *testing.T) {
+	src := ojson.Parse(`{"cache_control":{"type":"ephemeral"}}`)
+
+	t.Run("picks last non-empty block when trailing blocks are empty", func(t *testing.T) {
+		msg := []byte(`{"role":"user","content":[{"type":"text","text":"hello"},{"type":"text","text":""},{"type":"text","text":"   "}]}`)
+		out := AttachMessageCacheControl(msg, src)
+		if got := ojson.GetBytesNoCopy(out, "content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("content.0.cache_control.type = %q, want ephemeral; out=%s", got, out)
+		}
+		if ojson.GetBytesNoCopy(out, "content.1.cache_control").Exists() || ojson.GetBytesNoCopy(out, "content.2.cache_control").Exists() {
+			t.Fatalf("empty/whitespace text blocks must not receive cache_control; out=%s", out)
+		}
+	})
+
+	t.Run("skips when all blocks or string are empty", func(t *testing.T) {
+		for _, msg := range [][]byte{
+			[]byte(`{"role":"user","content":""}`),
+			[]byte(`{"role":"user","content":"   "}`),
+			[]byte(`{"role":"user","content":[{"type":"text","text":""},{"type":"text","text":" \n "}]}`),
+		} {
+			out := AttachMessageCacheControl(msg, src)
+			if ojson.GetBytesNoCopy(out, "content.0.cache_control").Exists() {
+				t.Fatalf("empty message content must not receive cache_control; out=%s", out)
+			}
+		}
+	})
 }

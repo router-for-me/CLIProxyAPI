@@ -39,6 +39,11 @@ type VertexCompatKey struct {
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
 	// Headers optionally adds extra HTTP headers for requests sent with this key.
 	// Commonly used for cookies, user-agent, and other authentication headers.
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
@@ -59,6 +64,12 @@ type VertexCompatKey struct {
 
 	// Interactions optionally enables native Vertex Interactions API routing for this key.
 	Interactions *bool `yaml:"interactions,omitempty" json:"interactions,omitempty"`
+
+	// OpenAPI overrides automatic OpenAI-compatible endpoint selection.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
+	// OpenAPILocation overrides the location used for OpenAPI requests.
+	OpenAPILocation string `yaml:"openapi-location,omitempty" json:"openapi-location,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }
@@ -81,9 +92,14 @@ type VertexCompatModel struct {
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
+	// OpenAPI overrides endpoint selection for this model.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
 	// Thinking configures the thinking/reasoning capability for this model.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
+
+func (m VertexCompatModel) GetOpenAPI() *bool { return m.OpenAPI }
 
 func (m VertexCompatModel) GetName() string        { return m.Name }
 func (m VertexCompatModel) GetAlias() string       { return m.Alias }
@@ -110,22 +126,23 @@ func (cfg *Config) SanitizeVertexCompatKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.OpenAPILocation = strings.TrimSpace(entry.OpenAPILocation)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 
-		// Sanitize models: remove entries without valid alias
+		// Sanitize models: remove entries without valid model name
 		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))
 		for _, model := range entry.Models {
 			model.Alias = strings.TrimSpace(model.Alias)
 			model.Name = strings.TrimSpace(model.Name)
-			if model.Alias != "" && model.Name != "" {
+			if model.Name != "" {
 				sanitizedModels = append(sanitizedModels, model)
 			}
 		}
 		entry.Models = sanitizedModels
 
-		// Use API key + base URL as uniqueness key
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		// Use API key + base URL + connection-pool settings as uniqueness key
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL + "\x00" + FormatConnectionPoolDedupID(entry.ConnectionPool)
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}

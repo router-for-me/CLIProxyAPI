@@ -13,13 +13,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -200,14 +199,21 @@ func injectEnabledCreditTypes(payload []byte) []byte {
 	if len(payload) == 0 {
 		return nil
 	}
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return nil
 	}
-	updated, err := sjson.SetRawBytes(payload, "enabledCreditTypes", []byte(`["GOOGLE_ONE_AI"]`))
-	if err != nil {
+	doc := ojson.NewDoc(payload)
+	if !injectEnabledCreditTypesDoc(doc) {
 		return nil
 	}
-	return updated
+	return doc.Bytes()
+}
+
+func injectEnabledCreditTypesDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	return doc.SetRawBytes("enabledCreditTypes", []byte(`["GOOGLE_ONE_AI"]`)) == nil
 }
 
 func classifyAntigravity429(body []byte) antigravity429Category {
@@ -233,21 +239,21 @@ func decideAntigravity429(body []byte) antigravity429Decision {
 		decision.retryAfter = retryAfter
 	}
 
-	status := strings.TrimSpace(gjson.GetBytes(body, "error.status").String())
+	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
 	if !strings.EqualFold(status, "RESOURCE_EXHAUSTED") {
 		return decision
 	}
 
-	details := gjson.GetBytes(body, "error.details")
+	details := ojson.GetBytesNoCopy(body, "error.details")
 	if details.Exists() && details.IsArray() {
 		for _, detail := range details.Array() {
 			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
 				continue
 			}
-			reason := strings.TrimSpace(detail.Get("reason").String())
+			reason := strings.Clone(strings.TrimSpace(detail.Get("reason").String()))
 			decision.reason = reason
 			switch {
-			case strings.EqualFold(reason, "QUOTA_EXHAUSTED"):
+			case strings.EqualFold(reason, "QUOTA_EXHAUSTED"), strings.EqualFold(reason, "INSUFFICIENT_G1_CREDITS_BALANCE"):
 				decision.kind = antigravity429DecisionFullQuotaExhausted
 				return decision
 			case strings.EqualFold(reason, "RATE_LIMIT_EXCEEDED"):
@@ -289,7 +295,13 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
-	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
+	authID := strings.TrimSpace(auth.ID)
+	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(authID)
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known && !hint.Available {
+		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		}
+	}
 }
 func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" || antigravityCoolingDisabled(auth, nil) {
@@ -327,7 +339,7 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	if len(body) == 0 {
 		return false
 	}
-	details := gjson.GetBytes(body, "error.details")
+	details := ojson.GetBytesNoCopy(body, "error.details")
 	if !details.Exists() || !details.IsArray() {
 		return false
 	}
@@ -363,7 +375,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	if authID == "" {
 		return
 	}
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known {
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
 		return
 	}
 	if strings.TrimSpace(accessToken) == "" {
@@ -516,7 +528,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		return
 	}
 
-	userAgent := resolveUserAgent(auth)
+	userAgent := resolveLoadCodeAssistUserAgent(auth)
 	loadReqBody, errMarshal := json.Marshal(map[string]any{
 		"metadata": map[string]string{
 			"ideType": "ANTIGRAVITY",
@@ -534,7 +546,6 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		return
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("Accept", "*/*")
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", userAgent)
 
@@ -578,9 +589,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			clearAntigravityCreditsPermanentlyDisabled(auth)
 		}
 	}
-	paidTierID := strings.TrimSpace(gjson.GetBytes(bodyBytes, "paidTier.id").String())
+	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
 
-	credits := gjson.GetBytes(bodyBytes, "paidTier.availableCredits")
+	credits := ojson.GetBytesNoCopy(bodyBytes, "paidTier.availableCredits")
 	if !credits.IsArray() {
 		publish(nil, cliproxyauth.AntigravityCreditsHint{
 			Known:      true,

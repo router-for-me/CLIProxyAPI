@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const claudeRaceProbeOAuthKey = "sk-ant-oat-beta-policy"
@@ -154,7 +154,7 @@ func TestClaudeExecutor_ContextManagementNeverLeaksToOtherUpstreams(t *testing.T
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+	if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 		t.Fatalf("non-Anthropic upstream received context_management = %s", got.Raw)
 	}
 }
@@ -521,5 +521,22 @@ func TestApplyClaudeHeaders_StructuredHelperBetaOrderPreservedWithAdvisor(t *tes
 	got := req.Header.Get("Anthropic-Beta")
 	if got != helperBeta {
 		t.Fatalf("helper Anthropic-Beta =\n got:  %q\n want: %q", got, helperBeta)
+	}
+}
+
+// A body that carries thinking.block_binding is rejected upstream unless the
+// thinking-binding-controls beta travels with it, so even caller-owned
+// (default API-key) and confirmed-passthrough modes must emit that beta.
+func TestApplyClaudeHeaders_BlockBindingBodyAlwaysGetsBindingBeta(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}},"messages":[{"role":"user","content":"hi"}]}`)
+	for _, confirmed := range []bool{false, true} {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-binding-beta"}}
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, auth, "key-binding-beta", false, nil, body, nil, nil, confirmed); err != nil {
+			t.Fatalf("confirmed=%v: applyClaudeHeaders() error = %v", confirmed, err)
+		}
+		if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, claudeThinkingBindingBeta) {
+			t.Fatalf("confirmed=%v: Anthropic-Beta = %q, want %s for a block_binding body", confirmed, got, claudeThinkingBindingBeta)
+		}
 	}
 }

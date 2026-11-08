@@ -8,6 +8,7 @@ package pluginhost
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 typedef struct {
 	void* ptr;
@@ -75,21 +76,88 @@ static void cliproxy_set_host_api(cliproxy_host_api* api, uint32_t abi_version, 
 	api->free_buffer = cliproxyHostFree;
 }
 
+static int cliproxy_probe_host_call(void* host_ctx, const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+	(void)host_ctx;
+	(void)method;
+	(void)request;
+	(void)request_len;
+	if (response != NULL) {
+		response->ptr = NULL;
+		response->len = 0;
+	}
+	return 1;
+}
+
+static void cliproxy_probe_host_free(void* ptr, size_t len) {
+	(void)ptr;
+	(void)len;
+}
+
+static int cliproxy_probe_init_and_shutdown(void* fn, uint32_t abi_version) {
+	static cliproxy_host_api host_api;
+	cliproxy_plugin_api plugin_api = {0};
+	host_api.abi_version = abi_version;
+	host_api.host_ctx = NULL;
+	host_api.call = cliproxy_probe_host_call;
+	host_api.free_buffer = cliproxy_probe_host_free;
+	int rc = ((cliproxy_plugin_init_fn)fn)(&host_api, &plugin_api);
+	if (rc == 0 && plugin_api.shutdown != NULL) {
+		plugin_api.shutdown();
+	}
+	return rc;
+}
+
+static void cliproxy_probe_exit(int code) {
+	_exit(code);
+}
+
 */
 import "C"
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 )
 
-var (
-	hostCallbackID      atomic.Uintptr
-	hostCallbackEntries sync.Map
+const (
+	pluginDlopenProbeEnv       = "CLIPROXY_PLUGIN_DLOPEN_PROBE"
+	pluginDlopenProbeStatusEnv = "CLIPROXY_PLUGIN_DLOPEN_PROBE_STATUS"
+	probeStatusStarted         = "started"
+	probeStatusLoaded          = "loaded"
+	probeStatusDlopenNull      = "dlopen_null"
+	maxPluginProbeOutputBytes  = 64 * 1024
 )
+
+var (
+	hostCallbackID        atomic.Uintptr
+	hostCallbackEntries   sync.Map
+	probedPluginShadows   sync.Map
+	pluginProbeExecutable = os.Executable
+	unixDlopen            = defaultUnixDlopen
+)
+
+func defaultUnixDlopen(path string) unsafe.Pointer {
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	return C.cliproxy_dlopen(cPath)
+}
+
+func init() {
+	if probePath := os.Getenv(pluginDlopenProbeEnv); probePath != "" {
+		runPluginDlopenProbe(probePath)
+	}
+}
 
 type dynamicLibraryLoader struct{}
 
@@ -109,17 +177,13 @@ func defaultPluginLoader() pluginLoader {
 }
 
 func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
-	loadPath, errShadow := shadowCopyPlugin(file)
+	loadPath, releaseGuard, errShadow := acquireShadowPluginLoad(file)
 	if errShadow != nil {
 		return nil, errShadow
 	}
-	cPath := C.CString(loadPath)
-	defer C.free(unsafe.Pointer(cPath))
-
-	handle := C.cliproxy_dlopen(cPath)
-	if handle == nil {
-		removeShadowPlugin(loadPath)
-		return nil, fmt.Errorf("dlopen %s: %s", file.Path, dlerrorString())
+	handle, loadPath, errOpen := openUnixShadowPluginWithFallback(file, loadPath, releaseGuard)
+	if errOpen != nil {
+		return nil, errOpen
 	}
 	// From here on the image must never be unloaded: dlopen may already
 	// have started the plugin runtime, and a Go c-shared runtime cannot be
@@ -259,10 +323,294 @@ func (c *dynamicLibraryClient) close() {
 	}
 }
 
+func openUnixShadowPluginWithFallback(file pluginFile, loadPath string, releaseGuard func()) (unsafe.Pointer, string, error) {
+	errProbe := probePluginLibrary(file.Path, loadPath)
+	if errProbe != nil {
+		releaseGuard()
+		if _, cached := probedPluginShadows.Load(filepath.Base(loadPath)); cached {
+			return nil, "", errProbe
+		}
+		if fallbackHandle, fallbackPath, okFallback := tryOpenUnixFallbackShadowPlugin(file, loadPath); okFallback {
+			return fallbackHandle, fallbackPath, nil
+		}
+		return nil, "", errProbe
+	}
+	handle := unixDlopen(loadPath)
+	firstErr := dlerrorString()
+	releaseGuard()
+	if handle != nil {
+		return handle, loadPath, nil
+	}
+	probedPluginShadows.Delete(filepath.Base(loadPath))
+
+	if fallbackHandle, fallbackPath, okFallback := tryOpenUnixFallbackShadowPlugin(file, loadPath); okFallback {
+		return fallbackHandle, fallbackPath, nil
+	}
+	return nil, "", fmt.Errorf("dlopen %s: %s", file.Path, firstErr)
+}
+
+func tryOpenUnixFallbackShadowPlugin(file pluginFile, failedLoadPath string) (unsafe.Pointer, string, bool) {
+	fallbackPath, releaseFallbackGuard, errFallback := acquireShadowPluginFallbackLoad(file, failedLoadPath)
+	if errFallback != nil {
+		return nil, "", false
+	}
+	if errFallbackProbe := probePluginLibrary(file.Path, fallbackPath); errFallbackProbe != nil {
+		releaseFallbackGuard()
+		return nil, "", false
+	}
+	fallbackHandle := unixDlopen(fallbackPath)
+	releaseFallbackGuard()
+	if fallbackHandle != nil {
+		return fallbackHandle, fallbackPath, true
+	}
+	probedPluginShadows.Delete(filepath.Base(fallbackPath))
+	return nil, "", false
+}
+
 func dlerrorString() string {
 	errText := C.cliproxy_dlerror()
 	if errText == nil {
 		return ""
 	}
 	return C.GoString(errText)
+}
+
+func runPluginDlopenProbe(probePath string) {
+	statusPath := os.Getenv(pluginDlopenProbeStatusEnv)
+	_ = os.Unsetenv(pluginDlopenProbeEnv)
+	_ = os.Unsetenv(pluginDlopenProbeStatusEnv)
+	writeProbeStatus(statusPath, probeStatusStarted)
+	cPath := C.CString(probePath)
+	handle := C.cliproxy_dlopen(cPath)
+	C.free(unsafe.Pointer(cPath))
+	if handle == nil {
+		writeProbeStatus(statusPath, probeStatusDlopenNull)
+		C.cliproxy_probe_exit(0)
+		return
+	}
+	cSymbol := C.CString("cliproxy_plugin_init")
+	initSymbol := C.cliproxy_dlsym(handle, cSymbol)
+	C.free(unsafe.Pointer(cSymbol))
+	if initSymbol != nil {
+		_ = C.cliproxy_probe_init_and_shutdown(initSymbol, C.uint32_t(pluginHostABIVersion))
+	}
+	writeProbeStatus(statusPath, probeStatusLoaded)
+	C.cliproxy_probe_exit(0)
+}
+
+func writeProbeStatus(statusPath, status string) {
+	if statusPath == "" {
+		return
+	}
+	_ = os.WriteFile(statusPath, []byte(status), 0o600)
+}
+
+type limitedProbeBuffer struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	limit int
+}
+
+func newLimitedProbeBuffer(limit int) *limitedProbeBuffer {
+	if limit <= 0 {
+		limit = maxPluginProbeOutputBytes
+	}
+	return &limitedProbeBuffer{limit: limit}
+}
+
+func (b *limitedProbeBuffer) Write(p []byte) (int, error) {
+	total := len(p)
+	if b == nil || b.limit <= 0 {
+		return total, nil
+	}
+	b.mu.Lock()
+	remaining := b.limit - b.buf.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.buf.Write(p)
+	}
+	b.mu.Unlock()
+	return total, nil
+}
+
+func (b *limitedProbeBuffer) String() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func probePluginLibrary(sourcePath, loadPath string) error {
+	cacheKey := filepath.Base(loadPath)
+	if cached, ok := probedPluginShadows.Load(cacheKey); ok {
+		if detail, _ := cached.(string); detail != "" {
+			return fmt.Errorf("dlopen %s: %s", sourcePath, detail)
+		}
+		return nil
+	}
+
+	execPath, errExec := pluginProbeExecutable()
+	if errExec != nil {
+		return fmt.Errorf("dlopen %s: resolve preflight probe executable: %w", sourcePath, errExec)
+	}
+	if strings.TrimSpace(execPath) == "" {
+		execPath = os.Args[0]
+	}
+
+	statusDir, errStatusDir := shadowPluginDir()
+	if errStatusDir != nil {
+		statusDir = os.TempDir()
+	}
+	statusFile, errStatus := os.CreateTemp(statusDir, ".cliproxy-probe-*.status")
+	if errStatus != nil {
+		return fmt.Errorf("dlopen %s: create preflight probe status file: %w", sourcePath, errStatus)
+	}
+	statusPath := statusFile.Name()
+	_ = statusFile.Close()
+	defer func() {
+		_ = os.Remove(statusPath)
+	}()
+
+	devNull, errDevNull := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if errDevNull != nil {
+		return fmt.Errorf("dlopen %s: open %s: %w", sourcePath, os.DevNull, errDevNull)
+	}
+	defer func() {
+		_ = devNull.Close()
+	}()
+
+	// Use an explicit os.Pipe (*os.File) for Stderr so os/exec does not spawn
+	// its own uncancelable pipe-drain goroutine. Closing stderrReader as soon
+	// as cmd.Wait() returns ensures a grandchild process that inherited Stderr
+	// neither blocks Wait() nor writes unbounded data to disk.
+	stderrReader, stderrWriter, errPipe := os.Pipe()
+	if errPipe != nil {
+		return fmt.Errorf("dlopen %s: create preflight probe pipe: %w", sourcePath, errPipe)
+	}
+	stderrBuf := newLimitedProbeBuffer(maxPluginProbeOutputBytes)
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		_, _ = io.Copy(stderrBuf, stderrReader)
+	}()
+
+	cmd := exec.Command(execPath)
+	cmd.Env = append(
+		os.Environ(),
+		pluginDlopenProbeEnv+"="+loadPath,
+		pluginDlopenProbeStatusEnv+"="+statusPath,
+	)
+	cmd.Stdout = devNull
+	cmd.Stderr = stderrWriter
+	errStart := cmd.Start()
+	_ = stderrWriter.Close()
+	if errStart != nil {
+		_ = stderrReader.Close()
+		<-stderrDone
+		return fmt.Errorf("dlopen %s: preflight probe failed: %w", sourcePath, errStart)
+	}
+	errRun := cmd.Wait()
+	_ = stderrReader.Close()
+	<-stderrDone
+
+	statusBytes, _ := os.ReadFile(statusPath)
+	statusText := strings.TrimSpace(string(statusBytes))
+	stderrText := stderrBuf.String()
+
+	if errRun == nil {
+		switch statusText {
+		case probeStatusLoaded:
+			probedPluginShadows.Store(cacheKey, "")
+			return nil
+		case probeStatusDlopenNull:
+			return nil
+		case probeStatusStarted:
+			detail := "preflight probe exited prematurely before completing initialization"
+			if firstLine := firstNonEmptyLine(stderrText); firstLine != "" {
+				detail = fmt.Sprintf("%s: %s", detail, firstLine)
+			}
+			probedPluginShadows.Store(cacheKey, detail)
+			return fmt.Errorf("dlopen %s: %s", sourcePath, detail)
+		default:
+			return fmt.Errorf("dlopen %s: preflight probe did not complete", sourcePath)
+		}
+	}
+
+	detail := describePluginProbeFailure(errRun, stderrText)
+	if statusText == probeStatusStarted && isCacheablePluginProbeFailure(errRun, stderrText) {
+		probedPluginShadows.Store(cacheKey, detail)
+	}
+	return fmt.Errorf("dlopen %s: %s", sourcePath, detail)
+}
+
+func isCacheablePluginProbeFailure(errRun error, stderrText string) bool {
+	var exitErr *exec.ExitError
+	if errors.As(errRun, &exitErr) {
+		if status, okStatus := exitErr.Sys().(syscall.WaitStatus); okStatus && status.Signaled() {
+			switch status.Signal() {
+			case syscall.SIGILL, syscall.SIGSEGV, syscall.SIGBUS, syscall.SIGFPE, syscall.SIGABRT, syscall.SIGTRAP, syscall.SIGSYS:
+				return true
+			default:
+				return false
+			}
+		}
+	}
+	lowerStderr := strings.ToLower(stderrText)
+	for _, token := range []string{
+		"sigill",
+		"illegal instruction",
+		"sigsegv",
+		"segmentation violation",
+		"sigbus",
+		"bus error",
+		"sigfpe",
+		"floating-point exception",
+		"sigabrt",
+		"sigtrap",
+		"panic:",
+		"fatal error:",
+	} {
+		if strings.Contains(lowerStderr, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func describePluginProbeFailure(errRun error, stderrText string) string {
+	firstLine := firstNonEmptyLine(stderrText)
+	lowerStderr := strings.ToLower(stderrText)
+	var exitErr *exec.ExitError
+	if errors.As(errRun, &exitErr) {
+		if status, okStatus := exitErr.Sys().(syscall.WaitStatus); okStatus && status.Signaled() {
+			sig := status.Signal()
+			if sig == syscall.SIGILL {
+				return "preflight probe terminated by SIGILL: illegal instruction (possible CPU instruction set mismatch)"
+			}
+			if firstLine != "" {
+				return fmt.Sprintf("preflight probe terminated by signal %s: %s", sig, firstLine)
+			}
+			return fmt.Sprintf("preflight probe terminated by signal %s", sig)
+		}
+	}
+	if strings.Contains(stderrText, "SIGILL") || strings.Contains(lowerStderr, "illegal instruction") {
+		return "preflight probe terminated by SIGILL: illegal instruction (possible CPU instruction set mismatch)"
+	}
+	if firstLine != "" {
+		return fmt.Sprintf("preflight probe failed (%v): %s", errRun, firstLine)
+	}
+	return fmt.Sprintf("preflight probe failed: %v", errRun)
+}
+
+func firstNonEmptyLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }

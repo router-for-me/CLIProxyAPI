@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/tidwall/gjson"
 )
 
 func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
@@ -23,7 +23,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
 		if strings.Contains(string(got), "image_url") {
 			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
 		}
-		messages := gjson.GetBytes(got, "messages").Array()
+		messages := ojson.GetBytes(got, "messages").Array()
 		if len(messages) != 2 {
 			t.Fatalf("expected 2 messages after dropping synthetic relay user message, got %d: %s", len(messages), string(got))
 		}
@@ -46,7 +46,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
 		if strings.Contains(string(got), "image_url") {
 			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
 		}
-		messages := gjson.GetBytes(got, "messages").Array()
+		messages := ojson.GetBytes(got, "messages").Array()
 		if len(messages) != 2 {
 			t.Fatalf("expected 2 messages, got %d: %s", len(messages), string(got))
 		}
@@ -70,7 +70,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
 		if strings.Contains(string(got), "image_url") {
 			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
 		}
-		messages := gjson.GetBytes(got, "messages").Array()
+		messages := ojson.GetBytes(got, "messages").Array()
 		if len(messages) != 3 {
 			t.Fatalf("expected 3 messages when user text is present, got %d: %s", len(messages), string(got))
 		}
@@ -104,7 +104,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
 		if strings.Contains(string(got), "image_url") {
 			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
 		}
-		messages := gjson.GetBytes(got, "messages").Array()
+		messages := ojson.GetBytes(got, "messages").Array()
 		if len(messages) != 3 {
 			t.Fatalf("expected 3 messages, got %d: %s", len(messages), string(got))
 		}
@@ -134,7 +134,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyRelayedImages(t *testing.T) {
 		if strings.Contains(string(got), "image_url") {
 			t.Fatalf("text-only normalization left image_url in payload: %s", string(got))
 		}
-		messages := gjson.GetBytes(got, "messages").Array()
+		messages := ojson.GetBytes(got, "messages").Array()
 		if len(messages) != 3 {
 			t.Fatalf("expected 3 messages, got %d: %s", len(messages), string(got))
 		}
@@ -160,20 +160,20 @@ func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 
 	got := NormalizeOpenAIToolResultsTextOnly(input)
 
-	toolContent := gjson.GetBytes(got, "messages.1.content")
-	if toolContent.Type != gjson.String {
+	toolContent := ojson.GetBytes(got, "messages.1.content")
+	if toolContent.Type != ojson.String {
 		t.Fatalf("tool content type = %s, want string", toolContent.Type)
 	}
 	if toolContent.String() != "image inspected\n\n"+openAIToolResultImageOmittedText {
 		t.Fatalf("tool content = %q", toolContent.String())
 	}
-	if gotContent := gjson.GetBytes(got, "messages.2.content"); gotContent.String() != "already text" {
+	if gotContent := ojson.GetBytes(got, "messages.2.content"); gotContent.String() != "already text" {
 		t.Fatalf("existing string tool content = %q", gotContent.String())
 	}
-	if !gjson.GetBytes(got, "messages.0.content").IsArray() {
+	if !ojson.GetBytes(got, "messages.0.content").IsArray() {
 		t.Fatal("assistant content array was unexpectedly changed")
 	}
-	if !gjson.GetBytes(got, "messages.3.content").IsArray() {
+	if !ojson.GetBytes(got, "messages.3.content").IsArray() {
 		t.Fatal("non-tool content array was unexpectedly changed")
 	}
 }
@@ -204,7 +204,7 @@ func TestNormalizeOpenAIToolResultsTextOnlyImageAndUnknownContent(t *testing.T) 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NormalizeOpenAIToolResultsTextOnly([]byte(tt.input))
-			if content := gjson.GetBytes(got, "messages.0.content").String(); content != tt.want {
+			if content := ojson.GetBytes(got, "messages.0.content").String(); content != tt.want {
 				t.Fatalf("tool content = %q, want %q", content, tt.want)
 			}
 		})
