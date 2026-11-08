@@ -1955,6 +1955,68 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 	}
 }
 
+func TestAntigravityReasoningReplaySkipsSymmetricGeminiAndInteractionsButKeepsAsymmetricAlias(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3-flash"
+	payload := []byte(`{"sessionId":"sess-symmetry","request":{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]}]}}`)
+	responseSSE := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},"finishReason":"STOP"}]}}`)
+
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatGemini, sdktranslator.FormatInteractions} {
+		t.Run("symmetric_"+format.String(), func(t *testing.T) {
+			internalcache.ClearAntigravityReasoningReplayCache()
+			req := cliproxyexecutor.Request{Model: model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   format,
+				ResponseFormat: format,
+			}
+			_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+			if errPrepare != nil {
+				t.Fatalf("prepare error: %v", errPrepare)
+			}
+			if scope.valid() {
+				t.Fatalf("symmetric format %q must not allocate reasoning replay KV scope, got %+v", format, scope)
+			}
+			if acc := newAntigravityReasoningReplayAccumulator(scope, payload); acc != nil {
+				t.Fatalf("symmetric format %q must not create replay accumulator", format)
+			}
+		})
+	}
+
+	t.Run("asymmetric_claude_haiku_alias_to_gemini_3_flash", func(t *testing.T) {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		// Downstream client sends Claude /v1/messages with model="claude-haiku-4-5-20251001",
+		// which model-alias resolves to baseModel="gemini-3-flash" inside AntigravityExecutor.
+		req := cliproxyexecutor.Request{Model: model, Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatClaude,
+			ResponseFormat: sdktranslator.FormatClaude,
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestedModelMetadataKey: "claude-haiku-4-5-20251001",
+			},
+		}
+		_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+		if errPrepare != nil {
+			t.Fatalf("prepare error: %v", errPrepare)
+		}
+		if !scope.valid() {
+			t.Fatal("asymmetric Claude -> Gemini alias request must allocate reasoning replay KV scope")
+		}
+		acc := newAntigravityReasoningReplayAccumulator(scope, payload)
+		if acc == nil {
+			t.Fatal("expected non-nil accumulator for asymmetric Claude -> Gemini request")
+		}
+		acc.ObserveSSELine(responseSSE)
+		acc.Commit(context.Background())
+
+		items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
+		if !ok || len(items) == 0 {
+			t.Fatalf("expected asymmetric replay items to be persisted in KV, ok=%v len=%d", ok, len(items))
+		}
+	})
+}
+
 func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)

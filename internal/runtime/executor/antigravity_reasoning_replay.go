@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -88,6 +89,27 @@ func (s antigravityReasoningReplayScope) valid() bool {
 	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
 }
 
+func antigravityFormatCarriesNativeThoughtSignatures(format sdktranslator.Format) bool {
+	switch strings.ToLower(strings.TrimSpace(format.String())) {
+	case sdktranslator.FormatGemini.String(),
+		sdktranslator.FormatInteractions.String():
+		return true
+	default:
+		return false
+	}
+}
+
+func antigravityRequestIsSymmetricForReasoningReplay(opts cliproxyexecutor.Options) bool {
+	source := strings.TrimSpace(opts.SourceFormat.String())
+	if source == "" {
+		return false
+	}
+	if !antigravityFormatCarriesNativeThoughtSignatures(opts.SourceFormat) {
+		return false
+	}
+	return antigravityFormatCarriesNativeThoughtSignatures(cliproxyexecutor.ResponseFormatOrSource(opts))
+}
+
 func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
@@ -127,6 +149,9 @@ func antigravityReasoningReplayScopeFromDoc(modelName string, doc *ojson.Doc) an
 }
 
 func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) antigravityReasoningReplayScope {
+	if antigravityRequestIsSymmetricForReasoningReplay(opts) && !antigravityPayloadHasClaudeToolProvenanceID(payload) {
+		return antigravityReasoningReplayScope{}
+	}
 	// Prefer an explicit downstream session over a provider sessionId synthesized
 	// from request text. This keeps identical prompts in separate client sessions
 	// from sharing an opaque Gemini reasoning chain.
@@ -157,6 +182,9 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 }
 
 func antigravityReasoningReplayScopeFromRequestDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) antigravityReasoningReplayScope {
+	if antigravityRequestIsSymmetricForReasoningReplay(opts) && !antigravityDocHasClaudeToolProvenanceID(doc) {
+		return antigravityReasoningReplayScope{}
+	}
 	scope := antigravityReasoningReplayScope{modelName: modelName}
 	if sessionKey := antigravityReasoningReplayClientSessionKey(ctx, req, opts); sessionKey != "" {
 		scope.sessionKey = sessionKey
