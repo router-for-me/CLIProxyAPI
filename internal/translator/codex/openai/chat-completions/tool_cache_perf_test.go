@@ -126,6 +126,7 @@ func TestCodexChatToolMetadataEquivalence(t *testing.T) {
 		tcRequest(3),
 		[]byte(`{"messages":[],"tools":{"type":"function","function":{"name":"apply_patch"}}}`),
 		[]byte(`{"messages":[],"tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`),
+		[]byte(`{"messages":[],"tools":[{"type":"custom","custom":{"name":"apply_patch","format":{"type":"grammar","grammar":{"syntax":"lark","definition":"start: patch"}}}}]}`),
 		[]byte(`{"messages":[],"tools":[{"type":"function","function":{"name":"apply_patch"}},{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}`),
 		[]byte(`{"messages":[],"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}]}`),
 		[]byte(`{"messages":[],"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","syntax":"lark","definition":"start: patch"}}]}]}`),

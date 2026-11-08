@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -478,7 +477,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 						if existing.LastError != nil {
 							auth.LastError = cloneError(existing.LastError)
 						} else if auth.RefreshError != nil {
-							auth.LastError = &Error{Code: "unauthorized", Message: auth.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+							auth.LastError = refreshAccessError(auth, auth.RefreshError.Message, false, hasUnauthorizedAuthFailure(existing))
+							if auth.LastError.Code == "refresh_outcome_unknown" {
+								auth.StatusMessage = auth.LastError.Message
+							}
 						}
 					}
 				}

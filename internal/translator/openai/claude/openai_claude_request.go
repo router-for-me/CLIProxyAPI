@@ -72,44 +72,46 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Stream
 	_ = outDoc.Set("stream", stream)
 
-	// Thinking: Convert Claude thinking.budget_tokens to OpenAI reasoning_effort
+	// Thinking: Convert Claude thinking.budget_tokens and output_config.effort to OpenAI reasoning_effort
+	effort := ""
+	if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String {
+		effort = strings.ToLower(strings.TrimSpace(v.String()))
+	}
 	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
 				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
-					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						_ = outDoc.Set("reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(budget); ok && mappedEffort != "" {
+						_ = outDoc.Set("reasoning_effort", mappedEffort)
 					}
-				} else if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				} else if effort != "" {
 					// Some Claude-compatible clients pair manual thinking with output_config.effort.
 					// Preserve that explicit level when there is no legacy token budget to map.
-					_ = outDoc.Set("reasoning_effort", strings.ToLower(strings.TrimSpace(v.String())))
+					_ = outDoc.Set("reasoning_effort", effort)
 				} else {
 					// No budget_tokens or explicit effort specified; preserve the enabled-thinking default.
-					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
-						_ = outDoc.Set("reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(-1); ok && mappedEffort != "" {
+						_ = outDoc.Set("reasoning_effort", mappedEffort)
 					}
 				}
 			case "adaptive", "auto":
 				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
-				effort := ""
-				if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String {
-					effort = strings.ToLower(strings.TrimSpace(v.String()))
-				}
 				if effort != "" {
 					_ = outDoc.Set("reasoning_effort", effort)
 				} else {
 					_ = outDoc.Set("reasoning_effort", string(thinking.LevelXHigh))
 				}
 			case "disabled":
-				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
-					_ = outDoc.Set("reasoning_effort", effort)
+				if mappedEffort, ok := thinking.ConvertBudgetToLevel(0); ok && mappedEffort != "" {
+					_ = outDoc.Set("reasoning_effort", mappedEffort)
 				}
 			}
 		}
+	} else if !thinkingConfig.Exists() && effort != "" {
+		_ = outDoc.Set("reasoning_effort", effort)
 	}
 
 	// Process messages and system.
