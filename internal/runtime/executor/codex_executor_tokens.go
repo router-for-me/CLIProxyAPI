@@ -49,6 +49,9 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	helps.SetBoolIfDifferentDoc(doc, "stream", false)
 	normalizeCodexInstructionsDoc(doc, helps.IsNativeCodexRequest(req.Payload, opts))
 
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		helps.NormalizeCodexCompatToolOutputsDoc(doc, e.resolveCodexModelIsCompat(auth, req, baseModel))
+	}
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts))
 	helps.FinalizePayloadDoc(ctx, doc)
 	body = doc.Bytes()

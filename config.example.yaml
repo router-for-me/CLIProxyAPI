@@ -730,6 +730,8 @@ upstream:
 #           force-mapping: true    # optional: rewrite response model fields back to the alias
 #           # Preserve thinking blocks with empty signatures for compatible upstreams.
 #           # client.codex.optimize-multi-agent-v2 applies to both OAuth and API-key credentials.
+#           # Also fold standalone function_call_output items with string output and no call reference into user context.
+#           # Delegation outputs keep their separate orphan-delegation-compatibility policy.
 #           is-compat: false
 #           # Optional: enable configuration_update for this API-key model; omitted defaults to false.
 #           support-configuration-update: false
