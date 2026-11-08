@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
 )
 
 func TestPluginUsagePresenceMissingAndMeasuredZero(t *testing.T) {
@@ -42,10 +42,10 @@ func TestPluginUsagePresenceRestoresResponsesAfterEverySplit(t *testing.T) {
 			observed.Observe(source[split:])
 			observed.Observe([]byte("data: [DONE]\n\n"))
 			patched := observed.RestoreResponses(EnsureResponsesUsageDetails(target))
-			var result gjson.Result
+			var result ojson.Result
 			IterateStreamLines(patched, func(line []byte) {
-				if raw := ExtractStreamJSONPayload(line); gjson.ValidBytes(raw) {
-					result = gjson.ParseBytes(raw)
+				if raw := ExtractStreamJSONPayload(line); ojson.ValidBytes(raw) {
+					result = ojson.ParseBytes(raw)
 				}
 			})
 			if result.Get("response.usage.input_tokens_details.cache_write_tokens").Int() != 2 || result.Get("response.usage.input_tokens_details.cached_tokens").Int() != 5 || result.Get("response.usage.output_tokens_details.reasoning_tokens").Exists() {
@@ -103,11 +103,11 @@ func TestPluginUsagePresenceRemovesEmptyResponseDetails(t *testing.T) {
 					prefix = "response.usage."
 				}
 				patched := observed.RestoreResponses(target)
-				result := gjson.ParseBytes(patched)
+				result := ojson.ParseBytes(patched)
 				if stream {
 					IterateStreamLines(patched, func(line []byte) {
-						if raw := ExtractStreamJSONPayload(line); gjson.ValidBytes(raw) {
-							result = gjson.ParseBytes(raw)
+						if raw := ExtractStreamJSONPayload(line); ojson.ValidBytes(raw) {
+							result = ojson.ParseBytes(raw)
 						}
 					})
 				}
@@ -131,14 +131,14 @@ func TestPluginUsagePresenceKeepsExplicitZeroAndRemovesUnknownParents(t *testing
 	observed.Observe([]byte(`{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`))
 	patched := observed.RestoreResponses(EnsureResponsesUsageDetails([]byte(`{"object":"response","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}`)))
 	for _, path := range []string{"usage.input_tokens_details.cached_tokens", "usage.input_tokens_details.cache_write_tokens", "usage.output_tokens_details.reasoning_tokens"} {
-		if node := gjson.GetBytes(patched, path); !node.Exists() || node.Int() != 0 {
+		if node := ojson.GetBytes(patched, path); !node.Exists() || node.Int() != 0 {
 			t.Fatalf("explicit zero lost at %s: %s", path, patched)
 		}
 	}
 	partial := NewPluginUsageObservation("openai")
 	partial.Observe([]byte(`{"usage":{"prompt_tokens":10}}`))
 	patched = partial.RestoreResponses([]byte(`{"object":"response","usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}`))
-	if gjson.GetBytes(patched, "usage.output_tokens").Exists() || gjson.GetBytes(patched, "usage.total_tokens").Exists() {
+	if ojson.GetBytes(patched, "usage.output_tokens").Exists() || ojson.GetBytes(patched, "usage.total_tokens").Exists() {
 		t.Fatalf("missing parent counters were synthesized: %s", patched)
 	}
 }
@@ -147,7 +147,7 @@ func TestPluginUsagePresenceAbsentUsageNeverSynthesized(t *testing.T) {
 	observed := NewPluginUsageObservation("openai")
 	observed.Observe([]byte(`{"choices":[]}`))
 	patched := observed.RestoreResponses([]byte(`{"type":"response.completed","response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`))
-	if gjson.GetBytes(patched, "response.usage").Exists() {
+	if ojson.GetBytes(patched, "response.usage").Exists() {
 		t.Fatalf("unknown usage was sent as zero: %s", patched)
 	}
 }

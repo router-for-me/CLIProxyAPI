@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func parseWSDataEventTypesFromForwardedChunks(forwarded [][]byte) []string {
@@ -18,8 +18,8 @@ func parseWSDataEventTypesFromForwardedChunks(forwarded [][]byte) []string {
 				continue
 			}
 			j := bytes.TrimSpace(ln[5:])
-			if gjson.ValidBytes(j) {
-				types = append(types, gjson.GetBytes(j, "type").String())
+			if ojson.ValidBytes(j) {
+				types = append(types, ojson.GetBytesNoCopy(j, "type").String())
 			}
 		}
 	}

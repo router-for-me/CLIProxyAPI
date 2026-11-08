@@ -126,7 +126,10 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		thinkingLevel = strings.TrimSpace(cleanModel[colonIdx+1:])
 	}
 
-	// 4. Normalize requested effort
+	// 4. Normalize requested effort. Compound "<level>-fast" requests select upstream
+	// fast-mode variants (see step 10); NormalizeThinkingLevel cannot represent them,
+	// so keep the raw level alongside the normalized effort.
+	rawLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
 	effort := NormalizeThinkingLevel(thinkingLevel, budgetTokens)
 	lowerBase := strings.ToLower(baseModel)
 	canonicalBase := strings.ReplaceAll(lowerBase, ".", "-")
@@ -239,9 +242,20 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 		return canonicalBase
 	}
 
-	// 10. Model has thinking levels: determine default effort and clamp
+	// 10. Fast-mode variants: a strict "<level>-fast" request keeps its level
+	// clamped to the catalog, never to the plain default.
+	if base, isFast := strings.CutSuffix(rawLevel, "-fast"); isFast && devinLevelIndex(base) != -1 {
+		defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
+		clamped := clampEffort(base, allowedLevels, defaultEffort)
+		return canonicalBase + "-" + clamped + "-fast"
+	}
+
+	// 11. Model has thinking levels: determine default effort and clamp
 	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
 	clamped := clampEffort(effort, allowedLevels, defaultEffort)
+	if effort == "fast" {
+		return canonicalBase + "-" + clamped + "-fast"
+	}
 	return canonicalBase + "-" + clamped
 }
 

@@ -22,8 +22,15 @@ func (f *pluginResponseFrames) feed(payload []byte) [][]byte {
 		if index < 0 {
 			break
 		}
-		frames = append(frames, bytes.Clone(f.pending[:index+1]))
+		line := bytes.Clone(f.pending[:index+1])
 		f.pending = f.pending[index+1:]
+		if len(bytes.TrimSpace(line)) == 0 {
+			if n := len(frames); n > 0 {
+				frames[n-1] = append(frames[n-1], line...)
+			}
+			continue
+		}
+		frames = append(frames, line)
 	}
 	if raw := helps.ExtractStreamJSONPayload(f.pending); json.Valid(raw) || bytes.Equal(bytes.TrimSpace(raw), []byte("[DONE]")) {
 		frames = append(frames, bytes.Clone(f.pending))

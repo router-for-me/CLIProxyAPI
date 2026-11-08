@@ -3,21 +3,21 @@ package responses
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertInteractionsResponseToOpenAIResponsesNonStream(t *testing.T) {
 	raw := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, nil)
-	if got := gjson.GetBytes(out, "output.0.content.0.text").String(); got != "ok" {
+	if got := ojson.GetBytesNoCopy(out, "output.0.content.0.text").String(); got != "ok" {
 		t.Fatalf("response text = %q, want ok. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.total_tokens").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(out, "usage.total_tokens").Int(); got != 3 {
 		t.Fatalf("usage.total_tokens = %d, want 3. Output: %s", got, string(out))
 	}
 }
@@ -48,7 +48,7 @@ func TestInteractionsResponsesGeneratedItemIDsDoNotCollideAcrossResponses(t *tes
 			} {
 				events = append(events, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "devin/gpt-6-1-sol", tc.req, nil, []byte(raw), &param)...)
 			}
-			id := gjson.GetBytes(findResponsesEventPayload(events, "response.output_item.added"), "item.id").String()
+			id := ojson.GetBytesNoCopy(findResponsesEventPayload(events, "response.output_item.added"), "item.id").String()
 			if id == "" || seen[id] {
 				t.Fatalf("%s response %d generated duplicate or empty item ID %q", tc.name, response, id)
 			}
@@ -58,7 +58,7 @@ func TestInteractionsResponsesGeneratedItemIDsDoNotCollideAcrossResponses(t *tes
 				{"response.output_item.done", "item.id"},
 				{"response.completed", "response.output.0.id"},
 			} {
-				if got := gjson.GetBytes(findResponsesEventPayload(events, check.event), check.path).String(); got != id {
+				if got := ojson.GetBytesNoCopy(findResponsesEventPayload(events, check.event), check.path).String(); got != id {
 					t.Fatalf("%s response %d %s item ID = %q, want %q", tc.name, response, check.event, got, id)
 				}
 			}
@@ -106,28 +106,28 @@ data: [DONE]
 		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, &param)...)
 	}
 
-	if payload := findResponsesEventPayload(out, "response.output_text.delta"); gjson.GetBytes(payload, "delta").String() != "I will call a tool." {
+	if payload := findResponsesEventPayload(out, "response.output_text.delta"); ojson.GetBytesNoCopy(payload, "delta").String() != "I will call a tool." {
 		t.Fatalf("output_text delta payload = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); gjson.GetBytes(payload, "delta").String() != `{"location":"北京"}` {
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); ojson.GetBytesNoCopy(payload, "delta").String() != `{"location":"北京"}` {
 		t.Fatalf("function args delta payload = %s", string(payload))
 	}
 	argumentsDonePayload := findResponsesEventPayload(out, "response.function_call_arguments.done")
-	if got := gjson.GetBytes(argumentsDonePayload, "item_id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(argumentsDonePayload, "item_id").String(); got != "call_1" {
 		t.Fatalf("function args done item_id = %q, want call_1. Payload: %s", got, string(argumentsDonePayload))
 	}
-	if got := gjson.GetBytes(argumentsDonePayload, "arguments").String(); got != `{"location":"北京"}` {
+	if got := ojson.GetBytesNoCopy(argumentsDonePayload, "arguments").String(); got != `{"location":"北京"}` {
 		t.Fatalf("function args done arguments = %q, want full arguments. Payload: %s", got, string(argumentsDonePayload))
 	}
 	createdPayload := findResponsesEventPayload(out, "response.created")
-	if got := gjson.GetBytes(createdPayload, "response.model").String(); got != "gpt-test" {
+	if got := ojson.GetBytesNoCopy(createdPayload, "response.model").String(); got != "gpt-test" {
 		t.Fatalf("response.created models = %q, want gpt-test", got)
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
-	if got := gjson.GetBytes(completedPayload, "response.usage.total_tokens").Int(); got != 399 {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.usage.total_tokens").Int(); got != 399 {
 		t.Fatalf("total_tokens = %d, want 399. Payload: %s", got, string(completedPayload))
 	}
-	if got := gjson.GetBytes(completedPayload, "response.usage.output_tokens_details.reasoning_tokens").Int(); got != 240 {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.usage.output_tokens_details.reasoning_tokens").Int(); got != 240 {
 		t.Fatalf("reasoning_tokens = %d, want 240. Payload: %s", got, string(completedPayload))
 	}
 	if got := strings.Join(responsesEventNames(out), ","); !strings.Contains(got, "response.completed") {
@@ -156,13 +156,13 @@ data: {"index":0,"event_type":"step.stop"}
 	if gotEvents != wantEvents {
 		t.Fatalf("events = %s, want %s", gotEvents, wantEvents)
 	}
-	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); gjson.GetBytes(payload, "delta").String() != `{"q":"x"}` {
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.delta"); ojson.GetBytesNoCopy(payload, "delta").String() != `{"q":"x"}` {
 		t.Fatalf("function args delta = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); gjson.GetBytes(payload, "arguments").String() != `{"q":"x"}` {
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); ojson.GetBytesNoCopy(payload, "arguments").String() != `{"q":"x"}` {
 		t.Fatalf("function args done = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.output_item.done"); gjson.GetBytes(payload, "item.arguments").String() != `{"q":"x"}` {
+	if payload := findResponsesEventPayload(out, "response.output_item.done"); ojson.GetBytesNoCopy(payload, "item.arguments").String() != `{"q":"x"}` {
 		t.Fatalf("output item done = %s", string(payload))
 	}
 }
@@ -192,13 +192,13 @@ data: {"interaction":{"id":"interaction_1","status":"completed","model":"gpt-tes
 	if gotEvents != wantEvents {
 		t.Fatalf("events = %s, want %s", gotEvents, wantEvents)
 	}
-	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); gjson.GetBytes(payload, "arguments").String() != "{}" {
+	if payload := findResponsesEventPayload(out, "response.function_call_arguments.done"); ojson.GetBytesNoCopy(payload, "arguments").String() != "{}" {
 		t.Fatalf("function args done = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.output_item.done"); gjson.GetBytes(payload, "item.arguments").String() != "{}" {
+	if payload := findResponsesEventPayload(out, "response.output_item.done"); ojson.GetBytesNoCopy(payload, "item.arguments").String() != "{}" {
 		t.Fatalf("output item done = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.completed"); gjson.GetBytes(payload, "response.output.0.arguments").String() != "{}" {
+	if payload := findResponsesEventPayload(out, "response.completed"); ojson.GetBytesNoCopy(payload, "response.output.0.arguments").String() != "{}" {
 		t.Fatalf("completed output = %s", string(payload))
 	}
 }
@@ -258,13 +258,13 @@ data: {"index":0,"event_type":"step.stop"}
 		out = append(out, ConvertInteractionsResponseToOpenAIResponses(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, &param)...)
 	}
 
-	if payload := findResponsesEventPayload(out, "response.output_text.done"); gjson.GetBytes(payload, "text").String() != "hello world" {
+	if payload := findResponsesEventPayload(out, "response.output_text.done"); ojson.GetBytesNoCopy(payload, "text").String() != "hello world" {
 		t.Fatalf("output_text done payload = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.content_part.done"); gjson.GetBytes(payload, "part.text").String() != "hello world" {
+	if payload := findResponsesEventPayload(out, "response.content_part.done"); ojson.GetBytesNoCopy(payload, "part.text").String() != "hello world" {
 		t.Fatalf("content_part done payload = %s", string(payload))
 	}
-	if payload := findResponsesEventPayload(out, "response.output_item.done"); gjson.GetBytes(payload, "item.content.0.text").String() != "hello world" {
+	if payload := findResponsesEventPayload(out, "response.output_item.done"); ojson.GetBytesNoCopy(payload, "item.content.0.text").String() != "hello world" {
 		t.Fatalf("output_item done payload = %s", string(payload))
 	}
 }
@@ -309,7 +309,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamReasoningSummaryLifec
 					t.Fatalf("frame %d events = %s, want exactly one immediate summary delta", i, got)
 				}
 				payload := findResponsesEventPayload(frames, "response.reasoning_summary_text.delta")
-				if got := gjson.GetBytes(payload, "delta"); !got.Exists() || got.String() != chunk {
+				if got := ojson.GetBytesNoCopy(payload, "delta"); !got.Exists() || got.String() != chunk {
 					t.Fatalf("frame %d delta = %s, want %q", i, payload, chunk)
 				}
 			}
@@ -335,7 +335,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamReasoningSummaryLifec
 			var previousSequence int64
 			for i, frame := range out {
 				payload := findResponsesEventPayload([][]byte{frame}, wantNames[i])
-				sequence := gjson.GetBytes(payload, "sequence_number")
+				sequence := ojson.GetBytesNoCopy(payload, "sequence_number")
 				if !sequence.Exists() || (i > 0 && sequence.Int() != previousSequence+1) {
 					t.Fatalf("invalid sequence: %s", payload)
 				}
@@ -343,17 +343,17 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamReasoningSummaryLifec
 				if wantNames[i] == "response.completed" {
 					continue
 				}
-				if index := gjson.GetBytes(payload, "output_index"); !index.Exists() || index.Int() != 3 {
+				if index := ojson.GetBytesNoCopy(payload, "output_index"); !index.Exists() || index.Int() != 3 {
 					t.Fatalf("invalid output_index: %s", payload)
 				}
 				idPath := "item.id"
 				if strings.HasPrefix(wantNames[i], "response.reasoning_summary_") {
 					idPath = "item_id"
-					if index := gjson.GetBytes(payload, "summary_index"); !index.Exists() || index.Int() != 0 {
+					if index := ojson.GetBytesNoCopy(payload, "summary_index"); !index.Exists() || index.Int() != 0 {
 						t.Fatalf("invalid summary_index: %s", payload)
 					}
 				}
-				if id := gjson.GetBytes(payload, idPath); !id.Exists() || id.String() != "reasoning_3" {
+				if id := ojson.GetBytesNoCopy(payload, idPath); !id.Exists() || id.String() != "reasoning_3" {
 					t.Fatalf("invalid item identity: %s", payload)
 				}
 			}
@@ -372,12 +372,12 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamReasoningSummaryLifec
 				{"response.output_item.done", "item.encrypted_content", signature},
 			} {
 				payload := findResponsesEventPayload(out, check.event)
-				if got := gjson.GetBytes(payload, check.path); !got.Exists() || got.String() != check.want {
+				if got := ojson.GetBytesNoCopy(payload, check.path); !got.Exists() || got.String() != check.want {
 					t.Errorf("%s %s = %s, want %q", check.event, check.path, payload, check.want)
 				}
 			}
-			done := gjson.GetBytes(findResponsesEventPayload(out, "response.output_item.done"), "item")
-			completed := gjson.GetBytes(findResponsesEventPayload(out, "response.completed"), "response.output")
+			done := ojson.GetBytesNoCopy(findResponsesEventPayload(out, "response.output_item.done"), "item")
+			completed := ojson.GetBytesNoCopy(findResponsesEventPayload(out, "response.completed"), "response.output")
 			if len(done.Get("summary").Array()) != 1 || len(completed.Array()) != 1 || done.Raw != completed.Get("0").Raw {
 				t.Fatalf("terminal reasoning items differ or summary count is wrong: done=%s completed=%s", done.Raw, completed.Raw)
 			}
@@ -422,14 +422,14 @@ data: {"interaction":{"id":"interaction_1","status":"completed","object":"intera
 		t.Fatalf("events = %s, did not expect output_text delta for thought signature", got)
 	}
 	donePayload := findResponsesEventPayload(out, "response.output_item.done")
-	if got := gjson.GetBytes(donePayload, "item.encrypted_content").String(); got != signature {
+	if got := ojson.GetBytesNoCopy(donePayload, "item.encrypted_content").String(); got != signature {
 		t.Fatalf("done encrypted_content = %q, want %q. Payload: %s", got, signature, string(donePayload))
 	}
-	if got := gjson.GetBytes(donePayload, "item.summary.0.text").String(); got != "thinking" {
+	if got := ojson.GetBytesNoCopy(donePayload, "item.summary.0.text").String(); got != "thinking" {
 		t.Fatalf("done summary = %q, want thinking. Payload: %s", got, string(donePayload))
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
-	if got := gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String(); got != signature {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.output.0.encrypted_content").String(); got != signature {
 		t.Fatalf("completed encrypted_content = %q, want %q. Payload: %s", got, signature, string(completedPayload))
 	}
 }
@@ -464,14 +464,14 @@ data: {"interaction":{"id":"interaction_1","status":"completed","object":"intera
 	}
 
 	donePayload := findResponsesEventPayload(out, "response.output_item.done")
-	if got := gjson.GetBytes(donePayload, "item.encrypted_content").String(); got != "" {
+	if got := ojson.GetBytesNoCopy(donePayload, "item.encrypted_content").String(); got != "" {
 		t.Fatalf("done encrypted_content = %q, want empty for foreign signature. Payload: %s", got, string(donePayload))
 	}
-	if got := gjson.GetBytes(donePayload, "item.summary.0.text").String(); got != "thinking" {
+	if got := ojson.GetBytesNoCopy(donePayload, "item.summary.0.text").String(); got != "thinking" {
 		t.Fatalf("done summary = %q, want thinking. Payload: %s", got, string(donePayload))
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
-	if got := gjson.GetBytes(completedPayload, "response.output.0.encrypted_content").String(); got != "" {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.output.0.encrypted_content").String(); got != "" {
 		t.Fatalf("completed encrypted_content = %q, want empty for foreign signature. Payload: %s", got, string(completedPayload))
 	}
 }
@@ -480,19 +480,19 @@ func TestConvertInteractionsResponseToOpenAIResponsesNonStreamThoughtSignature(t
 	validSig := testGPTResponsesReasoningSignature()
 	rawValid := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"thought","signature":"` + validSig + `","content":[{"type":"text","text":"thinking"}]}],"usage":{"total_tokens":1}}`)
 	outValid := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, rawValid, nil)
-	if got := gjson.GetBytes(outValid, "output.0.encrypted_content").String(); got != validSig {
+	if got := ojson.GetBytesNoCopy(outValid, "output.0.encrypted_content").String(); got != validSig {
 		t.Fatalf("valid encrypted_content = %q, want %q. Output: %s", got, validSig, string(outValid))
 	}
-	if got := gjson.GetBytes(outValid, "output.0.summary.0.text").String(); got != "thinking" {
+	if got := ojson.GetBytesNoCopy(outValid, "output.0.summary.0.text").String(); got != "thinking" {
 		t.Fatalf("summary = %q, want thinking. Output: %s", got, string(outValid))
 	}
 
 	rawForeign := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"thought","thought_signature":"foreign-gemini-signature","content":[{"type":"text","text":"thinking"}]}],"usage":{"total_tokens":1}}`)
 	outForeign := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, rawForeign, nil)
-	if got := gjson.GetBytes(outForeign, "output.0.encrypted_content").String(); got != "" {
+	if got := ojson.GetBytesNoCopy(outForeign, "output.0.encrypted_content").String(); got != "" {
 		t.Fatalf("foreign encrypted_content = %q, want empty. Output: %s", got, string(outForeign))
 	}
-	if got := gjson.GetBytes(outForeign, "output.0.summary.0.text").String(); got != "thinking" {
+	if got := ojson.GetBytesNoCopy(outForeign, "output.0.summary.0.text").String(); got != "thinking" {
 		t.Fatalf("summary = %q, want thinking. Output: %s", got, string(outForeign))
 	}
 }
@@ -500,13 +500,13 @@ func TestConvertInteractionsResponseToOpenAIResponsesNonStreamThoughtSignature(t
 func TestConvertOpenAIResponsesResponseToInteractionsNonStreamFunctionCall(t *testing.T) {
 	raw := []byte(`{"id":"resp_1","output":[{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 	out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call", got)
 	}
-	if got := gjson.GetBytes(out, "steps.0.name").String(); got != "lookup" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.name").String(); got != "lookup" {
 		t.Fatalf("name = %q, want lookup", got)
 	}
-	if got := gjson.GetBytes(out, "steps.0.call_id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.call_id").String(); got != "call_1" {
 		t.Fatalf("call_id = %q, want call_1", got)
 	}
 }
@@ -514,10 +514,10 @@ func TestConvertOpenAIResponsesResponseToInteractionsNonStreamFunctionCall(t *te
 func TestConvertOpenAIResponsesResponseToInteractionsNonStreamFunctionCallStringArgs(t *testing.T) {
 	raw := []byte(`{"id":"resp_1","output":[{"type":"function_call","name":"lookup","call_id":"call_1","arguments":"{\"q\":\"x\"}"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 	out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call", got)
 	}
-	if got := gjson.GetBytes(out, "steps.0.arguments.q").String(); got != "x" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x", got)
 	}
 }
@@ -525,19 +525,19 @@ func TestConvertOpenAIResponsesResponseToInteractionsNonStreamFunctionCallString
 func TestConvertOpenAIResponsesResponseToInteractionsNonStreamUsageDetails(t *testing.T) {
 	raw := []byte(`{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":11,"output_tokens":13,"total_tokens":24,"input_tokens_details":{"cached_tokens":5},"output_tokens_details":{"reasoning_tokens":7}}}`)
 	out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "id").String(); got != "resp_1" {
+	if got := ojson.GetBytesNoCopy(out, "id").String(); got != "resp_1" {
 		t.Fatalf("id = %q, want resp_1. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.input_tokens").Int(); got != 11 {
+	if got := ojson.GetBytesNoCopy(out, "usage.input_tokens").Int(); got != 11 {
 		t.Fatalf("usage.input_tokens = %d, want 11. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.output_tokens").Int(); got != 13 {
+	if got := ojson.GetBytesNoCopy(out, "usage.output_tokens").Int(); got != 13 {
 		t.Fatalf("usage.output_tokens = %d, want 13. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.reasoning_tokens").Int(); got != 7 {
+	if got := ojson.GetBytesNoCopy(out, "usage.reasoning_tokens").Int(); got != 7 {
 		t.Fatalf("usage.reasoning_tokens = %d, want 7. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "usage.cached_tokens").Int(); got != 5 {
+	if got := ojson.GetBytesNoCopy(out, "usage.cached_tokens").Int(); got != 5 {
 		t.Fatalf("usage.cached_tokens = %d, want 5. Output: %s", got, string(out))
 	}
 }
@@ -551,10 +551,10 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamFunctionCallCallID(t 
 		t.Fatalf("step.delta payload not found")
 	}
 	startPayload := findInteractionsEventPayload(out, "step.start")
-	if got := gjson.GetBytes(startPayload, "step.id").String(); got != "call_stream_1" {
+	if got := ojson.GetBytesNoCopy(startPayload, "step.id").String(); got != "call_stream_1" {
 		t.Fatalf("step.id = %q, want call_stream_1", got)
 	}
-	if got := gjson.GetBytes(payload, "delta.arguments").String(); got != `{"q":"x"}` {
+	if got := ojson.GetBytesNoCopy(payload, "delta.arguments").String(); got != `{"q":"x"}` {
 		t.Fatalf("delta.arguments = %q, want JSON string", got)
 	}
 }
@@ -567,7 +567,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsDoneArgumentsAft
 	if len(payload) == 0 {
 		t.Fatalf("delta step.delta payload not found")
 	}
-	if got := gjson.GetBytes(payload, "delta.arguments").String(); got != `{"q":"x"}` {
+	if got := ojson.GetBytesNoCopy(payload, "delta.arguments").String(); got != `{"q":"x"}` {
 		t.Fatalf("delta.arguments = %q, want JSON string. Payload: %s", got, string(payload))
 	}
 
@@ -589,7 +589,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsDoneTextAfterDel
 	if len(payload) == 0 {
 		t.Fatalf("delta step.delta payload not found")
 	}
-	if got := gjson.GetBytes(payload, "delta.text").String(); got != "hi" {
+	if got := ojson.GetBytesNoCopy(payload, "delta.text").String(); got != "hi" {
 		t.Fatalf("delta.text = %q, want hi. Payload: %s", got, string(payload))
 	}
 
@@ -608,7 +608,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsDoneTextAfterUnk
 	if len(payload) == 0 {
 		t.Fatalf("delta step.delta payload not found")
 	}
-	if got := gjson.GetBytes(payload, "delta.text").String(); got != "hi" {
+	if got := ojson.GetBytesNoCopy(payload, "delta.text").String(); got != "hi" {
 		t.Fatalf("delta.text = %q, want hi. Payload: %s", got, string(payload))
 	}
 
@@ -627,7 +627,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamCompletedOutputFallba
 	if len(payload) == 0 {
 		t.Fatalf("fallback step.delta payload not found")
 	}
-	if got := gjson.GetBytes(payload, "delta.text").String(); got != "final" {
+	if got := ojson.GetBytesNoCopy(payload, "delta.text").String(); got != "final" {
 		t.Fatalf("delta.text = %q, want final. Payload: %s", got, string(payload))
 	}
 	if got := countInteractionsEventType(out, "interaction.completed"); got != 1 {
@@ -665,19 +665,19 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamFinishMetadataUsage(t
 	if len(payload) == 0 {
 		t.Fatalf("response.completed payload not found")
 	}
-	if got := gjson.GetBytes(payload, "response.usage.input_tokens").Int(); got != 2 {
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.input_tokens").Int(); got != 2 {
 		t.Fatalf("input_tokens = %d, want 2. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "response.usage.output_tokens").Int(); got != 6 {
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.output_tokens").Int(); got != 6 {
 		t.Fatalf("output_tokens = %d, want 6. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "response.usage.output_tokens_details.reasoning_tokens").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.output_tokens_details.reasoning_tokens").Int(); got != 3 {
 		t.Fatalf("reasoning_tokens = %d, want 3. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int(); got != 1 {
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.input_tokens_details.cached_tokens").Int(); got != 1 {
 		t.Fatalf("cached_tokens = %d, want 1. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "response.usage.total_tokens").Int(); got != 11 {
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.total_tokens").Int(); got != 11 {
 		t.Fatalf("total_tokens = %d, want 11. Payload: %s", got, string(payload))
 	}
 }
@@ -698,7 +698,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamCreatedThenDelta(t *t
 		t.Fatalf("events = %s, want %s", got, want)
 	}
 	payload := findInteractionsEventPayload(out, "interaction.status_update")
-	if gotID := gjson.GetBytes(payload, "interaction_id").String(); gotID != "resp_1" {
+	if gotID := ojson.GetBytesNoCopy(payload, "interaction_id").String(); gotID != "resp_1" {
 		t.Fatalf("interaction_id = %q, want resp_1. Payload: %s", gotID, string(payload))
 	}
 }
@@ -720,7 +720,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamCompletesAfterSteps(t
 		t.Fatalf("events = %s, want %s", got, want)
 	}
 	completedPayload := findInteractionsEventPayload(out, "interaction.completed")
-	if gotTokens := gjson.GetBytes(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
+	if gotTokens := ojson.GetBytesNoCopy(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
 		t.Fatalf("total_tokens = %d, want 3. Payload: %s", gotTokens, string(completedPayload))
 	}
 }
@@ -733,7 +733,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsStreamSkipsCompletedTextAft
 	if len(payload) == 0 {
 		t.Fatalf("delta step.delta payload not found")
 	}
-	if got := gjson.GetBytes(payload, "delta.text").String(); got != "final" {
+	if got := ojson.GetBytesNoCopy(payload, "delta.text").String(); got != "final" {
 		t.Fatalf("delta.text = %q, want final. Payload: %s", got, string(payload))
 	}
 
@@ -751,13 +751,13 @@ func TestConvertOpenAIResponsesResponseToInteractionsIncompleteTerminal(t *testi
 	t.Run("NonStream", func(t *testing.T) {
 		raw := []byte(`{"id":"resp_1","status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-		if got := gjson.GetBytes(out, "status").String(); got != "incomplete" {
+		if got := ojson.GetBytesNoCopy(out, "status").String(); got != "incomplete" {
 			t.Fatalf("status = %q, want incomplete. Output: %s", got, string(out))
 		}
-		if gotText := gjson.GetBytes(out, "steps.0.content.0.text").String(); gotText != "partial" {
+		if gotText := ojson.GetBytesNoCopy(out, "steps.0.content.0.text").String(); gotText != "partial" {
 			t.Fatalf("step text = %q, want partial. Output: %s", gotText, string(out))
 		}
-		if gotTokens := gjson.GetBytes(out, "usage.total_tokens").Int(); gotTokens != 3 {
+		if gotTokens := ojson.GetBytesNoCopy(out, "usage.total_tokens").Int(); gotTokens != 3 {
 			t.Fatalf("total_tokens = %d, want 3. Output: %s", gotTokens, string(out))
 		}
 	})
@@ -773,14 +773,14 @@ func TestConvertOpenAIResponsesResponseToInteractionsIncompleteTerminal(t *testi
 			t.Fatalf("done count = %d, want 1", got)
 		}
 		deltaPayload := findInteractionsStepDeltaPayload(out)
-		if gotText := gjson.GetBytes(deltaPayload, "delta.text").String(); gotText != "partial" {
+		if gotText := ojson.GetBytesNoCopy(deltaPayload, "delta.text").String(); gotText != "partial" {
 			t.Fatalf("delta.text = %q, want partial. Payload: %s", gotText, string(deltaPayload))
 		}
 		completedPayload := findInteractionsEventPayload(out, "interaction.completed")
-		if got := gjson.GetBytes(completedPayload, "interaction.status").String(); got != "incomplete" {
+		if got := ojson.GetBytesNoCopy(completedPayload, "interaction.status").String(); got != "incomplete" {
 			t.Fatalf("interaction.status = %q, want incomplete. Payload: %s", got, string(completedPayload))
 		}
-		if gotTokens := gjson.GetBytes(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
+		if gotTokens := ojson.GetBytesNoCopy(completedPayload, "interaction.usage.total_tokens").Int(); gotTokens != 3 {
 			t.Fatalf("total_tokens = %d, want 3. Payload: %s", gotTokens, string(completedPayload))
 		}
 
@@ -796,7 +796,7 @@ func TestConvertOpenAIResponsesResponseToInteractionsIncompleteTerminal(t *testi
 	t.Run("CompletedControl", func(t *testing.T) {
 		raw := []byte(`{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 		out := ConvertOpenAIResponsesResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-		if got := gjson.GetBytes(out, "status").String(); got != "completed" {
+		if got := ojson.GetBytesNoCopy(out, "status").String(); got != "completed" {
 			t.Fatalf("status = %q, want completed. Output: %s", got, string(out))
 		}
 	})
@@ -848,7 +848,7 @@ func interactionsEventNames(events [][]byte) []string {
 }
 
 func interactionsEventName(event, payload []byte) string {
-	if eventType := gjson.GetBytes(payload, "event_type").String(); eventType != "" {
+	if eventType := ojson.GetBytesNoCopy(payload, "event_type").String(); eventType != "" {
 		return eventType
 	}
 	const prefix = "event: "
@@ -862,7 +862,7 @@ func interactionsEventName(event, payload []byte) string {
 func findResponsesEventPayload(events [][]byte, eventType string) []byte {
 	for _, event := range events {
 		payload := ssePayload(event)
-		if gjson.GetBytes(payload, "type").String() == eventType {
+		if ojson.GetBytesNoCopy(payload, "type").String() == eventType {
 			return payload
 		}
 	}
@@ -873,7 +873,7 @@ func responsesEventNames(events [][]byte) []string {
 	names := make([]string, 0, len(events))
 	for _, event := range events {
 		payload := ssePayload(event)
-		if name := gjson.GetBytes(payload, "type").String(); name != "" {
+		if name := ojson.GetBytesNoCopy(payload, "type").String(); name != "" {
 			names = append(names, name)
 		}
 	}
@@ -883,7 +883,7 @@ func responsesEventNames(events [][]byte) []string {
 func TestConvertInteractionsResponseToOpenAIResponsesNonStream_PreservesEnvironmentID(t *testing.T) {
 	raw := []byte(`{"id":"interaction_1","object":"interaction","environment_id":"env_abc123","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
 	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, nil)
-	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_abc123" {
+	if got := ojson.GetBytesNoCopy(out, "environment_id").String(); got != "env_abc123" {
 		t.Fatalf("environment_id = %q, want env_abc123. Output: %s", got, string(out))
 	}
 }
@@ -901,11 +901,11 @@ func TestConvertInteractionsResponseToOpenAIResponsesStream_PreservesEnvironment
 	}
 
 	createdPayload := findResponsesEventPayload(out, "response.created")
-	if got := gjson.GetBytes(createdPayload, "response.environment_id").String(); got != "env_stream123" {
+	if got := ojson.GetBytesNoCopy(createdPayload, "response.environment_id").String(); got != "env_stream123" {
 		t.Fatalf("response.created environment_id = %q, want env_stream123. Payload: %s", got, string(createdPayload))
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
-	if got := gjson.GetBytes(completedPayload, "response.environment_id").String(); got != "env_stream123" {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.environment_id").String(); got != "env_stream123" {
 		t.Fatalf("response.completed environment_id = %q, want env_stream123. Payload: %s", got, string(completedPayload))
 	}
 }
@@ -919,7 +919,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesNonStreamRestoresAntigravit
 		]
 	}`)
 	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, raw, nil)
-	if got := gjson.GetBytes(out, "output.0.name").String(); got != "read_file" {
+	if got := ojson.GetBytesNoCopy(out, "output.0.name").String(); got != "read_file" {
 		t.Fatalf("output.0.name = %q, want read_file. Output: %s", got, string(out))
 	}
 }
@@ -940,7 +940,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamRestoresAntigravityTo
 	}
 
 	addedPayload := findResponsesEventPayload(out, "response.output_item.added")
-	if got := gjson.GetBytes(addedPayload, "item.name").String(); got != "read_file" {
+	if got := ojson.GetBytesNoCopy(addedPayload, "item.name").String(); got != "read_file" {
 		t.Fatalf("stream item.name = %q, want read_file. Payload: %s", got, string(addedPayload))
 	}
 }
@@ -955,7 +955,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNon
 		]
 	}`)
 	outNonColliding := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", []byte(`{"model":"antigravity-preview-05-2026"}`), nil, rawNonColliding, nil)
-	if got := gjson.GetBytes(outNonColliding, "output.0.name").String(); got != "external_lookup" {
+	if got := ojson.GetBytesNoCopy(outNonColliding, "output.0.name").String(); got != "external_lookup" {
 		t.Fatalf("output.0.name = %q, want external_lookup (preserved). Output: %s", got, string(outNonColliding))
 	}
 
@@ -968,7 +968,7 @@ func TestConvertInteractionsResponseToOpenAIResponsesPreservesNonCollidingAndNon
 		]
 	}`)
 	outNonAnti := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.1-flash-lite", []byte(`{"model":"gemini-3.1-flash-lite"}`), nil, rawNonAnti, nil)
-	if got := gjson.GetBytes(outNonAnti, "output.0.name").String(); got != "external_read_file" {
+	if got := ojson.GetBytesNoCopy(outNonAnti, "output.0.name").String(); got != "external_read_file" {
 		t.Fatalf("output.0.name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
 	}
 }
@@ -1066,7 +1066,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_LogReplayTwoToolCalls(t *t
 		t.Fatalf("missing response.completed event")
 	}
 
-	outputItems := gjson.GetBytes(completedPayload, "response.output").Array()
+	outputItems := ojson.GetBytesNoCopy(completedPayload, "response.output").Array()
 	if len(outputItems) != 3 {
 		t.Fatalf("expected 3 output items (thought, title, bash), got %d: %s", len(outputItems), string(completedPayload))
 	}
@@ -1109,7 +1109,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *t
 	if addedPayload == nil {
 		t.Fatalf("missing response.output_item.added")
 	}
-	if got := gjson.GetBytes(addedPayload, "item.status").String(); got != "in_progress" {
+	if got := ojson.GetBytesNoCopy(addedPayload, "item.status").String(); got != "in_progress" {
 		t.Fatalf("added item.status = %q, want in_progress. Payload: %s", got, string(addedPayload))
 	}
 
@@ -1117,7 +1117,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *t
 	if donePayload == nil {
 		t.Fatalf("missing response.output_item.done")
 	}
-	if got := gjson.GetBytes(donePayload, "item.status").String(); got != "completed" {
+	if got := ojson.GetBytesNoCopy(donePayload, "item.status").String(); got != "completed" {
 		t.Fatalf("done item.status = %q, want completed. Payload: %s", got, string(donePayload))
 	}
 
@@ -1125,7 +1125,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *t
 	if completedPayload == nil {
 		t.Fatalf("missing response.completed")
 	}
-	if got := gjson.GetBytes(completedPayload, "response.output.0.status").String(); got != "completed" {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.output.0.status").String(); got != "completed" {
 		t.Fatalf("completed response.output.0.status = %q, want completed. Payload: %s", got, string(completedPayload))
 	}
 
@@ -1138,7 +1138,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *t
 		]
 	}`)
 	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
-	if got := gjson.GetBytes(outNonStream, "output.0.status").String(); got != "completed" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.status").String(); got != "completed" {
 		t.Fatalf("non-stream output.0.status = %q, want completed. Output: %s", got, string(outNonStream))
 	}
 
@@ -1161,10 +1161,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_FunctionCallHasStatus(t *t
 	if incompletePayload == nil {
 		t.Fatalf("expected response.incomplete event for truncated stream")
 	}
-	if got := gjson.GetBytes(incompletePayload, "response.status").String(); got != "incomplete" {
+	if got := ojson.GetBytesNoCopy(incompletePayload, "response.status").String(); got != "incomplete" {
 		t.Fatalf("response.status = %q, want incomplete", got)
 	}
-	if got := gjson.GetBytes(incompletePayload, "response.incomplete_details.reason").String(); got != "max_output_tokens" {
+	if got := ojson.GetBytesNoCopy(incompletePayload, "response.incomplete_details.reason").String(); got != "max_output_tokens" {
 		t.Fatalf("response.incomplete_details.reason = %q, want max_output_tokens", got)
 	}
 }
@@ -1188,7 +1188,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_ContentFilterIncomplete(t 
 	if incompletePayload == nil {
 		t.Fatalf("expected response.incomplete for content_filter")
 	}
-	if got := gjson.GetBytes(incompletePayload, "response.incomplete_details.reason").String(); got != "content_filter" {
+	if got := ojson.GetBytesNoCopy(incompletePayload, "response.incomplete_details.reason").String(); got != "content_filter" {
 		t.Fatalf("incomplete_details.reason = %q, want content_filter. Payload: %s", got, string(incompletePayload))
 	}
 
@@ -1201,10 +1201,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_ContentFilterIncomplete(t 
 		"steps":[{"type":"model_output","content":[{"type":"text","text":"blocked"}]}]
 	}`)
 	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
-	if got := gjson.GetBytes(outNonStream, "status").String(); got != "incomplete" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "status").String(); got != "incomplete" {
 		t.Fatalf("non-stream status = %q, want incomplete", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "incomplete_details.reason").String(); got != "content_filter" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "incomplete_details.reason").String(); got != "content_filter" {
 		t.Fatalf("non-stream incomplete_details.reason = %q, want content_filter", got)
 	}
 }
@@ -1228,16 +1228,16 @@ func TestConvertInteractionsResponseToOpenAIResponses_MissingUsageDefaultsToZero
 	if completedPayload == nil {
 		t.Fatalf("missing response.completed")
 	}
-	if !gjson.GetBytes(completedPayload, "response.usage.input_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(completedPayload, "response.usage.input_tokens").Exists() {
 		t.Fatalf("expected usage.input_tokens to exist. Payload: %s", string(completedPayload))
 	}
-	if got := gjson.GetBytes(completedPayload, "response.usage.input_tokens").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.usage.input_tokens").Int(); got != 0 {
 		t.Fatalf("usage.input_tokens = %d, want 0", got)
 	}
-	if !gjson.GetBytes(completedPayload, "response.usage.output_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(completedPayload, "response.usage.output_tokens").Exists() {
 		t.Fatalf("expected usage.output_tokens to exist")
 	}
-	if !gjson.GetBytes(completedPayload, "response.usage.total_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(completedPayload, "response.usage.total_tokens").Exists() {
 		t.Fatalf("expected usage.total_tokens to exist")
 	}
 
@@ -1249,13 +1249,13 @@ func TestConvertInteractionsResponseToOpenAIResponses_MissingUsageDefaultsToZero
 		"steps":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}]
 	}`)
 	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/swe-2", nil, nil, rawNonStream, nil)
-	if !gjson.GetBytes(outNonStream, "usage.input_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(outNonStream, "usage.input_tokens").Exists() {
 		t.Fatalf("expected non-stream usage.input_tokens to exist. Output: %s", string(outNonStream))
 	}
-	if !gjson.GetBytes(outNonStream, "usage.output_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(outNonStream, "usage.output_tokens").Exists() {
 		t.Fatalf("expected non-stream usage.output_tokens to exist")
 	}
-	if !gjson.GetBytes(outNonStream, "usage.total_tokens").Exists() {
+	if !ojson.GetBytesNoCopy(outNonStream, "usage.total_tokens").Exists() {
 		t.Fatalf("expected non-stream usage.total_tokens to exist")
 	}
 }
@@ -1303,30 +1303,30 @@ func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustom
 	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "devin/gemini-3-7-flash", origRequest, nil, rawNonStream, nil)
 
 	// Item 0: multi_agent_v1__close_agent -> name: "close_agent", namespace: "multi_agent_v1", type: "function_call"
-	if got := gjson.GetBytes(outNonStream, "output.0.name").String(); got != "close_agent" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.name").String(); got != "close_agent" {
 		t.Errorf("output.0.name = %q, want close_agent", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.0.namespace").String(); got != "multi_agent_v1" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.namespace").String(); got != "multi_agent_v1" {
 		t.Errorf("output.0.namespace = %q, want multi_agent_v1", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.0.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.type").String(); got != "function_call" {
 		t.Errorf("output.0.type = %q, want function_call", got)
 	}
 
 	// Item 1: functions__exec -> name: "exec", namespace: "functions", type: "custom_tool_call"
-	if got := gjson.GetBytes(outNonStream, "output.1.name").String(); got != "exec" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.1.name").String(); got != "exec" {
 		t.Errorf("output.1.name = %q, want exec", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.1.namespace").String(); got != "functions" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.1.namespace").String(); got != "functions" {
 		t.Errorf("output.1.namespace = %q, want functions", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.1.type").String(); got != "custom_tool_call" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.1.type").String(); got != "custom_tool_call" {
 		t.Errorf("output.1.type = %q, want custom_tool_call", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.1.input").String(); got != "echo hi" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.1.input").String(); got != "echo hi" {
 		t.Errorf("output.1.input = %q, want echo hi", got)
 	}
-	if gjson.GetBytes(outNonStream, "output.1.arguments").Exists() {
+	if ojson.GetBytesNoCopy(outNonStream, "output.1.arguments").Exists() {
 		t.Errorf("output.1.arguments should not exist for custom_tool_call")
 	}
 
@@ -1340,13 +1340,13 @@ func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustom
 		if strings.Contains(evStr, "response.output_item.added") {
 			foundAdded = true
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "item.name").String(); got != "close_agent" {
+			if got := ojson.Get(data, "item.name").String(); got != "close_agent" {
 				t.Errorf("stream item.name = %q, want close_agent", got)
 			}
-			if got := gjson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
+			if got := ojson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
 				t.Errorf("stream item.namespace = %q, want multi_agent_v1", got)
 			}
-			if got := gjson.Get(data, "item.type").String(); got != "function_call" {
+			if got := ojson.Get(data, "item.type").String(); got != "function_call" {
 				t.Errorf("stream item.type = %q, want function_call", got)
 			}
 		}
@@ -1364,10 +1364,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustom
 		if strings.Contains(evStr, "response.output_item.done") {
 			foundDone = true
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "item.name").String(); got != "close_agent" {
+			if got := ojson.Get(data, "item.name").String(); got != "close_agent" {
 				t.Errorf("stream done item.name = %q, want close_agent", got)
 			}
-			if got := gjson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
+			if got := ojson.Get(data, "item.namespace").String(); got != "multi_agent_v1" {
 				t.Errorf("stream done item.namespace = %q, want multi_agent_v1", got)
 			}
 		}
@@ -1386,13 +1386,13 @@ func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustom
 		if strings.Contains(evStr, "response.output_item.added") {
 			foundCustomAdded = true
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+			if got := ojson.Get(data, "item.type").String(); got != "custom_tool_call" {
 				t.Errorf("custom stream item.type = %q, want custom_tool_call", got)
 			}
-			if got := gjson.Get(data, "item.name").String(); got != "exec" {
+			if got := ojson.Get(data, "item.name").String(); got != "exec" {
 				t.Errorf("custom stream item.name = %q, want exec", got)
 			}
-			if got := gjson.Get(data, "item.namespace").String(); got != "functions" {
+			if got := ojson.Get(data, "item.namespace").String(); got != "functions" {
 				t.Errorf("custom stream item.namespace = %q, want functions", got)
 			}
 		}
@@ -1421,17 +1421,17 @@ func TestConvertInteractionsResponseToOpenAIResponses_RestoresNamespaceAndCustom
 		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
 			customInputDoneCount++
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "input").String(); got != "pwd" {
+			if got := ojson.Get(data, "input").String(); got != "pwd" {
 				t.Errorf("custom stream input = %q, want pwd", got)
 			}
 		}
 		if strings.Contains(evStr, "response.output_item.done") {
 			customItemDoneCount++
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "item.input").String(); got != "pwd" {
+			if got := ojson.Get(data, "item.input").String(); got != "pwd" {
 				t.Errorf("custom stream done item.input = %q, want pwd", got)
 			}
-			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+			if got := ojson.Get(data, "item.type").String(); got != "custom_tool_call" {
 				t.Errorf("custom stream done item.type = %q, want custom_tool_call", got)
 			}
 		}
@@ -1464,16 +1464,16 @@ func TestConvertInteractionsResponseToOpenAIResponses_AntigravityCustomToolResto
 	}`)
 
 	outNonStream := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "antigravity-preview-05-2026", origRequest, nil, rawNonStream, nil)
-	if got := gjson.GetBytes(outNonStream, "output.0.type").String(); got != "custom_tool_call" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.type").String(); got != "custom_tool_call" {
 		t.Fatalf("output.0.type = %q, want custom_tool_call", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.0.name").String(); got != "read_file" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.name").String(); got != "read_file" {
 		t.Fatalf("output.0.name = %q, want read_file", got)
 	}
-	if got := gjson.GetBytes(outNonStream, "output.0.input").String(); got != "/path/to/file" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "output.0.input").String(); got != "/path/to/file" {
 		t.Fatalf("output.0.input = %q, want /path/to/file", got)
 	}
-	if gjson.GetBytes(outNonStream, "output.0.arguments").Exists() {
+	if ojson.GetBytesNoCopy(outNonStream, "output.0.arguments").Exists() {
 		t.Fatalf("output.0.arguments unexpectedly exists for custom_tool_call")
 	}
 
@@ -1487,10 +1487,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_AntigravityCustomToolResto
 		if strings.Contains(evStr, "response.output_item.added") {
 			foundAdded = true
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "item.type").String(); got != "custom_tool_call" {
+			if got := ojson.Get(data, "item.type").String(); got != "custom_tool_call" {
 				t.Fatalf("stream item.type = %q, want custom_tool_call", got)
 			}
-			if got := gjson.Get(data, "item.name").String(); got != "read_file" {
+			if got := ojson.Get(data, "item.name").String(); got != "read_file" {
 				t.Fatalf("stream item.name = %q, want read_file", got)
 			}
 		}
@@ -1513,7 +1513,7 @@ func TestConvertInteractionsResponseToOpenAIResponses_AntigravityCustomToolResto
 		if strings.Contains(evStr, "response.custom_tool_call_input.done") {
 			customDoneCount++
 			data := strings.TrimPrefix(evStr, "data: ")
-			if got := gjson.Get(data, "input").String(); got != "/path/to/file" {
+			if got := ojson.Get(data, "input").String(); got != "/path/to/file" {
 				t.Fatalf("stream custom_tool_call_input.done = %q, want /path/to/file", got)
 			}
 		}
@@ -1561,14 +1561,14 @@ func TestConvertInteractionsResponseToOpenAIResponses_ResponseFailed(t *testing.
 			if len(payload) == 0 {
 				t.Fatalf("expected response.failed event payload, got: %s", string(bytes.Join(events, []byte("\n"))))
 			}
-			if got := gjson.GetBytes(payload, "response.status").String(); got != "failed" {
+			if got := ojson.GetBytesNoCopy(payload, "response.status").String(); got != "failed" {
 				t.Fatalf("response.status = %q, want failed", got)
 			}
-			if got := gjson.GetBytes(payload, "response.error.message").String(); !strings.Contains(got, tt.wantMsg) {
+			if got := ojson.GetBytesNoCopy(payload, "response.error.message").String(); !strings.Contains(got, tt.wantMsg) {
 				t.Fatalf("response.error.message = %q, want containing %q", got, tt.wantMsg)
 			}
 			if tt.wantCode != "" {
-				if got := gjson.GetBytes(payload, "response.error.code").String(); got != tt.wantCode {
+				if got := ojson.GetBytesNoCopy(payload, "response.error.code").String(); got != tt.wantCode {
 					t.Fatalf("response.error.code = %q, want %q", got, tt.wantCode)
 				}
 			}
@@ -1586,10 +1586,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_PreservesIDAndSeqOnFailure
 		t.Fatalf("expected response.created event")
 	}
 	createdPayload := findResponsesEventPayload(eventsCreated, "response.created")
-	if gotID := gjson.GetBytes(createdPayload, "response.id").String(); gotID != "interaction_test_id" {
+	if gotID := ojson.GetBytesNoCopy(createdPayload, "response.id").String(); gotID != "interaction_test_id" {
 		t.Fatalf("created response.id = %q, want interaction_test_id", gotID)
 	}
-	if seq := gjson.GetBytes(createdPayload, "sequence_number").Int(); seq != 1 {
+	if seq := ojson.GetBytesNoCopy(createdPayload, "sequence_number").Int(); seq != 1 {
 		t.Fatalf("created sequence_number = %d, want 1", seq)
 	}
 
@@ -1598,10 +1598,10 @@ func TestConvertInteractionsResponseToOpenAIResponses_PreservesIDAndSeqOnFailure
 		t.Fatalf("expected response.failed event")
 	}
 	failedPayload := findResponsesEventPayload(eventsFailed, "response.failed")
-	if gotID := gjson.GetBytes(failedPayload, "response.id").String(); gotID != "interaction_test_id" {
+	if gotID := ojson.GetBytesNoCopy(failedPayload, "response.id").String(); gotID != "interaction_test_id" {
 		t.Fatalf("failed response.id = %q, want interaction_test_id", gotID)
 	}
-	if seq := gjson.GetBytes(failedPayload, "sequence_number").Int(); seq != 2 {
+	if seq := ojson.GetBytesNoCopy(failedPayload, "sequence_number").Int(); seq != 2 {
 		t.Fatalf("failed sequence_number = %d, want 2", seq)
 	}
 }

@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestPluginResponsesPreserveUsagePresenceAcrossHost(t *testing.T) {
@@ -73,7 +73,7 @@ func TestPluginResponsesPreserveUsagePresenceAcrossHost(t *testing.T) {
 					auth := &coreauth.Auth{ID: "synthetic-auth", Provider: "presence-test"}
 					req := coreexecutor.Request{Model: "presence-model", Payload: []byte(`{"model":"presence-model","messages":[{"role":"user","content":"synthetic"}]}`)}
 					opts := coreexecutor.Options{SourceFormat: format, ResponseFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
-					var response gjson.Result
+					var response ojson.Result
 					if stream {
 						result, err := adapter.ExecuteStream(context.Background(), auth, req, opts)
 						if err != nil {
@@ -88,8 +88,8 @@ func TestPluginResponsesPreserveUsagePresenceAcrossHost(t *testing.T) {
 						}
 						helps.IterateStreamLines(wire.Bytes(), func(line []byte) {
 							json := helps.ExtractStreamJSONPayload(line)
-							if gjson.GetBytes(json, "type").String() == "response.completed" {
-								response = gjson.GetBytes(json, "response")
+							if ojson.GetBytes(json, "type").String() == "response.completed" {
+								response = ojson.GetBytes(json, "response")
 							}
 						})
 					} else {
@@ -97,7 +97,7 @@ func TestPluginResponsesPreserveUsagePresenceAcrossHost(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						response = gjson.ParseBytes(result.Payload)
+						response = ojson.ParseBytes(result.Payload)
 					}
 					if !response.IsObject() {
 						t.Fatal("missing completed response")

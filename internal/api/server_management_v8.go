@@ -31,6 +31,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/requests/api-call", s.mgmt.APICall)
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
 	v8.GET("/routing/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+	v8.POST("/routing/model-definitions/refresh", s.mgmt.RefreshModelDefinitions)
+	v8.POST("/models/refresh", s.mgmt.RefreshModelDefinitions)
 
 	v8.GET("/observability/logs", s.mgmt.GetLogs)
 	v8.DELETE("/observability/logs", s.mgmt.DeleteLogs)
@@ -48,6 +50,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.PATCH("/credentials/status", s.mgmt.PatchAuthFileStatus)
 	v8.PATCH("/credentials/fields", s.mgmt.PatchAuthFileFields)
 	v8.POST("/credentials/refresh", s.mgmt.RefreshAuthFiles)
+	v8.POST("/credentials/verify", s.mgmt.VerifyAuthFileV8)
 	v8.POST("/oauth/import", s.mgmt.ImportOAuthV8)
 	v8.GET("/oauth/auth-url", s.mgmt.StartOAuthV8)
 	v8.POST("/oauth/auth-url", s.mgmt.StartOAuthV8)

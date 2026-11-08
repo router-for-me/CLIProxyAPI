@@ -523,3 +523,37 @@ func TestMergeRefreshedAndExistingAuthMetadataPreservesSIWC(t *testing.T) {
 		t.Fatalf("merged siwc lost client_id or device_id: %#v", mergedSIWC)
 	}
 }
+
+func TestMergeExistingAuthMetadataPortalAttributionDeterministic(t *testing.T) {
+	// When target initially has neither oauth_provider nor portal, both fields from existingMap
+	// must be preserved deterministically regardless of map iteration order.
+	for i := 0; i < 20; i++ {
+		target := &Auth{
+			Provider: "zcode",
+			Metadata: map[string]any{"access_token": "new-tok"},
+		}
+		MergeExistingAuthMetadata(target, map[string]any{
+			"oauth_provider": "zcode-bigmodel",
+			"portal":         "zcode-bigmodel",
+		})
+		if target.Metadata["oauth_provider"] != "zcode-bigmodel" || target.Metadata["portal"] != "zcode-bigmodel" {
+			t.Fatalf("iteration %d: expected both oauth_provider and portal preserved, got %#v", i, target.Metadata)
+		}
+	}
+
+	// When target explicitly defines a new oauth_provider, stale portal from existingMap is skipped.
+	reloginTarget := &Auth{
+		Provider: "zcode",
+		Metadata: map[string]any{"oauth_provider": "zcode-zai", "access_token": "new-tok"},
+	}
+	MergeExistingAuthMetadata(reloginTarget, map[string]any{
+		"oauth_provider": "zcode-bigmodel",
+		"portal":         "zcode-bigmodel",
+	})
+	if reloginTarget.Metadata["oauth_provider"] != "zcode-zai" {
+		t.Fatalf("expected oauth_provider=zcode-zai, got %#v", reloginTarget.Metadata["oauth_provider"])
+	}
+	if _, hasPortal := reloginTarget.Metadata["portal"]; hasPortal {
+		t.Fatalf("expected stale portal to be skipped when target defines oauth_provider, got %#v", reloginTarget.Metadata["portal"])
+	}
+}

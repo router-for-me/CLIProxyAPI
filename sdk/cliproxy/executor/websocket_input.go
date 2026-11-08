@@ -8,11 +8,20 @@ import (
 // ErrNoActiveUpstreamWebsocket means response.interrupt has no live upstream socket.
 var ErrNoActiveUpstreamWebsocket = errors.New("no active upstream websocket for response.interrupt")
 
+// ErrUpstreamWebsocketInterruptRejected means a live upstream socket owns the
+// current turn, but response.interrupt does not target its running response
+// (unknown id, or that response already finished). Handlers must reject the
+// frame outright and must not fall back to local cancellation, which would
+// cancel a healthy websocket turn.
+var ErrUpstreamWebsocketInterruptRejected = errors.New("response.interrupt does not target the active upstream response")
+
 // WebsocketInput is a frame from the single downstream reader. Err terminates
 // the connection; Payload is owned by the receiver and must not be replayed.
 type WebsocketInput struct {
 	Payload []byte
 	Err     error
+	// Epoch is the downstream input epoch at read time; a loss advances it.
+	Epoch uint64
 }
 type websocketInputKey struct{}
 

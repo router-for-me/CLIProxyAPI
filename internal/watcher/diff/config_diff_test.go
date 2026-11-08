@@ -774,3 +774,68 @@ func TestBuildConfigChangeDetails_ClaudeNativeToolSearch(t *testing.T) {
 	newCfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "key", BaseURL: "https://gateway.example.com", NativeToolSearch: true}}}
 	expectContains(t, BuildConfigChangeDetails(oldCfg, newCfg), "claude[0].native-tool-search: false -> true")
 }
+
+func TestBuildConfigChangeDetails_APIKeyConnectionPool(t *testing.T) {
+	enabled := true
+	maxIdle := 4
+	oldCfg := &config.Config{
+		CodexKey: []config.CodexKey{{APIKey: "k", BaseURL: "https://ollama.com/v1"}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:          "compat",
+			BaseURL:       "https://compat.example.com",
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "k"}},
+		}},
+	}
+	newCfg := &config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:  "k",
+			BaseURL: "https://ollama.com/v1",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{
+				Enabled:             &enabled,
+				IdleConnTimeout:     "300s",
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		}},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:           "compat",
+			BaseURL:        "https://compat.example.com",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{Enabled: &enabled},
+			APIKeyEntries:  []config.OpenAICompatibilityAPIKey{{APIKey: "k"}},
+		}},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "codex[0].connection-pool.enabled: <unset> -> true")
+	expectContains(t, changes, `codex[0].connection-pool.idle-conn-timeout: "" -> "300s"`)
+	expectContains(t, changes, "codex[0].connection-pool.max-idle-conns-per-host: <unset> -> 4")
+	expectContains(t, changes, "  provider updated: compat (connection-pool updated)")
+}
+
+func TestBuildConfigChangeDetails_KVStore(t *testing.T) {
+	oldCfg := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: false,
+			Path:     "",
+		},
+	}
+	newCfg := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: true,
+			Path:     " ./data/kv.db ",
+		},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "kv-store.disabled: false -> true")
+	expectContains(t, changes, "kv-store.path: "+oldCfg.EffectiveKVStorePath()+" -> ./data/kv.db")
+	samePathTrimmed := &config.Config{
+		AuthDir: "/tmp/auth-a",
+		KVStore: config.KVStoreConfig{
+			Disabled: true,
+			Path:     "./data/kv.db",
+		},
+	}
+	if unchanged := BuildConfigChangeDetails(newCfg, samePathTrimmed); len(unchanged) != 0 {
+		t.Fatalf("whitespace-only path difference produced changes: %v", unchanged)
+	}
+}

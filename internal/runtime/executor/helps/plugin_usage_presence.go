@@ -5,9 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // PluginUsageObservation retains the latest OpenAI-compatible usage snapshot
@@ -33,7 +32,7 @@ func (o *PluginUsageObservation) Observe(payload []byte) {
 	if o == nil || len(payload) == 0 {
 		return
 	}
-	if len(o.pending) == 0 && gjson.ValidBytes(bytes.TrimSpace(payload)) {
+	if len(o.pending) == 0 && ojson.ValidBytes(bytes.TrimSpace(payload)) {
 		o.observeJSON(bytes.TrimSpace(payload))
 		return
 	}
@@ -47,19 +46,19 @@ func (o *PluginUsageObservation) Observe(payload []byte) {
 		o.observeJSON(ExtractStreamJSONPayload(line))
 		o.pending = o.pending[index+1:]
 	}
-	if raw := ExtractStreamJSONPayload(o.pending); len(raw) > 0 && gjson.ValidBytes(raw) {
+	if raw := ExtractStreamJSONPayload(o.pending); len(raw) > 0 && ojson.ValidBytes(raw) {
 		o.observeJSON(raw)
 		o.pending = nil
 	}
 }
 
-func pluginCounterPresent(node gjson.Result, paths ...string) bool {
+func pluginCounterPresent(node ojson.Result, paths ...string) bool {
 	for _, path := range paths {
 		value := node.Get(path)
 		if !value.Exists() {
 			continue
 		}
-		if value.Type != gjson.Number && value.Type != gjson.String {
+		if value.Type != ojson.Number && value.Type != ojson.String {
 			return false
 		}
 		n, err := strconv.ParseInt(value.String(), 10, 64)
@@ -69,15 +68,15 @@ func pluginCounterPresent(node gjson.Result, paths ...string) bool {
 }
 
 func (o *PluginUsageObservation) observeJSON(raw []byte) {
-	if len(raw) == 0 || !gjson.ValidBytes(raw) {
+	if len(raw) == 0 || !ojson.ValidBytes(raw) {
 		return
 	}
 	if tier := extractResponseServiceTier(raw); tier != "" {
 		o.tier = tier
 	}
-	node := gjson.GetBytes(raw, "response.usage")
+	node := ojson.GetBytes(raw, "response.usage")
 	if !node.IsObject() {
-		node = gjson.GetBytes(raw, "usage")
+		node = ojson.GetBytes(raw, "usage")
 	}
 	if !node.IsObject() {
 		return
@@ -117,7 +116,7 @@ func (o *PluginUsageObservation) RestoreResponses(payload []byte) []byte {
 	if o == nil || len(payload) == 0 {
 		return payload
 	}
-	if gjson.ValidBytes(bytes.TrimSpace(payload)) {
+	if ojson.ValidBytes(bytes.TrimSpace(payload)) {
 		return o.restoreJSON(payload)
 	}
 	lines := bytes.Split(payload, []byte("\n"))
@@ -131,7 +130,7 @@ func (o *PluginUsageObservation) RestoreResponses(payload []byte) []byte {
 			start++
 		}
 		raw := bytes.TrimSpace(line[start:])
-		if gjson.ValidBytes(raw) {
+		if ojson.ValidBytes(raw) {
 			lines[index] = append(bytes.Clone(line[:start]), o.restoreJSON(raw)...)
 		}
 	}
@@ -139,10 +138,10 @@ func (o *PluginUsageObservation) RestoreResponses(payload []byte) []byte {
 }
 
 func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
-	root := gjson.ParseBytes(payload)
+	root := ojson.ParseBytes(payload)
 	terminal := root.Get("type").String() == "response.completed" || root.Get("type").String() == "response.incomplete" || root.Get("type").String() == "response.failed"
 	for _, path := range []string{"response.usage", "usage"} {
-		node := gjson.GetBytes(payload, path)
+		node := ojson.GetBytes(payload, path)
 		create := terminal && ((path == "response.usage" && root.Get("response").IsObject()) || (path == "usage" && !root.Get("response").IsObject()))
 		if path == "usage" && root.Get("object").String() == "response" {
 			create = true
@@ -151,15 +150,15 @@ func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
 			continue
 		}
 		if !o.seen {
-			payload, _ = sjson.DeleteBytes(payload, path)
+			payload, _ = ojson.DeleteBytes(payload, path)
 			continue
 		}
 		observed := o.detail.TokenBreakdown.Observed
 		set := func(key string, present bool, value int64) {
 			if present {
-				payload, _ = sjson.SetBytes(payload, path+"."+key, value)
+				payload, _ = ojson.SetBytes(payload, path+"."+key, value)
 			} else {
-				payload, _ = sjson.DeleteBytes(payload, path+"."+key)
+				payload, _ = ojson.DeleteBytes(payload, path+"."+key)
 			}
 		}
 		set("input_tokens", observed.InputTokens, o.detail.InputTokens)
@@ -172,8 +171,8 @@ func (o *PluginUsageObservation) restoreJSON(payload []byte) []byte {
 		// Omit empty containers instead of inventing an unobserved zero.
 		for _, key := range []string{"input_tokens_details", "output_tokens_details"} {
 			detailsPath := path + "." + key
-			if details := gjson.GetBytes(payload, detailsPath); details.IsObject() && len(details.Map()) == 0 {
-				payload, _ = sjson.DeleteBytes(payload, detailsPath)
+			if details := ojson.GetBytes(payload, detailsPath); details.IsObject() && len(details.Map()) == 0 {
+				payload, _ = ojson.DeleteBytes(payload, detailsPath)
 			}
 		}
 	}
