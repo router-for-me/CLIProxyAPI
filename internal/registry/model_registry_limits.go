@@ -53,7 +53,9 @@ func minPositive(current, value int) int {
 // its effective window and output limit, whichever fields it uses (Gemini
 // routes declare InputTokenLimit/OutputTokenLimit, others ContextLength/
 // MaxCompletionTokens, configured overrides MaxContextLength), and the smallest
-// of each is published in every field any route declares.
+// of each is published in every field any route declares. When a route declares
+// no window (or no output limit), its real limit is unknown and may be lower, so
+// that limit is not published at all.
 func (s limitSet) published() (routeLimits, bool) {
 	if len(s) == 0 {
 		return routeLimits{}, false
@@ -64,15 +66,26 @@ func (s limitSet) published() (routeLimits, bool) {
 		}
 	}
 	var window, output int
+	windowUnknown, outputUnknown := false, false
 	var declared routeLimits
 	for limits := range s {
-		window = minPositive(window, minPositive(minPositive(limits.contextLength, limits.maxContextLength), limits.inputTokenLimit))
-		output = minPositive(output, minPositive(limits.maxCompletionTokens, limits.outputTokenLimit))
+		routeWindow := minPositive(minPositive(limits.contextLength, limits.maxContextLength), limits.inputTokenLimit)
+		routeOutput := minPositive(limits.maxCompletionTokens, limits.outputTokenLimit)
+		windowUnknown = windowUnknown || routeWindow <= 0
+		outputUnknown = outputUnknown || routeOutput <= 0
+		window = minPositive(window, routeWindow)
+		output = minPositive(output, routeOutput)
 		declared.contextLength = minPositive(declared.contextLength, limits.contextLength)
 		declared.maxContextLength = minPositive(declared.maxContextLength, limits.maxContextLength)
 		declared.maxCompletionTokens = minPositive(declared.maxCompletionTokens, limits.maxCompletionTokens)
 		declared.inputTokenLimit = minPositive(declared.inputTokenLimit, limits.inputTokenLimit)
 		declared.outputTokenLimit = minPositive(declared.outputTokenLimit, limits.outputTokenLimit)
+	}
+	if windowUnknown {
+		window = 0
+	}
+	if outputUnknown {
+		output = 0
 	}
 	pick := func(declaredValue, value int) int {
 		if declaredValue > 0 {

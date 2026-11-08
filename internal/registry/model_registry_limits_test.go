@@ -100,3 +100,20 @@ func TestRouteLimitCountsFollowClients(t *testing.T) {
 		t.Fatalf("counts left after every client left: %d/%d/%d", len(r.modelRouteLimits), len(r.providerRouteLimits), len(r.clientRouteLimits))
 	}
 }
+
+func TestSharedAliasWithAnUnknownRouteLimitPublishesNone(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("catalog", "claude", []*ModelInfo{limitedModel("team", 1_000_000, 128_000)})
+	r.RegisterClient("custom", "openai-compatibility", []*ModelInfo{limitedModel("team", 0, 32_000)})
+	got := r.GetModelInfo("team", "")
+	if got.ContextLength != 0 {
+		t.Fatalf("ContextLength = %d, want 0 while a route's window is unknown", got.ContextLength)
+	}
+	if got.MaxCompletionTokens != 32_000 {
+		t.Fatalf("MaxCompletionTokens = %d, want the smallest declared 32000 (every route declares one)", got.MaxCompletionTokens)
+	}
+	r.UnregisterClient("custom")
+	if got := r.GetModelInfo("team", ""); got.ContextLength != 1_000_000 || got.MaxCompletionTokens != 128_000 {
+		t.Fatalf("after the custom route left: %d/%d, want 1000000/128000", got.ContextLength, got.MaxCompletionTokens)
+	}
+}
