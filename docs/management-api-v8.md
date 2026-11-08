@@ -42,6 +42,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
+| `/config/routing/strategy` | `"round-robin"` (default), `"weighted-round-robin"`, `"fill-first"`, or `"soonest-reset"`. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |
 
 For example, `PATCH /v8/management/config` with this body disables additional
