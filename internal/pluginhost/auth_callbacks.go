@@ -446,8 +446,12 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 						auth.Metadata[key] = value
 					}
 				}
-				if pts, ok := auth.Storage.(*pluginTokenStorage); ok && pts != nil && len(bytes.TrimSpace(pts.rawJSON)) == 0 {
-					pts.rawJSON = bytes.Clone(data)
+				if pts, ok := auth.Storage.(*pluginTokenStorage); ok && pts != nil {
+					pts.mu.Lock()
+					if len(bytes.TrimSpace(pts.rawJSON)) == 0 {
+						pts.rawJSON = bytes.Clone(data)
+					}
+					pts.mu.Unlock()
 				}
 			}
 			if len(out) > 1 {

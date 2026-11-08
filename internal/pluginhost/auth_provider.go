@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -1147,6 +1148,7 @@ func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string
 }
 
 type pluginTokenStorage struct {
+	mu       sync.RWMutex
 	provider string
 	rawJSON  []byte
 	meta     map[string]any
@@ -1156,6 +1158,8 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, hadPriority := s.meta["priority"]; hadPriority {
 		if _, hasPriority := meta["priority"]; !hasPriority {
 			var raw map[string]any
@@ -1167,13 +1171,15 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 			}
 		}
 	}
-	s.meta = cloneAnyMap(meta)
+	s.meta = cloneInterceptorMetadata(meta)
 }
 
 func (s *pluginTokenStorage) RawJSON() []byte {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
 	if errPayload != nil {
 		return nil
@@ -1185,7 +1191,9 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if s == nil {
 		return fmt.Errorf("plugin token storage is nil")
 	}
+	s.mu.RLock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
+	s.mu.RUnlock()
 	if errPayload != nil {
 		return errPayload
 	}
@@ -1358,7 +1366,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 		ProxyURL:         strings.TrimSpace(data.ProxyURL),
 		Disabled:         data.Disabled,
 		Status:           status,
-		Storage:          &pluginTokenStorage{provider: provider, rawJSON: bytes.Clone(data.StorageJSON), meta: metadata},
+		Storage:          &pluginTokenStorage{provider: provider, rawJSON: bytes.Clone(data.StorageJSON), meta: cloneInterceptorMetadata(metadata)},
 		Metadata:         metadata,
 		Attributes:       attributes,
 		CreatedAt:        now,
