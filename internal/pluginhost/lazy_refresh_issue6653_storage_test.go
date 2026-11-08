@@ -184,3 +184,30 @@ func TestIssue6653StorageCallbackFallbackAndFilePriority(t *testing.T) {
 		t.Error("unchanged payload replaced the auth file")
 	}
 }
+
+func TestIssue6653StorageCloneSliceCycles(t *testing.T) {
+	source := make([]any, 2)
+	source[0] = source
+	source[1] = source[:1]
+	cloned := cloneInterceptorMetadata(map[string]any{"cycle": source})["cycle"].([]any)
+	if len(cloned) != 2 {
+		t.Fatalf("long cycle length=%d, want 2", len(cloned))
+	}
+	self := cloned[0].([]any)
+	short := cloned[1].([]any)
+	if len(self) != 2 || len(short) != 1 {
+		t.Fatalf("cycle view lengths=%d/%d, want 2/1", len(self), len(short))
+	}
+	if reflect.ValueOf(self).Pointer() != reflect.ValueOf(cloned).Pointer() ||
+		reflect.ValueOf(short[0].([]any)).Pointer() != reflect.ValueOf(cloned).Pointer() {
+		t.Fatal("clone failed to preserve references back to the long slice")
+	}
+	if reflect.ValueOf(cloned).Pointer() == reflect.ValueOf(source).Pointer() ||
+		reflect.ValueOf(short).Pointer() == reflect.ValueOf(source).Pointer() {
+		t.Fatal("clone retained the source backing array")
+	}
+	self[0] = "changed clone"
+	if _, ok := source[0].([]any); !ok {
+		t.Fatal("mutating the cloned cycle changed the source")
+	}
+}
