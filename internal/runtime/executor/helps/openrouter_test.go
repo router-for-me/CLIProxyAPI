@@ -54,6 +54,23 @@ func TestOpenRouterCacheControlMarksLastTextPart(t *testing.T) {
 	}
 }
 
+func TestOpenRouterCacheControlMarksFileParts(t *testing.T) {
+	out := openRouterCacheControlTestDoc(`{"messages":[{"role":"user","content":[
+		{"type":"text","text":"summarize"},{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,AA=="}}]}]}`, testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "messages.0.content.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("expected the trailing file part to be marked: %s", out)
+	}
+	if ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("only the file part should be marked: %s", out)
+	}
+
+	fileOnly := openRouterCacheControlTestDoc(`{"messages":[{"role":"user","content":[
+		{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,AA=="}}]}]}`, testOpenRouterBaseURL, false, "")
+	if !ojson.GetBytes(fileOnly, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("a file-only turn without a system message needs a breakpoint: %s", fileOnly)
+	}
+}
+
 func TestOpenRouterCacheControlLeavesRequestsAlone(t *testing.T) {
 	plain := `{"messages":[{"role":"user","content":"hi"}]}`
 	if out := openRouterCacheControlTestDoc(plain, "https://api.example.com/v1", false, ""); string(out) != plain {

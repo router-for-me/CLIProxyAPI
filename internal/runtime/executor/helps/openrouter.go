@@ -77,7 +77,7 @@ func openAIRequestHasCacheControl(doc *ojson.Doc) bool {
 	return false
 }
 
-// markOpenAIMessageCacheControlDoc puts cache_control on the message's last text or image part; string content
+// markOpenAIMessageCacheControlDoc puts cache_control on the message's last text, image or file part; string content
 // becomes a single text part. Messages with nothing to mark stay unchanged.
 func markOpenAIMessageCacheControlDoc(doc *ojson.Doc, index int, cacheControl string) {
 	path := "messages." + strconv.Itoa(index) + ".content"
@@ -101,7 +101,7 @@ func markOpenAIMessageCacheControlDoc(doc *ojson.Doc, index int, cacheControl st
 				if strings.TrimSpace(parts[j].Get("text").String()) == "" {
 					continue
 				}
-			case "image_url":
+			case "image_url", "file":
 			default:
 				continue
 			}
