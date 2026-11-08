@@ -740,6 +740,18 @@ func TestRebaseRelativeQuotaHeaders(t *testing.T) {
 	}
 }
 
+func TestRebaseRelativeQuotaHeadersMovesLaterReceiptsForward(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000000, 0)
+	headers := http.Header{"X-Codex-Primary-Reset-After-Seconds": []string{"60"}}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(string) time.Time { return observedAt.Add(10 * time.Minute) })
+	if v := got.Get("X-Codex-Primary-Reset-After-Seconds"); v != "660" {
+		t.Fatalf("reset-after = %q, want 660 (received 600s after the snapshot time)", v)
+	}
+}
+
 func TestQuotaAccountIdentityIncludesProviderAccountFields(t *testing.T) {
 	t.Parallel()
 

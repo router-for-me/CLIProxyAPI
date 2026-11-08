@@ -269,15 +269,20 @@ func TestMarkResultKeepsNewerResetOverLateUnrelatedMerge(t *testing.T) {
 }
 
 func TestUpdateClearsQuotaObservationWhenAccountChanges(t *testing.T) {
+	const oldEmail, oldToken = "first@example.com", "old-token"
 	resetAt := time.Now().Add(48 * time.Hour)
-	reload := func(manager *Manager, id, email string) *Auth {
+	reload := func(manager *Manager, id, email, token string) *Auth {
 		t.Helper()
-		data := []byte(`{"type":"codex","email":"` + email + `"}`)
+		metadata := map[string]any{"access_token": token}
+		if email != "" {
+			metadata["email"] = email
+		}
+		data := []byte(`{"type":"codex","email":"` + email + `","access_token":"` + token + `"}`)
 		path := filepath.Join(t.TempDir(), id+".json")
 		if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
 			t.Fatalf("write auth file: %v", errWrite)
 		}
-		snapshot := &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"email": email}}
+		snapshot := &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: metadata}
 		snapshot.BindFileSnapshot(path, data)
 		if _, errUpdate := manager.Update(context.Background(), snapshot); errUpdate != nil {
 			t.Fatalf("Update(%s) error = %v", id, errUpdate)
@@ -289,19 +294,23 @@ func TestUpdateClearsQuotaObservationWhenAccountChanges(t *testing.T) {
 		return auth
 	}
 
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name      string
 		newEmail  string
+		newToken  string
 		cooling   bool
 		wantKnown bool
 	}{
-		{name: "same account keeps the snapshot", newEmail: "first@example.com", wantKnown: true},
-		{name: "different account drops the snapshot", newEmail: "second@example.com", wantKnown: false},
-		{name: "different account drops the snapshot during a cooldown", newEmail: "second@example.com", cooling: true, wantKnown: false},
+		{name: "same account keeps the snapshot", newEmail: oldEmail, newToken: oldToken, wantKnown: true},
+		{name: "refreshed token on the same account keeps the snapshot", newEmail: oldEmail, newToken: "new-token", wantKnown: true},
+		{name: "different account drops the snapshot", newEmail: "second@example.com", newToken: oldToken},
+		{name: "different account drops the snapshot during a cooldown", newEmail: "second@example.com", newToken: oldToken, cooling: true},
+		{name: "replaced token without an identity drops the snapshot", newToken: "new-token"},
+		{name: "unchanged token without an identity keeps the snapshot", newToken: oldToken, wantKnown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := NewManager(nil, &SoonestResetSelector{}, nil)
-			id := "soonest-reset-account-" + strconv.FormatBool(tc.wantKnown) + "-" + strconv.FormatBool(tc.cooling)
+			id := "soonest-reset-account-" + strconv.Itoa(i)
 			quota := codexWeeklySignals(resetAt)
 			if tc.cooling {
 				quota.Exceeded = true
@@ -312,13 +321,13 @@ func TestUpdateClearsQuotaObservationWhenAccountChanges(t *testing.T) {
 				ID:       id,
 				Provider: "codex",
 				Status:   StatusActive,
-				Metadata: map[string]any{"email": "first@example.com"},
+				Metadata: map[string]any{"email": oldEmail, "access_token": oldToken},
 				Quota:    quota,
 			}); errRegister != nil {
 				t.Fatalf("Register(%s) error = %v", id, errRegister)
 			}
 
-			auth := reload(manager, id, tc.newEmail)
+			auth := reload(manager, id, tc.newEmail, tc.newToken)
 			if _, known := quotaWindowReset(auth); known != tc.wantKnown {
 				t.Fatalf("reset known after reload = %v, want %v; quota=%#v", known, tc.wantKnown, auth.Quota)
 			}
@@ -358,5 +367,48 @@ func TestMarkResultPrefersNewerRelativeResetOverRetainedAbsolute(t *testing.T) {
 	reset, okReset := quotaWindowReset(auth)
 	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) {
 		t.Fatalf("reset = %v, %v; want %v", reset, okReset, want)
+	}
+}
+
+func TestMarkResultOrdersSnapshotsByTheScoredWindow(t *testing.T) {
+	manager := NewManager(nil, &SoonestResetSelector{}, nil)
+	const id = "soonest-reset-scored-window"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register(%s) error = %v", id, errRegister)
+	}
+
+	t1 := time.Now().Add(-30 * time.Minute)
+	t2 := t1.Add(10 * time.Minute)
+	t3 := t2.Add(10 * time.Minute)
+	weekly := func(after time.Duration) http.Header {
+		return http.Header{
+			"X-Codex-Secondary-Window-Minutes":      []string{"10080"},
+			"X-Codex-Secondary-Reset-After-Seconds": []string{strconv.Itoa(int(after.Seconds()))},
+		}
+	}
+
+	// The older attempt holds the previous weekly reset from t1.
+	older := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeadersAt(older, weekly(time.Hour), t1)
+
+	// A newer attempt stores the new weekly reset at t2.
+	newer := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeadersAt(newer, weekly(7*24*time.Hour), t2)
+	manager.MarkResult(newer, Result{AuthID: id, Provider: "codex", Success: true})
+
+	// The older attempt then merges only a shorter primary window at t3.
+	internallogging.MergeResponseHeadersAt(older, http.Header{
+		"X-Codex-Primary-Window-Minutes":      []string{"300"},
+		"X-Codex-Primary-Reset-After-Seconds": []string{"3600"},
+	}, t3)
+	manager.MarkResult(older, Result{AuthID: id, Provider: "codex", Success: true})
+
+	auth, ok := manager.GetByID(id)
+	if !ok || auth == nil {
+		t.Fatalf("GetByID(%s) failed", id)
+	}
+	reset, okReset := quotaWindowReset(auth)
+	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) || !auth.Quota.ObservedAt.Equal(t2) {
+		t.Fatalf("reset = %v (observed %v); want %v observed at %v", reset, auth.Quota.ObservedAt, want, t2)
 	}
 }

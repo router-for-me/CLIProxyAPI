@@ -139,7 +139,7 @@ func quotaWindowReset(auth *Auth) (time.Time, bool) {
 	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
 	case "codex":
 		longest := int64(-1)
-		for _, prefix := range []string{"X-Codex-Primary-", "X-Codex-Secondary-"} {
+		for _, prefix := range codexQuotaWindowPrefixes {
 			windowReset, ok := codexWindowResetAt(signals, prefix, auth.Quota.ObservedAt)
 			if !ok {
 				continue

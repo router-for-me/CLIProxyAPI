@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// codexQuotaWindowPrefixes lists the Codex base quota windows, in tie-break order.
+var codexQuotaWindowPrefixes = []string{"X-Codex-Primary-", "X-Codex-Secondary-"}
+
 const (
 	maxQuotaSignalHeaders = 64
 	maxQuotaSignalValue   = 512
@@ -79,6 +82,18 @@ func quotaAccountIdentity(auth *Auth) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// quotaSnapshotIsForAnotherAccount reports whether a snapshot kept from existing
+// may describe a different account than auth. Without an identity on both
+// sides, a credential replacement cannot be shown to be the same account, and
+// wrongly clearing a snapshot costs only one probe request.
+func quotaSnapshotIsForAnotherAccount(existing, auth *Auth, credentialsReplaced bool) bool {
+	before, after := quotaAccountIdentity(existing), quotaAccountIdentity(auth)
+	if before != "" && after != "" {
+		return before != after
+	}
+	return credentialsReplaced
+}
+
 // observeResponseHeadersIfNotOlder applies an observation unless the snapshot
 // already holds a newer one. Observations are stamped at header receipt, and
 // concurrent requests on one credential can finish out of order, so an older
@@ -128,42 +143,53 @@ func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) tim
 	return result
 }
 
-// quotaResetReceivedAt returns the newest receipt time among the reset headers
-// in headers, or the zero time when none is present. Snapshots are ordered by
-// when their reset values arrived: an attempt can merge unrelated headers
-// (credits, additional limits) late while still holding an older reset, and
-// must not be taken for a newer reset observation.
+// quotaResetReceivedAt returns when the reset value the selector will score
+// arrived, or the zero time when headers carry none. It chooses the window the
+// same way quotaWindowReset does. Snapshots are ordered by this time: an
+// attempt can merge other headers late, even another window's reset, while
+// still holding an older value for the scored window, and must not be taken
+// for a newer observation of it.
 func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time) time.Time {
-	var latest time.Time
+	var scored time.Time
 	if receivedAt == nil {
-		return latest
+		return scored
 	}
-	for key := range headers {
-		if !isQuotaResetHeader(key) {
+	longest := int64(-1)
+	for _, prefix := range codexQuotaWindowPrefixes {
+		var windowReceived time.Time
+		for _, key := range []string{prefix + "Reset-At", prefix + "Reset-After-Seconds"} {
+			if strings.TrimSpace(headers.Get(key)) == "" {
+				continue
+			}
+			if received := receivedAt(key); received.After(windowReceived) {
+				windowReceived = received
+			}
+		}
+		if windowReceived.IsZero() {
 			continue
 		}
-		if received := receivedAt(key); received.After(latest) {
-			latest = received
+		minutes, _ := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"Window-Minutes")), 10, 64)
+		if minutes > longest {
+			longest = minutes
+			scored = windowReceived
 		}
 	}
-	return latest
-}
-
-// isQuotaResetHeader reports whether name is a reset value the selector scores.
-// Additional-limit namespaces are excluded: they do not describe the base window.
-func isQuotaResetHeader(name string) bool {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	if strings.HasPrefix(lower, "x-codex-primary-") || strings.HasPrefix(lower, "x-codex-secondary-") {
-		return strings.HasSuffix(lower, "-reset-after-seconds") || strings.HasSuffix(lower, "-reset-at")
+	if longest >= 0 {
+		return scored
 	}
-	return lower == "anthropic-ratelimit-unified-7d-reset" || lower == "anthropic-ratelimit-unified-reset"
+	for _, key := range []string{"Anthropic-Ratelimit-Unified-7d-Reset", "Anthropic-Ratelimit-Unified-Reset"} {
+		if strings.TrimSpace(headers.Get(key)) != "" {
+			return receivedAt(key)
+		}
+	}
+	return scored
 }
 
 // rebaseRelativeQuotaHeaders rewrites relative reset values so they count from
 // observedAt. A websocket quota frame can merge only some headers, so a
-// Reset-After-Seconds value received earlier than observedAt would otherwise
-// be anchored at the later time and its reset would drift. receivedAt reports
-// when a header was received; headers is not modified.
+// Reset-After-Seconds value received at another time than observedAt would
+// otherwise be anchored at the wrong moment and its reset would drift.
+// receivedAt reports when a header was received; headers is not modified.
 func rebaseRelativeQuotaHeaders(headers http.Header, observedAt time.Time, receivedAt func(string) time.Time) http.Header {
 	if len(headers) == 0 || receivedAt == nil {
 		return headers
@@ -175,7 +201,7 @@ func rebaseRelativeQuotaHeaders(headers http.Header, observedAt time.Time, recei
 			continue
 		}
 		received := receivedAt(key)
-		if received.IsZero() || !received.Before(observedAt) {
+		if received.IsZero() || received.Equal(observedAt) {
 			continue
 		}
 		seconds, errParse := strconv.ParseFloat(strings.TrimSpace(values[len(values)-1]), 64)
