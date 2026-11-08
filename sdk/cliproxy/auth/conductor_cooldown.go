@@ -1926,9 +1926,32 @@ func statusCodeFromError(err error) int {
 	return 0
 }
 
+func errorCodeFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil && strings.TrimSpace(authErr.Code) != "" {
+		return strings.TrimSpace(authErr.Code)
+	}
+	type errorCoder interface {
+		ErrorCode() string
+	}
+	var ec errorCoder
+	if errors.As(err, &ec) && ec != nil {
+		return strings.TrimSpace(ec.ErrorCode())
+	}
+	return ""
+}
+
 func isRequestScopedError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A preserved terminal response belongs to this request unless the executor
+	// explicitly classifies the rejection as safe to retry on another credential.
+	if isRequestTerminatedError(err) && !isCredentialScopedError(err) {
+		return true
 	}
 	requestErr, ok := errors.AsType[cliproxyexecutor.RequestScopedError](err)
 	return ok && requestErr != nil && requestErr.IsRequestScoped()
@@ -1966,6 +1989,9 @@ func resultErrorFromError(err error) *Error {
 		resultErr = cloneError(sourceErr)
 	} else {
 		resultErr = &Error{Message: err.Error()}
+	}
+	if resultErr.Code == "" {
+		resultErr.Code = errorCodeFromError(err)
 	}
 	if resultErr.HTTPStatus == 0 {
 		resultErr.HTTPStatus = statusCodeFromError(err)
@@ -2265,7 +2291,8 @@ var (
 
 func isKnownSafeOAuthErrorCode(code string) bool {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "refresh_token_reused",
+	case "refresh_outcome_unknown",
+		"refresh_token_reused",
 		"refresh_token_expired",
 		"refresh_token_invalidated",
 		"token_revoked",
@@ -2325,6 +2352,7 @@ func sanitizeRenewalMessage(raw string) string {
 func isTerminalRefreshGrantMessage(message string) bool {
 	lower := strings.ToLower(message)
 	for _, token := range []string{
+		"refresh_outcome_unknown",
 		"refresh_token_reused",
 		"refresh_token_expired",
 		"refresh_token_invalidated",
@@ -2366,6 +2394,7 @@ func isTerminalRefreshError(auth *Auth, err error) bool {
 func terminalRefreshErrorCode(message string, statusCode int) string {
 	lower := strings.ToLower(message)
 	for _, code := range []string{
+		"refresh_outcome_unknown",
 		"refresh_token_reused",
 		"refresh_token_expired",
 		"refresh_token_invalidated",
@@ -2712,11 +2741,43 @@ func isRequestScopedResultError(err *Error) bool {
 }
 
 func isCountTokensEndpointNotFoundError(err error, requestedModel string) bool {
-	if err == nil || statusCodeFromError(err) != http.StatusNotFound {
+	if err == nil {
 		return false
 	}
 	baseModel := thinking.ParseSuffix(requestedModel).ModelName
-	return !isExplicitModelNotFoundError(err, baseModel)
+	if isExplicitModelNotFoundError(err, baseModel) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == http.StatusNotFound {
+		return true
+	}
+	if isCredentialScopedError(err) || isCloudflareChallengeError(err) || isInvalidGrantError(err) || isCreditBalanceTooLowError(err) || isModelSupportErrorMessage(err.Error()) {
+		return false
+	}
+	switch status {
+	case http.StatusNotImplemented:
+		return true
+	case 0:
+		return isCountTokensUnsupportedErrorCode(errorCodeFromError(err)) || errors.Is(err, errors.ErrUnsupported)
+	default:
+		return false
+	}
+}
+
+func isCountTokensUnsupportedErrorCode(value string) bool {
+	normalized := strings.NewReplacer("-", "_", " ", "_").Replace(strings.ToLower(strings.TrimSpace(value)))
+	switch normalized {
+	case "not_implemented",
+		"count_tokens_unsupported",
+		"count_tokens_not_supported",
+		"unsupported_operation",
+		"unsupported_capability",
+		"method_not_implemented":
+		return true
+	default:
+		return false
+	}
 }
 
 func isResponsesCompactRequest(opts cliproxyexecutor.Options) bool {
@@ -2774,6 +2835,9 @@ func isResponsesCompactAvailabilityNeutralError(opts cliproxyexecutor.Options, e
 func isExplicitModelNotFoundError(err error, requestedModel string) bool {
 	if err == nil {
 		return false
+	}
+	if isModelNotFoundIdentifier(errorCodeFromError(err)) {
+		return true
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil {

@@ -1505,6 +1505,20 @@ func TestFailFromErrorsCarriesStreamTruncatedCode(t *testing.T) {
 	}
 }
 
+func TestFailFromErrorsCarriesRequestScopedCode(t *testing.T) {
+	errRequest := cliproxyauth.NewRequestScopedError("Use /v1/images/generations for forced image generation.", http.StatusBadRequest)
+	for _, err := range []error{errRequest, fmt.Errorf("validate payload: %w", errRequest)} {
+		fail := failFromErrors(err)
+		if fail.Code != usage.FailureRequestScopedCode || fail.StatusCode != http.StatusBadRequest {
+			t.Fatalf("request-scoped classification lost during usage reporting: %+v", fail)
+		}
+	}
+	plain := failFromErrors(&cliproxyauth.Error{HTTPStatus: http.StatusBadRequest, Message: "model_not_found"})
+	if plain.Code != "" {
+		t.Fatalf("upstream model rejection gained request-scoped classification: %+v", plain)
+	}
+}
+
 func TestParseClaudeUsageExtractsCacheTTLServerToolsIterationsAndCost(t *testing.T) {
 	var buffer StreamUsageBuffer
 	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":4,"cache_creation_input_tokens":3036,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036},"output_tokens":16,"service_tier":"standard","inference_geo":"global","speed":"standard"}}}`)

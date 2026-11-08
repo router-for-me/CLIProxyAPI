@@ -142,6 +142,10 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		partResults := partsResult.Array()
 		hasToolCallsArray := false
 		imageCount := 0
+		var textContent strings.Builder
+		var reasoningContent strings.Builder
+		hasTextContent := false
+		hasReasoningContent := false
 		for i := 0; i < len(partResults); i++ {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
@@ -156,7 +160,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			}
 
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
-			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+			hasTextPayload := partTextResult.Exists() && partTextResult.String() != ""
+			hasContentPayload := hasTextPayload || functionCallResult.Exists() || inlineDataResult.Exists()
 
 			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
 			if hasThoughtSignature && !hasContentPayload {
@@ -164,13 +169,15 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			}
 
 			if partTextResult.Exists() {
-				textContent := partTextResult.String()
+				text := partTextResult.String()
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					_ = templateDoc.Set("choices.0.delta.reasoning_content", textContent)
+					hasReasoningContent = true
+					reasoningContent.WriteString(text)
 				} else {
-					_ = templateDoc.Set("choices.0.delta.content", textContent)
+					hasTextContent = true
+					textContent.WriteString(text)
 				}
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
@@ -221,6 +228,12 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 				_ = templateDoc.SetRawBytes("choices.0.delta.images.-1", imageDoc.Bytes())
 			}
+		}
+		if hasTextContent {
+			_ = templateDoc.Set("choices.0.delta.content", textContent.String())
+		}
+		if hasReasoningContent {
+			_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 		}
 	}
 
