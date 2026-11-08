@@ -1096,7 +1096,7 @@ func TestManager_PrepareRequestAuth_DoesNotRollbackConcurrentlyRefreshedToken(t 
 
 	prepareDone := make(chan struct{})
 	go func() {
-		_, _ = manager.prepareRequestAuth(ctx, executor, auth)
+		_, _ = manager.prepareRequestAuth(ctx, executor, auth, "")
 		close(prepareDone)
 	}()
 
