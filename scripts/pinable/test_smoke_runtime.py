@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify the smoke HTTP helper without launching a runtime or making requests."""
 import io
+import json
 import unittest
 from unittest.mock import patch
 from subprocess import CompletedProcess
@@ -68,6 +69,26 @@ class DiscoveryProbeTests(unittest.TestCase):
         run.return_value = CompletedProcess(["runtime"], 1, b'{"error":"network unavailable"}', b'diagnostic')
         with self.assertRaisesRegex(ValueError, "network unavailable.*diagnostic"):
             smoke_runtime.discovery_probe(["runtime"], ".", {})
+
+    @patch("smoke_runtime.subprocess.run")
+    def test_explicit_multicast_limitation_is_reported_not_silently_passed(self, run):
+        payload = {"error": "discovery: send browse queries: interface en0: write udp 0.0.0.0:5353->224.0.0.251:5353: sendmsg: no route to host", "gateways": []}
+        run.return_value = CompletedProcess(["runtime"], 1, json.dumps(payload).encode(), b'')
+        with self.assertRaises(ValueError):
+            smoke_runtime.discovery_probe(["runtime"], ".", {})
+        self.assertEqual(smoke_runtime.discovery_probe(["runtime"], ".", {}, True), payload)
+
+    @patch("smoke_runtime.subprocess.run")
+    def test_multicast_allowance_rejects_other_errors_and_wrong_schema(self, run):
+        for payload in (
+            {"error": "discovery: open mDNS sockets: not implemented", "gateways": []},
+            {"error": "discovery: send browse queries: interface en0: write udp x: sendmsg: permission denied", "gateways": []},
+            {"error": "discovery: send browse queries: ", "gateways": []},
+            {"error": "discovery: send browse queries: interface en0: write udp x: sendmsg: no route to host", "gateways": ["unexpected"]},
+        ):
+            run.return_value = CompletedProcess(["runtime"], 1, json.dumps(payload).encode(), b'')
+            with self.assertRaises(ValueError):
+                smoke_runtime.discovery_probe(["runtime"], ".", {}, True)
 
     @patch("smoke_runtime.subprocess.run")
     def test_startup_banner_is_rejected(self, run):

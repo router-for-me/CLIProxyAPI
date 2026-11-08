@@ -24,7 +24,12 @@ Windows packet-info through Go's WSARecvMsg support, preserving mandatory
 interface and destination validation. Native tests exercise both IPv4 and IPv6
 metadata reception. IPv6 multicast queries explicitly carry their interface
 scope, and failed query diagnostics retain every interface error. The existing
-packaged-executable smoke checks remain strict.
+packaged-executable smoke checks remain strict except that hosted macOS runners
+may report the exact structured multicast `no route to host` error. This is
+explicitly recorded as real LAN scanning **not verified**, not a successful LAN
+scan. All other errors, malformed JSON, startup banners and unexpected schemas
+still fail. IPv4/IPv6 loopback metadata reception is tested natively on every
+platform. Production discovery still returns its original error and exit code.
 
 The Home heartbeat failover test now synchronizes on subscription/readiness
 instead of assuming the reconnect jitter completes within one second.

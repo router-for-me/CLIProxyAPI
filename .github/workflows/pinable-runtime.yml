@@ -117,7 +117,7 @@ jobs:
         shell: bash
         run: |
           python -m unittest discover -s scripts/pinable -p 'test_*runtime.py' -v
-          go test ./internal/discovery -run 'Test(MDNSQueryAddr6|ParseBrowsePacketInfo|WindowsBrowsePacketInfoLoopback)' -count=1
+          go test ./internal/discovery -run 'Test(MDNSQueryAddr6|ParseBrowsePacketInfo|WindowsBrowsePacketInfoLoopback|UnixBrowsePacketInfoLoopback)' -count=1
           go test ./cmd/server ./internal/cmd ./internal/api ./internal/api/handlers/management ./sdk/access ./sdk/cliproxy ./internal/watcher -run 'Test.*(Host|Runtime|Ephemeral|Parent|Version|SafeMode)' -count=1
       - name: Build pinned portable runtime (no catalog refresh)
         env:
@@ -128,7 +128,14 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
         shell: bash
-        run: python scripts/pinable/smoke_runtime.py --artifact-dir "$ARTIFACT_DIR"
+        run: |
+          args=()
+          # Hosted macOS has no LAN multicast route. Keep all other discovery
+          # errors fatal and label the real LAN scan unverified in smoke output.
+          if [[ "$TARGET" == darwin/* ]]; then
+            args+=(--allow-unavailable-multicast)
+          fi
+          python scripts/pinable/smoke_runtime.py --artifact-dir "$ARTIFACT_DIR" "${args[@]}"
       - uses: actions/upload-artifact@v4
         id: upload
         with:

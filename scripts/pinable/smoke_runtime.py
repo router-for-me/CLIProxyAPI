@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import secrets
 import socket
 import subprocess
@@ -35,9 +36,22 @@ def request(port, path, key="", method="GET", data: bytes | None = None):
         return error.code, error.read()
 
 
-def discovery_probe(command, cwd, env):
+def discovery_probe(command, cwd, env, allow_unavailable_multicast=False):
     result = subprocess.run(command, cwd=cwd, env=env, timeout=15, capture_output=True)
     if result.returncode != 0:
+        # Hosted macOS runners can have no multicast route. Only this exact
+        # transport limitation is eligible; malformed JSON and all other
+        # discovery failures must remain fatal. Production behavior is unchanged.
+        if allow_unavailable_multicast and result.returncode == 1:
+            payload = json.loads(result.stdout)
+            error = payload.get("error") if isinstance(payload, dict) else None
+            prefix = "discovery: send browse queries: "
+            if (isinstance(error, str) and error.startswith(prefix)
+                    and error[len(prefix):]
+                    and set(payload) == {"error", "gateways"} and payload["gateways"] == []
+                    and all(re.fullmatch(r"interface [^:]+: write udp .+: sendmsg: no route to host", line)
+                            for line in error[len(prefix):].splitlines())):
+                return payload
         raise ValueError(
             f"discovery probe failed ({result.returncode}): "
             f"stdout={result.stdout.decode('utf-8', errors='replace')!r}; "
@@ -65,7 +79,7 @@ def stop(process):
         process.wait(timeout=10)
 
 
-def smoke(artifact_dir: Path):
+def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
     manifests = list(artifact_dir.glob("*.manifest.json"))
     runtime.require(len(manifests) == 1, "expected one native platform artifact")
     manifest, _ = runtime.verify(manifests[0])
@@ -91,7 +105,10 @@ def smoke(artifact_dir: Path):
         checks.append("both version flags without configuration")
         for args in (("discover", "--json", "--timeout", "1"),
                      ("--discover-json", "--discover-timeout", "1")):
-            discovery_probe([str(binary), *args], cwd=isolated, env=env)
+            result = discovery_probe([str(binary), *args], cwd=isolated, env=env,
+                                     allow_unavailable_multicast=allow_unavailable_multicast)
+            if isinstance(result, dict) and "error" in result:
+                checks.append("discovery error JSON verified; real LAN scan not verified: " + result["error"])
         checks.append("new and legacy discovery JSON")
         if target == "darwin":
             subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
@@ -221,4 +238,7 @@ def smoke(artifact_dir: Path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-dir", type=Path, required=True)
-    smoke(parser.parse_args().artifact_dir.resolve())
+    parser.add_argument("--allow-unavailable-multicast", action="store_true",
+                        help="Allow only a structured multicast no-route error; report LAN scanning as unverified")
+    args = parser.parse_args()
+    smoke(args.artifact_dir.resolve(), args.allow_unavailable_multicast)
