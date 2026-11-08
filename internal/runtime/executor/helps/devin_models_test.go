@@ -21,6 +21,35 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:     "claude-fable-5-1-max",
 		},
 		{
+			name:     "direct swe-2-flash-high unchanged",
+			rawModel: "swe-2-flash-high",
+			want:     "swe-2-flash-high",
+		},
+		{
+			name:          "swe-2-flash default to high when no effort",
+			rawModel:      "swe-2-flash",
+			thinkingLevel: "",
+			want:          "swe-2-flash-high",
+		},
+		{
+			name:          "swe-2-flash with medium effort",
+			rawModel:      "swe-2-flash",
+			thinkingLevel: "medium",
+			want:          "swe-2-flash-medium",
+		},
+		{
+			name:          "swe-2-flash with max effort suffix",
+			rawModel:      "swe-2-flash(max)",
+			thinkingLevel: "",
+			want:          "swe-2-flash-max",
+		},
+		{
+			name:          "devin/swe-2-flash with colon medium",
+			rawModel:      "devin/swe-2-flash:medium",
+			thinkingLevel: "",
+			want:          "swe-2-flash-medium",
+		},
+		{
 			name:     "direct swe-2-high unchanged",
 			rawModel: "swe-2-high",
 			want:     "swe-2-high",

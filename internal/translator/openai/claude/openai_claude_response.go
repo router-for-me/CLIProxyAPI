@@ -440,7 +440,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 		var contentBlocks [][]byte
 
 		for _, reasoningText := range collectOpenAIObjectReasoningTexts(choice.Get("message")) {
-			if reasoningText == "" {
+			if strings.TrimSpace(reasoningText) == "" {
 				continue
 			}
 			blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
@@ -563,15 +563,19 @@ func emitStreamingThinkingDelta(param *ConvertOpenAIResponseToAnthropicParams, r
 	if reasoningText == "" {
 		return
 	}
+	// Anthropic rejects whitespace-only thinking blocks, so whitespace may only extend an open one.
 	if param.OpenToolCallIndex != -1 {
 		if n := len(param.InterleavedContentChunks); n > 0 && param.InterleavedContentChunks[n-1].Type == "thinking" {
 			param.InterleavedContentChunks[n-1].Text += reasoningText
-		} else {
+		} else if strings.TrimSpace(reasoningText) != "" {
 			param.InterleavedContentChunks = append(param.InterleavedContentChunks, InterleavedContentChunk{
 				Type: "thinking",
 				Text: strings.Clone(reasoningText),
 			})
 		}
+		return
+	}
+	if !param.ThinkingContentBlockStarted && strings.TrimSpace(reasoningText) == "" {
 		return
 	}
 	stopTextContentBlock(param, results)
@@ -695,7 +699,7 @@ func appendOpenAINonStreamingMessageContent(contentResult ojson.Result, toolName
 					})
 				}
 			case "reasoning", "thinking":
-				if thinkingText := extractOpenAIContentPartThinkingText(item); thinkingText != "" {
+				if thinkingText := extractOpenAIContentPartThinkingText(item); thinkingBuilder.Len() > 0 || strings.TrimSpace(thinkingText) != "" {
 					flushText()
 					thinkingBuilder.WriteString(thinkingText)
 				}
@@ -968,7 +972,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 		if message := choice.Get("message"); message.Exists() {
 			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
-				if reasoningText == "" {
+				if strings.TrimSpace(reasoningText) == "" {
 					continue
 				}
 				blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
