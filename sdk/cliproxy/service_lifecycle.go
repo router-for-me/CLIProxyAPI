@@ -176,6 +176,13 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.currentConfig())
 	}
 
+	// The server answers before the watcher's first full load has registered its
+	// models. finishCatalogLoading clears this once that load is applied.
+	// Home mode has no watcher, so it never sets the flag.
+	if !homeEnabled {
+		registry.SetCatalogLoading(true)
+	}
+
 	s.serverErr = make(chan error, 1)
 	go func() {
 		if errStart := s.server.Start(); errStart != nil {
@@ -231,6 +238,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.configRuntimeMu.Lock()
 		s.syncPluginModelRuntime(ctx)
 		s.configRuntimeMu.Unlock()
+		go s.finishCatalogLoading(ctx, watcherWrapper)
 	}
 
 	s.registerModelRefreshCallback()
@@ -439,4 +447,44 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+}
+
+// catalogLoadingCeiling bounds how long unknown models answer 503 after start.
+// A watcher that never dispatches auth updates must not leave the flag set.
+var catalogLoadingCeiling = 30 * time.Second
+
+// finishCatalogLoading clears the catalog-loading flag once the first full load
+// has been applied: nothing waits in the watcher's dispatch queue or the service
+// queue, and no batch is being handled. Start returns before that, because the
+// watcher hands updates to the service asynchronously and the service registers
+// models in consumeAuthUpdates. The ceiling covers custom watchers.
+func (s *Service) finishCatalogLoading(ctx context.Context, w *WatcherWrapper) {
+	defer registry.SetCatalogLoading(false)
+	ceiling := time.NewTimer(catalogLoadingCeiling)
+	defer ceiling.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ceiling.C:
+			log.Warnf("model catalog still loading after %s; serving unknown models as 400 from now on", catalogLoadingCeiling)
+			return
+		case <-ticker.C:
+			if !s.authUpdatesIdle(w) {
+				continue
+			}
+			// handleAuthUpdates holds authUpdateMu while it registers a batch's models.
+			s.authUpdateMu.Lock()
+			s.authUpdateMu.Unlock()
+			if s.authUpdatesIdle(w) {
+				return
+			}
+		}
+	}
+}
+
+func (s *Service) authUpdatesIdle(w *WatcherWrapper) bool {
+	return w.PendingAuthUpdates() == 0 && len(s.authUpdates) == 0
 }

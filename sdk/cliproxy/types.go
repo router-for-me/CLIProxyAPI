@@ -115,6 +115,7 @@ type WatcherWrapper struct {
 	rereadDiscardedFileSnapshot  func(auth *coreauth.Auth)
 	setPluginAuthParser          func(parser PluginAuthParser)
 	reloadConfigIfChanged        func()
+	pendingAuthUpdates           func() int
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -123,6 +124,15 @@ func (w *WatcherWrapper) Start(ctx context.Context) error {
 		return nil
 	}
 	return w.start(ctx)
+}
+
+// PendingAuthUpdates reports auth updates the watcher has not handed to the
+// service queue yet. A wrapper without a watcher reports zero.
+func (w *WatcherWrapper) PendingAuthUpdates() int {
+	if w == nil || w.pendingAuthUpdates == nil {
+		return 0
+	}
+	return w.pendingAuthUpdates()
 }
 
 // Stop proxies to the underlying watcher Stop implementation.

@@ -490,6 +490,14 @@ func (w *Watcher) authUpdateKey(update AuthUpdate, ts int64) string {
 	return fmt.Sprintf("%s:%d", update.Action, ts)
 }
 
+// PendingAuthUpdates reports how many auth updates wait for the dispatch loop.
+// The service uses it to tell when the first full load has been handed on.
+func (w *Watcher) PendingAuthUpdates() int {
+	w.dispatchMu.Lock()
+	defer w.dispatchMu.Unlock()
+	return len(w.pendingOrder)
+}
+
 func (w *Watcher) dispatchLoop(ctx context.Context) {
 	for {
 		batch, ok := w.nextPendingBatch(ctx)

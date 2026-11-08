@@ -10,6 +10,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -209,6 +210,11 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
+		// Before the first full client load the registry may not list the model yet.
+		// Ask the client to retry rather than reject a model that will be served.
+		if registry.CatalogLoading() {
+			return nil, "", catalogLoadingRejection()
+		}
 		// The client asked for a model this proxy cannot route. Report it as a request
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
@@ -230,6 +236,26 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+// catalogLoadingError is a 503 with a Retry-After hint. WriteErrorResponse reads the
+// SafeResponseHeaders method, so the header reaches the client without passthrough.
+type catalogLoadingError struct {
+	body string
+}
+
+func (e catalogLoadingError) Error() string { return e.body }
+
+func (e catalogLoadingError) SafeResponseHeaders() http.Header {
+	return http.Header{"Retry-After": []string{"5"}}
+}
+
+func catalogLoadingRejection() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error: catalogLoadingError{body: `{"error":{"message":"provider catalog still loading, retry",` +
+			`"type":"service_unavailable_error","code":"catalog_loading","param":"model"}}`},
+	}
 }
 
 func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *interfaces.ErrorMessage {
