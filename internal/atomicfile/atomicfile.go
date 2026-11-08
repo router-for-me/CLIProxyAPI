@@ -137,8 +137,12 @@ func write(path string, data []byte, perm os.FileMode, mustExist bool) error {
 	committed := false
 	defer func() {
 		if !committed {
+			// Until committed, tmpPath holds the new content: after an in-place
+			// fallback, the same data the target now has. Warn rather than fail the
+			// save: callers treat an error as "not written" and would roll back or
+			// reject content that did land.
 			if errRemove := os.Remove(tmpPath); errRemove != nil && !os.IsNotExist(errRemove) {
-				log.WithError(errRemove).Debugf("atomicfile: failed to remove temp file %s", tmpPath)
+				log.WithError(errRemove).Warnf("atomicfile: could not remove temp file %s next to %s; remove it by hand", tmpPath, target)
 			}
 		}
 	}()
