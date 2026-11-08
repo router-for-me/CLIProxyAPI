@@ -270,6 +270,9 @@ func TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences(t *testing.T
 		"line comment":        "management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
 		"key comment":         "management:\n  # " + uploadTestPlaintextSecret + "\n  secret-key: " + uploadTestPlaintextSecret + "\n",
 		"legacy line comment": "remote-management:\n  secret-key: " + uploadTestPlaintextSecret + " # " + uploadTestPlaintextSecret + "\n",
+		// A secret whose own edges are punctuation is delimited by them: letters
+		// right outside it do not hide it.
+		"punctuation-edged secret inside a comment word": "management:\n  secret-key: '!abc.' # foo!abc.def\n",
 		// A tagged scalar holds the plaintext it decodes to.
 		"binary copy": "password: !!binary dXBsb2FkLXBsYWludGV4dC1zZWNyZXQ=\nmanagement:\n  secret-key: " + uploadTestPlaintextSecret + "\n",
 	} {
@@ -304,6 +307,24 @@ func TestPrepareConfigFileForUploadAcceptsUnrelatedCommentsAndTaggedHash(t *test
 			t.Fatalf("management.secret-key %q is not the bcrypt hash of the secret:\n%s", secret, saved)
 		}
 	})
+	// The secret entry's comments count only where they hold the secret as a whole
+	// word: a short secret inside a longer word is not the plaintext.
+	for name, content := range map[string]string{
+		"short secret inside a word of its line comment": "management:\n  secret-key: dev # device password\n",
+		"short secret inside a word of the foot comment": "management:\n  secret-key: dev\n# developer notes\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeUploadTestConfig(t, content)
+			if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
+				t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+			}
+			saved := readUploadTestConfig(t, path)
+			secret, _ := uploadTestSecret(t, saved, "management")
+			if errCompare := bcrypt.CompareHashAndPassword([]byte(secret), []byte("dev")); errCompare != nil {
+				t.Fatalf("management.secret-key %q is not the bcrypt hash of the secret:\n%s", secret, saved)
+			}
+		})
+	}
 	t.Run("binary bcrypt hash", func(t *testing.T) {
 		content := "management:\n  secret-key: !!binary " + base64.StdEncoding.EncodeToString([]byte(hashed)) + "\n"
 		path := writeUploadTestConfig(t, content)
@@ -405,5 +426,8 @@ func TestHoldsAnyScalarValueFindsPlaintextInComments(t *testing.T) {
 	}
 	if HoldsAnyScalarValue([]byte("# hunter2xyz and xhunter2x\n"+hashedSecret), []string{"hunter2x"}) {
 		t.Error("HoldsAnyScalarValue() = true for the plaintext as part of a longer word")
+	}
+	if !HoldsAnyScalarValue([]byte("# foo!abc.def\n"+hashedSecret), []string{"!abc."}) {
+		t.Error("HoldsAnyScalarValue() = false for a punctuation-edged secret between letters")
 	}
 }

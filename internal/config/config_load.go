@@ -150,14 +150,15 @@ func yamlScalarExists(node *yaml.Node, value string) bool {
 // secret-key key or its value, in either section) holds value. The hashed write-back
 // rewrites that value in place and keeps those comments, so `secret-key: s3cret # s3cret`
 // would still carry the plaintext. A comment right after the section's last entry is
-// the section key's foot comment and counts too. Comments elsewhere are left alone: a
-// short secret would match unrelated words in them.
+// the section key's foot comment and counts too. Each holds it only as a whole word
+// (containsWord), so `secret-key: dev # device password` is not a match. Comments
+// elsewhere are left alone: a false positive here blocks startup.
 func secretEntryCommentHolds(root *yaml.Node, value string) bool {
 	if root.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(root.Content); i += 2 {
 			switch yamlScalarText(resolveYAMLAlias(root.Content[i])) {
 			case "management", "remote-management":
-				if strings.Contains(root.Content[i].FootComment, value) {
+				if containsWord(root.Content[i].FootComment, value) {
 					return true
 				}
 			}
@@ -170,18 +171,13 @@ func secretEntryCommentHolds(root *yaml.Node, value string) bool {
 			}
 			for i := 0; i+1 < len(mapping.Content); i += 2 {
 				key, val := mapping.Content[i], mapping.Content[i+1]
-				if yamlScalarText(resolveYAMLAlias(key)) == "secret-key" && (yamlCommentHolds(key, value) || yamlCommentHolds(val, value)) {
+				if yamlScalarText(resolveYAMLAlias(key)) == "secret-key" && (yamlCommentHoldsWord(key, value) || yamlCommentHoldsWord(val, value)) {
 					return true
 				}
 			}
 		}
 	}
 	return false
-}
-
-// yamlCommentHolds reports whether a comment attached to node contains value.
-func yamlCommentHolds(node *yaml.Node, value string) bool {
-	return strings.Contains(node.HeadComment, value) || strings.Contains(node.LineComment, value) || strings.Contains(node.FootComment, value)
 }
 
 // managementSecretKeyPath returns the management secret key path used by data: the v8
@@ -623,11 +619,15 @@ func yamlCommentHoldsWord(node *yaml.Node, value string) bool {
 }
 
 // containsWord reports whether s contains word at a position with no letter or
-// digit adjacent to either end.
+// digit adjacent to either end. An end of word that is itself not a letter or digit
+// (`!abc.`) is a boundary already, so what lies outside it does not matter there.
 func containsWord(s, word string) bool {
 	if word == "" {
 		return false
 	}
+	first, _ := utf8.DecodeRuneInString(word)
+	last, _ := utf8.DecodeLastRuneInString(word)
+	checkBefore, checkAfter := isWordRune(first), isWordRune(last)
 	for start := 0; start <= len(s)-len(word); {
 		i := strings.Index(s[start:], word)
 		if i < 0 {
@@ -636,7 +636,7 @@ func containsWord(s, word string) bool {
 		i += start
 		before, _ := utf8.DecodeLastRuneInString(s[:i])
 		after, _ := utf8.DecodeRuneInString(s[i+len(word):])
-		if !isWordRune(before) && !isWordRune(after) {
+		if (!checkBefore || !isWordRune(before)) && (!checkAfter || !isWordRune(after)) {
 			return true
 		}
 		start = i + 1
