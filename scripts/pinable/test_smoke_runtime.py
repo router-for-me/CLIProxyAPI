@@ -3,6 +3,7 @@
 import io
 import unittest
 from unittest.mock import patch
+from subprocess import CompletedProcess
 from urllib.error import HTTPError
 
 import smoke_runtime
@@ -53,6 +54,26 @@ class SmokeRequestTests(unittest.TestCase):
     def test_http_errors_remain_available_to_negative_auth_checks(self):
         self.client.open.side_effect = HTTPError("http://127.0.0.1/", 401, "Unauthorized", {}, io.BytesIO(b"denied"))
         self.assertEqual(smoke_runtime.request(12345, "/v8/management/config", "wrong"), (401, b"denied"))
+
+
+class DiscoveryProbeTests(unittest.TestCase):
+    @patch("smoke_runtime.subprocess.run")
+    def test_success_parses_clean_json(self, run):
+        run.return_value = CompletedProcess(["runtime"], 0, b'{"gateways":[]}', b'')
+        self.assertEqual(smoke_runtime.discovery_probe(["runtime"], ".", {}), {"gateways": []})
+        run.assert_called_once_with(["runtime"], cwd=".", env={}, timeout=15, capture_output=True)
+
+    @patch("smoke_runtime.subprocess.run")
+    def test_failure_reports_output_without_accepting_failed_probe(self, run):
+        run.return_value = CompletedProcess(["runtime"], 1, b'{"error":"network unavailable"}', b'diagnostic')
+        with self.assertRaisesRegex(ValueError, "network unavailable.*diagnostic"):
+            smoke_runtime.discovery_probe(["runtime"], ".", {})
+
+    @patch("smoke_runtime.subprocess.run")
+    def test_startup_banner_is_rejected(self, run):
+        run.return_value = CompletedProcess(["runtime"], 0, b'banner\n{"gateways":[]}', b'')
+        with self.assertRaises(ValueError):
+            smoke_runtime.discovery_probe(["runtime"], ".", {})
 
 
 if __name__ == "__main__":

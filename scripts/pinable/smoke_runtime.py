@@ -35,6 +35,17 @@ def request(port, path, key="", method="GET", data: bytes | None = None):
         return error.code, error.read()
 
 
+def discovery_probe(command, cwd, env):
+    result = subprocess.run(command, cwd=cwd, env=env, timeout=15, capture_output=True)
+    if result.returncode != 0:
+        raise ValueError(
+            f"discovery probe failed ({result.returncode}): "
+            f"stdout={result.stdout.decode('utf-8', errors='replace')!r}; "
+            f"stderr={result.stderr.decode('utf-8', errors='replace')!r}"
+        )
+    return json.loads(result.stdout)
+
+
 def wait_until(predicate, process, description, seconds=25):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -80,8 +91,7 @@ def smoke(artifact_dir: Path):
         checks.append("both version flags without configuration")
         for args in (("discover", "--json", "--timeout", "1"),
                      ("--discover-json", "--discover-timeout", "1")):
-            output = subprocess.check_output([str(binary), *args], cwd=isolated, env=env, timeout=15)
-            json.loads(output)
+            discovery_probe([str(binary), *args], cwd=isolated, env=env)
         checks.append("new and legacy discovery JSON")
         if target == "darwin":
             subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
