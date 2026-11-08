@@ -4,6 +4,7 @@ package pluginhost
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -431,6 +432,80 @@ func TestIssue6653NativeTerminalEnvelopeAndIdentity(t *testing.T) {
 				if !latest.RequiresSignIn || latest.RejectedRefreshToken == "" {
 					t.Fatal("loaded native terminal envelope treated as transient")
 				}
+			}
+		})
+	}
+}
+
+func TestIssue6653NativeSameIDDifferentProviderNoSideEffects(t *testing.T) {
+	h, p, r := issue6653NativeHost(t)
+	var refreshes, operations atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/refresh" {
+			operations.Add(1)
+			t.Error("provider mismatch dispatched")
+			return
+		}
+		refreshes.Add(1)
+		_, _ = w.Write([]byte(`{"qa_response_provider":"qa-different-provider","access_token":"qa-wrong-provider-access","refresh_token":"qa-wrong-provider-grant"}`))
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	physical := sdkauth.NewFileTokenStore()
+	physical.SetBaseDir(dir)
+	store := &issue6653CountedFileStore{Store: physical}
+	m, _ := issue6653NativeManager(t, h, p, r, store)
+	a := issue6653NativeRegister(t, h, m, "qa-provider-binding", upstream.URL, true)
+	before := a.Clone()
+	saveBefore := store.saves.Load()
+	file := filepath.Join(dir, a.FileName)
+	rawBefore, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"buffered", "stream", "quota", "quota-reset"} {
+		if err := issue6653NativeOperation(m, h, a, op); err == nil {
+			t.Fatalf("same-ID different-provider refresh admitted %s", op)
+		}
+	}
+	after, _ := m.GetByID(a.ID)
+	rawAfter, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) || string(rawBefore) != string(rawAfter) || store.saves.Load() != saveBefore || refreshes.Load() != 1 || operations.Load() != 0 {
+		t.Fatalf("binding error mutated/saved/dispatched: saves=%d->%d refresh=%d operations=%d", saveBefore, store.saves.Load(), refreshes.Load(), operations.Load())
+	}
+}
+
+func TestIssue6653NativeFirstAndCachedRetryContract(t *testing.T) {
+	h, p, r := issue6653NativeHost(t)
+	for _, op := range []string{"buffered", "stream"} {
+		t.Run(op, func(t *testing.T) {
+			var refreshes, operations atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path != "/refresh" {
+					operations.Add(1)
+					return
+				}
+				refreshes.Add(1)
+				_, _ = w.Write([]byte(`{"qa_error_code":"qa_retry_failure","qa_error_status":503,"qa_retry_after":7,"qa_error_message":"qa temporary renewal unavailable"}`))
+			}))
+			defer upstream.Close()
+			m, _ := issue6653NativeManager(t, h, p, r, nil)
+			a := issue6653NativeRegister(t, h, m, "qa-retry-"+op, upstream.URL, true)
+			for range 2 {
+				err := issue6653NativeOperation(m, h, a, op)
+				var coded interface {
+					ErrorCode() string
+					StatusCode() int
+				}
+				if !errors.As(err, &coded) || coded.ErrorCode() != "qa_retry_failure" || coded.StatusCode() != 503 || coreauth.SafeResponseHeaders(err).Get("Retry-After") != "7" {
+					t.Fatalf("native first/cached safe status/code/Retry-After lost: %v", err)
+				}
+			}
+			if refreshes.Load() != 1 || operations.Load() != 0 {
+				t.Fatal("native first/cached failure rotated again or dispatched")
 			}
 		})
 	}

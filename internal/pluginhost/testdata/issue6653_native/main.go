@@ -44,11 +44,18 @@ func cliproxy_plugin_init(_ *C.cliproxy_host_api, p *C.cliproxy_plugin_api) C.in
 }
 
 type qaTerminalError struct {
-	code   string
-	status int
+	code    string
+	status  int
+	retry   int
+	message string
 }
 
-func (e qaTerminalError) Error() string { return "renewal rejected" }
+func (e qaTerminalError) Error() string {
+	if e.message != "" {
+		return e.message
+	}
+	return "renewal rejected"
+}
 func envelope(result any, err error) []byte {
 	d := ojson.NewDoc([]byte(`{}`))
 	if err != nil {
@@ -56,6 +63,9 @@ func envelope(result any, err error) []byte {
 		fields := map[string]any{"code": "qa_native_error", "message": err.Error(), "http_status": 503}
 		if terminal, ok := err.(qaTerminalError); ok {
 			fields["code"] = terminal.code
+			if terminal.retry > 0 {
+				fields["retry_after_seconds"] = terminal.retry
+			}
 			delete(fields, "http_status")
 			if terminal.status != 0 {
 				fields["http_status"] = terminal.status
@@ -130,8 +140,15 @@ func dispatch(method string, raw []byte) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if code := ojson.GetBytes(payload, "qa_error_code").String(); code != "" {
+			return nil, qaTerminalError{code: code, status: int(ojson.GetBytes(payload, "qa_error_status").Int()), retry: int(ojson.GetBytes(payload, "qa_retry_after").Int()), message: ojson.GetBytes(payload, "qa_error_message").String()}
+		}
 		if code := ojson.GetBytes(payload, "qa_terminal_code").String(); code != "" {
 			return nil, qaTerminalError{code: code, status: int(ojson.GetBytes(payload, "qa_terminal_status").Int())}
+		}
+		provider := "qa-native-6653"
+		if responseProvider := ojson.GetBytes(payload, "qa_response_provider").String(); responseProvider != "" {
+			provider = responseProvider
 		}
 		id := ojson.GetBytes(raw, "AuthID").String()
 		if responseID := ojson.GetBytes(payload, "qa_response_id").String(); responseID != "" {
@@ -145,7 +162,7 @@ func dispatch(method string, raw []byte) (any, error) {
 		for key, value := range m {
 			_ = d.Set(key, value)
 		}
-		return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{Provider: "qa-native-6653", ID: id, Metadata: m, StorageJSON: d.Bytes()}}, nil
+		return pluginapi.AuthRefreshResponse{Auth: pluginapi.AuthData{Provider: provider, ID: id, Metadata: m, StorageJSON: d.Bytes()}}, nil
 	case "executor.execute", "executor.execute_stream", "executor.count_tokens":
 		m := metadata(raw, "AuthMetadata.")
 		path := "/chat"

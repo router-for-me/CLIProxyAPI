@@ -39,12 +39,21 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("native build %v\n%s", err, output)
 	}
-	for _, operation := range []string{"chat", "sse", "image", "count", "refresh-failure", "secret-buffered", "secret-prestream"} {
+	for _, operation := range []string{"chat", "sse", "image", "count", "refresh-failure", "secret-buffered", "secret-prestream", "retry-buffered", "retry-prestream"} {
 		t.Run(operation, func(t *testing.T) {
 			var refreshes, inferences atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/refresh" {
 					refreshes.Add(1)
+					if operation == "retry-buffered" || operation == "retry-prestream" {
+						d := ojson.NewDoc([]byte(`{}`))
+						_ = d.Set("qa_error_code", "qa_retry_failure")
+						_ = d.Set("qa_error_status", 503)
+						_ = d.Set("qa_retry_after", 7)
+						_ = d.Set("qa_error_message", strings.Repeat("界", 290)+" qa-old-refresh renewal unavailable")
+						_, _ = w.Write(d.Bytes())
+						return
+					}
 					if operation == "secret-buffered" || operation == "secret-prestream" {
 						w.WriteHeader(503)
 						_, _ = io.WriteString(w, "qa-old-access qa-old-refresh Bearer QA_BEARER_SECRET https://example.invalid/?secret=QA_URL_SECRET code=QA_CODE_SECRET")
@@ -131,7 +140,7 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 			defer server.Close()
 			path := "/v1/chat/completions"
 			body := `{"model":"qa-model-6653","messages":[{"role":"user","content":"qa"}]}`
-			if operation == "sse" || operation == "secret-prestream" {
+			if operation == "sse" || operation == "secret-prestream" || operation == "retry-prestream" {
 				body = `{"model":"qa-model-6653","stream":true,"messages":[{"role":"user","content":"qa"}]}`
 			}
 			if operation == "image" {
@@ -151,6 +160,30 @@ func TestIssue6653NativePublicHTTPHandlers(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantStatus, wantInference := 200, int32(1)
+			if operation == "retry-buffered" || operation == "retry-prestream" {
+				wantStatus = 503
+				wantInference = 0
+				if resp.Header.Get("Retry-After") != "7" || ojson.GetBytes(payload, "error.code").String() != "internal_server_error" {
+					t.Errorf("first public retry status/code/header lost: header=%v body=%s", resp.Header, payload)
+				}
+				cached, err := http.Post(server.URL+path, "application/json", strings.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cachedPayload, err := io.ReadAll(cached.Body)
+				cached.Body.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, body := range [][]byte{payload, cachedPayload} {
+					if strings.Contains(string(body), "qa-old-refresh") || strings.Contains(string(body), "qa-old-r") {
+						t.Fatalf("first/cached public truncation leaked dummy grant fragment: %s", body)
+					}
+				}
+				if cached.StatusCode != 503 || cached.Header.Get("Retry-After") != "7" || ojson.GetBytes(cachedPayload, "error.code").String() != "internal_server_error" || refreshes.Load() != 1 || inferences.Load() != 0 {
+					t.Fatalf("cached public retry status/code/header/cache lost: status=%d header=%v body=%s refresh=%d inference=%d", cached.StatusCode, cached.Header, cachedPayload, refreshes.Load(), inferences.Load())
+				}
+			}
 			if operation == "secret-buffered" || operation == "secret-prestream" {
 				wantStatus = 503
 				wantInference = 0
