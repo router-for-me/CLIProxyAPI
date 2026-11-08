@@ -107,8 +107,8 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 	if !node.IsObject() {
 		return
 	}
-	total := firstExistingUsageNode(node, "total_tokens", "totalTokenCount")
-	if total.Exists() && total.Int() == 0 {
+	total := firstNumericInteractionsUsageNode(node, "total_tokens", "totalTokenCount")
+	if total.Exists() && total.Float() == 0 {
 		// An explicit zero total resets omitted counters from earlier snapshots.
 		clear(buffer.interactionsUsage)
 	}
@@ -123,7 +123,7 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 		{"cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens"},
 		{"total_tokens", "totalTokenCount"},
 	} {
-		if value := firstExistingUsageNode(node, paths...); value.Exists() {
+		if value := firstNumericInteractionsUsageNode(node, paths...); value.Exists() {
 			if buffer.interactionsUsage == nil {
 				buffer.interactionsUsage = make(map[string]int64)
 			}
@@ -148,6 +148,16 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 	if tier := extractResponseServiceTier(payload); tier != "" {
 		buffer.detail.ResponseServiceTier = tier
 	}
+}
+
+// firstNumericInteractionsUsageNode skips nullable counters and their aliases.
+func firstNumericInteractionsUsageNode(node ojson.Result, paths ...string) ojson.Result {
+	for _, path := range paths {
+		if value := node.Get(path); value.Type == ojson.Number {
+			return value
+		}
+	}
+	return ojson.Result{}
 }
 
 // ObservePluginExecutorStreamTTFT inspects a streaming payload and records TTFT on the reporter.

@@ -341,3 +341,47 @@ func TestMergeStreamUsageDetailKeepsInconsistentClaudeDeltaInconsistent(t *testi
 		t.Fatalf("token breakdown = %+v, want valid inconsistent breakdown", merged.TokenBreakdown)
 	}
 }
+
+func TestObservePluginExecutorInteractionsUsageIgnoresNullCounters(t *testing.T) {
+	t.Parallel()
+	for _, protocol := range []string{"interactions", "interactions-response"} {
+		for _, tc := range []struct {
+			name  string
+			event string
+			want  string
+		}{
+			{name: "null total", event: `{"usage":{"total_tokens":null}}`},
+			{name: "null metadata total", event: `{"usageMetadata":{"totalTokenCount":null}}`},
+			{name: "null counters", event: `{"usage":{"input_tokens":null,"output_tokens":null,"reasoning_tokens":null,"cached_tokens":null,"cache_read_tokens":null,"cache_write_tokens":null,"tool_use_tokens":null}}`},
+			{name: "null total with output update", event: `{"usage":{"total_tokens":null,"output_tokens":40}}`, want: `{"usage":{"input_tokens":100,"cache_read_tokens":20,"output_tokens":40,"reasoning_tokens":10,"total_tokens":150}}`},
+			{name: "null input with alias", event: `{"usage":{"input_tokens":null,"prompt_tokens":120,"total_tokens":160}}`, want: `{"usage":{"input_tokens":120,"cache_read_tokens":20,"output_tokens":30,"reasoning_tokens":10,"total_tokens":160}}`},
+		} {
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				initial := `{"usage":{"input_tokens":100,"cache_read_tokens":20,"output_tokens":30,"reasoning_tokens":10,"total_tokens":140}}`
+				var buffer StreamUsageBuffer
+				ObservePluginExecutorStreamUsage(protocol, []byte(initial), &buffer)
+				for range 2 {
+					ObservePluginExecutorStreamUsage(protocol, []byte(tc.event), &buffer)
+				}
+				wantPayload := tc.want
+				if wantPayload == "" {
+					wantPayload = initial
+				}
+				got, ok := buffer.Detail()
+				want := ParseInteractionsUsage([]byte(wantPayload))
+				if !ok || !reflect.DeepEqual(got, want) {
+					t.Fatalf("stream usage = %+v (ok=%v), want %+v", got, ok, want)
+				}
+			})
+		}
+		t.Run(protocol+"/initial null-only event", func(t *testing.T) {
+			t.Parallel()
+			var buffer StreamUsageBuffer
+			ObservePluginExecutorStreamUsage(protocol, []byte(`{"usage":{"total_tokens":null,"input_tokens":null}}`), &buffer)
+			if got, ok := buffer.Detail(); ok {
+				t.Fatalf("null-only usage was recorded: %+v", got)
+			}
+		})
+	}
+}
