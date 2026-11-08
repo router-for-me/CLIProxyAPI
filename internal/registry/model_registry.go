@@ -502,6 +502,10 @@ func (r *ModelRegistry) ReplaceClientModels(clientID, clientProvider string, exp
 
 // registerClientLocked reconciles a client's models while the registry mutex is held.
 func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, models []*ModelInfo, preserveState bool) {
+	previousModels := append([]string(nil), r.clientModels[clientID]...)
+	defer func() {
+		r.reconcileModelLimitsLocked(append(previousModels, r.clientModels[clientID]...))
+	}()
 	r.ensureAvailableModelsCacheLocked()
 
 	if r.clientGenerations == nil {
@@ -906,6 +910,8 @@ func (r *ModelRegistry) UnregisterClient(clientID string) {
 
 // unregisterClientInternal performs the actual client unregistration (internal, no locking)
 func (r *ModelRegistry) unregisterClientInternal(clientID string) {
+	removedModels := append([]string(nil), r.clientModels[clientID]...)
+	defer r.reconcileModelLimitsLocked(removedModels)
 	if r.clientGenerations == nil {
 		r.clientGenerations = make(map[string]uint64)
 	}

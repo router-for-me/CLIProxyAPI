@@ -96,3 +96,35 @@ func TestBuildConfigModelsInheritsGeminiTokenLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildConfigModelsOneMillionVariantKeepsItsWindow(t *testing.T) {
+	var base *ModelInfo
+	for _, model := range registry.GetStaticModelDefinitionsByChannel("claude") {
+		if model != nil && model.ContextLength > 0 && model.ContextLength < 1_000_000 && model.MaxCompletionTokens > 0 {
+			base = model
+			break
+		}
+	}
+	if base == nil {
+		t.Skip("no static Claude model with a window under one million tokens")
+	}
+	got := buildClaudeConfigModels(&config.ClaudeKey{
+		Models: []config.ClaudeModel{{Name: base.ID + "[1m]", Alias: "team-claude-1m"}},
+	})
+	if len(got) != 1 {
+		t.Fatalf("got %d models, want 1", len(got))
+	}
+	if got[0].ContextLength != 1_000_000 {
+		t.Errorf("ContextLength = %d, want 1000000 for a [1m] variant of %s (%d)", got[0].ContextLength, base.ID, base.ContextLength)
+	}
+	if got[0].MaxCompletionTokens != base.MaxCompletionTokens {
+		t.Errorf("MaxCompletionTokens = %d, want the base entry's %d", got[0].MaxCompletionTokens, base.MaxCompletionTokens)
+	}
+
+	configured := buildClaudeConfigModels(&config.ClaudeKey{
+		Models: []config.ClaudeModel{{Name: base.ID + "[1m]", Alias: "team-claude-1m", MaxContextLength: 500_000}},
+	})[0]
+	if configured.ContextLength != 500_000 {
+		t.Errorf("configured max-context-length: ContextLength = %d, want 500000", configured.ContextLength)
+	}
+}
