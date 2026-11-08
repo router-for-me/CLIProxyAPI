@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -888,7 +889,10 @@ func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []
 		if openRouter && !model.Image {
 			// OpenRouter publishes each model's limits and accepted reasoning efforts; configured values
 			// (max-context-length, thinking) still win.
-			if published, ok := registry.LookupOpenRouterModel(providerKey, strings.TrimSpace(model.Name)); ok {
+			// OpenRouter's catalog is keyed by the plain model ID; a thinking suffix
+			// (anthropic/claude-opus-5.5(max)) is stripped at request time too.
+			upstream := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model.Name)).ModelName)
+			if published, ok := registry.LookupOpenRouterModel(providerKey, upstream); ok {
 				if info.ContextLength <= 0 && published.ContextLength > 0 {
 					info.ContextLength = published.ContextLength
 				}

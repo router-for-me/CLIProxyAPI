@@ -91,6 +91,7 @@ func TestBuildOpenAICompatibilityConfigModels_OpenRouterPublishedReasoningAndOwn
 		BaseURL: "https://openrouter.ai/api/v1",
 		Models: []config.OpenAICompatibilityModel{
 			{Name: "anthropic/claude-opus-5.5", Alias: "api/claude-opus-5-5"},
+			{Name: "anthropic/claude-opus-5.5(max)", Alias: "api/claude-opus-5-5-max"},
 			{Name: "anthropic/claude-haiku-5.5"},
 			{Name: "openai/gpt-6.1-terra", Thinking: &registry.ThinkingSupport{Levels: []string{"low"}}},
 			{Name: "~openai/gpt-sol-latest"},
@@ -111,6 +112,9 @@ func TestBuildOpenAICompatibilityConfigModels_OpenRouterPublishedReasoningAndOwn
 	}
 	if opus.OwnedBy != "anthropic" || opus.ContextLength != 1000000 || opus.MaxCompletionTokens != 128000 {
 		t.Fatalf("opus owner/limits = %q %d %d", opus.OwnedBy, opus.ContextLength, opus.MaxCompletionTokens)
+	}
+	if maxOpus := byID["api/claude-opus-5-5-max"]; maxOpus == nil || maxOpus.ContextLength != 1000000 || maxOpus.MaxCompletionTokens != 128000 || maxOpus.Thinking == nil || maxOpus.Thinking.Levels[len(maxOpus.Thinking.Levels)-1] != "max" {
+		t.Fatalf("a thinking suffix must not hide OpenRouter's entry: %+v", maxOpus)
 	}
 	if haiku := byID["anthropic/claude-haiku-5.5"]; haiku == nil || haiku.Thinking == nil || !haiku.Thinking.ZeroAllowed {
 		t.Fatalf("haiku publishes none, so thinking can be turned off: %+v", haiku)
