@@ -59,7 +59,7 @@ func (h *Host) freshQuotaAuth(ctx context.Context, id, index string) (*coreauth.
 	}
 	if index != "" {
 		byIndex, _ = h.authByIndex(index)
-		if byID.UsesLazyRefresh() && (byIndex == nil || byIndex.ID != byID.ID) {
+		if byID != nil && (byID.UsesLazyRefresh() || manager.HasLazyRefreshWork(byID.ID)) && (byIndex == nil || byIndex.ID != byID.ID) {
 			return nil, fmt.Errorf("quota auth ID and index do not match")
 		}
 	}
@@ -67,11 +67,21 @@ func (h *Host) freshQuotaAuth(ctx context.Context, id, index string) (*coreauth.
 	if index != "" {
 		auth = byIndex
 	}
-	if auth == nil || !auth.UsesLazyRefresh() {
+	if auth == nil {
 		return nil, nil
 	}
-	if index != "" && id != "" && id != auth.ID {
+	if (auth.UsesLazyRefresh() || manager.HasLazyRefreshWork(auth.ID)) && index != "" && id != "" && id != auth.ID {
 		return nil, fmt.Errorf("quota auth ID and index do not match")
 	}
-	return manager.EnsureAuthFresh(ctx, auth)
+	fresh, required, errFresh := manager.EnsureAuthFreshForOperation(ctx, auth)
+	if errFresh != nil {
+		return nil, errFresh
+	}
+	if !required {
+		return nil, nil
+	}
+	if index != "" && id != "" && id != fresh.ID {
+		return nil, fmt.Errorf("quota auth ID and index do not match")
+	}
+	return fresh, nil
 }

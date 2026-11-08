@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -420,6 +421,7 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 
 type authRefreshLock struct {
 	mu             sync.Mutex
+	lazyWork       atomic.Bool
 	pending        *pendingLazyRefresh
 	failure        error
 	retryAt        time.Time
@@ -1264,12 +1266,16 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	}
 	lock.mu.Lock()
 	defer lock.mu.Unlock()
+	defer func() { lock.lazyWork.Store(lock.pending != nil) }()
 
 	m.mu.RLock()
 	auth := m.auths[id].Clone()
 	var exec ProviderExecutor
 	store := m.store
 	if auth != nil {
+		if auth.UsesLazyRefresh() {
+			lock.lazyWork.Store(true)
+		}
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
 		exec, _ = m.executorLocked(executorKeyFromAuth(auth))

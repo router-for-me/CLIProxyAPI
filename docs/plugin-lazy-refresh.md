@@ -85,7 +85,8 @@ and restores it while parsing the saved file after restart.
 An opted-in rotation must reach the configured store before inference.
 If saving fails, the request fails and the host retains the rotated material
 under the refresh lock. The next request retries persistence without submitting
-the consumed old refresh grant. Replacing or removing the credential invalidates
+the consumed old refresh grant, even if the policy has changed to scheduled.
+Replacing or removing the credential invalidates
 that pending update. If the process exits before storage recovers, the failed
 rotation is not restart-safe. SDK managers without a store remain in-memory.
 

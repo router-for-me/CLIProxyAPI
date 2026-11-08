@@ -1590,7 +1590,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
-	fresh, enteredLazy, errFresh := m.ensureAuthFresh(ctx, auth)
+	fresh, enteredLazy, errFresh := m.EnsureAuthFreshForOperation(ctx, auth)
 	if errFresh != nil {
 		return auth, errFresh
 	}

@@ -84,18 +84,33 @@ type pendingLazyRefresh struct {
 // EnsureAuthFresh refreshes opted-in credentials before an authenticated operation.
 // It shares coordination and persistence with 401 recovery and explicit refresh.
 func (m *Manager) EnsureAuthFresh(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, error) {
-	fresh, _, err := m.ensureAuthFresh(ctx, auth, clientHeaders...)
+	fresh, _, err := m.EnsureAuthFreshForOperation(ctx, auth, clientHeaders...)
 	return fresh, err
 }
 
-func (m *Manager) ensureAuthFresh(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, bool, error) {
+// HasLazyRefreshWork reports an active lazy refresh or a retained unsaved rotation.
+func (m *Manager) HasLazyRefreshWork(id string) bool {
+	if m == nil {
+		return false
+	}
+	value, ok := m.refreshLocks.Load(id)
+	if !ok {
+		return false
+	}
+	lock, ok := value.(*authRefreshLock)
+	return ok && lock != nil && lock.lazyWork.Load()
+}
+
+// EnsureAuthFreshForOperation also reports whether freshness work required validation.
+func (m *Manager) EnsureAuthFreshForOperation(ctx context.Context, auth *Auth, clientHeaders ...http.Header) (*Auth, bool, error) {
 	if m == nil || auth == nil {
 		return auth, false, nil
 	}
 	m.mu.RLock()
 	current := m.auths[auth.ID].Clone()
+	hasWork := m.HasLazyRefreshWork(auth.ID)
 	m.mu.RUnlock()
-	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() {
+	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() && !hasWork {
 		return auth, false, nil
 	}
 	if current == nil || auth.RegistrationEpoch != 0 && current.RegistrationEpoch != auth.RegistrationEpoch ||
