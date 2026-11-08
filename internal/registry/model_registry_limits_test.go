@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func limitedModel(id string, contextLength, maxCompletionTokens int) *ModelInfo {
 	return &ModelInfo{ID: id, Object: "model", OwnedBy: "test", ContextLength: contextLength, MaxCompletionTokens: maxCompletionTokens}
@@ -46,5 +49,54 @@ func TestSharedAliasLimitsFollowReRegistration(t *testing.T) {
 	r.UnregisterClient("d")
 	if got := r.GetModelInfo("other", ""); got.ContextLength != 0 {
 		t.Fatalf("ContextLength = %d after the only declaring client left, want 0", got.ContextLength)
+	}
+}
+
+func TestSharedAliasNormalizesLimitFieldsAcrossRoutes(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("gemini", "gemini", []*ModelInfo{{ID: "team", Object: "model", InputTokenLimit: 1_048_576, OutputTokenLimit: 65_536}})
+	if got := r.GetModelInfo("team", ""); got.InputTokenLimit != 1_048_576 || got.ContextLength != 0 {
+		t.Fatalf("single route = input %d / context %d, want its own 1048576 / 0", got.InputTokenLimit, got.ContextLength)
+	}
+
+	r.RegisterClient("claude", "claude", []*ModelInfo{limitedModel("team", 200_000, 64_000)})
+	got := r.GetModelInfo("team", "")
+	if got.InputTokenLimit != 200_000 || got.ContextLength != 200_000 {
+		t.Fatalf("input/context = %d/%d, want 200000 in both", got.InputTokenLimit, got.ContextLength)
+	}
+	if got.OutputTokenLimit != 64_000 || got.MaxCompletionTokens != 64_000 {
+		t.Fatalf("output limits = %d/%d, want 64000 in both", got.OutputTokenLimit, got.MaxCompletionTokens)
+	}
+	if got := r.GetModelInfo("team", "gemini"); got.InputTokenLimit != 1_048_576 || got.ContextLength != 0 {
+		t.Fatalf("gemini route = input %d / context %d, want its own 1048576 / 0", got.InputTokenLimit, got.ContextLength)
+	}
+}
+
+func TestSharedAliasReconcilesMaxContextOverrides(t *testing.T) {
+	r := newTestModelRegistry()
+	large := limitedModel("team", 1_000_000, 128_000)
+	large.MaxContextLength = 1_000_000
+	r.RegisterClient("small", "codex", []*ModelInfo{limitedModel("team", 200_000, 128_000)})
+	r.RegisterClient("large", "claude", []*ModelInfo{large})
+	got := r.GetModelInfo("team", "")
+	if got.MaxContextLength != 200_000 || got.ContextLength != 200_000 {
+		t.Fatalf("max/context = %d/%d, want 200000 in both (an override must not exceed the smaller route)", got.MaxContextLength, got.ContextLength)
+	}
+}
+
+func TestRouteLimitCountsFollowClients(t *testing.T) {
+	r := newTestModelRegistry()
+	const clients = 2000
+	for i := 0; i < clients; i++ {
+		r.RegisterClient(fmt.Sprintf("c%d", i), "codex", []*ModelInfo{limitedModel("shared", 272_000, 128_000), limitedModel(fmt.Sprintf("own%d", i), 400_000, 128_000)})
+	}
+	if n := r.modelRouteLimits["shared"][routeLimits{contextLength: 272_000, maxCompletionTokens: 128_000}]; n != clients {
+		t.Fatalf("shared model counted %d clients, want %d", n, clients)
+	}
+	for i := 0; i < clients; i++ {
+		r.UnregisterClient(fmt.Sprintf("c%d", i))
+	}
+	if len(r.modelRouteLimits) != 0 || len(r.providerRouteLimits) != 0 || len(r.clientRouteLimits) != 0 {
+		t.Fatalf("counts left after every client left: %d/%d/%d", len(r.modelRouteLimits), len(r.providerRouteLimits), len(r.clientRouteLimits))
 	}
 }

@@ -210,6 +210,13 @@ type ModelRegistry struct {
 	// webSearchProviderCounts maps model ID to provider -> client count for
 	// clients advertising web search, mirroring webSearchClientCounts.
 	webSearchProviderCounts map[string]map[string]int
+	// modelRouteLimits counts, per model ID, the clients declaring each distinct
+	// set of token limits; providerRouteLimits does the same per provider and
+	// clientRouteLimits records each client's contribution. They let shared model
+	// IDs publish limits that hold for every route (model_registry_limits.go).
+	modelRouteLimits    map[string]limitSet
+	providerRouteLimits map[string]map[string]limitSet
+	clientRouteLimits   map[string]map[string]countedRouteLimits
 	// generation tracks changes to model registrations and availability.
 	generation uint64
 	// registrationEpoch tracks monotonic client registration and deregistration structural changes.
@@ -502,10 +509,7 @@ func (r *ModelRegistry) ReplaceClientModels(clientID, clientProvider string, exp
 
 // registerClientLocked reconciles a client's models while the registry mutex is held.
 func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, models []*ModelInfo, preserveState bool) {
-	previousModels := append([]string(nil), r.clientModels[clientID]...)
-	defer func() {
-		r.reconcileModelLimitsLocked(append(previousModels, r.clientModels[clientID]...))
-	}()
+	defer r.reconcileClientRouteLimitsLocked(clientID)
 	r.ensureAvailableModelsCacheLocked()
 
 	if r.clientGenerations == nil {
@@ -910,8 +914,7 @@ func (r *ModelRegistry) UnregisterClient(clientID string) {
 
 // unregisterClientInternal performs the actual client unregistration (internal, no locking)
 func (r *ModelRegistry) unregisterClientInternal(clientID string) {
-	removedModels := append([]string(nil), r.clientModels[clientID]...)
-	defer r.reconcileModelLimitsLocked(removedModels)
+	defer r.reconcileClientRouteLimitsLocked(clientID)
 	if r.clientGenerations == nil {
 		r.clientGenerations = make(map[string]uint64)
 	}

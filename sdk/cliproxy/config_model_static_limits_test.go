@@ -121,6 +121,13 @@ func TestBuildConfigModelsOneMillionVariantKeepsItsWindow(t *testing.T) {
 		t.Errorf("MaxCompletionTokens = %d, want the base entry's %d", got[0].MaxCompletionTokens, base.MaxCompletionTokens)
 	}
 
+	suffixed := buildClaudeConfigModels(&config.ClaudeKey{
+		Models: []config.ClaudeModel{{Name: base.ID + "[1m](high)", Alias: "team-claude-1m-high"}},
+	})[0]
+	if suffixed.ContextLength != 1_000_000 || suffixed.MaxCompletionTokens != base.MaxCompletionTokens {
+		t.Errorf("[1m](high): limits = %d/%d, want 1000000/%d", suffixed.ContextLength, suffixed.MaxCompletionTokens, base.MaxCompletionTokens)
+	}
+
 	configured := buildClaudeConfigModels(&config.ClaudeKey{
 		Models: []config.ClaudeModel{{Name: base.ID + "[1m]", Alias: "team-claude-1m", MaxContextLength: 500_000}},
 	})[0]
