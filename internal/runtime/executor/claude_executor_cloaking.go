@@ -945,51 +945,15 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 	return true
 }
 
-// claudeLegacySystemReminderModels lists the official Anthropic model IDs and
-// aliases that reject a mid-conversation role=system message. Entries mirror the
-// "claude" provider in internal/registry/models/models.json plus Anthropic's own
-// bare and "-latest" aliases. Other providers' synthetic IDs do not belong here.
-var claudeLegacySystemReminderModels = map[string]struct{}{
-	"claude-3-5-haiku-20241022":  {},
-	"claude-3-5-haiku-latest":    {},
-	"claude-3-7-sonnet-20250219": {},
-	"claude-3-7-sonnet-latest":   {},
-	"claude-haiku-4-5":           {},
-	"claude-haiku-4-5-20251001":  {},
-	"claude-opus-4":              {},
-	"claude-opus-4-20250514":     {},
-	"claude-opus-4-1":            {},
-	"claude-opus-4-1-20250805":   {},
-	"claude-opus-4-5":            {},
-	"claude-opus-4-5-20251101":   {},
-	"claude-opus-4-6":            {},
-	"claude-opus-4-7":            {},
-	"claude-sonnet-4":            {},
-	"claude-sonnet-4-20250514":   {},
-	"claude-sonnet-4-5":          {},
-	"claude-sonnet-4-5-20250929": {},
-	"claude-sonnet-4-6":          {},
-}
-
 func claudeUsesLegacySystemReminder(payload []byte) bool {
-	model := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String()))
-	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
-		model = model[slash+1:]
-	}
-	_, legacy := claudeLegacySystemReminderModels[model]
-	return legacy
+	return util.IsClaudeLegacySystemReminderModel(ojson.GetBytesNoCopy(payload, "model").String())
 }
 
 func claudeUsesLegacySystemReminderDoc(doc *ojson.Doc) bool {
 	if doc == nil {
 		return false
 	}
-	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
-		model = model[slash+1:]
-	}
-	_, legacy := claudeLegacySystemReminderModels[model]
-	return legacy
+	return util.IsClaudeLegacySystemReminderModel(doc.Get("model").String())
 }
 
 // claudeCallerSystemBlockError reports a caller system block that Claude cannot
