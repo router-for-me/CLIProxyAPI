@@ -134,3 +134,237 @@ func TestOpenAICompatExecutorClaudeStandaloneEffortFinalPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenAICompatExecutorStripsAssistantReasoningContentForMistralUpstream(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		baseURL       string
+		wantReasoning string
+	}{
+		{
+			name:          "mistral strips reasoning_content",
+			baseURL:       "http://api.mistral.ai/v1",
+			wantReasoning: "",
+		},
+		{
+			name:          "non-mistral retains reasoning_content",
+			baseURL:       "http://api.deepseek.com/v1",
+			wantReasoning: "[reasoning unavailable]",
+		},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", tt.name, stream), func(t *testing.T) {
+				bodies := make(chan []byte, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read upstream request: %v", errRead)
+					}
+					bodies <- body
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`)
+				}))
+				t.Cleanup(server.Close)
+
+				executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+				auth := &cliproxyauth.Auth{
+					Provider: "openai-compatibility",
+					ProxyURL: server.URL,
+					Attributes: map[string]string{
+						"base_url": tt.baseURL,
+						"api_key":  "test-key",
+					},
+				}
+				req := cliproxyexecutor.Request{
+					Model: "deepseek-v4-1-flash-1017",
+					Payload: []byte(`{
+						"model": "deepseek-v4.1-flash",
+						"reasoning": {"effort": "max"},
+						"input": [
+							{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+							{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"running tool"}]},
+							{"type":"function_call","call_id":"call_1","name":"terminal","arguments":"{}"},
+							{"type":"function_call_output","call_id":"call_1","output":"ok"}
+						]
+					}`),
+					Metadata: map[string]any{
+						"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
+					},
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAIResponse,
+					ResponseFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:         stream,
+				}
+				if stream {
+					result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream: %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk: %v", chunk.Err)
+						}
+					}
+				} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+					t.Fatalf("Execute: %v", errExecute)
+				}
+
+				body := <-bodies
+				messages := ojson.GetBytes(body, "messages").Array()
+				if len(messages) != 3 {
+					t.Fatalf("messages count = %d, want 3; body=%s", len(messages), body)
+				}
+				rc := messages[1].Get("reasoning_content")
+				if tt.wantReasoning == "" {
+					if rc.Exists() {
+						t.Fatalf("messages[1] unexpectedly contains reasoning_content: %s", messages[1].Raw)
+					}
+				} else if rc.String() != tt.wantReasoning {
+					t.Fatalf("messages[1].reasoning_content = %q, want %q; body=%s", rc.String(), tt.wantReasoning, body)
+				}
+				if got := messages[1].Get("tool_calls.0.id").String(); got != "call_1" {
+					t.Fatalf("messages[1] tool_calls.0.id = %q, want call_1; body=%s", got, body)
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAICompatExecutorMistralReasoningSanitizationPrecedenceWithPayloadRules(t *testing.T) {
+	models := []config.PayloadModelRule{{Name: "deepseek-v4-1-flash-1017", Protocol: "openai"}}
+	for _, tt := range []struct {
+		name    string
+		payload config.PayloadConfig
+		check   func(t *testing.T, body []byte)
+	}{
+		{
+			name: "conditional rules observe sanitized history",
+			payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: []config.PayloadModelRule{{
+							Name:     "deepseek-v4-1-flash-1017",
+							Protocol: "openai",
+							NotExist: []string{"messages.1.reasoning_content"},
+							Match:    []map[string]any{{"messages.1.tool_calls.0.id": "call_1"}},
+						}},
+						Params: map[string]any{"user": "sanitized-history"},
+					},
+					{
+						Models: []config.PayloadModelRule{{
+							Name:     "deepseek-v4-1-flash-1017",
+							Protocol: "openai",
+							Exist:    []string{"messages.1.reasoning_content"},
+						}},
+						Params: map[string]any{"user": "unsanitized-history"},
+					},
+				},
+			},
+			check: func(t *testing.T, body []byte) {
+				if got := ojson.GetBytes(body, "user").String(); got != "sanitized-history" {
+					t.Fatalf("user = %q, want sanitized-history (conditional rule must observe post-sanitization history); body=%s", got, body)
+				}
+				if ojson.GetBytes(body, "messages.1.reasoning_content").Exists() {
+					t.Fatalf("messages.1.reasoning_content should be absent: %s", body)
+				}
+			},
+		},
+		{
+			name: "explicitly configured reasoning_content survives sanitization",
+			payload: config.PayloadConfig{
+				Override: []config.PayloadRule{
+					{
+						Models: models,
+						Params: map[string]any{"messages.1.reasoning_content": "operator-configured"},
+					},
+				},
+			},
+			check: func(t *testing.T, body []byte) {
+				if got := ojson.GetBytes(body, "messages.1.reasoning_content").String(); got != "operator-configured" {
+					t.Fatalf("messages.1.reasoning_content = %q, want operator-configured; body=%s", got, body)
+				}
+			},
+		},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", tt.name, stream), func(t *testing.T) {
+				bodies := make(chan []byte, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read upstream request: %v", errRead)
+					}
+					bodies <- body
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`)
+				}))
+				t.Cleanup(server.Close)
+
+				executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{Payload: tt.payload})
+				auth := &cliproxyauth.Auth{
+					Provider: "openai-compatibility",
+					ProxyURL: server.URL,
+					Attributes: map[string]string{
+						"base_url": "http://api.mistral.ai/v1",
+						"api_key":  "test-key",
+					},
+				}
+				// Include a reasoning item before the user message so the translator synthesizes
+				// a reasoning-only assistant turn at messages.0 before sanitization removes it.
+				req := cliproxyexecutor.Request{
+					Model: "deepseek-v4-1-flash-1017",
+					Payload: []byte(`{
+						"model": "deepseek-v4.1-flash",
+						"reasoning": {"effort": "max"},
+						"input": [
+							{"type":"reasoning","summary":[{"type":"summary_text","text":"initial thought"}]},
+							{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+							{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"running tool"}]},
+							{"type":"function_call","call_id":"call_1","name":"terminal","arguments":"{}"},
+							{"type":"function_call_output","call_id":"call_1","output":"ok"}
+						]
+					}`),
+					Metadata: map[string]any{
+						"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
+					},
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAIResponse,
+					ResponseFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:         stream,
+				}
+				if stream {
+					result, errStream := executor.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream: %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk: %v", chunk.Err)
+						}
+					}
+				} else if _, errExecute := executor.Execute(context.Background(), auth, req, opts); errExecute != nil {
+					t.Fatalf("Execute: %v", errExecute)
+				}
+
+				body := <-bodies
+				messages := ojson.GetBytes(body, "messages").Array()
+				if len(messages) != 3 {
+					t.Fatalf("messages count = %d, want 3 (reasoning-only turn must be dropped); body=%s", len(messages), body)
+				}
+				tt.check(t, body)
+			})
+		}
+	}
+}
