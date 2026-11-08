@@ -222,43 +222,49 @@ func TestMarkResultRebasesRelativeResetAcrossPartialMerges(t *testing.T) {
 }
 
 func TestMarkResultKeepsNewerResetOverLateUnrelatedMerge(t *testing.T) {
-	manager := NewManager(nil, &SoonestResetSelector{}, nil)
-	manager.RegisterExecutor(&soonestResetExecutor{resets: map[string]time.Duration{}})
-	const id = "soonest-reset-rollover"
-	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
-		t.Fatalf("Register(%s) error = %v", id, errRegister)
-	}
+	for name, lateHeader := range map[string]string{
+		"credits":          "X-Codex-Credits-Balance",
+		"additional limit": "X-Codex-Additional-Spark-Primary-Reset-At",
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, &SoonestResetSelector{}, nil)
+			id := "soonest-reset-rollover-" + name
+			if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", id, errRegister)
+			}
 
-	t1 := time.Now().Add(-30 * time.Minute)
-	t2 := t1.Add(10 * time.Minute)
-	t3 := t2.Add(10 * time.Minute)
-	resetHeaders := func(after time.Duration) http.Header {
-		return http.Header{
-			"X-Codex-Primary-Window-Minutes":      []string{"10080"},
-			"X-Codex-Primary-Reset-After-Seconds": []string{strconv.Itoa(int(after.Seconds()))},
-		}
-	}
+			t1 := time.Now().Add(-30 * time.Minute)
+			t2 := t1.Add(10 * time.Minute)
+			t3 := t2.Add(10 * time.Minute)
+			resetHeaders := func(after time.Duration) http.Header {
+				return http.Header{
+					"X-Codex-Primary-Window-Minutes":      []string{"10080"},
+					"X-Codex-Primary-Reset-After-Seconds": []string{strconv.Itoa(int(after.Seconds()))},
+				}
+			}
 
-	// The older attempt saw the pre-rollover reset at t1 and is still streaming.
-	older := internallogging.WithResponseHeadersHolder(context.Background())
-	internallogging.SetResponseHeadersAt(older, resetHeaders(time.Hour), t1)
+			// The older attempt saw the pre-rollover reset at t1 and is still streaming.
+			older := internallogging.WithResponseHeadersHolder(context.Background())
+			internallogging.SetResponseHeadersAt(older, resetHeaders(time.Hour), t1)
 
-	// A newer attempt saw the post-rollover window at t2 and finished first.
-	newer := internallogging.WithResponseHeadersHolder(context.Background())
-	internallogging.SetResponseHeadersAt(newer, resetHeaders(7*24*time.Hour), t2)
-	manager.MarkResult(newer, Result{AuthID: id, Provider: "codex", Success: true})
+			// A newer attempt saw the post-rollover window at t2 and finished first.
+			newer := internallogging.WithResponseHeadersHolder(context.Background())
+			internallogging.SetResponseHeadersAt(newer, resetHeaders(7*24*time.Hour), t2)
+			manager.MarkResult(newer, Result{AuthID: id, Provider: "codex", Success: true})
 
-	// The older attempt merges only a credits header at t3, then finishes.
-	internallogging.MergeResponseHeadersAt(older, http.Header{"X-Codex-Credits-Balance": []string{"0"}}, t3)
-	manager.MarkResult(older, Result{AuthID: id, Provider: "codex", Success: true})
+			// The older attempt merges one unrelated header at t3, then finishes.
+			internallogging.MergeResponseHeadersAt(older, http.Header{lateHeader: []string{"1793810327"}}, t3)
+			manager.MarkResult(older, Result{AuthID: id, Provider: "codex", Success: true})
 
-	auth, ok := manager.GetByID(id)
-	if !ok || auth == nil {
-		t.Fatalf("GetByID(%s) failed", id)
-	}
-	reset, okReset := quotaWindowReset(auth)
-	if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) || !auth.Quota.ObservedAt.Equal(t2) {
-		t.Fatalf("reset = %v (observed %v); want %v observed at %v", reset, auth.Quota.ObservedAt, want, t2)
+			auth, ok := manager.GetByID(id)
+			if !ok || auth == nil {
+				t.Fatalf("GetByID(%s) failed", id)
+			}
+			reset, okReset := quotaWindowReset(auth)
+			if want := t2.Add(7 * 24 * time.Hour); !okReset || !reset.Equal(want) || !auth.Quota.ObservedAt.Equal(t2) {
+				t.Fatalf("reset = %v (observed %v); want %v observed at %v", reset, auth.Quota.ObservedAt, want, t2)
+			}
+		})
 	}
 }
 
@@ -286,20 +292,28 @@ func TestUpdateClearsQuotaObservationWhenAccountChanges(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		newEmail  string
+		cooling   bool
 		wantKnown bool
 	}{
 		{name: "same account keeps the snapshot", newEmail: "first@example.com", wantKnown: true},
 		{name: "different account drops the snapshot", newEmail: "second@example.com", wantKnown: false},
+		{name: "different account drops the snapshot during a cooldown", newEmail: "second@example.com", cooling: true, wantKnown: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := NewManager(nil, &SoonestResetSelector{}, nil)
-			id := "soonest-reset-account-" + strconv.FormatBool(tc.wantKnown)
+			id := "soonest-reset-account-" + strconv.FormatBool(tc.wantKnown) + "-" + strconv.FormatBool(tc.cooling)
+			quota := codexWeeklySignals(resetAt)
+			if tc.cooling {
+				quota.Exceeded = true
+				quota.Reason = "credential_quota"
+				quota.NextRecoverAt = resetAt
+			}
 			if _, errRegister := manager.Register(context.Background(), &Auth{
 				ID:       id,
 				Provider: "codex",
 				Status:   StatusActive,
 				Metadata: map[string]any{"email": "first@example.com"},
-				Quota:    codexWeeklySignals(resetAt),
+				Quota:    quota,
 			}); errRegister != nil {
 				t.Fatalf("Register(%s) error = %v", id, errRegister)
 			}

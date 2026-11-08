@@ -739,3 +739,26 @@ func TestRebaseRelativeQuotaHeaders(t *testing.T) {
 		t.Fatalf("input headers modified: %q", v)
 	}
 }
+
+func TestQuotaAccountIdentityIncludesProviderAccountFields(t *testing.T) {
+	t.Parallel()
+
+	identity := func(metadata map[string]any) string {
+		return quotaAccountIdentity(&Auth{ID: "x", Provider: "claude", Metadata: metadata})
+	}
+	base := identity(map[string]any{"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-1"})
+	if base == "" {
+		t.Fatal("identity is empty")
+	}
+	if got := identity(map[string]any{"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-1"}); got != base {
+		t.Fatalf("identical account identity = %q, want %q", got, base)
+	}
+	for name, metadata := range map[string]map[string]any{
+		"different account uuid":      {"email": "same@example.com", "account_uuid": "acct-2", "organization_uuid": "org-1"},
+		"different organization uuid": {"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-2"},
+	} {
+		if got := identity(metadata); got == base {
+			t.Fatalf("%s: identity did not change", name)
+		}
+	}
+}

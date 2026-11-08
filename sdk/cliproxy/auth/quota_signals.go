@@ -59,7 +59,7 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 
 // quotaAccountIdentity identifies whose quota a passive snapshot describes:
 // a digest of the provider plus the account email and, when present, the
-// upstream account ID. API-key credentials identify by their key, so only the
+// upstream account and organization IDs. API-key credentials identify by their key, so only the
 // digest is returned and the secret is never retained. It is empty when the
 // auth carries no account identity.
 func quotaAccountIdentity(auth *Auth) string {
@@ -67,8 +67,10 @@ func quotaAccountIdentity(auth *Auth) string {
 		return ""
 	}
 	_, account := auth.AccountInfo()
-	if accountID, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
-		account += "|" + strings.TrimSpace(accountID)
+	for _, key := range []string{"account_id", "account_uuid", "organization_uuid"} {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			account += "|" + key + "=" + strings.TrimSpace(value)
+		}
 	}
 	if account == "" {
 		return ""
@@ -147,12 +149,14 @@ func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time
 	return latest
 }
 
+// isQuotaResetHeader reports whether name is a reset value the selector scores.
+// Additional-limit namespaces are excluded: they do not describe the base window.
 func isQuotaResetHeader(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	if strings.HasSuffix(lower, "-reset-after-seconds") || strings.HasSuffix(lower, "-reset-at") {
-		return true
+	if strings.HasPrefix(lower, "x-codex-primary-") || strings.HasPrefix(lower, "x-codex-secondary-") {
+		return strings.HasSuffix(lower, "-reset-after-seconds") || strings.HasSuffix(lower, "-reset-at")
 	}
-	return strings.HasPrefix(lower, "anthropic-ratelimit-unified-") && strings.HasSuffix(lower, "-reset")
+	return lower == "anthropic-ratelimit-unified-7d-reset" || lower == "anthropic-ratelimit-unified-reset"
 }
 
 // rebaseRelativeQuotaHeaders rewrites relative reset values so they count from
