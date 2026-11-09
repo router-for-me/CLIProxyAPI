@@ -163,7 +163,7 @@ func TestRTKFilterUsesTheOriginatingCommand(t *testing.T) {
 		t.Fatal("this output is meant to be unrecognizable without its command")
 	}
 
-	stripped, ok := applyRTKFilters(output, command)
+	stripped, ok, _ := applyRTKFilters(output, command)
 	if !ok || strings.Contains(stripped, "\x1b") {
 		t.Fatalf("command filter did not strip ANSI:\n%q", stripped)
 	}

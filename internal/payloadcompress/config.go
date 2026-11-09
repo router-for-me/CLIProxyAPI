@@ -23,6 +23,7 @@
 package payloadcompress
 
 import (
+	"fmt"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -60,6 +61,12 @@ type Config struct {
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
 	Combos []Combo `yaml:"combos" json:"combos"`
+	// Exclusions names model ids or provider/model targets that bypass
+	// compression entirely. Empty patterns are dropped.
+	Exclusions []string `yaml:"exclusions" json:"exclusions"`
+	// HardBudgetTokens caps the request size after compression; zero disables
+	// the cap. Negative values are rejected.
+	HardBudgetTokens int `yaml:"hard-budget-tokens" json:"hard-budget-tokens"`
 	// LiveZone mirrors upstream's liveZone config: reuse the transform a previous
 	// request in the same session already produced for its unchanged prefix.
 	// Opt-in, because it keeps per-session state between requests.
@@ -136,6 +143,15 @@ type StepOptions struct {
 	MaxToolLength int `yaml:"max-tool-length" json:"max-tool-length"`
 	// Lite: skip tool-result truncation entirely when false.
 	CompressToolResults *bool `yaml:"compress-tool-results" json:"compress-tool-results"`
+	// Lite: keep interior whitespace inside tool results. Defaults to true, the
+	// upstream safe default.
+	PreserveToolWhitespace *bool `yaml:"preserve-tool-whitespace" json:"preserve-tool-whitespace"`
+	// Lossy engines: require the fidelity gate before rewriting. Nil means the
+	// engine default.
+	FidelityGate *bool `yaml:"fidelity-gate" json:"fidelity-gate"`
+	// Lossy engines: require the risk gate before rewriting. Nil means the
+	// engine default.
+	RiskGate *bool `yaml:"risk-gate" json:"risk-gate"`
 
 	// RTK: minimal, standard or aggressive. Sets threshold defaults.
 	Intensity string `yaml:"intensity" json:"intensity"`
@@ -204,12 +220,21 @@ func DefaultConfig() Config {
 		MinBytes:     defaultMinBytes,
 		DefaultCombo: defaultCombo,
 		Combos: []Combo{{
-			Name:     defaultCombo,
-			Models:   []string{"*"},
-			Pipeline: []Step{{Engine: EngineSessionDedup}, {Engine: EngineLite}},
+			Name:   defaultCombo,
+			Models: []string{"*"},
+			Pipeline: []Step{
+				{Engine: EngineSessionDedup},
+				{Engine: EngineLite, Options: StepOptions{
+					CompressToolResults:    boolPtr(false),
+					PreserveToolWhitespace: boolPtr(true),
+				}},
+			},
 		}},
 	}
 }
+
+// boolPtr returns a pointer to v, for the optional *bool engine knobs.
+func boolPtr(v bool) *bool { return &v }
 
 func knownEngine(name string) bool {
 	switch name {
@@ -219,20 +244,40 @@ func knownEngine(name string) bool {
 	return false
 }
 
-// normalizeEngineLevel clamps an engine level to its supported ladder. A missing
-// level defaults to the safest rung.
-func normalizeEngineLevel(engine, level string) string {
-	if engine != EngineCaveman {
-		return ""
+// normalizeEngineLevel resolves a step's level for its engine. Caveman keeps its
+// lite/full/ultra ladder. RTK maps those rungs onto its intensity ladder when
+// Intensity is unset, and every other engine has no level selector. An unknown
+// level is rejected with an error instead of being silently dropped.
+func normalizeEngineLevel(engine, level string) (normalizedLevel, intensity string, err error) {
+	lvl := strings.ToLower(strings.TrimSpace(level))
+	switch engine {
+	case EngineCaveman:
+		switch lvl {
+		case "", "lite":
+			return "lite", "", nil
+		case "full":
+			return "full", "", nil
+		case "ultra":
+			return "ultra", "", nil
+		}
+		return "", "", fmt.Errorf("unknown %s level %q", engine, level)
+	case EngineRTK:
+		switch lvl {
+		case "":
+			return "", "", nil
+		case "lite", "minimal":
+			return "", "minimal", nil
+		case "full", "standard":
+			return "", "standard", nil
+		case "ultra", "aggressive":
+			return "", "aggressive", nil
+		}
+		return "", "", fmt.Errorf("unknown %s level %q", engine, level)
 	}
-	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "full":
-		return "full"
-	case "ultra":
-		return "ultra"
-	default:
-		return "lite"
+	if lvl != "" {
+		return "", "", fmt.Errorf("engine %s has no level selector", engine)
 	}
+	return "", "", nil
 }
 
 // sanitizeStepOptions clamps the knobs an engine would misbehave on.
@@ -240,8 +285,10 @@ func sanitizeStepOptions(opts StepOptions) StepOptions {
 	if opts.MinRows < 0 {
 		opts.MinRows = 0
 	}
-	if opts.MaxToolLength < 0 {
-		opts.MaxToolLength = 0
+	// Upstream's DEFAULT_MAX_TOOL_LENGTH: non-positive means the default, never
+	// "truncate everything".
+	if opts.MaxToolLength <= 0 {
+		opts.MaxToolLength = liteDefaultMaxToolLength
 	}
 	if opts.MaxLines < 0 {
 		opts.MaxLines = 0
@@ -300,6 +347,17 @@ func (c *Config) Sanitize() {
 	if c.MinBytes <= 0 {
 		c.MinBytes = defaultMinBytes
 	}
+	if c.HardBudgetTokens < 0 {
+		log.Errorf("payloadcompress: hard-budget-tokens must be >= 0, got %d; disabling the cap", c.HardBudgetTokens)
+		c.HardBudgetTokens = 0
+	}
+	exclusions := make([]string, 0, len(c.Exclusions))
+	for _, pattern := range c.Exclusions {
+		if pattern = strings.TrimSpace(pattern); pattern != "" {
+			exclusions = append(exclusions, pattern)
+		}
+	}
+	c.Exclusions = exclusions
 	switch strings.ToLower(strings.TrimSpace(c.CachePrefix)) {
 	case CachePrefixProtect, "preserve":
 		c.CachePrefix = CachePrefixProtect
@@ -323,6 +381,7 @@ func (c *Config) Sanitize() {
 	if c.PrefixFreeze.Threshold <= 0 {
 		c.PrefixFreeze.Threshold = defaultPrefixFreezeThreshold
 	}
+	hadCombos := len(c.Combos) > 0
 	seen := make(map[string]struct{}, len(c.Combos))
 	combos := c.Combos[:0]
 	for _, combo := range c.Combos {
@@ -341,10 +400,18 @@ func (c *Config) Sanitize() {
 				log.Warnf("payloadcompress: unknown engine %q in combo %q ignored", step.Engine, name)
 				continue
 			}
+			level, intensity, errLevel := normalizeEngineLevel(engine, step.Level)
+			if errLevel != nil {
+				log.Errorf("payloadcompress: combo %q step %q: %v; using the engine default", name, engine, errLevel)
+			}
+			options := step.Options
+			if options.Intensity == "" && intensity != "" {
+				options.Intensity = intensity
+			}
 			steps = append(steps, Step{
 				Engine:  engine,
-				Level:   normalizeEngineLevel(engine, step.Level),
-				Options: sanitizeStepOptions(step.Options),
+				Level:   level,
+				Options: sanitizeStepOptions(options),
 			})
 		}
 		if len(steps) == 0 {
@@ -354,10 +421,15 @@ func (c *Config) Sanitize() {
 		combos = append(combos, Combo{Name: name, Models: combo.Models, Pipeline: steps})
 	}
 	c.Combos = combos
-	if len(c.Combos) == 0 && c.Enabled {
-		// Enabled with no usable pipeline means the built-in one, not silence.
+	if len(c.Combos) == 0 && c.Enabled && !hadCombos {
+		// Enabled with no pipeline configured at all means the built-in one, not
+		// silence. This matches upstream's default plan.
 		c.Combos = DefaultConfig().Combos
 	}
+	// A pipeline the operator did configure but whose engines all resolved away
+	// (unknown names) resolves to off: resolve() returns nil and compression is
+	// skipped. This is the mapping of upstream 916a464 ("legacy stacked dispatch
+	// with zero enabled engines resolves to off").
 
 	styles := make([]OutputStyle, 0, len(c.OutputStyles))
 	seenStyle := make(map[string]struct{}, len(c.OutputStyles))

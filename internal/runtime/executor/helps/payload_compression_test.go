@@ -70,7 +70,7 @@ func TestPayloadCompressionRunsBeforePayloadRules(t *testing.T) {
 func TestPayloadCompressionSkipsRootedPayloads(t *testing.T) {
 	cfg := &config.Config{Compression: compressionConfig(payloadcompress.EngineLite)}
 	body := noisyPayload()
-	out, _ := applyRequestCompression(cfg, "gpt-4o", "request", body, "")
+	out, _ := applyRequestCompression(cfg, "gpt-4o", "", "request", body, "")
 	if string(out) != string(body) {
 		t.Fatal("rooted payloads must be left alone")
 	}
@@ -79,7 +79,7 @@ func TestPayloadCompressionSkipsRootedPayloads(t *testing.T) {
 func TestPayloadCompressionDisabledByDefault(t *testing.T) {
 	cfg := &config.Config{}
 	body := noisyPayload()
-	out, _ := applyRequestCompression(cfg, "gpt-4o", "", body, "")
+	out, _ := applyRequestCompression(cfg, "gpt-4o", "", "", body, "")
 	if string(out) != string(body) {
 		t.Fatal("compression must be opt-in")
 	}
@@ -89,7 +89,7 @@ func TestPayloadCompressionShadowReturnsOriginal(t *testing.T) {
 	cfg := &config.Config{Compression: compressionConfig(payloadcompress.EngineLite)}
 	cfg.Compression.Shadow = true
 	body := noisyPayload()
-	out, _ := applyRequestCompression(cfg, "gpt-4o", "", body, "")
+	out, _ := applyRequestCompression(cfg, "gpt-4o", "", "", body, "")
 	if string(out) != string(body) {
 		t.Fatal("shadow mode must send the original payload")
 	}
@@ -119,5 +119,21 @@ func TestPayloadOutputStyleSurvivesRepeatedApplication(t *testing.T) {
 	}
 	if strings.Count(string(twice), "CLIProxyAPI Output Styles") != 1 {
 		t.Fatal("style injected twice")
+	}
+}
+
+func TestPayloadCompressionExclusionUsesProvider(t *testing.T) {
+	cfg := &config.Config{Compression: compressionConfig(payloadcompress.EngineLite)}
+	cfg.Compression.Exclusions = []string{"openai/*"}
+	body := noisyPayload()
+	excluded := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "openai", "", body, body, "gpt-4o", "/v1/chat/completions")
+	if string(excluded) != string(body) {
+		t.Fatal("provider-qualified exclusion must leave the payload byte-identical")
+	}
+	// Same model through another protocol must still be compressed: this fails if
+	// the executor stops forwarding the protocol to the exclusion matcher.
+	included := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "gemini", "", body, body, "gpt-4o", "/v1/chat/completions")
+	if string(included) == string(body) {
+		t.Fatal("non-excluded provider must still be compressed")
 	}
 }

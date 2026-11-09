@@ -22,6 +22,9 @@ const (
 	// kindToolBlocks is text in a tool message's content array: tool output for
 	// rtk, but upstream lite caps only string tool content.
 	kindToolBlocks
+	// kindAssistant is model-authored prose (chat/Responses assistant, Gemini
+	// model). Other engines must skip it; session dedup consumes it.
+	kindAssistant
 )
 
 // segment is one compressible JSON string value, identified by its byte span in
@@ -40,13 +43,17 @@ type segment struct {
 	command string
 	// toolName is the tool that produced this tool output, empty when unknown.
 	toolName string
+	// array marks text from a content array (a parts block) rather than a plain
+	// string field. Lite's whitespace cleanup only touches string content.
+	array bool
 }
 
 // scanner locates compressible text in a request payload.
 //
 // It only handles the shapes that carry bulk conversation text: chat messages
-// (`messages[]`) and Responses items (`input[]`). Assistant output, tool call
-// arguments and thinking blocks are never returned. The system prompt and the
+// (`messages[]`), Responses items (`input[]`) and Gemini native contents
+// (`contents[]`). Assistant prose is returned as kindAssistant (dedup only);
+// tool call arguments and thinking blocks are never returned. The system prompt and the
 // provider-cached head are returned only when the config allows rewriting them,
 // so a transform cannot corrupt anything that must survive verbatim.
 type scanner struct {
@@ -75,11 +82,15 @@ type scanner struct {
 	// includeSystem lifts the system-prompt exclusion; see
 	// Config.PreserveSystemPrompt.
 	includeSystem bool
+	// cacheCut is the last item index inside the provider-cached prefix, or -1.
+	// The hard-budget post-pass must not rewrite those items.
+	cacheCut int
 }
 
 // scan fills s.segs. It reports false when the payload has no recognizable
 // conversation shape.
 func (s *scanner) scan() bool {
+	s.cacheCut = -1
 	root := gjson.Parse(bodyString(s.body))
 
 	if input := root.Get("input"); input.Type == gjson.String {
@@ -93,6 +104,8 @@ func (s *scanner) scan() bool {
 		items = root.Get("messages")
 	case root.Get("input").IsArray():
 		items = root.Get("input")
+	case root.Get("contents").IsArray():
+		items = root.Get("contents")
 	default:
 		return false
 	}
@@ -111,6 +124,7 @@ func (s *scanner) scan() bool {
 			return true
 		})
 	}
+	s.cacheCut = cut
 
 	if s.includeSystem {
 		s.addSystem(root)
@@ -227,7 +241,7 @@ func currentTurnStart(items gjson.Result) (int, bool) {
 	from := len(arr)
 	found := false
 	for i, item := range arr {
-		if item.Get("role").String() == "assistant" {
+		if isAssistantRole(item.Get("role").String()) {
 			from, found = i+1, true
 		}
 	}
@@ -257,11 +271,17 @@ func lastUserTurn(items gjson.Result) (int, bool) {
 		return -1, false
 	}
 	for _, item := range arr[:last] {
-		if role := item.Get("role").String(); role == "user" || role == "assistant" {
+		if role := item.Get("role").String(); role == "user" || isAssistantRole(role) {
 			return last, true
 		}
 	}
 	return last, false
+}
+
+// isAssistantRole reports whether role is a model-authored turn in any supported
+// shape: chat and Responses call it assistant, Gemini native calls it model.
+func isAssistantRole(role string) bool {
+	return role == "assistant" || role == "model"
 }
 
 // isToolOutputItem reports whether a Responses item is a tool result.
@@ -308,7 +328,9 @@ func (s *scanner) addItem(item gjson.Result) {
 		return
 	}
 	switch item.Get("role").String() {
-	case "system":
+	case "system", "developer":
+		// Upstream normalizeRole maps developer to system; keep the role as-is but
+		// classify its text as system so engines skip it.
 		if !s.includeSystem {
 			return
 		}
@@ -323,6 +345,12 @@ func (s *scanner) addItem(item gjson.Result) {
 		}
 		s.add(content, kind)
 		s.addParts(content, kind, "")
+		s.addGeminiParts(item.Get("parts"), kind)
+	case "assistant", "model":
+		content := item.Get("content")
+		s.add(content, kindAssistant)
+		s.addParts(content, kindAssistant, "")
+		s.addGeminiParts(item.Get("parts"), kindAssistant)
 	case "tool":
 		callID := item.Get("tool_call_id").String()
 		content := item.Get("content")
@@ -341,9 +369,9 @@ func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string
 		switch part.Get("type").String() {
 		case "text", "input_text", "output_text":
 			if kind == kindToolOutput || kind == kindToolBlocks {
-				s.addTool(part.Get("text"), callID, kind)
+				s.addToolPart(part.Get("text"), callID, kind)
 			} else {
-				s.add(part.Get("text"), kind)
+				s.addPart(part.Get("text"), kind)
 			}
 		case "tool_result":
 			resultID := part.Get("tool_use_id").String()
@@ -351,13 +379,30 @@ func (s *scanner) addParts(content gjson.Result, kind segmentKind, callID string
 			if inner.IsArray() {
 				inner.ForEach(func(_, sub gjson.Result) bool {
 					if sub.Get("type").String() == "text" {
-						s.addTool(sub.Get("text"), resultID, kindToolOutput)
+						s.addToolPart(sub.Get("text"), resultID, kindToolOutput)
 					}
 					return true
 				})
 				return true
 			}
-			s.addTool(inner, resultID, kindToolOutput)
+			s.addToolPart(inner, resultID, kindToolOutput)
+		}
+		return true
+	})
+}
+
+// addGeminiParts records text parts of a Gemini native contents[] item. Gemini
+// parts carry no "type": any part with a string text field is prose. Function
+// call and response parts are skipped; upstream never scans contents[].
+func (s *scanner) addGeminiParts(parts gjson.Result, kind segmentKind) {
+	parts.ForEach(func(_, part gjson.Result) bool {
+		// Thinking parts carry a signature over their exact bytes; rewriting
+		// the text invalidates it, so leave them untouched.
+		if part.Get("thought").Bool() || part.Get("thoughtSignature").Exists() || part.Get("thought_signature").Exists() {
+			return true
+		}
+		if part.Get("text").Type == gjson.String {
+			s.addPart(part.Get("text"), kind)
 		}
 		return true
 	})
@@ -382,6 +427,25 @@ func (s *scanner) addTool(res gjson.Result, callID string, kind segmentKind) {
 	seg.toolName = s.toolNames[callID]
 }
 
+// addToolPart records tool output that lives in a content array.
+func (s *scanner) addToolPart(res gjson.Result, callID string, kind segmentKind) {
+	before := len(s.segs)
+	s.addTool(res, callID, kind)
+	if len(s.segs) > before {
+		s.segs[before].array = true
+	}
+}
+
+// addPart records a text block from a content array. Lite's whitespace cleanup
+// only applies to plain string content upstream, so the shape is tracked.
+func (s *scanner) addPart(res gjson.Result, kind segmentKind) {
+	before := len(s.segs)
+	s.add(res, kind)
+	if len(s.segs) > before {
+		s.segs[before].array = true
+	}
+}
+
 // add records a string value span. Spans whose offsets do not line up with the
 // original bytes are dropped instead of trusted.
 func (s *scanner) add(res gjson.Result, kind segmentKind) {
@@ -391,7 +455,7 @@ func (s *scanner) add(res gjson.Result, kind segmentKind) {
 	raw := res.Raw
 	start := int(res.Index)
 	end := start + len(raw)
-	if start <= 0 || len(raw) < 4 || end >= len(s.body) {
+	if start <= 0 || len(raw) < 3 || end >= len(s.body) {
 		return
 	}
 	if s.body[start] != '"' || s.body[end-1] != '"' {

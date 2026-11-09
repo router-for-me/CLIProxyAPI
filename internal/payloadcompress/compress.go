@@ -1,11 +1,14 @@
 package payloadcompress
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 	"unsafe"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Stats reports what one Apply call did.
@@ -70,6 +73,12 @@ type textEngine interface {
 
 // kindAware is implemented by engines that must know whether a segment is human
 // prose or captured machine output.
+// arrayAware handles text taken from content arrays separately: upstream's
+// whitespace pass skips arrays, but tool-result truncation still applies.
+type arrayAware interface {
+	compressArray(kind segmentKind, text string) (string, bool)
+}
+
 type kindAware interface {
 	compressKind(kind segmentKind, text string) (string, bool)
 }
@@ -105,13 +114,32 @@ func Apply(cfg Config, model string, body []byte) ([]byte, Stats) {
 // is exactly Apply. With it on, the transform a previous request already
 // produced for this session's unchanged prefix is reused and only the appended
 // tail is compressed. See livezone.go.
-func ApplySession(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
-	return applyCore(cfg, model, sessionID, body)
+func ApplySession(cfg Config, model, sessionID string, body []byte, provider ...string) ([]byte, Stats) {
+	return applyCore(cfg, model, sessionID, body, provider...)
 }
 
-func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
+func applyCore(cfg Config, model, sessionID string, body []byte, provider ...string) (out []byte, stats Stats) {
+	// Compression must never fail a request: a panic anywhere in the pipeline
+	// falls back to the untouched body.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("payloadcompress: pipeline panic, returning original body: %v", r)
+			out, stats = body, Stats{BytesIn: len(body)}
+		}
+	}()
+	p := ""
+	if len(provider) > 0 {
+		p = provider[0]
+	}
+	return applyCoreInner(cfg, model, p, sessionID, body)
+}
+
+func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) ([]byte, Stats) {
 	stats := Stats{BytesIn: len(body)}
 	if !cfg.Enabled || len(body) < cfg.MinBytes {
+		return body, stats
+	}
+	if isExcluded(model, cfg.Exclusions, provider) {
 		return body, stats
 	}
 	combo := cfg.resolve(model)
@@ -129,8 +157,8 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 		return body, stats
 	}
 
-	engines := buildEngines(combo.Pipeline)
-	if len(engines) == 0 {
+	steps := buildEngines(combo.Pipeline)
+	if len(steps) == 0 {
 		return body, stats
 	}
 	stats.Segments = len(s.segs)
@@ -140,8 +168,10 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 	commands := make([]string, len(s.segs))
 	tools := make([]string, len(s.segs))
 	skips := make([]bool, len(s.segs))
+	arrays := make([]bool, len(s.segs))
 	for i := range s.segs {
 		texts[i] = s.segs[i].value.String()
+		arrays[i] = s.segs[i].array
 		kinds[i] = s.segs[i].kind
 		commands[i] = s.segs[i].command
 		tools[i] = s.segs[i].toolName
@@ -162,12 +192,34 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 		}
 	}
 
-	saved := make(map[string]int, len(engines))
-	for _, eng := range engines {
-		delta := runEngine(eng, texts, kinds, commands, tools, skips, start)
-		if delta != 0 {
-			saved[eng.name()] = delta
+	saved := make(map[string]int, len(steps))
+	for _, step := range steps {
+		before := append(make([]string, 0, len(texts)), texts...)
+		runEngine(step, texts, kinds, arrays, commands, tools, skips, start)
+		if step.opts.FidelityGate != nil && *step.opts.FidelityGate && isLossyEngine(step.eng.name()) {
+			for i := range texts {
+				if kinds[i] == kindSystem || texts[i] == before[i] {
+					continue
+				}
+				// applyFidelityGate already returns the original text when it
+				// reverted; assign its choice unconditionally.
+				texts[i], _ = applyFidelityGate(before[i], texts[i])
+			}
 		}
+		delta := 0
+		for i := range texts {
+			delta += len(before[i]) - len(texts[i])
+		}
+		if delta < 0 {
+			// Inflation guard: a step that grew its input is reverted.
+			log.Warnf("payloadcompress: step %q grew its input, reverting", step.eng.name())
+			copy(texts, before)
+			continue
+		}
+		if delta == 0 {
+			continue
+		}
+		saved[step.eng.name()] += delta
 	}
 	if len(saved) > 0 {
 		stats.Saved = saved
@@ -180,22 +232,33 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 			break
 		}
 	}
-	if !changed {
+
+	out := body
+	if changed {
+		out = make([]byte, 0, len(body))
+		prev := 0
+		for i := range s.segs {
+			if texts[i] == originals[i] {
+				continue
+			}
+			out = append(out, body[prev:s.segs[i].start]...)
+			out = appendJSONString(out, texts[i])
+			prev = s.segs[i].end
+		}
+		out = append(out, body[prev:]...)
+	}
+
+	// The budget is an independent post-pass: a config with only a budget and
+	// no engine-level change must still enforce it.
+	if cfg.HardBudgetTokens > 0 {
+		out = []byte(applyHardBudget(string(out), cfg.HardBudgetTokens, s.cacheCut, !s.includeSystem))
+	}
+	// Whole-pipeline guard: never ship growth or a body that is no longer JSON.
+	if len(out) >= len(body) || !json.Valid(out) {
+		stats.Saved = nil
+		stats.BytesOut = len(body)
 		return body, stats
 	}
-
-	out := make([]byte, 0, len(body))
-	prev := 0
-	for i := range s.segs {
-		if texts[i] == originals[i] {
-			continue
-		}
-		out = append(out, body[prev:s.segs[i].start]...)
-		out = appendJSONString(out, texts[i])
-		prev = s.segs[i].end
-	}
-	out = append(out, body[prev:]...)
-
 	stats.BytesOut = len(out)
 	if cfg.Shadow {
 		return body, stats
@@ -205,49 +268,81 @@ func applyCore(cfg Config, model, sessionID string, body []byte) ([]byte, Stats)
 	return out, stats
 }
 
-// runEngine applies one engine from start onwards and returns the bytes it saved.
+// engineStep pairs one pipeline entry with its per-step options.
+type engineStep struct {
+	eng  engine
+	opts StepOptions
+}
+
+// runEngine applies one step's engine from start onwards. The opt-in risk gate
+// masks risky spans before the engine sees them and restores them afterwards.
 // Engines that need body-wide context still see every segment, so a reused
 // prefix informs session dedup without being rewritten.
-func runEngine(eng engine, texts []string, kinds []segmentKind, commands, tools []string, skips []bool, start int) int {
-	delta := 0
+func runEngine(step engineStep, texts []string, kinds []segmentKind, arrays []bool, commands, tools []string, skips []bool, start int) {
+	eng := step.eng
+	var masks []func(string) string
+	if step.opts.RiskGate != nil && *step.opts.RiskGate {
+		masks = make([]func(string) string, len(texts))
+		for i := range texts {
+			var unmask func(string) string
+			texts[i], unmask = maskRisks(texts[i])
+			masks[i] = unmask
+		}
+	}
+	// Lite's whitespace cleanup mirrors upstream's string-content-only pass, so
+	// it uses a separate array path. Other engines process arrays normally.
+	arrayEng, skipArray := eng.(arrayAware)
 	switch typed := eng.(type) {
 	case bodyEngine:
 		for i, repl := range typed.rewrite(texts, kinds, skips) {
 			if i < start || i >= len(texts) || repl == texts[i] {
 				continue
 			}
-			delta += len(texts[i]) - len(repl)
 			texts[i] = repl
 		}
 	case commandAware:
 		for i := start; i < len(texts); i++ {
-			out, hit := typed.compressCommand(kinds[i], tools[i], commands[i], texts[i])
-			if !hit || out == texts[i] {
+			if kinds[i] == kindAssistant {
 				continue
 			}
-			delta += len(texts[i]) - len(out)
-			texts[i] = out
+			if out, hit := typed.compressCommand(kinds[i], tools[i], commands[i], texts[i]); hit {
+				texts[i] = out
+			}
 		}
 	case kindAware:
 		for i := start; i < len(texts); i++ {
-			out, hit := typed.compressKind(kinds[i], texts[i])
-			if !hit || out == texts[i] {
+			if skipArray && arrays[i] {
+				if out, hit := arrayEng.compressArray(kinds[i], texts[i]); hit {
+					texts[i] = out
+				}
 				continue
 			}
-			delta += len(texts[i]) - len(out)
-			texts[i] = out
+			if out, hit := typed.compressKind(kinds[i], texts[i]); hit {
+				texts[i] = out
+			}
 		}
 	case textEngine:
 		for i := start; i < len(texts); i++ {
-			out, hit := typed.compress(texts[i])
-			if !hit || out == texts[i] {
-				continue
+			if out, hit := typed.compress(texts[i]); hit {
+				texts[i] = out
 			}
-			delta += len(texts[i]) - len(out)
-			texts[i] = out
 		}
 	}
-	return delta
+	for i := range masks {
+		if masks[i] != nil {
+			texts[i] = masks[i](texts[i])
+		}
+	}
+}
+
+// isLossyEngine reports whether an engine deliberately drops content, so the
+// fidelity gate can reject an over-aggressive rewrite.
+func isLossyEngine(name string) bool {
+	switch name {
+	case EngineCaveman, EngineRTK, EngineLite, EngineHeadroom:
+		return true
+	}
+	return false
 }
 
 // ApplyAll runs the whole transform chain: payload compression, then output-style
@@ -258,8 +353,8 @@ func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
 
 // ApplyAllSession is ApplyAll for a request that carries a session identity, so
 // the live zone can reuse the previous turn's compressed prefix.
-func ApplyAllSession(cfg Config, model, sessionID string, body []byte) ([]byte, Stats) {
-	out, stats := ApplySession(cfg, model, sessionID, body)
+func ApplyAllSession(cfg Config, model, sessionID string, body []byte, provider ...string) ([]byte, Stats) {
+	out, stats := ApplySession(cfg, model, sessionID, body, provider...)
 	styled, label := applyOutputStyles(cfg, out)
 	stats.Style = label
 	if label == "" || strings.HasPrefix(label, "skipped:") {
@@ -272,20 +367,31 @@ func ApplyAllSession(cfg Config, model, sessionID string, body []byte) ([]byte, 
 	stats.Applied = true
 	return styled, stats
 }
-func buildEngines(steps []Step) []engine {
-	engines := make([]engine, 0, len(steps))
+
+// testEngineHook injects a synthetic engine role for tests; production leaves it nil.
+var testEngineHook func(Step) engine
+
+func buildEngines(steps []Step) []engineStep {
+	engines := make([]engineStep, 0, len(steps))
 	for _, step := range steps {
+		var eng engine
+		if testEngineHook != nil {
+			eng = testEngineHook(step)
+		}
 		switch step.Engine {
 		case EngineLite:
-			engines = append(engines, liteEngine{opts: step.Options})
+			eng = liteEngine{opts: step.Options}
 		case EngineRTK:
-			engines = append(engines, rtkEngine{opts: step.Options})
+			eng = rtkEngine{opts: step.Options}
 		case EngineHeadroom:
-			engines = append(engines, headroomEngine{opts: step.Options})
+			eng = headroomEngine{opts: step.Options}
 		case EngineCaveman:
-			engines = append(engines, cavemanEngine{level: step.Level, opts: step.Options})
+			eng = cavemanEngine{level: step.Level, opts: step.Options}
 		case EngineSessionDedup:
-			engines = append(engines, &dedupEngine{opts: step.Options})
+			eng = &dedupEngine{opts: step.Options}
+		}
+		if eng != nil {
+			engines = append(engines, engineStep{eng: eng, opts: step.Options})
 		}
 	}
 	return engines

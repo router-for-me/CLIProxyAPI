@@ -11,9 +11,11 @@ import (
 )
 
 func testConfig(pipeline ...string) Config {
+	on, off := true, false
+	opts := StepOptions{CompressToolResults: &on, PreserveToolWhitespace: &off}
 	steps := make([]Step, 0, len(pipeline))
 	for _, name := range pipeline {
-		steps = append(steps, Step{Engine: name})
+		steps = append(steps, Step{Engine: name, Options: opts})
 	}
 	return Config{
 		Enabled:      true,
@@ -126,7 +128,7 @@ func TestApplyProtectsCachedPrefix(t *testing.T) {
 	}
 }
 
-func TestApplySkipsSystemAssistantAndToolArgs(t *testing.T) {
+func TestApplySkipsSystemAndToolArgs(t *testing.T) {
 	noisy := "system   prompt   with   noise   \n\n\n\n"
 	args := `{"path":"a/b","body":"x   y\n\n\n\nz"}`
 	body := []byte(`{"model":"m","messages":[` +
@@ -135,17 +137,24 @@ func TestApplySkipsSystemAssistantAndToolArgs(t *testing.T) {
 		`{"role":"assistant","content":` + quote(noisy) + `,` +
 		`"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":` + quote(args) + `}}]}]}`)
 
-	out, _ := Apply(testConfig(EngineLite), "m", body)
-	if string(out) != string(body) {
-		t.Fatalf("untouchable fields changed:\n%s", out)
+	out, stats := Apply(testConfig(EngineLite), "m", body)
+	if !stats.Applied {
+		t.Fatal("expected assistant prose to be compressed")
+	}
+	// System text stays intact; only the assistant's copy is collapsed.
+	if strings.Count(string(out), quote(noisy)) != 1 {
+		t.Fatalf("system prompt changed or assistant not compressed:\n%s", out)
+	}
+	if !strings.Contains(string(out), quote(args)) {
+		t.Fatalf("tool-call arguments changed:\n%s", out)
 	}
 }
 
 func TestApplyNoConversationShape(t *testing.T) {
-	body := []byte(`{"contents":[{"role":"user","parts":[{"text":"a   b   \n\n\n\nc"}]}]}`)
+	body := []byte(`{"prompt":"a   b   \n\n\n\nc"}`)
 	out, stats := Apply(testConfig(EngineLite), "m", body)
 	if stats.Applied || string(out) != string(body) {
-		t.Fatal("gemini-shaped payload must not be touched")
+		t.Fatal("payload without a conversation shape must not be touched")
 	}
 }
 
@@ -162,7 +171,10 @@ func TestApplyBelowMinBytes(t *testing.T) {
 func TestApplyShadowMode(t *testing.T) {
 	cfg := testConfig(EngineRTK)
 	cfg.Shadow = true
-	body := []byte(`{"messages":[{"role":"tool","content":` + quote(shellOutput()) + `}]}`)
+	// A long enough run keeps the dedup markers smaller than the lines they
+	// replace, so the projected size is genuinely lower.
+	toolOutput := "npm run build\n" + strings.Repeat("retrying\n", 12) + "added 1 package\ndone\n"
+	body := []byte(`{"messages":[{"role":"tool","content":` + quote(toolOutput) + `}]}`)
 	out, stats := Apply(cfg, "m", body)
 	if stats.Applied {
 		t.Fatal("shadow mode must not report Applied")
@@ -285,7 +297,7 @@ func TestLiteStripsANSI(t *testing.T) {
 func TestLiteCollapsesBlankRunsBeforeCappingToolOutput(t *testing.T) {
 	kept := "payload line"
 	text := strings.Repeat(kept+"   \n\n\n\n", 400)
-	e := liteEngine{opts: StepOptions{MaxToolLength: 500}}
+	e := lossyLite(500)
 	out, ok := e.compressKind(kindToolOutput, text)
 	if !ok {
 		t.Fatal("expected compression")
@@ -306,7 +318,7 @@ func TestRTKCollapsesRuns(t *testing.T) {
 	if !ok {
 		t.Fatal("expected compaction")
 	}
-	if !strings.Contains(out, "retrying"+rtkRepeatMark+"5)") {
+	if !strings.Contains(out, "[line repeated 4x]") {
 		t.Fatalf("repeated lines not collapsed:\n%s", out)
 	}
 	if again, hit := (rtkEngine{}).compress(out); hit || again != out {
@@ -428,19 +440,26 @@ func itoa(i int) string {
 }
 
 func TestApplyCoversAllThreeProtocols(t *testing.T) {
-	noise := strings.Repeat("output   \n\n\n\n", 40)
+	noise := strings.Repeat("output   \n\n\n\n", 200)
 	cfg := testConfig(EngineLite)
+	yes, no := true, false
+	opts := &cfg.Combos[0].Pipeline[0].Options
+	opts.CompressToolResults = &yes
+	opts.PreserveToolWhitespace = &no
 
 	cases := map[string]string{
 		"chat-completions": `{"model":"m","messages":[{"role":"user","content":` + quote("hi") + `},` +
-			`{"role":"tool","tool_call_id":"c1","content":` + quote(noise) + `}]}`,
+			`{"role":"tool","tool_call_id":"c1","content":` + quote(noise) + `},` +
+			`{"role":"user","content":"next"}]}`,
 		"anthropic-messages": `{"model":"m","messages":[{"role":"user","content":[` +
 			`{"type":"text","text":` + quote("hi") + `},` +
-			`{"type":"tool_result","tool_use_id":"t1","content":` + quote(noise) + `}]}]}`,
+			`{"type":"tool_result","tool_use_id":"t1","content":` + quote(noise) + `}]},` +
+			`{"role":"user","content":[{"type":"text","text":"next"}]}]}`,
 		"responses": `{"model":"m","input":[` +
-			`{"type":"message","role":"user","content":[{"type":"input_text","text":` + quote(noise) + `}]},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
 			`{"type":"function_call_output","call_id":"c1","output":` + quote(noise) + `},` +
-			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`,
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}`,
 	}
 
 	for name, body := range cases {
@@ -454,7 +473,9 @@ func TestApplyCoversAllThreeProtocols(t *testing.T) {
 		if len(out) >= len(body) {
 			t.Fatalf("%s: expected shrink, got %d >= %d", name, len(out), len(body))
 		}
-		if strings.Contains(string(out), `\n\n\n\n`) {
+		// Content-array text is string-content-only for lite upstream; only the
+		// plain string body collapses blank runs. Arrays shrink via truncation.
+		if name == "chat-completions" && strings.Contains(string(out), `\n\n\n\n`) {
 			t.Fatalf("%s: blank runs not collapsed:\n%s", name, out)
 		}
 	}
@@ -549,7 +570,10 @@ func TestCurrentTurnToolResultsAreNotCapped(t *testing.T) {
 	}
 	body := []byte(`{"model":"m","messages":[` + toolTurn("t1") + `,` + toolTurn("t2") + `]}`)
 
-	out, stats := Apply(testConfig(EngineLite), "m", body)
+	cfg := testConfig(EngineLite)
+	on := true
+	cfg.Combos[0].Pipeline[0].Options.CompressToolResults = &on
+	out, stats := Apply(cfg, "m", body)
 	if !stats.Applied {
 		t.Fatal("expected compression to apply")
 	}
@@ -643,5 +667,137 @@ func TestCavemanDefersLatestUserTurn(t *testing.T) {
 	out, _ = Apply(testConfig(EngineCaveman), "m", one)
 	if gjson.GetBytes(out, "messages.0.content").String() == text {
 		t.Fatal("a one-shot body must still compress")
+	}
+}
+
+func useTestEngine(t *testing.T, fn func(Step) engine) {
+	t.Helper()
+	testEngineHook = fn
+	t.Cleanup(func() { testEngineHook = nil })
+}
+
+type probeEngine struct{ ran *bool }
+
+func (probeEngine) name() string { return "probe" }
+func (e probeEngine) compress(string) (string, bool) {
+	*e.ran = true
+	return "x", true
+}
+
+type inflateEngine struct{}
+
+func (inflateEngine) name() string { return "inflate" }
+func (inflateEngine) compress(text string) (string, bool) {
+	return text + " growth growth growth", true
+}
+
+type panicEngine struct{}
+
+func (panicEngine) name() string                   { return "panic" }
+func (panicEngine) compress(string) (string, bool) { panic("boom") }
+
+func probeBody() []byte {
+	return []byte(`{"model":"m","messages":[{"role":"user","content":"hello hello hello"}]}`)
+}
+
+func TestApplyExclusionsSkipWholePipeline(t *testing.T) {
+	var ran bool
+	useTestEngine(t, func(step Step) engine {
+		if step.Engine == "probe" {
+			return probeEngine{ran: &ran}
+		}
+		return nil
+	})
+
+	cfg := testConfig("probe")
+	cfg.Exclusions = []string{"Claude-*"}
+	out, stats := Apply(cfg, "claude-sonnet", probeBody())
+	if ran {
+		t.Fatal("engine must not run for an excluded model")
+	}
+	if stats.Applied || !bytes.Equal(out, probeBody()) {
+		t.Fatal("excluded model must be returned byte-identical")
+	}
+
+	ran = false
+	cfg.Exclusions = nil
+	if _, stats := Apply(cfg, "claude-sonnet", probeBody()); !stats.Applied || !ran {
+		t.Fatal("a non-excluded model must still compress")
+	}
+}
+
+func TestApplyRevertsInflatingStep(t *testing.T) {
+	useTestEngine(t, func(step Step) engine {
+		if step.Engine == "inflate" {
+			return inflateEngine{}
+		}
+		return nil
+	})
+	out, stats := Apply(testConfig("inflate"), "m", probeBody())
+	if stats.Applied || !bytes.Equal(out, probeBody()) {
+		t.Fatal("an inflating step must be reverted")
+	}
+	if len(stats.Saved) != 0 {
+		t.Fatalf("reverted step must not report savings: %v", stats.Saved)
+	}
+}
+
+func TestApplyRecoversFromEnginePanic(t *testing.T) {
+	useTestEngine(t, func(step Step) engine {
+		if step.Engine == "panic" {
+			return panicEngine{}
+		}
+		return nil
+	})
+	out, stats := Apply(testConfig("panic"), "m", probeBody())
+	if stats.Applied || !bytes.Equal(out, probeBody()) {
+		t.Fatal("a panicking engine must fail open to the original body")
+	}
+}
+
+func TestApplyInvalidJSONFallsBack(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[`) // truncated, not valid JSON
+	out, stats := Apply(testConfig(EngineLite), "m", body)
+	if stats.Applied || !bytes.Equal(out, body) {
+		t.Fatal("invalid JSON must be returned unchanged")
+	}
+}
+
+func TestGatesOffByDefault(t *testing.T) {
+	def := DefaultConfig()
+	if (Config{}).HardBudgetTokens != 0 || def.HardBudgetTokens != 0 {
+		t.Fatal("hard budget must default off")
+	}
+	for _, step := range def.Combos[0].Pipeline {
+		if step.Options.FidelityGate != nil || step.Options.RiskGate != nil {
+			t.Fatalf("per-step gates must default off for %s", step.Engine)
+		}
+	}
+	var ran bool
+	useTestEngine(t, func(step Step) engine { return probeEngine{ran: &ran} })
+	if _, stats := Apply(testConfig("probe"), "m", probeBody()); !stats.Applied || !ran {
+		t.Fatal("default options must not block compression")
+	}
+}
+
+func TestDefaultConfigPreservesToolResults(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 400; i++ {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("tool line ")
+		b.WriteString(itoa(i))
+		b.WriteString(" value")
+	}
+	content := b.String()
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"user","content":"keep this"},` +
+		`{"role":"tool","tool_call_id":"c1","content":` + quote(content) + `}]}`)
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	out, _ := Apply(cfg, "m", body)
+	if got := gjson.GetBytes(out, "messages.1.content").String(); got != content {
+		t.Fatalf("default pipeline altered a tool result: %d -> %d bytes", len(content), len(got))
 	}
 }

@@ -41,11 +41,13 @@ func compressionEnabled(cfg *config.Config, root string) bool {
 // business payload. sessionID is the request's native affinity identity; with
 // live-zone on it lets an unchanged prefix reuse the previous turn's transform.
 // It reports whether the payload was actually rewritten.
-func applyRequestCompression(cfg *config.Config, model, root string, body []byte, sessionID string) ([]byte, bool) {
+func applyRequestCompression(cfg *config.Config, model, protocol, root string, body []byte, sessionID string) ([]byte, bool) {
 	if !compressionEnabled(cfg, root) {
 		return body, false
 	}
-	out, stats := payloadcompress.ApplyAllSession(cfg.Compression, model, sessionID, body)
+	// protocol doubles as the provider component for exclusions such as
+	// "openai/*": the model alone never carries it.
+	out, stats := payloadcompress.ApplyAllSession(cfg.Compression, model, sessionID, body, protocol)
 	// Info level: "what did this do to my request" is the only question the log has
 	// to answer, and it is invisible at debug. shortcut: one line per compressed
 	// request, quiet it with the log level if the volume is unwelcome.
@@ -186,7 +188,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 	// Compress conversation context deterministically. Built-in transforms run before
 	// payload rules so user rules remain the final semantic barrier.
 	if compressionEnabled(cfg, root) {
-		if out, applied := applyRequestCompression(cfg, model, root, doc.Bytes(), sessionID); applied {
+		if out, applied := applyRequestCompression(cfg, model, protocol, root, doc.Bytes(), sessionID); applied {
 			*doc = *ojson.NewDoc(out)
 			mutated = true
 		}
