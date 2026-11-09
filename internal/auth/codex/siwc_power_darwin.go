@@ -20,7 +20,7 @@ func siwcRefreshReadiness(ctx context.Context) error {
 	// shortcut: checks entry state; use native sleep coordination if in-flight sleep still breaks renewal.
 	state, errState := ReadSIWCSystemState(ctx)
 	if errState != nil {
-		return fmt.Errorf("SIWC renewal deferred: macOS power state unavailable: %w", errState)
+		return fmt.Errorf("SIWC renewal deferred: macOS power state unavailable: %w: %w", errState, ErrSIWCRefreshDeferred)
 	}
 	foundCapabilities := false
 	var fields []string
