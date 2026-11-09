@@ -366,6 +366,7 @@ requests:
   #   #   relevance:      relevance-budget-percent: 0.5,
   #   #                   relevance-overlap-threshold: 0.1
   #   #   read-lifecycle: enabled: false (opt-in; set true on the step to run it)
+  #   #   aggressive, ultra, ccr, codex-responses, ionizer, llm: no options
   #   #   any engine:     fidelity-gate: false, risk-gate: false
   #   # Output styles steer how the model writes its answer by appending an instruction
   #   # to the existing system prompt. They do not rewrite responses, so streaming and

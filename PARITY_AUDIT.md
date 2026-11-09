@@ -63,23 +63,21 @@ Engines:
 
 | upstream | lines | claim to check |
 |---|---|---|
-| `aggressive.ts` | 233 | another truncation ladder. Overlaps `lite`. Omitted. |
-| `ultra.ts` + `ultraHeuristic.ts` | 532 | Omitted. |
-| `engines/llmlingua/` | ~3325 | ONNX SLM. Non-deterministic, breaks append-stability. Omitted. |
-| `engines/ccr/` | ~1252 | replaces text with `[CCR retrieve hash=..]` needing an MCP retrieve tool. Unrecoverable here. Omitted. |
-| `engines/codex-responses/` | 335 | Omitted. |
-| `omniglyphAdapter.ts`, `omniglyphSingleMode.ts` | ~156 | Omitted. |
-| `summarizer.ts` | 244 | Omitted; only `aggressive.ts` uses it. |
-| `engines/ionizer/`, `engines/llm/` | ? | Not inspected in this audit. |
+| `aggressive.ts` | 233 | Ported: `aggressive.go` (tool-result compression, progressive aging, summarizer, caveman/lite downgrade). |
+| `ultra.ts` + `ultraHeuristic.ts` | 532 | Ported: `ultra.go` + `ultra_heuristic.go` (deterministic Tier-A heuristic only). |
+| `engines/llmlingua/` | ~3325 | Not portable: needs the ONNX runtime plus model files, which cannot ship in a Go proxy. |
+| `engines/ccr/` | ~1252 | Ported: `ccr.go` + `ccr_store.go` (retrieve markers + in-process store). |
+| `engines/codex-responses/` | 335 | Ported: `codex_responses.go`. |
+| `omniglyphAdapter.ts`, `omniglyphSingleMode.ts` | ~156 | Not portable: depends on an external codec package with no Go equivalent. |
+| `summarizer.ts` | 244 | Ported: `summarizer.go`. |
+| `engines/ionizer/`, `engines/llm/` | ? | Ported: `ionizer.go`, `llm.go` (LLM backend defaults to identity). |
 
 Governance and pipeline layer: the fidelity gate (protected tokens and numeric
 integrity), the secret risk gate (mask/restore), exclusions, hard budget and
 pipeline guards are ported. Still unported:
 
-`preservation.ts` (253), `progressiveAging.ts` (153),
 `strategySelector.ts` (1185), `adaptiveCompression/`, `cachingAware.ts` (145),
-`lossyRequestPolicy.ts` (71), `toolResultCompressor.ts` (290),
-`pipelineEngineBreaker.ts` (139), `resultMemo.ts` (217),
+`lossyRequestPolicy.ts` (71), `pipelineEngineBreaker.ts` (139), `resultMemo.ts` (217),
 `planResolution.ts` (166), `resolveCompressionPlan.ts` (28), `deriveDefaultPlan.ts` (56),
 `entrypointWrap.ts` (43), `failOpenNotifier.ts` (48), `stackedStepCore.ts` (117),
 `stepDetailConfig.ts` (28), `ruleLoader.ts` (307), `validation.ts` (432).
@@ -211,15 +209,18 @@ Engine parity
   quantum-lock   [x] faithful: protected-span masking, behind `quantum-lock`.
   telemetry      [x] faithful: per-engine byte counts in `Stats`.
 
-Omitted engines — was the omission correct?
-  aggressive     [x] yes — lossy prose rewrite; redundant with the lossless default.
-  ultra          [x] yes — most lossy tier; not enabled upstream by default either.
-  llmlingua      [x] yes — needs a Python/LLM runtime; cannot live in a Go proxy.
-  ccr            [x] yes — replays a prior compressed payload; needs an upstream session store.
-  codex-responses[x] yes — provider-specific Responses adapter; generic body compression covers it.
-  omniglyph      [x] yes — optional external codec, not an engine in the catalog used here.
+Engines ported after the first audit
+  aggressive     [x] ported — `aggressive.go`, payload engine.
+  ultra          [x] ported — `ultra.go` + `ultra_heuristic.go`, payload engine.
+  ccr            [x] ported — `ccr.go` + `ccr_store.go`, payload engine.
+  codex-responses[x] ported — `codex_responses.go`, payload engine.
+  ionizer        [x] ported — `ionizer.go`, payload engine.
+  llm            [x] ported — `llm.go`, payload engine (backend defaults to identity).
   read-lifecycle [x] ported — opt-in, chat shape, stubs superseded reads.
-  ionizer/llm    [x] yes — no deterministic compression behavior to port.
+
+Not portable
+  llmlingua      [x] needs the ONNX runtime plus model files; cannot live in a Go proxy.
+  omniglyph      [x] depends on an external codec package with no Go equivalent.
 
 Deliberately unported governance modules
   strategySelector     — picks an engine from model class; the port keeps explicit config/combos.
