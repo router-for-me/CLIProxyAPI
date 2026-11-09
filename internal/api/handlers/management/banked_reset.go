@@ -82,6 +82,9 @@ func (h *Handler) CheckBankedResets(c *gin.Context) {
 // send those mutations through the same account lock and durable intent as auto
 // use. Leave the off-mode contract untouched. No v0 routes are added.
 func (h *Handler) handleBankedResetAPICall(c *gin.Context, a *coreauth.Auth, method string, target *url.URL, data string) bool {
+	if !c.GetBool(ConfigV8ContextKey) {
+		return false
+	}
 	if method != http.MethodPost || a == nil || h.authManager == nil || h.cfg == nil {
 		return false
 	}
