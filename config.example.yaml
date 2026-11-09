@@ -339,16 +339,17 @@ requests:
   #             skip-rules: []      # Rule names to disable, e.g. ["articles", "ultra_abbreviations"].
   #         - engine: lite
   #           options:
-  #             max-tool-length: 2000       # Truncate longer tool results, in characters, head and tail kept.
-  #             compress-tool-results: true  # Set false to skip tool-result truncation entirely.
+  #             max-tool-length: 2000        # Truncate longer tool results, in characters, head and tail kept.
+  #             compress-tool-results: false # Opt-in truncation; upstream defaults true, this port's default combo is lossless.
   #             # This turn's tool results (everything after the last assistant
   #             # message) are never truncated: the model would only re-read them.
   #
   #   # Every engine accepts an options block; omitted knobs keep the defaults below,
-  #   # which are the upstream OmniRoute defaults.
+  #   # which are the upstream OmniRoute defaults except lite's compress-tool-results
+  #   # (opt-in here, so the default combo stays lossless).
   #   #   headroom:       min-rows: 8
   #   #   session-dedup:  min-block-chars: 80
-  #   #   lite:           max-tool-length: 2000, compress-tool-results: true
+  #   #   lite:           max-tool-length: 2000, compress-tool-results: false
   #   #   rtk:            intensity: minimal, max-lines: 120, max-chars: 12000,
   #   #                   deduplicate-threshold: 3, min-savings-percent: 0 (off)
   #   #   caveman:        level: lite, min-message-length: 50,
