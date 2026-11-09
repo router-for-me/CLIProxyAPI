@@ -40,7 +40,7 @@ You can access the following providers locally and with multiple CLI accounts th
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devin models (SWE-2, SWE-2 Flash, GPT-6 Astra, Claude Fable 5.1, etc.). Connect a Devin account with <code>--devin-login</code> to route the models available to that account.</td>
+        <td>Devin models (SWE-2, SWE-2 Flash, GPT-6 Astra, Claude Fable 5.2, etc.). Connect a Devin account with <code>--devin-login</code> to route the models available to that account.</td>
     </tr>
 </tbody>
 </table>

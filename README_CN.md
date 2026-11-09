@@ -40,7 +40,7 @@ CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API �
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devin 提供的模型（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.1 等）。使用 <code>--devin-login</code> 连接 Devin 账户，即可路由该账户可用的模型。</td>
+        <td>Devin 提供的模型（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.2 等）。使用 <code>--devin-login</code> 连接 Devin 账户，即可路由该账户可用的模型。</td>
     </tr>
 </tbody>
 </table>

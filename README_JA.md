@@ -40,7 +40,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devinのモデル（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.1など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
+        <td>Devinのモデル（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.2など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
     </tr>
 </tbody>
 </table>
