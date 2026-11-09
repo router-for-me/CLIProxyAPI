@@ -174,7 +174,8 @@ routing:
   # without moving existing bindings. Compensation is scoped to each eligible credential set;
   # priority tiers, transport preferences, and retry/cooldown subsets do not share credits.
   # Pinned requests use the eligible pool before pinning, within the pinned credential
-  # priority tier and transport class. Returning to a pool resumes its retained credits.
+  # priority tier and transport class, even when session-affinity is disabled.
+  # Returning to a pool resumes its retained credits.
   # Settled credits are capped at +/-32 times the eligible pool total; ratios are approximate.
   # In-flight offsets are preserved until the pool settles, regardless of commit order.
   # Sticky requests keep their bindings but stop adding compensation when the full

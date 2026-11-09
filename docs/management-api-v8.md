@@ -78,8 +78,9 @@ requests to the first when both remain eligible.
 Different priority tiers, transport preferences, and retry/cooldown candidate
 sets keep separate credits; returning to a set resumes its retained credits.
 Pinned requests account against the eligible pool before pinning, within the
-pinned credential's priority tier and transport class. A lower-priority binding
-never shifts the request ratio among higher-priority credentials.
+pinned credential's priority tier and transport class, even when session affinity
+is disabled. Pinned and ordinary requests share the same weighted credits. A
+lower-priority binding never shifts the request ratio among higher-priority credentials.
 
 Settled credits are capped at ±32 times the eligible pool total, so request
 ratios are approximate rather than guaranteed. While reservations are in flight,
