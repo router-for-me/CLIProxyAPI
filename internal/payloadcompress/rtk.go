@@ -1,6 +1,7 @@
 package payloadcompress
 
 import (
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,12 +20,12 @@ func (rtkEngine) name() string { return EngineRTK }
 
 const (
 	rtkMinLines   = 8
-	rtkRepeatMark = " (×"
+	rtkRepeatMark = "[line repeated "
 )
 
-// rtkLimits is the intensity ladder. Intensity picks how eagerly repeated lines
-// collapse; the size caps are safety nets, not the main mechanism. Explicit
-// options always win over the ladder.
+// rtkLimits is the intensity ladder. Intensity scales the truncation line
+// budget; the char cap is a fixed safety net. Explicit options always win over
+// the ladder.
 type rtkLimits struct {
 	minRun       int
 	maxLines     int
@@ -35,24 +36,29 @@ type rtkLimits struct {
 }
 
 func (e rtkEngine) limits() rtkLimits {
-	// Defaults are the upstream RTK defaults: minimal intensity, 120 lines, 12000
-	// chars, dedup threshold 3, and no savings gate.
-	limits := rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000, preserveHead: 24, preserveTail: 24}
-	switch e.opts.Intensity {
+	// Defaults are the upstream RTK defaults: 120 lines, 12000 chars, dedup
+	// threshold 3, and no savings gate. Empty intensity means minimal.
+	// Upstream scales only the line budget by intensity: minimal 1.5x, standard
+	// 1.0x, aggressive 0.5x (base 120). The char cap stays 12000 at every level.
+	baseLines := 120.0
+	if e.opts.MaxLines > 0 {
+		baseLines = float64(e.opts.MaxLines)
+	}
+	mult := 1.5
+	limits := rtkLimits{minRun: 3, maxChars: 12000, preserveHead: 24, preserveTail: 24}
+	switch e.intensity() {
 	case "standard":
-		limits.maxLines, limits.maxChars = 200, 24000
+		mult = 1.0
 	case "aggressive":
-		limits.minRun, limits.maxLines, limits.maxChars = 2, 400, 48000
+		mult = 0.5
 		limits.preserveHead, limits.preserveTail = 16, 16
 	}
+	limits.maxLines = int(math.Round(baseLines * mult))
 	if e.opts.DeduplicateThreshold > 0 {
 		limits.minRun = e.opts.DeduplicateThreshold
 	}
 	if limits.minRun < 2 {
 		limits.minRun = 2
-	}
-	if e.opts.MaxLines > 0 {
-		limits.maxLines = e.opts.MaxLines
 	}
 	if e.opts.MaxChars > 0 {
 		limits.maxChars = e.opts.MaxChars
@@ -61,6 +67,15 @@ func (e rtkEngine) limits() rtkLimits {
 		limits.minSavings = e.opts.MinSavingsPercent
 	}
 	return limits
+}
+
+// intensity defaults to minimal, matching upstream DEFAULT_RTK_CONFIG.
+func (e rtkEngine) intensity() string {
+	switch e.opts.Intensity {
+	case "minimal", "standard", "aggressive":
+		return e.opts.Intensity
+	}
+	return "minimal"
 }
 
 func (e rtkEngine) compress(text string) (string, bool) {
@@ -102,8 +117,12 @@ func (e rtkEngine) compressOutput(command, text string, skipFilters bool) (strin
 		detectRTKOutputType(text, command) == "unknown" &&
 		!rtkGenericErrorMarkers.MatchString(text)
 	changed := false
+	priority := rtkDefaultPriority
 	if !skipFilters && !docLike {
-		if filtered, ok := applyRTKFilters(text, command); ok {
+		if filtered, ok, filterPriority := applyRTKFilters(text, command, e.intensity()); ok {
+			// The filter's own preserve patterns must survive the engine-level
+			// line cap too, mirroring upstream filterPriorityPatterns.
+			priority = append(append([]*packRegex{}, rtkDefaultPriority...), filterPriority...)
 			text, changed = filtered, true
 		}
 	}
@@ -119,13 +138,14 @@ func (e rtkEngine) compressOutput(command, text string, skipFilters bool) (strin
 		raw := lines[i]
 		line := raw
 		run := 1
-		if raw != "" && !strings.Contains(raw, rtkRepeatMark) {
+		if strings.TrimSpace(raw) != "" && !strings.Contains(raw, rtkRepeatMark) {
 			for i+run < len(lines) && lines[i+run] == raw {
 				run++
 			}
 		}
 		if !skipFilters && run >= limits.minRun {
-			out = append(out, line+rtkRepeatMark+strconv.Itoa(run)+")")
+			dropped := strconv.Itoa(run - 1)
+			out = append(out, line, rtkRepeatMark+dropped+"x]", "[rtk:dropped "+dropped+" repeated lines]")
 			changed = true
 		} else {
 			for k := 0; k < run; k++ {
@@ -136,7 +156,7 @@ func (e rtkEngine) compressOutput(command, text string, skipFilters bool) (strin
 	}
 
 	if !docLike {
-		if capped, ok := rtkTruncate(out, limits, rtkDefaultPriority); ok {
+		if capped, ok := rtkTruncate(out, limits, priority); ok {
 			out = capped
 			changed = true
 		}
@@ -151,7 +171,7 @@ func (e rtkEngine) compressOutput(command, text string, skipFilters bool) (strin
 	}
 	// A rewrite that saves less than the threshold is not worth destabilizing the
 	// prefix for.
-	if len(res) >= len(original)-len(original)*limits.minSavings/100 {
+	if limits.minSavings > 0 && len(res) >= len(original)-len(original)*limits.minSavings/100 {
 		return original, false
 	}
 	return res, true
@@ -240,7 +260,7 @@ func rtkTruncate(lines []string, limits rtkLimits, priority []*packRegex) ([]str
 func rtkTruncateByChars(lines []string, patterns []*packRegex, maxChars int) []string {
 	budget := maxChars - charLen(rtkTruncatedByChars)
 	if budget <= 0 {
-		return []string{"[rtk:truncated by chars]"}
+		return []string{headRunes(rtkTruncatedByChars, maxChars)}
 	}
 	type ranked struct {
 		re   *packRegex

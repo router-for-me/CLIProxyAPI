@@ -269,35 +269,9 @@ func TestEngineOptionOverrides(t *testing.T) {
 	}
 }
 
-func TestRTKIntensityLadder(t *testing.T) {
-	// A pair of identical lines: the upstream default threshold (3) keeps them,
-	// aggressive (2) collapses them.
-	text := "build start\nretrying\nretrying\n" +
-		strings.Join([]string{"a", "b", "c", "d", "e", "f", "g", "h"}, "\n") + "\nbuild done\n"
-
-	if out, ok := (rtkEngine{}).compress(text); ok {
-		t.Fatalf("default threshold must not collapse a run of 2:\n%s", out)
-	}
-	aggOut, okAgg := (rtkEngine{opts: StepOptions{Intensity: "aggressive"}}).compress(text)
-	if !okAgg {
-		t.Fatal("aggressive should collapse the run")
-	}
-	if !strings.Contains(aggOut, "retrying"+rtkRepeatMark+"2)") {
-		t.Fatalf("aggressive did not collapse:\n%s", aggOut)
-	}
-
-	// An explicit deduplicate-threshold override wins over the ladder, and the
-	// upstream default is 3.
-	thresh := rtkEngine{opts: StepOptions{Intensity: "minimal", DeduplicateThreshold: 2}}
-	threshOut, okThresh := thresh.compress(text)
-	if !okThresh || !strings.Contains(threshOut, "retrying"+rtkRepeatMark+"2)") {
-		t.Fatalf("deduplicate-threshold override ignored:\n%s", threshOut)
-	}
-}
-
 func TestRTKDefaultCapsMatchUpstream(t *testing.T) {
 	limits := rtkEngine{}.limits()
-	if limits.minRun != 3 || limits.maxLines != 120 || limits.maxChars != 12000 {
+	if limits.minRun != 3 || limits.maxLines != 180 || limits.maxChars != 12000 {
 		t.Fatalf("default limits = %+v", limits)
 	}
 	if limits.minSavings != 0 {
@@ -350,9 +324,20 @@ func TestRTKKeepsMiddleDiagnostics(t *testing.T) {
 	}
 }
 
+// lossyLite opts a lite engine into the lossy behavior the older tests pin:
+// truncating tool results and folding their whitespace.
+func lossyLite(maxToolLength int) liteEngine {
+	on, off := true, false
+	return liteEngine{opts: StepOptions{
+		MaxToolLength:          maxToolLength,
+		CompressToolResults:    &on,
+		PreserveToolWhitespace: &off,
+	}}
+}
+
 func TestLiteToolResultCap(t *testing.T) {
 	long := strings.Repeat("x", 2000)
-	engine := liteEngine{opts: StepOptions{MaxToolLength: 500}}
+	engine := lossyLite(500)
 	out, ok := engine.compressKind(kindToolOutput, long)
 	if !ok {
 		t.Fatal("expected truncation")
@@ -374,7 +359,7 @@ func TestLiteToolResultCap(t *testing.T) {
 // TestLiteToolResultCapCountsChars pins the cap to characters: 300 CJK
 // characters are 900 bytes but only 300 characters, so a 500 cap keeps them.
 func TestLiteToolResultCapCountsChars(t *testing.T) {
-	engine := liteEngine{opts: StepOptions{MaxToolLength: 500}}
+	engine := lossyLite(500)
 	if out, ok := engine.compressKind(kindToolOutput, strings.Repeat("漢", 300)); ok {
 		t.Fatalf("300 chars under a 500 char cap must not truncate, got %d bytes", len(out))
 	}
@@ -409,10 +394,12 @@ func TestDefaultKnobsMatchUpstream(t *testing.T) {
 		t.Fatalf("lite max-tool-length = %d", liteDefaultMaxToolLength)
 	}
 	var li liteEngine
-	if !li.keepToolResults() {
-		t.Fatal("lite compress-tool-results must default to true")
+	// Tool-result truncation is lossy, so this port keeps it opt-in even though
+	// upstream's engine defaults to enabled.
+	if li.keepToolResults() {
+		t.Fatal("lite compress-tool-results must default to off")
 	}
-	if limits := (rtkEngine{}).limits(); limits != (rtkLimits{minRun: 3, maxLines: 120, maxChars: 12000, preserveHead: 24, preserveTail: 24}) {
+	if limits := (rtkEngine{}).limits(); limits != (rtkLimits{minRun: 3, maxLines: 180, maxChars: 12000, preserveHead: 24, preserveTail: 24}) {
 		t.Fatalf("rtk defaults = %+v", limits)
 	}
 	if got := (cavemanEngine{}).pack("  "); got != "en" {
@@ -475,7 +462,7 @@ func TestLiteToolResultCapElidesLines(t *testing.T) {
 	}
 	in := b.String()
 	const limit = 1000
-	out, ok := liteEngine{opts: StepOptions{MaxToolLength: limit}}.compressKind(kindToolOutput, in)
+	out, ok := lossyLite(limit).compressKind(kindToolOutput, in)
 	if !ok {
 		t.Fatal("expected truncation")
 	}
@@ -521,7 +508,7 @@ func TestLiteTailFitsItsBudget(t *testing.T) {
 		lines[i] = label + strings.Repeat("x", 200-len(label))
 	}
 	in := strings.Join(lines, "\n")
-	out, ok := liteEngine{}.compressKind(kindToolOutput, in)
+	out, ok := lossyLite(0).compressKind(kindToolOutput, in)
 	if !ok {
 		t.Fatal("expected truncation")
 	}
@@ -549,7 +536,7 @@ func TestLiteTailDroppedWhenNoLineFits(t *testing.T) {
 				label := strconv.Itoa(i+1) + ":"
 				lines[i] = label + strings.Repeat("y", width-len(label))
 			}
-			out, ok := liteEngine{}.compressKind(kindToolOutput, strings.Join(lines, "\n"))
+			out, ok := lossyLite(0).compressKind(kindToolOutput, strings.Join(lines, "\n"))
 			if !ok {
 				t.Fatalf("%d x %d: expected truncation", count, width)
 			}

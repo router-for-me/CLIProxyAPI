@@ -81,8 +81,9 @@ func (e *dedupEngine) rewrite(texts []string, kinds []segmentKind, skips []bool)
 		}
 	}
 
-	// Pass 2: replace the longest block that a strictly earlier segment owns.
-	// Every block is a suffix, so the longest duplicate covers the shorter ones.
+	// Pass 2: replace the first occurrence of the longest block that a strictly
+	// earlier segment owns. Every block is a suffix, so the longest duplicate
+	// covers the shorter ones.
 	var repl map[int]string
 	for _, i := range idx {
 		if skipAt(skips, i) {
@@ -99,13 +100,14 @@ func (e *dedupEngine) rewrite(texts []string, kinds []segmentKind, skips []bool)
 				longest = b
 			}
 		}
-		if longest.text == "" || !strings.HasSuffix(text, longest.text) {
+		at := strings.Index(text, longest.text)
+		if longest.text == "" || at < 0 {
 			continue
 		}
 		if repl == nil {
 			repl = make(map[int]string, 1)
 		}
-		repl[i] = text[:len(text)-len(longest.text)] + dedupRefPrefix + longest.sha + "]"
+		repl[i] = text[:at] + dedupRefPrefix + longest.sha + "]" + text[at+len(longest.text):]
 	}
 	return repl
 }

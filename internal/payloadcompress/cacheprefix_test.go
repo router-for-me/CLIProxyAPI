@@ -24,6 +24,7 @@ const cachePrefixTestModel = "claude-sonnet-4"
 // mid-conversation changes the prefix once, which is a known discontinuity and
 // not what these tests measure.
 func cachePrefixTestConfig(cachePrefix string) Config {
+	on, off := true, false
 	return Config{
 		Enabled:      true,
 		MinBytes:     1,
@@ -33,7 +34,7 @@ func cachePrefixTestConfig(cachePrefix string) Config {
 			Name:   "standard",
 			Models: []string{"*"},
 			Pipeline: []Step{
-				{Engine: EngineLite},
+				{Engine: EngineLite, Options: StepOptions{CompressToolResults: &on, PreserveToolWhitespace: &off}},
 			},
 		}},
 	}
@@ -65,6 +66,12 @@ const testCacheMarker = `,"cache_control":{"type":"ephemeral"}`
 
 func textMessage(role, text string, mark bool) []byte {
 	b := append([]byte(`{"role":"`), role...)
+	if role == "tool" {
+		// Plain string content: upstream lite only collapses string content.
+		b = append(b, `","content":`...)
+		b = appendJSONString(b, text)
+		return append(b, '}')
+	}
 	b = append(b, `","content":[{"type":"text","text":`...)
 	b = appendJSONString(b, text)
 	if mark {

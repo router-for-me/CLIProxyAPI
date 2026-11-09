@@ -29,23 +29,56 @@ func (e liteEngine) compressKind(kind segmentKind, text string) (string, bool) {
 		// re-read the same file (see currentTurnStart).
 		return text, false
 	}
-	cleaned, changed := e.compress(text)
-	limit := e.opts.MaxToolLength
-	if limit <= 0 {
-		limit = liteDefaultMaxToolLength
+	cleaned, changed := text, false
+	// Upstream's safe default keeps tool-result layout intact.
+	preserveToolLayout := isToolKind(kind) && e.preserveToolWhitespace()
+	if !preserveToolLayout {
+		cleaned, changed = e.compress(text)
 	}
-	if kind == kindToolOutput && e.keepToolResults() && len(cleaned) > limit && charLen(cleaned) > limit {
-		return truncateToolText(cleaned, limit), true
-	}
-	return cleaned, changed
+	return e.truncateTool(kind, cleaned, changed)
 }
 
+// compressArray handles text from a content array. Upstream's collapseWhitespace
+// skips non-string content entirely, but compressToolResults still caps tool
+// blocks, so only the truncation pass runs here.
+func (e liteEngine) compressArray(kind segmentKind, text string) (string, bool) {
+	if kind == kindToolCurrent {
+		return text, false
+	}
+	return e.truncateTool(kind, text, false)
+}
+
+func (e liteEngine) truncateTool(kind segmentKind, text string, changed bool) (string, bool) {
+	limit := e.opts.MaxToolLength
+	if limit < 256 || limit > 1_000_000 {
+		limit = liteDefaultMaxToolLength
+	}
+	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit && charLen(text) > limit {
+		return truncateToolText(text, limit), true
+	}
+	return text, changed
+}
+
+// skipsArrayContent mirrors upstream collapseWhitespace, which returns early
+// for non-string content.
+func (liteEngine) skipsArrayContent() bool { return true }
+
+func isToolKind(kind segmentKind) bool {
+	return kind == kindToolOutput || kind == kindToolBlocks
+}
+
+// keepToolResults defaults to false: truncating tool output loses data the
+// model may need, so only an explicit opt-in enables it.
 func (e liteEngine) keepToolResults() bool {
-	return e.opts.CompressToolResults == nil || *e.opts.CompressToolResults
+	return e.opts.CompressToolResults != nil && *e.opts.CompressToolResults
+}
+
+func (e liteEngine) preserveToolWhitespace() bool {
+	return e.opts.PreserveToolWhitespace == nil || *e.opts.PreserveToolWhitespace
 }
 
 func (liteEngine) compress(text string) (string, bool) {
-	if len(text) < 128 || !liteNeedsWork(text) {
+	if !liteNeedsWork(text) {
 		return text, false
 	}
 	var b strings.Builder

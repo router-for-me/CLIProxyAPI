@@ -11,6 +11,8 @@ func liveConfig() Config {
 	cfg := testConfig(EngineLite)
 	cfg.CachePrefix = CachePrefixRewrite
 	cfg.LiveZone = LiveZoneConfig{Enabled: true}
+	on, off := true, false
+	cfg.Combos[0].Pipeline[0].Options = StepOptions{CompressToolResults: &on, PreserveToolWhitespace: &off}
 	return cfg
 }
 

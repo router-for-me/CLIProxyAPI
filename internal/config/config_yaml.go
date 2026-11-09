@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/payloadcompress"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1038,5 +1042,67 @@ func replacePluginConfigsSubtree(dstRoot, srcRoot *yaml.Node) {
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "configs"},
 			copiedConfigs,
 		)
+	}
+}
+
+// knownCompressionConfigKeys derives the accepted YAML keys from
+// payloadcompress.Config so unsupported upstream keys can be reported.
+func knownCompressionConfigKeys() map[string]struct{} {
+	keys := make(map[string]struct{})
+	t := reflect.TypeOf(payloadcompress.Config{})
+	for i := 0; i < t.NumField(); i++ {
+		tag := t.Field(i).Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		if name := strings.Split(tag, ",")[0]; name != "" {
+			keys[name] = struct{}{}
+		}
+	}
+	return keys
+}
+
+// unsupportedCompressionConfigKeys returns compression keys present in root
+// that payloadcompress.Config does not understand, e.g. OmniRoute-only
+// settings such as defaultMode or engines. Both canonical (compression) and
+// legacy (requests.compression) layouts are inspected.
+func unsupportedCompressionConfigKeys(root *yaml.Node) []string {
+	if root == nil {
+		return nil
+	}
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		root = root.Content[0]
+	}
+	node := yamlPath(root, "compression")
+	if node == nil {
+		node = yamlPath(root, "requests.compression")
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	known := knownCompressionConfigKeys()
+	unsupported := make([]string, 0)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		// YAML merge keys and extension keys are not compression settings.
+		if key == "<<" || strings.HasPrefix(key, "x-") {
+			continue
+		}
+		if _, ok := known[key]; !ok {
+			unsupported = append(unsupported, key)
+		}
+	}
+	sort.Strings(unsupported)
+	return unsupported
+}
+
+// warnUnsupportedCompressionConfigKeys logs one warning per unsupported
+// compression key. Config loading stays non-fatal: the keys are simply ignored.
+func warnUnsupportedCompressionConfigKeys(root *yaml.Node) {
+	for _, key := range unsupportedCompressionConfigKeys(root) {
+		log.WithFields(log.Fields{
+			"component": "compression",
+			"key":       key,
+		}).Warn("ignoring unsupported compression config key")
 	}
 }

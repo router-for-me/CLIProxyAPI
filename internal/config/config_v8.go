@@ -276,6 +276,7 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	warnUnsupportedCompressionConfigKeys(root)
 	decoded := legacyConfig(*cfg)
 	if err = root.Decode(&decoded); err != nil {
 		return err

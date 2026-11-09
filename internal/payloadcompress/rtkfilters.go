@@ -1,9 +1,14 @@
 package payloadcompress
 
 import (
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
+	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -84,18 +89,20 @@ type rtkFilterPack struct {
 
 // rtkFilter is a compiled pack.
 type rtkFilter struct {
-	id       string
-	priority int
-	types    []string
-	commands []*packRegex
-	match    []*packRegex
-	keep     []*packRegex
-	drop     []*packRegex
-	collapse []*packRegex
-	rescue   []*packRegex
-	replace  []rtkCompiledReplace
-	emit     []rtkCompiledEmit
-	tests    []rtkFilterTest
+	id         string
+	priority   int
+	sourceRank int
+	formatRank int
+	types      []string
+	commands   []*packRegex
+	match      []*packRegex
+	keep       []*packRegex
+	drop       []*packRegex
+	collapse   []*packRegex
+	rescue     []*packRegex
+	replace    []rtkCompiledReplace
+	emit       []rtkCompiledEmit
+	tests      []rtkFilterTest
 
 	stripAnsi      bool
 	truncateLineAt int
@@ -124,6 +131,10 @@ var (
 	// rtkFilterCommands maps a filter type to the command lines it claims,
 	// compiled from each pack's match.commands.
 	rtkFilterCommands map[string][]*packRegex
+	// rtkDetectorCommands holds the detectors that carry their own command
+	// patterns. Upstream uses these instead of the pack's match.commands; they
+	// differ where a pack claims a broader command family than its detector.
+	rtkDetectorCommands map[string][]*packRegex
 )
 
 // compileRTKCommands compiles a pack's command patterns. Upstream matches them
@@ -149,6 +160,8 @@ func compileRTKFilter(pack rtkFilterPack) *rtkFilter {
 	f := &rtkFilter{
 		id:             pack.ID,
 		priority:       pack.Priority,
+		sourceRank:     1,
+		formatRank:     1,
 		types:          pack.Match.OutputTypes,
 		commands:       compileRTKCommands(pack.ID, pack.Match.Commands),
 		match:          compileRTKPatterns(pack.ID, "match", pack.Match.Patterns),
@@ -164,6 +177,14 @@ func compileRTKFilter(pack rtkFilterPack) *rtkFilter {
 		tailLines:      pack.Rules.TailLines,
 		onEmpty:        pack.Rules.OnEmpty,
 		tests:          pack.Tests,
+	}
+	// Upstream's schema defaults headLines/tailLines to 20 when a custom pack
+	// omits them; a zero here would drop the entire head and tail.
+	if f.headLines == 0 {
+		f.headLines = 20
+	}
+	if f.tailLines == 0 {
+		f.tailLines = 20
 	}
 	for _, rule := range pack.Rules.Replace {
 		re, err := compilePackRegex(rule.Pattern)
@@ -223,6 +244,7 @@ func loadRTKFilters() []*rtkFilter {
 			}
 			rtkFilterList = append(rtkFilterList, compileRTKFilter(pack))
 		}
+		rtkFilterList = append(rtkFilterList, loadCustomRTKFilters()...)
 		rtkFilterCommands = make(map[string][]*packRegex, len(rtkFilterList))
 		for _, filter := range rtkFilterList {
 			for _, typ := range filter.types {
@@ -232,7 +254,19 @@ func loadRTKFilters() []*rtkFilter {
 				rtkFilterCommands[typ] = append(rtkFilterCommands[typ], filter.commands...)
 			}
 		}
+		rtkDetectorCommands = make(map[string][]*packRegex)
+		for _, detector := range rtkDetectors {
+			if len(detector.commands) > 0 {
+				rtkDetectorCommands[detector.typ] = compileRTKCommands(detector.typ, detector.commands)
+			}
+		}
 		sort.SliceStable(rtkFilterList, func(i, j int) bool {
+			if rtkFilterList[i].sourceRank != rtkFilterList[j].sourceRank {
+				return rtkFilterList[i].sourceRank > rtkFilterList[j].sourceRank
+			}
+			if rtkFilterList[i].formatRank != rtkFilterList[j].formatRank {
+				return rtkFilterList[i].formatRank > rtkFilterList[j].formatRank
+			}
 			if rtkFilterList[i].priority != rtkFilterList[j].priority {
 				return rtkFilterList[i].priority > rtkFilterList[j].priority
 			}
@@ -240,6 +274,108 @@ func loadRTKFilters() []*rtkFilter {
 		})
 	})
 	return rtkFilterList
+}
+
+// rtkFilterSource is a custom pack file and its upstream precedence. Explicit
+// sources (project, global) outrank the bundled packs; project outranks global.
+type rtkFilterSource struct {
+	path       string
+	sourceRank int
+	formatRank int
+}
+
+// customRTKFilterSources mirrors upstream collectFilterSources: project packs
+// under .rtk/ (only when trusted), then global packs under the data dir. TOML
+// packs have no loader here; their JSON counterpart is read at the same paths.
+func customRTKFilterSources() []rtkFilterSource {
+	var out []rtkFilterSource
+	if wd, err := os.Getwd(); err == nil {
+		path := filepath.Join(wd, ".rtk", "filters.json")
+		if data, err := os.ReadFile(path); err == nil {
+			if trustedProjectFilters(path, data) {
+				out = append(out, rtkFilterSource{path: path, sourceRank: 3, formatRank: 1})
+			} else {
+				log.Warnf("payloadcompress: rtk: project filters not trusted, skipping %s", path)
+			}
+		}
+	}
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dataDir = filepath.Join(home, ".omniroute")
+		}
+	}
+	if dataDir != "" {
+		path := filepath.Join(dataDir, "rtk", "filters.json")
+		if _, err := os.Stat(path); err == nil {
+			out = append(out, rtkFilterSource{path: path, sourceRank: 2, formatRank: 1})
+		}
+	}
+	return out
+}
+
+// trustedProjectFilters matches upstream: an explicit opt-in trusts project
+// packs; otherwise trust.json must pin the file's SHA-256.
+func trustedProjectFilters(path string, data []byte) bool {
+	if os.Getenv("OMNIROUTE_RTK_TRUST_PROJECT_FILTERS") == "1" {
+		return true
+	}
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), "trust.json"))
+	if err != nil {
+		return false
+	}
+	var trust map[string]any
+	if err := json.Unmarshal(raw, &trust); err != nil {
+		return false
+	}
+	sum := fmt.Sprintf("%x", sha256.Sum256(data))
+	for _, key := range []string{"filtersSha256", "trustedFiltersSha256"} {
+		if value, ok := trust[key].(string); ok && value == sum {
+			return true
+		}
+	}
+	return false
+}
+
+// loadCustomRTKFilters loads and validates explicit pack files. A file may hold
+// one pack or an array; packs without an id are rejected like upstream's schema.
+func loadCustomRTKFilters() []*rtkFilter {
+	var out []*rtkFilter
+	for _, source := range customRTKFilterSources() {
+		data, err := os.ReadFile(source.path)
+		if err != nil {
+			log.Warnf("payloadcompress: rtk: read %s: %v", source.path, err)
+			continue
+		}
+		packs, err := parseRTKFilterPacks(data)
+		if err != nil {
+			log.Warnf("payloadcompress: rtk: invalid custom filter %s: %v", source.path, err)
+			continue
+		}
+		for _, pack := range packs {
+			if strings.TrimSpace(pack.ID) == "" {
+				log.Warnf("payloadcompress: rtk: custom filter in %s has no id, skipping", source.path)
+				continue
+			}
+			filter := compileRTKFilter(pack)
+			filter.sourceRank = source.sourceRank
+			filter.formatRank = source.formatRank
+			out = append(out, filter)
+		}
+	}
+	return out
+}
+
+func parseRTKFilterPacks(data []byte) ([]rtkFilterPack, error) {
+	var packs []rtkFilterPack
+	if err := json.Unmarshal(data, &packs); err == nil {
+		return packs, nil
+	}
+	var one rtkFilterPack
+	if err := json.Unmarshal(data, &one); err != nil {
+		return nil, err
+	}
+	return []rtkFilterPack{one}, nil
 }
 
 // rtkGenericErrorMarkers matches the three lines generic-output keys on. A tool
@@ -279,7 +415,14 @@ func detectRTKTypeFromCommand(command string) string {
 		return ""
 	}
 	for _, detector := range rtkDetectors {
-		for _, re := range rtkFilterCommands[detector.typ] {
+		// A detector's own command patterns win over its pack's broader
+		// match.commands. Upstream does the same: the shell-ls pack claims
+		// "find", but its detector only claims "ls", so find stays shell-find.
+		patterns := rtkDetectorCommands[detector.typ]
+		if len(patterns) == 0 {
+			patterns = rtkFilterCommands[detector.typ]
+		}
+		for _, re := range patterns {
 			if re.match(command) {
 				return detector.typ
 			}
@@ -312,20 +455,39 @@ func (f *rtkFilter) matchesText(text string) bool {
 // with no distinctive markers ever reaches its filter.
 func selectRTKFilter(text, command string) *rtkFilter {
 	typ := detectRTKOutputType(text, command)
-	if typ == "unknown" && !rtkGenericErrorMarkers.MatchString(text) {
+	// Upstream's isDocumentLikeRead gate: only an untyped output with no command
+	// is a plain file read; with a command the output is still machine-produced.
+	if typ == "unknown" && command == "" && !rtkGenericErrorMarkers.MatchString(text) {
 		// A plain file or document read: no filter, or the truncating fallback
 		// would cut a source file in half.
 		return nil
 	}
 	filters := loadRTKFilters()
-	for _, f := range filters {
-		if f.hasType(typ) {
-			return f
+	// Upstream's cascade is per source: project beats global beats builtin, and a
+	// project pattern must win over a builtin type.
+	for _, rank := range []int{3, 2, 1} {
+		var scoped []*rtkFilter
+		for _, f := range filters {
+			if f.sourceRank == rank {
+				scoped = append(scoped, f)
+			}
 		}
-	}
-	for _, f := range filters {
-		if f.matchesText(text) {
-			return f
+		if typ != "unknown" {
+			for _, f := range scoped {
+				if f.hasType(typ) {
+					return f
+				}
+			}
+		}
+		for _, f := range scoped {
+			if f.matchesCommand(command) {
+				return f
+			}
+		}
+		for _, f := range scoped {
+			if f.matchesText(text) {
+				return f
+			}
 		}
 	}
 	for _, f := range filters {
@@ -334,6 +496,18 @@ func selectRTKFilter(text, command string) *rtkFilter {
 		}
 	}
 	return nil
+}
+
+func (f *rtkFilter) matchesCommand(command string) bool {
+	if command == "" {
+		return false
+	}
+	for _, re := range f.commands {
+		if re.match(command) {
+			return true
+		}
+	}
+	return false
 }
 
 // rtkAnsiEscape is the SGR/CSI sequence stripper ported from upstream.
@@ -356,6 +530,10 @@ func truncateRTKLine(line string, n int) string {
 // changed. The stage order is upstream's lineFilter: strip ansi, replace, emit,
 // drop, keep, collapse, cut long lines, deduplicate, then head/tail truncation.
 func (f *rtkFilter) apply(text string) (string, bool) {
+	return f.applyWithIntensity(text, "")
+}
+
+func (f *rtkFilter) applyWithIntensity(text, intensity string) (string, bool) {
 	lines := strings.Split(text, "\n")
 
 	if f.stripAnsi {
@@ -422,11 +600,17 @@ func (f *rtkFilter) apply(text string) (string, bool) {
 		lines, _ = rtkCollapseRepeats(lines)
 	}
 
+	// A filter's own line budget scales with intensity, exactly like the global
+	// one; the char cap does not. Severity lines are rescued first, then the
+	// pack's preserve patterns.
+	priority := make([]*packRegex, 0, len(f.rescue)+len(rtkDefaultPriority))
+	priority = append(priority, rtkDefaultPriority...)
+	priority = append(priority, f.rescue...)
 	if capped, ok := rtkTruncate(lines, rtkLimits{
-		maxLines:     f.maxLines,
+		maxLines:     scaleRTKMaxLines(f.maxLines, intensity),
 		preserveHead: f.headLines,
 		preserveTail: f.tailLines,
-	}, f.rescue); ok {
+	}, priority); ok {
 		lines = capped
 	}
 
@@ -472,17 +656,43 @@ func rtkCollapseRepeats(lines []string) ([]string, bool) {
 // applyRTKFilters is the engine entry point: select a pack by the command that
 // produced the output, then by content, and apply it, or return the text
 // untouched.
-func applyRTKFilters(text, command string) (string, bool) {
+func applyRTKFilters(text, command string, intensity ...string) (string, bool, []*packRegex) {
 	filter := selectRTKFilter(text, command)
 	if filter == nil {
-		return text, false
+		return text, false, nil
 	}
-	return filter.apply(text)
+	level := ""
+	if len(intensity) > 0 {
+		level = intensity[0]
+	}
+	out, ok := filter.applyWithIntensity(text, level)
+	return out, ok, filter.rescue
+}
+
+// scaleRTKMaxLines is upstream effectiveMaxLines: only the line budget scales,
+// and an unset intensity means the upstream default (minimal).
+func scaleRTKMaxLines(base int, intensity string) int {
+	if base <= 0 {
+		return 0
+	}
+	factor := 1.5
+	switch intensity {
+	case "aggressive":
+		factor = 0.5
+	case "standard":
+		factor = 1.0
+	}
+	scaled := int(math.Round(float64(base) * factor))
+	if scaled < 1 {
+		scaled = 1
+	}
+	return scaled
 }
 
 // rtkDetector is the content half of upstream's command detector.
 type rtkDetector struct {
 	typ      string
+	commands []string
 	patterns []string
 }
 
@@ -531,7 +741,7 @@ var rtkDetectors = []rtkDetector{
 	{typ: "curl", patterns: []string{`curl: \(\d+\)`, `(?m)^HTTP\/\d(?:\.\d)? \d{3}`}},
 	{typ: "wget", patterns: []string{`(?m)^--\d{4}-\d{2}-\d{2}`, `(?m)^ERROR \d{3}:`}},
 	{typ: "json-output", patterns: []string{`^\s*[\[{][\s\S]*[\]}]\s*$`}},
-	{typ: "shell-ls", patterns: []string{`(?m)^total \d+`, `(?m)^\S+\s+\S+\s+\d+\s+\w+\s+\d{1,2}\s+`}},
+	{typ: "shell-ls", commands: []string{`^ls(?:\s+-[A-Za-z]+)?\b`}, patterns: []string{`(?m)^total \d+`, `(?m)^\S+\s+\S+\s+\d+\s+\w+\s+\d{1,2}\s+`}},
 	{typ: "shell-find", patterns: []string{`(?m)^(?:\.{1,2}|\/|[\w.-]+\/).+`}},
 	{typ: "shell-grep", patterns: []string{`(?m)^[\w./-]+\.(?:ts|tsx|js|jsx|py|go|rs|java|rb|md|json|ya?ml|txt):\d*:`, `(?m)^[\w./-]+\/[\w./-]+:\d*:`}},
 	{typ: "shell-ps", patterns: []string{`(?m)^(?:USER\s+PID|\s*PID\s+)`}},
