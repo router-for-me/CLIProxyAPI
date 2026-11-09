@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const catalogLoadingModel = "catalog-loading-test-model-not-registered"
@@ -56,5 +57,32 @@ func TestCatalogLoadingFlagClearedKeepsUnknownModelAs400(t *testing.T) {
 	}
 	if !strings.Contains(errMsg.Error.Error(), "unknown provider for model") {
 		t.Fatalf("message = %q, want the unknown-provider text", errMsg.Error.Error())
+	}
+}
+
+func TestCatalogLoadingPublicationBetweenLookupAndRejection(t *testing.T) {
+	for _, suffix := range []string{"", "(8192)"} {
+		t.Run(suffix, func(t *testing.T) {
+			registry.SetCatalogLoading(true)
+			defer registry.SetCatalogLoading(false)
+			reg := registry.GetGlobalRegistry()
+			clientID := "catalog-publication-boundary" + suffix
+			defer reg.UnregisterClient(clientID)
+			h := &BaseAPIHandler{}
+			_, _, errMsg := h.getRequestDetailsWithProviderLookup(catalogLoadingModel+suffix, false, false, func(string) []string {
+				// The lookup saw no model, then the last startup publication
+				// completed before this request chose its rejection status.
+				reg.RegisterClient(clientID, "gemini", []*registry.ModelInfo{{ID: catalogLoadingModel}})
+				registry.SetCatalogLoading(false)
+				return nil
+			})
+			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("startup lookup must remain retryable, got %v", errMsg)
+			}
+			providers, _, retryErr := h.getRequestDetailsWithProviderLookup(catalogLoadingModel+suffix, false, false, util.GetProviderName)
+			if retryErr != nil || len(providers) != 1 || providers[0] != "gemini" {
+				t.Fatalf("published model not routable on retry: providers=%v error=%v", providers, retryErr)
+			}
+		})
 	}
 }

@@ -2,11 +2,17 @@ package cliproxy
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // Negative readiness assertions call the exact production predicate. They cannot
@@ -148,5 +154,83 @@ func TestCatalogLoadingAcknowledgesCoalescedUpdates(t *testing.T) {
 	service.handleAuthUpdates(context.Background(), received)
 	if got := w.PendingAuthUpdates(); got != 0 {
 		t.Fatalf("pending after coalesced publication=%d, want 0", got)
+	}
+}
+
+func TestCatalogLoadingWaitsForInitialNativePublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resetAntigravityCapabilityCache()
+		defer resetAntigravityCapabilityCache()
+		service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
+		auth, err := service.coreManager.Register(t.Context(), antigravityTestAuth("catalog-loading-native", "https://catalog.invalid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg := GlobalModelRegistry()
+		defer reg.UnregisterClient(auth.ID)
+		started, release := make(chan struct{}, 1), make(chan struct{})
+		transport := http.DefaultTransport
+		http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-release:
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":{"gemini-3.1-flash-lite":{}}}`)), Request: req}, nil
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			}
+		})
+		defer func() { http.DefaultTransport = transport }()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer func() { cancel(); service.WaitAntigravityProbes(); synctest.Wait() }()
+		service.completeModelRegistrationForAuth(ctx, auth)
+		synctest.Wait()
+		select {
+		case <-started:
+		default:
+			t.Fatal("initial native probe did not start")
+		}
+		if reg.ClientSupportsModel(auth.ID, "gemini-3.1-flash-lite") {
+			t.Fatal("model published before probe response")
+		}
+		if service.catalogUpdatesApplied(&WatcherWrapper{}) {
+			t.Fatal("catalog ready while initial native publication is pending")
+		}
+		close(release)
+		service.WaitAntigravityProbes()
+		if !reg.ClientSupportsModel(auth.ID, "gemini-3.1-flash-lite") {
+			t.Fatal("probe finished without publishing the native model")
+		}
+		if !service.catalogUpdatesApplied(&WatcherWrapper{}) {
+			t.Fatal("catalog not ready after native publication")
+		}
+	})
+}
+
+func TestFinishCatalogLoadingCeilingWhileProbeMutexHeld(t *testing.T) {
+	service := &Service{}
+	service.antigravityProbeMu.Lock()
+	defer service.antigravityProbeMu.Unlock()
+	runCatalogSignals(t, service, &WatcherWrapper{}, false)
+}
+
+func TestCatalogLoadingWaitsForQueuedAndRunningNativeProbes(t *testing.T) {
+	service := &Service{antigravityRefreshPending: map[string]*antigravityModelRefreshRequest{
+		"queued":  {},
+		"running": nil,
+	}}
+	wrapper := &WatcherWrapper{}
+	if service.catalogUpdatesApplied(wrapper) {
+		t.Fatal("ready with queued native discovery")
+	}
+	delete(service.antigravityRefreshPending, "queued")
+	if service.catalogUpdatesApplied(wrapper) {
+		t.Fatal("ready with native publication in flight")
+	}
+	delete(service.antigravityRefreshPending, "running")
+	if !service.catalogUpdatesApplied(wrapper) {
+		t.Fatal("not ready after native discovery completed")
 	}
 }

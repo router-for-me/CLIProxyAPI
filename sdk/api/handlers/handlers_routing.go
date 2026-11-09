@@ -164,6 +164,10 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 }
 
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsWithProviderLookup(modelName, allowImageModel, allowSpeechModel, util.GetProviderName)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithProviderLookup(modelName string, allowImageModel, allowSpeechModel bool, lookup func(string) []string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -199,20 +203,23 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
+	// Capture readiness before the registry lookup. Publication may finish
+	// after an empty lookup, but that request must still receive a retryable error.
+	catalogLoading := registry.CatalogLoading()
+	providers = lookup(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
 	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		providers = lookup(resolvedModelName)
 	}
 
 	if len(providers) == 0 {
 		// Before the first full client load the registry may not list the model yet.
 		// Ask the client to retry rather than reject a model that will be served.
-		if registry.CatalogLoading() {
+		if catalogLoading {
 			return nil, "", catalogLoadingRejection()
 		}
 		// The client asked for a model this proxy cannot route. Report it as a request

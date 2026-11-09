@@ -455,9 +455,10 @@ var catalogLoadingCeiling = 30 * time.Second
 
 // finishCatalogLoading clears the catalog-loading flag once the first full load
 // has been applied: the watcher has received service acknowledgements for its
-// dispatched updates, both queues are empty, and no batch is being handled. Start returns before that, because the
-// watcher hands updates to the service asynchronously and the service registers
-// models in consumeAuthUpdates. The ceiling covers custom watchers.
+// dispatched updates, both queues are empty, no batch is being handled, and
+// native catalog discovery has finished publishing. Start returns before that,
+// because watcher updates and native probes publish asynchronously. The ceiling
+// also covers custom watchers and stalled discovery.
 func (s *Service) finishCatalogLoading(ctx context.Context, w *WatcherWrapper) {
 	ceiling := time.NewTimer(catalogLoadingCeiling)
 	defer ceiling.Stop()
@@ -489,7 +490,14 @@ func (s *Service) catalogUpdatesApplied(w *WatcherWrapper) bool {
 		return false
 	}
 	defer s.authUpdateMu.Unlock()
-	return s.authUpdatesIdle(w)
+	// The refresh map retains an entry while a native probe is queued or
+	// publishing, even when its queued successor is nil. Auth acknowledgement
+	// alone does not mean a cold native catalog has been published.
+	if !s.antigravityProbeMu.TryLock() {
+		return false
+	}
+	defer s.antigravityProbeMu.Unlock()
+	return s.authUpdatesIdle(w) && len(s.antigravityRefreshPending) == 0
 }
 
 func (s *Service) authUpdatesIdle(w *WatcherWrapper) bool {
