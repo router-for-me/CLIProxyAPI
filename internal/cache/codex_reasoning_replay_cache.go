@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -88,7 +87,7 @@ func CacheCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, se
 			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errClient)
 			return false
 		}
-		raw, errMarshal := json.Marshal(normalized)
+		raw, errMarshal := marshalReasoningReplayRawJSONArray(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errMarshal)
 			return false
@@ -146,13 +145,15 @@ func AppendCodexReasoningReplayItemsBestEffort(ctx context.Context, modelName, s
 			}
 			var existing [][]byte
 			if found {
-				if errUnmarshal := json.Unmarshal(existingRaw, &existing); errUnmarshal != nil {
-					log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errUnmarshal)
+				var errUnmarshal error
+				existing, errUnmarshal = unmarshalReasoningReplayRawJSONArray(existingRaw)
+				if errUnmarshal != nil {
+					log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:* (please upgrade CLIProxyAPI): %v", errUnmarshal)
 					return false
 				}
 			}
 			combined := appendCodexReasoningReplayTurn(existing, normalized)
-			raw, errMarshal := json.Marshal(combined)
+			raw, errMarshal := marshalReasoningReplayRawJSONArray(combined)
 			if errMarshal != nil {
 				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errMarshal)
 				return false
@@ -267,8 +268,9 @@ func GetCodexReasoningReplayItemsRequired(ctx context.Context, modelName, sessio
 		if errGet != nil || !found {
 			return nil, false, errGet
 		}
-		var homeItems [][]byte
-		if errUnmarshal := json.Unmarshal(raw, &homeItems); errUnmarshal != nil {
+		homeItems, errUnmarshal := unmarshalReasoningReplayRawJSONArray(raw)
+		if errUnmarshal != nil {
+			log.Warnf("codex reasoning replay KV decode failed (please upgrade CLIProxyAPI): %v", errUnmarshal)
 			return nil, false, errUnmarshal
 		}
 		if _, errExpire := client.KVExpire(ctx, codexReasoningReplayKVKey(modelName, sessionKey), CodexReasoningReplayCacheTTL); errExpire != nil {
