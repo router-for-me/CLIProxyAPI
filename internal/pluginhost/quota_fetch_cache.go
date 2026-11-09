@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	"hash"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,10 +25,9 @@ const quotaFetchCacheTTL = 5 * time.Second
 // Concurrent identical requests share one in-flight call, and successful results are
 // reused until they expire. Errors are never cached. The zero value is ready to use.
 type quotaFetchCache struct {
-	mu         sync.Mutex
-	entries    map[string]quotaFetchCacheEntry
-	inflight   map[string]*quotaFetchCall
-	generation uint64
+	mu       sync.Mutex
+	entries  map[string]quotaFetchCacheEntry
+	inflight map[string]*quotaFetchCall
 	// nowFunc, set by tests, overrides the wall clock.
 	nowFunc func() time.Time
 }
@@ -39,13 +40,12 @@ type quotaFetchCacheEntry struct {
 // quotaFetchCall is one shared upstream fetch. Its context is canceled once every waiter
 // has left, so an abandoned provider call never outlives all of its callers.
 type quotaFetchCall struct {
-	done       chan struct{}
-	cancel     context.CancelFunc
-	waiters    int
-	generation uint64
-	resp       pluginapi.QuotaFetchResponse
-	handled    bool
-	err        error
+	done    chan struct{}
+	cancel  context.CancelFunc
+	waiters int
+	resp    pluginapi.QuotaFetchResponse
+	handled bool
+	err     error
 }
 
 func (c *quotaFetchCache) now() time.Time {
@@ -77,7 +77,7 @@ func (c *quotaFetchCache) fetch(ctx context.Context, key string, load func(conte
 	if call == nil {
 		// Detach from this caller's cancellation; the call is canceled when its last waiter leaves.
 		callCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-		call = &quotaFetchCall{done: make(chan struct{}), cancel: cancel, generation: c.generation}
+		call = &quotaFetchCall{done: make(chan struct{}), cancel: cancel}
 		if c.inflight == nil {
 			c.inflight = make(map[string]*quotaFetchCall)
 		}
@@ -122,11 +122,15 @@ func (c *quotaFetchCache) run(ctx context.Context, key string, call *quotaFetchC
 
 func (c *quotaFetchCache) finish(key string, call *quotaFetchCall) {
 	c.mu.Lock()
-	if c.inflight[key] == call {
+	// A call stays in the in-flight map only while it is the current call for its key. Calls
+	// abandoned by all waiters or detached by an invalidation were already removed, so their
+	// results are never published and cannot overwrite a newer entry.
+	current := c.inflight[key] == call
+	if current {
 		delete(c.inflight, key)
 	}
-	// Only successful results are cached, and never from calls started before an invalidation.
-	if call.err == nil && call.handled && call.generation == c.generation {
+	// Only successful results from the current call are cached.
+	if current && call.err == nil && call.handled {
 		if c.entries == nil {
 			c.entries = make(map[string]quotaFetchCacheEntry)
 		}
@@ -140,7 +144,6 @@ func (c *quotaFetchCache) finish(key string, call *quotaFetchCall) {
 // invalidate drops all cached results and detaches in-flight fetches from future callers.
 func (c *quotaFetchCache) invalidate() {
 	c.mu.Lock()
-	c.generation++
 	c.entries = nil
 	c.inflight = nil
 	c.mu.Unlock()
@@ -163,13 +166,11 @@ func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest
 	if strings.TrimSpace(req.AuthIndex) == "" && strings.TrimSpace(req.AuthID) == "" {
 		return ""
 	}
-	metadataJSON, errMarshal := json.Marshal(req.Metadata)
-	if errMarshal != nil {
-		return ""
-	}
 	digest := sha256.New()
 	writeDigestField(digest, req.StorageJSON)
-	writeDigestField(digest, metadataJSON)
+	if !writeDigestValue(digest, req.Metadata) {
+		return ""
+	}
 	attributeKeys := make([]string, 0, len(req.Attributes))
 	for key := range req.Attributes {
 		attributeKeys = append(attributeKeys, key)
@@ -181,6 +182,7 @@ func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest
 	}
 	return strings.Join([]string{
 		record.id,
+		record.path,
 		record.version,
 		normalizeProviderID(req.Provider),
 		req.AuthIndex,
@@ -190,9 +192,55 @@ func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest
 }
 
 // writeDigestField length-prefixes each field so adjacent fields cannot be confused.
-func writeDigestField(digest interface{ Write([]byte) (int, error) }, field []byte) {
-	_, _ = fmt.Fprintf(digest, "%d:", len(field))
+func writeDigestField(digest hash.Hash, field []byte) {
+	_, _ = digest.Write(strconv.AppendInt(nil, int64(len(field)), 10))
+	_, _ = digest.Write([]byte{':'})
 	_, _ = digest.Write(field)
+}
+
+// writeDigestValue feeds a decoded metadata value into digest deterministically, with a type tag
+// per value and map keys in sorted order. It deliberately avoids JSON serialization so the key is
+// stable regardless of encoder behaviour. It reports false for value types it cannot represent
+// unambiguously; the caller then skips debouncing rather than risk two credentials sharing a key.
+func writeDigestValue(digest hash.Hash, value any) bool {
+	switch v := value.(type) {
+	case nil:
+		writeDigestField(digest, []byte("n"))
+	case bool:
+		writeDigestField(digest, []byte("b"+strconv.FormatBool(v)))
+	case string:
+		writeDigestField(digest, []byte("s"))
+		writeDigestField(digest, []byte(v))
+	case float64:
+		writeDigestField(digest, []byte("f"+strconv.FormatUint(math.Float64bits(v), 16)))
+	case int:
+		writeDigestField(digest, []byte("i"+strconv.FormatInt(int64(v), 10)))
+	case int64:
+		writeDigestField(digest, []byte("i"+strconv.FormatInt(v, 10)))
+	case []any:
+		writeDigestField(digest, []byte("a"+strconv.Itoa(len(v))))
+		for _, item := range v {
+			if !writeDigestValue(digest, item) {
+				return false
+			}
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		writeDigestField(digest, []byte("m"+strconv.Itoa(len(keys))))
+		for _, key := range keys {
+			writeDigestField(digest, []byte(key))
+			if !writeDigestValue(digest, v[key]) {
+				return false
+			}
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // cloneQuotaFetchResponse deep-copies a response so callers cannot mutate shared cached data.

@@ -407,3 +407,88 @@ func TestQuotaFetchDebounce_DifferentCredentialPayloadsDoNotShare(t *testing.T) 
 		t.Fatalf("expected identical request to be served from cache, got %d calls", got)
 	}
 }
+
+func TestQuotaFetchDebounce_AbandonedCallDoesNotOverwriteNewerResult(t *testing.T) {
+	var calls atomic.Int32
+	staleStarted := make(chan struct{})
+	releaseStale := make(chan struct{})
+	provider := &testQuotaProvider{
+		identifier: "quota-test",
+		fetchFn: func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			if calls.Add(1) == 1 {
+				close(staleStarted)
+				// Simulate an upstream response that wins the race against cancellation.
+				<-releaseStale
+				return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "stale"}}, nil
+			}
+			return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "fresh"}}, nil
+		},
+	}
+	host, _ := newQuotaDebounceHost(t, provider)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelled := make(chan error, 1)
+	go func() {
+		_, _, errFetch := host.FetchQuota(cancelCtx, pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"})
+		cancelled <- errFetch
+	}()
+	// Wait for the provider itself to be running, not just for the waiter to register, so the
+	// replacement fetch below cannot reach the provider first.
+	<-staleStarted
+	host.quotaFetches.mu.Lock()
+	var staleCall *quotaFetchCall
+	for _, call := range host.quotaFetches.inflight {
+		staleCall = call
+	}
+	host.quotaFetches.mu.Unlock()
+	cancel()
+	<-cancelled
+
+	if got := fetchQuotaForTest(t, host, "auth-1"); got.Subscription.Plan != "fresh" {
+		t.Fatalf("expected replacement call result, got %+v", got.Subscription)
+	}
+	close(releaseStale)
+	<-staleCall.done
+
+	if got := fetchQuotaForTest(t, host, "auth-1"); got.Subscription.Plan != "fresh" {
+		t.Fatalf("abandoned call overwrote newer cached result: %+v", got.Subscription)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 upstream fetches, got %d", got)
+	}
+}
+
+func TestQuotaFetchCacheKey_IncludesPluginPath(t *testing.T) {
+	req := pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"}
+	oldKey := quotaFetchCacheKey(capabilityRecord{id: "quota-plugin", path: "/plugins/old/quota.so", version: "1.0.0"}, req)
+	newKey := quotaFetchCacheKey(capabilityRecord{id: "quota-plugin", path: "/plugins/new/quota.so", version: "1.0.0"}, req)
+	if oldKey == "" || oldKey == newKey {
+		t.Fatalf("expected distinct keys for plugins replaced at a different path, got %q and %q", oldKey, newKey)
+	}
+}
+
+func TestQuotaFetchCacheKey_MetadataDigest(t *testing.T) {
+	record := capabilityRecord{id: "quota-plugin", path: "test/quota-plugin", version: "1.0.0"}
+	key := func(metadata map[string]any) string {
+		return quotaFetchCacheKey(record, pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1", Metadata: metadata})
+	}
+
+	base := key(map[string]any{"email": "a@example.com", "nested": map[string]any{"x": 1.0, "y": []any{"p", true, nil}}})
+	same := key(map[string]any{"nested": map[string]any{"y": []any{"p", true, nil}, "x": 1.0}, "email": "a@example.com"})
+	if base == "" || base != same {
+		t.Fatalf("expected equal metadata to produce a stable key, got %q and %q", base, same)
+	}
+	for name, metadata := range map[string]map[string]any{
+		"different value":      {"email": "b@example.com", "nested": map[string]any{"x": 1.0, "y": []any{"p", true, nil}}},
+		"different type":       {"email": "a@example.com", "nested": map[string]any{"x": "1", "y": []any{"p", true, nil}}},
+		"string vs bool":       {"email": "a@example.com", "nested": map[string]any{"x": 1.0, "y": []any{"p", "true", nil}}},
+		"value moved into key": {"email": "a@example.com", "nested": map[string]any{"x": 1.0, "y": []any{"p", true}}},
+	} {
+		if got := key(metadata); got == base {
+			t.Fatalf("%s: expected a different key", name)
+		}
+	}
+	if got := key(map[string]any{"opaque": struct{ A int }{A: 1}}); got != "" {
+		t.Fatalf("expected unsupported metadata types to disable debouncing, got %q", got)
+	}
+}
