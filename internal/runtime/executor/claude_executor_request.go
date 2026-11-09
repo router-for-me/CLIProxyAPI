@@ -1574,7 +1574,7 @@ func applyClaudeHeadersWithNativeProfile(
 			if errDeviceProfile != nil {
 				return errDeviceProfile
 			}
-			helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile)
+			helps.ApplyClaudeDeviceProfileHeaders(r, deviceProfile, helps.HeaderValueCaseInsensitive(incomingHeaders, "User-Agent"))
 		} else {
 			helps.ApplyClaudeDefaultDeviceProfileHeaders(r, cfg)
 		}

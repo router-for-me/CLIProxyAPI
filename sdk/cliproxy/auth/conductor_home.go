@@ -1084,11 +1084,17 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 	if opts.Metadata != nil {
-		if nodeKind, ok := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+		nodeKind, _ := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string)
+		if isFork, _ := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); isFork {
+			nodeKind = "fork"
+		}
+		if nodeKind = strings.TrimSpace(nodeKind); nodeKind != "" {
+			// Keep the caller headers unchanged when adding Home-only lineage metadata.
+			dispatchHeaders = dispatchHeaders.Clone()
 			if dispatchHeaders == nil {
 				dispatchHeaders = make(http.Header)
 			}
-			dispatchHeaders.Set("X-Node-Kind", strings.TrimSpace(nodeKind))
+			dispatchHeaders.Set("X-Node-Kind", nodeKind)
 		}
 	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
