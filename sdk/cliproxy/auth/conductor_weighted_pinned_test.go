@@ -14,12 +14,15 @@ import (
 
 func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 	for _, mixed := range []bool{false, true} {
-		for _, mode := range []string{"sticky", "cold", "no-session", "lcp"} {
+		for _, mode := range []string{"sticky", "cold", "no-session", "lcp", "no-affinity", "no-affinity-legacy"} {
 			t.Run(fmt.Sprintf("mixed=%t/%s", mixed, mode), func(t *testing.T) {
 				weighted := &WeightedRoundRobinSelector{}
 				selector := NewSessionAffinitySelector(weighted)
 				t.Cleanup(selector.Stop)
 				manager := NewManager(nil, selector, nil)
+				if mode == "no-affinity" || mode == "no-affinity-legacy" {
+					manager.SetSelector(weighted)
+				}
 				const provider, model = "weighted-pinned", "weighted-pinned-model"
 				manager.RegisterExecutor(schedulerTestExecutor{provider: provider})
 				ctx := withRequiredAuthKind(t.Context(), AuthKindAPIKey)
@@ -80,8 +83,16 @@ func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 					selector.cache.Set(bindingKey, bID)
 				}
 				tried := map[string]struct{}{triedID: {}}
-				// Normalize the legacy signatures without changing their pinning behavior.
+				// Exercise the production entrypoints as well as direct legacy selection.
 				pick := func(opts cliproxyexecutor.Options) (*Auth, error) {
+					if mode == "no-affinity" {
+						if mixed {
+							auth, _, _, errPick := manager.pickNextMixed(ctx, []string{provider, "no-executor"}, model, opts, tried)
+							return auth, errPick
+						}
+						auth, _, errPick := manager.pickNext(ctx, provider, model, opts, tried)
+						return auth, errPick
+					}
 					if mixed {
 						auth, _, _, errPick := manager.pickNextMixedLegacy(ctx, []string{provider, "no-executor"}, model, opts, tried)
 						return auth, errPick

@@ -135,6 +135,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		clearSchedulerSelectionID(opts.Metadata)
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, "")
+		execCtx = coreusage.WithHomeSelection(execCtx, coreusage.HomeSelection{
+			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
+		})
 		execCtx = newUpstreamAttemptContext(execCtx)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
