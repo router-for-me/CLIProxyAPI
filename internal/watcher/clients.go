@@ -25,12 +25,18 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var testReloadClientsCapturedGenHook func()
+
 func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
 	log.Debugf("starting full client load process")
 
 	w.clientsMutex.RLock()
 	cfg := w.config
+	scanAuthDirGen := w.authDirGeneration
 	w.clientsMutex.RUnlock()
+	if hook := testReloadClientsCapturedGenHook; hook != nil {
+		hook()
+	}
 
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
@@ -159,6 +165,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 			}
 		}
 		w.clientsMutex.Lock()
+		if scanAuthDirGen != w.authDirGeneration {
+			w.clientsMutex.Unlock()
+			w.authRescanMu.Unlock()
+			return
+		}
 		if incompleteRescanDir != "" {
 			markDirMemberIncomplete := func(trackedPath string) {
 				if !w.sameNormalizedAuthPath(filepath.Dir(trackedPath), incompleteRescanDir) {
@@ -208,7 +219,15 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.lastAuthContents = newAuthContents
 		w.fileAuthsByPath = newFileAuthsByPath
 		w.clientsMutex.Unlock()
-		w.authRescanMu.Unlock()
+	} else {
+		w.authRescanMu.Lock()
+		w.clientsMutex.RLock()
+		stale := scanAuthDirGen != w.authDirGeneration
+		w.clientsMutex.RUnlock()
+		if stale {
+			w.authRescanMu.Unlock()
+			return
+		}
 	}
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + openAICompatCount
@@ -217,6 +236,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		log.Debugf("triggering server update callback before auth refresh")
 		w.reloadCallback(cfg)
 	}
+	w.authRescanMu.Unlock()
 
 	w.refreshAuthState(forceAuthRefresh)
 	redisqueue.NotifyUsageRefresh()
@@ -253,6 +273,11 @@ func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
 	defer w.authRescanMu.Unlock()
 
 	w.clientsMutex.Lock()
+	if !w.matchesAuthDir(filepath.Dir(path), w.authDir) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	path = w.rebaseAuthFilePathLocked(path, w.authDir)
 	existing := w.currentAuths[auth.ID]
 	if existing == nil || !existing.SameFileSnapshot(auth) {
 		w.clientsMutex.Unlock()
@@ -312,6 +337,7 @@ func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
 }
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
+	path = w.rebaseAuthFilePath(path)
 	w.observeAuthFile(path)
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -343,6 +369,12 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	}
 	cfg := w.config
 	authDir := w.authDir
+	if !w.matchesAuthDir(filepath.Dir(normalized), authDir) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	path = w.rebaseAuthFilePathLocked(path, authDir)
+	normalized = w.normalizeAuthPath(path)
 	parser := w.pluginAuthParser
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
@@ -426,6 +458,7 @@ func (w *Watcher) removeClient(path string) {
 }
 
 func (w *Watcher) removeClientLocked(path string) {
+	path = w.rebaseAuthFilePath(path)
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1884,4 +1885,362 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+func TestReloadConfigUpdatesAuthDirSnapshotsAndWatchesNewDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	authDirA := filepath.Join(tmp, "auth-a")
+	authDirB := filepath.Join(tmp, "auth-b")
+	if err := os.MkdirAll(authDirA, 0o700); err != nil {
+		t.Fatalf("mkdir auth-a: %v", err)
+	}
+	if err := os.MkdirAll(authDirB, 0o700); err != nil {
+		t.Fatalf("mkdir auth-b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDirA, "a.json"), []byte(`{"type":"probe-a","access_token":"tok-a"}`), 0o600); err != nil {
+		t.Fatalf("write a.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDirB, "b.json"), []byte(`{"type":"probe-b","access_token":"tok-b"}`), 0o600); err != nil {
+		t.Fatalf("write b.json: %v", err)
+	}
+
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirA))), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	w, err := NewWatcher(cfgPath, authDirA, nil)
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	w.SetConfig(&config.Config{AuthDir: authDirA})
+
+	before := w.SnapshotCoreAuths()
+	if len(before) != 1 || before[0].Provider != "probe-a" {
+		t.Fatalf("initial snapshot = %+v, want [probe-a]", before)
+	}
+
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirB))), 0o600); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+	if !w.reloadConfig() {
+		t.Fatal("reloadConfig() returned false")
+	}
+
+	if gotDir := w.currentAuthDir(); gotDir != authDirB {
+		t.Fatalf("currentAuthDir() after reload = %q, want %q", gotDir, authDirB)
+	}
+	after := w.SnapshotCoreAuths()
+	if len(after) != 1 || after[0].Provider != "probe-b" {
+		t.Fatalf("snapshot after auth-dir reload = %+v, want [probe-b]", after)
+	}
+
+	// Events in the old directory must be ignored, while events in the new directory must be processed.
+	lateOld := filepath.Join(authDirA, "late-old.json")
+	if err := os.WriteFile(lateOld, []byte(`{"type":"probe-old-late","access_token":"tok-old"}`), 0o600); err != nil {
+		t.Fatalf("write late-old.json: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: lateOld, Op: fsnotify.Create})
+	if w.isKnownAuthFile(lateOld) {
+		t.Fatal("expected event from old auth-dir to be ignored after reload")
+	}
+
+	lateNew := filepath.Join(authDirB, "late-new.json")
+	if err := os.WriteFile(lateNew, []byte(`{"type":"probe-new-late","access_token":"tok-new"}`), 0o600); err != nil {
+		t.Fatalf("write late-new.json: %v", err)
+	}
+	w.handleEvent(fsnotify.Event{Name: lateNew, Op: fsnotify.Create})
+	if !w.isKnownAuthFile(lateNew) {
+		t.Fatal("expected event from new auth-dir to be processed after reload")
+	}
+
+	// Switching to a directory that does not exist yet creates and watches it
+	// when an initial watch is active, and SetConfig preserves raw paths as given.
+	w.clientsMutex.Lock()
+	w.watchedAuthDir = authDirB
+	w.clientsMutex.Unlock()
+	authDirC := filepath.Join(tmp, "auth-c-uncreated")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirC))), 0o600); err != nil {
+		t.Fatalf("write config for auth-c: %v", err)
+	}
+	if !w.reloadConfig() {
+		t.Fatal("reloadConfig() for auth-c returned false")
+	}
+	w.clientsMutex.RLock()
+	watchedAfter := w.watchedAuthDir
+	w.clientsMutex.RUnlock()
+	if watchedAfter != authDirC {
+		t.Fatalf("watchedAuthDir = %q, want %q", watchedAfter, authDirC)
+	}
+	w.SetConfig(&config.Config{AuthDir: "~/.cli-proxy-api"})
+	if gotRaw := w.currentAuthDir(); gotRaw != "~/.cli-proxy-api" {
+		t.Fatalf("SetConfig expanded raw AuthDir to %q, want ~/.cli-proxy-api", gotRaw)
+	}
+	if _, errStat := os.Stat("~"); !os.IsNotExist(errStat) {
+		t.Fatalf("SetConfig must not create a literal ~ directory in the working tree: err=%v", errStat)
+	}
+}
+
+func TestReloadConfigEquivalentAuthDirSpellingPreservesStableCredentialIDs(t *testing.T) {
+	t.Run("relative to absolute switch", func(t *testing.T) {
+		tmp := t.TempDir()
+		absAuthDir := filepath.Join(tmp, "auths")
+		if err := os.MkdirAll(absAuthDir, 0o700); err != nil {
+			t.Fatalf("mkdir auths: %v", err)
+		}
+		credPath := filepath.Join(absAuthDir, "x.json")
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-1"}`), 0o600); err != nil {
+			t.Fatalf("write x.json: %v", err)
+		}
+		cfgPath := filepath.Join(tmp, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", "auths")), 0o600); err != nil {
+			t.Fatalf("write initial config: %v", err)
+		}
+
+		origWD, errWD := os.Getwd()
+		if errWD != nil {
+			t.Fatalf("Getwd: %v", errWD)
+		}
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("Chdir(%s): %v", tmp, err)
+		}
+		defer func() { _ = os.Chdir(origWD) }()
+
+		w, err := NewWatcher(cfgPath, "auths", nil)
+		if err != nil {
+			t.Fatalf("NewWatcher: %v", err)
+		}
+		defer func() { _ = w.Stop() }()
+		updates := make(chan AuthUpdate, 16)
+		w.SetAuthUpdateQueue(updates)
+		w.SetConfig(&config.Config{AuthDir: "auths"})
+		w.clientsMutex.Lock()
+		w.watchedAuthDir = "auths"
+		w.clientsMutex.Unlock()
+		w.reloadClients(true, nil, false)
+		expectOneUpdate := func() AuthUpdate {
+			t.Helper()
+			select {
+			case u := <-updates:
+				return u
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for auth update")
+				return AuthUpdate{}
+			}
+		}
+		assertNoQueuedUpdates := func() {
+			t.Helper()
+			w.dispatchMu.Lock()
+			for len(w.pendingOrder) > 0 {
+				w.dispatchMu.Unlock()
+				runtime.Gosched()
+				w.dispatchMu.Lock()
+			}
+			w.dispatchMu.Unlock()
+			select {
+			case u := <-updates:
+				t.Fatalf("unexpected auth update: %+v", u)
+			default:
+			}
+		}
+		initial := expectOneUpdate()
+		if initial.Action != AuthUpdateActionAdd || initial.ID != "x.json" {
+			t.Fatalf("initial update = %+v, want add x.json", initial)
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(absAuthDir))), 0o600); err != nil {
+			t.Fatalf("write abs config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-2"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json: %v", err)
+		}
+		// fsnotify registered with relative "auths" emits relative paths.
+		w.handleEvent(fsnotify.Event{Name: filepath.Join("auths", "x.json"), Op: fsnotify.Write})
+		afterEdit := expectOneUpdate()
+		if afterEdit.Action != AuthUpdateActionModify || afterEdit.ID != "x.json" {
+			t.Fatalf("update after relative event edit = %+v, want modify x.json", afterEdit)
+		}
+		assertNoQueuedUpdates()
+	})
+
+	t.Run("symlink alias switch and subsequent reload", func(t *testing.T) {
+		tmp := t.TempDir()
+		realDir := filepath.Join(tmp, "real")
+		linkDir := filepath.Join(tmp, "link")
+		if err := os.MkdirAll(realDir, 0o700); err != nil {
+			t.Fatalf("mkdir real: %v", err)
+		}
+		if err := os.Symlink(realDir, linkDir); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		credPath := filepath.Join(realDir, "x.json")
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-1"}`), 0o600); err != nil {
+			t.Fatalf("write x.json: %v", err)
+		}
+		cfgPath := filepath.Join(tmp, "config.yaml")
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(realDir))), 0o600); err != nil {
+			t.Fatalf("write initial config: %v", err)
+		}
+
+		w, err := NewWatcher(cfgPath, realDir, nil)
+		if err != nil {
+			t.Fatalf("NewWatcher: %v", err)
+		}
+		defer func() { _ = w.Stop() }()
+		updates := make(chan AuthUpdate, 16)
+		w.SetAuthUpdateQueue(updates)
+		w.SetConfig(&config.Config{AuthDir: realDir})
+		w.clientsMutex.Lock()
+		w.watchedAuthDir = realDir
+		w.clientsMutex.Unlock()
+		w.reloadClients(true, nil, false)
+		expectOneUpdate := func() AuthUpdate {
+			t.Helper()
+			select {
+			case u := <-updates:
+				return u
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for auth update")
+				return AuthUpdate{}
+			}
+		}
+		assertNoQueuedUpdates := func() {
+			t.Helper()
+			w.dispatchMu.Lock()
+			for len(w.pendingOrder) > 0 {
+				w.dispatchMu.Unlock()
+				runtime.Gosched()
+				w.dispatchMu.Lock()
+			}
+			w.dispatchMu.Unlock()
+			select {
+			case u := <-updates:
+				t.Fatalf("unexpected auth update: %+v", u)
+			default:
+			}
+		}
+		_ = expectOneUpdate()
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(linkDir))), 0o600); err != nil {
+			t.Fatalf("write symlink config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-2"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json: %v", err)
+		}
+		w.handleEvent(fsnotify.Event{Name: credPath, Op: fsnotify.Write})
+		afterEdit := expectOneUpdate()
+		if afterEdit.Action != AuthUpdateActionModify || afterEdit.ID != "x.json" {
+			t.Fatalf("update after symlink edit = %+v, want modify x.json", afterEdit)
+		}
+		assertNoQueuedUpdates()
+
+		// Subsequent unrelated config reload must not flip the credential ID back.
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\ndebug: true\n", filepath.ToSlash(linkDir))), 0o600); err != nil {
+			t.Fatalf("write unrelated config update: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("unrelated reloadConfig() returned false")
+		}
+		assertNoQueuedUpdates()
+
+		// Switching from symlink back to the real directory and removing the obsolete
+		// symlink must keep SnapshotCoreAuths and incremental events working.
+		if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(realDir))), 0o600); err != nil {
+			t.Fatalf("write realDir config: %v", err)
+		}
+		if !w.reloadConfig() {
+			t.Fatal("reloadConfig() back to realDir returned false")
+		}
+		assertNoQueuedUpdates()
+		if gotDir := w.currentAuthDir(); gotDir != realDir {
+			t.Fatalf("currentAuthDir() = %q, want %q", gotDir, realDir)
+		}
+		if err := os.Remove(linkDir); err != nil {
+			t.Fatalf("remove obsolete symlink: %v", err)
+		}
+		snap := w.SnapshotCoreAuths()
+		if len(snap) != 1 || snap[0].ID != "x.json" {
+			t.Fatalf("SnapshotCoreAuths after removing obsolete symlink = %+v, want [x.json]", snap)
+		}
+		if err := os.WriteFile(credPath, []byte(`{"type":"probe","access_token":"tok-3"}`), 0o600); err != nil {
+			t.Fatalf("rewrite x.json after removing symlink: %v", err)
+		}
+		w.handleEvent(fsnotify.Event{Name: credPath, Op: fsnotify.Write})
+		afterSymlinkRemoved := expectOneUpdate()
+		if afterSymlinkRemoved.Action != AuthUpdateActionModify || afterSymlinkRemoved.ID != "x.json" {
+			t.Fatalf("update after removing obsolete symlink = %+v, want modify x.json", afterSymlinkRemoved)
+		}
+		assertNoQueuedUpdates()
+	})
+}
+
+func TestReloadClientsStaleAuthDirGenerationSkipsReloadCallback(t *testing.T) {
+	tmp := t.TempDir()
+	authDirA := filepath.Join(tmp, "auth-a")
+	authDirB := filepath.Join(tmp, "auth-b")
+	if err := os.MkdirAll(authDirA, 0o700); err != nil {
+		t.Fatalf("mkdir auth-a: %v", err)
+	}
+	if err := os.MkdirAll(authDirB, 0o700); err != nil {
+		t.Fatalf("mkdir auth-b: %v", err)
+	}
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(fmt.Sprintf("auth-dir: %q\n", filepath.ToSlash(authDirA))), 0o600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	var callbackMu sync.Mutex
+	var callbackDirs []string
+	w, err := NewWatcher(cfgPath, authDirA, func(cfg *config.Config) {
+		callbackMu.Lock()
+		callbackDirs = append(callbackDirs, cfg.AuthDir)
+		callbackMu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer func() { _ = w.Stop() }()
+	w.SetConfig(&config.Config{AuthDir: authDirA})
+
+	captured := make(chan struct{})
+	prevHook := testReloadClientsCapturedGenHook
+	testReloadClientsCapturedGenHook = func() {
+		close(captured)
+	}
+	t.Cleanup(func() { testReloadClientsCapturedGenHook = prevHook })
+
+	w.authRescanMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.reloadClients(false, nil, false)
+	}()
+	<-captured
+	w.clientsMutex.Lock()
+	w.config = &config.Config{AuthDir: authDirB}
+	w.authDir = authDirB
+	w.authDirGeneration++
+	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
+	<-done
+
+	callbackMu.Lock()
+	got := append([]string(nil), callbackDirs...)
+	callbackMu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("expected stale reloadClients to skip reloadCallback, got %v", got)
+	}
 }

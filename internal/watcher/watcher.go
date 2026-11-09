@@ -33,6 +33,8 @@ type authDirProvider interface {
 type Watcher struct {
 	configPath                 string
 	authDir                    string
+	watchedAuthDir             string
+	authDirGeneration          uint64
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
 	authRescanMu               sync.Mutex
@@ -168,10 +170,33 @@ func (w *Watcher) Stop() error {
 // SetConfig updates the current configuration
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	cloned := cfg.CloneForRuntime()
+	var nextAuthDir string
+	if cloned != nil {
+		if w.mirroredAuthDir != "" {
+			cloned.AuthDir = w.mirroredAuthDir
+			nextAuthDir = w.mirroredAuthDir
+		} else if trimmed := strings.TrimSpace(cloned.AuthDir); trimmed != "" {
+			nextAuthDir = trimmed
+		}
+	}
+	w.authRescanMu.Lock()
 	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
+	oldAuthDir := w.authDir
 	w.config = cloned
+	if nextAuthDir != "" {
+		w.authDir = nextAuthDir
+		if oldAuthDir != "" {
+			if !w.matchesAuthDir(oldAuthDir, nextAuthDir) {
+				w.authDirGeneration++
+				w.purgeStaleAuthDirStateLocked(nextAuthDir)
+			} else if oldAuthDir != nextAuthDir {
+				w.rebaseAuthDirStateLocked(nextAuthDir)
+			}
+		}
+	}
 	w.oldConfigYaml, _ = yaml.Marshal(cloned)
+	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.
@@ -197,6 +222,11 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchPersistedAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchPersistedAuthUpdate(update)
+}
+
+// AcceptsPersistedAuth reports whether a file-backed auth belongs to the current auth directory.
+func (w *Watcher) AcceptsPersistedAuth(auth *coreauth.Auth) bool {
+	return w.acceptsPersistedAuth(auth)
 }
 
 // DispatchPersistedAuthUpdateWithRevision pushes already-persisted file auth updates through the watcher queue
