@@ -108,6 +108,7 @@ func buildV8Paths() []configPath {
 		{"quota-exceeded.antigravity-credits", "oauth.providers.antigravity.antigravity-credits"},
 		{"xai", "upstream.xai"}, {"devin", "oauth.providers.devin"},
 		{"disable-image-generation", "multimedia.disable-image-generation"}, {"gpt-image-2-base-model", "multimedia.gpt-image-2-base-model"},
+		{"codex-lite-model-image-generation", "multimedia.codex-lite-model-image-generation"},
 		{"video-result-auth-cache-ttl", "multimedia.video-result-auth-cache-ttl"},
 		{"debug", "observability.logs.debug"}, {"logging-to-file", "observability.logs.logging-to-file"},
 		{"logs-max-total-size-mb", "observability.logs.logs-max-total-size-mb"}, {"request-log", "observability.logs.request-log"},

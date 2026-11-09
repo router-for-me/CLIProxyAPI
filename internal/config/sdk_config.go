@@ -77,6 +77,16 @@ type SDKConfig struct {
 	// default base model ("gpt-5.4-mini") is used.
 	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
 
+	// CodexLiteModelImageGeneration is an opt-in (default false) that restores the
+	// automatic hosted image_generation tool injection on Codex /responses for
+	// models flagged use_responses_lite in the embedded Codex client catalog
+	// (pre-8.0.57 behavior). It applies only to standard (non-Responses-Lite)
+	// requests: requests that actually speak Responses-Lite (header or client
+	// metadata) are still never injected. The default false keeps the #7270
+	// safeguard, because upstream can still derive an unsupported image
+	// complexity from reasoning.effort on these models.
+	CodexLiteModelImageGeneration bool `yaml:"codex-lite-model-image-generation,omitempty" json:"codex-lite-model-image-generation,omitempty"`
+
 	// VideoResultAuthCacheTTL controls how long video IDs stay pinned to the credential
 	// that created them. Accepts duration strings like "30m" or "3h".
 	// Empty or invalid values use the default 3h.

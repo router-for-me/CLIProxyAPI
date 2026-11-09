@@ -81,7 +81,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if !useSIWC {
 		normalizeCodexInstructionsDoc(doc, nativeRequest)
 		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-			ensureImageGenerationToolDoc(doc, baseModel, auth, opts.Headers)
+			ensureImageGenerationToolDoc(ctx, doc, baseModel, auth, opts.Headers, e.cfg != nil && e.cfg.CodexLiteModelImageGeneration)
 			if !codexAuthUsesAPIKey(auth) {
 				normalizeCodexImageGenerationToolsDoc(doc)
 			}

@@ -1232,6 +1232,14 @@ multimedia:
   # Must start with "gpt-" (case-insensitive). If unset or invalid, defaults to "gpt-5.4-mini".
   # gpt-image-2-base-model: "gpt-5.4-mini"
 
+  # Opt in (default false) to auto-inject the hosted image_generation tool on Codex /responses
+  # for models flagged use_responses_lite in the embedded Codex client catalog (pre-8.0.57 behavior).
+  # Only standard (non-Responses-Lite) requests are affected; requests carrying the
+  # Responses-Lite header or client metadata are never injected.
+  # Note: upstream may still reject such requests with HTTP 400 when it derives an unsupported
+  # image complexity from reasoning.effort; keep the default if that is not acceptable.
+  # codex-lite-model-image-generation: false
+
   # Grok video routes accept grok-imagine-video, grok-imagine-video-1.5,
   # grok-imagine-video-1.5-preview, and grok-imagine-video-1.5-lite.
   # Supported on /openai/v1/videos and the native xAI /v1/videos/* endpoints.

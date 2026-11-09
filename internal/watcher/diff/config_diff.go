@@ -73,6 +73,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if strings.TrimSpace(oldCfg.GPTImage2BaseModel) != strings.TrimSpace(newCfg.GPTImage2BaseModel) {
 		changes = append(changes, fmt.Sprintf("gpt-image-2-base-model: %s -> %s", strings.TrimSpace(oldCfg.GPTImage2BaseModel), strings.TrimSpace(newCfg.GPTImage2BaseModel)))
 	}
+	if oldCfg.CodexLiteModelImageGeneration != newCfg.CodexLiteModelImageGeneration {
+		changes = append(changes, fmt.Sprintf("codex-lite-model-image-generation: %t -> %t", oldCfg.CodexLiteModelImageGeneration, newCfg.CodexLiteModelImageGeneration))
+	}
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}

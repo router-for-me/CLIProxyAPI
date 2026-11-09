@@ -634,6 +634,29 @@ func codexOperatorHeaderValue(ctx context.Context, auth *cliproxyauth.Auth, clie
 	return strings.TrimSpace(resolved.Header.Get(name))
 }
 
+// codexEffectiveClientHeaders returns the client headers with the auth's
+// "header:" attribute overrides applied on top, mirroring the precedence of
+// the outbound HTTP and websocket header builders: a credential rule replaces
+// the client-supplied value, and a rule that resolves to nothing leaves the
+// client value untouched. Payload-shaping decisions that depend on an outbound
+// header must read it from this snapshot instead of the raw client headers.
+func codexEffectiveClientHeaders(ctx context.Context, auth *cliproxyauth.Auth, clientHeaders http.Header) http.Header {
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	if len(attrs) == 0 {
+		return clientHeaders
+	}
+	effective := http.Header{}
+	if clientHeaders != nil {
+		effective = clientHeaders.Clone()
+	}
+	resolved := (&http.Request{Header: effective}).WithContext(ctx)
+	util.ApplyCustomHeadersFromAttrs(resolved, attrs, clientHeaders)
+	return resolved.Header
+}
+
 func isCodexCloakingDisabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
 		cfg = cfg.ForAPIKey()
@@ -800,22 +823,40 @@ func isImageGenerationFunctionTool(tool ojson.Result) bool {
 	return false
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+func ensureImageGenerationTool(ctx context.Context, body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header, liteModelOptIn bool) []byte {
 	doc := ojson.NewDoc(body)
-	if !ensureImageGenerationToolDoc(doc, baseModel, auth, headers) {
+	if !ensureImageGenerationToolDoc(ctx, doc, baseModel, auth, headers, liteModelOptIn) {
 		return body
 	}
 	return doc.Bytes()
 }
 
-func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
-	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) || isCodexResponsesLiteModel(baseModel) {
+// ensureImageGenerationToolDoc appends the hosted image_generation tool when the
+// request does not already carry an image tool. Models flagged use_responses_lite
+// in the Codex client catalog are skipped by default: upstream can derive an
+// unsupported image complexity from reasoning.effort for them even on ordinary
+// non-Lite requests (#7270). liteModelOptIn is the explicit
+// codex-lite-model-image-generation opt-in that restores the pre-8.0.57
+// auto-injection for standard (non-Lite-protocol) Responses requests (#7384);
+// requests that actually speak Responses-Lite (header or client metadata) are
+// never injected regardless of the opt-in. The Lite-header check reads the
+// effective headers, with credential "header:" overrides applied over the
+// client headers using the same precedence as the outbound header builders,
+// because those overrides decide whether the outbound request speaks Lite.
+func ensureImageGenerationToolDoc(ctx context.Context, doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header, liteModelOptIn bool) bool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if doc == nil || isCodexResponsesLiteRequestDoc(doc, codexEffectiveClientHeaders(ctx, auth, headers)) {
 		return false
 	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return false
 	}
 	if isCodexFreePlanAuth(auth) {
+		return false
+	}
+	if !liteModelOptIn && isCodexResponsesLiteModel(baseModel) {
 		return false
 	}
 
