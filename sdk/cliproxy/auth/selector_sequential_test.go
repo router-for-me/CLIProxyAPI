@@ -329,3 +329,19 @@ func TestSequentialManagerMovesPoolWhenCurrentIsUnavailable(t *testing.T) {
 	*now = sequentialTestNow.Add(2 * time.Hour)
 	expectSequential(t, pick(nil), third.ID, "after second resets")
 }
+
+func TestSequentialCurrentReportsSavedAccountBeforeAnyPick(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "sequential-routing.state")
+	a, b := sequentialCodexAuth("a", 0), sequentialCodexAuth("b", 0)
+	setCodexUsage(a, "Primary", 95, sequentialTestNow.Add(time.Hour))
+	first, _ := newSequentialTestSelector(5, statePath)
+	if got := first.Current(); len(got) != 0 {
+		t.Fatalf("current before any pick = %v, want empty", got)
+	}
+	expectSequential(t, pickSequential(t, first, []*Auth{a, b}), "b", "first pick")
+
+	restarted, _ := newSequentialTestSelector(5, statePath)
+	if got := restarted.Current(); len(got) != 1 || got["codex"] != "b" {
+		t.Fatalf("current after restart = %v, want codex: b", got)
+	}
+}

@@ -68,3 +68,27 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 		"models":     models,
 	})
 }
+
+// GetSequentialRouting reports which account each pool is on under sequential
+// routing. "sequential" is false when another strategy is in use.
+func (h *Handler) GetSequentialRouting(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	current, ok := h.authManager.SequentialCurrent()
+	pools := gin.H{}
+	for pool, auth := range current {
+		name := strings.TrimSpace(auth.FileName)
+		if name == "" {
+			name = auth.ID
+		}
+		pools[pool] = gin.H{
+			"id":         auth.ID,
+			"auth_index": auth.Index,
+			"name":       name,
+			"provider":   strings.TrimSpace(auth.Provider),
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"sequential": ok, "current": pools})
+}

@@ -212,6 +212,19 @@ func (s *SequentialSelector) clock() time.Time {
 	return time.Now()
 }
 
+// Current returns each pool's current account ID, keyed by pool (for example
+// "claude" or "codex"). A pool that has not picked an account yet is absent.
+func (s *SequentialSelector) Current() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loadLocked()
+	current := make(map[string]string, len(s.current))
+	for key, position := range s.current {
+		current[key] = position.ID
+	}
+	return current
+}
+
 func (s *SequentialSelector) moveLocked(key string, from sequentialPosition, hadPosition bool, to *Auth, reason string) {
 	if to == nil || (hadPosition && from.ID == to.ID) {
 		return

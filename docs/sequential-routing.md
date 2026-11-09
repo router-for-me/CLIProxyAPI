@@ -54,6 +54,9 @@ weekly limit for one model) are not tracked.
 - Each pool's current account is saved to `sequential-routing.state` in the auth
   directory, so restarts and reboots continue where they left off. The log
   records every move as `sequential routing: <provider> moved from ... to ...`.
+- `GET /v8/management/routing/sequential` returns each pool's current account
+  (`id`, `auth_index`, `name`, `provider`); the management panel marks that
+  account's quota card "In use".
 - Requests already in flight finish on their account, and readings arrive
   after the fact, so an account can end slightly past the mark. The reserve
   absorbs this.

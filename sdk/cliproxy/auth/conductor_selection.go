@@ -2016,6 +2016,32 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	return authCopy, executor, nil
 }
 
+// SequentialCurrent returns each pool's current account under sequential
+// routing, keyed by pool. ok is false when another strategy is in use.
+func (m *Manager) SequentialCurrent() (current map[string]*Auth, ok bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	sequential, isSequential := m.selector.(*SequentialSelector)
+	m.mu.RUnlock()
+	if !isSequential {
+		return nil, false
+	}
+	ids := sequential.Current()
+	current = make(map[string]*Auth, len(ids))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for pool, id := range ids {
+		if auth := m.auths[id]; auth != nil {
+			current[pool] = auth.Clone()
+		} else {
+			current[pool] = &Auth{ID: id}
+		}
+	}
+	return current, true
+}
+
 // ShouldReleasePinnedAuth reports whether a session pinned to authID should drop
 // the pin so the next selection follows sequential routing. It is true only when
 // that account has reached the reserve and another account for the same provider
