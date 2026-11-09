@@ -2,10 +2,10 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"math"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -19,10 +19,9 @@ type weightedAccountingPoolKey struct{}
 // Releasing one request must never undo accounting committed by another request.
 type weightedReservation struct {
 	selector   *WeightedRoundRobinSelector
-	state      *smoothWeightedState
+	state      *weightedPoolState
 	generation uint64
-	weights    map[string]int64
-	authID     string
+	member     int
 	total      int64
 	bound      bool
 	finished   bool
@@ -95,55 +94,120 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 	return picked, nil
 }
 
-// weightedPoolStateKey isolates credits for actual competing sets. Reusing a
-// provider/model accumulator across different sets grants credit for requests
-// those sets cannot serve, which can permanently starve their smaller weights.
-// Length-prefixed, sorted IDs avoid collisions and keep input order irrelevant.
-// Weights stay out of the key so prepare can invalidate pending reservations on
-// configuration changes. Returning to a prior set resumes that set's credits.
-func weightedPoolStateKey(route string, weights map[string]int64) string {
+// weightedPoolMember stores each ID once, with parallel accounting values in a
+// single allocation. Members are sorted by ID; reservations retain only an index.
+type weightedPoolMember struct {
+	id      string
+	weight  int64
+	current int64
+	pending int64
+}
+
+// weightedPoolState is separate from the scheduler's transient-subset accumulator:
+// each selector pool has fixed membership and shares its weights across reservations.
+type weightedPoolState struct {
+	route      string
+	members    []weightedPoolMember
+	inFlight   uint64
+	generation uint64
+	next       *weightedPoolState // Exact-identity collision chain for the digest key.
+}
+
+func sortedWeightedIDs(weights map[string]int64) []string {
 	ids := make([]string, 0, len(weights))
 	for id := range weights {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	var key strings.Builder
-	key.WriteString(strconv.Itoa(len(route)))
-	key.WriteByte(':')
-	key.WriteString(route)
+	return ids
+}
+
+// weightedPoolStateKey isolates competing sets without retaining concatenated IDs.
+// Weights stay out of the key so configuration changes invalidate reservations.
+func weightedPoolStateKey(route string, weights map[string]int64) [32]byte {
+	return weightedPoolDigest(route, sortedWeightedIDs(weights))
+}
+
+func weightedPoolDigest(route string, ids []string) [32]byte {
+	size := 8 + len(route)
 	for _, id := range ids {
-		key.WriteString(strconv.Itoa(len(id)))
-		key.WriteByte(':')
-		key.WriteString(id)
+		size += 8 + len(id)
 	}
-	return key.String()
+	identity := make([]byte, 0, size)
+	identity = binary.LittleEndian.AppendUint64(identity, uint64(len(route)))
+	identity = append(identity, route...)
+	for _, id := range ids {
+		identity = binary.LittleEndian.AppendUint64(identity, uint64(len(id)))
+		identity = append(identity, id...)
+	}
+	return sha256.Sum256(identity)
+}
+
+// matches verifies the full identity even on a digest hit. Hash collisions must
+// never combine the quota or configured weights of unrelated candidate pools.
+func (s *weightedPoolState) matches(route string, ids []string) bool {
+	if s.route != route || len(s.members) != len(ids) {
+		return false
+	}
+	for i, id := range ids {
+		if s.members[i].id != id {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *weightedPoolState) prepare(weights map[string]int64) {
+	for _, member := range s.members {
+		if member.weight != weights[member.id] {
+			s.generation++
+			s.inFlight = 0
+			for i := range s.members {
+				s.members[i].weight = weights[s.members[i].id]
+				s.members[i].current = 0
+				s.members[i].pending = 0
+			}
+			return
+		}
+	}
 }
 
 // reserve selects and reserves credit atomically. A non-empty authID preserves a
 // sticky binding; otherwise committed and pending credits both guide selection.
-func (s *WeightedRoundRobinSelector) reserve(key string, available []*Auth, authID string) (*Auth, *weightedReservation) {
+func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, authID string) (*Auth, *weightedReservation) {
 	weights := authWeightVector(available)
-	key = weightedPoolStateKey(key, weights)
+	ids := sortedWeightedIDs(weights)
+	key := weightedPoolDigest(route, ids)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.states == nil {
-		s.states = make(map[string]*smoothWeightedState)
-	}
-	limit := s.maxKeys
-	if limit <= 0 {
-		limit = 4096
-	}
-	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
-		s.states = make(map[string]*smoothWeightedState)
+		s.states = make(map[[32]byte]*weightedPoolState)
 	}
 	state := s.states[key]
-	if state == nil {
-		state = &smoothWeightedState{}
-		s.states[key] = state
+	for state != nil && !state.matches(route, ids) {
+		state = state.next
 	}
-	state.prepare(weights)
+	if state == nil {
+		limit := s.maxKeys
+		if limit <= 0 {
+			limit = 4096
+		}
+		if s.stateCount >= limit {
+			s.states = make(map[[32]byte]*weightedPoolState)
+			s.stateCount = 0
+		}
+		state = &weightedPoolState{route: route, members: make([]weightedPoolMember, len(ids)), next: s.states[key]}
+		for i, id := range ids {
+			state.members[i] = weightedPoolMember{id: id, weight: weights[id]}
+		}
+		s.states[key] = state
+		s.stateCount++
+	} else {
+		state.prepare(weights)
+	}
 	var picked *Auth
 	var pickedCurrent, total int64
+	pickedMember := -1
 	for _, auth := range available {
 		if auth == nil || weights[auth.ID] <= 0 {
 			continue
@@ -152,10 +216,12 @@ func (s *WeightedRoundRobinSelector) reserve(key string, available []*Auth, auth
 		if authID != "" && auth.ID != authID {
 			continue
 		}
-		current := saturatingAddInt64(state.current[auth.ID], state.pending[auth.ID])
-		current = saturatingAddInt64(current, weights[auth.ID])
+		index := sort.SearchStrings(ids, auth.ID)
+		member := &state.members[index]
+		current := saturatingAddInt64(member.current, member.pending)
+		current = saturatingAddInt64(current, member.weight)
 		if picked == nil || current > pickedCurrent {
-			picked, pickedCurrent = auth, current
+			picked, pickedCurrent, pickedMember = auth, current, index
 		}
 	}
 	if picked == nil {
@@ -163,14 +229,14 @@ func (s *WeightedRoundRobinSelector) reserve(key string, available []*Auth, auth
 	}
 	// Bound traffic beyond the compensation window still keeps its credential,
 	// but must not create speculative credit that can starve concurrent picks.
-	if authID != "" && !state.boundChargeFits(weights, picked.ID, total) {
+	if authID != "" && !state.boundChargeFits(pickedMember, total) {
 		return picked, nil
 	}
-	state.adjustPending(weights, picked.ID, total, false)
+	state.adjustPending(pickedMember, total, false)
 	state.inFlight++
 	return picked, &weightedReservation{
 		selector: s, state: state, generation: state.generation,
-		weights: weights, authID: picked.ID, total: total, bound: authID != "",
+		member: pickedMember, total: total, bound: authID != "",
 	}
 }
 
@@ -188,31 +254,29 @@ func (r *weightedReservation) finish(committed bool) {
 	if r.state.generation != r.generation {
 		return
 	}
-	r.state.adjustPending(r.weights, r.authID, r.total, true)
+	r.state.adjustPending(r.member, r.total, true)
 	r.state.inFlight--
 	if committed {
-		r.state.charge(r.weights, r.authID, r.bound)
+		r.state.charge(r.member, r.bound)
 	} else if r.state.inFlight == 0 {
 		// A final rollback can remove the offset to already committed credit.
-		r.state.boundCredits(r.weights, r.total)
+		r.state.boundCredits(r.total)
 	}
 }
 
 // adjustPending must be called with the selector mutex held. Pending deltas are
 // not clamped, so releasing them cannot lose credit at the compensation bound.
-func (s *smoothWeightedState) adjustPending(weights map[string]int64, authID string, total int64, release bool) {
-	for id, weight := range weights {
-		delta := weight
-		if id == authID {
+func (s *weightedPoolState) adjustPending(selected int, total int64, release bool) {
+	for i := range s.members {
+		member := &s.members[i]
+		delta := member.weight
+		if i == selected {
 			delta -= total
 		}
 		if release {
 			delta = -delta
 		}
-		s.pending[id] = saturatingAddInt64(s.pending[id], delta)
-		if s.pending[id] == 0 {
-			delete(s.pending, id)
-		}
+		member.pending = saturatingAddInt64(member.pending, delta)
 	}
 }
 
@@ -222,17 +286,17 @@ const maxSmoothWeightedCreditRounds int64 = 32
 // boundChargeFits admits the whole sticky delta or none. Both reservation and
 // commit include outstanding deltas: committed credit alone can transiently
 // exceed the cap while successful reservations settle in a different order.
-func (s *smoothWeightedState) boundChargeFits(weights map[string]int64, authID string, totalWeight int64) bool {
+func (s *weightedPoolState) boundChargeFits(selected int, totalWeight int64) bool {
 	limit := int64(math.MaxInt64)
 	if totalWeight <= math.MaxInt64/maxSmoothWeightedCreditRounds {
 		limit = totalWeight * maxSmoothWeightedCreditRounds
 	}
-	for id, weight := range weights {
-		delta := weight
-		if id == authID {
+	for i, member := range s.members {
+		delta := member.weight
+		if i == selected {
 			delta -= totalWeight
 		}
-		current := saturatingAddInt64(s.current[id], s.pending[id])
+		current := saturatingAddInt64(member.current, member.pending)
 		next := saturatingAddInt64(current, delta)
 		if next < -limit || next > limit {
 			return false
@@ -241,36 +305,38 @@ func (s *smoothWeightedState) boundChargeFits(weights map[string]int64, authID s
 	return true
 }
 
-func (s *smoothWeightedState) charge(weights map[string]int64, authID string, bound bool) {
+func (s *weightedPoolState) charge(selected int, bound bool) {
 	var totalWeight int64
-	for _, weight := range weights {
-		totalWeight = saturatingAddInt64(totalWeight, weight)
+	for _, member := range s.members {
+		totalWeight = saturatingAddInt64(totalWeight, member.weight)
 	}
-	if !bound || s.boundChargeFits(weights, authID, totalWeight) {
+	if !bound || s.boundChargeFits(selected, totalWeight) {
 		// At the cap, forced traffic cannot erase a small peer's earnings.
 		// Pending repayments still count until they actually roll back.
-		for id, weight := range weights {
-			s.current[id] = saturatingAddInt64(s.current[id], weight)
+		for i := range s.members {
+			member := &s.members[i]
+			member.current = saturatingAddInt64(member.current, member.weight)
 		}
-		s.current[authID] = saturatingAddInt64(s.current[authID], -totalWeight)
+		member := &s.members[selected]
+		member.current = saturatingAddInt64(member.current, -totalWeight)
 	}
 	if s.inFlight == 0 {
-		s.boundCredits(weights, totalWeight)
+		s.boundCredits(totalWeight)
 	}
 }
 
 // boundCredits runs only once the pool settles. Net pending deltas can be zero
 // even with live reservations, so the in-flight count, not len(pending), decides
 // when clipping cannot irreversibly discard another reservation's offset.
-func (s *smoothWeightedState) boundCredits(weights map[string]int64, totalWeight int64) {
+func (s *weightedPoolState) boundCredits(totalWeight int64) {
 	limit := int64(math.MaxInt64)
 	if totalWeight <= math.MaxInt64/maxSmoothWeightedCreditRounds {
 		limit = totalWeight * maxSmoothWeightedCreditRounds
 	}
 	var minCredit, maxCredit int64 = math.MaxInt64, math.MinInt64
-	for id := range weights {
-		minCredit = min(minCredit, s.current[id])
-		maxCredit = max(maxCredit, s.current[id])
+	for _, member := range s.members {
+		minCredit = min(minCredit, member.current)
+		maxCredit = max(maxCredit, member.current)
 	}
 	// A common offset keeps leading credits distinct at the compensation bound.
 	// Independent clamps can repeatedly tie the leaders and starve the later
@@ -285,8 +351,8 @@ func (s *smoothWeightedState) boundCredits(weights map[string]int64, totalWeight
 	}
 	// If the full spread cannot fit, cap only the trailing debt after rebasing
 	// the leader to the upper bound. Do not flatten leading candidates' credits.
-	// Temporarily excluded credentials retain their credit for later selections.
-	for id := range weights {
-		s.current[id] = max(-limit, saturatingAddInt64(s.current[id], -offset))
+	for i := range s.members {
+		member := &s.members[i]
+		member.current = max(-limit, saturatingAddInt64(member.current, -offset))
 	}
 }

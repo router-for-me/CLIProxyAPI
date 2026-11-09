@@ -104,7 +104,7 @@ func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 					}
 				}
 				state := weightedStateForTest(t, weighted, namespace+":"+model, aID, bID)
-				if state == nil || !maps.Equal(state.current, map[string]int64{aID: 12, bID: -12}) || len(state.pending) != 0 {
+				if state == nil || !maps.Equal(state.currentForTest(), map[string]int64{aID: 12, bID: -12}) || len(state.pendingForTest()) != 0 {
 					t.Fatalf("pinned traffic did not consume the eligible pool's credit: %#v", state)
 				}
 				counts := map[string]int{}
@@ -118,8 +118,8 @@ func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 				if counts[aID] != 12 || counts[bID] != 0 {
 					t.Fatalf("fresh distribution = %v, want a=12 b=0", counts)
 				}
-				if !maps.Equal(state.current, map[string]int64{aID: 0, bID: 0}) || len(state.pending) != 0 {
-					t.Fatalf("compensation did not balance: current=%v pending=%v", state.current, state.pending)
+				if !maps.Equal(state.currentForTest(), map[string]int64{aID: 0, bID: 0}) || len(state.pendingForTest()) != 0 {
+					t.Fatalf("compensation did not balance: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 				}
 				if mode == "sticky" || mode == "cold" {
 					if binding, ok := selector.cache.Get(bindingKey); !ok || binding != bID {
@@ -135,8 +135,8 @@ func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 					if auth, errPick := pick(opts); errPick == nil || auth != nil {
 						t.Fatalf("invalid pin %q escaped pinning checks: auth=%v err=%v", pinnedID, auth, errPick)
 					}
-					if !maps.Equal(state.current, map[string]int64{aID: 0, bID: 0}) || len(state.pending) != 0 {
-						t.Fatalf("invalid pin %q changed accounting: current=%v pending=%v", pinnedID, state.current, state.pending)
+					if !maps.Equal(state.currentForTest(), map[string]int64{aID: 0, bID: 0}) || len(state.pendingForTest()) != 0 {
+						t.Fatalf("invalid pin %q changed accounting: current=%v pending=%v", pinnedID, state.currentForTest(), state.pendingForTest())
 					}
 				}
 				// A valid lower-priority pin still wins without charging another tier.
@@ -148,11 +148,11 @@ func TestManagerWeightedPinnedSessionCompensation(t *testing.T) {
 				if auth, errPick := pick(lowerOpts); errPick != nil || auth == nil || auth.ID != lowerID {
 					t.Fatalf("lower-priority pin was not enforced: auth=%v err=%v", auth, errPick)
 				}
-				if !maps.Equal(state.current, map[string]int64{aID: 0, bID: 0}) || len(state.pending) != 0 {
-					t.Fatalf("lower-priority pin changed higher-tier credits: current=%v pending=%v", state.current, state.pending)
+				if !maps.Equal(state.currentForTest(), map[string]int64{aID: 0, bID: 0}) || len(state.pendingForTest()) != 0 {
+					t.Fatalf("lower-priority pin changed higher-tier credits: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 				}
 				lowerState := weightedStateForTest(t, weighted, namespace+":"+model, lowerID)
-				if !maps.Equal(lowerState.current, map[string]int64{lowerID: 0}) || len(lowerState.pending) != 0 {
+				if !maps.Equal(lowerState.currentForTest(), map[string]int64{lowerID: 0}) || len(lowerState.pendingForTest()) != 0 {
 					t.Fatalf("lower-priority pin accounted the wrong pool: %#v", lowerState)
 				}
 			})

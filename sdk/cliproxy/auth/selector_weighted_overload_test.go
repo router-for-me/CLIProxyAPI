@@ -50,13 +50,13 @@ func TestWeightedOverloadExactCompensation(t *testing.T) {
 					}
 				}
 				for _, state := range weighted.states {
-					for id, credit := range state.current {
+					for id, credit := range state.currentForTest() {
 						if credit != 0 {
 							t.Errorf("exact compensation left %q credit=%d", id, credit)
 						}
 					}
-					if len(state.pending) != 0 {
-						t.Errorf("pending credit leaked: %v", state.pending)
+					if len(state.pendingForTest()) != 0 {
+						t.Errorf("pending credit leaked: %v", state.pendingForTest())
 					}
 				}
 			})
@@ -97,7 +97,7 @@ func TestWeightedOverloadSustainedStickyTrafficDoesNotStarveOthers(t *testing.T)
 				ids[i] = auth.ID
 			}
 			state := weightedStateForTest(t, weighted, "codex:model", ids...)
-			t.Logf("fresh distribution after warmup: %v; committed=%v", counts, state.current)
+			t.Logf("fresh distribution after warmup: %v; committed=%v", counts, state.currentForTest())
 			// Forced traffic makes global ratios infeasible; the remaining capacity
 			// should be shared by unbound peers rather than monopolized by one.
 			peerWeight := 0
@@ -235,8 +235,8 @@ func TestWeightedOverloadPendingStickyReservationsDoNotStarveOthers(t *testing.T
 		reservation.finish(true)
 	}
 	state := weightedStateForTest(t, weighted, key, "a", "b", "c")
-	if len(state.pending) != 0 {
-		t.Fatalf("settled reservations leaked credit: %v", state.pending)
+	if len(state.pendingForTest()) != 0 {
+		t.Fatalf("settled reservations leaked credit: %v", state.pendingForTest())
 	}
 }
 
@@ -249,7 +249,7 @@ func TestWeightedOverloadCommitAfterSpeculativeRepaymentRollsBack(t *testing.T) 
 		reservation.finish(true)
 	}
 	state := weightedStateForTest(t, weighted, key, "a", "b")
-	before := maps.Clone(state.current)
+	before := maps.Clone(state.currentForTest())
 	_, first := weighted.reserve(key, auths, "")
 	_, second := weighted.reserve(key, auths, "")
 	t.Cleanup(func() { first.finish(false); second.finish(false) })
@@ -265,12 +265,12 @@ func TestWeightedOverloadCommitAfterSpeculativeRepaymentRollsBack(t *testing.T) 
 	bound.finish(true)
 	bound.finish(true)
 	bound.finish(false)
-	if !maps.Equal(state.current, before) || len(state.pending) != 0 {
-		t.Fatalf("late commit crossed the cap or leaked pending credit: before=%v current=%v pending=%v", before, state.current, state.pending)
+	if !maps.Equal(state.currentForTest(), before) || len(state.pendingForTest()) != 0 {
+		t.Fatalf("late commit crossed the cap or leaked pending credit: before=%v current=%v pending=%v", before, state.currentForTest(), state.pendingForTest())
 	}
 	// An over-limit bound selection succeeds without reserving any credit.
 	picked, skipped := weighted.reserve(key, auths, "b")
-	if picked == nil || picked.ID != "b" || skipped != nil || !maps.Equal(state.current, before) || len(state.pending) != 0 {
+	if picked == nil || picked.ID != "b" || skipped != nil || !maps.Equal(state.currentForTest(), before) || len(state.pendingForTest()) != 0 {
 		t.Fatal("saturated bound selection should preserve binding and all credits")
 	}
 }
@@ -322,10 +322,10 @@ func TestWeightedOverloadSaturatedChargeLeavesPeersUnchanged(t *testing.T) {
 		{"a": -222, "b": 111, "c": 111},
 		{"a": -112, "b": 222, "c": -110},
 	} {
-		state := &smoothWeightedState{current: maps.Clone(credit)}
-		state.charge(map[string]int64{"a": 1, "b": 5, "c": 1}, "a", true)
-		if !maps.Equal(state.current, credit) {
-			t.Fatalf("saturated sticky charge changed peers: got=%v want=%v", state.current, credit)
+		state := weightedPoolForTest("route", map[string]int64{"a": 1, "b": 5, "c": 1}, credit)
+		state.charge(0, true)
+		if !maps.Equal(state.currentForTest(), credit) {
+			t.Fatalf("saturated sticky charge changed peers: got=%v want=%v", state.currentForTest(), credit)
 		}
 	}
 }
@@ -391,8 +391,8 @@ func TestManagerWeightedOverloadStickyAndPinnedSessions(t *testing.T) {
 					t.Fatalf("manager moved busy binding: %q, found=%t", binding, ok)
 				}
 				state := weightedStateForTest(t, weighted, namespace+":"+model, aID, bID, cID)
-				if len(state.pending) != 0 {
-					t.Fatalf("manager left speculative credit: %v", state.pending)
+				if len(state.pendingForTest()) != 0 {
+					t.Fatalf("manager left speculative credit: %v", state.pendingForTest())
 				}
 			})
 		}
@@ -446,8 +446,8 @@ func TestWeightedOverloadConcurrentStickyAccounting(t *testing.T) {
 	state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
 	// All 64 calls share one pool. Accounting must match actual accepted picks,
 	// regardless of whether the final arrivals happened to be sticky requests.
-	if state.current["a"] != int64(64*3-counts["a"]*4) || state.current["b"] != int64(64-counts["b"]*4) || len(state.pending) != 0 {
-		t.Fatalf("concurrent accounting drifted: counts=%v committed=%v pending=%v", counts, state.current, state.pending)
+	if state.currentForTest()["a"] != int64(64*3-counts["a"]*4) || state.currentForTest()["b"] != int64(64-counts["b"]*4) || len(state.pendingForTest()) != 0 {
+		t.Fatalf("concurrent accounting drifted: counts=%v committed=%v pending=%v", counts, state.currentForTest(), state.pendingForTest())
 	}
 	if bound, ok := selector.cache.Get(key); !ok || bound != "b" {
 		t.Fatalf("concurrency moved sticky binding: %q, found=%t", bound, ok)

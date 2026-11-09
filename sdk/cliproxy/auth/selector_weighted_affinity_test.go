@@ -52,8 +52,8 @@ func TestWeightedSessionAffinityCompensatesStickyRequests(t *testing.T) {
 				}
 			}
 			state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
-			if state.current["a"] != 12 || state.current["b"] != -12 || len(state.pending) != 0 {
-				t.Fatalf("sticky credits: current=%v pending=%v", state.current, state.pending)
+			if state.currentForTest()["a"] != 12 || state.currentForTest()["b"] != -12 || len(state.pendingForTest()) != 0 {
+				t.Fatalf("sticky credits: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 			}
 			for i := range 12 {
 				// Requests without an identity and cold sessions share the same credits.
@@ -66,8 +66,8 @@ func TestWeightedSessionAffinityCompensatesStickyRequests(t *testing.T) {
 					t.Fatalf("compensation %d: pick=%v err=%v", i, picked, errPick)
 				}
 			}
-			if state.current["a"] != 0 || state.current["b"] != 0 || len(state.pending) != 0 {
-				t.Fatalf("compensated credits: current=%v pending=%v", state.current, state.pending)
+			if state.currentForTest()["a"] != 0 || state.currentForTest()["b"] != 0 || len(state.pendingForTest()) != 0 {
+				t.Fatalf("compensated credits: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 			}
 			if binding, ok := selector.cache.Get(key); !ok || binding != "b" {
 				t.Fatalf("balancing moved the parent binding: %q, found=%t", binding, ok)
@@ -116,8 +116,8 @@ func TestWeightedSessionAffinityChangingPoolsDoNotStarveEqualWeights(t *testing.
 			if binding, ok := selector.cache.Get(key); !ok || binding != "a" {
 				t.Fatalf("balancing moved the sticky binding: %q, found=%t", binding, ok)
 			}
-			if state := weightedStateForTest(t, weighted, "codex:model", "b", "c"); len(state.pending) != 0 {
-				t.Fatalf("pending credits leaked: %v", state.pending)
+			if state := weightedStateForTest(t, weighted, "codex:model", "b", "c"); len(state.pendingForTest()) != 0 {
+				t.Fatalf("pending credits leaked: %v", state.pendingForTest())
 			}
 		})
 	}
@@ -137,8 +137,8 @@ func TestWeightedSessionAffinityColdSelectionsCountOnce(t *testing.T) {
 			t.Fatalf("pick=%v err=%v", picked, errPick)
 		}
 		state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
-		if i == 0 && (state.current["a"] != -1 || state.current["b"] != 1) {
-			t.Fatalf("first selection charged more than once: %v", state.current)
+		if i == 0 && (state.currentForTest()["a"] != -1 || state.currentForTest()["b"] != 1) {
+			t.Fatalf("first selection charged more than once: %v", state.currentForTest())
 		}
 		counts[picked.ID]++
 	}
@@ -165,16 +165,16 @@ func TestWeightedSessionAffinityBoundsCompensation(t *testing.T) {
 	limit := maxSmoothWeightedCreditRounds * 4
 	// A bound charge is admitted as a whole, stopping within one delta of the cap.
 	wantCredit := limit / 3 * 3
-	if state.current["a"] != wantCredit || state.current["b"] != -wantCredit {
-		t.Fatalf("bounded credits = %v, want +/- %d", state.current, wantCredit)
+	if state.currentForTest()["a"] != wantCredit || state.currentForTest()["b"] != -wantCredit {
+		t.Fatalf("bounded credits = %v, want +/- %d", state.currentForTest(), wantCredit)
 	}
 	for range wantCredit {
 		if _, errPick := weighted.Pick(t.Context(), "codex", "model", cliproxyexecutor.Options{}, auths); errPick != nil {
 			t.Fatal(errPick)
 		}
 	}
-	if state.current["a"] != 0 || state.current["b"] != 0 {
-		t.Fatalf("compensation did not finish: %v", state.current)
+	if state.currentForTest()["a"] != 0 || state.currentForTest()["b"] != 0 {
+		t.Fatalf("compensation did not finish: %v", state.currentForTest())
 	}
 }
 
@@ -215,8 +215,8 @@ func TestWeightedSessionAffinityLCPCredits(t *testing.T) {
 				t.Fatal("expected LCP compaction")
 			}
 			state := weightedStateForTest(t, weighted, "openai:model", "a", "b")
-			if state.current["a"] != 3 || state.current["b"] != -3 || len(state.pending) != 0 {
-				t.Fatalf("LCP credits: current=%v pending=%v", state.current, state.pending)
+			if state.currentForTest()["a"] != 3 || state.currentForTest()["b"] != -3 || len(state.pendingForTest()) != 0 {
+				t.Fatalf("LCP credits: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 			}
 		})
 	}
@@ -238,8 +238,8 @@ func TestWeightedReservationRollbackPreservesConcurrentCharges(t *testing.T) {
 	rejected.finish(true)
 	accepted.finish(false)
 	limit := maxSmoothWeightedCreditRounds * 4 / 3 * 3
-	if state.current["a"] != limit-1 || state.current["b"] != -limit+1 || len(state.pending) != 0 {
-		t.Fatalf("rollback lost another charge: current=%v pending=%v", state.current, state.pending)
+	if state.currentForTest()["a"] != limit-1 || state.currentForTest()["b"] != -limit+1 || len(state.pendingForTest()) != 0 {
+		t.Fatalf("rollback lost another charge: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 }
 
@@ -252,12 +252,12 @@ func TestWeightedReservationResetInvalidatesOldGeneration(t *testing.T) {
 	_, latest := weighted.reserve(key, auths, "")
 	old.finish(true)
 	state := weightedStateForTest(t, weighted, key, "a", "b")
-	if state.current["a"] != 0 || state.current["b"] != 0 || state.pending["a"] != -1 || state.pending["b"] != 1 {
-		t.Fatalf("stale reservation changed new generation: current=%v pending=%v", state.current, state.pending)
+	if state.currentForTest()["a"] != 0 || state.currentForTest()["b"] != 0 || state.pendingForTest()["a"] != -1 || state.pendingForTest()["b"] != 1 {
+		t.Fatalf("stale reservation changed new generation: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 	latest.finish(true)
-	if state.current["a"] != -1 || state.current["b"] != 1 || len(state.pending) != 0 {
-		t.Fatalf("new generation accounting: current=%v pending=%v", state.current, state.pending)
+	if state.currentForTest()["a"] != -1 || state.currentForTest()["b"] != 1 || len(state.pendingForTest()) != 0 {
+		t.Fatalf("new generation accounting: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 }
 
@@ -294,8 +294,8 @@ func TestWeightedReservationConcurrentSelectionsSeePendingCredits(t *testing.T) 
 		reservation.finish(true)
 	}
 	state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
-	if state.current["a"] != 0 || state.current["b"] != 0 || len(state.pending) != 0 {
-		t.Fatalf("concurrent accounting: current=%v pending=%v", state.current, state.pending)
+	if state.currentForTest()["a"] != 0 || state.currentForTest()["b"] != 0 || len(state.pendingForTest()) != 0 {
+		t.Fatalf("concurrent accounting: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 }
 
@@ -343,19 +343,19 @@ func TestWeightedSessionAffinityEligiblePoolAndModelIsolation(t *testing.T) {
 		t.Fatalf("sticky pick=%v err=%v", picked, errPick)
 	}
 	state := weightedStateForTest(t, weighted, "codex:requested", "a", "b")
-	if state == nil || len(weighted.states) != 1 || len(state.current) != 2 || state.current["a"] != 3 || state.current["b"] != -3 {
+	if state == nil || len(weighted.states) != 1 || len(state.currentForTest()) != 2 || state.currentForTest()["a"] != 3 || state.currentForTest()["b"] != -3 {
 		t.Fatalf("wrong model key or eligible pool: %v", weighted.states)
 	}
 	picked, errPick = weighted.Pick(ctx, "codex", "", cliproxyexecutor.Options{}, auths[:2])
-	if errPick != nil || picked == nil || picked.ID != "a" || state.current["a"] != 2 || state.current["b"] != -2 {
-		t.Fatalf("fallback did not share credits: pick=%v err=%v credits=%v", picked, errPick, state.current)
+	if errPick != nil || picked == nil || picked.ID != "a" || state.currentForTest()["a"] != 2 || state.currentForTest()["b"] != -2 {
+		t.Fatalf("fallback did not share credits: pick=%v err=%v credits=%v", picked, errPick, state.currentForTest())
 	}
 	for _, pair := range [][2]string{{"codex", "other-model"}, {"other-provider", "requested"}} {
 		if _, errOther := selector.Pick(t.Context(), pair[0], pair[1], cliproxyexecutor.Options{}, auths[:2]); errOther != nil {
 			t.Fatal(errOther)
 		}
 	}
-	if state.current["a"] != 2 || state.current["b"] != -2 {
+	if state.currentForTest()["a"] != 2 || state.currentForTest()["b"] != -2 {
 		t.Fatal("another provider or model changed credits")
 	}
 }
@@ -374,8 +374,8 @@ func TestWeightedSessionAffinityReselectionCountsOnce(t *testing.T) {
 		t.Fatalf("reselection: pick=%v err=%v", picked, errPick)
 	}
 	state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
-	if state.current["a"] != -1 || state.current["b"] != 1 || len(state.pending) != 0 {
-		t.Fatalf("reselection counted incorrectly: current=%v pending=%v", state.current, state.pending)
+	if state.currentForTest()["a"] != -1 || state.currentForTest()["b"] != 1 || len(state.pendingForTest()) != 0 {
+		t.Fatalf("reselection counted incorrectly: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 	if binding, ok := selector.cache.Get(key); !ok || binding != "a" {
 		t.Fatalf("reselection did not bind: %q, found=%t", binding, ok)
@@ -428,7 +428,7 @@ func TestManagerWeightedSessionAffinityCompensation(t *testing.T) {
 				}
 			}
 			state := weightedStateForTest(t, weighted, namespace+":"+model, aID, bID)
-			if state == nil || state.current[aID] != 0 || state.current[bID] != 0 || len(state.pending) != 0 {
+			if state == nil || state.currentForTest()[aID] != 0 || state.currentForTest()[bID] != 0 || len(state.pendingForTest()) != 0 {
 				t.Fatalf("manager credits did not balance: %#v", state)
 			}
 		})

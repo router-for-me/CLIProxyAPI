@@ -39,17 +39,15 @@ type RoundRobinSelector struct {
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
 type WeightedRoundRobinSelector struct {
-	mu      sync.Mutex
-	states  map[string]*smoothWeightedState
-	maxKeys int
+	mu         sync.Mutex
+	states     map[[32]byte]*weightedPoolState
+	stateCount int
+	maxKeys    int
 }
 
 type smoothWeightedState struct {
-	current    map[string]int64
-	weights    map[string]int64
-	pending    map[string]int64
-	inFlight   uint64
-	generation uint64
+	current map[string]int64
+	weights map[string]int64
 }
 
 type weightedSelectorStateModelKey struct{}
@@ -723,9 +721,6 @@ const maxSmoothWeightedStateEntries = 1024
 func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	if s.current == nil || weightsConfigChanged(s.weights, weights) {
 		s.current = make(map[string]int64, len(weights))
-		s.pending = make(map[string]int64, len(weights))
-		s.inFlight = 0
-		s.generation++
 	}
 	if s.weights == nil {
 		s.weights = make(map[string]int64, len(weights))

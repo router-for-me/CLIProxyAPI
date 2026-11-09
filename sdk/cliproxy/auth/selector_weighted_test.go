@@ -2,6 +2,7 @@ package auth
 
 import (
 	"maps"
+	"sort"
 	"testing"
 )
 
@@ -18,14 +19,14 @@ func TestSmoothWeightedStateChargeRebasesBeforeBounding(t *testing.T) {
 			current: map[string]int64{"a": -96, "b": 96, "c": 95},
 			weights: map[string]int64{"b": 1, "c": 1},
 			authID:  "b",
-			want:    map[string]int64{"a": -96, "b": 63, "c": 64},
+			want:    map[string]int64{"b": 63, "c": 64},
 		},
 		{
 			name:    "negative credits shift together",
 			current: map[string]int64{"a": 96, "b": -64, "c": -63},
 			weights: map[string]int64{"b": 1, "c": 1},
 			authID:  "b",
-			want:    map[string]int64{"a": 96, "b": -64, "c": -61},
+			want:    map[string]int64{"b": -64, "c": -61},
 		},
 		{
 			name:    "excessive spread clips debt without tying leaders",
@@ -43,10 +44,10 @@ func TestSmoothWeightedStateChargeRebasesBeforeBounding(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state := &smoothWeightedState{current: tc.current}
-			state.charge(tc.weights, tc.authID, false)
-			if !maps.Equal(state.current, tc.want) {
-				t.Fatalf("rebased credits = %v, want %v", state.current, tc.want)
+			state := weightedPoolForTest("route", tc.weights, tc.current)
+			state.charge(sort.Search(len(state.members), func(i int) bool { return state.members[i].id >= tc.authID }), false)
+			if !maps.Equal(state.currentForTest(), tc.want) {
+				t.Fatalf("rebased credits = %v, want %v", state.currentForTest(), tc.want)
 			}
 		})
 	}
@@ -54,12 +55,9 @@ func TestSmoothWeightedStateChargeRebasesBeforeBounding(t *testing.T) {
 
 func TestWeightedReservationRollbackPreservesConcurrentCredits(t *testing.T) {
 	key := "codex:model"
-	state := &smoothWeightedState{
-		current: map[string]int64{"a": -94, "b": 94, "c": 93},
-		weights: map[string]int64{"a": 1, "b": 1, "c": 1},
-		pending: make(map[string]int64),
-	}
-	weighted := &WeightedRoundRobinSelector{states: map[string]*smoothWeightedState{weightedPoolStateKey(key, state.weights): state}}
+	weights := map[string]int64{"a": 1, "b": 1, "c": 1}
+	state := weightedPoolForTest(key, weights, map[string]int64{"a": -94, "b": 94, "c": 93})
+	weighted := &WeightedRoundRobinSelector{states: map[[32]byte]*weightedPoolState{weightedPoolStateKey(key, weights): state}, stateCount: 1}
 	auths := []*Auth{{ID: "a"}, {ID: "b"}, {ID: "c"}}
 	_, rejected := weighted.reserve(key, auths, "a")
 	t.Cleanup(func() { rejected.finish(false) })
@@ -67,15 +65,15 @@ func TestWeightedReservationRollbackPreservesConcurrentCredits(t *testing.T) {
 	t.Cleanup(func() { accepted.finish(false) })
 	accepted.finish(true)
 	want := map[string]int64{"a": -93, "b": 92, "c": 94}
-	if !maps.Equal(state.current, want) {
-		t.Fatalf("committed credits = %v, want %v", state.current, want)
+	if !maps.Equal(state.currentForTest(), want) {
+		t.Fatalf("committed credits = %v, want %v", state.currentForTest(), want)
 	}
-	if !maps.Equal(state.pending, map[string]int64{"a": -2, "b": 1, "c": 1}) {
-		t.Fatalf("commit changed another request's reservation: %v", state.pending)
+	if !maps.Equal(state.pendingForTest(), map[string]int64{"a": -2, "b": 1, "c": 1}) {
+		t.Fatalf("commit changed another request's reservation: %v", state.pendingForTest())
 	}
 	rejected.finish(false)
 	rejected.finish(true)
-	if !maps.Equal(state.current, want) || len(state.pending) != 0 {
-		t.Fatalf("rollback changed committed credits: current=%v pending=%v", state.current, state.pending)
+	if !maps.Equal(state.currentForTest(), want) || len(state.pendingForTest()) != 0 {
+		t.Fatalf("rollback changed committed credits: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 	}
 }

@@ -14,13 +14,17 @@ import (
 )
 
 // weightedStateForTest checks that the requested accounting pool was created.
-func weightedStateForTest(t *testing.T, selector *WeightedRoundRobinSelector, route string, ids ...string) *smoothWeightedState {
+func weightedStateForTest(t *testing.T, selector *WeightedRoundRobinSelector, route string, ids ...string) *weightedPoolState {
 	t.Helper()
 	weights := make(map[string]int64, len(ids))
 	for _, id := range ids {
 		weights[id] = 1
 	}
 	state := selector.states[weightedPoolStateKey(route, weights)]
+	ids = sortedWeightedIDs(weights)
+	for state != nil && !state.matches(route, ids) {
+		state = state.next
+	}
 	if state == nil {
 		t.Fatalf("missing weighted state for %q and %v", route, ids)
 	}
@@ -38,11 +42,11 @@ func TestWeightedPoolsResumeCreditsAndIsolatePendingReservations(t *testing.T) {
 	pendingSubset.finish(true)
 	subset := weightedStateForTest(t, weighted, key, "a", "b")
 	full := weightedStateForTest(t, weighted, key, "a", "b", "c")
-	if !maps.Equal(subset.current, map[string]int64{"a": 3, "b": -3}) || len(full.current) != 0 {
-		t.Fatalf("commit crossed pool boundary: subset=%v full=%v", subset.current, full.current)
+	if !maps.Equal(subset.currentForTest(), map[string]int64{"a": 3, "b": -3}) || full.hasCurrentForTest() {
+		t.Fatalf("commit crossed pool boundary: subset=%v full=%v", subset.currentForTest(), full.currentForTest())
 	}
-	if !maps.Equal(full.pending, map[string]int64{"a": 3, "b": -4, "c": 1}) {
-		t.Fatalf("another pool consumed pending credit: %v", full.pending)
+	if !maps.Equal(full.pendingForTest(), map[string]int64{"a": 3, "b": -4, "c": 1}) {
+		t.Fatalf("another pool consumed pending credit: %v", full.pendingForTest())
 	}
 	pendingFull.finish(false)
 	for range 100 {
@@ -53,11 +57,11 @@ func TestWeightedPoolsResumeCreditsAndIsolatePendingReservations(t *testing.T) {
 	for range 3 {
 		picked, reservation := weighted.reserve(key, []*Auth{auths[1], auths[0]}, "")
 		if picked == nil || picked.ID != "a" {
-			t.Fatalf("returning subset lost credit: pick=%v credits=%v", picked, subset.current)
+			t.Fatalf("returning subset lost credit: pick=%v credits=%v", picked, subset.currentForTest())
 		}
 		reservation.finish(true)
 	}
-	if !maps.Equal(subset.current, map[string]int64{"a": 0, "b": 0}) || len(subset.pending) != 0 || len(full.pending) != 0 {
+	if !maps.Equal(subset.currentForTest(), map[string]int64{"a": 0, "b": 0}) || len(subset.pendingForTest()) != 0 || len(full.pendingForTest()) != 0 {
 		t.Fatalf("returning subset failed to balance: %#v", subset)
 	}
 }
@@ -96,14 +100,14 @@ func TestWeightedPoolInterleavingMatchesIndependentSelectors(t *testing.T) {
 		independentReservation.finish(committed)
 		poolKey := weightedPoolStateKey("route", authWeightVector(pool))
 		state, independentState := shared.states[poolKey], independent[mask].states[poolKey]
-		if !maps.Equal(state.current, independentState.current) || len(state.pending) != 0 {
+		if !maps.Equal(state.currentForTest(), independentState.currentForTest()) || len(state.pendingForTest()) != 0 {
 			t.Fatalf("step %d pool %d: credits diverged or pending leaked", step, mask)
 		}
 	}
 }
 
 func TestWeightedPoolKeysAndCapacity(t *testing.T) {
-	seen := make(map[string]struct{})
+	seen := make(map[[32]byte]struct{})
 	for _, tc := range []struct {
 		route string
 		ids   []string
@@ -145,7 +149,7 @@ func TestWeightedPoolKeysAndCapacity(t *testing.T) {
 		t.Fatal("pool eviction failed to bound or replace state")
 	}
 	old.finish(true)
-	if len(current.state.current) != 0 || !maps.Equal(current.state.pending, map[string]int64{"a": -1, "b": 1}) {
+	if current.state.hasCurrentForTest() || !maps.Equal(current.state.pendingForTest(), map[string]int64{"a": -1, "b": 1}) {
 		t.Fatal("finishing an evicted reservation affected the new pool")
 	}
 	current.finish(true)
@@ -273,8 +277,8 @@ func TestWeightedSessionAffinityPoolIsolation(t *testing.T) {
 					t.Fatalf("binding moved: %q, found=%t", bound, ok)
 				}
 				for _, state := range weighted.states {
-					if len(state.pending) != 0 {
-						t.Fatalf("pending credits leaked: %v", state.pending)
+					if len(state.pendingForTest()) != 0 {
+						t.Fatalf("pending credits leaked: %v", state.pendingForTest())
 					}
 				}
 			})

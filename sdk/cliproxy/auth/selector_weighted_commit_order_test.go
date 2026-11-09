@@ -41,8 +41,8 @@ func TestWeightedReservationFinalRollbackBoundsSettledCredits(t *testing.T) {
 			}
 			state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
 			limit := maxSmoothWeightedCreditRounds * 2
-			if state.inFlight != 0 || len(state.pending) != 0 || !maps.Equal(state.current, map[string]int64{"a": -limit, "b": limit}) {
-				t.Fatalf("settled credit did not reach its bound: current=%v pending=%v in-flight=%d", state.current, state.pending, state.inFlight)
+			if state.inFlight != 0 || len(state.pendingForTest()) != 0 || !maps.Equal(state.currentForTest(), map[string]int64{"a": -limit, "b": limit}) {
+				t.Fatalf("settled credit did not reach its bound: current=%v pending=%v in-flight=%d", state.currentForTest(), state.pendingForTest(), state.inFlight)
 			}
 		})
 	}
@@ -98,7 +98,7 @@ func TestWeightedReservationUnequalWeightsOutOfOrderCommits(t *testing.T) {
 					t.Fatalf("%s distribution = %v, want 48:16", phase, counts)
 				}
 			}
-			if state.inFlight != 0 || len(state.pending) != 0 || !maps.Equal(state.current, map[string]int64{"a": 0, "b": 0}) {
+			if state.inFlight != 0 || len(state.pendingForTest()) != 0 || !maps.Equal(state.currentForTest(), map[string]int64{"a": 0, "b": 0}) {
 				t.Fatalf("settled 3:1 batch drifted: %#v", state)
 			}
 		})
@@ -128,11 +128,11 @@ func TestWeightedReservationResetDoesNotReleaseNewGeneration(t *testing.T) {
 		reservation.finish(true)
 	}
 	state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
-	if state.inFlight != 1 || len(state.current) != 0 || !maps.Equal(state.pending, map[string]int64{"a": -1, "b": 1}) {
+	if state.inFlight != 1 || state.hasCurrentForTest() || !maps.Equal(state.pendingForTest(), map[string]int64{"a": -1, "b": 1}) {
 		t.Fatalf("old generation altered new accounting: %#v", state)
 	}
 	latest.finish(true)
-	if state.inFlight != 0 || len(state.pending) != 0 || !maps.Equal(state.current, map[string]int64{"a": -1, "b": 1}) {
+	if state.inFlight != 0 || len(state.pendingForTest()) != 0 || !maps.Equal(state.currentForTest(), map[string]int64{"a": -1, "b": 1}) {
 		t.Fatalf("new generation failed to settle: %#v", state)
 	}
 }
@@ -167,8 +167,8 @@ func TestWeightedReservationOutOfOrderBalancedCommits(t *testing.T) {
 				}
 				state := weightedStateForTest(t, weighted, "codex:model", "a", "b")
 				// A zero net pending vector does not mean all reservations settled.
-				if state.inFlight != 256 || len(state.pending) != 0 {
-					t.Fatalf("in-flight=%d pending=%v, want 256 live balanced reservations", state.inFlight, state.pending)
+				if state.inFlight != 256 || len(state.pendingForTest()) != 0 {
+					t.Fatalf("in-flight=%d pending=%v, want 256 live balanced reservations", state.inFlight, state.pendingForTest())
 				}
 				last := "b"
 				if first == "b" {
@@ -179,8 +179,8 @@ func TestWeightedReservationOutOfOrderBalancedCommits(t *testing.T) {
 						reservation.finish(true)
 					}
 				}
-				if !maps.Equal(state.current, map[string]int64{"a": 0, "b": 0}) || len(state.pending) != 0 || state.inFlight != 0 {
-					t.Errorf("commit order distorted balanced credit: current=%v pending=%v", state.current, state.pending)
+				if !maps.Equal(state.currentForTest(), map[string]int64{"a": 0, "b": 0}) || len(state.pendingForTest()) != 0 || state.inFlight != 0 {
+					t.Errorf("commit order distorted balanced credit: current=%v pending=%v", state.currentForTest(), state.pendingForTest())
 				}
 				counts := map[string]int{}
 				for range 64 {
