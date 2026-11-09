@@ -34,6 +34,32 @@ func TestRuntimeConfigYAMLAddsHostDefaultsToRawPluginConfig(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigYAMLStripsHostOwnedStoreMetadata(t *testing.T) {
+	var node yaml.Node
+	raw := "store:\n  id: alpha\n  version: 1.0.3\n  install:\n    type: github-release\nconfig1: true\n"
+	if errDecode := yaml.Unmarshal([]byte(raw), &node); errDecode != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", errDecode)
+	}
+	item := config.PluginInstanceConfig{
+		Priority: 3,
+		Raw:      *node.Content[0],
+	}
+
+	got := string(runtimeConfigYAML(item, true))
+	if strings.Contains(got, "store:") || strings.Contains(got, "github-release") {
+		t.Fatalf("runtimeConfigYAML() leaked host-owned store metadata:\n%s", got)
+	}
+	for _, want := range []string{
+		"config1: true",
+		"enabled: true",
+		"priority: 3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("runtimeConfigYAML() missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 func TestRuntimeConfigYAMLDefaultsEnabledFalse(t *testing.T) {
 	item := config.PluginInstanceConfig{
 		Priority: 3,

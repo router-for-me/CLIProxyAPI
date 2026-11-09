@@ -70,7 +70,7 @@ func startCodexMockOAuthServers(t *testing.T, idToken string) (proxyURL string, 
 				http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 				return
 			}
-			clientConn, _, errHijack := hijacker.Hijack()
+			clientConn, clientBuffer, errHijack := hijacker.Hijack()
 			if errHijack != nil {
 				_ = destConn.Close()
 				return
@@ -78,7 +78,9 @@ func startCodexMockOAuthServers(t *testing.T, idToken string) (proxyURL string, 
 			go func() {
 				defer func() { _ = destConn.Close() }()
 				defer func() { _ = clientConn.Close() }()
-				_, _ = io.Copy(destConn, clientConn)
+				// Hijack may retain the start of the TLS handshake after CONNECT.
+				// Forward those buffered bytes before reading from the socket.
+				_, _ = io.Copy(destConn, clientBuffer)
 			}()
 			go func() {
 				defer func() { _ = destConn.Close() }()
@@ -351,7 +353,7 @@ func startDualCodexAndSIWCMockOAuthServer(t *testing.T, idToken string, failSIWC
 				_ = destConn.Close()
 				return
 			}
-			clientConn, _, errHijack := hijacker.Hijack()
+			clientConn, clientBuffer, errHijack := hijacker.Hijack()
 			if errHijack != nil {
 				_ = destConn.Close()
 				return
@@ -359,7 +361,9 @@ func startDualCodexAndSIWCMockOAuthServer(t *testing.T, idToken string, failSIWC
 			go func() {
 				defer func() { _ = destConn.Close() }()
 				defer func() { _ = clientConn.Close() }()
-				_, _ = io.Copy(destConn, clientConn)
+				// Hijack may retain the start of the TLS handshake after CONNECT.
+				// Forward those buffered bytes before reading from the socket.
+				_, _ = io.Copy(destConn, clientBuffer)
 			}()
 			go func() {
 				defer func() { _ = destConn.Close() }()

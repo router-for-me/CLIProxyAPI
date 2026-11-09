@@ -510,6 +510,51 @@ func (a *Auth) Clone() *Auth {
 	return &copyAuth
 }
 
+// NormalizeForComparison returns a deep clone with manager-assigned versions,
+// stable indices, in-memory counters, runtime handles, and volatile timestamps
+// cleared. Callers compare the result to decide whether two auth records carry
+// different persisted content, without treating runtime bookkeeping as changes.
+func (a *Auth) NormalizeForComparison() *Auth {
+	if a == nil {
+		return nil
+	}
+	clone := a.Clone()
+	clone.ClearFileSnapshot()
+	clone.RegistrationEpoch = 0
+	clone.CredentialVersion = 0
+	clone.Generation = 0
+	clone.Index = ""
+	clone.indexAssigned = false
+	clone.Storage = nil
+	clone.CodexRefreshPatch = nil
+	clone.Runtime = nil
+	clone.RejectedAccessToken = ""
+	clone.RejectedSIWCAccessToken = ""
+	clone.RejectedRefreshToken = ""
+	clone.RejectedSIWCRefreshToken = ""
+	clone.RenewalWarnedRefreshToken = ""
+	clone.RequiresSignIn = false
+	clone.RefreshError = nil
+	clone.RenewalEventAt = time.Time{}
+	clone.AdoptedAt = time.Time{}
+	clone.AdoptedGrantHash = ""
+	clone.InferenceVerified = false
+	clone.LastInferenceVerifiedAt = time.Time{}
+	clone.RenewalVerified = false
+	clone.LastRenewalVerifiedAt = time.Time{}
+	clone.Success = 0
+	clone.Failed = 0
+	clone.RefreshFailures = 0
+	clone.cooldownRecordedSeq = 0
+	clone.recentRequests = recentRequestRing{}
+	clone.CreatedAt = time.Time{}
+	clone.UpdatedAt = time.Time{}
+	clone.LastRefreshedAt = time.Time{}
+	clone.NextRefreshAfter = time.Time{}
+	clone.Quota.NextRecoverAt = time.Time{}
+	return clone
+}
+
 // ProxyConnectionPoolOverride holds the per-api-key connection-pool settings.
 // Omitted fields fall back to the pool defaults (300s idle, 2 idle per host).
 type ProxyConnectionPoolOverride struct {

@@ -2642,6 +2642,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	requestSeen := make(chan struct{})
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
@@ -2670,10 +2671,15 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Start server reader loop so server processes control frames.
 		readErrCh := make(chan error, 1)
 		go func() {
+			first := true
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					readErrCh <- errRead
 					return
+				}
+				if first {
+					first = false
+					close(requestSeen)
 				}
 			}
 		}()
@@ -2698,6 +2704,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		// The client payload write resumes once the pong is observed. Wait until the
+		// server has actually read that payload before sending the terminal event and
+		// closing the socket; otherwise the close races the in-flight client write.
+		select {
+		case <-requestSeen:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for client request payload")
 			return
 		}
 
@@ -2742,6 +2758,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	requestSeen := make(chan struct{})
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
@@ -2767,9 +2784,14 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		})
 
 		go func() {
+			first := true
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if first {
+					first = false
+					close(requestSeen)
 				}
 			}
 		}()
@@ -2794,6 +2816,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		// The client payload write resumes once the pong is observed. Wait until the
+		// server has actually read that payload before sending the terminal event and
+		// closing the socket; otherwise the close races the in-flight client write.
+		select {
+		case <-requestSeen:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for client request payload")
 			return
 		}
 
@@ -2834,6 +2866,7 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
 	pongDeliveredDuringWrite := make(chan struct{})
+	requestSeen := make(chan struct{})
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
 		close(inWriteHook)
@@ -2859,9 +2892,14 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		})
 
 		go func() {
+			first := true
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if first {
+					first = false
+					close(requestSeen)
 				}
 			}
 		}()
@@ -2886,6 +2924,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			close(pongDeliveredDuringWrite)
 		case <-time.After(2 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
+			return
+		}
+
+		// The client payload write resumes once the pong is observed. Wait until the
+		// server has actually read that payload before sending the terminal event and
+		// closing the socket; otherwise the close races the in-flight client write.
+		select {
+		case <-requestSeen:
+		case <-time.After(2 * time.Second):
+			t.Errorf("timed out waiting for client request payload")
 			return
 		}
 
