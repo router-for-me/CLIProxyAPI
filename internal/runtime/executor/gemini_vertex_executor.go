@@ -456,7 +456,6 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 
 		fixGeminiImageAspectRatioDoc(baseModel, doc)
 		helps.SetStringIfDifferentDoc(doc, "model", baseModel)
-		helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 		internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 	}
 
@@ -470,6 +469,18 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	if action != "countTokens" {
 		helps.DropGeminiTrailingThoughtOnlyContentDoc(doc, "contents")
 		helps.EnsureGeminiTrailingUserContentDoc(doc, "contents")
+	}
+	replayScope := antigravityReasoningReplayScope{}
+	var replayRequestPayload []byte
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		var errReplay error
+		replayScope, replayRequestPayload, _, errReplay = prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc)
+		if errReplay != nil {
+			return resp, errReplay
+		}
+	}
+	if !isImagenModel(baseModel) {
+		helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, opts.SourceFormat.String())
 	}
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
@@ -534,6 +545,9 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
+			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -543,6 +557,9 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if action != "countTokens" && !isImagenModel(baseModel) {
+		cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, replayRequestPayload, data)
+	}
 	reporter.ObserveResponseModel(data)
 
 	// For Imagen models, convert response to Gemini format before translation
@@ -612,7 +629,6 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
-	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 
 	action := getVertexAction(baseModel, false)
@@ -626,6 +642,16 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		helps.DropGeminiTrailingThoughtOnlyContentDoc(doc, "contents")
 		helps.EnsureGeminiTrailingUserContentDoc(doc, "contents")
 	}
+	replayScope := antigravityReasoningReplayScope{}
+	var replayRequestPayload []byte
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		var errReplay error
+		replayScope, replayRequestPayload, _, errReplay = prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc)
+		if errReplay != nil {
+			return resp, errReplay
+		}
+	}
+	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 
 	// For API key auth, use simpler URL format without project/location.
 	// The helper honors base URLs that already encode "/publishers/..." so
@@ -690,6 +716,9 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
+			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -699,6 +728,9 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		return resp, errRead
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if action != "countTokens" && !isImagenModel(baseModel) {
+		cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, replayRequestPayload, data)
+	}
 	reporter.ObserveResponseModel(data)
 	if blockMsg, blocked := geminiPromptBlockErrorMessage(data); blocked {
 		err = statusErr{code: http.StatusBadGateway, msg: blockMsg}
@@ -757,12 +789,21 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
-	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 
 	action := getVertexAction(baseModel, true)
 	helps.DropGeminiTrailingThoughtOnlyContentDoc(doc, "contents")
 	helps.EnsureGeminiBoundaryUserContentDoc(doc, "contents")
+	replayScope := antigravityReasoningReplayScope{}
+	var replayRequestPayload []byte
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		var errReplay error
+		replayScope, replayRequestPayload, _, errReplay = prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc)
+		if errReplay != nil {
+			return nil, errReplay
+		}
+	}
+	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -829,9 +870,13 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
+		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
+			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+		}
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 
+	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayRequestPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func() {
 		defer close(out)
@@ -853,9 +898,16 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var replayCommitted bool
 		var pendingFilterLine []byte
 		var pendingFilterMsg string
 		var param any
+		commitReplay := func() {
+			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamErr == nil && helps.ApplyPatchTranslationError(param) == nil {
+				replayAccumulator.Commit(ctx)
+				replayCommitted = true
+			}
+		}
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		emitTranslatedLine := func(line []byte) bool {
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
@@ -863,6 +915,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 				return statusErr{code: http.StatusBadGateway, msg: msg}
 			})
+			if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && antigravityStreamChunksHaveTerminalCommitEvent(lines) {
+				commitReplay()
+			}
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -878,6 +933,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if replayAccumulator != nil {
+				replayAccumulator.ObserveSSELine(line)
+			}
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
 			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
@@ -970,6 +1028,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 			return statusErr{code: http.StatusBadGateway, msg: msg}
 		})
+		commitReplay()
 		for i := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -1018,12 +1077,21 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
-	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 
 	action := getVertexAction(baseModel, true)
 	helps.DropGeminiTrailingThoughtOnlyContentDoc(doc, "contents")
 	helps.EnsureGeminiBoundaryUserContentDoc(doc, "contents")
+	replayScope := antigravityReasoningReplayScope{}
+	var replayRequestPayload []byte
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		var errReplay error
+		replayScope, replayRequestPayload, _, errReplay = prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc)
+		if errReplay != nil {
+			return nil, errReplay
+		}
+	}
+	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	// For API key auth, use simpler URL format without project/location
 	url := vertexAPIKeyModelsURL(baseURL, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -1087,9 +1155,13 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("vertex executor: close response body error: %v", errClose)
 		}
+		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
+			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+		}
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 
+	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayRequestPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func() {
 		defer close(out)
@@ -1111,9 +1183,16 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		}()
 		var terminalDelivered bool
 		var sawFinishReason bool
+		var replayCommitted bool
 		var pendingFilterLine []byte
 		var pendingFilterMsg string
 		var param any
+		commitReplay := func() {
+			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamErr == nil && helps.ApplyPatchTranslationError(param) == nil {
+				replayAccumulator.Commit(ctx)
+				replayCommitted = true
+			}
+		}
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		emitTranslatedLine := func(line []byte) bool {
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
@@ -1121,6 +1200,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 				return statusErr{code: http.StatusBadGateway, msg: msg}
 			})
+			if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && antigravityStreamChunksHaveTerminalCommitEvent(lines) {
+				commitReplay()
+			}
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -1136,6 +1218,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if replayAccumulator != nil {
+				replayAccumulator.ObserveSSELine(line)
+			}
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
 			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
@@ -1228,6 +1313,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		helps.CaptureTranslatedClaudeStreamError(responseFormat, lines, &streamErr, func(msg string) error {
 			return statusErr{code: http.StatusBadGateway, msg: msg}
 		})
+		commitReplay()
 		for i := range lines {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
@@ -1269,13 +1355,18 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(ctx context.Context
 
 	fixGeminiImageAspectRatioDoc(baseModel, doc)
 	_ = doc.Set("model", baseModel)
-	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	_ = doc.Delete("tools")
 	_ = doc.Delete("generationConfig")
 	_ = doc.Delete("safetySettings")
 	internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 	helps.EnsureGeminiLeadingUserContentDoc(doc, "contents")
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		if _, errReplay := prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
+			return cliproxyexecutor.Response{}, errReplay
+		}
+	}
+	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf("%s/%s/projects/%s/locations/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, projectID, location, baseModel, "countTokens")
@@ -1373,13 +1464,18 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(ctx context.Context, auth *
 
 	fixGeminiImageAspectRatioDoc(baseModel, doc)
 	_ = doc.Set("model", baseModel)
-	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 	respCtx := context.WithValue(ctx, "alt", opts.Alt)
 	_ = doc.Delete("tools")
 	_ = doc.Delete("generationConfig")
 	_ = doc.Delete("safetySettings")
 	internalsignature.SanitizeGeminiRequestThoughtSignaturesDoc(doc, "contents")
 	helps.EnsureGeminiLeadingUserContentDoc(doc, "contents")
+	if !isImagenModel(baseModel) && antigravityUsesReasoningReplayCache(baseModel) {
+		if _, errReplay := prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
+			return cliproxyexecutor.Response{}, errReplay
+		}
+	}
+	helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc, from.String())
 
 	// For API key auth, use simpler URL format without project/location
 	url := vertexAPIKeyModelsURL(baseURL, baseModel, "countTokens")
