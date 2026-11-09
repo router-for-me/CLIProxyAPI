@@ -1902,6 +1902,12 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if model.Thinking != nil {
+			// Optional capability metadata: configured thinking support
+			// (token budgets and/or discrete effort levels). Clients that
+			// do not understand the field ignore it.
+			result["thinking"] = model.Thinking
+		}
 		return result
 
 	case "claude":

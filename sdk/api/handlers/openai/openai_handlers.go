@@ -100,6 +100,13 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			filteredModel["owned_by"] = ownedBy
 		}
 
+		// Pass through configured thinking support so OpenAI-compatible
+		// clients can map reasoning capabilities into their configurations.
+		// Optional field: clients that do not use it ignore unknown keys.
+		if thinking, exists := model["thinking"]; exists {
+			filteredModel["thinking"] = thinking
+		}
+
 		filteredModels[i] = filteredModel
 	}
 
