@@ -833,6 +833,9 @@ func ClaudePayloadHas1hTTL(payload []byte) bool {
 	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !ojson.ValidBytes(payload) {
 		return false
 	}
+	if topCC := ojson.GetBytesNoCopy(payload, "cache_control"); topCC.IsObject() && topCC.Get("ttl").String() == "1h" {
+		return true
+	}
 	has1h := false
 	checkBlock := func(item ojson.Result) bool {
 		cc := item.Get("cache_control")

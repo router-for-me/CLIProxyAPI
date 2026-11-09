@@ -869,6 +869,78 @@ func TestUsageRecordRequestIDAndTraceID(t *testing.T) {
 	}
 }
 
+func TestUsageDetailModalityTokenCounters(t *testing.T) {
+	int64Ptr := func(v int64) *int64 { return &v }
+	record := UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: UsageDetail{
+			InputTokens:       80,
+			OutputTokens:      1056,
+			CachedTokens:      40,
+			CacheReadTokens:   40,
+			TotalTokens:       1136,
+			TextInputTokens:   int64Ptr(30),
+			ImageInputTokens:  int64Ptr(50),
+			AudioInputTokens:  int64Ptr(0),
+			VideoInputTokens:  nil,
+			FileInputTokens:   int64Ptr(12),
+			CachedTextTokens:  int64Ptr(25),
+			CachedImageTokens: int64Ptr(15),
+			CachedAudioTokens: int64Ptr(0),
+			TextOutputTokens:  int64Ptr(0),
+			ImageOutputTokens: int64Ptr(1056),
+			AudioOutputTokens: nil,
+		},
+	}
+
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshal)
+	}
+	got := decoded.Detail
+	if got.InputTokens != 80 || got.OutputTokens != 1056 || got.TotalTokens != 1136 {
+		t.Fatalf("aggregate Detail = %+v", got)
+	}
+	if got.TextInputTokens == nil || *got.TextInputTokens != 30 {
+		t.Fatalf("TextInputTokens = %v, want 30", got.TextInputTokens)
+	}
+	if got.ImageInputTokens == nil || *got.ImageInputTokens != 50 {
+		t.Fatalf("ImageInputTokens = %v, want 50", got.ImageInputTokens)
+	}
+	if got.AudioInputTokens == nil || *got.AudioInputTokens != 0 {
+		t.Fatalf("AudioInputTokens = %v, want explicit 0", got.AudioInputTokens)
+	}
+	if got.VideoInputTokens != nil {
+		t.Fatalf("VideoInputTokens = %v, want nil", got.VideoInputTokens)
+	}
+	if got.FileInputTokens == nil || *got.FileInputTokens != 12 {
+		t.Fatalf("FileInputTokens = %v, want 12", got.FileInputTokens)
+	}
+	if got.CachedTextTokens == nil || *got.CachedTextTokens != 25 {
+		t.Fatalf("CachedTextTokens = %v, want 25", got.CachedTextTokens)
+	}
+	if got.CachedImageTokens == nil || *got.CachedImageTokens != 15 {
+		t.Fatalf("CachedImageTokens = %v, want 15", got.CachedImageTokens)
+	}
+	if got.CachedAudioTokens == nil || *got.CachedAudioTokens != 0 {
+		t.Fatalf("CachedAudioTokens = %v, want explicit 0", got.CachedAudioTokens)
+	}
+	if got.TextOutputTokens == nil || *got.TextOutputTokens != 0 {
+		t.Fatalf("TextOutputTokens = %v, want explicit 0", got.TextOutputTokens)
+	}
+	if got.ImageOutputTokens == nil || *got.ImageOutputTokens != 1056 {
+		t.Fatalf("ImageOutputTokens = %v, want 1056", got.ImageOutputTokens)
+	}
+	if got.AudioOutputTokens != nil {
+		t.Fatalf("AudioOutputTokens = %v, want nil", got.AudioOutputTokens)
+	}
+}
+
 func TestQuotaPayloadJSON(t *testing.T) {
 	// Test camelCase input
 	camelJSON := []byte(`{
