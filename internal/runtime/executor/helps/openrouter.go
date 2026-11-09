@@ -24,12 +24,19 @@ const (
 // Placement follows CPA's own Claude breakpoints: the last system message and the latest user or tool message, which
 // covers the whole conversation prefix. Requests that already carry cache_control on a message or a tool are left
 // alone. A Claude-format client (claudeSource) asking for the 1-hour lifetime in sourcePayloads keeps it.
+//
+// An OpenAI-format client asking for a cache lifetime (prompt_cache_options.ttl, e.g. "12h") keeps it too: see
+// applyOpenRouterPromptCacheOptionsDoc.
 func ApplyOpenRouterCacheControlDoc(doc *ojson.Doc, baseURL string, claudeSource bool, sourcePayloads ...[]byte) {
 	if doc == nil || !util.IsOpenRouterURL(baseURL) {
 		return
 	}
 	messages := doc.Get("messages")
-	if !messages.IsArray() || openAIRequestHasCacheControl(doc) {
+	if !messages.IsArray() {
+		return
+	}
+	defer applyOpenRouterPromptCacheOptionsDoc(doc, sourcePayloads...)
+	if openAIRequestHasCacheControl(doc) {
 		return
 	}
 	cacheControl := openRouterCacheControl
@@ -50,6 +57,44 @@ func ApplyOpenRouterCacheControlDoc(doc *ojson.Doc, baseURL string, claudeSource
 			markOpenAIMessageCacheControlDoc(doc, i, cacheControl)
 		}
 	}
+}
+
+// applyOpenRouterPromptCacheOptionsDoc carries the client's OpenAI cache lifetime to OpenRouter. OpenRouter applies
+// prompt_cache_options only to OpenAI models (GPT-5.6 and newer) and only in explicit mode, where the cache_control
+// breakpoints decide what is cached; without mode "explicit" the ttl is silently ignored (billed as the 30-minute
+// default). The Responses-to-Chat-Completions translation drops the field, so the ttl is read from the translated
+// request first and then from the client's original payloads. Nothing is added without a breakpoint to cache.
+func applyOpenRouterPromptCacheOptionsDoc(doc *ojson.Doc, sourcePayloads ...[]byte) {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(doc.Get("model").String())), "openai/") {
+		return
+	}
+	if !openAIRequestHasCacheControl(doc) {
+		return
+	}
+	ttl := strings.TrimSpace(doc.Get("prompt_cache_options.ttl").String())
+	if ttl == "" {
+		ttl = RequestPromptCacheTTL(sourcePayloads...)
+	}
+	if ttl == "" {
+		return
+	}
+	_ = doc.Set("prompt_cache_options.ttl", ttl)
+	if strings.TrimSpace(doc.Get("prompt_cache_options.mode").String()) == "" {
+		_ = doc.Set("prompt_cache_options.mode", "explicit")
+	}
+}
+
+// RequestPromptCacheTTL returns the first OpenAI prompt_cache_options.ttl found in payloads, or "".
+func RequestPromptCacheTTL(payloads ...[]byte) string {
+	for _, payload := range payloads {
+		if len(payload) == 0 || !ojson.ValidBytes(payload) {
+			continue
+		}
+		if ttl := strings.TrimSpace(ojson.GetBytes(payload, "prompt_cache_options.ttl").String()); ttl != "" {
+			return ttl
+		}
+	}
+	return ""
 }
 
 // openAIRequestHasCacheControl reports whether the caller already placed cache_control on a tool (tools[i] or

@@ -171,3 +171,52 @@ func TestApplyOpenRouterSessionHeader(t *testing.T) {
 		t.Fatalf("no session known: got %q, want none", got)
 	}
 }
+
+func TestOpenRouterPromptCacheOptionsCarryClientTTL(t *testing.T) {
+	// Responses client asking for 12h: the translated chat body has no prompt_cache_options.
+	out := openRouterCacheControlTestDoc(`{"model":"openai/gpt-6.1-sol","messages":[{"role":"user","content":"hi"}]}`,
+		testOpenRouterBaseURL, false, `{"model":"gpt-6.1-sol","input":"hi","prompt_cache_options":{"ttl":"12h"}}`)
+	if got := ojson.GetBytes(out, "prompt_cache_options.ttl").String(); got != "12h" {
+		t.Fatalf("ttl = %q, want 12h: %s", got, out)
+	}
+	if got := ojson.GetBytes(out, "prompt_cache_options.mode").String(); got != "explicit" {
+		t.Fatalf("mode = %q, want explicit (OpenRouter ignores the ttl otherwise): %s", got, out)
+	}
+	if !ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("explicit mode needs a breakpoint: %s", out)
+	}
+
+	// Chat client sending the ttl itself without a mode, and its own breakpoint.
+	out = openRouterCacheControlTestDoc(`{"model":"openai/gpt-6.1-terra","prompt_cache_options":{"ttl":"12h"},
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`,
+		testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "prompt_cache_options.mode").String(); got != "explicit" {
+		t.Fatalf("mode = %q, want explicit: %s", got, out)
+	}
+}
+
+func TestOpenRouterPromptCacheOptionsLeftAlone(t *testing.T) {
+	cases := map[string]struct{ payload, original string }{
+		"no ttl asked":        {`{"model":"openai/gpt-6.1-sol","messages":[{"role":"user","content":"hi"}]}`, `{"input":"hi"}`},
+		"not an OpenAI model": {`{"model":"anthropic/claude-opus-5.5","messages":[{"role":"user","content":"hi"}]}`, `{"prompt_cache_options":{"ttl":"12h"}}`},
+		"nothing to mark":     {`{"model":"openai/gpt-6.1-sol","messages":[{"role":"user","content":"  "}]}`, `{"prompt_cache_options":{"ttl":"12h"}}`},
+	}
+	for name, c := range cases {
+		out := openRouterCacheControlTestDoc(c.payload, testOpenRouterBaseURL, false, c.original)
+		if ojson.GetBytes(out, "prompt_cache_options").Exists() {
+			t.Fatalf("%s: unexpected prompt_cache_options: %s", name, out)
+		}
+	}
+	// A mode the client chose is kept.
+	out := openRouterCacheControlTestDoc(`{"model":"openai/gpt-6.1-sol","prompt_cache_options":{"mode":"implicit","ttl":"30m"},
+		"messages":[{"role":"user","content":"hi"}]}`, testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "prompt_cache_options.mode").String(); got != "implicit" {
+		t.Fatalf("client mode replaced: %s", out)
+	}
+	// Other base URLs are never touched.
+	out = openRouterCacheControlTestDoc(`{"model":"openai/gpt-6.1-sol","messages":[{"role":"user","content":"hi"}]}`,
+		"https://api.openai.com/v1", false, `{"prompt_cache_options":{"ttl":"12h"}}`)
+	if ojson.GetBytes(out, "prompt_cache_options").Exists() {
+		t.Fatalf("non-OpenRouter request changed: %s", out)
+	}
+}
