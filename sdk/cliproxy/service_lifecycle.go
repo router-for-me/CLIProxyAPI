@@ -476,7 +476,7 @@ var catalogLoadingCeiling = 30 * time.Second
 // the early-readiness gate; cancellation and the ceiling do not need that gate.
 func (s *Service) startCatalogLoading(ctx context.Context) (chan<- *WatcherWrapper, func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	registry.SetCatalogLoading(true)
+	releaseLoading := registry.BeginCatalogLoading()
 	ceiling := time.NewTimer(catalogLoadingCeiling)
 	ticker := time.NewTicker(50 * time.Millisecond)
 	// Buffered so startup can finish even if cancellation or the ceiling won.
@@ -486,6 +486,7 @@ func (s *Service) startCatalogLoading(ctx context.Context) (chan<- *WatcherWrapp
 		defer close(done)
 		defer ceiling.Stop()
 		defer ticker.Stop()
+		defer releaseLoading()
 		s.finishCatalogLoadingWithSignals(ctx, startupReady, ticker.C, ceiling.C)
 	}()
 	return startupReady, func() { cancel(); <-done }
@@ -493,7 +494,6 @@ func (s *Service) startCatalogLoading(ctx context.Context) (chan<- *WatcherWrapp
 
 // Separate signals let ordering tests drive each readiness check without sleeps.
 func (s *Service) finishCatalogLoadingWithSignals(ctx context.Context, startupReady <-chan *WatcherWrapper, ticks, ceiling <-chan time.Time) {
-	defer registry.SetCatalogLoading(false)
 	var w *WatcherWrapper
 	initialized := false
 	for {

@@ -53,14 +53,15 @@ func TestFinishCatalogLoadingWaitsForInFlightBatch(t *testing.T) {
 
 func runCatalogSignals(t *testing.T, service *Service, wrapper *WatcherWrapper, cancelInstead bool) {
 	t.Helper()
-	registry.SetCatalogLoading(true)
-	defer registry.SetCatalogLoading(false)
+	releaseLoading := registry.BeginCatalogLoading()
+	defer releaseLoading()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ticks, ceiling := make(chan time.Time), make(chan time.Time)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer releaseLoading()
 		service.finishCatalogLoadingWithSignals(ctx, catalogStartupReady(wrapper), ticks, ceiling)
 	}()
 	// Receiving a second tick proves the worker completed the first readiness
@@ -464,4 +465,50 @@ func TestServiceCatalogStartupHomeDoesNotChangeLoading(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestServiceCatalogLoadingOwnersRemainIndependent(t *testing.T) {
+	for _, completion := range []string{"ready", "cancel", "ceiling"} {
+		t.Run(completion, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				first := &Service{}
+				firstReady, stopFirst := first.startCatalogLoading(t.Context())
+				defer stopFirst()
+				// The second service's ceiling must expire later than the first.
+				time.Sleep(time.Second)
+				second := &Service{antigravityRefreshPending: map[string]*antigravityModelRefreshRequest{"initial": nil}}
+				secondReady, stopSecond := second.startCatalogLoading(t.Context())
+				defer stopSecond()
+				switch completion {
+				case "ready":
+					firstReady <- &WatcherWrapper{}
+					time.Sleep(50 * time.Millisecond)
+				case "cancel":
+					stopFirst()
+				case "ceiling":
+					time.Sleep(29 * time.Second)
+				}
+				synctest.Wait()
+				if !registry.CatalogLoading() {
+					t.Error("first service cleared another service's closed startup gate")
+				}
+				stopFirst()
+				stopFirst() // Repeated cleanup must not release another owner.
+				secondReady <- &WatcherWrapper{}
+				time.Sleep(50 * time.Millisecond)
+				synctest.Wait()
+				if !registry.CatalogLoading() {
+					t.Error("first service cleanup cleared another service's pending native publication")
+				}
+				second.antigravityProbeMu.Lock()
+				delete(second.antigravityRefreshPending, "initial")
+				second.antigravityProbeMu.Unlock()
+				time.Sleep(50 * time.Millisecond)
+				synctest.Wait()
+				if registry.CatalogLoading() {
+					t.Error("loading remained set after both services completed")
+				}
+			})
+		})
+	}
 }

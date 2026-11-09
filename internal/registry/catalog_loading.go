@@ -2,17 +2,30 @@ package registry
 
 import "sync/atomic"
 
-// catalogLoading is true from service start until the first full client load
-// has registered its models. Until then a request for a model the registry does
-// not know yet is a startup condition, not a bad request.
+// The explicit override and service-owned publication windows are independent.
+// A model missing while either is active is retryable startup, not a bad request.
 var catalogLoading atomic.Bool
+var catalogLoadingOwners atomic.Int64
 
-// SetCatalogLoading marks the model catalog as loading (true) or loaded (false).
+// SetCatalogLoading sets an explicit loading override. Clearing the override
+// does not release loading owned by active service startups.
 func SetCatalogLoading(loading bool) {
 	catalogLoading.Store(loading)
 }
 
-// CatalogLoading reports whether the first full client load is still running.
+// BeginCatalogLoading owns one service's initial publication window. The
+// returned release is idempotent and cannot finish another service's window.
+func BeginCatalogLoading() func() {
+	catalogLoadingOwners.Add(1)
+	var released atomic.Bool
+	return func() {
+		if released.CompareAndSwap(false, true) {
+			catalogLoadingOwners.Add(-1)
+		}
+	}
+}
+
+// CatalogLoading reports whether any initial load or explicit override remains.
 func CatalogLoading() bool {
-	return catalogLoading.Load()
+	return catalogLoading.Load() || catalogLoadingOwners.Load() > 0
 }
