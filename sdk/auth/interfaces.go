@@ -19,6 +19,7 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	ProxyURL     string
 	// OnDeviceCode runs after a device code is issued and before token polling starts.
 	OnDeviceCode func(DeviceCodeInfo)
 }
