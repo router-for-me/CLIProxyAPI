@@ -50,6 +50,10 @@ Framework and cross-cutting pieces that did ship:
 - `engines/headroom/` embedded arrays -> `compactEmbeddedArrays` in `headroom.go`.
 - `engines/mcpAccessibility/` -> `mcp_accessibility.go` (noise-line drop,
   repeated-line collapse, oversized-text clamp).
+- `engines/readLifecycle/` -> `read_lifecycle.go` (opt-in; stale reads stubbed
+  after a later read/edit of the same path).
+- `progressiveAging.ts` -> `progressive_aging.go` (recent turns verbatim, older
+  tiers tagged with `[COMPRESSED:aging:...]`).
 - `quantumLock/` -> `quantum_lock.go` (span masking, `quantum-lock` config knob).
 - per-engine telemetry (`engineBreakdown.ts`) -> `Stats.EngineBytesIn`/`EngineBytesOut`.
 
@@ -67,14 +71,14 @@ Engines:
 | `engines/ccr/` | ~1252 | replaces text with `[CCR retrieve hash=..]` needing an MCP retrieve tool. Unrecoverable here. Omitted. |
 | `engines/codex-responses/` | 335 | Omitted. |
 | `omniglyphAdapter.ts`, `omniglyphSingleMode.ts` | ~156 | Omitted. |
-| `summarizer.ts` | 244 | Omitted. |
-| `engines/ionizer/`, `engines/llm/`, `engines/readLifecycle/` | ? | Not inspected in this audit. |
+| `summarizer.ts` | 244 | Omitted; only `aggressive.ts` uses it. |
+| `engines/ionizer/`, `engines/llm/` | ? | Not inspected in this audit. |
 
 Governance and pipeline layer: the fidelity gate (protected tokens and numeric
 integrity), the secret risk gate (mask/restore), exclusions, hard budget and
 pipeline guards are ported. Still unported:
 
-`preservation.ts` (253), `progressiveAging.ts` (153),
+`preservation.ts` (253),
 `strategySelector.ts` (1185), `adaptiveCompression/`, `cachingAware.ts` (145),
 `lossyRequestPolicy.ts` (71), `toolResultCompressor.ts` (290),
 `pipelineEngineBreaker.ts` (139), `resultMemo.ts` (217),
@@ -210,20 +214,24 @@ Engine parity
   telemetry      [x] faithful: per-engine byte counts in `Stats`.
 
 Omitted engines — was the omission correct?
-  aggressive     [x] yes — lossy prose rewrite; redundant with the lossless default.
+  aggressive     [ ] partial — `progressiveAging` tiers are ported as the
+                 `progressive-aging` engine; the `toolResultCompressor` ladder and
+                 rule summarizer that `aggressive.ts` wraps around them are not.
   ultra          [x] yes — most lossy tier; not enabled upstream by default either.
   llmlingua      [x] yes — needs a Python/LLM runtime; cannot live in a Go proxy.
   ccr            [x] yes — replays a prior compressed payload; needs an upstream session store.
   codex-responses[x] yes — provider-specific Responses adapter; generic body compression covers it.
   omniglyph      [x] yes — optional external codec, not an engine in the catalog used here.
-  ionizer/llm/readLifecycle [x] yes — catalog entries without compression
-                 behavior (read-lifecycle needs a session store); nothing to port.
+  read-lifecycle [x] ported — opt-in, chat shape, stubs superseded reads.
+  ionizer/llm    [x] yes — no deterministic compression behavior to port.
 
 Deliberately unported governance modules
   strategySelector     — picks an engine from model class; the port keeps explicit config/combos.
   adaptiveCompression  — tunes intensity from runtime token pressure; out of scope, lossless default.
-  progressiveAging     — ages/evicts cached prefixes; needs a long-lived cache owner.
-  resultMemo           — memoizes engine results; the port has no cross-request result cache.
+  progressiveAging     — ported as the opt-in `progressive-aging` engine.
+  resultMemo           — skipped: liveZone already reuses a session's previous
+                         compressed prefix, and the engines are pure, so a global
+                         body-hash memo would only save CPU while adding an LRU.
   worker pool          — schedules large batches concurrently; Go handles bodies synchronously per request.
 
 Silently missing
@@ -279,3 +287,10 @@ Known open items for that last section, to confirm or refute:
 - Zero-engine stacked resolution: a combo with zero enabled engines resolves to
   off.
 - session-dedup: first-occurrence rewrite with the upstream sha marker.
+- read-lifecycle (`read_lifecycle.go`): opt-in (`enabled: true`) body pre-pass
+  that stubs a file read once the same path is read or written later. Supports
+  Anthropic `tool_use`/`tool_result` blocks and OpenAI `tool_calls`/`role: tool`.
+  Chat shape only, like upstream; idempotent.
+- progressive-aging (`progressive_aging.go`): recent turns stay verbatim, older
+  turns get lite/caveman/summary with `[COMPRESSED:aging:<tier>]` tags. JSON and
+  fenced content are left intact. Chat shape only.
