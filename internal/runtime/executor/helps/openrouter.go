@@ -21,8 +21,9 @@ const (
 // and the Claude-to-OpenAI translation drops the client's markers, so without this no such request through an
 // OpenRouter entry is ever cached. OpenRouter ignores the markers for models that cache automatically.
 //
-// Placement follows CPA's own Claude breakpoints: the last system message and the latest user or tool message, which
-// covers the whole conversation prefix. Requests that already carry cache_control on a message or a tool are left
+// Placement follows CPA's own Claude breakpoints: the last system message and the last conversation message (user,
+// tool, or an assistant prefill ending the request) that has content to mark, which covers the whole conversation
+// prefix. Requests that already carry cache_control on a message or a tool are left
 // alone. A Claude-format client (claudeSource) asking for the 1-hour lifetime in sourcePayloads keeps it.
 //
 // An OpenAI-format client asking for a cache lifetime (prompt_cache_options.ttl, e.g. "12h") keeps it too: see
@@ -43,18 +44,19 @@ func ApplyOpenRouterCacheControlDoc(doc *ojson.Doc, baseURL string, claudeSource
 	if claudeSource && ClaudeRequestAsksOneHourCache(sourcePayloads...) {
 		cacheControl = openRouterCacheControlOneHour
 	}
-	lastSystem, lastTurn := -1, -1
-	for i, msg := range messages.Array() {
-		switch msg.Get("role").String() {
-		case "system", "developer":
-			lastSystem = i
-		case "user", "tool":
-			lastTurn = i
+	list := messages.Array()
+	for i := len(list) - 1; i >= 0; i-- {
+		if role := list[i].Get("role").String(); role == "system" || role == "developer" {
+			markOpenAIMessageCacheControlDoc(doc, i, cacheControl)
+			break
 		}
 	}
-	for _, i := range []int{lastSystem, lastTurn} {
-		if i >= 0 {
-			markOpenAIMessageCacheControlDoc(doc, i, cacheControl)
+	for i := len(list) - 1; i >= 0; i-- {
+		switch list[i].Get("role").String() {
+		case "user", "tool", "assistant":
+			if markOpenAIMessageCacheControlDoc(doc, i, cacheControl) {
+				return
+			}
 		}
 	}
 }
@@ -63,38 +65,47 @@ func ApplyOpenRouterCacheControlDoc(doc *ojson.Doc, baseURL string, claudeSource
 // prompt_cache_options only to OpenAI models (GPT-5.6 and newer) and only in explicit mode, where the cache_control
 // breakpoints decide what is cached; without mode "explicit" the ttl is silently ignored (billed as the 30-minute
 // default). The Responses-to-Chat-Completions translation drops the field, so the ttl is read from the translated
-// request first and then from the client's original payloads. Nothing is added without a breakpoint to cache.
+// request first and then from the client's original payloads, together with the client's mode. Nothing is added
+// without a breakpoint to cache.
 func applyOpenRouterPromptCacheOptionsDoc(doc *ojson.Doc, sourcePayloads ...[]byte) {
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(doc.Get("model").String())), "openai/") {
+	model := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(doc.Get("model").String())), "~")
+	if !strings.HasPrefix(model, "openai/") {
 		return
 	}
 	if !openAIRequestHasCacheControl(doc) {
 		return
 	}
 	ttl := strings.TrimSpace(doc.Get("prompt_cache_options.ttl").String())
+	mode := strings.TrimSpace(doc.Get("prompt_cache_options.mode").String())
 	if ttl == "" {
-		ttl = RequestPromptCacheTTL(sourcePayloads...)
+		var sourceMode string
+		ttl, sourceMode = RequestPromptCacheOptions(sourcePayloads...)
+		if mode == "" {
+			mode = sourceMode
+		}
 	}
 	if ttl == "" {
 		return
 	}
-	_ = doc.Set("prompt_cache_options.ttl", ttl)
-	if strings.TrimSpace(doc.Get("prompt_cache_options.mode").String()) == "" {
-		_ = doc.Set("prompt_cache_options.mode", "explicit")
+	if mode == "" {
+		mode = "explicit"
 	}
+	_ = doc.Set("prompt_cache_options.ttl", ttl)
+	_ = doc.Set("prompt_cache_options.mode", mode)
 }
 
-// RequestPromptCacheTTL returns the first OpenAI prompt_cache_options.ttl found in payloads, or "".
-func RequestPromptCacheTTL(payloads ...[]byte) string {
+// RequestPromptCacheOptions returns the first OpenAI prompt_cache_options.ttl found in payloads and the mode sent
+// with it, or empty strings.
+func RequestPromptCacheOptions(payloads ...[]byte) (ttl, mode string) {
 	for _, payload := range payloads {
 		if len(payload) == 0 || !ojson.ValidBytes(payload) {
 			continue
 		}
-		if ttl := strings.TrimSpace(ojson.GetBytes(payload, "prompt_cache_options.ttl").String()); ttl != "" {
-			return ttl
+		if ttl = strings.TrimSpace(ojson.GetBytes(payload, "prompt_cache_options.ttl").String()); ttl != "" {
+			return ttl, strings.TrimSpace(ojson.GetBytes(payload, "prompt_cache_options.mode").String())
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // openAIRequestHasCacheControl reports whether the caller already placed cache_control on a tool (tools[i] or
@@ -123,21 +134,21 @@ func openAIRequestHasCacheControl(doc *ojson.Doc) bool {
 }
 
 // markOpenAIMessageCacheControlDoc puts cache_control on the message's last text, image or file part; string content
-// becomes a single text part. Messages with nothing to mark stay unchanged.
-func markOpenAIMessageCacheControlDoc(doc *ojson.Doc, index int, cacheControl string) {
+// becomes a single text part. Messages with nothing to mark stay unchanged and it reports false.
+func markOpenAIMessageCacheControlDoc(doc *ojson.Doc, index int, cacheControl string) bool {
 	path := "messages." + strconv.Itoa(index) + ".content"
 	content := doc.Get(path)
 	switch {
 	case content.Type == ojson.String:
 		text := content.String()
 		if strings.TrimSpace(text) == "" {
-			return
+			return false
 		}
 		if doc.SetRaw(path, `[{"type":"text","text":""}]`) != nil {
-			return
+			return false
 		}
 		_ = doc.Set(path+".0.text", text)
-		_ = doc.SetRaw(path+".0.cache_control", cacheControl)
+		return doc.SetRaw(path+".0.cache_control", cacheControl) == nil
 	case content.IsArray():
 		parts := content.Array()
 		for j := len(parts) - 1; j >= 0; j-- {
@@ -150,10 +161,10 @@ func markOpenAIMessageCacheControlDoc(doc *ojson.Doc, index int, cacheControl st
 			default:
 				continue
 			}
-			_ = doc.SetRaw(path+"."+strconv.Itoa(j)+".cache_control", cacheControl)
-			return
+			return doc.SetRaw(path+"."+strconv.Itoa(j)+".cache_control", cacheControl) == nil
 		}
 	}
+	return false
 }
 
 // ClaudeRequestAsksOneHourCache reports whether a Claude Messages request marks the request, a tool, a system block

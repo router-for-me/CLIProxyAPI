@@ -220,3 +220,53 @@ func TestOpenRouterPromptCacheOptionsLeftAlone(t *testing.T) {
 		t.Fatalf("non-OpenRouter request changed: %s", out)
 	}
 }
+
+func TestOpenRouterCacheControlMarksAssistantPrefill(t *testing.T) {
+	// A request ending with an assistant prefill caches the prefill too.
+	out := openRouterCacheControlTestDoc(`{"messages":[
+		{"role":"user","content":"write a poem"},
+		{"role":"assistant","content":"Roses"}]}`, testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("assistant prefill not marked: %s", out)
+	}
+	if ojson.GetBytes(out, "messages.0.content").Type != ojson.String {
+		t.Fatalf("only the last message should be marked: %s", out)
+	}
+
+	// An assistant-only request still gets a breakpoint.
+	out = openRouterCacheControlTestDoc(`{"messages":[{"role":"assistant","content":"hello"}]}`, testOpenRouterBaseURL, false, "")
+	if !ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("assistant-only request not marked: %s", out)
+	}
+
+	// A last message with nothing to mark falls back to the one before it.
+	out = openRouterCacheControlTestDoc(`{"messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]}]}`,
+		testOpenRouterBaseURL, false, "")
+	if !ojson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("expected the user message to be marked: %s", out)
+	}
+}
+
+func TestOpenRouterPromptCacheOptionsTildeModelsAndSourceMode(t *testing.T) {
+	// ~openai/ ids are OpenAI models too.
+	out := openRouterCacheControlTestDoc(`{"model":"~openai/gpt-latest","messages":[{"role":"user","content":"hi"}]}`,
+		testOpenRouterBaseURL, false, `{"input":"hi","prompt_cache_options":{"ttl":"12h"}}`)
+	if got := ojson.GetBytes(out, "prompt_cache_options.ttl").String(); got != "12h" {
+		t.Fatalf("~openai ttl = %q, want 12h: %s", got, out)
+	}
+	if got := ojson.GetBytes(out, "prompt_cache_options.mode").String(); got != "explicit" {
+		t.Fatalf("~openai mode = %q, want explicit: %s", got, out)
+	}
+
+	// A Responses client's own mode survives the translation, like on the Chat path.
+	out = openRouterCacheControlTestDoc(`{"model":"openai/gpt-6.1-sol","messages":[{"role":"user","content":"hi"}]}`,
+		testOpenRouterBaseURL, false, `{"input":"hi","prompt_cache_options":{"mode":"implicit","ttl":"12h"}}`)
+	if got := ojson.GetBytes(out, "prompt_cache_options.mode").String(); got != "implicit" {
+		t.Fatalf("source mode = %q, want implicit: %s", got, out)
+	}
+	if got := ojson.GetBytes(out, "prompt_cache_options.ttl").String(); got != "12h" {
+		t.Fatalf("source ttl = %q, want 12h: %s", got, out)
+	}
+}
