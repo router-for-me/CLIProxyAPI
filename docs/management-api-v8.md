@@ -64,6 +64,48 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
+### Weighted routing with session affinity
+
+Set `routing.strategy` to `weighted-round-robin` to use per-credential integer
+`weight` values (default `1`, maximum `1000000`; non-positive values are excluded).
+With `routing.session-affinity` enabled, sticky requests, parent inheritance,
+Guardian selections, and LCP matches also consume weighted credits without moving
+existing bindings. New or reselected sessions favor under-served credentials
+within the same eligible credential set. For example, with weights `3:1`, four
+sticky requests to the second credential can be compensated by twelve new
+requests to the first when both remain eligible.
+
+Different priority tiers, transport preferences, and retry/cooldown candidate
+sets keep separate credits; returning to a set resumes its retained credits.
+Pinned requests account against the eligible pool before pinning, within the
+pinned credential's priority tier and transport class, even when session affinity
+is disabled. Pinned and ordinary requests share the same weighted credits. A
+lower-priority binding never shifts the request ratio among higher-priority credentials.
+
+Settled credits are capped at ±32 times the eligible pool total, so request
+ratios are approximate rather than guaranteed. While reservations are in flight,
+committed balances can temporarily exceed the cap; their pending offsets remain
+intact until the pool settles, including when the last reservation rolls back. Sticky requests still use their binding at
+the cap, but stop adding compensation when their full credit delta cannot fit.
+New sessions continue repaying debt and earning credit, so excessive sticky
+traffic does not starve smaller-weight peers.
+
+Credits are local to the CPA process and reset on restart, selector replacement,
+or bounded pool-cache eviction. Concurrent selections see pending credit; local
+selection/binding success confirms it, while failure releases it. In Home mode,
+scheduling and credit accounting remain owned by Home. With matching CPA and Home
+versions, retained WebSocket responses (including Codex duplex successors) report
+`home_selection.reused` through usage so Home can charge later turns without
+redispatching or acquiring another concurrency slot. The scheduling model is
+carried separately from the upstream model. First-turn primary usage does not
+charge again. Split additional-model billing records (such as image usage) carry
+`home_selection.additional` and never add scheduling charges, even when they have
+independent execution IDs. Each reused execution is charged once through primary
+usage; redelivery of that execution ID is deduplicated.
+Compensation arrives after completion and uses Home's current eligible
+pool and API-key permissions, so it remains approximate. Old peers ignore the
+optional metadata; missing usage cannot compensate a reused turn.
+
 ### Codex multi-agent configuration migration
 
 `client.codex.optimize-multi-agent-v2` is the sole runtime setting. Loading older

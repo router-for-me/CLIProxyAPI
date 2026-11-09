@@ -39,9 +39,10 @@ type RoundRobinSelector struct {
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
 type WeightedRoundRobinSelector struct {
-	mu      sync.Mutex
-	states  map[string]*smoothWeightedState
-	maxKeys int
+	mu         sync.Mutex
+	states     map[[32]byte]*weightedPoolState
+	stateCount int
+	maxKeys    int
 }
 
 type smoothWeightedState struct {
@@ -411,6 +412,18 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+func canonicalModelLookupKey(model string) string {
+	return strings.ToLower(canonicalModelKey(model))
+}
+
+func sameCanonicalModelKey(left, right string) bool {
+	leftKey := canonicalModelLookupKey(left)
+	if leftKey == "" {
+		return false
+	}
+	return leftKey == canonicalModelLookupKey(right)
+}
+
 func authWebsocketsEnabled(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -628,7 +641,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model)
+	key := provider + ":" + canonicalModelLookupKey(model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastPicked == nil {
@@ -680,38 +693,11 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = opts
-	available, errAvailable := getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
-	if errAvailable != nil {
-		return nil, errAvailable
+	picked, reservation, errPick := s.reserveForRequest(ctx, provider, model, opts, auths, nil)
+	if errPick != nil {
+		return nil, errPick
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
-	stateModel := weightedSelectorStateModel(ctx, model)
-	key := provider + ":" + canonicalModelKey(stateModel)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.states == nil {
-		s.states = make(map[string]*smoothWeightedState)
-	}
-	limit := s.maxKeys
-	if limit <= 0 {
-		limit = 4096
-	}
-	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
-		s.states = make(map[string]*smoothWeightedState)
-	}
-	state := s.states[key]
-	if state == nil {
-		state = &smoothWeightedState{}
-		s.states[key] = state
-	}
-	weights := authWeightVector(available)
-	state.prepare(weights)
-	picked := pickSmoothWeightedAuth(available, state.current)
-	if picked == nil {
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
-	}
+	reservation.finish(true)
 	return picked, nil
 }
 
@@ -784,29 +770,6 @@ func authWeightVector(auths []*Auth) map[string]int64 {
 	return weights
 }
 
-func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
-	var picked *Auth
-	var pickedCurrent int64
-	var totalWeight int64
-	for _, auth := range auths {
-		weight := authWeight(auth)
-		if auth == nil || weight <= 0 {
-			continue
-		}
-		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
-		totalWeight = saturatingAddInt64(totalWeight, weight)
-		if picked == nil || current[auth.ID] > pickedCurrent {
-			picked = auth
-			pickedCurrent = current[auth.ID]
-		}
-	}
-	if picked == nil {
-		return nil
-	}
-	current[picked.ID] = saturatingAddInt64(current[picked.ID], -totalWeight)
-	return picked
-}
-
 func saturatingAddInt64(value, delta int64) int64 {
 	if delta > 0 && value > math.MaxInt64-delta {
 		return math.MaxInt64
@@ -861,13 +824,13 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			modelKey := canonicalModelKey(model)
+			modelKey := canonicalModelLookupKey(model)
 			matched := false
 			blocked := false
 			blockedReason := blockReasonNone
 			nextRetry := time.Time{}
 			for stateModel, state := range auth.ModelStates {
-				if state == nil || canonicalModelKey(stateModel) != modelKey {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
 					continue
 				}
 				matched = true
@@ -1022,9 +985,9 @@ func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Aut
 		return true
 	}
 	if model != "" && len(auth.ModelStates) > 0 {
-		modelKey := canonicalModelKey(model)
+		modelKey := canonicalModelLookupKey(model)
 		for stateModel, state := range auth.ModelStates {
-			if state == nil || canonicalModelKey(stateModel) != modelKey {
+			if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
 				continue
 			}
 			if state.Status == StatusDisabled {
@@ -1152,7 +1115,16 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
-func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (selected *Auth, errPick error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	var reservation *weightedReservation
+	// Local bindings complete inside Pick; failed selections release speculative credit.
+	defer func() { reservation.finish(selected != nil && errPick == nil) }()
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
@@ -1164,7 +1136,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// consulted when no header, body, or execution-session identity is present.
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if explicitID == "" {
-		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry); handled || errLCP != nil {
+		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry, &reservation); handled || errLCP != nil {
 			return auth, errLCP
 		}
 	} else if opts.Metadata != nil {
@@ -1206,7 +1178,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
@@ -1256,7 +1228,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
+				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
 		if s.rebindOnNever {
@@ -1269,7 +1241,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, err
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 		if err != nil {
 			return nil, err
 		}
@@ -1303,7 +1275,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == parentAuthID {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
+					return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 				}
 			}
 		}
@@ -1320,7 +1292,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
-						return auth, nil
+						return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 					}
 				}
 			}
@@ -1331,7 +1303,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return nil, errBound
 			}
 			if !isSubagent && !isFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
-				auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+				auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 				if err != nil {
 					return nil, err
 				}
@@ -1348,7 +1320,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if err != nil {
 		return nil, err
 	}
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 	if err != nil {
 		return nil, err
 	}
@@ -1364,7 +1336,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	return auth, nil
 }
 
-func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
+func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry, reservation **weightedReservation) (*Auth, bool, error) {
 	if s == nil || s.matcher == nil {
 		return nil, false, nil
 	}
@@ -1437,7 +1409,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
-			return auth, true, nil
+			picked, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, reservation)
+			return picked, true, errPick
 		}
 		if !match.IsFork && s.rebindOnNever {
 			if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, match.AuthID); bindRes.SessionID != "" {
@@ -1476,7 +1449,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		return nil, true, errAvailable
 	}
 	fallbackAuths := highestPriorityAuths(available)
-	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, reservation)
 	if errPick != nil {
 		return nil, true, errPick
 	}
