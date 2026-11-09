@@ -97,6 +97,7 @@ type Host struct {
 	callbackContexts         *callbackContextRegistry
 	usageStates              map[string]*pluginUsageState
 	maxPendingUsageRecords   int
+	quotaFetches             quotaFetchCache
 	snapshot                 atomic.Value
 	// loadCleanupDoneHook, set by tests, runs after a late load cleanup dropped its load token.
 	loadCleanupDoneHook func()
