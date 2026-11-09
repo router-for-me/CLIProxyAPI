@@ -92,7 +92,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if !useSIWC {
 		normalizeCodexInstructionsDoc(doc, preserveNativeOutput)
 		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-			ensureImageGenerationToolDoc(doc, baseModel, auth, opts.Headers, e.cfg != nil && e.cfg.CodexLiteModelImageGeneration)
+			ensureImageGenerationToolDoc(ctx, doc, baseModel, auth, opts.Headers, e.cfg != nil && e.cfg.CodexLiteModelImageGeneration)
 			if !codexAuthUsesAPIKey(auth) {
 				normalizeCodexImageGenerationToolsDoc(doc)
 			}

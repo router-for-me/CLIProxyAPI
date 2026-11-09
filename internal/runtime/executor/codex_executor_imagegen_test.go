@@ -109,7 +109,7 @@ func TestCodexExecutorExecuteStreamResponsesLiteHeaderForcesParallelToolCallsFal
 
 func TestEnsureImageGenerationTool_ResponsesLiteMetadataDoesNotInjectTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"true"},"input":[{"role":"user","content":"hello"}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.6-sol", nil, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected responses-lite body to be unchanged, got %s", string(result))
@@ -121,7 +121,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteMetadataDoesNotInjectTool(t *tes
 
 func TestEnsureImageGenerationTool_ResponsesLiteBooleanMetadataDoesNotInjectTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":true},"input":"hello"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.6-sol", nil, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected responses-lite body to be unchanged, got %s", string(result))
@@ -132,7 +132,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteHeaderDoesNotInjectTool(t *testi
 	body := []byte(`{"model":"gpt-5.6-sol","input":"hello"}`)
 	headers := make(http.Header)
 	headers.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
-	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, headers, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.6-sol", nil, headers, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected responses-lite body to be unchanged, got %s", string(result))
@@ -141,7 +141,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteHeaderDoesNotInjectTool(t *testi
 
 func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)
@@ -153,7 +153,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t 
 		liteBody := []byte(`{"model":"` + liteModel + `","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
 		liteHeaders := make(http.Header)
 		liteHeaders.Set(codexResponsesLiteHeader, "false")
-		liteResult := ensureImageGenerationTool(liteBody, liteModel, nil, liteHeaders, true)
+		liteResult := ensureImageGenerationTool(context.Background(), liteBody, liteModel, nil, liteHeaders, true)
 		if got := ojson.GetBytes(liteResult, "tools.0.type").String(); got != "image_generation" {
 			t.Fatalf("for %s: tools.0.type = %q, want image_generation on standard (non-lite) request; body=%s", liteModel, got, liteResult)
 		}
@@ -162,7 +162,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t 
 
 func TestEnsureImageGenerationTool_NoTools(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","input":"draw a cat"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools")
 	if !tools.IsArray() {
@@ -182,7 +182,7 @@ func TestEnsureImageGenerationTool_NoTools(t *testing.T) {
 
 func TestEnsureImageGenerationTool_ExistingToolsWithoutImageGen(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"get_weather","parameters":{}}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
@@ -199,7 +199,7 @@ func TestEnsureImageGenerationTool_ExistingToolsWithoutImageGen(t *testing.T) {
 
 func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"image_generation","output_format":"webp"},{"type":"function","name":"f1"}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
@@ -213,7 +213,7 @@ func TestEnsureImageGenerationTool_AlreadyPresent(t *testing.T) {
 
 func TestEnsureImageGenerationTool_ImageGenNamespaceDoesNotInjectTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
@@ -222,7 +222,7 @@ func TestEnsureImageGenerationTool_ImageGenNamespaceDoesNotInjectTool(t *testing
 
 func TestEnsureImageGenerationTool_FlattenedImageGenFunctionDoesNotInjectTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"function","name":"image_gen.imagegen","parameters":{}}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
@@ -231,7 +231,7 @@ func TestEnsureImageGenerationTool_FlattenedImageGenFunctionDoesNotInjectTool(t 
 
 func TestEnsureImageGenerationTool_SimilarNamespaceStillInjectsTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"image_tools","tools":[{"type":"function","name":"imagegen","parameters":{}}]}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools").Array()
 	if len(tools) != 2 {
@@ -244,7 +244,7 @@ func TestEnsureImageGenerationTool_SimilarNamespaceStillInjectsTool(t *testing.T
 
 func TestEnsureImageGenerationTool_EmptyToolsArray(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
@@ -258,7 +258,7 @@ func TestEnsureImageGenerationTool_EmptyToolsArray(t *testing.T) {
 
 func TestEnsureImageGenerationTool_WebSearchAndImageGen(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","tools":[{"type":"web_search"}]}`)
-	result := ensureImageGenerationTool(body, "gpt-5.4", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", nil, nil, false)
 
 	tools := ojson.GetBytes(result, "tools")
 	arr := tools.Array()
@@ -275,7 +275,7 @@ func TestEnsureImageGenerationTool_WebSearchAndImageGen(t *testing.T) {
 
 func TestEnsureImageGenerationTool_GPT53CodexSparkDoesNotInjectTool(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"draw a cat"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.3-codex-spark", nil, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.3-codex-spark", nil, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
@@ -291,7 +291,7 @@ func TestEnsureImageGenerationTool_FreeCodexAuthDoesNotInjectTool(t *testing.T) 
 		Provider:   "codex",
 		Attributes: map[string]string{"plan_type": "free"},
 	}
-	result := ensureImageGenerationTool(body, "gpt-5.4", freeAuth, nil, false)
+	result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", freeAuth, nil, false)
 
 	if string(result) != string(body) {
 		t.Fatalf("expected body to be unchanged, got %s", string(result))
@@ -325,10 +325,10 @@ func TestEnsureImageGenerationTool_ResponsesLiteFlaggedModelsRequireOptInOnStand
 	} {
 		t.Run(model, func(t *testing.T) {
 			body := []byte(`{"model":"` + model + `","input":"hello"}`)
-			if result := ensureImageGenerationTool(body, model, nil, nil, false); ojson.GetBytes(result, "tools").Exists() {
+			if result := ensureImageGenerationTool(context.Background(), body, model, nil, nil, false); ojson.GetBytes(result, "tools").Exists() {
 				t.Fatalf("for %s: default config must not inject on lite-flagged model, got %s", model, result)
 			}
-			result := ensureImageGenerationTool(body, model, nil, nil, true)
+			result := ensureImageGenerationTool(context.Background(), body, model, nil, nil, true)
 			tools := ojson.GetBytes(result, "tools")
 			if !tools.IsArray() {
 				t.Fatalf("for %s: expected auto-injected tools with opt-in, got %s", model, result)
@@ -351,7 +351,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteFlaggedModelsRequireOptInOnStand
 	for _, nonLiteModel := range []string{"gpt-5.5", "gpt-5.4"} {
 		t.Run("non-lite/"+nonLiteModel, func(t *testing.T) {
 			body := []byte(`{"model":"` + nonLiteModel + `","input":"hello"}`)
-			result := ensureImageGenerationTool(body, nonLiteModel, nil, nil, false)
+			result := ensureImageGenerationTool(context.Background(), body, nonLiteModel, nil, nil, false)
 			if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
 				t.Fatalf("for %s: tools.0.type = %q, want image_generation; body=%s", nonLiteModel, got, result)
 			}
@@ -360,7 +360,7 @@ func TestEnsureImageGenerationTool_ResponsesLiteFlaggedModelsRequireOptInOnStand
 
 	t.Run("opt-in appends exactly once to function tools", func(t *testing.T) {
 		body := []byte(`{"model":"gpt-6-astra","input":"hello","tools":[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}`)
-		result := ensureImageGenerationTool(body, "gpt-6-astra", nil, nil, true)
+		result := ensureImageGenerationTool(context.Background(), body, "gpt-6-astra", nil, nil, true)
 		tools := ojson.GetBytes(result, "tools").Array()
 		if len(tools) != 2 {
 			t.Fatalf("expected 2 tools, got %d; body=%s", len(tools), result)
@@ -377,19 +377,19 @@ func TestEnsureImageGenerationTool_ResponsesLiteFlaggedModelsRequireOptInOnStand
 		headerBody := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
 		headerHeaders := make(http.Header)
 		headerHeaders.Set(codexResponsesLiteHeader, "true")
-		if result := ensureImageGenerationTool(headerBody, "gpt-6-astra", nil, headerHeaders, true); ojson.GetBytes(result, "tools").Exists() {
+		if result := ensureImageGenerationTool(context.Background(), headerBody, "gpt-6-astra", nil, headerHeaders, true); ojson.GetBytes(result, "tools").Exists() {
 			t.Fatalf("expected no tools for responses-lite header request, got %s", result)
 		}
 
 		metadataBody := []byte(`{"model":"gpt-6-astra","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":true},"input":"hello"}`)
-		if result := ensureImageGenerationTool(metadataBody, "gpt-6-astra", nil, nil, true); ojson.GetBytes(result, "tools").Exists() {
+		if result := ensureImageGenerationTool(context.Background(), metadataBody, "gpt-6-astra", nil, nil, true); ojson.GetBytes(result, "tools").Exists() {
 			t.Fatalf("expected no tools for responses-lite metadata request, got %s", result)
 		}
 	})
 
 	t.Run("spark suffix and free-plan auth still do not inject with opt-in", func(t *testing.T) {
 		sparkBody := []byte(`{"model":"gpt-6-astra-spark","input":"hello"}`)
-		if result := ensureImageGenerationTool(sparkBody, "gpt-6-astra-spark", nil, nil, true); ojson.GetBytes(result, "tools").Exists() {
+		if result := ensureImageGenerationTool(context.Background(), sparkBody, "gpt-6-astra-spark", nil, nil, true); ojson.GetBytes(result, "tools").Exists() {
 			t.Fatalf("expected no tools for spark model, got %s", result)
 		}
 
@@ -398,8 +398,60 @@ func TestEnsureImageGenerationTool_ResponsesLiteFlaggedModelsRequireOptInOnStand
 			Attributes: map[string]string{"plan_type": "free"},
 		}
 		freeBody := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
-		if result := ensureImageGenerationTool(freeBody, "gpt-6-astra", freeAuth, nil, true); ojson.GetBytes(result, "tools").Exists() {
+		if result := ensureImageGenerationTool(context.Background(), freeBody, "gpt-6-astra", freeAuth, nil, true); ojson.GetBytes(result, "tools").Exists() {
 			t.Fatalf("expected no tools for free-plan codex auth, got %s", result)
+		}
+	})
+}
+
+// A credential "header:" rule that enables the Responses-Lite header makes the
+// outbound request speak Lite even when the client sent no Lite header, so the
+// tool must not be injected. The credential value replaces the client value,
+// matching the precedence of the outbound header builders.
+func TestEnsureImageGenerationTool_CredentialLiteHeaderOverrideSuppression(t *testing.T) {
+	liteAttrAuth := func(value string) *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{
+			Provider: "codex",
+			Attributes: map[string]string{
+				"plan_type":                          "pro",
+				"header:" + codexResponsesLiteHeader: value,
+			},
+		}
+	}
+
+	t.Run("credential enables lite without client header and with opt-in", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
+		if result := ensureImageGenerationTool(context.Background(), body, "gpt-6-astra", liteAttrAuth("true"), nil, true); ojson.GetBytes(result, "tools").Exists() {
+			t.Fatalf("expected no tools when credential enables responses-lite, got %s", result)
+		}
+	})
+
+	t.Run("credential enables lite without opt-in on non-lite model", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+		if result := ensureImageGenerationTool(context.Background(), body, "gpt-5.4", liteAttrAuth("true"), nil, false); ojson.GetBytes(result, "tools").Exists() {
+			t.Fatalf("expected no tools when credential enables responses-lite, got %s", result)
+		}
+	})
+
+	t.Run("credential disabling lite overrides client lite header", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
+		headers := make(http.Header)
+		headers.Set(codexResponsesLiteHeader, "true")
+		result := ensureImageGenerationTool(context.Background(), body, "gpt-6-astra", liteAttrAuth("false"), headers, true)
+		if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
+			t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)
+		}
+	})
+
+	t.Run("credential rule without lite header leaves client decision intact", func(t *testing.T) {
+		body := []byte(`{"model":"gpt-6-astra","input":"hello"}`)
+		auth := &cliproxyauth.Auth{
+			Provider:   "codex",
+			Attributes: map[string]string{"plan_type": "pro", "header:X-Unrelated": "1"},
+		}
+		result := ensureImageGenerationTool(context.Background(), body, "gpt-6-astra", auth, nil, true)
+		if got := ojson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
+			t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)
 		}
 	})
 }
@@ -903,5 +955,64 @@ func TestCodexExecutorImageGenerationOptInStillSuppressesResponsesLiteRequests(t
 				t.Fatalf("expected no image_generation tool for responses-lite request even with opt-in, got %d; body=%s", count, gotBody)
 			}
 		})
+	}
+}
+
+// A credential "header:" rule that enables the Responses-Lite header decides
+// the Lite route of the outbound request even when the client sent no Lite
+// header, so the opt-in must not inject image_generation into that request.
+func TestCodexExecutorImageGenerationOptInHonorsCredentialLiteHeader(t *testing.T) {
+	cfg := &config.Config{SDKConfig: config.SDKConfig{CodexLiteModelImageGeneration: true}}
+	for _, transport := range []string{"http", "websocket"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(transport+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
+				server, captured, _ := newCodexHostedImageTestServer(t, transport)
+				var exec cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
+				if transport == "websocket" {
+					exec = NewCodexWebsocketsExecutor(cfg)
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name(),
+					Provider: "codex",
+					Attributes: map[string]string{
+						"base_url":                           server.URL,
+						"plan_type":                          "pro",
+						"header:" + codexResponsesLiteHeader: "true",
+					},
+					Metadata: map[string]any{"access_token": "test-token", "account_id": "acct-1"},
+				}
+				req := cliproxyexecutor.Request{
+					Model: "gpt-6-astra",
+					Payload: []byte(`{"model":"gpt-6-astra","reasoning":{"effort":"medium"},"input":"Hello","stream":true,` +
+						`"tools":[{"type":"function","name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}]}`),
+				}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
+				if stream {
+					result, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream() error = %v", errStream)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatalf("stream chunk error = %v", chunk.Err)
+						}
+					}
+				} else {
+					if _, errExec := exec.Execute(context.Background(), auth, req, opts); errExec != nil {
+						t.Fatalf("Execute() error = %v", errExec)
+					}
+				}
+				got := <-captured
+				if count := countImageGenerationTools(got.body); count != 0 {
+					t.Fatalf("expected no image_generation tool when credential enables responses-lite, got %d; body=%s", count, got.body)
+				}
+				if gotTool := ojson.GetBytes(got.body, "tools.0.type").String(); gotTool != "function" {
+					t.Fatalf("declared function tool must survive, got tools.0.type=%q; body=%s", gotTool, got.body)
+				}
+				if gotLite := got.headers.Get(codexResponsesLiteHeader); !strings.EqualFold(strings.TrimSpace(gotLite), "true") {
+					t.Fatalf("upstream %s = %q, want true (credential override must land on the wire)", codexResponsesLiteHeader, gotLite)
+				}
+			})
+		}
 	}
 }
