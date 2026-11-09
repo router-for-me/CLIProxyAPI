@@ -617,9 +617,22 @@ func (value claudeDeviceProfileKVValue) ToProfile() ClaudeDeviceProfile {
 	return profile
 }
 
-func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfile) {
+// ApplyClaudeDeviceProfileHeaders applies a stable software identity. An optional
+// UA from a confirmed native caller supplies only this request's extension fields.
+func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfile, requestUserAgent ...string) {
 	if r == nil {
 		return
+	}
+	userAgent := profile.UserAgent
+	if len(requestUserAgent) > 0 {
+		stable, validStable := parseClaudeCodeUserAgent(profile.UserAgent)
+		current, validCurrent := parseClaudeCodeUserAgent(requestUserAgent[0])
+		if validStable && validCurrent {
+			userAgent = stable.profileUserAgent
+			if len(current.requestFields) > 0 {
+				userAgent = strings.TrimSuffix(userAgent, ")") + "," + strings.Join(current.requestFields, ",") + ")"
+			}
+		}
 	}
 	for _, headerName := range []string{
 		"User-Agent",
@@ -630,7 +643,7 @@ func ApplyClaudeDeviceProfileHeaders(r *http.Request, profile ClaudeDeviceProfil
 	} {
 		r.Header.Del(headerName)
 	}
-	r.Header.Set("User-Agent", profile.UserAgent)
+	r.Header.Set("User-Agent", userAgent)
 	r.Header.Set("X-Stainless-Package-Version", profile.PackageVersion)
 	r.Header.Set("X-Stainless-Runtime-Version", profile.RuntimeVersion)
 	r.Header.Set("X-Stainless-Os", profile.OS)

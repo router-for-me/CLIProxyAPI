@@ -15,6 +15,21 @@ import (
 )
 
 func TestClaudeExecutorUserAgentFieldsPreserveNativePayload(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		stabilize bool
+	}{
+		{name: "default"},
+		{name: "stabilized", stabilize: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			testClaudeExecutorUserAgentFields(t, testCase.stabilize)
+		})
+	}
+}
+
+func testClaudeExecutorUserAgentFields(t *testing.T, stabilize bool) {
+	t.Helper()
 	for _, path := range []string{"messages", "stream", "count_tokens"} {
 		t.Run(path, func(t *testing.T) {
 			doc := ojson.NewDoc([]byte(`{"model":"claude-sonnet-4-6","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.312; cc_entrypoint=cli; cch=00000;"},{"type":"text","text":"Stable caller instructions","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"Check the task","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"Read","description":"Read a file","input_schema":{"type":"object","properties":{}}}]}`))
@@ -27,12 +42,15 @@ func TestClaudeExecutorUserAgentFieldsPreserveNativePayload(t *testing.T) {
 			}
 			payload := doc.Bytes()
 			var nativeSystem string
-			for _, userAgent := range []string{
-				"claude-cli/2.1.312 (external, cli)",
-				"claude-cli/2.1.312 (external, cli, workload/cron)",
-				"claude-cli/2.1.312 (external, cli, future-feature/value, agent-sdk/0.2.133)",
+			for _, testCase := range []struct {
+				userAgent, stabilizedUserAgent string
+			}{
+				{userAgent: "claude-cli/2.1.312 (external, cli)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli)"},
+				{userAgent: "claude-cli/2.1.312 (external, cli, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, workload/cron)"},
+				{userAgent: "claude-cli/2.1.312 (external, cli, future-feature/value, agent-sdk/0.2.133)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, future-feature/value)"},
+				{userAgent: "claude-cli/2.1.312 (external, cli, request-phase/background, agent-sdk/0.2.133, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, request-phase/background, workload/cron)"},
 			} {
-				t.Run(userAgent, func(t *testing.T) {
+				t.Run(testCase.userAgent, func(t *testing.T) {
 					var upstreamBody []byte
 					var upstreamHeaders http.Header
 					transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
@@ -53,11 +71,13 @@ func TestClaudeExecutorUserAgentFieldsPreserveNativePayload(t *testing.T) {
 					})
 					ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 					headers := http.Header{}
-					headers.Set("User-Agent", userAgent)
+					headers.Set("User-Agent", testCase.userAgent)
 					headers.Set("X-App", "cli")
 					headers.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
-					auth := &cliproxyauth.Auth{ID: "ua-fields-" + path, Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{"api_key": "sk-ant-oat-ua-fields"}}
-					executor := NewClaudeExecutor(&config.Config{})
+					auth := &cliproxyauth.Auth{ID: "ua-fields-" + t.Name(), Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{"api_key": "sk-ant-oat-ua-fields"}}
+					executor := NewClaudeExecutor(&config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+						UserAgent: "claude-cli/2.1.312 (external, cli)", StabilizeDeviceProfile: &stabilize,
+					}})
 					request := cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: payload}
 					options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Headers: headers}
 					switch path {
@@ -102,8 +122,12 @@ func TestClaudeExecutorUserAgentFieldsPreserveNativePayload(t *testing.T) {
 					} else if system.Raw != nativeSystem {
 						t.Fatalf("extended UA changed the native prefix\n got: %s\nwant: %s", system.Raw, nativeSystem)
 					}
-					if got := upstreamHeaders.Get("User-Agent"); got != userAgent {
-						t.Fatalf("upstream UA = %q, want original %q", got, userAgent)
+					wantUserAgent := testCase.userAgent
+					if stabilize {
+						wantUserAgent = testCase.stabilizedUserAgent
+					}
+					if got := upstreamHeaders.Get("User-Agent"); got != wantUserAgent {
+						t.Fatalf("upstream UA = %q, want %q", got, wantUserAgent)
 					}
 				})
 			}

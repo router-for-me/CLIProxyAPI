@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -144,18 +145,60 @@ func TestClaudeDeviceProfileUserAgentFieldsStayRequestScoped(t *testing.T) {
 			auth := &cliproxyauth.Auth{ID: "request-fields-" + name}
 			baseUA := "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133)"
 			cronUA := "claude-cli/2.1.280 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)"
-			for _, userAgent := range []string{cronUA, baseUA, ""} {
-				headers := claudeDeviceHeaders(userAgent)
+			for _, testCase := range []struct{ userAgent, want string }{
+				{userAgent: cronUA, want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133, workload/cron, future-feature/value)"},
+				{userAgent: baseUA, want: baseUA},
+				{userAgent: "claude-cli/2.1.280 (external, cli, future-feature/next)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133, future-feature/next)"},
+				{want: baseUA},
+			} {
+				headers := claudeDeviceHeaders(testCase.userAgent)
 				profile, errProfile := ResolveClaudeDeviceProfileRequired(context.Background(), auth, "dummy-key", headers, nil)
 				if errProfile != nil {
 					t.Fatal(errProfile)
 				}
 				if profile.UserAgent != baseUA {
-					t.Fatalf("profile UA = %q after %q, want %q", profile.UserAgent, userAgent, baseUA)
+					t.Fatalf("profile UA = %q after %q, want %q", profile.UserAgent, testCase.userAgent, baseUA)
+				}
+				request := httptest.NewRequest("POST", "https://example.invalid/messages", nil)
+				ApplyClaudeDeviceProfileHeaders(request, profile, testCase.userAgent)
+				if got := request.Header.Get("User-Agent"); got != testCase.want {
+					t.Fatalf("request UA = %q, want only current fields in %q", got, testCase.want)
 				}
 			}
 			if homeMode && client.setCount != 1 {
 				t.Fatalf("stored %d profiles, want one shared stable identity", client.setCount)
+			}
+		})
+	}
+}
+
+func TestApplyClaudeDeviceProfileHeadersKeepsCurrentUserAgentFields(t *testing.T) {
+	profile := defaultClaudeDeviceProfile(nil)
+	profile.UserAgent = "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220)"
+	for _, testCase := range []struct {
+		name, userAgent, want string
+	}{
+		{name: "current fields", userAgent: "claude-cli/2.1.312 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220, workload/cron, future-feature/value)"},
+		{name: "next request fields", userAgent: "claude-cli/2.1.312 (external, cli, future-feature/next)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220, future-feature/next)"},
+		{name: "ordinary request", userAgent: "claude-cli/2.1.312 (external, cli)", want: profile.UserAgent},
+		{name: "malformed request", userAgent: "claude-cli/2.1.312 (external, cli, foo)", want: profile.UserAgent},
+		{name: "no request", want: profile.UserAgent},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := httptest.NewRequest("POST", "https://example.invalid/messages", nil)
+			ApplyClaudeDeviceProfileHeaders(request, profile, testCase.userAgent)
+			if got := request.Header.Get("User-Agent"); got != testCase.want {
+				t.Fatalf("upstream UA = %q, want %q", got, testCase.want)
+			}
+			for name, want := range map[string]string{
+				"X-Stainless-Package-Version": profile.PackageVersion,
+				"X-Stainless-Runtime-Version": profile.RuntimeVersion,
+				"X-Stainless-Os":              profile.OS,
+				"X-Stainless-Arch":            profile.Arch,
+			} {
+				if got := request.Header.Get(name); got != want {
+					t.Fatalf("%s = %q, want stabilized %q", name, got, want)
+				}
 			}
 		})
 	}
@@ -176,7 +219,7 @@ func FuzzParseClaudeCodeUserAgent(f *testing.F) {
 			return
 		}
 		stable, okStable := parseClaudeCodeUserAgent(parsed.profileUserAgent)
-		if !okStable || stable.version != parsed.version || stable.entrypoint != parsed.entrypoint || stable.agentSDKVersion != parsed.agentSDKVersion || stable.profileUserAgent != parsed.profileUserAgent {
+		if !okStable || stable.version != parsed.version || stable.entrypoint != parsed.entrypoint || stable.agentSDKVersion != parsed.agentSDKVersion || stable.profileUserAgent != parsed.profileUserAgent || len(stable.requestFields) != 0 {
 			t.Fatalf("unstable parsed identity: %+v -> %+v (valid = %v)", parsed, stable, okStable)
 		}
 	})

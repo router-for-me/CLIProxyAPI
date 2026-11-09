@@ -7,6 +7,7 @@ type claudeCodeUserAgent struct {
 	entrypoint       string
 	agentSDKVersion  string
 	profileUserAgent string
+	requestFields    []string
 }
 
 // parseClaudeCodeUserAgent separates client identity from opaque request fields.
@@ -64,9 +65,11 @@ func parseClaudeCodeUserAgent(userAgent string) (claudeCodeUserAgent, bool) {
 			}
 			parsed.agentSDKVersion = value
 			stableFields = append(stableFields, field)
+		} else {
+			parsed.requestFields = append(parsed.requestFields, field)
 		}
 	}
-	if len(stableFields) != len(fields) {
+	if len(parsed.requestFields) > 0 {
 		// Request fields must never become a credential's stored device identity.
 		parsed.profileUserAgent = prefix + "(" + strings.Join(stableFields, ",") + ")"
 	}
