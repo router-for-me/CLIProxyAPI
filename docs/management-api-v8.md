@@ -133,6 +133,7 @@ retain the corresponding business operation's fields.
 | `/server/latest-version` | GET | Get latest release information. |
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
+| `/routing/codex-reset-policy?auth_index=<index>` | GET, PUT | Read or change per-account opt-in [expiring Codex reset automation](codex-expiring-resets.md). |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
