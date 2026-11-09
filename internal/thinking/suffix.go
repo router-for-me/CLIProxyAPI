@@ -7,7 +7,22 @@ package thinking
 import (
 	"strconv"
 	"strings"
+	"unicode"
 )
+
+// SanitizeModelName strips invisible Unicode format characters (category Cf)
+// from a model name before trimming whitespace.
+func SanitizeModelName(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
 
 // ParseSuffix extracts thinking suffix from a model name.
 //

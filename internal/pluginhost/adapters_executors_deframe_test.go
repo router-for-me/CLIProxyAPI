@@ -175,6 +175,30 @@ func TestExecutorSSEDeframerBoundaries(t *testing.T) {
 		}
 	})
 
+	t.Run("coalesced leading blank heartbeat and first sse event", func(t *testing.T) {
+		input := "\n\r\n" + frame1 + frameDone
+		got, tail := collectDeframerOutput(t, input, nil)
+		assertStringsEqual(t, "coalesced heartbeat prefix", got, []string{frame1, frameDone})
+		if tail != "" {
+			t.Errorf("flush = %q, want empty", tail)
+		}
+	})
+
+	t.Run("ambiguous newline data prefix restored on bare fallback", func(t *testing.T) {
+		deframer := &executorSSEDeframer{}
+		if got := deframer.feed([]byte("\ndata")); len(got) != 0 {
+			t.Fatalf("partial prefix emitted %q, want buffered", got)
+		}
+		var got []string
+		for _, chunk := range deframer.feed([]byte("base")) {
+			got = append(got, string(chunk))
+		}
+		assertStringsEqual(t, "restored bare chunks", got, []string{"\ndata", "base"})
+		if tail := deframer.flush(); len(tail) != 0 {
+			t.Errorf("flush = %q, want empty", tail)
+		}
+	})
+
 	t.Run("blank line between events across chunks", func(t *testing.T) {
 		// A blank line that arrives in a later chunk, between two SSE
 		// events, is framing: the following event (itself split mid-JSON)

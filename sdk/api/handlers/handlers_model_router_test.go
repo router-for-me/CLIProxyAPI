@@ -332,6 +332,33 @@ func TestHandlerModelRouterCanTargetPluginExecutorWithoutChangingModel(t *testin
 	}
 }
 
+func TestHandlerModelRouterDirectPluginExecutorSanitizesModelName(t *testing.T) {
+	originalModel := string([]rune{0x200b}) + "handler-router-direct-model" + string([]rune{0x2063, 0xfeff})
+	wantSanitized := "handler-router-direct-model"
+	targetPluginID := "direct-plugin"
+	host := &handlerDirectExecutorRouteHost{}
+	host.hasRouters = true
+	host.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "claude", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	if string(body) != "direct-ok" {
+		t.Fatalf("body = %q, want direct plugin executor response", body)
+	}
+	if host.lastRequest.Model != wantSanitized {
+		t.Fatalf("executor model = %q, want %q", host.lastRequest.Model, wantSanitized)
+	}
+	if host.lastOptions.Metadata[coreexecutor.RequestedModelMetadataKey] != originalModel {
+		t.Fatalf("requested model metadata = %#v, want %q", host.lastOptions.Metadata[coreexecutor.RequestedModelMetadataKey], originalModel)
+	}
+}
+
 func TestHandlerModelRouterRoutesCountBeforeRequestDetails(t *testing.T) {
 	originalModel := "handler-router-count-original-model"
 	targetPluginID := "count-plugin"

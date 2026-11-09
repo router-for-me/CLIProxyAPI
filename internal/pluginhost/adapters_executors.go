@@ -524,7 +524,11 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		return preparedExecutorCall{}, errOutput
 	}
 
-	baseModel := strings.TrimSpace(req.Model)
+	rawReqModel := req.Model
+	req.Model = strings.TrimSpace(stripZeroWidthChars(req.Model))
+	modelSanitized := req.Model != rawReqModel
+
+	baseModel := req.Model
 	modelInfo := a.lookupPluginModelInfo(baseModel)
 	if parsed := thinking.ParseSuffix(req.Model); parsed.HasSuffix && modelInfo == nil {
 		baseModel = strings.TrimSpace(parsed.ModelName)
@@ -555,7 +559,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		thinking.GetProviderApplier(a.provider) != nil
 	originalTranslated := nativeReq.Payload
 	doc := ojson.NewDoc(nativeReq.Payload)
-	if hasPluginThinkingTarget && baseModel != "" && doc.Get("model").Exists() {
+	if (hasPluginThinkingTarget || modelSanitized) && baseModel != "" && doc.Get("model").Exists() {
 		_ = helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	}
 	if doc.Len() > 0 {
@@ -595,7 +599,7 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	if doc.Len() > 0 {
 		nativeReq.Payload = doc.Bytes()
 	}
-	if hasPluginThinkingTarget {
+	if hasPluginThinkingTarget || modelSanitized {
 		nativeReq.Model = baseModel
 	}
 	nativeReq.Format = outputFormat
@@ -610,6 +614,10 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 		inputFormat:     inputFormat,
 		outputFormat:    outputFormat,
 	}, nil
+}
+
+func stripZeroWidthChars(s string) string {
+	return thinking.SanitizeModelName(s)
 }
 
 func (a *executorAdapter) lookupPluginModelInfo(baseModel string) *registry.ModelInfo {

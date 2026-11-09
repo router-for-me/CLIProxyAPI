@@ -35,6 +35,7 @@ func (h *Host) RouteModelExcept(ctx context.Context, req pluginapi.ModelRouteReq
 		return pluginapi.ModelRouteResponse{}, false
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
+	req.RequestedModel = strings.TrimSpace(stripZeroWidthChars(req.RequestedModel))
 	req.AvailableProviders = h.availableProvidersSnapshot()
 	for _, record := range h.activeRecords() {
 		router := record.plugin.Capabilities.ModelRouter

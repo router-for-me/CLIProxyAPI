@@ -328,3 +328,27 @@ func TestExecuteImageWithAuthManager_AllowsImageOnlyModels(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRequestDetails_StripsInvisibleUnicodeFormatChars(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+	modelRegistry.RegisterClient("test-format-chars-openai", "openai", []*registry.ModelInfo{
+		{ID: "gpt-5.2", Created: now},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-format-chars-openai")
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	input := string([]rune{0x200b}) + "gpt-5.2(high)" + string([]rune{0x2063, 0xfeff})
+	providers, model, errMsg := handler.getRequestDetails(input)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() error = %v, want nil", errMsg)
+	}
+	if !reflect.DeepEqual(providers, []string{"openai"}) {
+		t.Fatalf("getRequestDetails() providers = %v, want [openai]", providers)
+	}
+	if model != "gpt-5.2(high)" {
+		t.Fatalf("getRequestDetails() model = %q, want %q", model, "gpt-5.2(high)")
+	}
+}
