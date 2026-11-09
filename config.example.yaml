@@ -170,6 +170,16 @@ routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
+  # Sticky requests (including inherited and LCP bindings) also consume weighted credits
+  # without moving existing bindings. Compensation is scoped to each eligible credential set;
+  # priority tiers, transport preferences, and retry/cooldown subsets do not share credits.
+  # Pinned requests use the eligible pool before pinning, within the pinned credential
+  # priority tier and transport class. Returning to a pool resumes its retained credits.
+  # Settled credits are capped at +/-32 times the eligible pool total; ratios are approximate.
+  # In-flight offsets are preserved until the pool settles, regardless of commit order.
+  # Sticky requests keep their bindings but stop adding compensation when the full
+  # credit delta cannot fit the cap; new sessions keep earning credit to avoid starvation.
+  # Credits are process-local and reset on restart or selector replacement.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,

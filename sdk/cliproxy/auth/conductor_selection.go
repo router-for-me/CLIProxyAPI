@@ -2258,7 +2258,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	targetKey := canonicalSchedulingProvider(provider)
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
 	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
-	var affinityCandidates []*Auth
+	trackPinnedAccounting := false
+	if hasAffinity && affinitySelector != nil && pinnedAuthID != "" {
+		_, trackPinnedAccounting = affinitySelector.fallback.(*WeightedRoundRobinSelector)
+	}
+	var accountingCandidates, affinityCandidates []*Auth
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
@@ -2266,7 +2270,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
 			continue
 		}
-		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		if !eligibility.allows(candidate) {
@@ -2275,10 +2279,18 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		_, used := tried[candidate.ID]
+		// Pinning restricts selection, not the eligible pool used for accounting.
+		if trackPinnedAccounting && !used {
+			accountingCandidates = append(accountingCandidates, candidate)
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
 		if trackTransientAffinity {
 			affinityCandidates = append(affinityCandidates, candidate)
 		}
-		if _, used := tried[candidate.ID]; used {
+		if used {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -2302,6 +2314,15 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			return nil, nil, errAvailable
 		}
 	}
+	var accountingAuths []*Auth
+	if trackPinnedAccounting && len(candidates) > 0 && errAvailable == nil {
+		_, fullAvailable, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, provider, model, now, false, opts.Headers)
+		if errAccounting != nil {
+			m.mu.RUnlock()
+			return nil, nil, errAccounting
+		}
+		accountingAuths = fullAvailable
+	}
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
@@ -2313,6 +2334,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		if accountingAuths != nil {
+			selectorCtx = context.WithValue(selectorCtx, weightedAccountingPoolKey{}, accountingAuths)
+		}
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isAuthNotFoundError(errPick) {
@@ -2678,7 +2702,11 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	registryRef := registry.GetGlobalRegistry()
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
 	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
-	var affinityCandidates []*Auth
+	trackPinnedAccounting := false
+	if hasAffinity && affinitySelector != nil && pinnedAuthID != "" {
+		_, trackPinnedAccounting = affinitySelector.fallback.(*WeightedRoundRobinSelector)
+	}
+	var accountingCandidates, affinityCandidates []*Auth
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
@@ -2686,7 +2714,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if candidate == nil || candidate.Disabled {
 			continue
 		}
-		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
 		if !eligibility.allows(candidate) {
@@ -2705,10 +2733,18 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if modelKey != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
 			continue
 		}
+		_, used := tried[candidate.ID]
+		// Pinning restricts selection, not the eligible pool used for accounting.
+		if trackPinnedAccounting && !used {
+			accountingCandidates = append(accountingCandidates, candidate)
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
 		if trackTransientAffinity {
 			affinityCandidates = append(affinityCandidates, candidate)
 		}
-		if _, used := tried[candidate.ID]; used {
+		if used {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -2732,6 +2768,15 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			return nil, nil, "", errAvailable
 		}
 	}
+	var accountingAuths []*Auth
+	if trackPinnedAccounting && len(candidates) > 0 && errAvailable == nil {
+		_, fullAvailable, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, "mixed", model, now, false, opts.Headers)
+		if errAccounting != nil {
+			m.mu.RUnlock()
+			return nil, nil, "", errAccounting
+		}
+		accountingAuths = fullAvailable
+	}
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
@@ -2743,6 +2788,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		if accountingAuths != nil {
+			selectorCtx = context.WithValue(selectorCtx, weightedAccountingPoolKey{}, accountingAuths)
+		}
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isAuthNotFoundError(errPick) {
