@@ -63,6 +63,7 @@ type Watcher struct {
 	dispatchCond               *sync.Cond
 	pendingUpdates             map[string]AuthUpdate
 	pendingOrder               []string
+	unappliedUpdates           int
 	dispatchCancel             context.CancelFunc
 	storePersister             storePersister
 	pluginAuthParser           synthesizer.PluginAuthParser
@@ -79,8 +80,22 @@ const (
 	AuthUpdateActionDelete AuthUpdateAction = "delete"
 )
 
+type authUpdateCompletion struct {
+	once    sync.Once
+	release func()
+}
+
+// MarkApplied acknowledges completion after the service publishes this update.
+// Copies of an update share one acknowledgement.
+func (u AuthUpdate) MarkApplied() {
+	if u.completion != nil {
+		u.completion.once.Do(u.completion.release)
+	}
+}
+
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
+	completion  *authUpdateCompletion
 	Action      AuthUpdateAction
 	ID          string
 	Auth        *coreauth.Auth

@@ -490,12 +490,12 @@ func (w *Watcher) authUpdateKey(update AuthUpdate, ts int64) string {
 	return fmt.Sprintf("%s:%d", update.Action, ts)
 }
 
-// PendingAuthUpdates reports how many auth updates wait for the dispatch loop.
+// PendingAuthUpdates counts queued updates and dispatched updates not yet applied.
 // The service uses it to tell when the first full load has been handed on.
 func (w *Watcher) PendingAuthUpdates() int {
 	w.dispatchMu.Lock()
 	defer w.dispatchMu.Unlock()
-	return len(w.pendingOrder)
+	return len(w.pendingOrder) + w.unappliedUpdates
 }
 
 func (w *Watcher) dispatchLoop(ctx context.Context) {
@@ -506,16 +506,22 @@ func (w *Watcher) dispatchLoop(ctx context.Context) {
 		}
 		queue := w.getAuthQueue()
 		if queue == nil {
+			for _, update := range batch {
+				update.MarkApplied()
+			}
 			if ctx.Err() != nil {
 				return
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		for _, update := range batch {
+		for i, update := range batch {
 			select {
 			case queue <- update:
 			case <-ctx.Done():
+				for _, unsent := range batch[i:] {
+					unsent.MarkApplied()
+				}
 				return
 			}
 		}
@@ -536,7 +542,14 @@ func (w *Watcher) nextPendingBatch(ctx context.Context) ([]AuthUpdate, bool) {
 	}
 	batch := make([]AuthUpdate, 0, len(w.pendingOrder))
 	for _, key := range w.pendingOrder {
-		batch = append(batch, w.pendingUpdates[key])
+		update := w.pendingUpdates[key]
+		w.unappliedUpdates++
+		update.completion = &authUpdateCompletion{release: func() {
+			w.dispatchMu.Lock()
+			w.unappliedUpdates--
+			w.dispatchMu.Unlock()
+		}}
+		batch = append(batch, update)
 		delete(w.pendingUpdates, key)
 	}
 	w.pendingOrder = w.pendingOrder[:0]

@@ -454,35 +454,42 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 var catalogLoadingCeiling = 30 * time.Second
 
 // finishCatalogLoading clears the catalog-loading flag once the first full load
-// has been applied: nothing waits in the watcher's dispatch queue or the service
-// queue, and no batch is being handled. Start returns before that, because the
+// has been applied: the watcher has received service acknowledgements for its
+// dispatched updates, both queues are empty, and no batch is being handled. Start returns before that, because the
 // watcher hands updates to the service asynchronously and the service registers
 // models in consumeAuthUpdates. The ceiling covers custom watchers.
 func (s *Service) finishCatalogLoading(ctx context.Context, w *WatcherWrapper) {
-	defer registry.SetCatalogLoading(false)
 	ceiling := time.NewTimer(catalogLoadingCeiling)
 	defer ceiling.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
+	s.finishCatalogLoadingWithSignals(ctx, w, ticker.C, ceiling.C)
+}
+
+// Separate signals let ordering tests drive each readiness check without sleeps.
+func (s *Service) finishCatalogLoadingWithSignals(ctx context.Context, w *WatcherWrapper, ticks, ceiling <-chan time.Time) {
+	defer registry.SetCatalogLoading(false)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ceiling.C:
-			log.Warnf("model catalog still loading after %s; serving unknown models as 400 from now on", catalogLoadingCeiling)
+		case <-ceiling:
+			log.Warn("model catalog loading ceiling reached; serving unknown models as 400")
 			return
-		case <-ticker.C:
-			if !s.authUpdatesIdle(w) {
-				continue
-			}
-			// handleAuthUpdates holds authUpdateMu while it registers a batch's models.
-			s.authUpdateMu.Lock()
-			s.authUpdateMu.Unlock()
-			if s.authUpdatesIdle(w) {
+		case <-ticks:
+			if s.catalogUpdatesApplied(w) {
 				return
 			}
 		}
 	}
+}
+
+func (s *Service) catalogUpdatesApplied(w *WatcherWrapper) bool {
+	if !s.authUpdatesIdle(w) || !s.authUpdateMu.TryLock() {
+		return false
+	}
+	defer s.authUpdateMu.Unlock()
+	return s.authUpdatesIdle(w)
 }
 
 func (s *Service) authUpdatesIdle(w *WatcherWrapper) bool {
