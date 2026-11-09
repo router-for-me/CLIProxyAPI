@@ -308,14 +308,23 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
-// a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// Request-shape failures and exhausted credential pools are exposed because
+// reconnecting cannot resolve them. Individual credential and transport failures
+// stay silent so the client can reconnect and resend its full context.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
+	}
+	type modelCooldownMarker interface {
+		IsModelCooldown() bool
+	}
+	var cooldown modelCooldownMarker
+	if errors.As(errMsg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
+		return true
+	}
+	if errMsg.Error != nil && responsesWebsocketErrorStatus(errMsg) == http.StatusTooManyRequests &&
+		gjson.Get(errMsg.Error.Error(), "error.code").String() == "model_cooldown" {
+		return true
 	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
@@ -363,6 +372,9 @@ func writeResponsesWebsocketTerminalError(
 }
 
 func shouldReplayResponsesWebsocketPinnedAuthFailure(errMsg *interfaces.ErrorMessage) bool {
+	if responsesWebsocketErrorStatus(errMsg) == http.StatusTooManyRequests && shouldExposeResponsesUpstreamError(errMsg) {
+		return false
+	}
 	switch responsesWebsocketErrorStatus(errMsg) {
 	case http.StatusUnauthorized, http.StatusTooManyRequests:
 		return true
