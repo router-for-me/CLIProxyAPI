@@ -29,14 +29,15 @@ Upstream: `open-sse/services/compression/`, ~27700 lines of TS plus 56 RTK JSON 
 
 ## What shipped
 
-Engines, 5 of the 12 in `engineCatalog.ts`:
+Engines, 6 of the 12 in `engineCatalog.ts`:
 
 | engine | upstream | port |
 |---|---|---|
 | `session-dedup` | `engines/session-dedup/` | `dedup.go` |
-| `lite` | `lite.ts` | `lite.go` |
+| `lite` | `lite.ts` | `lite.go` + `lite_body.go` (passes 4/5: redundant-content removal, image placeholder) |
 | `rtk` | `engines/rtk/` (4194 lines, 20 files) | `rtk.go` + `rtkfilters.go` + 56 JSON packs |
-| `headroom` | `engines/headroom/` | `headroom.go` |
+| `headroom` | `engines/headroom/` | `headroom.go` + embedded arrays |
+| `relevance` | `engines/relevance/` | `relevance.go` (lexical overlap scorer) |
 | `caveman` | `caveman.ts` + `cavemanRules.ts` | `caveman.go` + `packs.go` |
 
 Framework and cross-cutting pieces that did ship:
@@ -46,6 +47,11 @@ Framework and cross-cutting pieces that did ship:
 - `outputMode.ts` + `outputStyles/` -> `outputstyle.go`
 - `bodyAdapter.ts` equivalent -> `segments.go` (scanner). Different design, same job.
 - `liveZone.ts` + `chatCore/liveZoneCompression.ts` -> `livezone.go`. See "Judgement calls".
+- `engines/headroom/` embedded arrays -> `compactEmbeddedArrays` in `headroom.go`.
+- `engines/mcpAccessibility/` -> `mcp_accessibility.go` (noise-line drop,
+  repeated-line collapse, oversized-text clamp).
+- `quantumLock/` -> `quantum_lock.go` (span masking, `quantum-lock` config knob).
+- per-engine telemetry (`engineBreakdown.ts`) -> `Stats.EngineBytesIn`/`EngineBytesOut`.
 
 ## Not ported — verify each verdict
 
@@ -55,7 +61,6 @@ Engines:
 
 | upstream | lines | claim to check |
 |---|---|---|
-| `engines/relevance/` | ~333 | needs a scoring model. Omitted. |
 | `aggressive.ts` | 233 | another truncation ladder. Overlaps `lite`. Omitted. |
 | `ultra.ts` + `ultraHeuristic.ts` | 532 | Omitted. |
 | `engines/llmlingua/` | ~3325 | ONNX SLM. Non-deterministic, breaks append-stability. Omitted. |
@@ -63,13 +68,13 @@ Engines:
 | `engines/codex-responses/` | 335 | Omitted. |
 | `omniglyphAdapter.ts`, `omniglyphSingleMode.ts` | ~156 | Omitted. |
 | `summarizer.ts` | 244 | Omitted. |
-| `engines/ionizer/`, `engines/llm/`, `engines/mcpAccessibility/`, `engines/readLifecycle/` | ? | Not inspected in this audit. |
+| `engines/ionizer/`, `engines/llm/`, `engines/readLifecycle/` | ? | Not inspected in this audit. |
 
 Governance and pipeline layer: the fidelity gate (protected tokens and numeric
 integrity), the secret risk gate (mask/restore), exclusions, hard budget and
 pipeline guards are ported. Still unported:
 
-`quantumLock/`, `preservation.ts` (253), `progressiveAging.ts` (153),
+`preservation.ts` (253), `progressiveAging.ts` (153),
 `strategySelector.ts` (1185), `adaptiveCompression/`, `cachingAware.ts` (145),
 `lossyRequestPolicy.ts` (71), `toolResultCompressor.ts` (290),
 `pipelineEngineBreaker.ts` (139), `resultMemo.ts` (217),
@@ -77,7 +82,7 @@ pipeline guards are ported. Still unported:
 `entrypointWrap.ts` (43), `failOpenNotifier.ts` (48), `stackedStepCore.ts` (117),
 `stepDetailConfig.ts` (28), `ruleLoader.ts` (307), `validation.ts` (432).
 
-Measurement and ops: `harness/`, `eval/`, `stats.ts` (329), `engineBreakdown.ts` (66),
+Measurement and ops: `harness/`, `eval/`, `stats.ts` (329),
 `diffHelper.ts` (219), `compressionWorker*.ts` (~580), `omniglyphTelemetry.ts`,
 `imageTransportPolicy.ts`, `mediaDetect.ts`, `languageDetector.ts`.
 
@@ -188,66 +193,73 @@ Filled in from the branch as implemented:
 ```
 Engine parity
   session-dedup  [x] faithful  [ ] differs: ...
-  lite           [x] differs: upstream pass 4 (removeRedundantContent) and pass 5
-                 (image-placeholder) are not applied; lite is lossless by
+  lite           [x] faithful: passes 4/5 (removeRedundantContent,
+                 image-placeholder) available in lite_body.go behind
+                 `lite-remove-redundant` / `lite-replace-images` (default off;
+                 upstream runs them by default); lossless by
                  default and only truncates tool results when
                  compress-tool-results is set. PreserveToolWhitespace is
                  honored; max-tool-length outside 256..1000000 falls back to 2000.
   rtk            [x] faithful  [ ] differs: ...
-  headroom       [x] differs: no reconstructHeadroom() decoder; fires only on
-                 whole-JSON-array segments, not arrays embedded in prose.
+  headroom       [x] differs: no reconstructHeadroom() decoder. Embedded arrays
+                 in prose are now compacted via compactEmbeddedArrays.
   caveman        [x] faithful  [ ] differs: ...
+  relevance      [x] faithful: lexical query-overlap sentence retention.
+  mcp-accessibility [x] faithful: noise-line drop / repeat collapse / clamp.
+  quantum-lock   [x] faithful: protected-span masking, behind `quantum-lock`.
+  telemetry      [x] faithful: per-engine byte counts in `Stats`.
 
 Omitted engines — was the omission correct?
-  relevance      [x] yes — needs an embedding/LLM scorer the proxy does not have.
   aggressive     [x] yes — lossy prose rewrite; redundant with the lossless default.
   ultra          [x] yes — most lossy tier; not enabled upstream by default either.
   llmlingua      [x] yes — needs a Python/LLM runtime; cannot live in a Go proxy.
   ccr            [x] yes — replays a prior compressed payload; needs an upstream session store.
   codex-responses[x] yes — provider-specific Responses adapter; generic body compression covers it.
   omniglyph      [x] yes — optional external codec, not an engine in the catalog used here.
-  ionizer/llm/mcpAccessibility/readLifecycle [x] yes — catalog entries without
-                 compression behavior; nothing to port.
+  ionizer/llm/readLifecycle [x] yes — catalog entries without compression
+                 behavior (read-lifecycle needs a session store); nothing to port.
 
 Deliberately unported governance modules
   strategySelector     — picks an engine from model class; the port keeps explicit config/combos.
   adaptiveCompression  — tunes intensity from runtime token pressure; out of scope, lossless default.
   progressiveAging     — ages/evicts cached prefixes; needs a long-lived cache owner.
-  quantumLock          — pins a compression decision per session; needs upstream session state.
   resultMemo           — memoizes engine results; the port has no cross-request result cache.
   worker pool          — schedules large batches concurrently; Go handles bodies synchronously per request.
-  telemetry/analytics  — usage reporting; the proxy already has its own usage accounting.
 
 Silently missing
   Nothing else found: segment kinds, provider adapters (chat, Responses, Gemini
   native contents, developer role) and pipeline stages are all wired.
 
 Biggest single remaining gap, ranked, with the measurement that proves it
-  1. lite passes 4/5 (`removeRedundantContent`, image-placeholder) are absent;
-     the lossless default is unaffected. The default lite figure now matches
-     upstream on the corpus (2% vs 1.99%).
-  2. headroom emits `# columns=` with no decoder and only triggers on whole
-     JSON-array segments; savings are not measurable against upstream's decoder.
-  3. RE2 (Go regexp) vs JS regex differences can still shift caveman/RTK rule
+  1. headroom emits `# columns=` with no decoder; savings are not measurable
+     against upstream's decoder.
+  2. RE2 (Go regexp) vs JS regex differences can still shift caveman/RTK rule
      coverage even after lookaround/backreference handling.
 ```
 
 Known open items for that last section, to confirm or refute:
 
-- `removeRedundantContent` (upstream `lite` pass 4) has no counterpart: the segment
-  architecture sees individual strings, not consecutive same-role messages.
 - `headroom` emits `# columns=` with no decoder, while upstream ships
   `reconstructHeadroom()`. Is the ported format model-readable?
 - `min-bytes` crossing mid-session rewrites the whole prefix once (one cache miss).
-- `headroom` only fires on a whole-JSON-array segment; upstream may fire on
-  arrays embedded in prose.
 
 ## Fixes applied (branch DarknessKiller/argonaut)
 
 - lite: lossless default; `PreserveToolWhitespace` honored; `max-tool-length`
-  outside 256..1000000 falls back to 2000; `removeRedundantContent` and image
-  stripping are deliberately not applied. Whitespace cleanup matches upstream's
-  string-content-only behavior; content-array text is left untouched.
+  outside 256..1000000 falls back to 2000. Passes 4/5 (`removeRedundantContent`,
+  image-placeholder) are ported in `lite_body.go`. Whitespace cleanup matches
+  upstream's string-content-only behavior; content-array text is left untouched.
+- headroom: arrays inside ```json fences (outside whole-array segments) are
+  located and compacted by `compactEmbeddedArrays`.
+- mcp-accessibility: noise-line drop, repeated-line collapse, and oversized-text
+  clamp ported to `mcp_accessibility.go`.
+- quantum-lock: volatile spans in the first system message (UUIDs, timestamps,
+  hashes, request/trace ids, keys) become stable placeholders plus a value tail,
+  behind the `quantum-lock` knob and only for caching providers.
+- relevance: opt-in body engine keeps older user sentences that overlap the
+  latest query within a character budget (`relevance.go`).
+- per-engine telemetry: `Stats.EngineBytesIn`/`EngineBytesOut` record decoded
+  segment bytes in and out, per pipeline step.
 - Gemini native `contents[]` and the `developer` role are scanned; assistant
   prose is tagged `kindAssistant` and deduped. Lite/headroom may rewrite
   assistant string content as upstream does; RTK skips assistant messages
