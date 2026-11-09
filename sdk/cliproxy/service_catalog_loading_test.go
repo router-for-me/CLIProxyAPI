@@ -2,13 +2,16 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -56,7 +59,10 @@ func runCatalogSignals(t *testing.T, service *Service, wrapper *WatcherWrapper, 
 	defer cancel()
 	ticks, ceiling := make(chan time.Time), make(chan time.Time)
 	done := make(chan struct{})
-	go func() { defer close(done); service.finishCatalogLoadingWithSignals(ctx, wrapper, ticks, ceiling) }()
+	go func() {
+		defer close(done)
+		service.finishCatalogLoadingWithSignals(ctx, catalogStartupReady(wrapper), ticks, ceiling)
+	}()
 	// Receiving a second tick proves the worker completed the first readiness
 	// check. A mutex-blocking implementation cannot reach this handshake.
 	for i := 0; i < 2; i++ {
@@ -109,15 +115,17 @@ func TestFinishCatalogLoadingCancellationWhileAuthMutexHeld(t *testing.T) {
 }
 
 func TestFinishCatalogLoadingClearsOnPublication(t *testing.T) {
-	registry.SetCatalogLoading(true)
-	defer registry.SetCatalogLoading(false)
-	ticks := make(chan time.Time, 1)
-	ticks <- time.Time{}
-	service := &Service{authUpdates: make(chan watcher.AuthUpdate)}
-	service.finishCatalogLoadingWithSignals(context.Background(), &WatcherWrapper{}, ticks, nil)
-	if registry.CatalogLoading() {
-		t.Fatal("loading did not clear after publication")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		service := &Service{authUpdates: make(chan watcher.AuthUpdate)}
+		ready, stop := service.startCatalogLoading(t.Context())
+		defer stop()
+		ready <- &WatcherWrapper{}
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		if registry.CatalogLoading() {
+			t.Fatal("loading did not clear after publication")
+		}
+	})
 }
 
 // A service batch may coalesce two revisions of the same auth. Both original
@@ -233,4 +241,227 @@ func TestCatalogLoadingWaitsForQueuedAndRunningNativeProbes(t *testing.T) {
 	if !service.catalogUpdatesApplied(wrapper) {
 		t.Fatal("not ready after native discovery completed")
 	}
+}
+
+// Exercise the post-listener startup sequence called by Run, including the
+// loading transition, server start, hook, watcher factory and watcher start.
+func TestServiceRunCatalogDeadlineCoversSynchronousStartup(t *testing.T) {
+	for _, stage := range []string{"after-start", "watcher-factory", "watcher-start"} {
+		t.Run(stage, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				service := catalogStartupTestService(t)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				entered, release := make(chan struct{}), make(chan struct{})
+				block := func() { close(entered); <-release }
+				service.hooks.OnAfterStart = func(*Service) {
+					if stage == "after-start" {
+						block()
+					}
+				}
+				service.watcherFactory = func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+					if stage == "watcher-factory" {
+						block()
+					}
+					return &WatcherWrapper{start: func(context.Context) error {
+						if stage == "watcher-start" {
+							block()
+						}
+						return nil
+					}}, nil
+				}
+				done := make(chan error, 1)
+				go func() {
+					stop, err := service.startServerAndWatcher(ctx, false)
+					stop()
+					done <- err
+				}()
+				<-entered
+				synctest.Wait()
+				if !registry.CatalogLoading() {
+					t.Error("empty queues cleared loading before startup completed")
+				}
+				time.Sleep(31 * time.Second) // synctest virtual time, not wall-clock ordering
+				synctest.Wait()
+				if registry.CatalogLoading() {
+					t.Error("startup stall prevented the 30-second ceiling from clearing loading")
+				}
+				cancel()
+				close(release)
+				<-done
+				synctest.Wait()
+				if registry.CatalogLoading() {
+					t.Error("loading remained set after Run exited")
+				}
+			})
+		})
+	}
+}
+
+func catalogStartupTestService(t *testing.T) *Service {
+	t.Helper()
+	t.Cleanup(func() { registry.SetCatalogLoading(false) })
+	// An uninitialized server returns immediately without opening sockets or
+	// allocating unrelated management-handler background workers.
+	return &Service{cfg: &config.Config{}, server: &api.Server{}}
+}
+
+func catalogStartupReady(w *WatcherWrapper) <-chan *WatcherWrapper {
+	ready := make(chan *WatcherWrapper, 1)
+	ready <- w
+	return ready
+}
+
+func TestServiceCatalogStartupGateAndPublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		service := catalogStartupTestService(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var pending atomic.Int64
+		pending.Store(1)
+		watcherStarted, release := make(chan struct{}), make(chan struct{})
+		service.watcherFactory = func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+			return &WatcherWrapper{
+				start: func(context.Context) error {
+					close(watcherStarted)
+					<-release
+					return nil
+				},
+				pendingAuthUpdates: func() int { return int(pending.Load()) },
+			}, nil
+		}
+		stopped := make(chan func(), 1)
+		go func() {
+			stop, err := service.startServerAndWatcher(ctx, false)
+			if err != nil {
+				t.Error(err)
+			}
+			stopped <- stop
+		}()
+		<-watcherStarted
+		// Even empty queues must not bypass the still-incomplete startup stage.
+		pending.Store(0)
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+		if !registry.CatalogLoading() {
+			t.Error("loading cleared before watcher initialization completed")
+		}
+		pending.Store(1)
+		close(release)
+		stop := <-stopped
+		defer stop()
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+		if !registry.CatalogLoading() {
+			t.Error("loading cleared before initial publication was acknowledged")
+		}
+		pending.Store(0)
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		if registry.CatalogLoading() {
+			t.Error("loading remained set after startup and publication completed")
+		}
+	})
+}
+
+func TestServiceCatalogStartupNilWatcher(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		service := &Service{}
+		ready, stop := service.startCatalogLoading(t.Context())
+		defer stop()
+		time.Sleep(50 * time.Millisecond) // Virtual time inside synctest.
+		synctest.Wait()
+		if !registry.CatalogLoading() {
+			t.Fatal("loading cleared before startup readiness was signalled")
+		}
+		// WatcherWrapper methods explicitly support nil to disable watching.
+		// Receiving that completed startup must not look like an unopened gate.
+		ready <- nil
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		if registry.CatalogLoading() {
+			t.Fatal("nil watcher prevented completed startup from becoming ready")
+		}
+	})
+}
+
+func TestServiceCatalogStartupCancellationAndErrors(t *testing.T) {
+	for _, stage := range []string{"cancel", "factory-error", "start-error"} {
+		t.Run(stage, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				service := catalogStartupTestService(t)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				entered, release := make(chan struct{}), make(chan struct{})
+				wantErr := errors.New("startup failed")
+				service.watcherFactory = func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+					if stage == "factory-error" {
+						return nil, wantErr
+					}
+					return &WatcherWrapper{start: func(context.Context) error {
+						if stage == "start-error" {
+							return wantErr
+						}
+						close(entered)
+						<-release
+						return nil
+					}}, nil
+				}
+				done := make(chan error, 1)
+				go func() {
+					stop, err := service.startServerAndWatcher(ctx, false)
+					stop() // Must be safe after the error path already stopped the worker.
+					done <- err
+				}()
+				if stage == "cancel" {
+					<-entered
+					cancel()
+					synctest.Wait()
+					if registry.CatalogLoading() {
+						t.Error("cancellation waited for blocked startup")
+					}
+					close(release)
+				}
+				err := <-done
+				if stage != "cancel" && !errors.Is(err, wantErr) {
+					t.Errorf("error = %v, want startup failure", err)
+				}
+				cancel()
+				synctest.Wait()
+				if registry.CatalogLoading() {
+					t.Error("loading remained set after startup exited")
+				}
+				// No owned timer/worker may survive to clear a subsequent loading epoch.
+				registry.SetCatalogLoading(true)
+				time.Sleep(31 * time.Second)
+				synctest.Wait()
+				if !registry.CatalogLoading() {
+					t.Error("startup worker survived cleanup")
+				}
+			})
+		})
+	}
+}
+
+func TestServiceCatalogStartupHomeDoesNotChangeLoading(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		service := catalogStartupTestService(t)
+		service.watcherFactory = func(string, string, func(*config.Config)) (*WatcherWrapper, error) {
+			t.Error("Home mode created a watcher")
+			return &WatcherWrapper{}, nil
+		}
+		for _, loading := range []bool{false, true} {
+			registry.SetCatalogLoading(loading)
+			stop, err := service.startServerAndWatcher(t.Context(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop()
+			time.Sleep(31 * time.Second)
+			synctest.Wait()
+			if registry.CatalogLoading() != loading {
+				t.Errorf("Home mode changed loading from %t", loading)
+			}
+		}
+	})
 }

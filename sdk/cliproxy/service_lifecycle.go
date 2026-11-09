@@ -176,12 +176,41 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.currentConfig())
 	}
 
-	// The server answers before the watcher's first full load has registered its
-	// models. finishCatalogLoading clears this once that load is applied.
-	// Home mode has no watcher, so it never sets the flag.
-	if !homeEnabled {
-		registry.SetCatalogLoading(true)
+	stopCatalogLoading, errStart := s.startServerAndWatcher(ctx, homeEnabled)
+	defer stopCatalogLoading()
+	if errStart != nil {
+		return errStart
 	}
+
+	s.registerModelRefreshCallback()
+	if !homeEnabled {
+		go s.runAntigravityModelRefresh(ctx)
+	}
+
+	select {
+	case <-ctx.Done():
+		log.Debug("service context cancelled, shutting down...")
+		return ctx.Err()
+	case errServer := <-s.serverErr:
+		return errServer
+	}
+}
+
+// startServerAndWatcher owns the post-listener startup sequence.
+func (s *Service) startServerAndWatcher(ctx context.Context, homeEnabled bool) (stopCatalogLoading func(), err error) {
+	stopCatalogLoading = func() {}
+	// The server answers before the watcher's first full load has registered its
+	// models. The startup gate and publication checks clear loading when ready.
+	// Home mode has no watcher, so it never sets the flag.
+	var startupReady chan<- *WatcherWrapper
+	if !homeEnabled {
+		startupReady, stopCatalogLoading = s.startCatalogLoading(ctx)
+	}
+	defer func() {
+		if err != nil {
+			stopCatalogLoading()
+		}
+	}()
 
 	s.serverErr = make(chan error, 1)
 	go func() {
@@ -217,7 +246,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		watcherWrapper, errCreate := s.watcherFactory(s.configPath, authDir, reloadCallback)
 		if errCreate != nil {
-			return fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
+			return stopCatalogLoading, fmt.Errorf("cliproxy: failed to create watcher: %w", errCreate)
 		}
 		s.setWatcher(watcherWrapper)
 		s.ensureAuthUpdateQueue(ctx)
@@ -232,27 +261,16 @@ func (s *Service) Run(ctx context.Context) error {
 		s.watcherCancel = watcherCancel
 		s.cfgMu.Unlock()
 		if errStart := watcherWrapper.Start(watcherCtx); errStart != nil {
-			return fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
+			return stopCatalogLoading, fmt.Errorf("cliproxy: failed to start watcher: %w", errStart)
 		}
 		log.Info("file watcher started for config and auth directory changes")
 		s.configRuntimeMu.Lock()
 		s.syncPluginModelRuntime(ctx)
 		s.configRuntimeMu.Unlock()
-		go s.finishCatalogLoading(ctx, watcherWrapper)
+		startupReady <- watcherWrapper
 	}
 
-	s.registerModelRefreshCallback()
-	if !homeEnabled {
-		go s.runAntigravityModelRefresh(ctx)
-	}
-
-	select {
-	case <-ctx.Done():
-		log.Debug("service context cancelled, shutting down...")
-		return ctx.Err()
-	case errServer := <-s.serverErr:
-		return errServer
-	}
+	return stopCatalogLoading, nil
 }
 
 // Shutdown stops background workers and immediately closes the HTTP server.
@@ -453,23 +471,31 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 // A watcher that never dispatches auth updates must not leave the flag set.
 var catalogLoadingCeiling = 30 * time.Second
 
-// finishCatalogLoading clears the catalog-loading flag once the first full load
-// has been applied: the watcher has received service acknowledgements for its
-// dispatched updates, both queues are empty, no batch is being handled, and
-// native catalog discovery has finished publishing. Start returns before that,
-// because watcher updates and native probes publish asynchronously. The ceiling
-// also covers custom watchers and stalled discovery.
-func (s *Service) finishCatalogLoading(ctx context.Context, w *WatcherWrapper) {
+// startCatalogLoading arms the ceiling before any post-listener startup can
+// block. Only a successfully initialized watcher and plugin publication open
+// the early-readiness gate; cancellation and the ceiling do not need that gate.
+func (s *Service) startCatalogLoading(ctx context.Context) (chan<- *WatcherWrapper, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	registry.SetCatalogLoading(true)
 	ceiling := time.NewTimer(catalogLoadingCeiling)
-	defer ceiling.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	s.finishCatalogLoadingWithSignals(ctx, w, ticker.C, ceiling.C)
+	// Buffered so startup can finish even if cancellation or the ceiling won.
+	startupReady := make(chan *WatcherWrapper, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer ceiling.Stop()
+		defer ticker.Stop()
+		s.finishCatalogLoadingWithSignals(ctx, startupReady, ticker.C, ceiling.C)
+	}()
+	return startupReady, func() { cancel(); <-done }
 }
 
 // Separate signals let ordering tests drive each readiness check without sleeps.
-func (s *Service) finishCatalogLoadingWithSignals(ctx context.Context, w *WatcherWrapper, ticks, ceiling <-chan time.Time) {
+func (s *Service) finishCatalogLoadingWithSignals(ctx context.Context, startupReady <-chan *WatcherWrapper, ticks, ceiling <-chan time.Time) {
 	defer registry.SetCatalogLoading(false)
+	var w *WatcherWrapper
+	initialized := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -477,8 +503,11 @@ func (s *Service) finishCatalogLoadingWithSignals(ctx context.Context, w *Watche
 		case <-ceiling:
 			log.Warn("model catalog loading ceiling reached; serving unknown models as 400")
 			return
+		case w = <-startupReady:
+			startupReady = nil
+			initialized = true
 		case <-ticks:
-			if s.catalogUpdatesApplied(w) {
+			if initialized && s.catalogUpdatesApplied(w) {
 				return
 			}
 		}
