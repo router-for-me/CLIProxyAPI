@@ -261,7 +261,7 @@ class Bridge:
                 continue
             result = self.management("/requests/api-call", {
                 "auth_index": auth_index, "method": "GET", "url": CLAUDE_USAGE,
-                "header": {"User-Agent": "claude-cli/2.1.280 (external, cli)",
+                "header": {"User-Agent": "claude-cli/2.1.309 (external, cli)",
                            "Authorization": "Bearer $TOKEN$", "Content-Type": "application/json",
                            "anthropic-beta": "oauth-2025-04-20", "Accept": "application/json"},
             })
