@@ -258,6 +258,15 @@ func (w *FileStreamingLogWriter) Close() error {
 	return writeErr
 }
 
+// Discard stops the streaming writer and removes temporary files without creating a final log file.
+func (w *FileStreamingLogWriter) Discard() error {
+	if w == nil {
+		return nil
+	}
+	w.logFilename = ""
+	return w.Close()
+}
+
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
 // It continuously reads chunks from the channel and appends them to a temp file for later assembly.
 func (w *FileStreamingLogWriter) asyncWriter() {
