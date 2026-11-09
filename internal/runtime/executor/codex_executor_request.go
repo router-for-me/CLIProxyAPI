@@ -800,22 +800,34 @@ func isImageGenerationFunctionTool(tool ojson.Result) bool {
 	return false
 }
 
-func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
+func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header, liteModelOptIn bool) []byte {
 	doc := ojson.NewDoc(body)
-	if !ensureImageGenerationToolDoc(doc, baseModel, auth, headers) {
+	if !ensureImageGenerationToolDoc(doc, baseModel, auth, headers, liteModelOptIn) {
 		return body
 	}
 	return doc.Bytes()
 }
 
-func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
-	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) || isCodexResponsesLiteModel(baseModel) {
+// ensureImageGenerationToolDoc appends the hosted image_generation tool when the
+// request does not already carry an image tool. Models flagged use_responses_lite
+// in the Codex client catalog are skipped by default: upstream can derive an
+// unsupported image complexity from reasoning.effort for them even on ordinary
+// non-Lite requests (#7270). liteModelOptIn is the explicit
+// codex-lite-model-image-generation opt-in that restores the pre-8.0.57
+// auto-injection for standard (non-Lite-protocol) Responses requests (#7384);
+// requests that actually speak Responses-Lite (header or client metadata) are
+// never injected regardless of the opt-in.
+func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *cliproxyauth.Auth, headers http.Header, liteModelOptIn bool) bool {
+	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) {
 		return false
 	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return false
 	}
 	if isCodexFreePlanAuth(auth) {
+		return false
+	}
+	if !liteModelOptIn && isCodexResponsesLiteModel(baseModel) {
 		return false
 	}
 
