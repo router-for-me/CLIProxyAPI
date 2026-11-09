@@ -93,7 +93,18 @@ traffic does not starve smaller-weight peers.
 Credits are local to the CPA process and reset on restart, selector replacement,
 or bounded pool-cache eviction. Concurrent selections see pending credit; local
 selection/binding success confirms it, while failure releases it. In Home mode,
-scheduling and credit accounting remain owned by Home.
+scheduling and credit accounting remain owned by Home. With matching CPA and Home
+versions, retained WebSocket responses (including Codex duplex successors) report
+`home_selection.reused` through usage so Home can charge later turns without
+redispatching or acquiring another concurrency slot. The scheduling model is
+carried separately from the upstream model. First-turn primary usage does not
+charge again. Split additional-model billing records (such as image usage) carry
+`home_selection.additional` and never add scheduling charges, even when they have
+independent execution IDs. Each reused execution is charged once through primary
+usage; redelivery of that execution ID is deduplicated.
+Compensation arrives after completion and uses Home's current eligible
+pool and API-key permissions, so it remains approximate. Old peers ignore the
+optional metadata; missing usage cannot compensate a reused turn.
 
 ### Codex multi-agent configuration migration
 
