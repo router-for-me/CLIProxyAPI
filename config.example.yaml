@@ -282,6 +282,9 @@ requests:
   #   enabled: false               # Default: false.
   #   shadow: false                # Default: false. Compute and log savings, send the original payload.
   #   min-bytes: 4096              # Payloads smaller than this are skipped.
+  #   exclusions: []               # Model ids or "provider/model" values that bypass compression.
+  #   hard-budget-tokens: 0        # 0 = off. Cap the token count after compression.
+  #   quantum-lock: false          # Mask volatile spans in the first system message (caching providers only).
   #   cache-prefix: compress      # preserve | compress. Compress (the default) rewrites the
   #                               # whole body, including the provider-cached prefix: the bytes
   #                               # shrink and stay identical turn over turn, so the provider caches
@@ -349,11 +352,21 @@ requests:
   #   # (opt-in here, so the default combo stays lossless).
   #   #   headroom:       min-rows: 8
   #   #   session-dedup:  min-block-chars: 80
-  #   #   lite:           max-tool-length: 2000, compress-tool-results: false
+  #   #   lite:           max-tool-length: 2000, compress-tool-results: false,
+  #   #                   preserve-tool-whitespace: true, lite-remove-redundant: false,
+  #   #                   lite-replace-images: false
   #   #   rtk:            intensity: minimal, max-lines: 120, max-chars: 12000,
   #   #                   deduplicate-threshold: 3, min-savings-percent: 0 (off)
   #   #   caveman:        level: lite, min-message-length: 50,
-  #   #                   language: "", auto-detect: true, language-packs: [en]
+  #   #                   language: "", auto-detect: true, language-packs: [en],
+  #   #                   skip-rules: []
+  #   #   mcp-accessibility: mcp-min-length: 2000, mcp-max-chars: 50000,
+  #   #                   mcp-collapse-threshold: 30, mcp-collapse-keep-head: 10,
+  #   #                   mcp-collapse-keep-tail: 5
+  #   #   relevance:      relevance-budget-percent: 0.5,
+  #   #                   relevance-overlap-threshold: 0.1
+  #   #   read-lifecycle: enabled: false (opt-in; set true on the step to run it)
+  #   #   any engine:     fidelity-gate: false, risk-gate: false
   #   # Output styles steer how the model writes its answer by appending an instruction
   #   # to the existing system prompt. They do not rewrite responses, so streaming and
   #   # tool calls are untouched. Injection is skipped for prompts that must not be
