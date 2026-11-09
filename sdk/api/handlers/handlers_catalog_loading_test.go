@@ -69,7 +69,7 @@ func TestCatalogLoadingPublicationBetweenLookupAndRejection(t *testing.T) {
 			clientID := "catalog-publication-boundary" + suffix
 			defer reg.UnregisterClient(clientID)
 			h := &BaseAPIHandler{}
-			_, _, errMsg := h.getRequestDetailsWithProviderLookup(catalogLoadingModel+suffix, false, false, func(string) []string {
+			_, _, errMsg := h.getRequestDetailsWithResolvers(catalogLoadingModel+suffix, false, false, util.ResolveAutoModel, func(string) []string {
 				// The lookup saw no model, then the last startup publication
 				// completed before this request chose its rejection status.
 				reg.RegisterClient(clientID, "gemini", []*registry.ModelInfo{{ID: catalogLoadingModel}})
@@ -79,9 +79,36 @@ func TestCatalogLoadingPublicationBetweenLookupAndRejection(t *testing.T) {
 			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("startup lookup must remain retryable, got %v", errMsg)
 			}
-			providers, _, retryErr := h.getRequestDetailsWithProviderLookup(catalogLoadingModel+suffix, false, false, util.GetProviderName)
+			providers, _, retryErr := h.getRequestDetailsWithResolvers(catalogLoadingModel+suffix, false, false, util.ResolveAutoModel, util.GetProviderName)
 			if retryErr != nil || len(providers) != 1 || providers[0] != "gemini" {
 				t.Fatalf("published model not routable on retry: providers=%v error=%v", providers, retryErr)
+			}
+		})
+	}
+}
+
+func TestCatalogLoadingAutoPublicationBeforeProviderLookup(t *testing.T) {
+	for _, model := range []string{"auto", "auto(8192)"} {
+		t.Run(model, func(t *testing.T) {
+			registry.SetCatalogLoading(true)
+			defer registry.SetCatalogLoading(false)
+			reg := registry.GetGlobalRegistry()
+			clientID := "catalog-auto-boundary-" + model
+			defer reg.UnregisterClient(clientID)
+			h := &BaseAPIHandler{}
+			_, _, errMsg := h.getRequestDetailsWithResolvers(model, false, false, func(string) string {
+				// Auto resolution saw an empty registry. The first model
+				// became available before provider resolution began.
+				reg.RegisterClient(clientID, "gemini", []*registry.ModelInfo{{ID: catalogLoadingModel}})
+				registry.SetCatalogLoading(false)
+				return "auto"
+			}, util.GetProviderName)
+			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("auto resolution during startup must remain retryable, got %v", errMsg)
+			}
+			providers, _, retryErr := h.getRequestDetails(model)
+			if retryErr != nil || len(providers) == 0 {
+				t.Fatalf("auto model not routable on retry: providers=%v error=%v", providers, retryErr)
 			}
 		})
 	}

@@ -164,17 +164,20 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 }
 
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
-	return h.getRequestDetailsWithProviderLookup(modelName, allowImageModel, allowSpeechModel, util.GetProviderName)
+	return h.getRequestDetailsWithResolvers(modelName, allowImageModel, allowSpeechModel, util.ResolveAutoModel, util.GetProviderName)
 }
 
-func (h *BaseAPIHandler) getRequestDetailsWithProviderLookup(modelName string, allowImageModel, allowSpeechModel bool, lookup func(string) []string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetailsWithResolvers(modelName string, allowImageModel, allowSpeechModel bool, resolve func(string) string, lookup func(string) []string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	// Both auto resolution and provider lookup read the registry. Capture
+	// readiness before either so their empty startup snapshots stay retryable.
+	catalogLoading := registry.CatalogLoading()
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 			resolvedModelName = modelName
 		} else {
-			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+			resolvedBase := resolve(initialSuffix.ModelName)
 			if initialSuffix.HasSuffix {
 				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 			} else {
@@ -185,7 +188,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithProviderLookup(modelName string, a
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 			resolvedModelName = modelName
 		} else {
-			resolvedModelName = util.ResolveAutoModel(modelName)
+			resolvedModelName = resolve(modelName)
 		}
 	}
 
@@ -203,9 +206,6 @@ func (h *BaseAPIHandler) getRequestDetailsWithProviderLookup(modelName string, a
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	// Capture readiness before the registry lookup. Publication may finish
-	// after an empty lookup, but that request must still receive a retryable error.
-	catalogLoading := registry.CatalogLoading()
 	providers = lookup(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
