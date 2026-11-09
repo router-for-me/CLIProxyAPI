@@ -245,9 +245,6 @@ const (
 	// EngineReadLifecycle stubs file reads that a later read or write
 	// superseded. Opt-in, like upstream.
 	EngineReadLifecycle = "read-lifecycle"
-	// EngineProgressiveAging compresses older turns more aggressively than
-	// recent ones (`progressiveAging.ts`).
-	EngineProgressiveAging = "progressive-aging"
 )
 
 // CachePrefix modes name the only cache decision this package makes: whether the
@@ -303,8 +300,7 @@ func boolPtr(v bool) *bool { return &v }
 func knownEngine(name string) bool {
 	switch name {
 	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman,
-		EngineMCPAccessibility, EngineRelevance, EngineReadLifecycle,
-		EngineProgressiveAging:
+		EngineMCPAccessibility, EngineRelevance, EngineReadLifecycle:
 		return true
 	}
 	return false

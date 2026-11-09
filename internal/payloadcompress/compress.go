@@ -159,14 +159,10 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	stats.Combo = combo.Name
 	inBody := body
 	inBodyLen := len(body)
-	// Body-level engines run before the scanner: they edit whole messages
-	// (read lifecycle) or age entire turns, which the per-segment scanner
-	// deliberately does not model.
+	// read-lifecycle is opt-in upstream and runs before the scanner: it edits
+	// whole tool-result messages, which the per-segment scanner does not model.
 	if comboHasEngine(combo, EngineReadLifecycle) && readLifecycleEnabled(combo) {
 		body = applyReadLifecycle(body)
-	}
-	if comboHasEngine(combo, EngineProgressiveAging) {
-		body = applyProgressiveAging(combo, body)
 	}
 	// Resolve the cache-protection decision once per request. The lite body
 	// passes and the scanner must agree, and each resolution advances the
@@ -185,12 +181,12 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 		includeSystem: !preserveSystem,
 	}
 	if !s.scan() {
-		return finishPrepass(cfg, combo, inBody, body, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
+		return finishPrepass(cfg, combo, inBody, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
 	}
 
 	steps := buildEngines(combo.Pipeline)
 	if len(steps) == 0 {
-		return finishPrepass(cfg, combo, inBody, body, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
+		return finishPrepass(cfg, combo, inBody, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
 	}
 	stats.Segments = len(s.segs)
 
@@ -412,7 +408,7 @@ func comboHasEngine(combo *Combo, name string) bool {
 
 // finishPrepass returns the body when the pipeline had no segment engines, so a
 // combo made only of body-level engines still applies and reports its saving.
-func finishPrepass(cfg Config, combo *Combo, inBody, body, out []byte, stats Stats) ([]byte, Stats) {
+func finishPrepass(cfg Config, combo *Combo, inBody, out []byte, stats Stats) ([]byte, Stats) {
 	if bytes.Equal(out, inBody) || len(out) >= len(inBody) {
 		stats.BytesOut = len(inBody)
 		return inBody, stats
@@ -420,7 +416,7 @@ func finishPrepass(cfg Config, combo *Combo, inBody, body, out []byte, stats Sta
 	stats.BytesOut = len(out)
 	stats.Saved = map[string]int{}
 	for _, step := range combo.Pipeline {
-		if step.Engine == EngineReadLifecycle || step.Engine == EngineProgressiveAging {
+		if step.Engine == EngineReadLifecycle {
 			stats.Saved[step.Engine] = len(inBody) - len(out)
 		}
 	}
