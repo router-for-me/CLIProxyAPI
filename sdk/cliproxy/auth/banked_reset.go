@@ -54,6 +54,7 @@ type bankedResetAccount struct {
 	nextCheck  time.Time
 	retryAfter time.Time
 	failures   int
+	restored   bool
 	// After an ambiguous POST, only the same request may be retried. This is
 	// persisted before dispatch and survives restarts/HA copies in auth metadata.
 	pending *bankedResetOperation
@@ -61,6 +62,7 @@ type bankedResetAccount struct {
 }
 
 type bankedResetOperation struct {
+	AuthID       string    `json:"auth_id,omitempty"`
 	AccountKey   string    `json:"account_key"`
 	CreditID     string    `json:"credit_id"`
 	RequestID    string    `json:"request_id"`
@@ -307,8 +309,8 @@ func (m *Manager) saveBankedOperation(ctx context.Context, authID string, op *ba
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a := m.auths[authID]
-	if a == nil {
-		return errors.New("reset credential removed")
+	if a == nil || bankedAccountKey(a) != op.AccountKey {
+		return errors.New("reset credential removed or replaced")
 	}
 	if a.Metadata == nil {
 		a.Metadata = make(map[string]any)
@@ -364,6 +366,7 @@ func (m *Manager) useBankedReset(ctx context.Context, authID, creditID string, a
 	state := m.bankedAccount(a)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	m.restoreBankedLedger(state, accountKey)
 	if now.Before(state.retryAfter) {
 		return result, ErrBankedResetBackoff
 	}
@@ -444,7 +447,7 @@ func (m *Manager) useBankedReset(ctx context.Context, authID, creditID string, a
 					requestID = uuid.NewSHA1(uuid.NameSpaceURL, []byte(requestID+":"+saved.RequestID)).String()
 				}
 			}
-			op = &bankedResetOperation{AccountKey: accountKey, CreditID: reset.ID, RequestID: requestID, Reason: reason, At: now}
+			op = &bankedResetOperation{AuthID: authID, AccountKey: accountKey, CreditID: reset.ID, RequestID: requestID, Reason: reason, At: now}
 			if a.Provider == "claude" {
 				profile, errProfile := m.bankedRequest(ctx, a, http.MethodGet, "https://api.anthropic.com/api/oauth/profile", nil)
 				if errProfile != nil {
@@ -522,7 +525,17 @@ func (m *Manager) useBankedReset(ctx context.Context, authID, creditID string, a
 		state.fail(now)
 		return result, errors.New("reset redeemed but cooldown persistence failed")
 	}
-	if errSave := m.saveBankedOperation(ctx, authID, op); errSave != nil {
+	journalID := authID
+	if origin, exists := m.GetByID(op.AuthID); exists && bankedAccountKey(origin) == accountKey {
+		journalID = origin.ID
+		if origin.ID != authID {
+			if _, _, errReset := m.ResetQuota(ctx, origin.ID); errReset != nil {
+				state.fail(now)
+				return result, errors.New("reset redeemed but original credential cooldown persistence failed")
+			}
+		}
+	}
+	if errSave := m.saveBankedOperation(ctx, journalID, op); errSave != nil {
 		state.fail(now)
 		return result, errors.New("reset redeemed but audit persistence failed")
 	}
@@ -612,4 +625,35 @@ func bankedResetNoSpend(provider, code string) bool {
 		return true
 	}
 	return false
+}
+
+// Duplicate login files share a provider account. On restart, recover the intent
+// from any alias before looking at a newer credit inventory. Finish the journal
+// on its originating credential, so another restart cannot resurrect it.
+func (m *Manager) restoreBankedLedger(state *bankedResetAccount, accountKey string) {
+	if state.restored {
+		return
+	}
+	for _, candidate := range m.List() {
+		if bankedAccountKey(candidate) != accountKey {
+			continue
+		}
+		saved := bankedOperation(candidate)
+		if saved == nil {
+			continue
+		}
+		if saved.AuthID == "" {
+			saved.AuthID = candidate.ID
+		}
+		if saved.Code == "" && state.pending == nil {
+			state.pending = saved
+		}
+		if saved.AccountKey == accountKey && bankedResetConfirmed(candidate.Provider, saved.Code) && (state.last == nil || saved.At.After(state.last.At)) {
+			state.last = saved
+		}
+	}
+	if state.last != nil {
+		state.nextCheck = state.last.At.Add(time.Minute)
+	}
+	state.restored = true
 }

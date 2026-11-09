@@ -448,3 +448,51 @@ func TestBankedResetFresh429RetriesBeforeFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestBankedResetRestartFindsIntentOnAnotherLoginFile(t *testing.T) {
+	m, f, id := newBankedFixture(t, "codex", "auto")
+	now := time.Now()
+	f.exhausted = true
+	f.failPost = true
+	f.credits = resetCredits(now, time.Hour)
+	alias, _ := m.GetByID(id)
+	alias.ID += "-alias"
+	alias.Index = ""
+	if _, err := m.Register(context.Background(), alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.useBankedReset(context.Background(), id, "", true, now); err == nil {
+		t.Fatal("wanted ambiguous failure")
+	}
+	origin, _ := m.GetByID(id)
+	alias, _ = m.GetByID(alias.ID)
+	replacement := NewManager(nil, nil, nil)
+	replacement.SetConfig(m.runtimeConfigSnapshot())
+	replacement.RegisterExecutor(f)
+	for _, a := range []*Auth{origin, alias} {
+		if _, err := replacement.Register(context.Background(), a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Inventory changed after the ambiguous POST. Recover the old operation,
+	// rather than selecting the next credit through the other login file.
+	f.failPost = false
+	f.postCode = "already_redeemed"
+	f.credits = strings.ReplaceAll(f.credits, "earliest", "next-credit")
+	result, err := replacement.useBankedReset(context.Background(), alias.ID, "", true, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CreditID != "earliest" || len(f.posts) != 2 || f.posts[0]["redeem_request_id"] != f.posts[1]["redeem_request_id"] {
+		t.Fatal("alias recovery selected another reset")
+	}
+	updated, _ := replacement.GetByID(id)
+	if bankedOperation(updated).Code != "already_redeemed" {
+		t.Fatal("origin intent was left unresolved")
+	}
+	state := &bankedResetAccount{}
+	replacement.restoreBankedLedger(state, bankedAccountKey(updated))
+	if state.pending != nil {
+		t.Fatal("another restart resurrected a completed intent")
+	}
+}
