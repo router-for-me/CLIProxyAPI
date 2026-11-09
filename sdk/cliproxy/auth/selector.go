@@ -693,16 +693,9 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = opts
-	available, errAvailable := getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
-	if errAvailable != nil {
-		return nil, errAvailable
-	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
-	picked, reservation := s.reserve(key, available, "")
-	if picked == nil {
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+	picked, reservation, errPick := s.reserveForRequest(ctx, provider, model, opts, auths, nil)
+	if errPick != nil {
+		return nil, errPick
 	}
 	reservation.finish(true)
 	return picked, nil

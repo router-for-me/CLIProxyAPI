@@ -32,6 +32,7 @@ type UsageReporter struct {
 	requestID            string
 	traceID              string
 	selectionID          string
+	homeSelection        *usage.HomeSelection
 	provider             string
 	baseURL              string
 	executorType         string
@@ -131,6 +132,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestID:       uuid.NewString(),
 		traceID:         traceID,
 		selectionID:     usage.SelectionIDFromContext(ctx),
+		homeSelection:   usage.HomeSelectionFromContext(ctx),
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
@@ -542,6 +544,13 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	}
 	rec := r.buildRecordForModel(model, detail, false, usage.Failure{})
 	rec.RequestID = uuid.NewString()
+	if rec.HomeSelection != nil {
+		// Split billing details do not represent another scheduled request.
+		// Mark them separately without changing the primary usage metadata.
+		selection := *rec.HomeSelection
+		selection.Additional = true
+		rec.HomeSelection = &selection
+	}
 	return rec, true
 }
 
@@ -680,6 +689,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestID:            r.requestID,
 		TraceID:              r.traceID,
 		SelectionID:          r.selectionID,
+		HomeSelection:        r.homeSelection,
 		Provider:             r.provider,
 		BaseURL:              r.baseURL,
 		ExecutorType:         r.executorType,

@@ -15,6 +15,10 @@ import (
 // accounting only; the selector still receives pin-filtered selection candidates.
 type weightedAccountingPoolKey struct{}
 
+// weightedTransportProviderKey preserves single-provider transport preference on
+// the mixed entrypoint without changing its weighted accounting namespace.
+type weightedTransportProviderKey struct{}
+
 // weightedReservation separates speculative credit from committed, clamped credit.
 // Releasing one request must never undo accounting committed by another request.
 type weightedReservation struct {
@@ -37,6 +41,20 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 		}
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
+	picked, pending, errPick := weighted.reserveForRequest(ctx, provider, model, opts, auths, bound)
+	*reservation = pending
+	return picked, errPick
+}
+
+// reserveForRequest shares candidate normalization and pinned accounting between
+// bare weighted routing and session affinity, which owns deferred confirmation.
+func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, bound *Auth) (*Auth, *weightedReservation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, nil, errContext
+	}
 	if accountingAuths, ok := ctx.Value(weightedAccountingPoolKey{}).([]*Auth); ok {
 		pinnedID := pinnedAuthIDFromMetadata(opts.Metadata)
 		if bound == nil {
@@ -48,9 +66,17 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 			}
 		}
 		if bound == nil || bound.ID != pinnedID || authWeight(bound) <= 0 {
-			return nil, &Error{Code: "auth_unavailable", Message: "pinned auth is not available for weighted accounting"}
+			return nil, nil, &Error{Code: "auth_unavailable", Message: "pinned auth is not available for weighted accounting"}
 		}
 		auths = positiveWeightAuths(accountingAuths)
+	}
+	transportProvider := provider
+	if singleProvider, ok := ctx.Value(weightedTransportProviderKey{}).(string); ok {
+		transportProvider = singleProvider
+	}
+	if providerPrefersWebsocketTransport(transportProvider) {
+		// Reuse the transport filter for every provider preferred by the scheduler.
+		transportProvider = "codex"
 	}
 	var available []*Auth
 	authID := ""
@@ -58,9 +84,9 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 		var errAvailable error
 		available, errAvailable = getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
 		if errAvailable != nil {
-			return nil, errAvailable
+			return nil, nil, errAvailable
 		}
-		available = preferCodexWebsocketAuths(ctx, provider, available)
+		available = preferCodexWebsocketAuths(ctx, transportProvider, available)
 	} else {
 		authID = bound.ID
 		// A binding may bypass priority or transport preference, but its traffic
@@ -71,7 +97,7 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 				available = append(available, auth)
 			}
 		}
-		preferred := preferCodexWebsocketAuths(ctx, provider, available)
+		preferred := preferCodexWebsocketAuths(ctx, transportProvider, available)
 		if len(preferred) < len(available) && !authWebsocketsEnabled(bound) {
 			// Keep an HTTP-bound session outside the preferred WebSocket pool.
 			nonWebsocket := available[:0]
@@ -86,12 +112,11 @@ func (s *SessionAffinitySelector) pickWithAffinityReservation(ctx context.Contex
 		}
 	}
 	key := provider + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
-	picked, pending := weighted.reserve(key, available, authID)
+	picked, pending := s.reserve(key, available, authID)
 	if picked == nil {
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+		return nil, nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 	}
-	*reservation = pending
-	return picked, nil
+	return picked, pending, nil
 }
 
 // weightedPoolMember stores each ID once, with parallel accounting values in a
@@ -157,13 +182,13 @@ func (s *weightedPoolState) matches(route string, ids []string) bool {
 	return true
 }
 
-func (s *weightedPoolState) prepare(weights map[string]int64) {
-	for _, member := range s.members {
-		if member.weight != weights[member.id] {
+func (s *weightedPoolState) prepare(weights []int64) {
+	for i, member := range s.members {
+		if member.weight != weights[i] {
 			s.generation++
 			s.inFlight = 0
 			for i := range s.members {
-				s.members[i].weight = weights[s.members[i].id]
+				s.members[i].weight = weights[i]
 				s.members[i].current = 0
 				s.members[i].pending = 0
 			}
@@ -175,8 +200,19 @@ func (s *weightedPoolState) prepare(weights map[string]int64) {
 // reserve selects and reserves credit atomically. A non-empty authID preserves a
 // sticky binding; otherwise committed and pending credits both guide selection.
 func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, authID string) (*Auth, *weightedReservation) {
-	weights := authWeightVector(available)
-	ids := sortedWeightedIDs(weights)
+	weightVector := authWeightVector(available)
+	ids := sortedWeightedIDs(weightVector)
+	weights := make([]int64, len(ids))
+	for i, id := range ids {
+		weights[i] = weightVector[id]
+	}
+	return s.reservePool(route, available, weights, ids, authID)
+}
+
+// reservePool consumes a normalized pool. Scheduler ready views already supply
+// ID-sorted candidates and cached weights, avoiding sorting and cloning auths.
+// ids must be sorted, with one positive weight per ID in the parallel slice.
+func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
 	key := weightedPoolDigest(route, ids)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -198,7 +234,7 @@ func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, au
 		}
 		state = &weightedPoolState{route: route, members: make([]weightedPoolMember, len(ids)), next: s.states[key]}
 		for i, id := range ids {
-			state.members[i] = weightedPoolMember{id: id, weight: weights[id]}
+			state.members[i] = weightedPoolMember{id: id, weight: weights[i]}
 		}
 		s.states[key] = state
 		s.stateCount++
@@ -209,14 +245,17 @@ func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, au
 	var pickedCurrent, total int64
 	pickedMember := -1
 	for _, auth := range available {
-		if auth == nil || weights[auth.ID] <= 0 {
-			continue
-		}
-		total = saturatingAddInt64(total, weights[auth.ID])
-		if authID != "" && auth.ID != authID {
+		if auth == nil {
 			continue
 		}
 		index := sort.SearchStrings(ids, auth.ID)
+		if index == len(ids) || ids[index] != auth.ID || weights[index] <= 0 {
+			continue
+		}
+		total = saturatingAddInt64(total, weights[index])
+		if authID != "" && auth.ID != authID {
+			continue
+		}
 		member := &state.members[index]
 		current := saturatingAddInt64(member.current, member.pending)
 		current = saturatingAddInt64(current, member.weight)

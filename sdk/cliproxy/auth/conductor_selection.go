@@ -941,6 +941,11 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool, clientHeaders ...http.Header) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+		// Exclude zero-weight credentials before priority selection, just as the
+		// scheduler predicate does, including when only a lower tier has weight.
+		auths = positiveWeightAuths(auths)
+	}
 
 	if !sessionAffinity && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModelForRequest(ctx, auths, provider, routeModel, now, false, clientHeaders...)
@@ -2382,10 +2387,11 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	targetKey := canonicalSchedulingProvider(provider)
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
 	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
-	trackPinnedAccounting := false
-	if hasAffinity && affinitySelector != nil && pinnedAuthID != "" {
-		_, trackPinnedAccounting = affinitySelector.fallback.(*WeightedRoundRobinSelector)
+	_, weighted := selector.(*WeightedRoundRobinSelector)
+	if hasAffinity && affinitySelector != nil {
+		_, weighted = affinitySelector.fallback.(*WeightedRoundRobinSelector)
 	}
+	trackPinnedAccounting := pinnedAuthID != "" && weighted
 	var accountingCandidates, affinityCandidates []*Auth
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
@@ -2440,7 +2446,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	}
 	var accountingAuths []*Auth
 	if trackPinnedAccounting && len(candidates) > 0 && errAvailable == nil {
-		_, fullAvailable, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, provider, model, now, false, opts.Headers)
+		fullAvailable, _, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, provider, model, now, true, opts.Headers)
 		if errAccounting != nil {
 			m.mu.RUnlock()
 			return nil, nil, errAccounting
@@ -2826,10 +2832,11 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	registryRef := registry.GetGlobalRegistry()
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
 	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
-	trackPinnedAccounting := false
-	if hasAffinity && affinitySelector != nil && pinnedAuthID != "" {
-		_, trackPinnedAccounting = affinitySelector.fallback.(*WeightedRoundRobinSelector)
+	_, weighted := selector.(*WeightedRoundRobinSelector)
+	if hasAffinity && affinitySelector != nil {
+		_, weighted = affinitySelector.fallback.(*WeightedRoundRobinSelector)
 	}
+	trackPinnedAccounting := pinnedAuthID != "" && weighted
 	var accountingCandidates, affinityCandidates []*Auth
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
@@ -2894,7 +2901,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	var accountingAuths []*Auth
 	if trackPinnedAccounting && len(candidates) > 0 && errAvailable == nil {
-		_, fullAvailable, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, "mixed", model, now, false, opts.Headers)
+		fullAvailable, _, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, "mixed", model, now, true, opts.Headers)
 		if errAccounting != nil {
 			m.mu.RUnlock()
 			return nil, nil, "", errAccounting
@@ -2914,6 +2921,24 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		if accountingAuths != nil {
 			selectorCtx = context.WithValue(selectorCtx, weightedAccountingPoolKey{}, accountingAuths)
+		}
+		if _, bareWeighted := selector.(*WeightedRoundRobinSelector); bareWeighted {
+			// Match the scheduler's single-provider transport preference after
+			// excluding providers without an executor.
+			singleProvider := ""
+			for providerKey := range providerSet {
+				if _, okExecutor := m.Executor(providerKey); !okExecutor {
+					continue
+				}
+				if singleProvider != "" {
+					singleProvider = ""
+					break
+				}
+				singleProvider = providerKey
+			}
+			if singleProvider != "" {
+				selectorCtx = context.WithValue(selectorCtx, weightedTransportProviderKey{}, singleProvider)
+			}
 		}
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
