@@ -89,6 +89,8 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"kimi",
 		"kimi-ai",
 		"kimi.ai",
+		"qoder",
+		"qoder-cn",
 		"xai",
 		"openai-compatibility",
 		"plugin-provider",

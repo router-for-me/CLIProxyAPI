@@ -29,6 +29,7 @@ import iconAntigravity from '@/assets/icons/antigravity.svg';
 import iconKiro from '@/assets/icons/kiro.svg';
 import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconKimiDark from '@/assets/icons/kimi-dark.svg';
+import iconQoder from '@/assets/icons/qoder.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
 import iconGrok from '@/assets/icons/grok.svg';
 import iconGrokDark from '@/assets/icons/grok-dark.svg';
@@ -116,6 +117,18 @@ const PROVIDERS: BuiltInOAuthProviderCard[] = [
   },
   {
     kind: 'builtin',
+    id: 'qoder',
+    titleKey: 'auth_login.qoder_oauth_title',
+    icon: iconQoder,
+  },
+  {
+    kind: 'builtin',
+    id: 'qoder-cn',
+    titleKey: 'auth_login.qoder_cn_oauth_title',
+    icon: iconQoder,
+  },
+  {
+    kind: 'builtin',
     id: 'codex',
     titleKey: 'auth_login.codex_oauth_title',
     icon: iconCodex,
@@ -148,7 +161,7 @@ const PROVIDERS: BuiltInOAuthProviderCard[] = [
 
 const BUILTIN_PROVIDER_IDS = new Set<string>(PROVIDERS.map((provider) => provider.id));
 const CALLBACK_SUPPORTED = new Set<string>(['codex', 'anthropic', 'antigravity', 'xai', 'devin']);
-const CANCELLABLE_PROVIDERS = new Set(['devin', 'zcode', 'kiro']);
+const CANCELLABLE_PROVIDERS = new Set(['devin', 'zcode', 'kiro', 'qoder', 'qoder-cn']);
 const KIRO_METHODS = ['builderid', 'google', 'github'] as const;
 type KiroMethod = (typeof KIRO_METHODS)[number];
 const XAI_CALLBACK_URL = 'http://127.0.0.1:56121/callback';

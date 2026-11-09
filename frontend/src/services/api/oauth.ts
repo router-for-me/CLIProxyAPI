@@ -19,6 +19,8 @@ export type BuiltInOAuthProvider =
   | 'kiro'
   | 'kimi'
   | 'kimi-ai'
+  | 'qoder'
+  | 'qoder-cn'
   | 'xai'
   | 'devin'
   | 'meta'

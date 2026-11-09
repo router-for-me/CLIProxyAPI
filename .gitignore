@@ -36,6 +36,7 @@ docs/*
 !docs/development_CN.md
 !docs/image-api.md
 !docs/kiro.md
+!docs/qoder.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

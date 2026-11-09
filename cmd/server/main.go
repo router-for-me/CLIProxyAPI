@@ -115,6 +115,8 @@ func main() {
 	var kiroMethod string
 	var kimiLogin bool
 	var kimiAILogin bool
+	var qoderLogin bool
+	var qoderCNLogin bool
 	var xaiLogin bool
 	var devinLogin bool
 	var metaLogin bool
@@ -147,6 +149,8 @@ func main() {
 	flag.StringVar(&kiroMethod, "kiro-method", "", "Kiro login method: builderid (default), google or github")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi (.com) using OAuth")
 	flag.BoolVar(&kimiAILogin, "kimi-ai-login", false, "Login to Kimi.ai using OAuth")
+	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder International using OAuth")
+	flag.BoolVar(&qoderCNLogin, "qoder-cn-login", false, "Login to Qoder China using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
@@ -660,7 +664,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || zcodeLogin || kiroLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || zcodeLogin || kiroLogin || kimiLogin || kimiAILogin || qoderLogin || qoderCNLogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -738,6 +742,10 @@ func main() {
 		cmd.DoKimiLogin(cfg, options)
 	} else if kimiAILogin {
 		cmd.DoKimiAILogin(cfg, options)
+	} else if qoderLogin {
+		cmd.DoQoderLogin(cfg, options)
+	} else if qoderCNLogin {
+		cmd.DoQoderCNLogin(cfg, options)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
 	} else if devinLogin {
@@ -953,7 +961,7 @@ func argvEnablesBoolFlag(args []string, name string) bool {
 func argvFlagConsumesValue(name string) bool {
 	switch name {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
-		"antigravity-login", "zcode-login", "kiro-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
+		"antigravity-login", "zcode-login", "kiro-login", "kimi-login", "kimi-ai-login", "qoder-login", "qoder-cn-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
 		"tui", "standalone", "local-model":
 		return false

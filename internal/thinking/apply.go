@@ -29,6 +29,8 @@ var nativeProviderAppliers = map[string]ProviderApplier{
 	"kimi-ai":     nil,
 	"kimi.ai":     nil,
 	"kimi.com":    nil,
+	"qoder":       nil,
+	"qoder-cn":    nil,
 	"xai":         nil,
 }
 

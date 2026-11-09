@@ -678,7 +678,7 @@ func (h *Handler) HubDeleteChannel(c *gin.Context) {
 func (h *Handler) HubOAuth(c *gin.Context) {
 	provider := strings.ToLower(strings.TrimSpace(c.Query("provider")))
 	switch provider {
-	case "codex", "claude", "kiro", "kimi", "kimi-ai", "antigravity", "xai", "meta", "devin", "zcode":
+	case "codex", "claude", "kiro", "kimi", "kimi-ai", "qoder", "qoder-cn", "antigravity", "xai", "meta", "devin", "zcode":
 	default:
 		hubError(c, fmt.Errorf("%w: use a built-in OAuth provider or upload a credential JSON", multiuser.ErrInvalid))
 		return

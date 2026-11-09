@@ -129,6 +129,9 @@ func (s *Service) credentialModelCatalog(ctx context.Context, a *coreauth.Auth, 
 		}
 		return &coreauth.CredentialModelCatalog{Models: models, Source: status}, nil
 	}
+	if provider == "qoder" || provider == "qoder-cn" {
+		return s.qoderCredentialModelCatalog(ctx, a, refresh)
+	}
 	if provider == "zcode" || provider == "openai-compatible" {
 		return s.upstreamCredentialModelCatalog(ctx, a, provider, refresh)
 	}

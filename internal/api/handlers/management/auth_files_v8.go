@@ -24,6 +24,10 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 		h.RequestKimiToken(c)
 	case "kimi-ai":
 		h.RequestKimiAIToken(c)
+	case "qoder":
+		h.RequestQoderToken(c)
+	case "qoder-cn":
+		h.RequestQoderCNToken(c)
 	case "xai":
 		h.RequestXAIToken(c)
 	case "devin":

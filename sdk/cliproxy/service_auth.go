@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
@@ -26,6 +27,8 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewKimiAuthenticator(),
 		sdkAuth.NewKimiAIAuthenticator(),
 		sdkAuth.NewKimiAIDotAuthenticator(),
+		sdkAuth.NewQoderAuthenticator(),
+		sdkAuth.NewQoderCNAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
 		sdkAuth.NewDevinAuthenticator(),
 		sdkAuth.NewMetaAuthenticator(),
@@ -540,6 +543,9 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	}
 	if strings.EqualFold(provider, "xai") {
 		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
+	}
+	if strings.EqualFold(provider, "qoder") || strings.EqualFold(provider, "qoder-cn") {
+		qoderauth.DropCatalog(id)
 	}
 }
 
