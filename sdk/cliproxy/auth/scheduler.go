@@ -403,7 +403,7 @@ func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, mo
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	providerKey := canonicalSchedulingProvider(provider)
-	modelKey := canonicalModelKey(model)
+	modelKey := canonicalModelLookupKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
@@ -465,7 +465,7 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
-	modelKey := canonicalModelKey(model)
+	modelKey := canonicalModelLookupKey(model)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -644,7 +644,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		shard := providerState.ensureModelLocked(canonicalModelLookupKey(model), now)
 		if shard == nil {
 			continue
 		}
@@ -1077,7 +1077,7 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 		if model == nil {
 			continue
 		}
-		modelKey := canonicalModelKey(model.ID)
+		modelKey := canonicalModelLookupKey(model.ID)
 		if modelKey == "" {
 			continue
 		}
@@ -1130,7 +1130,7 @@ func (p *providerScheduler) updateTargetShardsLocked(meta *scheduledAuthMeta, ta
 
 	seen := make(map[string]struct{}, len(targetModels))
 	for _, m := range targetModels {
-		modelKey := canonicalModelKey(m)
+		modelKey := canonicalModelLookupKey(m)
 		if _, ok := seen[modelKey]; ok {
 			continue
 		}
@@ -1166,7 +1166,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 	if p == nil {
 		return nil
 	}
-	modelKey = canonicalModelKey(modelKey)
+	modelKey = canonicalModelLookupKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
 		shard.promoteExpiredLocked(now)
 		return shard
@@ -1188,7 +1188,7 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 
 // supportsModel reports whether the auth metadata currently supports modelKey.
 func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
-	modelKey = canonicalModelKey(modelKey)
+	modelKey = canonicalModelLookupKey(modelKey)
 	if modelKey == "" {
 		return true
 	}
@@ -1461,7 +1461,6 @@ func (m *modelScheduler) candidateErrorsLocked(model string, predicate func(*sch
 	if m == nil {
 		return nil, time.Time{}, "", nil, time.Time{}, ""
 	}
-	modelKey := canonicalModelKey(model)
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
 			continue
@@ -1473,15 +1472,7 @@ func (m *modelScheduler) candidateErrorsLocked(model string, predicate func(*sch
 		var curModelErr error
 		var curModelTime time.Time
 		if len(auth.ModelStates) > 0 {
-			if state, ok := auth.ModelStates[model]; ok && state != nil {
-				if state.LastError != nil {
-					curModelErr = state.LastError
-					curModelTime = state.UpdatedAt
-				} else if strings.TrimSpace(state.StatusMessage) != "" {
-					curModelErr = errors.New(state.StatusMessage)
-					curModelTime = state.UpdatedAt
-				}
-			} else if state, ok := auth.ModelStates[modelKey]; ok && state != nil {
+			if state := existingModelState(auth, model); state != nil {
 				if state.LastError != nil {
 					curModelErr = state.LastError
 					curModelTime = state.UpdatedAt
