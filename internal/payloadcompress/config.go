@@ -201,6 +201,9 @@ type StepOptions struct {
 	// Relevance: similarity overlap threshold, between 0 and 1.
 	RelevanceOverlapThreshold float64 `yaml:"relevance-overlap-threshold" json:"relevance-overlap-threshold"`
 
+	// Read lifecycle: the engine is opt-in, so the step must set enabled: true.
+	ReadLifecycleEnabled *bool `yaml:"enabled" json:"enabled"`
+
 	// Presence of explicit YAML keys: an explicit 0 differs from "unset" for the
 	// MCP keep knobs, where 0 means "keep no siblings".
 	mcpKeepHeadSet bool
@@ -239,6 +242,12 @@ const (
 	EngineMCPAccessibility = "mcp-accessibility"
 	// EngineRelevance keeps the segments most relevant to the recent request.
 	EngineRelevance = "relevance"
+	// EngineReadLifecycle stubs file reads that a later read or write
+	// superseded. Opt-in, like upstream.
+	EngineReadLifecycle = "read-lifecycle"
+	// EngineProgressiveAging compresses older turns more aggressively than
+	// recent ones (`progressiveAging.ts`).
+	EngineProgressiveAging = "progressive-aging"
 )
 
 // CachePrefix modes name the only cache decision this package makes: whether the
@@ -294,7 +303,8 @@ func boolPtr(v bool) *bool { return &v }
 func knownEngine(name string) bool {
 	switch name {
 	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman,
-		EngineMCPAccessibility, EngineRelevance:
+		EngineMCPAccessibility, EngineRelevance, EngineReadLifecycle,
+		EngineProgressiveAging:
 		return true
 	}
 	return false
