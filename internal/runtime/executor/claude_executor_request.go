@@ -1769,7 +1769,17 @@ func dropMidSystemMessagesDoc(doc *ojson.Doc) bool {
 		}
 		return true
 	})
-	return doc.SetRawBytes("messages", rawJSONArray(keptMessages)) == nil
+	if len(keptMessages) == 0 {
+		// Dropping every turn would send an empty messages array, which the
+		// upstream rejects. Leave the request as the client sent it.
+		log.Warn("drop-mid-system-message: messages contain only system turns, leaving them in place")
+		return false
+	}
+	if err := doc.SetRawBytes("messages", rawJSONArray(keptMessages)); err != nil {
+		log.WithError(err).Warn("drop-mid-system-message: failed to rewrite messages, forwarding system turns unchanged")
+		return false
+	}
+	return true
 }
 
 func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {

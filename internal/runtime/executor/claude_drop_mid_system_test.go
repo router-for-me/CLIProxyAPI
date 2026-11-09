@@ -160,3 +160,72 @@ func TestDropMidSystemMessageConfigAuthIsAuthoritative(t *testing.T) {
 		t.Fatal("drop-disabled entry inherited the option from another entry with the same key and base URL")
 	}
 }
+
+// With no user turn there is nowhere to put the <system-reminder>, so the
+// caller's system prompt must stay in the top-level system field.
+func TestCloakingDropKeepsCallerSystemWithoutUserTurn(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
+
+	payload := []byte(`{"model":"claude-opus-5","system":"Caller rule","messages":[` +
+		`{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}`)
+	auth := &cliproxyauth.Auth{ID: "drop-no-user", Attributes: map[string]string{"cloak_mode": "always", "drop_mid_system_message": "true"}}
+	ctx := helps.WithClaudeSessionID(context.Background(), "drop-no-user-session")
+	cfg := &config.Config{}
+
+	body := applyMidSystemMessagePolicy(cfg, auth, payload)
+	out, didCloak, errCloaking := applyCloaking(ctx, cfg, auth, body, "sk-ant-oat-test", false, false)
+	if errCloaking != nil || !didCloak {
+		t.Fatalf("applyCloaking() cloaked=%v err=%v", didCloak, errCloaking)
+	}
+	if !strings.Contains(ojson.GetBytes(out, "system").Raw, "Caller rule") {
+		t.Fatalf("caller system prompt lost: system=%s messages=%s", ojson.GetBytes(out, "system").Raw, ojson.GetBytes(out, "messages").Raw)
+	}
+	if claudePayloadHasMidSystemMessage(out) {
+		t.Fatalf("drop key got a role=system turn: %s", ojson.GetBytes(out, "messages").Raw)
+	}
+
+	counted := relocateClaudeSystemPromptForCountTokensWithPolicy(body, false, false, false, true)
+	if !strings.Contains(ojson.GetBytes(counted, "system").Raw, "Caller rule") {
+		t.Fatalf("count_tokens lost the caller system prompt: %s", counted)
+	}
+}
+
+// Dropping every turn would leave an empty messages array; keep the payload.
+func TestDropMidSystemMessagesKeepsAllSystemPayload(t *testing.T) {
+	in := []byte(`{"system":"Top","messages":[{"role":"system","content":"a"},{"role":"system","content":"b"}]}`)
+	if out := dropMidSystemMessages(in); string(out) != string(in) {
+		t.Fatalf("payload changed: %s", out)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"drop_mid_system_message": "true"}}
+	if out := applyMidSystemMessagePolicy(&config.Config{}, auth, in); ojson.GetBytes(out, "messages.#").Int() != 2 {
+		t.Fatalf("policy emptied messages: %s", out)
+	}
+}
+
+// Rebuild follows the same rule as drop for config-synthesized auths, and key
+// config lookup picks the entry whose prefix matches the auth.
+func TestMidSystemMessageConfigLookupHonorsPrefix(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
+		{APIKey: "shared-key", BaseURL: "https://upstream.example", Prefix: "a", RebuildMidSystemMessage: true, DropMidSystemMessage: true},
+		{APIKey: "shared-key", BaseURL: "https://upstream.example", Prefix: "b"},
+	}}
+	configAuth := &cliproxyauth.Auth{Prefix: "b", Attributes: map[string]string{
+		"source": "config:claude[b]", "api_key": "shared-key", "base_url": "https://upstream.example",
+	}}
+	if rebuildMidSystemMessageEnabled(cfg, configAuth) {
+		t.Fatal("rebuild-disabled config entry inherited the option from another entry")
+	}
+	fileAuth := &cliproxyauth.Auth{Prefix: "b", Attributes: map[string]string{
+		"api_key": "shared-key", "base_url": "https://upstream.example",
+	}}
+	if entry := resolveClaudeKeyConfig(cfg, fileAuth); entry == nil || entry.Prefix != "b" {
+		t.Fatalf("resolveClaudeKeyConfig picked %+v, want prefix b", entry)
+	}
+	if rebuildMidSystemMessageEnabled(cfg, fileAuth) || dropMidSystemMessageEnabled(cfg, fileAuth) {
+		t.Fatal("prefix b auth inherited options from prefix a")
+	}
+	if entry := resolveClaudeKeyConfig(cfg, &cliproxyauth.Auth{Prefix: "c", Attributes: map[string]string{"api_key": "shared-key"}}); entry != nil {
+		t.Fatalf("unknown prefix matched %+v", entry)
+	}
+}

@@ -906,7 +906,14 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 		return true
 	}
 	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
-		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
+		if !prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit) {
+			// No user turn to carry the reminder: keep the caller's system prompt
+			// in the top-level system field rather than losing it.
+			for _, block := range forwardedSystemBlocks {
+				systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
+			}
+			_ = doc.SetRawBytes("system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
+		}
 	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEndDoc(doc) {
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
@@ -972,7 +979,15 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 		return false
 	}
 	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
-		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
+		if !prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit) {
+			// Mirror the Messages path: with no user turn, keep the caller's
+			// system prompt in the top-level system field.
+			blocks := make([]string, 0, len(forwardedSystemBlocks))
+			for _, block := range forwardedSystemBlocks {
+				blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
+			}
+			_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
+		}
 		return true
 	}
 	if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEndDoc(doc) {
