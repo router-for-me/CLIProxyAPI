@@ -225,6 +225,87 @@ func TestWorkerCooldownRetryNeverRedeemsAgain(t *testing.T) {
 	}
 }
 
+type aliasManager struct {
+	*fakeManager
+	auths   []*coreauth.Auth
+	failID  string
+	cleared map[string]int
+}
+
+func (m *aliasManager) List() []*coreauth.Auth { return m.auths }
+func (m *aliasManager) GetByID(id string) (*coreauth.Auth, bool) {
+	for _, auth := range m.auths {
+		if auth.ID == id {
+			return auth, true
+		}
+	}
+	return nil, false
+}
+func (m *aliasManager) ResetQuota(ctx context.Context, id string) (*coreauth.Auth, []string, error) {
+	if id == m.failID {
+		return nil, nil, errors.New("storage offline")
+	}
+	m.cleared[id]++
+	return m.fakeManager.ResetQuota(ctx, id)
+}
+
+func TestWorkerClearsEveryAccountAlias(t *testing.T) {
+	for _, code := range []string{"reset", "already_redeemed"} {
+		t.Run(code, func(t *testing.T) {
+			w, m, key := setup(t, true)
+			m.answer = fmt.Sprintf(`{"code":%q}`, code)
+			alias := testAuth("user")
+			alias.ID, alias.Prefix = "prefixed-alias", "team"
+			disabled := testAuth("user")
+			disabled.ID, disabled.Disabled = "disabled-alias", true
+			otherWorkspace := testAuth("user")
+			otherWorkspace.ID = "other-workspace"
+			otherWorkspace.Metadata["account_id"] = "other-workspace"
+			// Keep both immutable claims consistent, so isolation is tested against a valid account.
+			claims := `{"sub":"user","https://api.openai.com/auth":{"chatgpt_account_id":"other-workspace"}}`
+			otherWorkspace.Metadata["id_token"] = "e30." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".sig"
+			manager := &aliasManager{fakeManager: m, auths: []*coreauth.Auth{m.auth, alias, disabled, testAuth("another-user"), otherWorkspace}, cleared: map[string]int{}}
+			w.Manager = manager
+			w.Check(context.Background())
+			state, _, _, errRead := Read(context.Background(), w.Store, key)
+			if errRead != nil || state.Result != "reset" || m.consume != 1 || len(manager.cleared) != 3 {
+				t.Fatalf("consume=%d cleared=%v state=%+v err=%v", m.consume, manager.cleared, state, errRead)
+			}
+			for _, id := range []string{"user", "prefixed-alias", "disabled-alias"} {
+				if manager.cleared[id] != 1 {
+					t.Fatalf("credential %q not cleared exactly once: %v", id, manager.cleared)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerAliasCleanupFailureRetriesWithoutRedemption(t *testing.T) {
+	w, m, key := setup(t, true)
+	alias, sibling := testAuth("user"), testAuth("user")
+	alias.ID, sibling.ID = "alias", "sibling"
+	manager := &aliasManager{fakeManager: m, auths: []*coreauth.Auth{m.auth, alias, sibling}, failID: alias.ID, cleared: map[string]int{}}
+	w.Manager = manager
+	w.Check(context.Background())
+	state, _, _, errRead := Read(context.Background(), w.Store, key)
+	if errRead != nil || state.Result != "cooldown_pending" || state.Pending || m.consume != 1 || manager.cleared["user"] != 1 || manager.cleared["sibling"] != 1 || manager.cleared["alias"] != 0 {
+		t.Fatalf("consume=%d cleared=%v state=%+v err=%v", m.consume, manager.cleared, state, errRead)
+	}
+	// Cleanup survives the original credential's removal and revoked redemption consent.
+	state.Enabled = false
+	_, raw, exists, _ := Read(context.Background(), w.Store, key)
+	if saved, errSave := Save(context.Background(), w.Store, state, raw, exists); !saved || errSave != nil {
+		t.Fatalf("disable: %v", errSave)
+	}
+	manager.auths, manager.failID = []*coreauth.Auth{alias, sibling}, ""
+	w.Now = func() time.Time { return testNow.Add(interval) }
+	w.Check(context.Background())
+	state, _, _, errRead = Read(context.Background(), w.Store, key)
+	if errRead != nil || state.Result != "reset" || state.Enabled || state.Pending || m.consume != 1 || manager.cleared["alias"] != 1 || manager.cleared["sibling"] != 2 {
+		t.Fatalf("cleanup retry spent or failed: consume=%d cleared=%v state=%+v err=%v", m.consume, manager.cleared, state, errRead)
+	}
+}
+
 func TestAccountIdentity(t *testing.T) {
 	a, b := testAuth("user"), testAuth("another-user")
 	if AccountKey(a) == "" || AccountKey(a) == AccountKey(b) {

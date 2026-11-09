@@ -152,7 +152,7 @@ func (w *Worker) Check(ctx context.Context) {
 			continue
 		}
 		if state.Result == "cooldown_pending" {
-			w.clearCooldown(ctx, auth, &state)
+			w.clearCooldown(ctx, &state)
 			continue
 		}
 		w.checkAccount(ctx, auth, state)
@@ -206,19 +206,30 @@ func (w *Worker) checkAccount(ctx context.Context, auth *coreauth.Auth, state St
 	switch answer.Get("code").String() {
 	case "reset", "already_redeemed":
 		if w.finish(ctx, latest, "cooldown_pending") {
-			w.clearCooldown(ctx, current, &latest)
+			w.clearCooldown(ctx, &latest)
 		}
 	case "no_credit", "nothing_to_reset":
 		w.finish(ctx, latest, answer.Get("code").String())
 	}
 }
 
-func (w *Worker) clearCooldown(ctx context.Context, auth *coreauth.Auth, state *State) {
-	current, exists := w.Manager.GetByID(auth.ID)
-	if !exists || AccountKey(current) != state.AccountKey {
-		return
+func (w *Worker) clearCooldown(ctx context.Context, state *State) {
+	matched, clearedAll := false, true
+	// The journal is account-wide, but routing cooldowns belong to each credential.
+	for _, auth := range w.Manager.List() {
+		if AccountKey(auth) != state.AccountKey {
+			continue
+		}
+		current, exists := w.Manager.GetByID(auth.ID)
+		if !exists || AccountKey(current) != state.AccountKey {
+			continue
+		}
+		matched = true
+		if _, _, errReset := w.Manager.ResetQuota(ctx, auth.ID); errReset != nil {
+			clearedAll = false
+		}
 	}
-	if _, _, errReset := w.Manager.ResetQuota(ctx, auth.ID); errReset == nil {
+	if matched && clearedAll {
 		w.finish(ctx, *state, "reset")
 	}
 }

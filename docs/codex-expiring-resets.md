@@ -61,7 +61,9 @@ persistent store is unavailable; there is no in-memory fallback.
 - Atomic persistent claims serialize probes/redemptions. The idempotency ID and
   selected credit are saved **before** POST. Only `reset` or `already_redeemed`
   confirms success, including `windows_reset: 0`. Only then is the gateway's
-  cooldown cleared. Cooldown-cleanup failures retry cleanup, never spending.
+  cooldown cleared for every current credential sharing that user/workspace,
+  including prefixed and disabled aliases. Cleanup remains `cooldown_pending`
+  until all matching credentials are cleared; failures retry cleanup, never spending.
 - `nothing_to_reset` and `no_credit` do not clear gateway cooldowns. Lost responses,
   non-success HTTP responses, malformed JSON and unknown outcomes leave `pending:
   true` and stop automatic redemption for that account, including after restart.
