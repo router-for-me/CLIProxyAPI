@@ -33,17 +33,17 @@ func claudeReplayTestAuth(baseURL string) *cliproxyauth.Auth {
 
 func claudeReplayTestRequest(payload []byte, sessionID string, isCompat bool, source sdktranslator.Format) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	return cliproxyexecutor.Request{
-			Model:   "claude-synthetic-4772",
-			Payload: payload,
-			Metadata: map[string]any{
-				claudeReplayResolvedModelInfoKey: &registry.ModelInfo{IsCompat: isCompat},
-			},
-		}, cliproxyexecutor.Options{
-			SourceFormat: source,
-			Metadata: map[string]any{
-				cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
-			},
-		}
+		Model:   "claude-synthetic-4772",
+		Payload: payload,
+		Metadata: map[string]any{
+			claudeReplayResolvedModelInfoKey: &registry.ModelInfo{IsCompat: isCompat},
+		},
+	}, cliproxyexecutor.Options{
+		SourceFormat: source,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: sessionID,
+		},
+	}
 }
 
 func TestClaudeThinkingReplayEnabledRequiresCompatClaudeAPIKey(t *testing.T) {
