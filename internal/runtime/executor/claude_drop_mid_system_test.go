@@ -229,3 +229,34 @@ func TestMidSystemMessageConfigLookupHonorsPrefix(t *testing.T) {
 		t.Fatalf("unknown prefix matched %+v", entry)
 	}
 }
+
+// When the first user turn already carries the caller's reminder (a replayed
+// request), the prompt must not be duplicated into top-level system.
+func TestCloakingDropDoesNotDuplicateExistingReminder(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
+
+	reminder := claudeCallerSystemReminder("Caller rule")
+	payload := []byte(`{"model":"claude-opus-5","system":"Caller rule","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":` + marshalJSONStringWithoutHTMLEscape(reminder) + `},{"type":"text","text":"hi"}]}]}`)
+	auth := &cliproxyauth.Auth{ID: "drop-existing-reminder", Attributes: map[string]string{"cloak_mode": "always", "drop_mid_system_message": "true"}}
+	ctx := helps.WithClaudeSessionID(context.Background(), "drop-existing-reminder-session")
+	cfg := &config.Config{}
+
+	body := applyMidSystemMessagePolicy(cfg, auth, payload)
+	out, didCloak, errCloaking := applyCloaking(ctx, cfg, auth, body, "sk-ant-oat-test", false, false)
+	if errCloaking != nil || !didCloak {
+		t.Fatalf("applyCloaking() cloaked=%v err=%v", didCloak, errCloaking)
+	}
+	if strings.Contains(ojson.GetBytes(out, "system").Raw, "Caller rule") {
+		t.Fatalf("caller prompt duplicated into top-level system: %s", ojson.GetBytes(out, "system").Raw)
+	}
+	if got := strings.Count(string(out), "Caller rule"); got != 1 {
+		t.Fatalf("caller prompt appears %d times, want 1: %s", got, out)
+	}
+
+	counted := relocateClaudeSystemPromptForCountTokensWithPolicy(body, false, false, false, true)
+	if got := strings.Count(string(counted), "Caller rule"); got != 1 {
+		t.Fatalf("count_tokens has the caller prompt %d times, want 1: %s", got, counted)
+	}
+}

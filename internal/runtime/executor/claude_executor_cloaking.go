@@ -906,7 +906,11 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 		return true
 	}
 	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
-		if !prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit) {
+		if firstClaudeUserMessageIndexDoc(doc) >= 0 {
+			// The helper reports false both on failure and when the first user
+			// turn already carries these reminders; neither needs a fallback.
+			prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
+		} else {
 			// No user turn to carry the reminder: keep the caller's system prompt
 			// in the top-level system field rather than losing it.
 			for _, block := range forwardedSystemBlocks {
@@ -979,7 +983,9 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 		return false
 	}
 	if avoidMidSystemTurns || claudeUsesLegacySystemReminderDoc(doc) {
-		if !prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit) {
+		if firstClaudeUserMessageIndexDoc(doc) >= 0 {
+			prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
+		} else {
 			// Mirror the Messages path: with no user turn, keep the caller's
 			// system prompt in the top-level system field.
 			blocks := make([]string, 0, len(forwardedSystemBlocks))
