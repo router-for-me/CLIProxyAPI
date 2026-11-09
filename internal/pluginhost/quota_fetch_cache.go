@@ -166,15 +166,19 @@ func (c *quotaFetchCache) pruneExpiredLocked() {
 	}
 }
 
-// quotaFetchCacheKey identifies requests that may share a result. It covers the plugin, the
-// credential identity, and a digest of the provider-visible credential payload, so requests
-// carrying different credential material never share results. It returns "" to disable
-// debouncing when the request has no credential identity or the payload cannot be digested.
+// quotaFetchCacheKey identifies requests that may share a result. It is a digest of the plugin
+// identity and every request field forwarded to the provider, each length-prefixed so distinct
+// requests never map to the same key. It returns "" to disable debouncing when the request has
+// no credential identity or the payload cannot be digested.
 func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest) string {
 	if strings.TrimSpace(req.AuthIndex) == "" && strings.TrimSpace(req.AuthID) == "" {
 		return ""
 	}
 	digest := sha256.New()
+	// Use the provider value exactly as forwarded to the plugin, which may route on it.
+	for _, field := range []string{record.id, record.path, record.version, req.Provider, req.AuthIndex, req.AuthID} {
+		writeDigestField(digest, []byte(field))
+	}
 	writeDigestField(digest, req.StorageJSON)
 	budget := quotaFetchMetadataDigestLimit
 	if !writeDigestValue(digest, req.Metadata, &budget) {
@@ -189,15 +193,7 @@ func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest
 		writeDigestField(digest, []byte(key))
 		writeDigestField(digest, []byte(req.Attributes[key]))
 	}
-	return strings.Join([]string{
-		record.id,
-		record.path,
-		record.version,
-		normalizeProviderID(req.Provider),
-		req.AuthIndex,
-		req.AuthID,
-		hex.EncodeToString(digest.Sum(nil)),
-	}, "\x00")
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // writeDigestField length-prefixes each field so adjacent fields cannot be confused.

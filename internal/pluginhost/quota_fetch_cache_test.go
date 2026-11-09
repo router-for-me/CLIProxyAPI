@@ -523,3 +523,30 @@ func TestQuotaFetchDebounce_CanceledCallerDoesNotGetCacheHit(t *testing.T) {
 		t.Fatalf("expected context.Canceled for a canceled caller, got %v", errFetch)
 	}
 }
+
+func TestQuotaFetchCacheKey_DistinctRequestsNeverCollide(t *testing.T) {
+	record := capabilityRecord{id: "quota-plugin", path: "test/quota-plugin", version: "1.0.0"}
+	key := func(req pluginapi.QuotaFetchRequest) string {
+		got := quotaFetchCacheKey(record, req)
+		if got == "" {
+			t.Fatalf("expected a cache key for %+v", req)
+		}
+		return got
+	}
+
+	// Field boundaries must be unambiguous even when identities contain the old separator.
+	if key(pluginapi.QuotaFetchRequest{Provider: "p", AuthIndex: "a\x00b", AuthID: "c"}) ==
+		key(pluginapi.QuotaFetchRequest{Provider: "p", AuthIndex: "a", AuthID: "b\x00c"}) {
+		t.Fatal("expected identities split differently across fields to produce different keys")
+	}
+	// The provider is forwarded verbatim to the plugin, so its exact spelling is part of the key.
+	if key(pluginapi.QuotaFetchRequest{Provider: "Foo", AuthIndex: "auth-1"}) ==
+		key(pluginapi.QuotaFetchRequest{Provider: "foo", AuthIndex: "auth-1"}) {
+		t.Fatal("expected provider spellings forwarded to the plugin to produce different keys")
+	}
+	// Identical requests still share a key.
+	if key(pluginapi.QuotaFetchRequest{Provider: "foo", AuthIndex: "auth-1"}) !=
+		key(pluginapi.QuotaFetchRequest{Provider: "foo", AuthIndex: "auth-1"}) {
+		t.Fatal("expected identical requests to share a key")
+	}
+}
