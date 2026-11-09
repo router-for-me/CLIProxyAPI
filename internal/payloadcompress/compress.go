@@ -70,6 +70,22 @@ func (s Stats) SavedPct() int {
 	return 100 * (s.BytesIn - s.BytesOut) / s.BytesIn
 }
 
+// payloadEngine is a whole-body transform that runs before the segment scanner.
+type payloadEngine interface {
+	engine
+	applyBody(body []byte) []byte
+}
+
+// payloadEngineFactories maps an engine name to its constructor.
+var payloadEngineFactories = map[string]func() payloadEngine{
+	EngineAggressive:     func() payloadEngine { return newAggressiveEngine() },
+	EngineUltra:          func() payloadEngine { return newUltraEngine() },
+	EngineCCR:            func() payloadEngine { return newCCREngine() },
+	EngineCodexResponses: func() payloadEngine { return newCodexResponsesEngine() },
+	EngineIonizer:        func() payloadEngine { return newIonizerEngine() },
+	EngineLLM:            func() payloadEngine { return newLLMEngine() },
+}
+
 // engine is the identity every pipeline step shares.
 type engine interface {
 	name() string
@@ -163,6 +179,22 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	// whole tool-result messages, which the per-segment scanner does not model.
 	if comboHasEngine(combo, EngineReadLifecycle) && readLifecycleEnabled(combo) {
 		body = applyReadLifecycle(body)
+	}
+	// Payload engines rewrite the whole body, so they run before the scanner in
+	// pipeline order. Savings are attributed to each step by name.
+	for _, step := range combo.Pipeline {
+		factory, ok := payloadEngineFactories[step.Engine]
+		if !ok {
+			continue
+		}
+		before := len(body)
+		body = factory().applyBody(body)
+		if delta := before - len(body); delta != 0 {
+			if stats.Saved == nil {
+				stats.Saved = map[string]int{}
+			}
+			stats.Saved[step.Engine] += delta
+		}
 	}
 	// Resolve the cache-protection decision once per request. The lite body
 	// passes and the scanner must agree, and each resolution advances the
@@ -414,7 +446,9 @@ func finishPrepass(cfg Config, combo *Combo, inBody, out []byte, stats Stats) ([
 		return inBody, stats
 	}
 	stats.BytesOut = len(out)
-	stats.Saved = map[string]int{}
+	if stats.Saved == nil {
+		stats.Saved = map[string]int{}
+	}
 	for _, step := range combo.Pipeline {
 		if step.Engine == EngineReadLifecycle {
 			stats.Saved[step.Engine] = len(inBody) - len(out)

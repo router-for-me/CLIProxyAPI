@@ -245,6 +245,13 @@ const (
 	// EngineReadLifecycle stubs file reads that a later read or write
 	// superseded. Opt-in, like upstream.
 	EngineReadLifecycle = "read-lifecycle"
+	// Payload engines rewrite the whole body before the segment scanner runs.
+	EngineAggressive     = "aggressive"
+	EngineUltra          = "ultra"
+	EngineCCR            = "ccr"
+	EngineCodexResponses = "codex-responses"
+	EngineIonizer        = "ionizer"
+	EngineLLM            = "llm"
 )
 
 // CachePrefix modes name the only cache decision this package makes: whether the
@@ -300,7 +307,9 @@ func boolPtr(v bool) *bool { return &v }
 func knownEngine(name string) bool {
 	switch name {
 	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman,
-		EngineMCPAccessibility, EngineRelevance, EngineReadLifecycle:
+		EngineMCPAccessibility, EngineRelevance, EngineReadLifecycle,
+		EngineAggressive, EngineUltra, EngineCCR, EngineCodexResponses,
+		EngineIonizer, EngineLLM:
 		return true
 	}
 	return false
