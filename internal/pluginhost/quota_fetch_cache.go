@@ -21,6 +21,10 @@ import (
 // collapses those bursts into a single upstream call without noticeably delaying fresh data.
 const quotaFetchCacheTTL = 5 * time.Second
 
+// quotaFetchMetadataDigestLimit bounds how many metadata values are digested for a cache key.
+// Real credential metadata is far smaller; larger or cyclic values simply bypass debouncing.
+const quotaFetchMetadataDigestLimit = 4096
+
 // quotaFetchCache debounces quota fetches per plugin and credential.
 // Concurrent identical requests share one in-flight call, and successful results are
 // reused until they expire. Errors are never cached. The zero value is ready to use.
@@ -60,6 +64,10 @@ func (c *quotaFetchCache) now() time.Time {
 func (c *quotaFetchCache) fetch(ctx context.Context, key string, load func(context.Context) (pluginapi.QuotaFetchResponse, bool, error)) (pluginapi.QuotaFetchResponse, bool, error) {
 	if key == "" {
 		return load(ctx)
+	}
+	// Honour cancellation consistently, whether or not a cached entry exists.
+	if errCtx := ctx.Err(); errCtx != nil {
+		return pluginapi.QuotaFetchResponse{}, true, errCtx
 	}
 
 	// The cache lookup and in-flight registration happen under one lock, and a finished call
@@ -168,7 +176,8 @@ func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest
 	}
 	digest := sha256.New()
 	writeDigestField(digest, req.StorageJSON)
-	if !writeDigestValue(digest, req.Metadata) {
+	budget := quotaFetchMetadataDigestLimit
+	if !writeDigestValue(digest, req.Metadata, &budget) {
 		return ""
 	}
 	attributeKeys := make([]string, 0, len(req.Attributes))
@@ -202,7 +211,13 @@ func writeDigestField(digest hash.Hash, field []byte) {
 // per value and map keys in sorted order. It deliberately avoids JSON serialization so the key is
 // stable regardless of encoder behaviour. It reports false for value types it cannot represent
 // unambiguously; the caller then skips debouncing rather than risk two credentials sharing a key.
-func writeDigestValue(digest hash.Hash, value any) bool {
+// budget caps the number of values visited, so self-referential or pathologically shared metadata
+// (possible for SDK callers) disables debouncing instead of recursing without bound.
+func writeDigestValue(digest hash.Hash, value any, budget *int) bool {
+	if *budget <= 0 {
+		return false
+	}
+	*budget--
 	switch v := value.(type) {
 	case nil:
 		writeDigestField(digest, []byte("n"))
@@ -220,7 +235,7 @@ func writeDigestValue(digest hash.Hash, value any) bool {
 	case []any:
 		writeDigestField(digest, []byte("a"+strconv.Itoa(len(v))))
 		for _, item := range v {
-			if !writeDigestValue(digest, item) {
+			if !writeDigestValue(digest, item, budget) {
 				return false
 			}
 		}
@@ -233,7 +248,7 @@ func writeDigestValue(digest hash.Hash, value any) bool {
 		writeDigestField(digest, []byte("m"+strconv.Itoa(len(keys))))
 		for _, key := range keys {
 			writeDigestField(digest, []byte(key))
-			if !writeDigestValue(digest, v[key]) {
+			if !writeDigestValue(digest, v[key], budget) {
 				return false
 			}
 		}

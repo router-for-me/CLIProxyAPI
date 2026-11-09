@@ -492,3 +492,34 @@ func TestQuotaFetchCacheKey_MetadataDigest(t *testing.T) {
 		t.Fatalf("expected unsupported metadata types to disable debouncing, got %q", got)
 	}
 }
+
+func TestQuotaFetchCacheKey_CyclicMetadataDisablesDebouncing(t *testing.T) {
+	record := capabilityRecord{id: "quota-plugin", path: "test/quota-plugin", version: "1.0.0"}
+	cyclic := map[string]any{"email": "a@example.com"}
+	cyclic["self"] = cyclic
+	// Two self-references would grow exponentially without a visit budget.
+	cyclic["again"] = cyclic
+	list := []any{"x"}
+	list = append(list, nil)
+	list[1] = list
+	for name, metadata := range map[string]map[string]any{
+		"cyclic map":   cyclic,
+		"cyclic slice": {"list": list},
+	} {
+		if got := quotaFetchCacheKey(record, pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1", Metadata: metadata}); got != "" {
+			t.Fatalf("%s: expected debouncing to be disabled, got %q", name, got)
+		}
+	}
+}
+
+func TestQuotaFetchDebounce_CanceledCallerDoesNotGetCacheHit(t *testing.T) {
+	var calls atomic.Int32
+	host, _ := newQuotaDebounceHost(t, countingQuotaProvider(&calls))
+
+	fetchQuotaForTest(t, host, "auth-1")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, errFetch := host.FetchQuotaByPlugin(ctx, "quota-plugin", pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"}); !errors.Is(errFetch, context.Canceled) {
+		t.Fatalf("expected context.Canceled for a canceled caller, got %v", errFetch)
+	}
+}
