@@ -74,6 +74,10 @@ type Config struct {
 	// OutputStyles injects response-style instructions into the system prompt.
 	// Independent of Enabled: styles are prompt shaping, not payload compression.
 	OutputStyles []OutputStyle `yaml:"output-styles" json:"output-styles"`
+	// QuantumLock replaces volatile spans (UUIDs, timestamps, hashes, request ids)
+	// in the first system message with stable placeholders plus a value tail.
+	// before the engines run and restores them afterwards. Off by default.
+	QuantumLock bool `yaml:"quantum-lock" json:"quantum-lock"`
 }
 
 // PrefixFreezeConfig mirrors upstream's COMPRESSION_PREFIX_FREEZE_* settings.
@@ -146,6 +150,11 @@ type StepOptions struct {
 	// Lite: keep interior whitespace inside tool results. Defaults to true, the
 	// upstream safe default.
 	PreserveToolWhitespace *bool `yaml:"preserve-tool-whitespace" json:"preserve-tool-whitespace"`
+	// Lite: drop redundant consecutive messages. Opt-in: it discards content.
+	LiteRemoveRedundant *bool `yaml:"lite-remove-redundant" json:"lite-remove-redundant"`
+	// Lite: replace image payloads with text placeholders for non-vision models.
+	// Opt-in: unknown or self-hosted vision models can lose images otherwise.
+	LiteReplaceImages *bool `yaml:"lite-replace-images" json:"lite-replace-images"`
 	// Lossy engines: require the fidelity gate before rewriting. Nil means the
 	// engine default.
 	FidelityGate *bool `yaml:"fidelity-gate" json:"fidelity-gate"`
@@ -175,6 +184,48 @@ type StepOptions struct {
 	AutoDetect *bool `yaml:"auto-detect" json:"auto-detect"`
 	// Caveman: packs auto-detection may pick from. Defaults to English only.
 	LanguagePacks []string `yaml:"language-packs" json:"language-packs"`
+
+	// MCP accessibility: minimum segment length considered for rewriting.
+	McpMinLength int `yaml:"mcp-min-length" json:"mcp-min-length"`
+	// MCP accessibility: maximum size of a rewritten segment.
+	McpMaxChars int `yaml:"mcp-max-chars" json:"mcp-max-chars"`
+	// MCP accessibility: repeated-pattern run length that collapses.
+	McpCollapseThreshold int `yaml:"mcp-collapse-threshold" json:"mcp-collapse-threshold"`
+	// MCP accessibility: lines kept at the head when collapsing repeats.
+	McpCollapseKeepHead int `yaml:"mcp-collapse-keep-head" json:"mcp-collapse-keep-head"`
+	// MCP accessibility: lines kept at the tail when collapsing repeats.
+	McpCollapseKeepTail int `yaml:"mcp-collapse-keep-tail" json:"mcp-collapse-keep-tail"`
+
+	// Relevance: percentage of the body kept, between 0.1 and 1.
+	RelevanceBudgetPercent float64 `yaml:"relevance-budget-percent" json:"relevance-budget-percent"`
+	// Relevance: similarity overlap threshold, between 0 and 1.
+	RelevanceOverlapThreshold float64 `yaml:"relevance-overlap-threshold" json:"relevance-overlap-threshold"`
+
+	// Presence of explicit YAML keys: an explicit 0 differs from "unset" for the
+	// MCP keep knobs, where 0 means "keep no siblings".
+	mcpKeepHeadSet bool
+	mcpKeepTailSet bool
+}
+
+// UnmarshalYAML records whether the MCP keep knobs were set explicitly, so the
+// engine can tell an explicit 0 from the zero value of an omitted field.
+func (o *StepOptions) UnmarshalYAML(node *yaml.Node) error {
+	// Decode in place so nested options merge with inline keys already set.
+	type plain StepOptions
+	if err := node.Decode((*plain)(o)); err != nil {
+		return err
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			switch node.Content[i].Value {
+			case "mcp-collapse-keep-head":
+				o.mcpKeepHeadSet = true
+			case "mcp-collapse-keep-tail":
+				o.mcpKeepTailSet = true
+			}
+		}
+	}
+	return nil
 }
 
 // Supported engine names.
@@ -184,6 +235,10 @@ const (
 	EngineLite         = "lite"
 	EngineRTK          = "rtk"
 	EngineCaveman      = "caveman"
+	// EngineMCPAccessibility collapses repetitive MCP tool output.
+	EngineMCPAccessibility = "mcp-accessibility"
+	// EngineRelevance keeps the segments most relevant to the recent request.
+	EngineRelevance = "relevance"
 )
 
 // CachePrefix modes name the only cache decision this package makes: whether the
@@ -238,7 +293,8 @@ func boolPtr(v bool) *bool { return &v }
 
 func knownEngine(name string) bool {
 	switch name {
-	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman:
+	case EngineSessionDedup, EngineHeadroom, EngineLite, EngineRTK, EngineCaveman,
+		EngineMCPAccessibility, EngineRelevance:
 		return true
 	}
 	return false
@@ -326,7 +382,35 @@ func sanitizeStepOptions(opts StepOptions) StepOptions {
 		packs = append(packs, tag)
 	}
 	opts.LanguagePacks = packs
+	for _, v := range []*int{&opts.McpMinLength, &opts.McpMaxChars, &opts.McpCollapseThreshold, &opts.McpCollapseKeepHead, &opts.McpCollapseKeepTail} {
+		if *v < 0 {
+			*v = 0
+		}
+	}
+	// Upstream falls back to the default when maxTextChars is below twice the
+	// tail reserve: a smaller head would truncate the entire output.
+	if opts.McpMaxChars > 0 && opts.McpMaxChars < mcpMinMaxTextChars {
+		opts.McpMaxChars = 0
+	}
+	// 0 stays the engine's "use the default" sentinel; any other value is a
+	// percentage clamped to 0.1..1.
+	opts.RelevanceBudgetPercent = clampPercent(opts.RelevanceBudgetPercent)
+	opts.RelevanceOverlapThreshold = clampPercent(opts.RelevanceOverlapThreshold)
 	return opts
+}
+
+// clampPercent keeps 0 (the engine default sentinel) and clamps other
+// percentages to 0.1..1.
+func clampPercent(v float64) float64 {
+	switch {
+	case v <= 0:
+		return 0
+	case v < 0.1:
+		return 0.1
+	case v > 1:
+		return 1
+	}
+	return v
 }
 
 func knownLanguage(tag string) bool {

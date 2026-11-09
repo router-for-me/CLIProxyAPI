@@ -26,6 +26,15 @@ type Stats struct {
 	Style string
 	// StyleBytes is the byte delta of the system prompt injection.
 	StyleBytes int
+	// EngineBytesIn and EngineBytesOut track the decoded-segment bytes each
+	// pipeline step saw and produced, including steps that saved nothing.
+	EngineBytesIn  map[string]int
+	EngineBytesOut map[string]int
+}
+
+// EngineSaved reports the byte delta of one engine, whether or not it saved.
+func (s Stats) EngineSaved(name string) int {
+	return s.EngineBytesIn[name] - s.EngineBytesOut[name]
 }
 
 // Engines renders the engines that actually saved bytes, as "lite=130,rtk=2610"
@@ -147,19 +156,31 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 		return body, stats
 	}
 	stats.Combo = combo.Name
+	inBody := body
+	inBodyLen := len(body)
+	// Resolve the cache-protection decision once per request. The lite body
+	// passes and the scanner must agree, and each resolution advances the
+	// prefix-freeze counter.
+	preserveSystem := cfg.shouldPreserveSystemPrompt(model, body)
+	liteBody := comboHasEngine(combo, EngineLite) && liteBodyHasArray(body)
+	liteOpts := StepOptions{}
+	if liteBody {
+		liteOpts = liteStepOptions(combo)
+		body = applyLiteBodyBeforePreserve(preserveSystem, body)
+	}
 
 	s := &scanner{
 		body:          body,
 		cachePrefix:   cfg.CachePrefix,
-		includeSystem: !cfg.shouldPreserveSystemPrompt(model, body),
+		includeSystem: !preserveSystem,
 	}
 	if !s.scan() {
-		return body, stats
+		return restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats
 	}
 
 	steps := buildEngines(combo.Pipeline)
 	if len(steps) == 0 {
-		return body, stats
+		return restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats
 	}
 	stats.Segments = len(s.segs)
 
@@ -192,9 +213,23 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 		}
 	}
 
+	// Quantum lock stabilizes the first string-content system message only:
+	// volatile spans become placeholders and their values move to an in-band
+	// tail, keeping the cacheable prefix stable.
+	// Upstream only locks caching providers; unknown models keep plain text.
+	if cfg.QuantumLock && modelCachesPrefix(model) {
+		for i := range texts {
+			if kinds[i] == kindSystem && !s.segs[i].array {
+				texts[i] = lockQuantumSpans(texts[i])
+				break
+			}
+		}
+	}
+
 	saved := make(map[string]int, len(steps))
 	for _, step := range steps {
 		before := append(make([]string, 0, len(texts)), texts...)
+		inBytes := textBytes(before)
 		runEngine(step, texts, kinds, arrays, commands, tools, skips, start)
 		if step.opts.FidelityGate != nil && *step.opts.FidelityGate && isLossyEngine(step.eng.name()) {
 			for i := range texts {
@@ -214,12 +249,19 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 			// Inflation guard: a step that grew its input is reverted.
 			log.Warnf("payloadcompress: step %q grew its input, reverting", step.eng.name())
 			copy(texts, before)
-			continue
+			delta = 0
 		}
+		name := step.eng.name()
+		if stats.EngineBytesIn == nil {
+			stats.EngineBytesIn = make(map[string]int, len(steps))
+			stats.EngineBytesOut = make(map[string]int, len(steps))
+		}
+		stats.EngineBytesIn[name] += inBytes
+		stats.EngineBytesOut[name] += textBytes(texts)
 		if delta == 0 {
 			continue
 		}
-		saved[step.eng.name()] += delta
+		saved[name] += delta
 	}
 	if len(saved) > 0 {
 		stats.Saved = saved
@@ -253,15 +295,18 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	if cfg.HardBudgetTokens > 0 {
 		out = []byte(applyHardBudget(string(out), cfg.HardBudgetTokens, s.cacheCut, !s.includeSystem))
 	}
+	if liteBody {
+		out = applyLiteBodyAfterPreserve(preserveSystem, liteOpts, model, provider, out)
+	}
 	// Whole-pipeline guard: never ship growth or a body that is no longer JSON.
-	if len(out) >= len(body) || !json.Valid(out) {
+	if len(out) >= inBodyLen || !json.Valid(out) {
 		stats.Saved = nil
-		stats.BytesOut = len(body)
-		return body, stats
+		stats.BytesOut = inBodyLen
+		return inBody, stats
 	}
 	stats.BytesOut = len(out)
 	if cfg.Shadow {
-		return body, stats
+		return inBody, stats
 	}
 	liveZoneStore(cfg, model, sessionID, body, s.segs, texts)
 	stats.Applied = true
@@ -339,10 +384,47 @@ func runEngine(step engineStep, texts []string, kinds []segmentKind, arrays []bo
 // fidelity gate can reject an over-aggressive rewrite.
 func isLossyEngine(name string) bool {
 	switch name {
-	case EngineCaveman, EngineRTK, EngineLite, EngineHeadroom:
+	case EngineCaveman, EngineRTK, EngineLite, EngineHeadroom, EngineMCPAccessibility, EngineRelevance:
 		return true
 	}
 	return false
+}
+
+// comboHasEngine reports whether a resolved combo runs the named engine.
+func comboHasEngine(combo *Combo, name string) bool {
+	for _, step := range combo.Pipeline {
+		if step.Engine == name {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreLiteBody undoes the lite-only body pass on an early return.
+func restoreLiteBody(preserveSystem bool, opts StepOptions, model, provider string, enabled bool, body []byte) []byte {
+	if !enabled {
+		return body
+	}
+	return applyLiteBodyAfterPreserve(preserveSystem, opts, model, provider, body)
+}
+
+// liteStepOptions returns the options of the combo's lite step.
+func liteStepOptions(combo *Combo) StepOptions {
+	for _, step := range combo.Pipeline {
+		if step.Engine == EngineLite {
+			return step.Options
+		}
+	}
+	return StepOptions{}
+}
+
+// textBytes sums the decoded segment bytes a pipeline step sees.
+func textBytes(texts []string) int {
+	n := 0
+	for _, text := range texts {
+		n += len(text)
+	}
+	return n
 }
 
 // ApplyAll runs the whole transform chain: payload compression, then output-style
@@ -355,7 +437,7 @@ func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
 // the live zone can reuse the previous turn's compressed prefix.
 func ApplyAllSession(cfg Config, model, sessionID string, body []byte, provider ...string) ([]byte, Stats) {
 	out, stats := ApplySession(cfg, model, sessionID, body, provider...)
-	styled, label := applyOutputStyles(cfg, out)
+	styled, label := applyOutputStyles(cfg, out, body)
 	stats.Style = label
 	if label == "" || strings.HasPrefix(label, "skipped:") {
 		return out, stats
@@ -389,6 +471,10 @@ func buildEngines(steps []Step) []engineStep {
 			eng = cavemanEngine{level: step.Level, opts: step.Options}
 		case EngineSessionDedup:
 			eng = &dedupEngine{opts: step.Options}
+		case EngineMCPAccessibility:
+			eng = mcpAccessibilityEngine{opts: step.Options}
+		case EngineRelevance:
+			eng = relevanceEngine{opts: step.Options}
 		}
 		if eng != nil {
 			engines = append(engines, engineStep{eng: eng, opts: step.Options})

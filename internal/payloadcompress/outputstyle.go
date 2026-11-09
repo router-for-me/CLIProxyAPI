@@ -291,7 +291,7 @@ func recentUserText(body []byte) string {
 
 // applyOutputStyles injects the configured styles into the system prompt. It
 // appends, so the bulk of the prefix stays byte-identical between requests.
-func applyOutputStyles(cfg Config, body []byte) ([]byte, string) {
+func applyOutputStyles(cfg Config, body, original []byte) ([]byte, string) {
 	if len(cfg.OutputStyles) == 0 {
 		return body, ""
 	}
@@ -305,7 +305,12 @@ func applyOutputStyles(cfg Config, body []byte) ([]byte, string) {
 	if slotsStyled(body) {
 		return body, "already"
 	}
-	if reason := styleBypass(body); reason != "" {
+	// Style selection ran before compression upstream, so media detection must
+	// use the original body: lite may replace image URLs for text-only models.
+	if len(original) == 0 {
+		original = body
+	}
+	if reason := styleBypass(original); reason != "" {
 		return body, "skipped:" + reason
 	}
 

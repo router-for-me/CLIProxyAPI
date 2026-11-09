@@ -12,7 +12,13 @@ import (
 
 func testConfig(pipeline ...string) Config {
 	on, off := true, false
-	opts := StepOptions{CompressToolResults: &on, PreserveToolWhitespace: &off}
+	opts := StepOptions{
+		CompressToolResults:    &on,
+		PreserveToolWhitespace: &off,
+		// Tests exercise the lossy lite body passes, now opt-in.
+		LiteRemoveRedundant: &on,
+		LiteReplaceImages:   &on,
+	}
 	steps := make([]Step, 0, len(pipeline))
 	for _, name := range pipeline {
 		steps = append(steps, Step{Engine: name, Options: opts})
