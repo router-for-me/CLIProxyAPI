@@ -622,6 +622,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
+		if pinnedAuthID != "" && h.AuthManager != nil && h.AuthManager.ShouldReleasePinnedAuth(pinnedAuthID, requestModelName) {
+			// Sequential routing has moved on from this account. Drop the pin so the
+			// request follows the pool; a continuation that needs the old upstream
+			// socket is replayed by the client with full context.
+			forgetPinnedAuth()
+		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {

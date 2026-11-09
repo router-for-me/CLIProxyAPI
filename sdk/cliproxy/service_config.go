@@ -2,10 +2,12 @@ package cliproxy
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -60,7 +62,13 @@ type routingRuntimeState struct {
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
+	sequentialReserve        float64
+	sequentialStatePath      string
 }
+
+// sequentialStateFile keeps each sequential pool's current account across restarts.
+// It lives in the auth directory without a .json suffix so it is never read as a credential.
+const sequentialStateFile = "sequential-routing.state"
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	state := routingRuntimeState{
@@ -78,6 +86,20 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	case "sequential", "sequential-fill":
+		state.strategy = "sequential"
+		state.sequentialReserve = coreauth.DefaultSequentialReservePercent
+		if reserve := cfg.Routing.SequentialReservePercent; reserve != nil && *reserve >= 0 && *reserve < 100 {
+			state.sequentialReserve = *reserve
+		}
+		if !cfg.Home.Enabled {
+			if authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir); errResolve == nil && authDir != "" {
+				state.sequentialStatePath = filepath.Join(authDir, sequentialStateFile)
+			}
+		}
+		// One account carries all traffic, so session bindings have nothing to add
+		// and would keep sessions on an account the pool has left.
+		return state
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -104,6 +126,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "sequential":
+		return coreauth.NewSequentialSelector(state.sequentialReserve, state.sequentialStatePath)
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}

@@ -630,6 +630,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 // or scheduler additionally receives lower priority tiers.
 func (m *Manager) availableAuthsForSelector(selector Selector, auths []*Auth, provider, routeModel string, now time.Time, schedulerAcross bool) (priorityAuths, selectorAuths []*Auth, err error) {
 	_, sessionAffinity := selector.(*SessionAffinitySelector)
+	// Sequential routing orders the whole pool itself, so it sees every priority tier.
+	_, sequential := selector.(*SequentialSelector)
+	sessionAffinity = sessionAffinity || sequential
 
 	if !sessionAffinity && !schedulerAcross {
 		priorityAuths, err = m.availableAuthsForRouteModel(auths, provider, routeModel, now)
@@ -1934,6 +1937,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
+	_, sequential := selector.(*SequentialSelector)
+	collectSequentialPool := sequential && pinnedAuthID == ""
+	var sequentialPool []*Auth
 	for _, candidate := range m.auths {
 		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
 			continue
@@ -1949,6 +1955,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 		if trackTransientAffinity {
 			affinityCandidates = append(affinityCandidates, candidate)
+		}
+		if collectSequentialPool {
+			sequentialPool = append(sequentialPool, candidate)
 		}
 		if _, used := tried[candidate.ID]; used {
 			continue
@@ -1967,6 +1976,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return nil, nil, errAvailable
 	}
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, model, now)
+	if collectSequentialPool {
+		sequentialPool = cloneAuthSlice(sequentialPool)
+	}
 	m.mu.RUnlock()
 
 	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
@@ -1977,6 +1989,9 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		if collectSequentialPool {
+			selectorCtx = withSequentialPool(selectorCtx, sequentialPool)
+		}
 		selected, errPick = selector.Pick(selectorCtx, provider, selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {
@@ -1999,6 +2014,43 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.Unlock()
 	}
 	return authCopy, executor, nil
+}
+
+// ShouldReleasePinnedAuth reports whether a session pinned to authID should drop
+// the pin so the next selection follows sequential routing. It is true only when
+// that account has reached the reserve and another account for the same provider
+// and model still has room. Other strategies never release a pin here.
+func (m *Manager) ShouldReleasePinnedAuth(authID, model string) bool {
+	if m == nil || strings.TrimSpace(authID) == "" {
+		return false
+	}
+	m.mu.RLock()
+	sequential, ok := m.selector.(*SequentialSelector)
+	pinned := m.auths[strings.TrimSpace(authID)]
+	if !ok || pinned == nil {
+		m.mu.RUnlock()
+		return false
+	}
+	registryRef := registry.GetGlobalRegistry()
+	targetKey := canonicalSchedulingProvider(executorKeyFromAuth(pinned))
+	now := time.Now()
+	pool := make([]*Auth, 0, len(m.auths))
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.ID == pinned.ID || candidate.Disabled ||
+			canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey {
+			continue
+		}
+		if strings.TrimSpace(model) != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		if blocked, _, _ := isAuthBlockedForModel(candidate, model, now); blocked {
+			continue
+		}
+		pool = append(pool, candidate.Clone())
+	}
+	pinned = pinned.Clone()
+	m.mu.RUnlock()
+	return sequential.ShouldRelease(pinned, pool)
 }
 
 // SelectAuth selects one credential through the configured scheduling strategy.
@@ -2273,6 +2325,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if trackTransientAffinity {
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
+	_, sequential := selector.(*SequentialSelector)
+	collectSequentialPool := sequential && pinnedAuthID == ""
+	var sequentialPool []*Auth
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
@@ -2299,6 +2354,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		if trackTransientAffinity {
 			affinityCandidates = append(affinityCandidates, candidate)
 		}
+		if collectSequentialPool {
+			sequentialPool = append(sequentialPool, candidate)
+		}
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
@@ -2316,6 +2374,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		return nil, nil, "", errAvailable
 	}
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(selector, affinityCandidates, model, now)
+	if collectSequentialPool {
+		sequentialPool = cloneAuthSlice(sequentialPool)
+	}
 	m.mu.RUnlock()
 
 	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
@@ -2326,6 +2387,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	if !handled {
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
+		if collectSequentialPool {
+			selectorCtx = withSequentialPool(selectorCtx, sequentialPool)
+		}
 		selected, errPick = selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, selectorAuths)
 		if errPick != nil {
 			if isBuiltInSelector(selector) {

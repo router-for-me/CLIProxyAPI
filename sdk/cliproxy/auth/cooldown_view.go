@@ -37,16 +37,6 @@ func CooldownSnapshotForAuth(auth *Auth, now time.Time) []CooldownView {
 		}
 	}
 
-	if reserveUntil := codexQuotaReserveUntil(auth, now); reserveUntil.After(now) && (len(views) == 0 || reserveUntil.After(views[0].RetryAt)) {
-		view := newCooldownView("credential", "", reserveUntil, now, QuotaState{}, "", nil)
-		view.Reason = "quota_reserve"
-		if len(views) == 0 {
-			views = append(views, view)
-		} else {
-			views[0] = view
-		}
-	}
-
 	// Sorting source keys makes ties deterministic after selector precedence.
 	keys := make([]string, 0, len(auth.ModelStates))
 	for key := range auth.ModelStates {

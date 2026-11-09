@@ -457,8 +457,16 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "sequential".
+	// "sequential" keeps all traffic for a provider on one account until any of its
+	// usage windows reaches 100 minus SequentialReservePercent, then moves on to the
+	// next account in order; session affinity is not used with it.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// SequentialReservePercent is the share of each usage window held back while
+	// another account still has room. Used only by the "sequential" strategy.
+	// Default: 5. Accepts 0 up to, but not including, 100.
+	SequentialReservePercent *float64 `yaml:"sequential-reserve-percent,omitempty" json:"sequential-reserve-percent,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,

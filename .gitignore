@@ -31,7 +31,7 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
-!docs/quota-reserve.md
+!docs/sequential-routing.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

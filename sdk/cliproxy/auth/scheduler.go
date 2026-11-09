@@ -900,9 +900,6 @@ func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) boo
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true
 	}
-	if codexQuotaReserveUntil(auth, now).After(now) {
-		return true
-	}
 	if len(auth.ModelStates) == 0 {
 		return auth.Unavailable || auth.Quota.Exceeded || (!auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now))
 	}
@@ -982,7 +979,7 @@ func (s *authScheduler) upsertAuthResultLocked(auth *Auth, targetModels []string
 	isBlocked := isCredentialBlocked(auth, modelCount, now)
 	credentialAvailabilityChanged := wasBlocked != isBlocked
 
-	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 || codexQuotaReservePercent(auth) > 0 {
+	if modelSetChanged || credentialScoped || credentialAvailabilityChanged || len(targetModels) == 0 {
 		// Synchronize all shards when model sets change, when failures are credential-scoped,
 		// or when credential-level availability transitioned.
 		providerState.upsertAuthForModelsLocked(meta, nil, true, now)
