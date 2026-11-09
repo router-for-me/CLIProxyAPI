@@ -45,6 +45,10 @@ func (j *FileRefreshJournal) RefreshClaim(ctx context.Context, key string) (bool
 		return false, errMkdir
 	}
 	if errSync := syncRefreshClaimDirectories(path); errSync != nil {
+		// No exchange was sent, so drop the claim rather than lock the grant.
+		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			log.Warnf("remove unsynced refresh claim: %v", errRemove)
+		}
 		return false, errSync
 	}
 	return true, nil

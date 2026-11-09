@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	log "github.com/sirupsen/logrus"
 )
 
 // RefreshJournal records consumption before sending a refresh grant. Claims never
@@ -135,9 +136,17 @@ func journalRefresh[T any](ctx context.Context, journal RefreshJournal, clientID
 	if errSet != nil {
 		return zero, &RefreshOutcomeUnknownError{Stage: "receipt-encode", Cause: errSet}
 	}
-	// Use an independent acquisition context for the receipt, just as for the
-	// exchange itself. Caller cancellation must not discard a successful rotation.
-	if errComplete := journal.RefreshComplete(ctx, key, doc.Bytes()); errComplete != nil {
+	// The receipt gets its own deadline: an exchange that finished as the
+	// refresh deadline expired must still be recorded.
+	completeCtx, cancelComplete := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+	defer cancelComplete()
+	if errComplete := journal.RefreshComplete(completeCtx, key, doc.Bytes()); errComplete != nil {
+		if errRun == nil {
+			// The old grant is spent upstream; keep the rotated tokens. Its claim
+			// stays pending, so the old grant is still never replayed.
+			log.Warnf("codex refresh receipt write failed after a successful rotation: %v", errComplete)
+			return value, nil
+		}
 		return zero, errors.Join(errRun, &RefreshOutcomeUnknownError{Stage: "receipt-write", Cause: errComplete})
 	}
 	return value, errRun
