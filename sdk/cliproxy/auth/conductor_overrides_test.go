@@ -3621,3 +3621,18 @@ func TestManager_Execute_DevinMCPConfigurationIssue403_DoesNotRetryOrCooldown(t 
 		}
 	}
 }
+
+func TestCoolingDisabledRetryAtMatchesModelCaseInsensitively(t *testing.T) {
+	reset := time.Now().Add(time.Minute)
+	auth := &Auth{ModelStates: map[string]*ModelState{
+		"Claude-Sonnet-X": {coolingDisabledRetryAt: reset},
+	}}
+	for _, model := range []string{"Claude-Sonnet-X", "claude-sonnet-x", "CLAUDE-SONNET-X"} {
+		if got := coolingDisabledRetryAt(auth, model); !got.Equal(reset) {
+			t.Fatalf("coolingDisabledRetryAt(%q) = %v, want %v", model, got, reset)
+		}
+	}
+	if got := coolingDisabledRetryAt(auth, "claude-sonnet-y"); !got.IsZero() {
+		t.Fatalf("coolingDisabledRetryAt(other model) = %v, want zero", got)
+	}
+}

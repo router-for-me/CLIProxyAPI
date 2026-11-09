@@ -460,8 +460,7 @@ func authMetadataString(metadata map[string]any, key string) string {
 // must bypass the shared cache (zero/negative pool bounds or a fenced config
 // generation). It uses the kind's own builder so an unpooled uTLS transport keeps
 // its TLS fingerprint. DisableKeepAlives is always set: no cache owns this transport,
-// so any connection left in its idle list would survive until an idle timer fires (or
-// forever on a transport built with IdleConnTimeout=0, such as the Claude Code one).
+// so any connection left in its idle list would survive until an idle timer fires.
 func unpooledTransport(build func() (*http.Transport, error)) *http.Transport {
 	tr, errBuild := build()
 	if errBuild != nil {
