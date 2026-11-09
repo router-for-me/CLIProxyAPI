@@ -304,9 +304,8 @@ func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (Claude
 		return ClaudeDeviceProfile{}, false
 	}
 
-	userAgent := strings.TrimSpace(headers.Get("User-Agent"))
-	version, ok := parseClaudeCLIVersion(userAgent)
-	if !ok || !claudeCodeNativeUserAgentPattern.MatchString(userAgent) {
+	userAgent, ok := parseClaudeCodeUserAgent(headers.Get("User-Agent"))
+	if !ok {
 		return ClaudeDeviceProfile{}, false
 	}
 
@@ -320,12 +319,12 @@ func extractClaudeDeviceProfile(headers http.Header, cfg *config.Config) (Claude
 		runtimeVersion = baseline.RuntimeVersion
 	}
 	profile := ClaudeDeviceProfile{
-		UserAgent:      userAgent,
+		UserAgent:      userAgent.profileUserAgent,
 		PackageVersion: packageVersion,
 		RuntimeVersion: runtimeVersion,
 		OS:             firstNonEmptyHeader(headers, "X-Stainless-Os", baseline.OS),
 		Arch:           firstNonEmptyHeader(headers, "X-Stainless-Arch", baseline.Arch),
-		version:        version,
+		version:        userAgent.version,
 		hasVersion:     true,
 	}
 	return profile, true
