@@ -2,13 +2,16 @@ package pluginhost
 
 import (
 	"context"
-	"strconv"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"golang.org/x/sync/singleflight"
 )
 
 // quotaFetchCacheTTL bounds how long a successful quota fetch is reused for identical requests.
@@ -22,8 +25,8 @@ const quotaFetchCacheTTL = 5 * time.Second
 type quotaFetchCache struct {
 	mu         sync.Mutex
 	entries    map[string]quotaFetchCacheEntry
+	inflight   map[string]*quotaFetchCall
 	generation uint64
-	group      singleflight.Group
 	// nowFunc, set by tests, overrides the wall clock.
 	nowFunc func() time.Time
 }
@@ -33,6 +36,18 @@ type quotaFetchCacheEntry struct {
 	expiresAt time.Time
 }
 
+// quotaFetchCall is one shared upstream fetch. Its context is canceled once every waiter
+// has left, so an abandoned provider call never outlives all of its callers.
+type quotaFetchCall struct {
+	done       chan struct{}
+	cancel     context.CancelFunc
+	waiters    int
+	generation uint64
+	resp       pluginapi.QuotaFetchResponse
+	handled    bool
+	err        error
+}
+
 func (c *quotaFetchCache) now() time.Time {
 	if c.nowFunc != nil {
 		return c.nowFunc()
@@ -40,9 +55,16 @@ func (c *quotaFetchCache) now() time.Time {
 	return time.Now()
 }
 
-// fetch returns a cached response for key when still fresh, otherwise runs load once for all
-// concurrent callers sharing the key. Each caller still honours its own context cancellation.
+// fetch returns a cached response for key when still fresh, otherwise joins or starts a shared
+// call to load. An empty key disables debouncing for the request.
 func (c *quotaFetchCache) fetch(ctx context.Context, key string, load func(context.Context) (pluginapi.QuotaFetchResponse, bool, error)) (pluginapi.QuotaFetchResponse, bool, error) {
+	if key == "" {
+		return load(ctx)
+	}
+
+	// The cache lookup and in-flight registration happen under one lock, and a finished call
+	// publishes its result and leaves the in-flight map under the same lock, so a caller can
+	// never miss both and start a redundant upstream fetch.
 	c.mu.Lock()
 	if entry, ok := c.entries[key]; ok {
 		if c.now().Before(entry.expiresAt) {
@@ -51,40 +73,68 @@ func (c *quotaFetchCache) fetch(ctx context.Context, key string, load func(conte
 		}
 		delete(c.entries, key)
 	}
-	generation := c.generation
+	call := c.inflight[key]
+	if call == nil {
+		// Detach from this caller's cancellation; the call is canceled when its last waiter leaves.
+		callCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		call = &quotaFetchCall{done: make(chan struct{}), cancel: cancel, generation: c.generation}
+		if c.inflight == nil {
+			c.inflight = make(map[string]*quotaFetchCall)
+		}
+		c.inflight[key] = call
+		go c.run(callCtx, key, call, load)
+	}
+	call.waiters++
 	c.mu.Unlock()
 
-	type result struct {
-		resp    pluginapi.QuotaFetchResponse
-		handled bool
-	}
-	// Include the generation so callers arriving after an invalidation never join a stale in-flight fetch.
-	flightKey := strconv.FormatUint(generation, 10) + "|" + key
-	// Detach cancellation so one caller disconnecting does not fail the others sharing the call.
-	loadCtx := context.WithoutCancel(ctx)
-	ch := c.group.DoChan(flightKey, func() (any, error) {
-		resp, handled, errLoad := load(loadCtx)
-		if errLoad == nil && handled {
-			c.mu.Lock()
-			if c.generation == generation {
-				if c.entries == nil {
-					c.entries = make(map[string]quotaFetchCacheEntry)
-				}
-				c.pruneExpiredLocked()
-				c.entries[key] = quotaFetchCacheEntry{resp: resp, expiresAt: c.now().Add(quotaFetchCacheTTL)}
-			}
-			c.mu.Unlock()
-		}
-		return result{resp: resp, handled: handled}, errLoad
-	})
-
 	select {
+	case <-call.done:
+		c.mu.Lock()
+		call.waiters--
+		c.mu.Unlock()
+		return cloneQuotaFetchResponse(call.resp), call.handled, call.err
 	case <-ctx.Done():
+		c.mu.Lock()
+		call.waiters--
+		if call.waiters == 0 {
+			// Nobody is waiting anymore: cancel the provider call and stop new callers joining it.
+			call.cancel()
+			if c.inflight[key] == call {
+				delete(c.inflight, key)
+			}
+		}
+		c.mu.Unlock()
 		return pluginapi.QuotaFetchResponse{}, true, ctx.Err()
-	case res := <-ch:
-		out, _ := res.Val.(result)
-		return cloneQuotaFetchResponse(out.resp), out.handled, res.Err
 	}
+}
+
+func (c *quotaFetchCache) run(ctx context.Context, key string, call *quotaFetchCall, load func(context.Context) (pluginapi.QuotaFetchResponse, bool, error)) {
+	defer call.cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			call.resp, call.handled, call.err = pluginapi.QuotaFetchResponse{}, false, fmt.Errorf("quota fetch panicked: %v", recovered)
+			c.finish(key, call)
+		}
+	}()
+	call.resp, call.handled, call.err = load(ctx)
+	c.finish(key, call)
+}
+
+func (c *quotaFetchCache) finish(key string, call *quotaFetchCall) {
+	c.mu.Lock()
+	if c.inflight[key] == call {
+		delete(c.inflight, key)
+	}
+	// Only successful results are cached, and never from calls started before an invalidation.
+	if call.err == nil && call.handled && call.generation == c.generation {
+		if c.entries == nil {
+			c.entries = make(map[string]quotaFetchCacheEntry)
+		}
+		c.pruneExpiredLocked()
+		c.entries[key] = quotaFetchCacheEntry{resp: call.resp, expiresAt: c.now().Add(quotaFetchCacheTTL)}
+	}
+	c.mu.Unlock()
+	close(call.done)
 }
 
 // invalidate drops all cached results and detaches in-flight fetches from future callers.
@@ -92,6 +142,7 @@ func (c *quotaFetchCache) invalidate() {
 	c.mu.Lock()
 	c.generation++
 	c.entries = nil
+	c.inflight = nil
 	c.mu.Unlock()
 }
 
@@ -104,14 +155,44 @@ func (c *quotaFetchCache) pruneExpiredLocked() {
 	}
 }
 
+// quotaFetchCacheKey identifies requests that may share a result. It covers the plugin, the
+// credential identity, and a digest of the provider-visible credential payload, so requests
+// carrying different credential material never share results. It returns "" to disable
+// debouncing when the request has no credential identity or the payload cannot be digested.
 func quotaFetchCacheKey(record capabilityRecord, req pluginapi.QuotaFetchRequest) string {
+	if strings.TrimSpace(req.AuthIndex) == "" && strings.TrimSpace(req.AuthID) == "" {
+		return ""
+	}
+	metadataJSON, errMarshal := json.Marshal(req.Metadata)
+	if errMarshal != nil {
+		return ""
+	}
+	digest := sha256.New()
+	writeDigestField(digest, req.StorageJSON)
+	writeDigestField(digest, metadataJSON)
+	attributeKeys := make([]string, 0, len(req.Attributes))
+	for key := range req.Attributes {
+		attributeKeys = append(attributeKeys, key)
+	}
+	sort.Strings(attributeKeys)
+	for _, key := range attributeKeys {
+		writeDigestField(digest, []byte(key))
+		writeDigestField(digest, []byte(req.Attributes[key]))
+	}
 	return strings.Join([]string{
 		record.id,
 		record.version,
 		normalizeProviderID(req.Provider),
 		req.AuthIndex,
 		req.AuthID,
+		hex.EncodeToString(digest.Sum(nil)),
 	}, "\x00")
+}
+
+// writeDigestField length-prefixes each field so adjacent fields cannot be confused.
+func writeDigestField(digest interface{ Write([]byte) (int, error) }, field []byte) {
+	_, _ = fmt.Fprintf(digest, "%d:", len(field))
+	_, _ = digest.Write(field)
 }
 
 // cloneQuotaFetchResponse deep-copies a response so callers cannot mutate shared cached data.

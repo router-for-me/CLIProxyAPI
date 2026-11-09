@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,15 +253,31 @@ func TestQuotaFetchDebounce_CallerMutationDoesNotLeak(t *testing.T) {
 	}
 }
 
+// waitForQuotaWaiters blocks until the in-flight call for any key has the wanted number of waiters.
+func waitForQuotaWaiters(t *testing.T, host *Host, want int) {
+	t.Helper()
+	for i := 0; i < 1_000_000; i++ {
+		host.quotaFetches.mu.Lock()
+		got := 0
+		for _, call := range host.quotaFetches.inflight {
+			got += call.waiters
+		}
+		host.quotaFetches.mu.Unlock()
+		if got == want {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("timed out waiting for %d quota waiters", want)
+}
+
 func TestQuotaFetchDebounce_CallerCancellationDoesNotAffectOthers(t *testing.T) {
 	var calls atomic.Int32
-	started := make(chan struct{})
 	release := make(chan struct{})
 	provider := &testQuotaProvider{
 		identifier: "quota-test",
 		fetchFn: func(ctx context.Context, _ pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
 			calls.Add(1)
-			close(started)
 			<-release
 			if errCtx := ctx.Err(); errCtx != nil {
 				return pluginapi.QuotaFetchResponse{}, errCtx
@@ -276,18 +293,117 @@ func TestQuotaFetchDebounce_CallerCancellationDoesNotAffectOthers(t *testing.T) 
 		_, _, errFetch := host.FetchQuota(cancelCtx, pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"})
 		cancelled <- errFetch
 	}()
-	<-started
+	waitForQuotaWaiters(t, host, 1)
+	remaining := make(chan pluginapi.QuotaFetchResponse, 1)
+	go func() {
+		resp, _, errFetch := host.FetchQuota(context.Background(), pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"})
+		if errFetch != nil {
+			t.Errorf("unexpected fetch error for remaining caller: %v", errFetch)
+		}
+		remaining <- resp
+	}()
+	waitForQuotaWaiters(t, host, 2)
+
 	cancel()
 	if errFetch := <-cancelled; !errors.Is(errFetch, context.Canceled) {
 		t.Fatalf("expected cancelled caller to return context.Canceled, got %v", errFetch)
 	}
-
 	close(release)
-	resp := fetchQuotaForTest(t, host, "auth-1")
+	resp := <-remaining
 	if resp.Subscription == nil || resp.Subscription.Plan != "Pro" {
-		t.Fatalf("expected shared fetch to complete for remaining callers, got %+v", resp)
+		t.Fatalf("expected shared fetch to complete for the remaining caller, got %+v", resp)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected a single upstream fetch, got %d", got)
+	}
+}
+
+func TestQuotaFetchDebounce_LastWaiterLeavingCancelsSharedCall(t *testing.T) {
+	var calls atomic.Int32
+	providerCanceled := make(chan struct{})
+	provider := &testQuotaProvider{
+		identifier: "quota-test",
+		fetchFn: func(ctx context.Context, _ pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			if calls.Add(1) == 1 {
+				// Simulate a provider call that hangs until it is canceled.
+				<-ctx.Done()
+				close(providerCanceled)
+				return pluginapi.QuotaFetchResponse{}, ctx.Err()
+			}
+			return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: "Fresh"}}, nil
+		},
+	}
+	host, _ := newQuotaDebounceHost(t, provider)
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancelled := make(chan error, 1)
+	go func() {
+		_, _, errFetch := host.FetchQuota(cancelCtx, pluginapi.QuotaFetchRequest{Provider: "quota-test", AuthIndex: "auth-1"})
+		cancelled <- errFetch
+	}()
+	waitForQuotaWaiters(t, host, 1)
+	cancel()
+	if errFetch := <-cancelled; !errors.Is(errFetch, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", errFetch)
+	}
+	<-providerCanceled // The hung provider call must observe cancellation.
+
+	// A new caller must start a fresh call rather than join the abandoned one.
+	resp := fetchQuotaForTest(t, host, "auth-1")
+	if resp.Subscription == nil || resp.Subscription.Plan != "Fresh" {
+		t.Fatalf("expected a fresh fetch after abandonment, got %+v", resp)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 upstream fetches, got %d", got)
+	}
+}
+
+func TestQuotaFetchDebounce_DifferentCredentialPayloadsDoNotShare(t *testing.T) {
+	var calls atomic.Int32
+	provider := &testQuotaProvider{
+		identifier: "quota-test",
+		fetchFn: func(_ context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			calls.Add(1)
+			return pluginapi.QuotaFetchResponse{Subscription: &pluginapi.QuotaSubscription{Plan: string(req.StorageJSON)}}, nil
+		},
+	}
+	host, _ := newQuotaDebounceHost(t, provider)
+
+	fetch := func(authIndex, storage string) string {
+		t.Helper()
+		resp, _, errFetch := host.FetchQuotaByPlugin(context.Background(), "quota-plugin", pluginapi.QuotaFetchRequest{
+			Provider:    "quota-test",
+			AuthIndex:   authIndex,
+			StorageJSON: []byte(storage),
+		})
+		if errFetch != nil {
+			t.Fatalf("unexpected fetch error: %v", errFetch)
+		}
+		return resp.Subscription.Plan
+	}
+
+	// Same credential identity but different credential material must not share results.
+	if got := fetch("auth-1", `{"account":"a"}`); got != `{"account":"a"}` {
+		t.Fatalf("unexpected result: %s", got)
+	}
+	if got := fetch("auth-1", `{"account":"b"}`); got != `{"account":"b"}` {
+		t.Fatalf("result crossed credential payloads: %s", got)
+	}
+	// Requests without any credential identity are never debounced.
+	if got := fetch("", `{"account":"c"}`); got != `{"account":"c"}` {
+		t.Fatalf("unexpected result: %s", got)
+	}
+	if got := fetch("", `{"account":"d"}`); got != `{"account":"d"}` {
+		t.Fatalf("result crossed anonymous credential payloads: %s", got)
+	}
+	fetch("", `{"account":"d"}`)
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("expected every distinct or anonymous request to reach the provider, got %d calls", got)
+	}
+
+	// Identical identity and payload still share a result.
+	fetch("auth-1", `{"account":"a"}`)
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("expected identical request to be served from cache, got %d calls", got)
 	}
 }
