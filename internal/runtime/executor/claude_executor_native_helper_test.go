@@ -30,7 +30,7 @@ func claudeNativeHelperHeaders(betas, compression string) http.Header {
 		"Accept":            {"application/json"},
 		"Accept-Encoding":   {compression},
 		"Content-Type":      {"application/json"},
-		"User-Agent":        {"claude-cli/2.1.280 (external, cli)"},
+		"User-Agent":        {"claude-cli/2.1.321 (external, cli)"},
 		"X-App":             {"cli"},
 		"Anthropic-Beta":    {betas},
 		"Anthropic-Version": {"2023-06-01"},
@@ -39,8 +39,8 @@ func claudeNativeHelperHeaders(betas, compression string) http.Header {
 		"X-Client-Request-Id":                       {"66666666-7777-4888-8999-aaaaaaaaaaaa"},
 		"X-Stainless-Lang":                          {"js"},
 		"X-Stainless-Runtime":                       {"node"},
-		"X-Stainless-Package-Version":               {"0.112.1"},
-		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.12.1"},
 		"X-Stainless-OS":                            {"MacOS"},
 		"X-Stainless-Arch":                          {"arm64"},
 		"X-Stainless-Retry-Count":                   {"0"},
@@ -379,6 +379,6 @@ func TestClaudeExecutor_Native280HaikuTitleHelperPreservesServerSideFallbackBeta
 	}
 	outBeta := helps.HeaderValueCaseInsensitive(seenHeaders, "Anthropic-Beta")
 	if !strings.Contains(outBeta, "server-side-fallback-2026-06-01") {
-		t.Fatalf("Anthropic-Beta = %q, want server-side-fallback-2026-06-01 preserved for 2.1.280 title helper", outBeta)
+		t.Fatalf("Anthropic-Beta = %q, want server-side-fallback-2026-06-01 preserved for 2.1.321 title helper", outBeta)
 	}
 }

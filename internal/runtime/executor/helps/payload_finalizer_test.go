@@ -166,7 +166,7 @@ func TestFinalizePayloadDocCrossMethodPipeline(t *testing.T) {
 
 func TestExecutorHelpersDocCrossMethodPipelines(t *testing.T) {
 	t.Run("claude doc pipeline", func(t *testing.T) {
-		raw := []byte(`{"model":"claude-sonnet-5-5","tool_choice":{"type":"tool","name":"calc"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.280; cc_prev_req=old;"},{"type":"text","text":"secret word here"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"bad id!","name":"calc","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"bad id!","content":"secret word here"}]}]}`)
+		raw := []byte(`{"model":"claude-sonnet-5-5","tool_choice":{"type":"tool","name":"calc"},"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_prev_req=old;"},{"type":"text","text":"secret word here"}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"bad id!","name":"calc","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"bad id!","content":"secret word here"}]}]}`)
 		doc := ojson.NewDoc(raw)
 		matcher := BuildSensitiveWordMatcher([]string{"secret"})
 		if !NormalizeClaudeToolChoiceDoc("claude", "claude-sonnet-5-5", doc) {

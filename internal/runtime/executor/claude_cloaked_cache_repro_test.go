@@ -80,11 +80,11 @@ func TestComputeFingerprintUsesNativeUTF16Indices(t *testing.T) {
 	for _, tt := range []struct {
 		name, text, want string
 	}{
-		{name: "emoji before sampled positions", text: "😀abcdefghijklmnopqrstuvwxyz", want: "dac"},
-		{name: "sampled high surrogate", text: "abc😀abcdefghijklmnop", want: "695"},
+		{name: "emoji before sampled positions", text: "😀abcdefghijklmnopqrstuvwxyz", want: "496"},
+		{name: "sampled high surrogate", text: "abc😀abcdefghijklmnop", want: "6eb"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := computeFingerprint(tt.text, "2.1.280"); got != tt.want {
+			if got := computeFingerprint(tt.text, "2.1.321"); got != tt.want {
 				t.Errorf("fingerprint = %q, want %q", got, tt.want)
 			}
 		})
