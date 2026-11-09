@@ -178,6 +178,8 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
 
+	m.CheckBankedResets(ctx, normalized)
+
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -298,6 +300,8 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+
+	m.CheckBankedResets(ctx, normalized)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -766,6 +770,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			if isResponsesCompactRequestFaultError(opts, authErr) || isRequestInvalidError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
+			}
+			if m.recoverBankedReset(ctx, auth.ID, authErr) {
+				delete(tried, auth.ID)
+				delete(attempted, auth.ID)
+				continue
 			}
 			lastErr = authErr
 			if homeMode {
@@ -1289,6 +1298,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					return nil, wrapRequestStopError(errStream)
 				}
 				return nil, errStream
+			}
+			if !homeMode && m.recoverBankedReset(ctx, auth.ID, errStream) {
+				delete(tried, auth.ID)
+				delete(attempted, auth.ID)
+				continue
 			}
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errStream)

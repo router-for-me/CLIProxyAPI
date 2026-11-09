@@ -1319,6 +1319,14 @@ plugins:
       config-object:
         mode: "safe"
 
+# Banked subscription resets. Omitted/off preserves normal routing and spending.
+# See docs/banked-resets.md for the management API and provider restrictions.
+quota-exceeded:
+  banked-reset:
+    mode: off # off, manual, auto
+    use-before: 2h # 0s disables expiry use; exhaustion still applies in auto mode
+    providers: [codex, claude] # restrict to [codex] for a Codex-only rollout
+
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
 # fields remain in their old locations until a successful v8 configuration write.

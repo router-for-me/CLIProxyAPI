@@ -513,9 +513,18 @@ type RemoteManagement struct {
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
 }
 
-// QuotaExceeded defines the behavior when API quota limits are exceeded.
-// It provides configuration options for automatic failover mechanisms.
+// BankedResetConfig controls OAuth usage resets. The zero value disables spending.
+type BankedResetConfig struct {
+	Mode      string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	UseBefore string `yaml:"use-before,omitempty" json:"use-before,omitempty"`
+	// Providers limits automatic use; empty enables Codex and Claude.
+	Providers []string `yaml:"providers,omitempty" json:"providers,omitempty"`
+}
+
+// QuotaExceeded defines quota failover and optional banked reset policies.
 type QuotaExceeded struct {
+	BankedReset BankedResetConfig `yaml:"banked-reset,omitempty" json:"banked-reset,omitempty"`
+
 	// SwitchProject indicates whether to automatically switch to another project when a quota is exceeded.
 	SwitchProject bool `yaml:"switch-project" json:"switch-project"`
 
