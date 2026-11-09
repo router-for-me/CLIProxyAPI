@@ -19,7 +19,9 @@ import (
 )
 
 // SelectorFactory constructs a complete routing selector at build time and when
-// normalized routing settings change. Unrelated reloads retain the selector.
+// normalized routing settings change. Unrelated reloads retain the selector. A
+// reloaded routing change first gets a trial build, stopped at once, so a config
+// the factory rejects is refused before the watcher adopts it.
 // Use NewRoutingSelector to retain native affinity around a custom policy.
 // Each invocation transfers ownership of a fresh selector to the service. Return
 // a non-nil selector or an error; do not return the currently installed instance.

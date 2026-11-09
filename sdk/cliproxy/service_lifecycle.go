@@ -216,6 +216,9 @@ func (s *Service) Run(ctx context.Context) error {
 			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
 		watcherWrapper.SetConfig(s.currentConfig())
+		if s.selectorFactory != nil {
+			watcherWrapper.SetConfigValidator(s.checkRoutingSelector)
+		}
 		s.registerPluginAuthParser()
 
 		watcherCtx, watcherCancel := context.WithCancel(context.Background())

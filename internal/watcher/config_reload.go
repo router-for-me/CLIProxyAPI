@@ -112,6 +112,16 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
+	w.clientsMutex.RLock()
+	validate := w.configValidator
+	w.clientsMutex.RUnlock()
+	if validate != nil {
+		if errValidate := validate(newConfig.CloneForRuntime()); errValidate != nil {
+			log.WithError(errValidate).Warn("rejected config reload with invalid application settings")
+			return false
+		}
+	}
+
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)

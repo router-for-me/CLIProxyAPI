@@ -45,6 +45,7 @@ type Watcher struct {
 	serverUpdatePend           bool
 	stopped                    atomic.Bool
 	reloadCallback             func(*config.Config)
+	configValidator            func(*config.Config) error
 	watcher                    *fsnotify.Watcher
 	lastAuthHashes             map[string]string
 	lastAuthContents           map[string]*coreauth.Auth
@@ -172,6 +173,14 @@ func (w *Watcher) SetConfig(cfg *config.Config) {
 	defer w.clientsMutex.Unlock()
 	w.config = cloned
 	w.oldConfigYaml, _ = yaml.Marshal(cloned)
+}
+
+// SetConfigValidator installs a check that runs on each reloaded config file before
+// the watcher adopts it or refreshes credentials from it.
+func (w *Watcher) SetConfigValidator(validate func(*config.Config) error) {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	w.configValidator = validate
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.

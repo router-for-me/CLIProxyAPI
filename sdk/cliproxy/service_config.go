@@ -247,6 +247,25 @@ func (s *Service) configCommitCurrent(commit configCommit) bool {
 	return current
 }
 
+// checkRoutingSelector builds and stops the selector a routing change needs, so a
+// config the factory rejects is refused before the watcher adopts it. It compares
+// against the published config instead of taking configRuntimeMu, since callers
+// validate while holding their own locks. commitConfigUpdate builds the selector it installs.
+func (s *Service) checkRoutingSelector(cfg *config.Config) error {
+	if s.selectorFactory == nil {
+		return nil
+	}
+	if current := s.currentConfig(); current != nil && normalizedRoutingRuntimeState(current) == normalizedRoutingRuntimeState(cfg) {
+		return nil
+	}
+	selector, err := buildRoutingSelector(cfg, s.selectorFactory)
+	if err != nil {
+		return err
+	}
+	(&preparedRoutingSelector{selector: selector}).stop()
+	return nil
+}
+
 // discardConfigCommit stops a commit's selector preparation when its runtime
 // apply is skipped, so it does not stay pending until the next commit.
 func (s *Service) discardConfigCommit(commit configCommit) {
