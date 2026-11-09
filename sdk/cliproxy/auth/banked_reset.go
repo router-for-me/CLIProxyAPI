@@ -476,6 +476,13 @@ func (m *Manager) useBankedReset(ctx context.Context, authID, creditID string, a
 		}
 		return result, nil
 	}
+	// Claude grants can contain multiple uses. Its Management Center bounds
+	// ambiguous retries to ten minutes; do not rely on indefinite provider
+	// deduplication after that window. Keep the intent unresolved for inspection.
+	if a.Provider == "claude" && retrying && (op.At.IsZero() || op.At.After(now) || now.Sub(op.At) >= 10*time.Minute) {
+		state.fail(now)
+		return result, errors.New("ambiguous Claude reset is outside the safe retry window; inspect provider usage before resolving the intent")
+	}
 	// Re-read the login and setting immediately before sending a mutation.
 	a, ok = m.GetByID(authID)
 	if !ok || !bankedEligible(a) || bankedAccountKey(a) != accountKey {

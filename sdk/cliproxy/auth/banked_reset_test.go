@@ -496,3 +496,31 @@ func TestBankedResetRestartFindsIntentOnAnotherLoginFile(t *testing.T) {
 		t.Fatal("another restart resurrected a completed intent")
 	}
 }
+
+func TestBankedResetClaudeAmbiguousClaimStopsAfterSafeWindow(t *testing.T) {
+	m, f, id := newBankedFixture(t, "claude", "auto")
+	now := time.Now()
+	f.failPost = true
+	f.credits = claudeGrants(now, true, false, time.Hour)
+	if _, err := m.useBankedReset(context.Background(), id, "", true, now); err == nil {
+		t.Fatal("wanted ambiguous failure")
+	}
+	a, _ := m.GetByID(id)
+	restarted := NewManager(nil, nil, nil)
+	restarted.SetConfig(m.runtimeConfigSnapshot())
+	restarted.RegisterExecutor(f)
+	if _, err := restarted.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	f.failPost = false
+	if _, err := restarted.useBankedReset(context.Background(), id, "", true, now.Add(11*time.Minute)); err == nil {
+		t.Fatal("old ambiguous claim was retried")
+	}
+	if len(f.posts) != 1 {
+		t.Fatal("sent another multi-use grant claim after retry window")
+	}
+	a, _ = restarted.GetByID(id)
+	if bankedOperation(a).Code != "" {
+		t.Fatal("silently resolved an unknown outcome")
+	}
+}
