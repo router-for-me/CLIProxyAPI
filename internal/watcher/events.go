@@ -34,16 +34,61 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watchAuthDirectoryTree(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+	w.watchMu.Lock()
+	w.authRescanMu.Lock()
+	authDir := w.currentAuthDir()
+	if errAddAuthDir := w.watchAuthDirectoryTree(authDir); errAddAuthDir != nil {
+		w.authRescanMu.Unlock()
+		w.watchMu.Unlock()
+		log.Errorf("failed to watch auth directory %s: %v", authDir, errAddAuthDir)
 		return errAddAuthDir
 	}
-	log.Debugf("watching auth directory tree: %s", w.authDir)
+	w.started = true
+	w.watchedAuthDir = authDir
+	w.authRescanMu.Unlock()
+	w.watchMu.Unlock()
+	log.Debugf("watching auth directory tree: %s", authDir)
 
 	go w.processEvents(ctx)
 
 	w.reloadClients(true, nil, false)
 	return nil
+}
+
+func (w *Watcher) syncAuthDirWatch() {
+	if w == nil || w.watcher == nil || w.stopped.Load() {
+		return
+	}
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	if !w.started || w.stopped.Load() {
+		return
+	}
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+	target := strings.TrimSpace(w.currentAuthDir())
+	oldWatched := strings.TrimSpace(w.watchedAuthDir)
+	if oldWatched == target {
+		return
+	}
+	if oldWatched != "" && !w.sameNormalizedAuthPath(oldWatched, w.configPath) && !w.sameNormalizedAuthPath(oldWatched, target) {
+		w.removeAuthDirectoryTree(oldWatched)
+		w.watchedAuthDir = ""
+	}
+	if target == "" {
+		w.watchedAuthDir = ""
+		return
+	}
+	if w.watchedAuthDir != "" && w.sameNormalizedAuthPath(w.watchedAuthDir, target) {
+		w.watchedAuthDir = target
+		return
+	}
+	if errAdd := w.watchAuthDirectoryTree(target); errAdd != nil {
+		log.Errorf("failed to watch auth directory %s: %v", target, errAdd)
+		return
+	}
+	w.watchedAuthDir = target
+	log.Debugf("watching auth directory: %s", target)
 }
 
 func (w *Watcher) processEvents(ctx context.Context) {
@@ -70,7 +115,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
+	normalizedAuthDir := w.normalizeAuthPath(w.currentAuthDir())
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 	// Keep root-level JSON events eligible for Watcher literals used by incremental
@@ -99,6 +144,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 	if isAuthDirEvent {
 		w.authRescanMu.Lock()
+		if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+			w.authRescanMu.Unlock()
+			return
+		}
 		// A removed directory can already have been recreated when its queued event
 		// reaches us. Retire the old inode's watches before registering that path again.
 		if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && w.isWatchedAuthDirectory(normalizedName) {
@@ -119,6 +168,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Handle auth directory changes incrementally (.json only)
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
+	if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+		return
+	}
 	w.observeAuthFile(event.Name)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
@@ -129,6 +181,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
+		if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+			return
+		}
 		statSucceeded := false
 		if _, statErr := os.Stat(event.Name); statErr == nil {
 			statSucceeded = true
@@ -138,6 +193,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			// before treating a known auth file as permanently removed.
 			for attempt := 0; attempt < 3; attempt++ {
 				time.Sleep(25 * time.Millisecond)
+				if !w.isPathInAuthDir(normalizedName, w.currentAuthDir()) {
+					return
+				}
 				if _, retryErr := os.Stat(event.Name); retryErr == nil {
 					statSucceeded = true
 					break
@@ -180,6 +238,9 @@ func (w *Watcher) observeAuthFile(path string) {
 	}
 	w.clientsMutex.Lock()
 	defer w.clientsMutex.Unlock()
+	if !w.isPathInCurrentAuthDirLocked(normalized) {
+		return
+	}
 	if w.fileObservations == nil {
 		w.fileObservations = make(map[string]uint64)
 	}

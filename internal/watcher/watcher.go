@@ -11,6 +11,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	"gopkg.in/yaml.v3"
 
@@ -33,6 +34,9 @@ type authDirProvider interface {
 type Watcher struct {
 	configPath                 string
 	authDir                    string
+	watchMu                    sync.Mutex
+	started                    bool
+	watchedAuthDir             string
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
 	authWatchMu                sync.RWMutex
@@ -171,9 +175,76 @@ func (w *Watcher) Stop() error {
 func (w *Watcher) SetConfig(cfg *config.Config) {
 	cloned := cfg.CloneForRuntime()
 	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
+	if cloned != nil {
+		if w.mirroredAuthDir != "" {
+			cloned.AuthDir = w.mirroredAuthDir
+			w.authDir = w.mirroredAuthDir
+		} else if trimmedAuthDir := strings.TrimSpace(cloned.AuthDir); trimmedAuthDir != "" {
+			if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(trimmedAuthDir); errResolveAuthDir == nil && resolvedAuthDir != "" {
+				cloned.AuthDir = resolvedAuthDir
+				w.authDir = resolvedAuthDir
+			} else if w.authDir == "" {
+				w.authDir = trimmedAuthDir
+			}
+		}
+	}
 	w.config = cloned
 	w.oldConfigYaml, _ = yaml.Marshal(cloned)
+	w.clientsMutex.Unlock()
+	w.syncAuthDirWatch()
+}
+
+func (w *Watcher) currentAuthDirLocked() string {
+	if w == nil {
+		return ""
+	}
+	if authDir := strings.TrimSpace(w.authDir); authDir != "" {
+		return authDir
+	}
+	if w.config != nil {
+		if cfgAuthDir := strings.TrimSpace(w.config.AuthDir); cfgAuthDir != "" {
+			if resolved, errResolve := util.ResolveAuthDir(cfgAuthDir); errResolve == nil && resolved != "" {
+				return resolved
+			}
+			return cfgAuthDir
+		}
+	}
+	return ""
+}
+
+func (w *Watcher) currentAuthDir() string {
+	if w == nil {
+		return ""
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	return w.currentAuthDirLocked()
+}
+
+func (w *Watcher) isPathInAuthDir(path, authDir string) bool {
+	normalizedPath := w.normalizeAuthPath(path)
+	normalizedDir := w.normalizeAuthPath(authDir)
+	if normalizedPath == "" || normalizedDir == "" {
+		return false
+	}
+	return !w.sameNormalizedAuthPath(normalizedPath, normalizedDir) && !isPrivateAuthPath(normalizedDir, normalizedPath)
+}
+
+func (w *Watcher) isPathInCurrentAuthDirLocked(path string) bool {
+	authDir := w.currentAuthDirLocked()
+	if authDir == "" {
+		return true
+	}
+	return w.isPathInAuthDir(path, authDir)
+}
+
+func (w *Watcher) isPathInCurrentAuthDir(path string) bool {
+	if w == nil {
+		return false
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	return w.isPathInCurrentAuthDirLocked(path)
 }
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.
@@ -217,7 +288,7 @@ func (w *Watcher) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
-	authDir := w.authDir
+	authDir := w.currentAuthDirLocked()
 	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
 	return snapshotCoreAuths(cfg, authDir, parser)
