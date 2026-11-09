@@ -45,6 +45,8 @@ import (
 const (
 	devinGetCliModelConfigsURL = "https://server.codeium.com/exa.api_server_pb.ApiServerService/GetCliModelConfigs"
 	devinDefaultUserAgent      = "connect-go/1.19.1 (go1.25.0)"
+
+	defaultDevinMaxCompletionTokens = 64000
 )
 
 func init() {
@@ -77,6 +79,7 @@ type rawDevinModel struct {
 	UID           string
 	Label         string
 	ContextLength int
+	MaxOutput     int
 	Multimodal    bool
 	VendorID      uint64
 	EffortTier    string
@@ -340,6 +343,17 @@ func parseSingleModelConfig(b []byte) rawDevinModel {
 					continue
 				}
 			}
+		case 23: // model config; field 13 = max output tokens
+			if typ == protowire.BytesType {
+				val, mLen := protowire.ConsumeBytes(b)
+				if mLen >= 0 {
+					if maxOutput := parseModelConfigMaxOutput(val); maxOutput > 0 {
+						m.MaxOutput = maxOutput
+					}
+					b = b[mLen:]
+					continue
+				}
+			}
 		case 22: // chat_model_uid
 			if typ == protowire.BytesType {
 				val, mLen := protowire.ConsumeString(b)
@@ -358,6 +372,43 @@ func parseSingleModelConfig(b []byte) rawDevinModel {
 		b = b[skip:]
 	}
 	return m
+}
+
+// parseModelConfigMaxOutput reads the max output tokens (field 13) from a model's
+// nested config message. It returns 0 when the field is missing or malformed.
+func parseModelConfigMaxOutput(b []byte) int {
+	maxOutput := 0
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return 0
+		}
+		b = b[n:]
+		if num == 13 && typ == protowire.VarintType {
+			val, mLen := protowire.ConsumeVarint(b)
+			if mLen < 0 {
+				return 0
+			}
+			maxOutput = int(val)
+			b = b[mLen:]
+			continue
+		}
+		skip := protowire.ConsumeFieldValue(num, typ, b)
+		if skip < 0 {
+			return 0
+		}
+		b = b[skip:]
+	}
+	return maxOutput
+}
+
+// maxCompletionTokens returns the upstream max output, or the historical
+// 64000 default when the upstream config does not report one.
+func maxCompletionTokens(maxOutput int) int {
+	if maxOutput > 0 {
+		return maxOutput
+	}
+	return defaultDevinMaxCompletionTokens
 }
 
 func vendorName(id uint64, uid string) string {
@@ -400,7 +451,7 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 			OwnedBy:                   vendorName(r.VendorID, r.UID),
 			DisplayName:               r.Label,
 			ContextLength:             r.ContextLength,
-			MaxCompletionTokens:       64000,
+			MaxCompletionTokens:       maxCompletionTokens(r.MaxOutput),
 			SupportedInputModalities:  modalities,
 			SupportedOutputModalities: []string{"text"},
 		})
@@ -507,6 +558,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		displayName   string
 		vendorID      uint64
 		contextLength int
+		maxOutput     int
 		multimodal    bool
 		levels        map[string]struct{}
 	}
@@ -536,6 +588,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 				displayName:   cleanDisplayName(r.Label),
 				vendorID:      r.VendorID,
 				contextLength: r.ContextLength,
+				maxOutput:     r.MaxOutput,
 				multimodal:    r.Multimodal,
 				levels:        initialLevels,
 			}
@@ -554,6 +607,10 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		}
 		if r.ContextLength > entry.contextLength {
 			entry.contextLength = r.ContextLength
+		}
+		// Keep the smallest reported output limit so every variant accepts it.
+		if r.MaxOutput > 0 && (entry.maxOutput == 0 || r.MaxOutput < entry.maxOutput) {
+			entry.maxOutput = r.MaxOutput
 		}
 		if level != "" && level != "priority" {
 			entry.levels[level] = struct{}{}
@@ -594,7 +651,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
 			DisplayName:               displayName,
 			ContextLength:             entry.contextLength,
-			MaxCompletionTokens:       64000,
+			MaxCompletionTokens:       maxCompletionTokens(entry.maxOutput),
 			SupportedInputModalities:  modalities,
 			SupportedOutputModalities: []string{"text"},
 			Thinking:                  thinking,
