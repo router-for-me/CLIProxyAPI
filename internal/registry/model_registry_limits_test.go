@@ -117,3 +117,25 @@ func TestSharedAliasWithAnUnknownRouteLimitPublishesNone(t *testing.T) {
 		t.Fatalf("after the custom route left: %d/%d, want 1000000/128000", got.ContextLength, got.MaxCompletionTokens)
 	}
 }
+
+func TestUnknownRouteLimitIsMarked(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("catalog", "claude", []*ModelInfo{limitedModel("team", 1_000_000, 128_000)})
+	r.RegisterClient("custom", "openai-compatibility", []*ModelInfo{limitedModel("team", 0, 0)})
+	got := r.GetModelInfo("team", "")
+	if !got.ContextLengthUnknown || !got.MaxCompletionTokensUnknown {
+		t.Fatalf("unknown marks = %v/%v, want both while a route declares neither", got.ContextLengthUnknown, got.MaxCompletionTokensUnknown)
+	}
+	// A client re-registering a copy of the published model must not declare the marks.
+	published := *got
+	published.ContextLength, published.MaxCompletionTokens = 1_000_000, 128_000
+	r.RegisterClient("catalog", "claude", []*ModelInfo{&published})
+	r.UnregisterClient("custom")
+	if got := r.GetModelInfo("team", ""); got.ContextLengthUnknown || got.MaxCompletionTokensUnknown || got.ContextLength != 1_000_000 {
+		t.Fatalf("after the custom route left: %+v", got)
+	}
+	r.RegisterClient("solo", "openai-compatibility", []*ModelInfo{limitedModel("solo-model", 0, 0)})
+	if got := r.GetModelInfo("solo-model", ""); got.ContextLengthUnknown {
+		t.Fatal("a single route that declares nothing publishes as declared, without a mark")
+	}
+}

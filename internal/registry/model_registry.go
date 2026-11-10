@@ -76,6 +76,11 @@ type ModelInfo struct {
 	MaxContextLength int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
+	// ContextLengthUnknown / MaxCompletionTokensUnknown mark a window or output limit the registry
+	// leaves out because routes sharing the model disagree and one declares none, so clients
+	// must not substitute a default that could exceed a route.
+	ContextLengthUnknown       bool `json:"-"`
+	MaxCompletionTokensUnknown bool `json:"-"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
 	// SupportedInputModalities lists supported input modalities (e.g., TEXT, IMAGE, VIDEO, AUDIO)

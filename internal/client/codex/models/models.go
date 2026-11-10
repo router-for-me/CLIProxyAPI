@@ -133,6 +133,7 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 			applyCodexClientBaseInstructions(entry, model)
 			applyCodexClientMaxContextLengthOverride(entry, model)
 			applyCodexClientMaxTokens(entry, model)
+			applyCodexClientUnknownLimits(entry, info)
 			if thinkingSupport := codexClientThinkingSupport(model); thinkingSupport != nil {
 				applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
 			}
@@ -153,6 +154,7 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		entry := cloneCodexClientModelMap(defaultTemplate)
 		applyCodexClientModelMetadata(entry, id, model, optimizeMultiAgentV2, clientVersion)
 		applyCodexClientMaxTokens(entry, model)
+		applyCodexClientUnknownLimits(entry, registry.LookupModelInfo(id))
 		applyCodexClientSearchToolSupport(entry, id, false, searchToolProvidersForModel, toolSearchCapabilityForModel)
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
@@ -538,6 +540,22 @@ func applyCodexClientMaxContextLengthOverride(entry map[string]any, model map[st
 	if maxContextLength := intModelValue(model, "max_context_length"); maxContextLength > 0 {
 		entry["context_window"] = maxContextLength
 		entry["max_context_window"] = maxContextLength
+	}
+}
+
+// applyCodexClientUnknownLimits clears the template's window and output limit when the registry
+// publishes them as unknown: a template value could exceed the route that lacks one. Codex reads
+// a null window as unset and uses its own default.
+func applyCodexClientUnknownLimits(entry map[string]any, info *registry.ModelInfo) {
+	if info == nil {
+		return
+	}
+	if info.ContextLengthUnknown {
+		entry["context_window"] = nil
+		entry["max_context_window"] = nil
+	}
+	if info.MaxCompletionTokensUnknown {
+		delete(entry, "max_tokens")
 	}
 }
 

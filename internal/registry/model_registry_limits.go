@@ -14,6 +14,18 @@ type routeLimits struct {
 	maxCompletionTokens int
 	inputTokenLimit     int
 	outputTokenLimit    int
+	// windowUnknown / outputUnknown mark a published limit left out because a route declares none
+	// (see published); declared limits never set them.
+	windowUnknown bool
+	outputUnknown bool
+}
+
+// declaredRouteLimits is what a client declares for a model: its limits without the unknown marks,
+// which only the registry sets when publishing.
+func declaredRouteLimits(info *ModelInfo) routeLimits {
+	limits := routeLimitsOf(info)
+	limits.windowUnknown, limits.outputUnknown = false, false
+	return limits
 }
 
 func routeLimitsOf(info *ModelInfo) routeLimits {
@@ -26,6 +38,8 @@ func routeLimitsOf(info *ModelInfo) routeLimits {
 		maxCompletionTokens: info.MaxCompletionTokens,
 		inputTokenLimit:     info.InputTokenLimit,
 		outputTokenLimit:    info.OutputTokenLimit,
+		windowUnknown:       info.ContextLengthUnknown,
+		outputUnknown:       info.MaxCompletionTokensUnknown,
 	}
 }
 
@@ -99,6 +113,8 @@ func (s limitSet) published() (routeLimits, bool) {
 		maxCompletionTokens: pick(declared.maxCompletionTokens, output),
 		inputTokenLimit:     pick(declared.inputTokenLimit, window),
 		outputTokenLimit:    pick(declared.outputTokenLimit, output),
+		windowUnknown:       windowUnknown,
+		outputUnknown:       outputUnknown,
 	}, true
 }
 
@@ -112,6 +128,8 @@ func (l routeLimits) applyTo(info *ModelInfo) bool {
 	info.MaxCompletionTokens = l.maxCompletionTokens
 	info.InputTokenLimit = l.inputTokenLimit
 	info.OutputTokenLimit = l.outputTokenLimit
+	info.ContextLengthUnknown = l.windowUnknown
+	info.MaxCompletionTokensUnknown = l.outputUnknown
 	return true
 }
 
@@ -174,7 +192,7 @@ func (r *ModelRegistry) reconcileClientRouteLimitsLocked(clientID string) {
 	touched := make([]string, 0, len(counted)+len(current))
 	for modelID, previous := range counted {
 		touched = append(touched, modelID)
-		if info := current[modelID]; info != nil && previous == (countedRouteLimits{provider: provider, limits: routeLimitsOf(info)}) {
+		if info := current[modelID]; info != nil && previous == (countedRouteLimits{provider: provider, limits: declaredRouteLimits(info)}) {
 			continue
 		}
 		r.countRouteLimitsLocked(modelID, previous, -1)
@@ -188,7 +206,7 @@ func (r *ModelRegistry) reconcileClientRouteLimitsLocked(clientID string) {
 			continue
 		}
 		touched = append(touched, modelID)
-		entry := countedRouteLimits{provider: provider, limits: routeLimitsOf(info)}
+		entry := countedRouteLimits{provider: provider, limits: declaredRouteLimits(info)}
 		r.countRouteLimitsLocked(modelID, entry, 1)
 		if counted == nil {
 			counted = make(map[string]countedRouteLimits)
