@@ -156,6 +156,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 			metadata["disable_cooling"] = *entry.DisableCooling
 		}
 		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addMaxQuotaCooldownToMetadata(entry.MaxQuotaCooldownSeconds, metadata)
 		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
@@ -224,6 +225,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			metadata["disable_cooling"] = *ck.DisableCooling
 		}
 		addRequestRetryToMetadata(ck.RequestRetry, metadata)
+		addMaxQuotaCooldownToMetadata(ck.MaxQuotaCooldownSeconds, metadata)
 		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
@@ -314,6 +316,7 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 			metadata["disable_cooling"] = *entry.DisableCooling
 		}
 		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addMaxQuotaCooldownToMetadata(entry.MaxQuotaCooldownSeconds, metadata)
 		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
@@ -403,6 +406,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				metadata["disable_cooling"] = *disableCooling
 			}
 			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addMaxQuotaCooldownToMetadata(compat.MaxQuotaCooldownSeconds, metadata)
 			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
@@ -455,6 +459,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				metadata["disable_cooling"] = *disableCooling
 			}
 			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addMaxQuotaCooldownToMetadata(compat.MaxQuotaCooldownSeconds, metadata)
 			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
@@ -536,6 +541,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 			metadata["disable_cooling"] = *compat.DisableCooling
 		}
 		addRequestRetryToMetadata(compat.RequestRetry, metadata)
+		addMaxQuotaCooldownToMetadata(compat.MaxQuotaCooldownSeconds, metadata)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,

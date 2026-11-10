@@ -588,6 +588,7 @@ upstream:
 #       prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #         - status: 400        # HTTP status code to match
 #           match:             # optional: string contains matching
@@ -652,6 +653,7 @@ upstream:
 #       prefix: "native" # optional: require calls like "native/gemini-3-pro-preview" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #         - status: 400
 #           match:
@@ -716,6 +718,7 @@ upstream:
 #       prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #         - status: 400
 #           match:
@@ -779,6 +782,7 @@ upstream:
 #       prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #         - status: 400
 #           match:
@@ -895,6 +899,7 @@ upstream:
 #       prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
 #         - status: 400
 #           match:
@@ -933,6 +938,7 @@ upstream:
 #       prefix: "meta" # optional: require calls like "meta/muse-spark-1.3" to target this credential
 #       disable-cooling: false # optional override: true disables cooling, false enables it; omit to inherit global
 #       request-retry: 3 # optional per-auth override; 0 disables additional rounds; omit or set < 0 to inherit global
+#       max-quota-cooldown-seconds: 300 # optional: cap an inherited upstream Retry-After quota cooldown (seconds); set this on a key that cascades to another multi-account gateway so one exhausted account cannot lock the whole key for days; the capped window is also the half-open re-probe interval; omit, 0 or negative keeps the full upstream cooldown
 #       base-url: "https://api.meta.ai/v1" # optional: defaults to https://api.meta.ai/v1
 #       proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #       models:

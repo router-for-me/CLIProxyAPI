@@ -62,6 +62,15 @@ type VertexCompatKey struct {
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
+	// MaxQuotaCooldownSeconds optionally caps the effective duration of a quota
+	// cooldown that this credential inherits from an upstream Retry-After 429.
+	// Set this when the entry points at another gateway pooling multiple accounts
+	// behind one key, so one exhausted downstream account cannot lock the whole
+	// cascade for its multi-day quota window. The capped window doubles as a
+	// half-open probe interval; a healthy downstream account clears the cooldown
+	// on the first success. Nil, zero or negative preserves the legacy behavior.
+	MaxQuotaCooldownSeconds *int `yaml:"max-quota-cooldown-seconds,omitempty" json:"max-quota-cooldown-seconds,omitempty"`
+
 	// Interactions optionally enables native Vertex Interactions API routing for this key.
 	Interactions *bool `yaml:"interactions,omitempty" json:"interactions,omitempty"`
 
