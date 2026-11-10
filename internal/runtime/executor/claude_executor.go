@@ -453,7 +453,8 @@ func (e *ClaudeExecutor) applyNativeToolSearchFallback(ctx context.Context, auth
 // needs the cloaked Claude Code wire, which sends the mid-conversation system
 // beta, and a model that accepts it. Strict cloaking drops every caller system
 // instruction and rebuild_mid_system_message folds the turns into the system
-// field, so both keep the top-level path, as does an uncloaked request, which
+// field, so both keep the top-level path; drop_mid_system_message would
+// discard in-place turns, so it keeps the top-level path too, as does an uncloaked request, which
 // forwards the caller's betas unchanged.
 func (e *ClaudeExecutor) pinResponsesSystemItemPlacement(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, upstreamModel string, policy claudeWirePolicy, settings claudeCloakSettings) context.Context {
 	if from != sdktranslator.FormatOpenAIResponse {
@@ -462,7 +463,8 @@ func (e *ClaudeExecutor) pinResponsesSystemItemPlacement(ctx context.Context, au
 	inPlace := policy.Cloak &&
 		!settings.strictMode &&
 		!util.IsClaudeLegacySystemReminderModel(upstreamModel) &&
-		!rebuildMidSystemMessageEnabled(e.cfg, auth)
+		!rebuildMidSystemMessageEnabled(e.cfg, auth) &&
+		!dropMidSystemMessageEnabled(e.cfg, auth)
 	return responsesclaude.WithTopLevelSystemItems(ctx, !inPlace)
 }
 
