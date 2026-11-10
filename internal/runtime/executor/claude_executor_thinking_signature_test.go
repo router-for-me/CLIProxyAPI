@@ -165,7 +165,7 @@ func TestClaudeThinkingSignaturesSurviveSensitiveWordObfuscation(t *testing.T) {
 			if contentBlock.Get("type").String() != "text" {
 				return true
 			}
-			if text := contentBlock.Get("text").String(); strings.Contains(text, "\u200B") {
+			if text := contentBlock.Get("text").String(); strings.Contains(text, "\u034F") {
 				obfuscatedUserText = true
 				return false
 			}

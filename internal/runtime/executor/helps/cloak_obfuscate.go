@@ -9,8 +9,18 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-// zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
-const zeroWidthSpace = "\u200B"
+// cloakJoiner is the invisible Unicode combining grapheme joiner (U+034F)
+// inserted into sensitive words to break blocked-keyword matching. The legacy
+// cloak character U+200B (zero-width space) must no longer be used because
+// upstream filters (e.g. Antigravity) strip it before matching keywords.
+const cloakJoiner = "\u034F"
+
+// StripCloakChars removes every cloak character from s, including the legacy
+// zero-width space (U+200B) used before the combining grapheme joiner.
+func StripCloakChars(s string) string {
+	s = strings.ReplaceAll(s, cloakJoiner, "")
+	return strings.ReplaceAll(s, "\u200B", "")
+}
 
 // SensitiveWordMatcher holds the compiled regex for matching sensitive words.
 type SensitiveWordMatcher struct {
@@ -28,7 +38,7 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	var validWords []string
 	for _, w := range words {
 		w = strings.TrimSpace(w)
-		if utf8.RuneCountInString(w) >= 2 && !strings.Contains(w, zeroWidthSpace) {
+		if utf8.RuneCountInString(w) >= 2 && !strings.Contains(w, cloakJoiner) {
 			validWords = append(validWords, w)
 		}
 	}
@@ -57,9 +67,9 @@ func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	return &SensitiveWordMatcher{regex: re}
 }
 
-// obfuscateWord inserts a zero-width space after the first grapheme.
+// obfuscateWord inserts the invisible cloak joiner after the first grapheme.
 func obfuscateWord(word string) string {
-	if strings.Contains(word, zeroWidthSpace) {
+	if strings.Contains(word, cloakJoiner) {
 		return word
 	}
 
@@ -69,7 +79,7 @@ func obfuscateWord(word string) string {
 		return word
 	}
 
-	return string(r) + zeroWidthSpace + word[size:]
+	return string(r) + cloakJoiner + word[size:]
 }
 
 // obfuscateText replaces all sensitive words in the text.

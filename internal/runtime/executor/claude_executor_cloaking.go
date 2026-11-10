@@ -1627,11 +1627,11 @@ func hasFableReportingBlockDoc(doc *ojson.Doc) bool {
 
 func hasFableReportingBlockFromSystem(system ojson.Result) bool {
 	if !system.IsArray() {
-		str := strings.ReplaceAll(system.String(), "\u200B", "")
+		str := helps.StripCloakChars(system.String())
 		return str == claudeCodeFableReportingOutcomes || strings.Contains(str, claudeCodeFableReportingOutcomes)
 	}
 	for _, blk := range system.Array() {
-		text := strings.ReplaceAll(blk.Get("text").String(), "\u200B", "")
+		text := helps.StripCloakChars(blk.Get("text").String())
 		if text == claudeCodeFableReportingOutcomes {
 			return true
 		}
@@ -1702,7 +1702,7 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 				blocks := make([]string, 0, len(system.Array()))
 				removed := false
 				for _, blk := range system.Array() {
-					if strings.ReplaceAll(blk.Get("text").String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+					if helps.StripCloakChars(blk.Get("text").String()) == claudeCodeFableReportingOutcomes {
 						removed = true
 						continue
 					}
@@ -1712,7 +1712,7 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 					_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
 					changed = true
 				}
-			} else if strings.ReplaceAll(system.String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+			} else if helps.StripCloakChars(system.String()) == claudeCodeFableReportingOutcomes {
 				if doc.Delete("system") == nil {
 					changed = true
 				}
@@ -1820,7 +1820,7 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 			blocks := make([]string, 0, len(system.Array()))
 			removed := false
 			for _, blk := range system.Array() {
-				if strings.ReplaceAll(blk.Get("text").String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+				if helps.StripCloakChars(blk.Get("text").String()) == claudeCodeFableReportingOutcomes {
 					removed = true
 					continue
 				}
@@ -1830,7 +1830,7 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 				_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
 				changed = true
 			}
-		} else if strings.ReplaceAll(system.String(), "\u200B", "") == claudeCodeFableReportingOutcomes {
+		} else if helps.StripCloakChars(system.String()) == claudeCodeFableReportingOutcomes {
 			if doc.Delete("system") == nil {
 				changed = true
 			}

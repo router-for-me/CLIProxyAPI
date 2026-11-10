@@ -5884,7 +5884,7 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 		t.Fatalf("strict mode should add only currentDate before user text, got %d content blocks", len(content))
 	}
 	assertClaudeCodeCurrentDateBlock(t, content[0])
-	if got := content[1].Get("text").String(); !strings.Contains(got, "\u200B") {
+	if got := content[1].Get("text").String(); !strings.Contains(got, "\u034F") {
 		t.Fatalf("expected configured sensitive word obfuscation to apply, got %q", got)
 	}
 }
@@ -6423,7 +6423,7 @@ func TestClaudeExecutor_PayloadOverrideFableModelLeavesBuiltinsUnchanged(t *test
 	if ojson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(helps.StripCloakChars(ojson.GetBytes(seenBody, "system").Raw), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -6700,7 +6700,7 @@ func TestClaudeExecutor_PayloadFableProbeOverrideKeepsBuiltinAdditions(t *testin
 	if ojson.GetBytes(seenBody, "fallbacks.0.model").String() != "claude-opus-5" {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(helps.StripCloakChars(ojson.GetBytes(seenBody, "system").Raw), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 	if ojson.GetBytes(seenBody, "max_tokens").Int() != 1 || ojson.GetBytes(seenBody, "thinking.display").String() != "updates" {
@@ -6891,7 +6891,7 @@ func TestClaudeExecutor_PayloadSystemTTLOverrideKeepsBuiltinFableReporting(t *te
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(helps.StripCloakChars(ojson.GetBytes(seenBody, "system").Raw), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 	if ojson.GetBytes(seenBody, "system.0.cache_control.ttl").String() != cfg.Payload.Override[0].Params["system.0.cache_control.ttl"] {
@@ -7287,11 +7287,11 @@ func TestClaudeExecutor_FableWithSensitiveWordsHasSingleObfuscatedReportingBlock
 	reportingCount := 0
 	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		raw := blk.Get("text").String()
-		cleaned := strings.ReplaceAll(raw, "\u200B", "")
+		cleaned := helps.StripCloakChars(raw)
 		if cleaned == claudeCodeFableReportingOutcomes {
 			reportingCount++
-			if !strings.Contains(raw, "\u200B") {
-				t.Fatalf("Reporting block must be obfuscated with zero-width space, got: %q", raw)
+			if !strings.Contains(raw, "\u034F") {
+				t.Fatalf("Reporting block must be obfuscated with the cloak joiner, got: %q", raw)
 			}
 			if strings.Contains(raw, "Reporting") {
 				t.Fatalf("Reporting block must not contain cleartext sensitive word 'Reporting', got: %q", raw)
@@ -7350,11 +7350,11 @@ func TestClaudeExecutor_PayloadSonnetToFableWithSensitiveWordsDoesNotInjectRepor
 	reportingCount := 0
 	for _, blk := range ojson.GetBytes(seenBody, "system").Array() {
 		raw := blk.Get("text").String()
-		cleaned := strings.ReplaceAll(raw, "\u200B", "")
+		cleaned := helps.StripCloakChars(raw)
 		if cleaned == claudeCodeFableReportingOutcomes {
 			reportingCount++
-			if !strings.Contains(raw, "\u200B") {
-				t.Fatalf("Reporting block must be obfuscated with zero-width space, got: %q", raw)
+			if !strings.Contains(raw, "\u034F") {
+				t.Fatalf("Reporting block must be obfuscated with the cloak joiner, got: %q", raw)
 			}
 			if strings.Contains(raw, "Reporting") {
 				t.Fatalf("Reporting block must not contain cleartext sensitive word 'Reporting', got: %q", raw)
@@ -7410,10 +7410,10 @@ func TestClaudeExecutor_PayloadFableToSonnetPreservesObfuscatedBuiltins(t *testi
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	if !strings.Contains(strings.ReplaceAll(ojson.GetBytes(seenBody, "system").Raw, "\u200b", ""), "eporting outcomes") {
+	if !strings.Contains(helps.StripCloakChars(ojson.GetBytes(seenBody, "system").Raw), "eporting outcomes") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
-	if !strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "\u200b") {
+	if !strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "\u034f") {
 		t.Fatalf("payload override must not rerun built-ins: %s", seenBody)
 	}
 
@@ -7455,13 +7455,13 @@ func TestClaudeExecutor_SensitiveWordsDoNotCorruptBillingHeaderTags(t *testing.T
 		t.Fatalf("Execute error = %v", err)
 	}
 
-	// system[0] billing header must NOT contain zero-width spaces in its tags
+	// system[0] billing header must NOT contain cloak characters in its tags
 	billingText := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header: cc_version=") {
 		t.Fatalf("billing header must start cleanly without obfuscation, got: %q", billingText)
 	}
-	if strings.Contains(billingText, "\u200B") {
-		t.Fatalf("billing header must not contain zero-width space characters, got: %q", billingText)
+	if strings.ContainsAny(billingText, "\u200B\u034F") {
+		t.Fatalf("billing header must not contain cloak characters, got: %q", billingText)
 	}
 	if !strings.Contains(billingText, "cc_entrypoint=cli;") {
 		t.Fatalf("billing header must preserve cc_entrypoint=cli;, got: %q", billingText)
@@ -7506,8 +7506,8 @@ func TestClaudeExecutor_DisabledCloakingSkipsSensitiveWordObfuscation(t *testing
 	}
 
 	rawBody := string(seenBody)
-	if strings.Contains(rawBody, "\u200B") {
-		t.Fatalf("disabled cloaking must not insert zero-width spaces into Execute body, got: %s", rawBody)
+	if strings.ContainsAny(rawBody, "\u200B\u034F") {
+		t.Fatalf("disabled cloaking must not insert cloak characters into Execute body, got: %s", rawBody)
 	}
 	if !strings.Contains(rawBody, "confidential") || !strings.Contains(rawBody, "secret") {
 		t.Fatalf("expected cleartext preserved in Execute, got: %s", rawBody)
@@ -7555,8 +7555,8 @@ func TestClaudeExecutor_DisabledCloakingStreamSkipsSensitiveWordObfuscation(t *t
 	}
 
 	rawBody := string(seenBody)
-	if strings.Contains(rawBody, "\u200B") {
-		t.Fatalf("disabled cloaking must not insert zero-width spaces into ExecuteStream body, got: %s", rawBody)
+	if strings.ContainsAny(rawBody, "\u200B\u034F") {
+		t.Fatalf("disabled cloaking must not insert cloak characters into ExecuteStream body, got: %s", rawBody)
 	}
 	if !strings.Contains(rawBody, "confidential") || !strings.Contains(rawBody, "secret") {
 		t.Fatalf("expected cleartext preserved in ExecuteStream, got: %s", rawBody)

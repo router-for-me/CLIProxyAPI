@@ -154,8 +154,8 @@ func TestSanitizeDevinSystemPrompt_AndSensitiveWords(t *testing.T) {
 	if strings.Contains(sanitized, "You are Claude Code") {
 		t.Errorf("sanitized prompt still contains Claude Code identity: %s", sanitized)
 	}
-	if strings.Contains(sanitized, "API") && !strings.Contains(sanitized, zeroWidthSpace) {
-		t.Errorf("API was not obfuscated with zero-width space")
+	if strings.Contains(sanitized, "API") && !strings.Contains(sanitized, cloakJoiner) {
+		t.Errorf("API was not obfuscated with the cloak joiner")
 	}
 }
 
