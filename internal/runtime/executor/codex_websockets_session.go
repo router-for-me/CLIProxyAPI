@@ -95,6 +95,14 @@ type codexWebsocketSession struct {
 	activeResponseID       string
 	activeResponseTerminal bool
 
+	// endedResponseIDs remembers, bounded and guarded by activeMu, the
+	// responses that were still running on an upstream socket when it was
+	// lost. A late response.interrupt for one of them asks for something
+	// that already happened and is absorbed instead of rejected: the loss was
+	// reported once to the client, and a second error frame is fatal for
+	// clients that treat any error as a failed run. Ids are never replayed.
+	endedResponseIDs []string
+
 	readerConn *websocket.Conn
 
 	upstreamDisconnectOnce    sync.Once
@@ -155,6 +163,51 @@ func (s *codexWebsocketSession) activate(conn *websocket.Conn) chan codexWebsock
 	}
 	s.setActiveLocked(conn, ch)
 	return ch
+}
+
+// maxEndedResponseIDs bounds endedResponseIDs; the oldest ids are dropped first.
+const maxEndedResponseIDs = 32
+
+// rememberEndedResponsesLocked records the responses known on conn when its
+// socket is lost. The caller must hold activeMu.
+func (s *codexWebsocketSession) rememberEndedResponsesLocked(conn *websocket.Conn) {
+	if s == nil || conn == nil || s.responseStateConn != conn {
+		return
+	}
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		for _, known := range s.endedResponseIDs {
+			if known == id {
+				return
+			}
+		}
+		if len(s.endedResponseIDs) >= maxEndedResponseIDs {
+			s.endedResponseIDs = append(s.endedResponseIDs[:0], s.endedResponseIDs[1:]...)
+		}
+		s.endedResponseIDs = append(s.endedResponseIDs, id)
+	}
+	// Only the response still in flight is recorded. Responses that already
+	// reached a terminal event keep their existing contract after a
+	// disconnect (ErrNoActiveUpstreamWebsocket).
+	if !s.activeResponseTerminal {
+		add(s.activeResponseID)
+	}
+}
+
+// responseEndedLocked reports whether id belongs to a response whose socket
+// was lost. The caller must hold activeMu.
+func (s *codexWebsocketSession) responseEndedLocked(id string) bool {
+	if s == nil || id == "" {
+		return false
+	}
+	for _, known := range s.endedResponseIDs {
+		if known == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *codexWebsocketSession) resetTerminalError(conn *websocket.Conn) {
@@ -940,6 +993,10 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	turnContext := sess.turnContext
 	sess.turnContext = nil
 	closer := sess.connCloser
+	// Lock order connMu -> activeMu, as in markTerminalError.
+	sess.activeMu.Lock()
+	sess.rememberEndedResponsesLocked(conn)
+	sess.activeMu.Unlock()
 	sess.lifecycle = nil
 	sess.lifecycleModel = ""
 	sess.conn = nil

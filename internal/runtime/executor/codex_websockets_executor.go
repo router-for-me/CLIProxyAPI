@@ -214,11 +214,24 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	if sess == nil {
 		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
 	}
+	// A response whose socket was already lost is reported to the client
+	// once, by the turn that owned it. Interrupting it again is idempotent:
+	// nothing is written upstream, and the connection stays usable.
+	endedByLoss := func(id string) bool {
+		sess.activeMu.Lock()
+		defer sess.activeMu.Unlock()
+		return sess.responseEndedLocked(id)
+	}
+	targetID := ojson.GetBytesNoCopy(payload, "response_id").String()
 	sess.connMu.Lock()
 	conn := sess.conn
 	authID := sess.authID
 	sess.connMu.Unlock()
 	if conn == nil {
+		if endedByLoss(targetID) {
+			log.WithField("outcome", "already_lost").Debug("codex websockets: response.interrupt handled")
+			return nil
+		}
 		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
 	}
 	// Account checks may call back into the auth manager; do not hold session
@@ -227,10 +240,13 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	sess.connMu.Lock()
 	if sess.conn != conn {
 		sess.connMu.Unlock()
+		if endedByLoss(targetID) {
+			log.WithField("outcome", "already_lost").Debug("codex websockets: response.interrupt handled")
+			return nil
+		}
 		return cliproxyexecutor.ErrNoActiveUpstreamWebsocket
 	}
 	sess.activeMu.Lock()
-	targetID := ojson.GetBytesNoCopy(payload, "response_id").String()
 	_, alreadyTerminal := sess.terminalResponseIDs[targetID]
 	alreadyTerminal = alreadyTerminal && sess.responseStateConn == conn
 	// activeResponseID/Terminal track the running response at read-loop
@@ -245,10 +261,17 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	if sess.terminalConn == conn {
 		disconnectErr = sess.terminalErr
 	}
+	// The loss is already marked but not yet consumed by the turn: an
+	// interrupt for the response it killed is absorbed too.
+	lostTarget := disconnectErr != nil && targetID != "" && sess.activeResponseID == targetID
 	// Terminal state and the active channel must belong to one snapshot:
 	// completion can otherwise land between the checks and produce a stale 400.
 	sess.activeMu.Unlock()
 	sess.connMu.Unlock()
+	if lostTarget && cliproxyexecutor.IsUpstreamWebsocketTurnError(disconnectErr) {
+		log.WithField("outcome", "already_lost").Debug("codex websockets: response.interrupt handled")
+		return nil
+	}
 	if disconnectErr != nil {
 		return disconnectErr
 	}
