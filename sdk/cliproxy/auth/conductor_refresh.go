@@ -1135,7 +1135,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		return auth, false
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
-	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.runtimeConfigSnapshot()); ruleMatched {
+	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.requestScopedErrorConfig(ctx)); ruleMatched {
 		return auth, false
 	}
 	failedToken := authAccessTokenForRequest(ctx, auth, clientHeaders...)
@@ -1346,6 +1346,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.RegistrationEpoch == auth.RegistrationEpoch &&
 			current.CredentialVersion == auth.CredentialVersion &&
 			authHasUnchangedRejectedRefreshToken(current) {
+			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			current.Generation++
 			current.UpdatedAt = checkNow
 			current.Unavailable = true
@@ -1366,7 +1367,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			if current.RefreshError != nil && strings.TrimSpace(current.RefreshError.Message) != "" {
 				msg = current.RefreshError.Message
 			}
-			current.LastError = &Error{Code: "unauthorized", Message: msg, HTTPStatus: http.StatusUnauthorized}
+			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
+			if current.LastError.Code == "refresh_outcome_unknown" {
+				current.StatusMessage = current.LastError.Message
+			}
 			m.auths[id] = current
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
@@ -1383,7 +1387,22 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
-	if err != nil && errors.Is(err, context.Canceled) && !codex.IsRefreshOutcomeUnknown(err) {
+	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
+	if refreshCanceled {
+		var partitions interface {
+			OuterRefreshError() error
+			SIWCRefreshError() error
+		}
+		if errors.As(err, &partitions) {
+			for _, partitionErr := range []error{partitions.OuterRefreshError(), partitions.SIWCRefreshError()} {
+				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
+					refreshCanceled = false
+					break
+				}
+			}
+		}
+	}
+	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
@@ -1551,8 +1570,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.NextRefreshAfter = time.Time{}
 					current.NextRetryAfter = time.Time{}
 					current.RefreshFailures = 0
-					current.LastError = &Error{Code: "unauthorized", Message: sanitizedRefreshErr.Message, HTTPStatus: http.StatusUnauthorized}
-					if unauthorized {
+					current.LastError = refreshAccessError(current, sanitizedRefreshErr.Message, accessTokenRejected, wasTerminalUnauthorized)
+					if current.LastError.Code == "refresh_outcome_unknown" {
+						current.StatusMessage = current.LastError.Message
+					} else if unauthorized {
 						current.StatusMessage = "unauthorized"
 					} else {
 						current.StatusMessage = "unauthorized (refresh token invalid)"
@@ -1658,7 +1679,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			updated.StatusMessage = "unauthorized (refresh token invalid)"
 		}
 		if updated.LastError == nil && updated.RefreshError != nil {
-			updated.LastError = &Error{Code: "unauthorized", Message: updated.RefreshError.Message, HTTPStatus: http.StatusUnauthorized}
+			updated.LastError = refreshAccessError(updated, updated.RefreshError.Message, failedAccessToken != "" && authMatchesTokenPartition(updated, failedAccessToken), hasUnauthorizedAuthFailure(base))
+			if updated.LastError.Code == "refresh_outcome_unknown" {
+				updated.StatusMessage = updated.LastError.Message
+			}
 		}
 	}
 	updated.UpdatedAt = now

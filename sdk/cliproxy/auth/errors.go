@@ -47,6 +47,12 @@ const ErrorCodeTransientRateLimit = "transient_rate_limit"
 
 const transientRateLimitErrorCode = ErrorCodeTransientRateLimit
 
+// ErrorCodeCredentialQuota marks a rate-limit/quota refusal that applies to the
+// entire credential across all models rather than only the reporting model.
+const ErrorCodeCredentialQuota = "credential_quota"
+
+const credentialQuotaErrorCode = ErrorCodeCredentialQuota
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.

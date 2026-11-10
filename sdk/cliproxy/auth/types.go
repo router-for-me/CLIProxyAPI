@@ -1094,6 +1094,15 @@ const CodexOuterRefreshLead = 96 * time.Hour
 // a Sign in with ChatGPT (SIWC) token, matching pi's DEFAULT_OAUTH_MINIMUM_VALIDITY_MS (5 minutes).
 const CodexSIWCRefreshLead = 5 * time.Minute
 
+// SIWCEarliestRefreshTime returns the server's lower bound for SIWC token renewal.
+func (a *Auth) SIWCEarliestRefreshTime() (time.Time, bool) {
+	if a == nil || a.Metadata == nil {
+		return time.Time{}, false
+	}
+	siwc, _ := a.Metadata["siwc"].(map[string]any)
+	return lookupMetadataTime(siwc, "earliest_refresh_at")
+}
+
 // SIWCStatus represents the read-only validity state of a Codex SIWC credential.
 type SIWCStatus string
 
@@ -1311,28 +1320,26 @@ func CodexSIWCNeedsRefresh(a *Auth, now time.Time) (dueAt time.Time, hasRefresh 
 
 	siwcToken, _ := siwcMap["access_token"].(string)
 	siwcToken = strings.TrimSpace(siwcToken)
-	if siwcToken == "" {
+	due := now
+	if siwcToken != "" && !a.isSIWCAccessTokenRejected(siwcToken) {
+		// The legacy expired field already includes a margin; prefer the real expiry.
+		expiry, hasExpiry := a.SIWCRealExpirationTime()
+		if !hasExpiry {
+			expiry, hasExpiry = a.SIWCExpirationTime()
+		}
+		if hasExpiry && !expiry.IsZero() {
+			due = expiry.Add(-CodexSIWCRefreshLead)
+		} else if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
+			due = lastRefresh.Add(CodexSIWCRefreshLead)
+		}
+	}
+	if earliest, okEarliest := a.SIWCEarliestRefreshTime(); okEarliest && earliest.After(due) {
+		due = earliest
+	}
+	if !due.After(now) {
 		return now, true, true
 	}
-	if a.isSIWCAccessTokenRejected(siwcToken) {
-		return now, true, true
-	}
-	expiry, hasExpiry := a.SIWCExpirationTime()
-	if hasExpiry && !expiry.IsZero() {
-		due := expiry.Add(-CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
-	}
-	if lastRefresh, okLast := lookupMetadataTime(siwcMap, "last_refresh", "lastRefresh"); okLast && !lastRefresh.IsZero() {
-		due := lastRefresh.Add(CodexSIWCRefreshLead)
-		if !due.After(now) {
-			return now, true, true
-		}
-		return due, true, false
-	}
-	return now, true, true
+	return due, true, false
 }
 
 // OuterAccessTokenExpirationTime returns the expiration time of the outer access_token,

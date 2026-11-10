@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1884,4 +1885,362 @@ func TestScheduleProcessEventsStopsOnContextDone(t *testing.T) {
 
 func hexString(data []byte) string {
 	return strings.ToLower(fmt.Sprintf("%x", data))
+}
+
+func TestReloadConfigUpdatesAuthDirWatchAndSnapshots(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "auth-a")
+	dirB := filepath.Join(tmpDir, "auth-b")
+	if errMkdirA := os.MkdirAll(dirA, 0o755); errMkdirA != nil {
+		t.Fatalf("failed to create auth dir A: %v", errMkdirA)
+	}
+	if errMkdirB := os.MkdirAll(dirB, 0o755); errMkdirB != nil {
+		t.Fatalf("failed to create auth dir B: %v", errMkdirB)
+	}
+
+	credAPath := filepath.Join(dirA, "cred-a.json")
+	if errWriteA := os.WriteFile(credAPath, []byte(`{"type":"codex","email":"a@example.com"}`), 0o600); errWriteA != nil {
+		t.Fatalf("failed to write cred-a.json: %v", errWriteA)
+	}
+	sharedAPath := filepath.Join(dirA, "shared.json")
+	if errWriteSharedA := os.WriteFile(sharedAPath, []byte(`{"type":"codex","email":"shared-a@example.com"}`), 0o600); errWriteSharedA != nil {
+		t.Fatalf("failed to write shared.json in dirA: %v", errWriteSharedA)
+	}
+	credBPath := filepath.Join(dirB, "cred-b.json")
+	if errWriteB := os.WriteFile(credBPath, []byte(`{"type":"codex","email":"b@example.com"}`), 0o600); errWriteB != nil {
+		t.Fatalf("failed to write cred-b.json: %v", errWriteB)
+	}
+	sharedBPath := filepath.Join(dirB, "shared.json")
+	if errWriteSharedB := os.WriteFile(sharedBPath, []byte(`{"type":"codex","email":"shared-b@example.com"}`), 0o600); errWriteSharedB != nil {
+		t.Fatalf("failed to write shared.json in dirB: %v", errWriteSharedB)
+	}
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(authDir string) {
+		t.Helper()
+		cfg := &config.Config{
+			AuthDir:            authDir,
+			CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+		}
+		data, errMarshal := yaml.Marshal(cfg)
+		if errMarshal != nil {
+			t.Fatalf("failed to marshal config: %v", errMarshal)
+		}
+		if errWriteCfg := os.WriteFile(configPath, data, 0o600); errWriteCfg != nil {
+			t.Fatalf("failed to write config: %v", errWriteCfg)
+		}
+	}
+	writeConfig(dirA)
+
+	w, errNewWatcher := NewWatcher(configPath, dirA, nil)
+	if errNewWatcher != nil {
+		t.Fatalf("NewWatcher failed: %v", errNewWatcher)
+	}
+	defer func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("failed to stop watcher: %v", errStop)
+		}
+	}()
+
+	queue := make(chan AuthUpdate, 16)
+	w.SetAuthUpdateQueue(queue)
+	w.SetConfig(&config.Config{
+		AuthDir:            dirA,
+		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if errStart := w.Start(ctx); errStart != nil {
+		t.Fatalf("Start failed: %v", errStart)
+	}
+
+	initialSeen := make(map[string]bool)
+	for len(initialSeen) < 2 {
+		select {
+		case initial := <-queue:
+			if initial.Action != AuthUpdateActionAdd {
+				t.Fatalf("unexpected initial auth update: %+v", initial)
+			}
+			initialSeen[initial.ID] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for initial updates, got %v", initialSeen)
+		}
+	}
+	if !initialSeen["cred-a.json"] || !initialSeen["shared.json"] {
+		t.Fatalf("expected cred-a.json and shared.json in initial updates, got %v", initialSeen)
+	}
+
+	// Switch auth-dir from dirA to dirB at runtime.
+	writeConfig(dirB)
+	w.ReloadConfigIfChanged()
+
+	seenAddB := false
+	seenModifyShared := false
+	seenDeleteA := false
+	for !seenAddB || !seenModifyShared || !seenDeleteA {
+		select {
+		case update := <-queue:
+			if update.ID == "cred-b.json" && update.Action == AuthUpdateActionAdd {
+				seenAddB = true
+			}
+			if update.ID == "shared.json" && update.Action == AuthUpdateActionModify && update.Auth != nil && update.Auth.Label == "shared-b@example.com" {
+				seenModifyShared = true
+			}
+			if update.ID == "cred-a.json" && update.Action == AuthUpdateActionDelete {
+				seenDeleteA = true
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for auth-dir switch updates (seenAddB=%v, seenModifyShared=%v, seenDeleteA=%v)", seenAddB, seenModifyShared, seenDeleteA)
+		}
+	}
+
+	snapshot := w.SnapshotCoreAuths()
+	if len(snapshot) != 2 {
+		t.Fatalf("expected SnapshotCoreAuths to return 2 entries from dirB, got %+v", snapshot)
+	}
+	w.clientsMutex.RLock()
+	_, staleSharedIndexed := w.fileAuthsByPath[w.normalizeAuthPath(sharedAPath)]
+	_, newSharedIndexed := w.fileAuthsByPath[w.normalizeAuthPath(sharedBPath)]
+	w.clientsMutex.RUnlock()
+	if staleSharedIndexed || !newSharedIndexed {
+		t.Fatalf("expected fileAuthsByPath to drop dirA shared.json (%v) and keep dirB shared.json (%v)", staleSharedIndexed, newSharedIndexed)
+	}
+
+	fileSnapshot, errSnapshotFile := w.SnapshotAuthFile(credBPath)
+	if errSnapshotFile != nil {
+		t.Fatalf("SnapshotAuthFile(credBPath) failed: %v", errSnapshotFile)
+	}
+	if len(fileSnapshot) != 1 || fileSnapshot[0].ID != "cred-b.json" {
+		t.Fatalf("expected SnapshotAuthFile(credBPath) ID=cred-b.json, got %+v", fileSnapshot)
+	}
+
+	// Events for the old directory must be ignored, while events in the new directory must be processed.
+	credA2Path := filepath.Join(dirA, "cred-a2.json")
+	if errWriteA2 := os.WriteFile(credA2Path, []byte(`{"type":"codex","email":"a2@example.com"}`), 0o600); errWriteA2 != nil {
+		t.Fatalf("failed to write cred-a2.json: %v", errWriteA2)
+	}
+	w.handleEvent(fsnotify.Event{Name: credA2Path, Op: fsnotify.Create})
+
+	credB2Path := filepath.Join(dirB, "cred-b2.json")
+	if errWriteB2 := os.WriteFile(credB2Path, []byte(`{"type":"codex","email":"b2@example.com"}`), 0o600); errWriteB2 != nil {
+		t.Fatalf("failed to write cred-b2.json: %v", errWriteB2)
+	}
+
+	select {
+	case update := <-queue:
+		if update.Action != AuthUpdateActionAdd || update.ID != "cred-b2.json" {
+			t.Fatalf("expected add update for cred-b2.json, got %+v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fsnotify update from new auth-dir dirB")
+	}
+}
+
+func TestSetConfigUpdatesAuthDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "auth-a")
+	dirB := filepath.Join(tmpDir, "auth-b")
+	if errMkdirA := os.MkdirAll(dirA, 0o755); errMkdirA != nil {
+		t.Fatalf("failed to create auth dir A: %v", errMkdirA)
+	}
+	if errMkdirB := os.MkdirAll(dirB, 0o755); errMkdirB != nil {
+		t.Fatalf("failed to create auth dir B: %v", errMkdirB)
+	}
+	credBPath := filepath.Join(dirB, "cred-b.json")
+	if errWriteB := os.WriteFile(credBPath, []byte(`{"type":"codex","email":"b@example.com"}`), 0o600); errWriteB != nil {
+		t.Fatalf("failed to write cred-b.json: %v", errWriteB)
+	}
+
+	w, errNewWatcher := NewWatcher(filepath.Join(tmpDir, "config.yaml"), dirA, nil)
+	if errNewWatcher != nil {
+		t.Fatalf("NewWatcher failed: %v", errNewWatcher)
+	}
+	defer func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("failed to stop watcher: %v", errStop)
+		}
+	}()
+
+	w.SetConfig(&config.Config{AuthDir: dirB})
+
+	snapshot := w.SnapshotCoreAuths()
+	if len(snapshot) != 1 || snapshot[0].ID != "cred-b.json" {
+		t.Fatalf("expected SnapshotCoreAuths to return cred-b.json from dirB, got %+v", snapshot)
+	}
+	fileSnapshot, errSnapshotFile := w.SnapshotAuthFile(credBPath)
+	if errSnapshotFile != nil {
+		t.Fatalf("SnapshotAuthFile failed: %v", errSnapshotFile)
+	}
+	if len(fileSnapshot) != 1 || fileSnapshot[0].ID != "cred-b.json" {
+		t.Fatalf("expected SnapshotAuthFile ID=cred-b.json, got %+v", fileSnapshot)
+	}
+}
+
+type blockingAuthDirSwitchParser struct {
+	blockPath string
+	entered   chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (p *blockingAuthDirSwitchParser) ParseAuth(_ context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	if filepath.Clean(req.Path) == filepath.Clean(p.blockPath) {
+		p.once.Do(func() {
+			close(p.entered)
+		})
+		<-p.release
+	}
+	return nil, false, nil
+}
+
+func TestAddOrUpdateClientDiscardsStaleDirEventAcrossAuthDirSwitch(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "auth-a")
+	dirB := filepath.Join(tmpDir, "auth-b")
+	if errMkdirA := os.MkdirAll(dirA, 0o755); errMkdirA != nil {
+		t.Fatalf("failed to create auth dir A: %v", errMkdirA)
+	}
+	if errMkdirB := os.MkdirAll(dirB, 0o755); errMkdirB != nil {
+		t.Fatalf("failed to create auth dir B: %v", errMkdirB)
+	}
+
+	lateAPath := filepath.Join(dirA, "late-a.json")
+	if errWriteLateA := os.WriteFile(lateAPath, []byte(`{"type":"codex","email":"late-a@example.com"}`), 0o600); errWriteLateA != nil {
+		t.Fatalf("failed to write late-a.json: %v", errWriteLateA)
+	}
+	credBPath := filepath.Join(dirB, "cred-b.json")
+	if errWriteB := os.WriteFile(credBPath, []byte(`{"type":"codex","email":"b@example.com"}`), 0o600); errWriteB != nil {
+		t.Fatalf("failed to write cred-b.json: %v", errWriteB)
+	}
+
+	parser := &blockingAuthDirSwitchParser{
+		blockPath: lateAPath,
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+
+	queue := make(chan AuthUpdate, 16)
+	w := &Watcher{
+		authDir:          dirA,
+		lastAuthHashes:   make(map[string]string),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+		pluginAuthParser: parser,
+	}
+	w.SetConfig(&config.Config{AuthDir: dirA})
+	w.SetAuthUpdateQueue(queue)
+	defer w.stopDispatch()
+
+	done := make(chan struct{})
+	go func() {
+		w.addOrUpdateClientLocked(lateAPath)
+		close(done)
+	}()
+
+	select {
+	case <-parser.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for addOrUpdateClientLocked to reach synthesis")
+	}
+
+	// Switch auth-dir to dirB while the dirA event is paused mid-synthesis.
+	w.SetConfig(&config.Config{AuthDir: dirB})
+	w.refreshAuthState(false)
+
+	select {
+	case update := <-queue:
+		if update.Action != AuthUpdateActionAdd || update.ID != "cred-b.json" {
+			t.Fatalf("expected add update for cred-b.json, got %+v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cred-b.json update")
+	}
+
+	close(parser.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for paused addOrUpdateClientLocked to finish")
+	}
+
+	w.clientsMutex.RLock()
+	currentCount := len(w.currentAuths)
+	_, hasCredB := w.currentAuths["cred-b.json"]
+	_, hasLateA := w.lastAuthHashes[w.normalizeAuthPath(lateAPath)]
+	w.clientsMutex.RUnlock()
+	if currentCount != 1 || !hasCredB || hasLateA {
+		t.Fatalf("stale dirA event polluted state after switch: currentCount=%d, hasCredB=%v, hasLateA=%v", currentCount, hasCredB, hasLateA)
+	}
+}
+
+func TestConcurrentSetConfigKeepsWatchedAuthDirOnLatestConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	dirA := filepath.Join(tmpDir, "auth-a")
+	dirB := filepath.Join(tmpDir, "auth-b")
+	dirC := filepath.Join(tmpDir, "auth-c")
+	for _, dir := range []string{dirA, dirB, dirC} {
+		if errMkdir := os.MkdirAll(dir, 0o755); errMkdir != nil {
+			t.Fatalf("failed to create auth dir %s: %v", dir, errMkdir)
+		}
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if errWriteCfg := os.WriteFile(configPath, []byte("auth_dir: "+dirA+"\n"), 0o600); errWriteCfg != nil {
+		t.Fatalf("failed to write config: %v", errWriteCfg)
+	}
+
+	w, errNewWatcher := NewWatcher(configPath, dirA, nil)
+	if errNewWatcher != nil {
+		t.Fatalf("NewWatcher failed: %v", errNewWatcher)
+	}
+	defer func() {
+		if errStop := w.Stop(); errStop != nil {
+			t.Errorf("failed to stop watcher: %v", errStop)
+		}
+	}()
+
+	queue := make(chan AuthUpdate, 16)
+	w.SetAuthUpdateQueue(queue)
+	w.SetConfig(&config.Config{AuthDir: dirA})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if errStart := w.Start(ctx); errStart != nil {
+		t.Fatalf("Start failed: %v", errStart)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			w.SetConfig(&config.Config{AuthDir: dirB})
+		}()
+		go func() {
+			defer wg.Done()
+			w.SetConfig(&config.Config{AuthDir: dirC})
+		}()
+	}
+	wg.Wait()
+	w.SetConfig(&config.Config{AuthDir: dirC})
+
+	w.watchMu.Lock()
+	watched := w.watchedAuthDir
+	w.watchMu.Unlock()
+	if !w.sameNormalizedAuthPath(watched, dirC) || !w.sameNormalizedAuthPath(w.currentAuthDir(), dirC) {
+		t.Fatalf("expected watchedAuthDir=%q and currentAuthDir=%q to match dirC=%q", watched, w.currentAuthDir(), dirC)
+	}
+
+	credCPath := filepath.Join(dirC, "cred-c.json")
+	if errWriteC := os.WriteFile(credCPath, []byte(`{"type":"codex","email":"c@example.com"}`), 0o600); errWriteC != nil {
+		t.Fatalf("failed to write cred-c.json: %v", errWriteC)
+	}
+	select {
+	case update := <-queue:
+		if update.Action != AuthUpdateActionAdd || update.ID != "cred-c.json" {
+			t.Fatalf("expected add update for cred-c.json, got %+v", update)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fsnotify update from dirC")
+	}
 }

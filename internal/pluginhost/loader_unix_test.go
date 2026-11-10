@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
@@ -165,6 +166,88 @@ func testShutdownCallCount(t *testing.T, client pluginClient) int {
 		t.Fatalf("parse shutdown calls %q: %v", calls, errParse)
 	}
 	return count
+}
+
+func TestUnixPluginLoaderFallsBackToSharedCacheWhenLocalShadowDirNoexec(t *testing.T) {
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, "noexec-fallback"+testPluginLibraryExtension())
+	buildReloadTestPlugin(t, 1, pluginPath)
+
+	localShadowDir := filepath.Clean(filepath.Join(dir, shadowPluginLocalDirName))
+	origDlopen := unixDlopen
+	t.Cleanup(func() {
+		unixDlopen = origDlopen
+	})
+	unixDlopen = func(path string) unsafe.Pointer {
+		if filepath.Clean(filepath.Dir(path)) == localShadowDir {
+			return nil
+		}
+		return origDlopen(path)
+	}
+
+	host := New()
+	file := pluginFile{ID: "noexec-fallback", Path: pluginPath, Version: "1"}
+	client, errOpen := dynamicLibraryLoader{}.Open(file, host)
+	if errOpen != nil {
+		t.Fatalf("Open() with simulated noexec local .shadow error = %v, want fallback success", errOpen)
+	}
+	defer client.Shutdown()
+	dlc, okType := client.(*dynamicLibraryClient)
+	if !okType {
+		t.Fatalf("Open() client type = %T, want *dynamicLibraryClient", client)
+	}
+	t.Cleanup(func() {
+		removeShadowPluginDir(filepath.Dir(dlc.tempPath))
+	})
+	wantFallbackDir, errFallbackDir := shadowPluginFallbackDir(pluginPath)
+	if errFallbackDir != nil {
+		t.Fatalf("shadowPluginFallbackDir() error = %v", errFallbackDir)
+	}
+	if filepath.Clean(filepath.Dir(dlc.tempPath)) != filepath.Clean(wantFallbackDir) {
+		t.Fatalf("loaded shadow dir = %q, want fallback dir %q", filepath.Dir(dlc.tempPath), wantFallbackDir)
+	}
+	resp, errCall := client.Call(context.Background(), "test.marker", nil)
+	if errCall != nil {
+		t.Fatalf("Call() fallback plugin error = %v", errCall)
+	}
+	if string(resp) != "v1" {
+		t.Fatalf("Call() fallback plugin response = %q, want v1", resp)
+	}
+}
+
+func TestUnixPluginLoaderLoadsFromReadOnlyPopulatedLocalShadowDir(t *testing.T) {
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, "readonly-shadow"+testPluginLibraryExtension())
+	buildReloadTestPlugin(t, 1, pluginPath)
+	file := pluginFile{ID: "readonly-shadow", Path: pluginPath, Version: "1"}
+
+	shadowPath, errShadow := shadowCopyPlugin(file)
+	if errShadow != nil {
+		t.Fatalf("shadowCopyPlugin() pre-populate error = %v", errShadow)
+	}
+	localShadowDir := filepath.Dir(shadowPath)
+	probedPluginShadows.Delete(filepath.Base(shadowPath))
+
+	if errChmod := os.Chmod(localShadowDir, 0o500); errChmod != nil {
+		t.Fatalf("Chmod(localShadowDir) error = %v", errChmod)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(localShadowDir, 0o700)
+	})
+
+	host := New()
+	client, errOpen := dynamicLibraryLoader{}.Open(file, host)
+	if errOpen != nil {
+		t.Fatalf("Open() with read-only populated .shadow error = %v, want success", errOpen)
+	}
+	defer client.Shutdown()
+	resp, errCall := client.Call(context.Background(), "test.marker", nil)
+	if errCall != nil {
+		t.Fatalf("Call() plugin error = %v", errCall)
+	}
+	if string(resp) != "v1" {
+		t.Fatalf("Call() plugin response = %q, want v1", resp)
+	}
 }
 
 func TestUnixPluginOpenFailureKeepsImageUsableOnRetry(t *testing.T) {

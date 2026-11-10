@@ -19,6 +19,7 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	ProxyURL     string
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

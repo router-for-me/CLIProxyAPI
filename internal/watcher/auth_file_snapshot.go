@@ -18,7 +18,7 @@ func (w *Watcher) SnapshotAuthFile(path string) ([]*coreauth.Auth, error) {
 	}
 	w.clientsMutex.RLock()
 	cfg := w.config
-	authDir := w.authDir
+	authDir := w.currentAuthDirLocked()
 	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
 	if cfg == nil || authDir == "" {

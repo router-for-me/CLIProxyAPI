@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"strings"
 	"sync"
@@ -101,7 +100,7 @@ func StoreXAIReasoningReplayItems(ctx context.Context, modelName, sessionKey str
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errClient)
 			return XAIReasoningReplayStoreBackendError
 		}
-		raw, errMarshal := json.Marshal(normalized)
+		raw, errMarshal := marshalReasoningReplayRawJSONArray(normalized)
 		if errMarshal != nil {
 			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errMarshal)
 			return XAIReasoningReplayStoreBackendError
@@ -164,8 +163,9 @@ func GetXAIReasoningReplayItemsRequired(ctx context.Context, modelName, sessionK
 		if errGet != nil || !found {
 			return nil, false, errGet
 		}
-		var homeItems [][]byte
-		if errUnmarshal := json.Unmarshal(raw, &homeItems); errUnmarshal != nil {
+		homeItems, errUnmarshal := unmarshalReasoningReplayRawJSONArray(raw)
+		if errUnmarshal != nil {
+			log.Warnf("xai reasoning replay KV decode failed (please upgrade CLIProxyAPI): %v", errUnmarshal)
 			return nil, false, errUnmarshal
 		}
 		if _, errExpire := client.KVExpire(ctx, xaiReasoningReplayKVKey(modelName, sessionKey), XAIReasoningReplayCacheTTL); errExpire != nil {

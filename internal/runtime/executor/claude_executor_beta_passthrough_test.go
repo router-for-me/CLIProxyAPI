@@ -21,7 +21,7 @@ func fixtureAuth() *cliproxyauth.Auth {
 // A caller the cloak does not recognize (a Claude Code newer than the pinned
 // profile) keeps betas the proxy does not manage: dropping them fails whole
 // turns whose features need the missing authorization (#5738). per-turn-control
-// is now assembled for fable-5-1, so this uses a beta that is still unmanaged.
+// and message-threads are now assembled, so this uses a beta that is still unmanaged.
 func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 	t.Parallel()
 
@@ -31,16 +31,16 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 		t.Fatalf("NewRequest() error = %v", errReq)
 	}
 	incoming := http.Header{}
-	incoming.Set("Anthropic-Beta", "message-threads-2026-08-12")
+	incoming.Set("Anthropic-Beta", "future-feature-2030-01-01")
 	if errHeaders := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-fable-5-1"}`), &config.Config{}, incoming, false); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
-	if !strings.Contains(betas, "message-threads-2026-08-12") {
+	if !strings.Contains(betas, "future-feature-2030-01-01") {
 		t.Fatalf("Anthropic-Beta = %q, want unmanaged caller beta forwarded", betas)
 	}
-	if !strings.Contains(betas, "mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24") {
-		t.Fatalf("Anthropic-Beta = %q, want fable-5-1 per-turn-control between mid-conversation-system and tool-changes", betas)
+	if !strings.Contains(betas, "prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,thinking-token-count-2026-05-13,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24") {
+		t.Fatalf("Anthropic-Beta = %q, want fable-5-1 per-turn-control right after prompt-caching-scope", betas)
 	}
 }
 

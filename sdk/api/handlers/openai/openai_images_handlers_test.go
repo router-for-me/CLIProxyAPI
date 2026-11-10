@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
@@ -1296,6 +1297,263 @@ func TestXAIImagesPayloadDefaultAndOverrideRules(t *testing.T) {
 		}
 		if ojson.GetBytesNoCopy(resp.Body.Bytes(), "data.0.url").Exists() {
 			t.Fatalf("unexpected data.0.url in response: %s", resp.Body.String())
+		}
+	})
+}
+
+type rawImageStreamTestExecutor struct {
+	provider string
+	chunks   <-chan coreexecutor.StreamChunk
+}
+
+func (e *rawImageStreamTestExecutor) Identifier() string { return e.provider }
+
+func (e *rawImageStreamTestExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
+}
+
+func (e *rawImageStreamTestExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	return &coreexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func (e *rawImageStreamTestExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *rawImageStreamTestExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
+}
+
+func (e *rawImageStreamTestExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented"}
+}
+
+func TestImagesStreamKeepAliveDoesNotSplitCompletedEventMidLine_Issue7330(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const (
+		keepAliveFrame = "event: keepalive\ndata: {\"type\":\"keepalive\"}\n\n"
+		completedPart1 = "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"iVBORw0KGgoAAAA"
+		completedPart2 = "BBBB\",\"size\":\"1536x1024\"}\n\n"
+		wantCompleted  = "event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"iVBORw0KGgoAAAABBBB\",\"size\":\"1536x1024\"}\n\n"
+	)
+
+	t.Run("forwardRawImageStream suppresses keep-alive mid-line and writes at event boundary", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+			return tickChan, func() {}
+		})
+		defer restore()
+
+		h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 20},
+		}, nil))
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, imagesGenerationsPath, nil)
+
+		data := make(chan []byte)
+		errs := make(chan *interfaces.ErrorMessage)
+		close(errs)
+
+		go func() {
+			data <- []byte(keepAliveFrame)
+			data <- []byte(completedPart1)
+			// Tick while in the middle of the image_generation.completed data: line.
+			tickChan <- time.Unix(1, 0)
+			data <- []byte(completedPart2)
+			// Tick after the SSE event has completed with \n\n.
+			tickChan <- time.Unix(2, 0)
+			close(data)
+		}()
+
+		var canceled error
+		h.forwardRawImageStream(context.Background(), c, func(err error) { canceled = err }, data, errs)
+		if canceled != nil {
+			t.Fatalf("unexpected cancel error: %v", canceled)
+		}
+
+		wantBody := keepAliveFrame + wantCompleted + ": keep-alive\n\n"
+		if got := recorder.Body.String(); got != wantBody {
+			t.Fatalf("stream body = %q, want %q", got, wantBody)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		provider  string
+		model     string
+		modelType string
+	}{
+		{
+			name:      "routed codex image stream",
+			provider:  "codex",
+			model:     defaultImagesToolModel,
+			modelType: "codex",
+		},
+		{
+			name:      "openai-compatibility image stream",
+			provider:  "openai-compatibility",
+			model:     "compat-image-7330",
+			modelType: registry.OpenAIImageModelType,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tickChan := make(chan time.Time)
+			resetCh := make(chan struct{}, 8)
+			restore := handlers.SetStreamingKeepAliveTickerWithResetFactoryForTest(func(time.Duration) (<-chan time.Time, func(), func()) {
+				return tickChan, func() {}, func() {
+					resetCh <- struct{}{}
+				}
+			})
+			defer restore()
+
+			chunks := make(chan coreexecutor.StreamChunk)
+			exec := &rawImageStreamTestExecutor{provider: tc.provider, chunks: chunks}
+			manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+			manager.RegisterExecutor(exec)
+			auth := &coreauth.Auth{
+				ID:       "auth-7330-" + tc.provider,
+				Provider: tc.provider,
+				Status:   coreauth.StatusActive,
+			}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("manager.Register: %v", errRegister)
+			}
+			modelRegistry := registry.GetGlobalRegistry()
+			modelRegistry.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+				{ID: tc.model, Object: "model", OwnedBy: tc.provider, Type: tc.modelType},
+			})
+			manager.RefreshSchedulerEntry(auth.ID)
+			t.Cleanup(func() {
+				modelRegistry.UnregisterClient(auth.ID)
+			})
+
+			go func() {
+				// First chunk itself is an incomplete SSE event (first 32KB read of image_generation.completed).
+				chunks <- coreexecutor.StreamChunk{Payload: []byte(completedPart1)}
+				// Keep-alive tick fires before the second chunk of the same line arrives.
+				tickChan <- time.Unix(1, 0)
+				chunks <- coreexecutor.StreamChunk{Payload: []byte(completedPart2)}
+				// Wait until the handler receives completedPart2 and resets the keep-alive timer.
+				<-resetCh
+				// Keep-alive tick fires at the completed event boundary.
+				tickChan <- time.Unix(2, 0)
+				close(chunks)
+			}()
+
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+				Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 20},
+			}, manager)
+			handler := NewOpenAIAPIHandler(base)
+			body := strings.NewReader("{\"model\":\"" + tc.model + "\",\"prompt\":\"a red fox\",\"stream\":true}")
+			resp := performImagesEndpointRequest(t, imagesGenerationsPath, "application/json", body, handler.ImagesGenerations)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+			}
+
+			wantBody := wantCompleted + ": keep-alive\n\n"
+			if got := resp.Body.String(); got != wantBody {
+				t.Fatalf("stream body = %q, want %q", got, wantBody)
+			}
+		})
+	}
+
+	t.Run("resets keep-alive on each chunk and ensures SSE event boundary before error", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		data := make(chan []byte)
+		errs := make(chan *interfaces.ErrorMessage, 1)
+		resetCount := 0
+		restore := handlers.SetStreamingKeepAliveTickerWithResetFactoryForTest(func(time.Duration) (<-chan time.Time, func(), func()) {
+			return tickChan, func() {}, func() {
+				resetCount++
+			}
+		})
+		defer restore()
+
+		h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 20},
+		}, nil))
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, imagesGenerationsPath, nil)
+
+		go func() {
+			data <- []byte(completedPart1)
+			tickChan <- time.Unix(1, 0)
+			errs <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New("upstream interrupted mid-frame")}
+			close(errs)
+			close(data)
+		}()
+
+		var canceled error
+		h.forwardRawImageStream(context.Background(), c, func(err error) { canceled = err }, data, errs)
+		if canceled == nil || !strings.Contains(canceled.Error(), "upstream interrupted mid-frame") {
+			t.Fatalf("unexpected cancel error: %v", canceled)
+		}
+		if resetCount != 1 {
+			t.Fatalf("resetCount = %d, want 1", resetCount)
+		}
+		got := recorder.Body.String()
+		if strings.Contains(got, ": keep-alive") {
+			t.Fatalf("expected mid-frame keep-alive tick to be suppressed, got %q", got)
+		}
+		if !strings.Contains(got, completedPart1+"\n\nevent: error\ndata: ") {
+			t.Fatalf("expected error event to be preceded by SSE event boundary \\n\\n, got %q", got)
+		}
+	})
+
+	t.Run("forwardImagesStream still writes keep-alive when upstream chunks produce no downstream output", func(t *testing.T) {
+		tickChan := make(chan time.Time)
+		resetCount := 0
+		restore := handlers.SetStreamingKeepAliveTickerWithResetFactoryForTest(func(time.Duration) (<-chan time.Time, func(), func()) {
+			return tickChan, func() {}, func() {
+				resetCount++
+			}
+		})
+		defer restore()
+
+		h := NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 20},
+		}, nil))
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, imagesGenerationsPath, nil)
+		flusher, ok := c.Writer.(http.Flusher)
+		if !ok {
+			t.Fatal("expected gin writer to implement http.Flusher")
+		}
+
+		data := make(chan []byte)
+		errs := make(chan *interfaces.ErrorMessage)
+		close(errs)
+
+		firstChunk := []byte("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+		go func() {
+			// Ignored non-image event and buffered incomplete frame produce no downstream output.
+			data <- []byte("event: response.in_progress\ndata: {\"type\":\"response.in_progress\"}\n\n")
+			data <- []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"image_generation_call\",")
+			// Keep-alive tick must still be written while downstream has received no output.
+			tickChan <- time.Unix(1, 0)
+			data <- []byte("\"result\":\"aW1hZ2U=\"}]}}\n\n")
+			close(data)
+		}()
+
+		var canceled error
+		writeEvent := func(eventName string, dataJSON []byte) {
+			_, _ = c.Writer.Write([]byte("event: " + eventName + "\ndata: " + string(dataJSON) + "\n\n"))
+			flusher.Flush()
+		}
+		h.forwardImagesStream(context.Background(), c, flusher, func(err error) { canceled = err }, data, errs, firstChunk, "b64_json", "image_generation", writeEvent)
+		if canceled != nil {
+			t.Fatalf("unexpected cancel error: %v", canceled)
+		}
+		if resetCount != 1 {
+			t.Fatalf("resetCount = %d, want 1 (only when downstream image event is written)", resetCount)
+		}
+		got := recorder.Body.String()
+		if !strings.HasPrefix(got, ": keep-alive\n\nevent: image_generation.completed\ndata: ") {
+			t.Fatalf("expected keep-alive before completed event when earlier chunks produced no downstream output, got %q", got)
 		}
 	})
 }

@@ -40,7 +40,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devinのモデル（SWE-2、GPT-6 Astra、Claude Fable 5.1など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
+        <td>Devinのモデル（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.1など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
     </tr>
 </tbody>
 </table>
@@ -59,10 +59,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 
 <table>
 <tbody>
-<tr>
-<td width="180"><a href="https://www.aicodemirror.ai/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
-<td>AICodeMirrorのスポンサーシップに感謝します！AICodeMirrorはClaude Code / Codex / Gemini向けの公式高安定性リレーサービスを提供しており、エンタープライズグレードの同時接続、迅速な請求書発行、24時間365日の専任技術サポートを備えています。Claude Code / Codex / Geminiの公式チャネルが元の価格の38% / 2% / 9%で利用でき、チャージ時にはさらに割引があります！CLIProxyAPIユーザー向けの特別特典：<a href="https://www.aicodemirror.ai/register?invitecode=TJNAIF">こちらのリンク</a>から登録すると、初回チャージが20%割引になり、エンタープライズのお客様は最大25%割引を受けられます！</td>
-</tr>
 <tr>
 <td width="180"><a href="https://apikey.fan/register?aff=CLIProxyAPI"><img src="./assets/apikey.png" alt="APIKEY.FUN" width="150"></a></td>
 <td>APIKEY.FUNのスポンサーシップに感謝します！APIKEY.FUNはプロフェッショナルなエンタープライズ向けAIリレーサービスで、企業および個人開発者に安定・高効率・低コストなAIモデルAPI接続サービスを提供しています。Claude、OpenAI、Geminiなどの主要人気モデルに対応し、価格は公式価格の7%から利用できます。本プロジェクトの<a href="https://apikey.fan/register?aff=CLIProxyAPI">専用リンク</a>から登録すると、さらに<b>チャージが永続的に5%割引</b>となる特別優待を受けられます。</td>
@@ -300,7 +296,7 @@ Cloudflare ベースの LLM ゲートウェイ兼プロキシサーバー。CLIP
 
 ### [Hermes CLIProxyAPI Provider](https://github.com/duu261/hermes-cliproxyapi-provider)
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) 向けのモデルプロバイダープラグイン。CLIProxyAPI のプロバイダーごとに Hermes プロバイダーを 1 つ登録し、それぞれの executor が受け付けるプロトコル（Anthropic Messages、Responses、Chat Completions）を使います。コンテキストウィンドウと推論レベルは CLIProxyAPI から取得します。正確なプロバイダーグループ分けのための読み取り専用 Management API 照会はオプションです。[Hermes プラグインカタログ](https://hermes-agent.nousresearch.com/docs/plugins/cliproxyapi-provider)に掲載されています：`hermes plugins install cliproxyapi-provider`。
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) 向けのモデルプロバイダープラグイン。CLIProxyAPI のプロバイダーごとに Hermes プロバイダーを 1 つ登録し、それぞれの executor が受け付けるプロトコル（Anthropic Messages、Responses、Chat Completions）を使います。コンテキストウィンドウと推論レベルは CLIProxyAPI から取得します。正確なプロバイダーグループ分けのための読み取り専用 Management API 照会はオプションです。コンパニオンプラグインの `/cpa` チャットコマンドで、各プールのアカウント状態と、必要に応じて各アカウントのリアルタイムのクォータを確認できます。[Hermes プラグインカタログ](https://hermes-agent.nousresearch.com/docs/plugins)に掲載されています：`hermes plugins install cliproxyapi-provider` および `hermes plugins install cpa-status`。
 
 ### [Ebb](https://github.com/lucasnsaraujo/ebb)
 

@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
@@ -3196,8 +3197,9 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	}
 
 	root := ojson.ParseBytes(interactionsJSON)
-	if root.Get("usage.total_input_tokens").Int() != 53 {
-		t.Errorf("usage.total_input_tokens = %d, want 53", root.Get("usage.total_input_tokens").Int())
+	// total input = uncached 3 + cache read 50 + cache write 14361
+	if root.Get("usage.total_input_tokens").Int() != 14414 {
+		t.Errorf("usage.total_input_tokens = %d, want 14414", root.Get("usage.total_input_tokens").Int())
 	}
 	if root.Get("usage.cache_write_tokens").Int() != 14361 {
 		t.Errorf("usage.cache_write_tokens = %d, want 14361", root.Get("usage.cache_write_tokens").Int())
@@ -3206,8 +3208,11 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if detail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsUsage CacheCreationTokens = %d, want 14361", detail.CacheCreationTokens)
 	}
-	if detail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 53", detail.InputTokens)
+	if detail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 14414", detail.InputTokens)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete || detail.TokenBreakdown.Input.UncachedTokens != 3 {
+		t.Errorf("token breakdown = %+v, want complete with 3 uncached", detail.TokenBreakdown)
 	}
 
 	// 2. Streaming test
@@ -3265,8 +3270,11 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if sDetail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsStreamUsage CacheCreationTokens = %d, want 14361", sDetail.CacheCreationTokens)
 	}
-	if sDetail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 53", sDetail.InputTokens)
+	if sDetail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 14414", sDetail.InputTokens)
+	}
+	if got := cRoot.Get("interaction.usage.total_input_tokens").Int(); got != 14414 {
+		t.Errorf("interaction.usage.total_input_tokens = %d, want 14414", got)
 	}
 }
 

@@ -173,16 +173,17 @@ func decodeSIWCRefreshReceipt(value ojson.Result) (*CodexSIWCTokenData, error) {
 	}
 	scope := value.Get("scope").String()
 	return &CodexSIWCTokenData{
-		AccessToken:  value.Get("access_token").String(),
-		RefreshToken: value.Get("refresh_token").String(),
-		IDToken:      value.Get("id_token").String(),
-		ClientID:     value.Get("client_id").String(),
-		Scope:        scope,
-		Scopes:       strings.Fields(scope),
-		Expire:       value.Get("expired").String(),
-		ExpiresAt:    value.Get("expires_at").String(),
-		LastRefresh:  value.Get("last_refresh").String(),
-		DeviceID:     value.Get("device_id").String(),
+		AccessToken:       value.Get("access_token").String(),
+		RefreshToken:      value.Get("refresh_token").String(),
+		IDToken:           value.Get("id_token").String(),
+		ClientID:          value.Get("client_id").String(),
+		Scope:             scope,
+		Scopes:            strings.Fields(scope),
+		Expire:            value.Get("expired").String(),
+		ExpiresAt:         value.Get("expires_at").String(),
+		EarliestRefreshAt: value.Get("earliest_refresh_at").Value(),
+		LastRefresh:       value.Get("last_refresh").String(),
+		DeviceID:          value.Get("device_id").String(),
 	}, nil
 }
 

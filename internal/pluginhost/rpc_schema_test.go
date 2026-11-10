@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -903,6 +904,105 @@ func TestRPCSchedulerAndUsageSelectionIDCompatibility(t *testing.T) {
 	}
 	if legacy.Provider != "openai" || legacy.RequestID != "req-1" || legacy.TraceID != "trace-1" {
 		t.Fatalf("legacyUsageRecord = %+v", legacy)
+	}
+}
+
+func TestUsageRecordRPCModalityTokenCounters(t *testing.T) {
+	var deliveredRaw []byte
+	var deliveredRecord pluginapi.UsageRecord
+	rpcAdapter := &rpcPluginAdapter{
+		id: "rpc-usage-modality",
+		client: &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+			if method != pluginabi.MethodUsageHandle {
+				return nil, io.ErrUnexpectedEOF
+			}
+			deliveredRaw = bytes.Clone(request)
+			if errUnmarshal := json.Unmarshal(request, &deliveredRecord); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		}},
+	}
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "rpc-usage-modality",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: rpcAdapter,
+		}},
+	})
+	rpcAdapter.host = host
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "rpc-usage-modality",
+		plugin:   rpcAdapter,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: coreusage.Detail{
+			InputTokens:       80,
+			OutputTokens:      1056,
+			CachedTokens:      40,
+			CacheReadTokens:   40,
+			TotalTokens:       1136,
+			TextInputTokens:   coreusage.Int64Ptr(30),
+			ImageInputTokens:  coreusage.Int64Ptr(50),
+			CachedTextTokens:  coreusage.Int64Ptr(25),
+			CachedImageTokens: coreusage.Int64Ptr(15),
+			TextOutputTokens:  coreusage.Int64Ptr(0),
+			ImageOutputTokens: coreusage.Int64Ptr(1056),
+		},
+	})
+
+	got := deliveredRecord.Detail
+	if got.InputTokens != 80 || got.OutputTokens != 1056 || got.CachedTokens != 40 || got.CacheReadTokens != 40 || got.TotalTokens != 1136 {
+		t.Fatalf("delivered aggregate Detail = %+v", got)
+	}
+	if got.TextInputTokens == nil || *got.TextInputTokens != 30 {
+		t.Fatalf("delivered TextInputTokens = %v, want 30", got.TextInputTokens)
+	}
+	if got.ImageInputTokens == nil || *got.ImageInputTokens != 50 {
+		t.Fatalf("delivered ImageInputTokens = %v, want 50", got.ImageInputTokens)
+	}
+	if got.CachedTextTokens == nil || *got.CachedTextTokens != 25 {
+		t.Fatalf("delivered CachedTextTokens = %v, want 25", got.CachedTextTokens)
+	}
+	if got.CachedImageTokens == nil || *got.CachedImageTokens != 15 {
+		t.Fatalf("delivered CachedImageTokens = %v, want 15", got.CachedImageTokens)
+	}
+	if got.TextOutputTokens == nil || *got.TextOutputTokens != 0 {
+		t.Fatalf("delivered TextOutputTokens = %v, want explicit 0", got.TextOutputTokens)
+	}
+	if got.ImageOutputTokens == nil || *got.ImageOutputTokens != 1056 {
+		t.Fatalf("delivered ImageOutputTokens = %v, want 1056", got.ImageOutputTokens)
+	}
+	if got.AudioInputTokens != nil || got.VideoInputTokens != nil || got.FileInputTokens != nil ||
+		got.CachedAudioTokens != nil || got.AudioOutputTokens != nil {
+		t.Fatalf("expected absent modality counters to remain nil over RPC, got %+v", got)
+	}
+
+	// Legacy plugins compiled against the 7-field UsageDetail must still unmarshal cleanly.
+	type legacyUsageDetail struct {
+		InputTokens         int64
+		OutputTokens        int64
+		ReasoningTokens     int64
+		CachedTokens        int64
+		CacheReadTokens     int64
+		CacheCreationTokens int64
+		TotalTokens         int64
+	}
+	type legacyUsageRecordWithDetail struct {
+		Provider string
+		Model    string
+		Detail   legacyUsageDetail
+	}
+	var legacyRec legacyUsageRecordWithDetail
+	if errLegacy := json.Unmarshal(deliveredRaw, &legacyRec); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecordWithDetail) error = %v", errLegacy)
+	}
+	if legacyRec.Detail.InputTokens != 80 || legacyRec.Detail.OutputTokens != 1056 || legacyRec.Detail.TotalTokens != 1136 {
+		t.Fatalf("legacyUsageRecordWithDetail.Detail = %+v", legacyRec.Detail)
 	}
 }
 

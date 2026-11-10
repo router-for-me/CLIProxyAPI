@@ -137,7 +137,7 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	if m == nil || auth == nil || retryAfter == nil {
 		return
 	}
-	action, okAction := matchRequestScopedErrorAction(auth, err, m.runtimeConfigSnapshot())
+	action, okAction := matchRequestScopedErrorAction(auth, err, m.requestScopedErrorConfig(ctx))
 	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfter, AccessToken: authAccessTokenForRequest(ctx, auth, opts.Headers), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 	result.CredentialScope = isCredentialScopedError(err)
 	applyRequestScopedActionToResult(action, okAction, &result)
@@ -165,7 +165,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				entry := logEntryWithRequestID(ctx)
 				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
 				rerr := resultErrorFromError(chunk.Err)
-				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
+				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.requestScopedErrorConfig(ctx))
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 				result.RetryAfter = retryAfterFromError(chunk.Err)
 				result.CredentialScope = isCredentialScopedError(chunk.Err)
@@ -412,7 +412,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
-		ctx = newUpstreamAttemptContext(ctx)
+		ctx = m.newUpstreamAttemptContext(ctx)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
@@ -456,7 +456,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					ctx = newUpstreamAttemptContext(ctx)
+					ctx = m.newUpstreamAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
@@ -489,7 +489,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.runtimeConfigSnapshot())
+			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(ctx))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			result.RetryAfter = retryAfterFromError(errStream)
 			if isCredentialScopedError(errStream) {
@@ -538,7 +538,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					ctx = newUpstreamAttemptContext(ctx)
+					ctx = m.newUpstreamAttemptContext(ctx)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
@@ -578,7 +578,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
-			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.runtimeConfigSnapshot())
+			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.requestScopedErrorConfig(ctx))
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}

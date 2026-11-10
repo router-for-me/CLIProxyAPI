@@ -9,6 +9,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
@@ -48,7 +49,7 @@ func (f PayloadFinalizer) FinalizeDoc(doc *ojson.Doc) {
 }
 
 // NewPayloadFinalizer snapshots matching context before built-in request mutations.
-func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root string, original []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) PayloadFinalizer {
+func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root string, original []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, auths ...*cliproxyauth.Auth) PayloadFinalizer {
 	requestedModel := PayloadRequestedModel(opts, req.Model)
 	requestPath := PayloadRequestPath(opts)
 	headers := opts.Headers.Clone()
@@ -56,6 +57,10 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 	// the live zone sees one conversation per session, not per header spelling.
 	sessionID := cliproxysession.SessionIDFromMetadata(opts.Metadata)
 	source := append([]byte(nil), original...)
+	var auth *cliproxyauth.Auth
+	if len(auths) > 0 {
+		auth = auths[0]
+	}
 	var formatCallback func(string)
 	if opts.Metadata != nil {
 		formatCallback, _ = opts.Metadata[cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey].(func(string))
@@ -65,7 +70,7 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 			key := &body[:1][0]
 			if v, ok := payloadDocProbes.LoadAndDelete(key); ok {
 				if doc, okDoc := v.(*ojson.Doc); okDoc && doc != nil {
-					ApplyPayloadConfigWithRequestForExecutorDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, sessionID)
+					applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, sessionID)
 					if formatCallback != nil {
 						formatCallback(strings.Clone(strings.TrimSpace(doc.Get(buildPayloadPath(root, "response_format")).String())))
 					}
@@ -73,7 +78,12 @@ func NewPayloadFinalizer(cfg *config.Config, executor, model, protocol, root str
 				return nil
 			}
 		}
-		out := ApplyPayloadConfigWithRequestForExecutor(cfg, executor, model, protocol, opts.SourceFormat.String(), root, body, source, requestedModel, requestPath, headers, sessionID)
+		doc := ojson.NewDoc(body)
+		_, mutated := applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, executor, model, protocol, opts.SourceFormat.String(), root, doc, source, requestedModel, requestPath, headers, auth, sessionID)
+		out := body
+		if mutated {
+			out = doc.Bytes()
+		}
 		if formatCallback != nil {
 			formatCallback(strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(out, buildPayloadPath(root, "response_format")).String())))
 		}

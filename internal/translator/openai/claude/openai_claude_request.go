@@ -72,45 +72,49 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	// Stream
 	_ = outDoc.Set("stream", stream)
 
-	// Thinking: Convert Claude thinking.budget_tokens to OpenAI reasoning_effort
+	// Thinking: Convert Claude thinking.budget_tokens and output_config.effort to OpenAI reasoning_effort
+	effort := ""
+	if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String {
+		effort = strings.ToLower(strings.TrimSpace(v.String()))
+	}
 	if thinkingConfig := root.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 		if thinkingType := thinkingConfig.Get("type"); thinkingType.Exists() {
 			switch thinkingType.String() {
 			case "enabled":
 				if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
 					budget := int(budgetTokens.Int())
-					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
-						_ = outDoc.Set("reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(budget); ok && mappedEffort != "" {
+						_ = outDoc.Set("reasoning_effort", mappedEffort)
 					}
-				} else if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String && strings.TrimSpace(v.String()) != "" {
+				} else if effort != "" {
 					// Some Claude-compatible clients pair manual thinking with output_config.effort.
 					// Preserve that explicit level when there is no legacy token budget to map.
-					_ = outDoc.Set("reasoning_effort", strings.ToLower(strings.TrimSpace(v.String())))
+					_ = outDoc.Set("reasoning_effort", effort)
 				} else {
 					// No budget_tokens or explicit effort specified; preserve the enabled-thinking default.
-					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
-						_ = outDoc.Set("reasoning_effort", effort)
+					if mappedEffort, ok := thinking.ConvertBudgetToLevel(-1); ok && mappedEffort != "" {
+						_ = outDoc.Set("reasoning_effort", mappedEffort)
 					}
 				}
 			case "adaptive", "auto":
 				// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
 				// Pass through directly; ApplyThinking handles clamping to target model's levels.
-				effort := ""
-				if v := root.Get("output_config.effort"); v.Exists() && v.Type == ojson.String {
-					effort = strings.ToLower(strings.TrimSpace(v.String()))
-				}
 				if effort != "" {
 					_ = outDoc.Set("reasoning_effort", effort)
 				} else {
 					_ = outDoc.Set("reasoning_effort", string(thinking.LevelXHigh))
 				}
 			case "disabled":
-				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
-					_ = outDoc.Set("reasoning_effort", effort)
+				if mappedEffort, ok := thinking.ConvertBudgetToLevel(0); ok && mappedEffort != "" {
+					_ = outDoc.Set("reasoning_effort", mappedEffort)
 				}
 			}
 		}
+	} else if !thinkingConfig.Exists() && effort != "" {
+		_ = outDoc.Set("reasoning_effort", effort)
 	}
+
+	reasoningActive := isClaudeRequestReasoningActive(outDoc.Get("reasoning_effort"), modelName, root.Get("model").String())
 
 	// Process messages and system.
 	messageCapacity := root.Get("messages.#").Int()
@@ -340,6 +344,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Add reasoning_content if present
 						if hasReasoning {
 							_ = msgDoc.Set("reasoning_content", reasoningContent)
+						} else if hasToolCalls && preserveThinkingBlocks && reasoningActive {
+							// Assistant turn with tool_calls but no replayable thinking text.
+							// Compat thinking upstreams (DeepSeek, Moonshot/Kimi) require
+							// reasoning_content to be present on such messages when reasoning is active.
+							_ = msgDoc.Set("reasoning_content", " ")
 						}
 
 						// Add tool_calls if present (in same message as content)
@@ -541,6 +550,37 @@ func normalizeObjectSchemaProperties(schema any) any {
 	default:
 		return schema
 	}
+}
+
+func isClaudeRequestReasoningActive(effortRes ojson.Result, modelName, payloadModel string) bool {
+	if active, ok := isThinkingSuffixActive(modelName); ok {
+		return active
+	}
+	if active, ok := isThinkingSuffixActive(payloadModel); ok {
+		return active
+	}
+	if !effortRes.Exists() {
+		return false
+	}
+	resolvedEffort := strings.ToLower(strings.TrimSpace(effortRes.String()))
+	return resolvedEffort != "" && resolvedEffort != string(thinking.LevelNone) && resolvedEffort != "0" && resolvedEffort != "false"
+}
+
+func isThinkingSuffixActive(model string) (bool, bool) {
+	suffix := thinking.ParseSuffix(strings.TrimSpace(model))
+	if !suffix.HasSuffix {
+		return false, false
+	}
+	if mode, ok := thinking.ParseSpecialSuffix(suffix.RawSuffix); ok {
+		return mode != thinking.ModeNone, true
+	}
+	if budget, ok := thinking.ParseNumericSuffix(suffix.RawSuffix); ok {
+		return budget > 0, true
+	}
+	if level, ok := thinking.ParseLevelSuffix(suffix.RawSuffix); ok {
+		return level != "" && level != thinking.LevelNone, true
+	}
+	return false, false
 }
 
 func shouldMapClaudeThinkingToGPTReasoning(part ojson.Result, preserveThinkingBlocks ...bool) bool {
