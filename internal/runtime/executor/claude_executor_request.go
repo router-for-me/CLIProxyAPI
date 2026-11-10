@@ -459,7 +459,18 @@ func applyClaudePreservedThinkingBindingDoc(doc *ojson.Doc) bool {
 // Claude Code 2.1.321 added Fable 5.2 and Haiku 5.5.
 func claudeModelUsesProgressDisplay(model string) bool {
 	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeFable52Model(model) ||
+		isClaudeMythos52Model(model) ||
 		isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model)
+}
+
+func isClaudeMythos52Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	for _, prefix := range []string{"claude-mythos-5-2", "claude-mythos-5.2"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") || strings.HasPrefix(model, prefix+"[") {
+			return true
+		}
+	}
+	return false
 }
 
 func isClaudeFable52Model(model string) bool {
@@ -502,11 +513,15 @@ func applyClaudeCloakThinkingDisplayDoc(doc *ojson.Doc, callerOwned bool) bool {
 }
 
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) ||
-		strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1") ||
-		isClaudeFable52Model(model) ||
-		isClaudeSonnet55Model(model) ||
-		isClaudeHaiku55Model(model)
+	m := claudeCanonicalModel(model)
+	return isClaudeOpus55Model(m) ||
+		strings.HasPrefix(m, "claude-fable-5-1") ||
+		isClaudeFable52Model(m) ||
+		strings.HasPrefix(m, "claude-mythos-5-1") ||
+		strings.HasPrefix(m, "claude-mythos-5-2") ||
+		strings.HasPrefix(m, "claude-mythos-5.2") ||
+		isClaudeSonnet55Model(m) ||
+		isClaudeHaiku55Model(m)
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -517,10 +532,7 @@ func claudeModelHasPerTurnTiming(model string) bool {
 	if isClaudeHaiku55Model(model) {
 		return false
 	}
-	return claudeModelHasPerTurnEffort(model) ||
-		strings.HasPrefix(model, "claude-mythos-5-1") ||
-		strings.HasPrefix(model, "claude-mythos-5-2") ||
-		strings.HasPrefix(model, "claude-mythos-5.2")
+	return claudeModelHasPerTurnEffort(model)
 }
 
 // claudeIncludePerTurnControl also covers the models Claude Code 2.1.321 sends
