@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -102,22 +103,32 @@ func (w *Watcher) reloadConfig() bool {
 		return false
 	}
 
+	resolvedNewAuthDir := ""
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir
+		resolvedNewAuthDir = w.mirroredAuthDir
 	} else {
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(newConfig.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory from config: %v", errResolveAuthDir)
 		} else {
 			newConfig.AuthDir = resolvedAuthDir
+			resolvedNewAuthDir = resolvedAuthDir
 		}
 	}
 
+	w.authRescanMu.Lock()
 	w.clientsMutex.Lock()
 	var oldConfig *config.Config
 	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
+	prevAuthDir := w.authDir
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
+	if strings.TrimSpace(resolvedNewAuthDir) != "" {
+		w.authDir = resolvedNewAuthDir
+	}
+	curAuthDir := w.authDir
 	w.clientsMutex.Unlock()
+	w.authRescanMu.Unlock()
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
@@ -141,7 +152,10 @@ func (w *Watcher) reloadConfig() bool {
 		}
 	}
 
-	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir
+	authDirChanged := oldConfig == nil || oldConfig.AuthDir != newConfig.AuthDir || prevAuthDir != curAuthDir
+	if authDirChanged {
+		w.syncAuthDirWatch()
+	}
 	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
 	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || !reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged)
 

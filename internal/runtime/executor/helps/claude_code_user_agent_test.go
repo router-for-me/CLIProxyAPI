@@ -13,10 +13,10 @@ func TestDetectClaudeCodeRequestAcceptsUserAgentFields(t *testing.T) {
 	for _, testCase := range []struct {
 		name, userAgent, sdkVersion string
 	}{
-		{name: "cron", userAgent: "claude-cli/2.1.312 (external, cli, workload/cron)"},
-		{name: "field before SDK", userAgent: "claude-cli/2.1.312 (external, cli, workload/cron, agent-sdk/0.2.133)", sdkVersion: "0.2.133"},
-		{name: "field after SDK", userAgent: "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, workload/cron)", sdkVersion: "0.2.133"},
-		{name: "unknown fields", userAgent: "claude-cli/2.1.312 (external, cli, future-feature/value, workload/background)"},
+		{name: "cron", userAgent: "claude-cli/2.1.353 (external, cli, workload/cron)"},
+		{name: "field before SDK", userAgent: "claude-cli/2.1.353 (external, cli, workload/cron, agent-sdk/0.2.133)", sdkVersion: "0.2.133"},
+		{name: "field after SDK", userAgent: "claude-cli/2.1.353 (external, cli, agent-sdk/0.2.133, workload/cron)", sdkVersion: "0.2.133"},
+		{name: "unknown fields", userAgent: "claude-cli/2.1.353 (external, cli, future-feature/value, workload/background)"},
 	} {
 		for _, countTokens := range []bool{false, true} {
 			path := "messages"
@@ -46,15 +46,15 @@ func TestParseClaudeCodeUserAgent(t *testing.T) {
 	for _, testCase := range []struct {
 		name, userAgent, entrypoint, sdkVersion, profile string
 	}{
-		{name: "plain", userAgent: "claude-cli/2.1.312 (external, cli)", entrypoint: "cli"},
-		{name: "SDK", userAgent: "claude-cli/2.1.312 (external, sdk-ts, agent-sdk/0.2.133)", entrypoint: "sdk-ts", sdkVersion: "0.2.133"},
-		{name: "cron", userAgent: "claude-cli/2.1.312 (external, cli, workload/cron)", entrypoint: "cli", profile: "claude-cli/2.1.312 (external, cli)"},
-		{name: "SDK after metadata", userAgent: "claude-cli/2.1.312 (external, sdk-ts, workload/cron, agent-sdk/0.2.133, future-feature/value)", entrypoint: "sdk-ts", sdkVersion: "0.2.133", profile: "claude-cli/2.1.312 (external, sdk-ts, agent-sdk/0.2.133)"},
-		{name: "token field name", userAgent: "claude-cli/2.1.312 (external, cli, future_field.v2/value/path)", entrypoint: "cli", profile: "claude-cli/2.1.312 (external, cli)"},
+		{name: "plain", userAgent: "claude-cli/2.1.353 (external, cli)", entrypoint: "cli"},
+		{name: "SDK", userAgent: "claude-cli/2.1.353 (external, sdk-ts, agent-sdk/0.2.133)", entrypoint: "sdk-ts", sdkVersion: "0.2.133"},
+		{name: "cron", userAgent: "claude-cli/2.1.353 (external, cli, workload/cron)", entrypoint: "cli", profile: "claude-cli/2.1.353 (external, cli)"},
+		{name: "SDK after metadata", userAgent: "claude-cli/2.1.353 (external, sdk-ts, workload/cron, agent-sdk/0.2.133, future-feature/value)", entrypoint: "sdk-ts", sdkVersion: "0.2.133", profile: "claude-cli/2.1.353 (external, sdk-ts, agent-sdk/0.2.133)"},
+		{name: "token field name", userAgent: "claude-cli/2.1.353 (external, cli, future_field.v2/value/path)", entrypoint: "cli", profile: "claude-cli/2.1.353 (external, cli)"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			parsed, ok := parseClaudeCodeUserAgent(testCase.userAgent)
-			if !ok || parsed.version != (claudeCLIVersion{major: 2, minor: 1, patch: 312}) || parsed.entrypoint != testCase.entrypoint || parsed.agentSDKVersion != testCase.sdkVersion {
+			if !ok || parsed.version != (claudeCLIVersion{major: 2, minor: 1, patch: 353}) || parsed.entrypoint != testCase.entrypoint || parsed.agentSDKVersion != testCase.sdkVersion {
 				t.Fatalf("parsed = %+v, valid = %v", parsed, ok)
 			}
 			profile := testCase.profile
@@ -70,21 +70,21 @@ func TestParseClaudeCodeUserAgent(t *testing.T) {
 
 func TestParseClaudeCodeUserAgentRejectsMalformedFields(t *testing.T) {
 	for _, userAgent := range []string{
-		"claude-cli/2.1.312(external, cli)",
-		"claude-cli/2.1.312-extra (external, cli)",
+		"claude-cli/2.1.353(external, cli)",
+		"claude-cli/2.1.353-extra (external, cli)",
 		"claude-cli/999999999999999999999999.1.0 (external, cli)",
-		"claude-cli/2.1.312 (external, )",
-		"claude-cli/2.1.312 (external, cli, foo)",
-		"claude-cli/2.1.312 (external, cli, /cron)",
-		"claude-cli/2.1.312 (external, cli, workload/)",
-		"claude-cli/2.1.312 (external, cli, bad name/value)",
-		"claude-cli/2.1.312 (external, cli, workload/(cron))",
-		"claude-cli/2.1.312 (external, cli, workload/cron, WORKLOAD/background)",
-		"claude-cli/2.1.312 (external, cli, agent-sdk/dev)",
-		"claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, agent-sdk/0.2.134)",
-		"claude-cli/2.1.312 (external, cli, workload/cron) trailing",
-		"claude-cli/2.1.312 (external, cli, workload/cr\non)",
-		"claude-cli/2.1.312 (external, cli)\r\n",
+		"claude-cli/2.1.353 (external, )",
+		"claude-cli/2.1.353 (external, cli, foo)",
+		"claude-cli/2.1.353 (external, cli, /cron)",
+		"claude-cli/2.1.353 (external, cli, workload/)",
+		"claude-cli/2.1.353 (external, cli, bad name/value)",
+		"claude-cli/2.1.353 (external, cli, workload/(cron))",
+		"claude-cli/2.1.353 (external, cli, workload/cron, WORKLOAD/background)",
+		"claude-cli/2.1.353 (external, cli, agent-sdk/dev)",
+		"claude-cli/2.1.353 (external, cli, agent-sdk/0.2.133, agent-sdk/0.2.134)",
+		"claude-cli/2.1.353 (external, cli, workload/cron) trailing",
+		"claude-cli/2.1.353 (external, cli, workload/cr\non)",
+		"claude-cli/2.1.353 (external, cli)\r\n",
 	} {
 		t.Run(userAgent, func(t *testing.T) {
 			if parsed, ok := parseClaudeCodeUserAgent(userAgent); ok {
@@ -99,19 +99,19 @@ func TestDetectClaudeCodeRequestUserAgentFieldsKeepNativeGuards(t *testing.T) {
 		name, userAgent, missingHeader                  string
 		missingMetadata, allowEntrypoint, wantConfirmed bool
 	}{
-		{name: "old patch", userAgent: "claude-cli/2.1.279 (external, cli, workload/cron)"},
+		{name: "old patch", userAgent: "claude-cli/2.1.320 (external, cli, workload/cron)"},
 		{name: "unknown release line", userAgent: "claude-cli/2.2.0 (external, cli, workload/cron)"},
-		{name: "unknown entrypoint", userAgent: "claude-cli/2.1.312 (external, other-client, workload/cron)"},
+		{name: "unknown entrypoint", userAgent: "claude-cli/2.1.353 (external, other-client, workload/cron)"},
 		{name: "missing app", missingHeader: "X-App"},
 		{name: "missing beta", missingHeader: "Anthropic-Beta"},
 		{name: "missing metadata", missingMetadata: true},
-		{name: "configured entrypoint", userAgent: "claude-cli/2.1.312 (external, other-client, workload/cron)", allowEntrypoint: true, wantConfirmed: true},
+		{name: "configured entrypoint", userAgent: "claude-cli/2.1.353 (external, other-client, workload/cron)", allowEntrypoint: true, wantConfirmed: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			headers := confirmedClaudeCodeHeaders()
 			userAgent := testCase.userAgent
 			if userAgent == "" {
-				userAgent = "claude-cli/2.1.312 (external, cli, workload/cron)"
+				userAgent = "claude-cli/2.1.353 (external, cli, workload/cron)"
 			}
 			headers.Set("User-Agent", userAgent)
 			headers.Del(testCase.missingHeader)
@@ -143,12 +143,12 @@ func TestClaudeDeviceProfileUserAgentFieldsStayRequestScoped(t *testing.T) {
 			client := newFakeClaudeDeviceProfileKVClient()
 			useFakeClaudeDeviceProfileKVClient(t, client, homeMode, nil)
 			auth := &cliproxyauth.Auth{ID: "request-fields-" + name}
-			baseUA := "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133)"
-			cronUA := "claude-cli/2.1.280 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)"
+			baseUA := "claude-cli/2.1.321 (external, cli, agent-sdk/0.2.133)"
+			cronUA := "claude-cli/2.1.321 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)"
 			for _, testCase := range []struct{ userAgent, want string }{
-				{userAgent: cronUA, want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133, workload/cron, future-feature/value)"},
+				{userAgent: cronUA, want: "claude-cli/2.1.321 (external, cli, agent-sdk/0.2.133, workload/cron, future-feature/value)"},
 				{userAgent: baseUA, want: baseUA},
-				{userAgent: "claude-cli/2.1.280 (external, cli, future-feature/next)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.2.133, future-feature/next)"},
+				{userAgent: "claude-cli/2.1.321 (external, cli, future-feature/next)", want: "claude-cli/2.1.321 (external, cli, agent-sdk/0.2.133, future-feature/next)"},
 				{want: baseUA},
 			} {
 				headers := claudeDeviceHeaders(testCase.userAgent)
@@ -174,14 +174,14 @@ func TestClaudeDeviceProfileUserAgentFieldsStayRequestScoped(t *testing.T) {
 
 func TestApplyClaudeDeviceProfileHeadersKeepsCurrentUserAgentFields(t *testing.T) {
 	profile := defaultClaudeDeviceProfile(nil)
-	profile.UserAgent = "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220)"
+	profile.UserAgent = "claude-cli/2.1.321 (external, cli, agent-sdk/0.3.220)"
 	for _, testCase := range []struct {
 		name, userAgent, want string
 	}{
-		{name: "current fields", userAgent: "claude-cli/2.1.312 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220, workload/cron, future-feature/value)"},
-		{name: "next request fields", userAgent: "claude-cli/2.1.312 (external, cli, future-feature/next)", want: "claude-cli/2.1.280 (external, cli, agent-sdk/0.3.220, future-feature/next)"},
-		{name: "ordinary request", userAgent: "claude-cli/2.1.312 (external, cli)", want: profile.UserAgent},
-		{name: "malformed request", userAgent: "claude-cli/2.1.312 (external, cli, foo)", want: profile.UserAgent},
+		{name: "current fields", userAgent: "claude-cli/2.1.353 (external, cli, workload/cron, agent-sdk/0.2.133, future-feature/value)", want: "claude-cli/2.1.321 (external, cli, agent-sdk/0.3.220, workload/cron, future-feature/value)"},
+		{name: "next request fields", userAgent: "claude-cli/2.1.353 (external, cli, future-feature/next)", want: "claude-cli/2.1.321 (external, cli, agent-sdk/0.3.220, future-feature/next)"},
+		{name: "ordinary request", userAgent: "claude-cli/2.1.353 (external, cli)", want: profile.UserAgent},
+		{name: "malformed request", userAgent: "claude-cli/2.1.353 (external, cli, foo)", want: profile.UserAgent},
 		{name: "no request", want: profile.UserAgent},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -206,9 +206,9 @@ func TestApplyClaudeDeviceProfileHeadersKeepsCurrentUserAgentFields(t *testing.T
 
 func FuzzParseClaudeCodeUserAgent(f *testing.F) {
 	for _, seed := range []string{
-		"claude-cli/2.1.312 (external, cli)",
-		"claude-cli/2.1.312 (external, cli, workload/cron, agent-sdk/0.2.133)",
-		"claude-cli/2.1.312 (external, cli, agent-sdk/dev)",
+		"claude-cli/2.1.353 (external, cli)",
+		"claude-cli/2.1.353 (external, cli, workload/cron, agent-sdk/0.2.133)",
+		"claude-cli/2.1.353 (external, cli, agent-sdk/dev)",
 		"",
 	} {
 		f.Add(seed)
