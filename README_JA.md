@@ -28,7 +28,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://antigravity.google/"><img src="./assets/logo/antigravity.svg" alt="Antigravity" width="28" height="28" /></a></td>
-        <td>Google GeminiシリーズにはGemini 4 ArgonやGemini 3.8 Flashがあります。CLIProxyAPIはGemini API、AI Studio、Vertex AI、Gemini CLI、Antigravityのアカウントに対応し、利用できるモデルは経路によって異なります。Gemini 3.8 Flashは、長期のソフトウェア開発やエージェントのワークフロー向けのGoogleの最新Flashモデルです。Antigravityの<a href="https://antigravity.google/docs/models/">公式モデル提供状況</a>では、Claude Sonnet 5.5（thinking）とClaude Opus 5.5（thinking）はGoogle AI Pro（試用版を除く）、Google AI Ultra、Enterpriseで利用可能とされています。</td>
+        <td>Google GeminiシリーズにはGemini 4 Carbon、Gemini 4 Argon、Gemini 3.8 Flashがあります。CLIProxyAPIはGemini API、AI Studio、Vertex AI、Gemini CLI、Antigravityのアカウントに対応し、利用できるモデルは経路によって異なります。Gemini 4 CarbonはGemini APIの有料枠と、AntigravityのGoogle AI UltraおよびEnterpriseで利用できます。Gemini 3.8 Flashは、長期のソフトウェア開発やエージェントのワークフロー向けのGoogleの最新Flashモデルです。Antigravityの<a href="https://antigravity.google/docs/models/">公式モデル提供状況</a>では、Claude Sonnet 5.5（thinking）とClaude Opus 5.5（thinking）はGoogle AI Pro（試用版を除く）、Google AI Ultra、Enterpriseで利用可能とされています。</td>
     </tr>
     <tr>
         <td align="center"><a href="https://docs.x.ai/developers/grok-4-7"><img src="./assets/logo/xai.svg" alt="xAI" width="28" height="28" /></a></td>
