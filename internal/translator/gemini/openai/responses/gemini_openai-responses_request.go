@@ -81,7 +81,7 @@ func convertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 	// Convert input messages to Gemini contents format
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(restoreGeminiResponsesTextSignatures(modelName, normalizeOpenAIResponsesToolSearchItems(input.Array(), forwardMap)))
+		inputItems, hasGeminiCarrier := normalizeGeminiResponsesCarriers(restoreGeminiResponsesTextSignatures(modelName, normalizeOpenAIResponsesToolSearchItems(normalizeOpenAIResponsesCustomToolItems(input.Array()), forwardMap)))
 		if hasGeminiCarrier {
 			useGeminiNativeReasoningLayout = true
 		}
@@ -703,6 +703,72 @@ func isOpenAIResponsesToolCall(item ojson.Result) bool {
 func isOpenAIResponsesToolOutput(item ojson.Result) bool {
 	t := item.Get("type").String()
 	return t == "function_call_output" || t == "custom_tool_call_output"
+}
+
+// normalizeOpenAIResponsesCustomToolItems rewrites custom_tool_call /
+// custom_tool_call_output input items into the equivalent function_call /
+// function_call_output shape before any other translation stage runs.
+// Replayed freeform custom tool items have been observed to stall Gemini
+// backends with zero bytes returned and no upstream error, while the identical
+// content as regular function_call items completes (#7422). Normalizing first
+// guarantees every later stage sees the proven-working shape, including
+// stringified tool outputs instead of raw structured arrays inside
+// functionResponse.response.result.
+func normalizeOpenAIResponsesCustomToolItems(items []ojson.Result) []ojson.Result {
+	normalized := make([]ojson.Result, 0, len(items))
+	changed := false
+	for _, item := range items {
+		switch item.Get("type").String() {
+		case "custom_tool_call":
+			itemDoc := ojson.NewDocString(item.Raw)
+			_ = itemDoc.Set("type", "function_call")
+			_ = itemDoc.Delete("input")
+			argumentsDoc := ojson.NewDocString(`{"input":""}`)
+			if inputVal := item.Get("input"); inputVal.Exists() {
+				if inputVal.Type == ojson.String {
+					_ = argumentsDoc.Set("input", inputVal.String())
+				} else {
+					_ = argumentsDoc.SetRaw("input", inputVal.Raw)
+				}
+			}
+			_ = itemDoc.Set("arguments", argumentsDoc.String())
+			normalized = append(normalized, util.ParseGJSONBytesNoCopy(itemDoc.Bytes()))
+			changed = true
+		case "custom_tool_call_output":
+			itemDoc := ojson.NewDocString(item.Raw)
+			_ = itemDoc.Set("type", "function_call_output")
+			if output := item.Get("output"); output.IsArray() {
+				_ = itemDoc.Set("output", joinResponsesCustomToolOutputText(output))
+			}
+			normalized = append(normalized, util.ParseGJSONBytesNoCopy(itemDoc.Bytes()))
+			changed = true
+		default:
+			normalized = append(normalized, item)
+		}
+	}
+	if !changed {
+		return items
+	}
+	return normalized
+}
+
+// joinResponsesCustomToolOutputText renders a structured custom tool output as
+// the plain string a function_call_output carries: text parts are joined with
+// newlines and non-text blocks fall back to their raw JSON so no fragment is
+// silently dropped.
+func joinResponsesCustomToolOutputText(output ojson.Result) string {
+	var texts []string
+	output.ForEach(func(_, part ojson.Result) bool {
+		if text := part.Get("text"); text.Type == ojson.String {
+			texts = append(texts, text.String())
+		} else if part.Type == ojson.String {
+			texts = append(texts, part.String())
+		} else {
+			texts = append(texts, part.Raw)
+		}
+		return true
+	})
+	return strings.Join(texts, "\n")
 }
 
 func pairOpenAIResponsesReasoningWithFunctionCalls(items []ojson.Result) []ojson.Result {
