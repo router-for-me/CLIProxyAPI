@@ -6,6 +6,8 @@ export type AuthFileType =
   | 'qwen'
   | 'kiro'
   | 'kimi'
+  | 'qoder'
+  | 'qoder-cn'
   | 'gemini'
   | 'aistudio'
   | 'claude'

@@ -357,10 +357,19 @@ export interface KimiUsagePayload {
 
 export type KimiQuotaRow = CountQuotaRow;
 export type KiroQuotaRow = CountQuotaRow;
+export type QoderQuotaRow = CountQuotaRow;
 
 export interface KiroQuotaState {
   status: 'idle' | 'loading' | 'success' | 'error';
   rows: KiroQuotaRow[];
+  plan?: string;
+  error?: string;
+  errorStatus?: number;
+}
+
+export interface QoderQuotaState {
+  status: 'idle' | 'loading' | 'success' | 'error';
+  rows: QoderQuotaRow[];
   plan?: string;
   error?: string;
   errorStatus?: number;

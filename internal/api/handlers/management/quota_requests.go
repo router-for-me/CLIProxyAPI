@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -18,6 +19,8 @@ func quotaProviderKey(provider string) string {
 	switch key {
 	case "kimi-ai", "kimi.ai", "kimi.com":
 		return "kimi"
+	case "qoder-cn":
+		return "qoder"
 	default:
 		return key
 	}
@@ -82,6 +85,19 @@ func prepareCredentialQuotaRequest(auth *coreauth.Auth, target *url.URL, headers
 				target.Host = "api.kimi.com"
 			}
 		}
+	case "qoder":
+		if !hubQuotaRouteAllowed("qoder", host, target.Path) {
+			return nil
+		}
+		endpoints, errEndpoints := qoderauth.ResolveEndpoints(qoderauth.RegionFromAuth(auth.Provider, auth.Metadata))
+		if errEndpoints != nil {
+			return errEndpoints
+		}
+		openAPI, errParse := url.Parse(endpoints.OpenAPIBase)
+		if errParse != nil || openAPI.Host == "" {
+			return errors.New("invalid Qoder OpenAPI endpoint")
+		}
+		target.Host = openAPI.Host
 	case "meta":
 		if host != "api.meta.ai" || target.Path != "/muse-code/key" {
 			return nil

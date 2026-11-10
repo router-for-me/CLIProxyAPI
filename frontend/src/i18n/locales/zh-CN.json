@@ -345,6 +345,8 @@
     "filter_gemini": "Gemini",
     "filter_kiro": "Kiro",
     "filter_kimi": "Kimi",
+    "filter_qoder": "Qoder 国际版",
+    "filter_qoder-cn": "Qoder 国内版",
     "filter_aistudio": "AIStudio",
     "filter_claude": "Claude",
     "filter_codex": "Codex",
@@ -615,6 +617,22 @@
     "monthly_credits": "月度积分",
     "trial_credits": "试用积分",
     "bonus_credits": "赠送积分",
+    "plan": "套餐"
+  },
+  "qoder_quota": {
+    "idle": "点击此处刷新额度",
+    "loading": "正在加载额度...",
+    "load_failed": "额度获取失败：{{message}}",
+    "missing_auth_index": "认证文件缺少 auth_index",
+    "empty_data": "暂无额度数据",
+    "refresh_button": "刷新额度",
+    "fetch_all": "获取全部",
+    "title": "Qoder 额度",
+    "empty_title": "暂无 Qoder 凭证",
+    "empty_desc": "登录 Qoder 国际版或国内版后即可查看额度。",
+    "plan_credits": "套餐积分",
+    "add_on_credits": "加购积分",
+    "org_credits": "组织资源包",
     "plan": "套餐"
   },
   "kimi_quota": {

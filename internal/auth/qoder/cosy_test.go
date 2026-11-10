@@ -76,6 +76,20 @@ func TestSignRequestVerifiesExactWireBody(t *testing.T) {
 	}
 }
 
+func TestCOSYKeyIsPrintableLikeOfficialClient(t *testing.T) {
+	for range 32 {
+		key := newCOSYKey()
+		if len(key) != 16 {
+			t.Fatalf("key length = %d", len(key))
+		}
+		for _, char := range key {
+			if !strings.ContainsRune("0123456789abcdef-", rune(char)) {
+				t.Fatalf("key %q has non-uuid byte %q; the gateway rejects such signatures", key, char)
+			}
+		}
+	}
+}
+
 func TestMarshalWireDoesNotHTMLEscape(t *testing.T) {
 	body, err := MarshalWire(map[string]string{"text": "<tag>&中文"})
 	if err != nil {

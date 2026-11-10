@@ -325,7 +325,8 @@ func credentialModelsError(c *gin.Context, err error) {
 	case errors.Is(err, coreauth.ErrCredentialModelsUnavailable):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": coreauth.ErrCredentialModelsUnavailable.Error()})
 	case errors.Is(err, coreauth.ErrCredentialModelsRefreshFailed):
-		c.JSON(http.StatusBadGateway, gin.H{"error": coreauth.ErrCredentialModelsRefreshFailed.Error()})
+		// Wrapped errors carry the upstream reason so the panel can show why discovery failed.
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 	default:
 		log.WithError(err).Error("credential model operation failed")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "credential model operation failed"})

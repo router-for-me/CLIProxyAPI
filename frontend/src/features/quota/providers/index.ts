@@ -18,6 +18,8 @@ import { META_CONFIG } from './meta/data';
 import { MetaQuotaBody } from './meta/MetaQuotaBody';
 import { KIRO_CONFIG } from './kiro/data';
 import { KiroQuotaBody } from './kiro/KiroQuotaBody';
+import { QODER_CONFIG } from './qoder/data';
+import { QoderQuotaBody } from './qoder/QoderQuotaBody';
 import { KIMI_CONFIG } from './kimi/data';
 import { KimiQuotaBody } from './kimi/KimiQuotaBody';
 import { XAI_CONFIG } from './xai/data';
@@ -59,6 +61,7 @@ export const QUOTA_ADAPTERS: Record<QuotaProviderType, QuotaAdapter> = {
   devin: { ...DEVIN_CONFIG, Body: DevinQuotaBody } as unknown as QuotaAdapter,
   kiro: { ...KIRO_CONFIG, Body: KiroQuotaBody } as unknown as QuotaAdapter,
   kimi: { ...KIMI_CONFIG, Body: KimiQuotaBody } as unknown as QuotaAdapter,
+  qoder: { ...QODER_CONFIG, Body: QoderQuotaBody } as unknown as QuotaAdapter,
   meta: { ...META_CONFIG, Body: MetaQuotaBody } as unknown as QuotaAdapter,
   xai: { ...XAI_CONFIG, Body: XaiQuotaBody } as unknown as QuotaAdapter,
   zcode: { ...ZCODE_CONFIG, Body: ZCodeQuotaBody } as unknown as QuotaAdapter,

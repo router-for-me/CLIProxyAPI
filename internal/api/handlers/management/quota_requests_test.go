@@ -54,6 +54,28 @@ func TestPrepareCredentialQuotaRequestAntigravityUserAgent(t *testing.T) {
 	}
 }
 
+func TestPrepareCredentialQuotaRequestQoderPinsRegionalOpenAPI(t *testing.T) {
+	for _, tc := range []struct {
+		provider, requested, want string
+	}{
+		{"qoder", "https://openapi.qoder.com.cn/api/v2/quota/usage", "openapi.qoder.sh"},
+		{"qoder-cn", "https://openapi.qoder.sh/api/v2/quota/usage", "openapi.qoder.com.cn"},
+		{"qoder-cn", "https://openapi.qoder.com.cn/api/v2/user/plan", "openapi.qoder.com.cn"},
+	} {
+		auth := &coreauth.Auth{Provider: tc.provider}
+		target, _ := url.Parse(tc.requested)
+		if err := prepareCredentialQuotaRequest(auth, target, map[string]string{}); err != nil {
+			t.Fatal(err)
+		}
+		if target.Host != tc.want {
+			t.Fatalf("%s quota host = %s, want %s", tc.provider, target.Host, tc.want)
+		}
+	}
+	if !hubQuotaRouteAllowed("qoder-cn", "openapi.qoder.com.cn", "/api/v2/quota/usage") || hubQuotaRouteAllowed("qoder", "openapi.qoder.sh", "/api/v1/userinfo") {
+		t.Fatal("Qoder hub quota allowlist is wrong")
+	}
+}
+
 func TestPrepareCredentialQuotaRequestKimiDomain(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

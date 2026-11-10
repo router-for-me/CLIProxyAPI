@@ -9,3 +9,10 @@ func TestKiroCanonicalUsageKeepsCacheInsideInput(t *testing.T) {
 		t.Fatalf("Kiro usage was double-counted or left unclassified: %+v", breakdown)
 	}
 }
+
+func TestQoderCanonicalUsageKeepsCacheInsideInput(t *testing.T) {
+	detail := EnsureTokenBreakdownForProvider(Detail{InputTokens: 35, OutputTokens: 7, TotalTokens: 42, CacheReadTokens: 20}, "qoder-cn", "QoderExecutor")
+	if breakdown := detail.TokenBreakdown; !breakdown.Valid() || breakdown.Quality != TokenAccountingQualityComplete || breakdown.Input.UncachedTokens != 15 {
+		t.Fatalf("Qoder usage was left unclassified: %+v", breakdown)
+	}
+}

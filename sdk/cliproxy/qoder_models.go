@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
@@ -18,8 +19,9 @@ func (s *Service) qoderModelsForAuth(ctx context.Context, auth *coreauth.Auth) [
 	}
 	catalog, err := s.fetchQoderCatalog(ctx, auth)
 	if err != nil {
-		log.WithError(err).Debug("qoder: account model discovery failed")
-		return nil
+		log.WithError(err).Warnf("qoder: account model discovery failed for %s", auth.ID)
+		// Keep serving the last account catalog instead of dropping every model.
+		return qoderauth.CachedModels(auth.ID)
 	}
 	storeUpstreamModels(auth, catalog.Models)
 	return catalog.Models
@@ -56,7 +58,8 @@ func (s *Service) qoderCredentialModelCatalog(ctx context.Context, auth *coreaut
 	if refresh {
 		catalog, err := s.fetchQoderCatalog(ctx, auth)
 		if err != nil {
-			return nil, coreauth.ErrCredentialModelsRefreshFailed
+			log.WithError(err).Warnf("qoder: model catalog refresh failed for %s", auth.ID)
+			return nil, fmt.Errorf("%w: %v", coreauth.ErrCredentialModelsRefreshFailed, err)
 		}
 		storeUpstreamModels(auth, catalog.Models)
 		if s.coreManager != nil {
@@ -66,5 +69,9 @@ func (s *Service) qoderCredentialModelCatalog(ctx context.Context, auth *coreaut
 		}
 		return &coreauth.CredentialModelCatalog{Models: catalog.Models, Source: status}, nil
 	}
-	return &coreauth.CredentialModelCatalog{Models: cachedUpstreamModels(auth), Source: status}, nil
+	models := cachedUpstreamModels(auth)
+	if models == nil {
+		models = qoderauth.CachedModels(auth.ID)
+	}
+	return &coreauth.CredentialModelCatalog{Models: models, Source: status}, nil
 }

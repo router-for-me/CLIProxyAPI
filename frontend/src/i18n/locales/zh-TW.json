@@ -345,6 +345,8 @@
     "filter_gemini": "Gemini",
     "filter_kiro": "Kiro",
     "filter_kimi": "Kimi",
+    "filter_qoder": "Qoder 國際版",
+    "filter_qoder-cn": "Qoder 中國版",
     "filter_aistudio": "AIStudio",
     "filter_claude": "Claude",
     "filter_codex": "Codex",
@@ -615,6 +617,22 @@
     "monthly_credits": "每月點數",
     "trial_credits": "試用點數",
     "bonus_credits": "贈送點數",
+    "plan": "方案"
+  },
+  "qoder_quota": {
+    "idle": "點擊此處重新整理配額",
+    "loading": "正在載入配額...",
+    "load_failed": "配額取得失敗：{{message}}",
+    "missing_auth_index": "驗證檔案缺少 auth_index",
+    "empty_data": "暫無配額資料",
+    "refresh_button": "重新整理配額",
+    "fetch_all": "取得全部",
+    "title": "Qoder 配額",
+    "empty_title": "暫無 Qoder 憑證",
+    "empty_desc": "登入 Qoder 國際版或中國版後即可查看配額。",
+    "plan_credits": "方案點數",
+    "add_on_credits": "加購點數",
+    "org_credits": "組織資源包",
     "plan": "方案"
   },
   "kimi_quota": {

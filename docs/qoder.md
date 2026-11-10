@@ -33,12 +33,27 @@ Official references:
 - https://www.npmjs.com/package/@qoder-ai/qodercli
 - https://www.npmjs.com/package/@qodercn-ai/qoderclicn
 
+## Quota
+
+The panel reads the official CLI's account endpoints with the credential's
+bearer token: `GET /api/v2/quota/usage` (plan, add-on and organization
+credit buckets, plus the cycle `expiresAt`) and `GET /api/v2/user/plan` (plan
+name). Both editions share one quota adapter; the backend pins the OpenAPI host
+to the credential's region (`openapi.qoder.sh` or `openapi.qoder.com.cn`) and
+refreshes an expiring token before the call.
+
 ## Models and requests
 
 The model list is account-bound. CLIProxyAPI fetches `/algo/api/v2/model/list`
 for each credential, keeps the upstream model IDs unchanged, and preserves the
 published context, output, visual, and reasoning capabilities. No static mapping
 is substituted when discovery fails.
+
+COSY signing requires the AES key to be printable ASCII (`uuid[:16]`, as the
+official client does). Random key bytes make both gateways answer
+`{"code":"101","message":"Signature invalid"}`, which broke model discovery and
+chat. A failed refresh keeps the last account catalog and returns the upstream
+reason to the panel.
 
 Chat requests use Qoder's COSY-signed, encoded SSE protocol. OpenAI, Claude, and
 Gemini inputs are translated to the Qoder business payload; payload rules run

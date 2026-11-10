@@ -96,10 +96,9 @@ func signRequestAt(req *http.Request, body []byte, storage *TokenStorage, now ti
 	if err != nil {
 		return fmt.Errorf("qoder: marshal signing identity: %w", err)
 	}
-	aesKey := make([]byte, 16)
-	if _, errRandom := rand.Read(aesKey); errRandom != nil {
-		return fmt.Errorf("qoder: generate COSY AES key: %w", errRandom)
-	}
+	// The gateway decrypts the identity with a printable key; arbitrary bytes are
+	// rejected as "Signature invalid". The official client uses uuid[:16].
+	aesKey := newCOSYKey()
 	info, err := encryptAESBase64(identity, aesKey)
 	if err != nil {
 		return err
@@ -158,6 +157,10 @@ func signRequestAt(req *http.Request, body []byte, storage *TokenStorage, now ti
 		req.Header.Set("Cosy-Organization-Tags", strings.Join(storage.OrganizationTags, ","))
 	}
 	return nil
+}
+
+func newCOSYKey() []byte {
+	return []byte(uuid.NewString()[:16])
 }
 
 // EncodeBody applies Qoder's base64 rearrangement and alphabet substitution.

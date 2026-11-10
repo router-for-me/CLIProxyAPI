@@ -30,6 +30,7 @@ import iconKiro from '@/assets/icons/kiro.svg';
 import iconKimiLight from '@/assets/icons/kimi-light.svg';
 import iconKimiDark from '@/assets/icons/kimi-dark.svg';
 import iconQoder from '@/assets/icons/qoder.svg';
+import iconQoderDark from '@/assets/icons/qoder-dark.svg';
 import iconVertex from '@/assets/icons/vertex.svg';
 import iconGrok from '@/assets/icons/grok.svg';
 import iconGrokDark from '@/assets/icons/grok-dark.svg';
@@ -119,13 +120,13 @@ const PROVIDERS: BuiltInOAuthProviderCard[] = [
     kind: 'builtin',
     id: 'qoder',
     titleKey: 'auth_login.qoder_oauth_title',
-    icon: iconQoder,
+    icon: { light: iconQoder, dark: iconQoderDark },
   },
   {
     kind: 'builtin',
     id: 'qoder-cn',
     titleKey: 'auth_login.qoder_cn_oauth_title',
-    icon: iconQoder,
+    icon: { light: iconQoder, dark: iconQoderDark },
   },
   {
     kind: 'builtin',

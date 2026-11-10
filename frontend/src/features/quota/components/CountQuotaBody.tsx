@@ -14,7 +14,7 @@ export function CountQuotaBody({
   classes,
 }: {
   rows: CountQuotaRow[];
-  provider: 'kimi' | 'kiro';
+  provider: 'kimi' | 'kiro' | 'qoder';
   classes: QuotaClassMap;
 }) {
   const { t, i18n } = useTranslation();

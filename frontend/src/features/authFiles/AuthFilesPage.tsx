@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { copyToClipboard } from '@/utils/clipboard';
 import { paginate } from '@/utils/pagination';
 import { getQuotaCacheKey } from '@/utils/quota/identity';
+import { resolveAuthProvider } from '@/utils/quota/validators';
 import {
   QUOTA_PROVIDER_TYPES,
   clampCardPageSize,
@@ -196,10 +197,12 @@ export function AuthFilesPage() {
 
   const disableControls = connectionStatus !== 'connected' || refreshingAllCredentials;
   const normalizedFilter = normalizeProviderKey(String(filter));
+  // Regional editions (kimi-ai, qoder-cn) share their base provider's quota adapter.
+  const quotaFilterKey = resolveAuthProvider({ name: '', type: normalizedFilter });
   const quotaFilterType: QuotaProviderType | null = QUOTA_PROVIDER_TYPES.has(
-    normalizedFilter as QuotaProviderType
+    quotaFilterKey as QuotaProviderType
   )
-    ? (normalizedFilter as QuotaProviderType)
+    ? (quotaFilterKey as QuotaProviderType)
     : null;
   const activeQuotaFilter: AuthFileQuotaFilter =
     normalizedFilter === 'all' ? 'all' : quotaFilterType;

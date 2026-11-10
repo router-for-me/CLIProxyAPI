@@ -511,7 +511,7 @@ export function buildTimelineLane(input: TimelineLaneInput): TimelineLane {
     };
   }
 
-  if (provider === 'kimi' || provider === 'kiro') {
+  if (provider === 'kimi' || provider === 'kiro' || provider === 'qoder') {
     const rows = ((quota as { rows?: KimiRowLike[] }).rows ?? []).filter(
       (row) => typeof row.resetAtMs === 'number'
     );

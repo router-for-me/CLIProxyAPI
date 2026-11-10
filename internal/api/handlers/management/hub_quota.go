@@ -49,6 +49,11 @@ var hubQuotaRoutes = map[string][]hubQuotaRoute{
 		{host: "api.kimi.com", prefixes: []string{"/coding/v1/usages"}},
 		{host: "api.kimi.ai", prefixes: []string{"/coding/v1/usages"}},
 	},
+	// Both editions are listed; prepareCredentialQuotaRequest pins the host to the credential's region.
+	"qoder": {
+		{host: "openapi.qoder.sh", prefixes: []string{"/api/v2/quota/usage", "/api/v2/user/plan"}},
+		{host: "openapi.qoder.com.cn", prefixes: []string{"/api/v2/quota/usage", "/api/v2/user/plan"}},
+	},
 	"xai": {
 		{host: "cli-chat-proxy.grok.com", prefixes: []string{"/v1/billing", "/v1/user", "/v1/settings"}},
 		{host: "api.x.ai", prefixes: []string{"/v1/me", "/v1/chat/completions"}},
@@ -141,10 +146,10 @@ func (h *Handler) HubQuotaAPICall(c *gin.Context) {
 	}
 
 	var errPrepare error
-	a, errPrepare = h.prepareKiroAuth(c.Request.Context(), a, "")
+	a, errPrepare = h.prepareProviderAuth(c.Request.Context(), a, "")
 	if errPrepare != nil {
-		log.WithError(errPrepare).Debug("hub quota: Kiro credential preparation failed")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Kiro credential preparation failed"})
+		log.WithError(errPrepare).Debug("hub quota: credential preparation failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "credential preparation failed"})
 		return
 	}
 	reqHeaders := body.Header

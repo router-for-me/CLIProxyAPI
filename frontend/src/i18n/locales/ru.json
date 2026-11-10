@@ -350,6 +350,8 @@
     "filter_gemini": "Gemini",
     "filter_kiro": "Kiro",
     "filter_kimi": "Kimi",
+    "filter_qoder": "Qoder",
+    "filter_qoder-cn": "Qoder CN",
     "filter_aistudio": "AIStudio",
     "filter_claude": "Claude",
     "filter_codex": "Codex",
@@ -620,6 +622,22 @@
     "monthly_credits": "Месячные кредиты",
     "trial_credits": "Пробные кредиты",
     "bonus_credits": "Бонусные кредиты",
+    "plan": "Тариф"
+  },
+  "qoder_quota": {
+    "idle": "Не загружено. Нажмите \"Обновить квоту\".",
+    "loading": "Загрузка квоты...",
+    "load_failed": "Не удалось загрузить квоту: {{message}}",
+    "missing_auth_index": "В файле авторизации отсутствует auth_index",
+    "empty_data": "Данные по квоте отсутствуют",
+    "refresh_button": "Обновить квоту",
+    "fetch_all": "Получить все",
+    "title": "Квота Qoder",
+    "empty_title": "Нет учётных данных Qoder",
+    "empty_desc": "Войдите в Qoder (международная или китайская версия), чтобы увидеть квоту.",
+    "plan_credits": "Кредиты тарифа",
+    "add_on_credits": "Дополнительные кредиты",
+    "org_credits": "Пакет организации",
     "plan": "Тариф"
   },
   "kimi_quota": {

@@ -10,6 +10,8 @@ export function resolveAuthProvider(file: AuthFileItem): string {
   if (key === 'x-ai' || key === 'grok') return 'xai';
   // Kimi International (kimi.ai) accounts share Kimi's quota API on another host.
   if (key === 'kimi-ai') return 'kimi';
+  // Qoder China uses the same quota API on its own regional host.
+  if (key === 'qoder-cn') return 'qoder';
   return key;
 }
 

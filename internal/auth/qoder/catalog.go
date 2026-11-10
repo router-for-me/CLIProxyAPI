@@ -52,6 +52,17 @@ func DropCatalog(authID string) {
 	catalogCache.Unlock()
 }
 
+// CachedModels returns a copy of the last fetched catalog, or nil when none was loaded.
+func CachedModels(authID string) []*registry.ModelInfo {
+	catalogCache.RLock()
+	catalog, exists := catalogCache.entries[authID]
+	catalogCache.RUnlock()
+	if !exists {
+		return nil
+	}
+	return cloneCatalog(&catalog).Models
+}
+
 // CachedModelConfig returns a defensive copy of one account's model configuration.
 func CachedModelConfig(authID, model string) (map[string]any, error) {
 	catalogCache.RLock()

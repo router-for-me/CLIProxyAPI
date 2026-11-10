@@ -347,6 +347,8 @@
     "filter_gemini": "Gemini",
     "filter_kiro": "Kiro",
     "filter_kimi": "Kimi",
+    "filter_qoder": "Qoder",
+    "filter_qoder-cn": "Qoder CN",
     "filter_aistudio": "AIStudio",
     "filter_claude": "Claude",
     "filter_codex": "Codex",
@@ -617,6 +619,22 @@
     "monthly_credits": "Monthly credits",
     "trial_credits": "Trial credits",
     "bonus_credits": "Bonus credits",
+    "plan": "Plan"
+  },
+  "qoder_quota": {
+    "idle": "Click here to refresh quota",
+    "loading": "Loading quota...",
+    "load_failed": "Failed to load quota: {{message}}",
+    "missing_auth_index": "Auth file missing auth_index",
+    "empty_data": "No quota data available",
+    "refresh_button": "Refresh Quota",
+    "fetch_all": "Fetch All",
+    "title": "Qoder quota",
+    "empty_title": "No Qoder credentials",
+    "empty_desc": "Log in to Qoder International or China to view quota.",
+    "plan_credits": "Plan credits",
+    "add_on_credits": "Add-on credits",
+    "org_credits": "Organization package",
     "plan": "Plan"
   },
   "kimi_quota": {

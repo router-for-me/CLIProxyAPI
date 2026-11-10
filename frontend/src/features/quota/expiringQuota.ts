@@ -204,7 +204,7 @@ export function collectExpiringQuotaRows(
         });
       }
     }
-  } else if (provider === 'kimi' || provider === 'kiro') {
+  } else if (provider === 'kimi' || provider === 'kiro' || provider === 'qoder') {
     const kimiRows = (quota as { rows?: KimiRowShape[] }).rows ?? [];
     kimiRows.forEach((row, index) => {
       const used = isFiniteNumber(row.used) ? row.used : null;
