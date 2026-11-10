@@ -1817,6 +1817,39 @@
       }
     },
     {
+      "id": "gemini-4-carbon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Carbon",
+      "name": "gemini-4-carbon",
+      "description": "Gemini 4 Carbon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
       "id": "gemini-omni-1.2-flash",
       "object": "model",
       "owned_by": "google",
@@ -4433,6 +4466,40 @@
       }
     },
     {
+      "id": "gemini-4-carbon-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Carbon",
+      "name": "gemini-4-carbon-high",
+      "description": "Gemini 4 Carbon (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
       "id": "gemini-3.8-flash-high",
       "object": "model",
       "owned_by": "antigravity",
@@ -5013,6 +5080,40 @@
     }
   ],
   "meta": [
+    {
+      "id": "muse-ember-1.0",
+      "object": "model",
+      "created": 1794182400,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Ember 1.0",
+      "name": "muse-ember-1.0",
+      "description": "Meta's smallest and most efficient model designed for complex reasoning execution, tool calls, coding subtasks, routing, extraction, and long document parsing.",
+      "context_length": 1048576,
+      "max_completion_tokens": 524288,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
     {
       "id": "muse-wonder-1.0",
       "object": "model",
