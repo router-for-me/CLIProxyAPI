@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,8 +317,9 @@ func TestHasActionableError(t *testing.T) {
 }
 
 type recordingRequestLogger struct {
-	loggedCalls []int
-	enabled     bool
+	loggedCalls  []int
+	apiResponses [][]byte
+	enabled      bool
 }
 
 func (l *recordingRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
@@ -336,8 +338,85 @@ func (l *recordingRequestLogger) IsEnabled() bool {
 func (l *recordingRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	if force || l.enabled {
 		l.loggedCalls = append(l.loggedCalls, statusCode)
+		l.apiResponses = append(l.apiResponses, bytes.Clone(apiResponse))
 	}
 	return nil
+}
+
+type stubDeferredAPIResponse struct {
+	section []byte
+}
+
+func (s *stubDeferredAPIResponse) RenderAPIResponse() []byte {
+	return s.section
+}
+
+func TestFinalizeForceLogPrependsDeferredAPIResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	newTestWrapper := func(c *gin.Context, logger *recordingRequestLogger, status int) *ResponseWriterWrapper {
+		return &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			logOnErrorOnly: true,
+			statusCode:     status,
+			requestInfo: &RequestInfo{
+				URL:       "/v1/chat/completions",
+				Method:    http.MethodPost,
+				RequestID: "req-deferred-response",
+				Timestamp: time.Now(),
+			},
+		}
+	}
+
+	t.Run("error log prepends the deferred upstream response", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set(logging.DeferredAPIResponseContextKey, &stubDeferredAPIResponse{
+			section: []byte("=== API RESPONSE 1 ===\nTimestamp: 2026-11-11T00:45:05Z\n\nStatus: 502\n\nBody:\nupstream-error-body\n\n"),
+		})
+		c.Set("API_RESPONSE", []byte(`{"error":{"message":"upstream failed"}}`))
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := newTestWrapper(c, logger, http.StatusInternalServerError)
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("Finalize error: %v", err)
+		}
+		if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusInternalServerError {
+			t.Fatalf("expected 1 logged call for 500 status, got: %v", logger.loggedCalls)
+		}
+		if len(logger.apiResponses) != 1 {
+			t.Fatalf("expected 1 captured API response payload, got %d", len(logger.apiResponses))
+		}
+		got := string(logger.apiResponses[0])
+		for _, want := range []string{"=== API RESPONSE 1 ===", "Status: 502", "upstream-error-body", `{"error":{"message":"upstream failed"}}`} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("logged API response missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Index(got, "upstream-error-body") > strings.Index(got, `{"error":{"message":"upstream failed"}}`) {
+			t.Fatalf("deferred upstream response must come before the proxy error payload:\n%s", got)
+		}
+	})
+
+	t.Run("success does not log the captured response body", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set(logging.DeferredAPIResponseContextKey, &stubDeferredAPIResponse{
+			section: []byte("=== API RESPONSE 1 ===\n\nBody:\nupstream-success-body\n\n"),
+		})
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := newTestWrapper(c, logger, http.StatusOK)
+		if err := wrapper.Finalize(c); err != nil {
+			t.Fatalf("Finalize error: %v", err)
+		}
+		if len(logger.loggedCalls) != 0 {
+			t.Fatalf("expected 0 logged calls for a successful request with request-log off, got %d: %v", len(logger.loggedCalls), logger.loggedCalls)
+		}
+	})
 }
 
 func TestFinalizeExcludes499FromForceLog(t *testing.T) {
