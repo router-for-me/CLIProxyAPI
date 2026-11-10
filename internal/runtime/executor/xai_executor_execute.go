@@ -98,7 +98,12 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			continue
 		}
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
-		upstreamUsage.ObserveResponsesStream(eventData)
+		// Failure terminals are not successful usage. xaiDoneTerminalType leaves
+		// every other event type unchanged, so this still observes item and
+		// completed/incomplete usage, including a clean response.done.
+		if xaiDoneTerminalType(eventData) != "response.done" {
+			upstreamUsage.ObserveResponsesStream(eventData)
+		}
 		prepared.applyPatch.RememberDispatcherEvent(eventData)
 		eventData = namespaceRestorer.restore(eventData)
 		if prepared.webSearchAlias != "" {
@@ -120,10 +125,18 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-			case "response.completed", "response.incomplete":
-				completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+			case "response.completed", "response.incomplete", "response.done":
+				// Same terminal rule as ExecuteStream: promote a clean response.done
+				// to completed, keep incomplete as incomplete, and leave failed,
+				// cancelled, or error-bearing events unchanged.
+				terminalType := xaiDoneTerminalType(eventData)
+				if terminalType == "response.done" {
+					return cliproxyexecutor.Response{Payload: xaiTerminalFailurePayload(eventData), Headers: httpResp.Header.Clone()}, nil
+				}
+				completedData := xaiSetTerminalEventType(eventData, terminalType)
+				completedData = xaiPatchCompletedOutput(completedData, outputItemsByIndex, outputItemsFallback)
 				completedData = xaiNormalizeReasoningSummaryData(completedData)
-				if eventType == "response.completed" {
+				if terminalType == "response.completed" {
 					// A truncated turn carries no replayable terminal state, so only a
 					// completed response may refresh the reasoning replay cache.
 					cacheXAIReasoningReplayFromCompleted(ctx, prepared.replayScope, completedData)
