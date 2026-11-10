@@ -324,6 +324,11 @@ func applySummaryConfigForProviderDoc(doc *ojson.Doc, docValid bool, format, mod
 		value := "omitted"
 		if enabled {
 			value = "summarized"
+			// Cloaking fills display only when it is absent, so a caller-supplied
+			// "updates" must be written back instead of rewritten to "summarized".
+			if strings.ToLower(strings.TrimSpace(doc.Get("thinking.display").String())) == "updates" {
+				value = "updates"
+			}
 		}
 		if doc.Set("thinking.display", value) == nil {
 			modified = true
@@ -554,7 +559,7 @@ func claudeSummaryConfigFromGetter(get func(string) ojson.Result, path string) (
 		return SummaryConfig{}, false
 	}
 	switch strings.ToLower(strings.TrimSpace(value.String())) {
-	case "summarized":
+	case "summarized", "updates":
 		return SummaryConfig{Mode: SummaryEnabled, Detail: "auto"}, true
 	case "omitted":
 		return SummaryConfig{Mode: SummaryDisabled}, true
