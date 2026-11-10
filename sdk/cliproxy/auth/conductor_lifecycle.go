@@ -706,6 +706,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 	if m.scheduler != nil {
 		m.scheduler.RecordRemovalTombstone(id, tombstoneEpoch)
 	}
+	m.forgetWeightedAuth(id)
 	m.structuralEpoch.Add(1)
 	m.queueRefreshUnschedule(id)
 	m.invalidateSessionAffinity(id)
@@ -730,6 +731,19 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	sel := m.Selector()
 	if invalidator, ok := sel.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
 		invalidator.InvalidateAuth(authID)
+	}
+}
+
+// forgetWeightedAuth drops weighted round-robin accounting for a permanently removed
+// credential. Only true deregistration may reach this path: transient exclusions from
+// retry tried sets or cooldowns must retain their accumulated credit (issue #7431).
+func (m *Manager) forgetWeightedAuth(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	sel := m.Selector()
+	if forgetter, ok := sel.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
 	}
 }
 

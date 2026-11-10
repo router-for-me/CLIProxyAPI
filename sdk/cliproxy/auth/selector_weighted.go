@@ -136,7 +136,23 @@ type weightedPoolState struct {
 	inFlight   uint64
 	generation uint64
 	next       *weightedPoolState // Exact-identity collision chain for the digest key.
+	// dynamic marks a shared route-level accumulator used by oversized candidate sets.
+	// Membership grows and shrinks with registration changes instead of matching one
+	// exact candidate set, credits persist across transient exclusions, and picks charge
+	// immediately because no reservation holds member indices. It is only ever stored in
+	// WeightedRoundRobinSelector.largeStates.
+	dynamic bool
+	// peak is the largest candidate vector this pool has accounted. The stale-member
+	// prune bound scales with it so transient exclusions never drop credits.
+	peak int
 }
+
+// maxExactWeightedPoolMembers is the candidate-set size above which exact-membership
+// pools are abandoned for one shared accumulator per route. Above this scale, retry
+// exclusions and cooldowns produce unboundedly many transient candidate subsets, and a
+// fresh zero-credit pool per subset would collapse smooth weighted round-robin onto the
+// first remaining IDs in sorted order (issue #7431).
+const maxExactWeightedPoolMembers = maxSmoothWeightedStateEntries
 
 func sortedWeightedIDs(weights map[string]int64) []string {
 	ids := make([]string, 0, len(weights))
@@ -213,9 +229,14 @@ func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, au
 // ID-sorted candidates and cached weights, avoiding sorting and cloning auths.
 // ids must be sorted, with one positive weight per ID in the parallel slice.
 func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
-	key := weightedPoolDigest(route, ids)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Oversized candidate sets (and any route that ever saw one) share a single
+	// route-level accumulator so transient exclusions cannot reset rotation credits.
+	if len(ids) > maxExactWeightedPoolMembers || s.largeStates[route] != nil {
+		return s.reserveLargePoolLocked(route, available, weights, ids, authID)
+	}
+	key := weightedPoolDigest(route, ids)
 	if s.states == nil {
 		s.states = make(map[[32]byte]*weightedPoolState)
 	}
@@ -277,6 +298,174 @@ func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth
 		selector: s, state: state, generation: state.generation,
 		member: pickedMember, total: total, bound: authID != "",
 	}
+}
+
+// reserveLargePoolLocked selects from an oversized candidate set against one shared
+// route-level accumulator. Credits persist across transient exclusions (tried sets,
+// cooldowns), so rotation continues across the whole positive-weight pool instead of
+// collapsing onto the lowest remaining IDs. The selector mutex must be held.
+func (s *WeightedRoundRobinSelector) reserveLargePoolLocked(route string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
+	if s.largeStates == nil {
+		s.largeStates = make(map[string]*weightedPoolState)
+	}
+	state := s.largeStates[route]
+	if state == nil {
+		state = &weightedPoolState{route: route, dynamic: true}
+		s.largeStates[route] = state
+	}
+	state.syncDynamicMembers(ids, weights)
+	var picked *Auth
+	var pickedCurrent, total int64
+	for _, auth := range available {
+		if auth == nil {
+			continue
+		}
+		idIndex := sort.SearchStrings(ids, auth.ID)
+		if idIndex == len(ids) || ids[idIndex] != auth.ID || weights[idIndex] <= 0 {
+			continue
+		}
+		memberIndex, ok := state.findMember(auth.ID)
+		if !ok {
+			continue
+		}
+		weight := weights[idIndex]
+		total = saturatingAddInt64(total, weight)
+		if authID != "" && auth.ID != authID {
+			continue
+		}
+		current := saturatingAddInt64(state.members[memberIndex].current, weight)
+		if picked == nil || current > pickedCurrent {
+			picked, pickedCurrent = auth, current
+		}
+	}
+	if picked == nil {
+		return nil, nil
+	}
+	// Oversized pools carry no reservations: membership may change between pick and
+	// confirm, so the selection charges immediately and clamps bounded credit instead.
+	state.chargeDynamicMembers(ids, picked.ID, total)
+	return picked, nil
+}
+
+// findMember locates id in the sorted member slice, returning its index when present.
+func (s *weightedPoolState) findMember(id string) (int, bool) {
+	index := sort.Search(len(s.members), func(i int) bool { return s.members[i].id >= id })
+	if index < len(s.members) && s.members[index].id == id {
+		return index, true
+	}
+	return index, false
+}
+
+// syncDynamicMembers merges the candidate vector into the shared accumulator. Membership
+// changes never reset credits by themselves: a credential absent because of a retry
+// exclusion or cooldown keeps its credit, and previously unseen credentials join at zero.
+// Only a configured weight change on a known credential resets the ledger, matching exact
+// pool semantics.
+func (s *weightedPoolState) syncDynamicMembers(ids []string, weights []int64) {
+	if len(ids) > s.peak {
+		s.peak = len(ids)
+	}
+	changed := false
+	for i, id := range ids {
+		if index, ok := s.findMember(id); ok && s.members[index].weight != weights[i] {
+			changed = true
+			break
+		}
+	}
+	if changed {
+		s.generation++
+		for i := range s.members {
+			s.members[i].current = 0
+			s.members[i].pending = 0
+		}
+	}
+	for i, id := range ids {
+		index, ok := s.findMember(id)
+		if ok {
+			s.members[index].weight = weights[i]
+			continue
+		}
+		s.members = append(s.members, weightedPoolMember{})
+		copy(s.members[index+1:], s.members[index:])
+		s.members[index] = weightedPoolMember{id: id, weight: weights[i]}
+	}
+	// Leak guard: only prune absent members once they outnumber the largest live pool
+	// this route has served. Known removals go through ForgetAuth; this bound only
+	// catches unannounced churn.
+	if len(s.members) > 2*s.peak {
+		present := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			present[id] = struct{}{}
+		}
+		kept := s.members[:0]
+		for _, member := range s.members {
+			if _, ok := present[member.id]; ok {
+				kept = append(kept, member)
+			}
+		}
+		s.members = kept
+	}
+}
+
+// chargeDynamicMembers commits a dynamic-pool selection immediately: only present members
+// are charged, so excluded members keep their credit untouched for when they return.
+func (s *weightedPoolState) chargeDynamicMembers(ids []string, selectedID string, total int64) {
+	for _, id := range ids {
+		if index, ok := s.findMember(id); ok {
+			member := &s.members[index]
+			member.current = saturatingAddInt64(member.current, member.weight)
+		}
+	}
+	if index, ok := s.findMember(selectedID); ok {
+		s.members[index].current = saturatingAddInt64(s.members[index].current, -total)
+	}
+	s.boundCredits(total)
+}
+
+// ForgetAuth drops all accounting for a permanently removed credential. It must only be
+// called for true deregistration (config deletion / registration epoch change); transient
+// exclusions such as retry tried sets and cooldowns never forget credentials.
+func (s *WeightedRoundRobinSelector) ForgetAuth(authID string) {
+	if s == nil || authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for route, state := range s.largeStates {
+		if index, ok := state.findMember(authID); ok {
+			state.members = append(state.members[:index], state.members[index+1:]...)
+		}
+		if len(state.members) == 0 {
+			delete(s.largeStates, route)
+		}
+	}
+	for key, head := range s.states {
+		var previous *weightedPoolState
+		for state := head; state != nil; {
+			next := state.next
+			if state.containsMember(authID) {
+				if previous == nil {
+					if next == nil {
+						delete(s.states, key)
+					} else {
+						s.states[key] = next
+					}
+				} else {
+					previous.next = next
+				}
+				s.stateCount--
+			} else {
+				previous = state
+			}
+			state = next
+		}
+	}
+}
+
+// containsMember reports whether the exact pool membership includes authID.
+func (s *weightedPoolState) containsMember(authID string) bool {
+	_, ok := s.findMember(authID)
+	return ok
 }
 
 // finish confirms or releases a reservation exactly once under the selector lock.
