@@ -748,6 +748,7 @@ upstream:
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
 #           force-mapping: true    # optional: rewrite response model fields back to the alias
 #           # Preserve thinking blocks with empty signatures for compatible upstreams.
+#           # Also handle compaction_trigger requests with local summary compaction instead of forwarding them upstream.
 #           # client.codex.optimize-multi-agent-v2 applies to both OAuth and API-key credentials.
 #           is-compat: false
 #           # Optional: enable configuration_update for this API-key model; omitted defaults to false.

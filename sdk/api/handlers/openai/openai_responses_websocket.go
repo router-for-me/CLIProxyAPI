@@ -549,6 +549,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	lastResponseOutput := []byte("[]")
 	var observedCompaction responsesWebsocketObservedCompactionState
 	lastResponseID := ""
+	localCompactionBoundary := false
 	// Remains pending until a generating request commits successfully.
 	pendingPrewarmID := ""
 	var lastResponsePendingToolCallIDs []string
@@ -854,6 +855,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			requestJSON, errMsg = normalizeResponsesWebsocketPassthroughRequest(payload, requestModelName)
 		} else if len(lastRequest) == 0 && previousResponseID != "" {
 			errMsg = responsesWebsocketPreviousResponseNotFoundError()
+		} else if previousResponseID != "" && (localCompactionBoundary || strings.HasPrefix(previousResponseID, "resp_ag_compact_")) && previousResponseID != strings.TrimSpace(lastResponseID) {
+			errMsg = responsesWebsocketPreviousResponseNotFoundError()
 		} else {
 			requestJSON, updatedLastRequest, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState(
 				payload,
@@ -906,6 +909,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastResponseOutput = []byte("[]")
 			observedCompaction.clear()
 			lastResponseID = ""
+			localCompactionBoundary = false
 			lastResponsePendingToolCallIDs = nil
 			prewarmID, errWrite := writeResponsesWebsocketSyntheticPrewarm(c, writer, requestJSON, wsTimelineLog, passthroughSessionID)
 			if errWrite != nil {
@@ -938,6 +942,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		turnStartEpoch := inputEpoch.Load()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, executionParent)
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+		cliCtx = cliproxyexecutor.WithLocalWebsocketTurnTracker(cliCtx)
 		cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
 		if duplexInput != nil {
 			cliCtx = cliproxyexecutor.WithWebsocketInput(cliCtx, duplexInput)
@@ -967,6 +972,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		cliCtx = handlers.WithSelectedAuthIDCallback(cliCtx, func(authID string) {
 			preserveNativeOutput.Store(false)
 			codexDuplexStream.Store(false)
+			cliproxyexecutor.ResetLocalWebsocketTurn(cliCtx)
 			authID = strings.TrimSpace(authID)
 			if authID == "" || h == nil || h.AuthManager == nil {
 				return
@@ -1042,12 +1048,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			passthroughSessionID,
 			responsesWebsocketForwardOptions{
 				preserveCompletionOutput: preserveNativeOutput.Load,
-				duplexStream:             codexDuplexStream.Load,
-				toolCacheTurn:            toolCacheTurn,
-				suppressError:            replayPinnedAuthFailure,
-				localInterrupt:           localInterrupt,
+				duplexStream: func() bool {
+					return codexDuplexStream.Load() && !cliproxyexecutor.LocalWebsocketTurnExecuted(cliCtx)
+				},
+				toolCacheTurn:  toolCacheTurn,
+				suppressError:  replayPinnedAuthFailure,
+				localInterrupt: localInterrupt,
 				websocketOwned: func() bool {
-					return attemptedUpstreamMode == responsesWebsocketUpstreamModeWS
+					return attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && !cliproxyexecutor.LocalWebsocketTurnExecuted(cliCtx)
 				},
 			},
 		)
@@ -1098,6 +1106,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		toolCacheTurn.commit()
 		pendingPrewarmID = ""
+		localTurnExecuted := cliproxyexecutor.LocalWebsocketTurnExecuted(cliCtx)
+		if localTurnExecuted {
+			attemptedUpstreamMode = responsesWebsocketUpstreamModeHTTP
+			if lastAttemptedAuthID != "" {
+				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+			}
+			nextLastRequest = responsesWebsocketLocalCompactionBoundaryRequest(requestJSON)
+		}
+		localCompactionBoundary = localTurnExecuted
 		upstreamMode = attemptedUpstreamMode
 		if upstreamMode == responsesWebsocketUpstreamModeWS {
 			upstreamWebsocketAuthID = lastAttemptedAuthID
@@ -1169,6 +1186,17 @@ type responsesWebsocketObservedCompactionState struct {
 
 func (s *responsesWebsocketObservedCompactionState) clear() {
 	*s = responsesWebsocketObservedCompactionState{}
+}
+
+func responsesWebsocketLocalCompactionBoundaryRequest(requestJSON []byte) []byte {
+	if len(requestJSON) == 0 {
+		return []byte(`{"input":[]}`)
+	}
+	doc := ojson.NewDoc(requestJSON)
+	_ = doc.Delete("type")
+	_ = doc.Delete("previous_response_id")
+	_ = doc.SetRawBytes("input", []byte("[]"))
+	return doc.Bytes()
 }
 
 func responsesWebsocketHTTPReplayRequiredError() error {

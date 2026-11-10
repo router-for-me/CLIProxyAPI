@@ -927,6 +927,7 @@ type CodexModel struct {
 	// Use this for third-party Responses-compatible endpoints that do not accept
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
+	// When enabled, compaction_trigger items also use local summary compaction.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
 	// SupportConfigurationUpdate enables configuration_update for this API-key model.
