@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -281,9 +282,13 @@ func TestWorkerCooldownRetryNeverRedeemsAgain(t *testing.T) {
 
 type aliasManager struct {
 	*fakeManager
-	auths   []*coreauth.Auth
-	failID  string
-	cleared map[string]int
+	auths       []*coreauth.Auth
+	failID      string
+	cleared     map[string]int
+	rejectPath  string
+	rejectCodes map[string]int
+	retryAfter  map[string]string
+	requests    map[string]int
 }
 
 func (m *aliasManager) List() []*coreauth.Auth { return m.auths }
@@ -295,12 +300,92 @@ func (m *aliasManager) GetByID(id string) (*coreauth.Auth, bool) {
 	}
 	return nil, false
 }
+func (m *aliasManager) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	m.mu.Lock()
+	if m.requests == nil {
+		m.requests = map[string]int{}
+	}
+	m.requests[auth.ID+req.URL.Path]++
+	code := m.rejectCodes[auth.ID]
+	m.mu.Unlock()
+	if code != 0 && req.URL.Path == "/backend-api/wham/"+m.rejectPath {
+		return &http.Response{StatusCode: code, Header: http.Header{"Retry-After": []string{m.retryAfter[auth.ID]}}, Body: io.NopCloser(strings.NewReader("rejected"))}, nil
+	}
+	return m.fakeManager.HttpRequest(ctx, m.auth, req)
+}
 func (m *aliasManager) ResetQuota(ctx context.Context, id string) (*coreauth.Auth, []string, error) {
 	if id == m.failID {
 		return nil, nil, errors.New("storage offline")
 	}
 	m.cleared[id]++
 	return m.fakeManager.ResetQuota(ctx, id)
+}
+
+func TestWorkerFallsBackOnlyOnReadAuthenticationFailures(t *testing.T) {
+	for _, path := range []string{"usage", "rate-limit-reset-credits", "rate-limit-reset-credits/consume"} {
+		for _, code := range []int{401, 403, 429, 500} {
+			t.Run(fmt.Sprintf("%s/%d", path, code), func(t *testing.T) {
+				w, m, key := setup(t, true)
+				stale, disabled, other := testAuth("user"), testAuth("user"), testAuth("another-user")
+				stale.ID, disabled.ID, disabled.Disabled = "stale", "disabled", true
+				manager := &aliasManager{fakeManager: m, auths: []*coreauth.Auth{stale, disabled, other, m.auth}, cleared: map[string]int{}, rejectPath: path, rejectCodes: map[string]int{stale.ID: code}}
+				if path == "rate-limit-reset-credits/consume" {
+					manager.rejectCodes = nil
+					m.status = code
+				}
+				w.Manager = manager
+				w.Check(context.Background())
+				state, _, _, errRead := Read(context.Background(), w.Store, key)
+				fallback := path != "rate-limit-reset-credits/consume" && code == 401
+				wantResult, wantConsume := "read_failed", 0
+				if fallback {
+					wantResult, wantConsume = "reset", 1
+				} else if path == "rate-limit-reset-credits/consume" {
+					wantResult, wantConsume = "unknown", 1
+				}
+				if errRead != nil || state.Result != wantResult || m.consume != wantConsume || state.Pending != (wantResult == "unknown") {
+					t.Fatalf("consume=%d state=%+v err=%v", m.consume, state, errRead)
+				}
+				if (manager.requests[m.auth.ID+"/backend-api/wham/usage"] == 1) != fallback {
+					t.Fatalf("unexpected alias fallback: %v", manager.requests)
+				}
+				if fallback && (manager.requests[m.auth.ID+"/backend-api/wham/rate-limit-reset-credits"] != 1 || manager.requests[m.auth.ID+"/backend-api/wham/rate-limit-reset-credits/consume"] != 1) {
+					t.Fatalf("reads and redemption did not use the working alias: %v", manager.requests)
+				}
+				for request := range manager.requests {
+					if strings.HasPrefix(request, disabled.ID+"/") || strings.HasPrefix(request, other.ID+"/") {
+						t.Fatalf("probed disabled or unrelated account: %v", manager.requests)
+					}
+				}
+				before := maps.Clone(manager.requests)
+				w.Check(context.Background())
+				if !maps.Equal(manager.requests, before) || m.consume != wantConsume {
+					t.Fatal("shared claim or pending journal allowed a repeated probe/redemption")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkerBacksOffAfterAllAliasesAreUnauthorized(t *testing.T) {
+	for _, retryAfter := range []string{"", "7200"} {
+		t.Run("retryAfter="+retryAfter, func(t *testing.T) {
+			w, m, key := setup(t, true)
+			alias := testAuth("user")
+			alias.ID = "alias"
+			manager := &aliasManager{fakeManager: m, auths: []*coreauth.Auth{m.auth, alias}, rejectPath: "usage", rejectCodes: map[string]int{m.auth.ID: 401, alias.ID: 401}, retryAfter: map[string]string{m.auth.ID: retryAfter}}
+			w.Manager = manager
+			w.Check(context.Background())
+			state, _, _, errRead := Read(context.Background(), w.Store, key)
+			wantNext := testNow.Add(2 * interval).Unix()
+			if retryAfter != "" {
+				wantNext = testNow.Add(2 * time.Hour).Unix()
+			}
+			if errRead != nil || state.Result != "read_failed" || state.Failures != 1 || state.NextCheckAt != wantNext || m.consume != 0 || len(manager.requests) != 2 {
+				t.Fatalf("requests=%v state=%+v err=%v", manager.requests, state, errRead)
+			}
+		})
+	}
 }
 
 func TestWorkerClearsEveryAccountAlias(t *testing.T) {

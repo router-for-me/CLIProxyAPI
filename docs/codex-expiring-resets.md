@@ -46,7 +46,10 @@ persistent store is unavailable; there is no in-memory fallback.
 
 - The worker wakes every minute and probes each opted-in account at most once
   per five minutes, with exponential read-failure backoff capped at one hour.
-  A longer upstream `Retry-After` is honored.
+  A longer upstream `Retry-After` is honored. Within a claimed probe, a read-only
+  HTTP 401 tries other enabled aliases of the same user/workspace before backing
+  off. Both reads must succeed with one alias; other failures do not switch aliases,
+  and consume requests are never retried.
 - It reads live usage and reset-credit details, requiring a positive upstream
   `available_count` and a still-active five-hour/weekly primary/secondary usage
   window with **less than 80% remaining**. Optional applicability counts, when

@@ -156,19 +156,43 @@ func (w *Worker) Check(ctx context.Context) {
 			w.clearCooldown(ctx, &state)
 			continue
 		}
-		w.checkAccount(ctx, auth, state)
+		w.checkAccount(ctx, state)
 	}
 }
 
-func (w *Worker) checkAccount(ctx context.Context, auth *coreauth.Auth, state State) {
-	usage, errUsage := w.request(ctx, auth, "usage", "")
-	if errUsage != nil {
-		w.readFailed(ctx, state, errUsage)
+func (w *Worker) checkAccount(ctx context.Context, state State) {
+	var auth *coreauth.Auth
+	var usage, credits ojson.Result
+	var errRead error
+	for _, candidate := range w.Manager.List() {
+		if ctx.Err() != nil {
+			return
+		}
+		current, ok := w.Manager.GetByID(candidate.ID)
+		if !ok || current.Disabled || AccountKey(current) != state.AccountKey {
+			continue
+		}
+		usage, errRead = w.request(ctx, current, "usage", "")
+		if errRead == nil {
+			credits, errRead = w.request(ctx, current, "rate-limit-reset-credits", "")
+		}
+		if errRead == nil {
+			auth = current
+			break
+		}
+		// Retry only read-only authentication failures; never bypass account-wide limits.
+		upstream, ok := errRead.(*statusError)
+		if !ok || upstream.code != http.StatusUnauthorized {
+			break
+		}
+		state.NextCheckAt = max(state.NextCheckAt, upstream.retryAt)
+	}
+	if errRead != nil {
+		w.readFailed(ctx, state, errRead)
 		return
 	}
-	credits, errCredits := w.request(ctx, auth, "rate-limit-reset-credits", "")
-	if errCredits != nil {
-		w.readFailed(ctx, state, errCredits)
+	if auth == nil {
+		w.finish(ctx, state, "identity_changed")
 		return
 	}
 	now := w.Now()
