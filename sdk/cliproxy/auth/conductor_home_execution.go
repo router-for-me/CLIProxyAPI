@@ -138,7 +138,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		execCtx = coreusage.WithHomeSelection(execCtx, coreusage.HomeSelection{
 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
 		})
-		execCtx = newUpstreamAttemptContext(execCtx)
+		execCtx = m.newUpstreamAttemptContext(execCtx)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -177,7 +177,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			continue
 		}
 		for _, upstreamModel := range models {
-			execCtx = newUpstreamAttemptContext(execCtx)
+			execCtx = m.newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -278,7 +278,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}
-			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
+			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.requestScopedErrorConfig(execCtx))
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
