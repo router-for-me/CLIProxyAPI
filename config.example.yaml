@@ -185,9 +185,13 @@ routing:
   # CPA preserves the retained credential and concurrency slot instead of redispatching each turn.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # Enable universal session-sticky routing for all clients.
-  # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-  # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-  # execution or derived session identity, and the existing first-message hash fallback.
+  # Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers
+  # are preferred, followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+  # execution session identity, Merkle LCP prefix/compaction matching, derived session
+  # identity, and the existing first-message hash fallback.
+  # LCP compaction matching requires at least 2 shared trailing turns; clients whose
+  # compaction replaces all earlier turns with a summary should send X-Session-ID (or
+  # another explicit session ID), or affinity starts a new binding at every compaction.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
