@@ -10596,7 +10596,7 @@ func runClaudeExecutorCapture(t *testing.T, cfg *config.Config, cloakMode string
 }
 
 func TestClaudeExecutor_PreservedThinkingReplayInjectsDropBlock(t *testing.T) {
-	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
+	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2", "claude-fable-5-2[1m]"} {
 		t.Run(model, func(t *testing.T) {
 			seenBody, seenHeaders := runClaudeExecutorCapture(t, nil, "", false, model, preservedThinkingReplayPayload(model))
 			if got := ojson.GetBytes(seenBody, "thinking.block_binding.prefix_mismatch_behavior").String(); got != "drop_block" {
@@ -10653,7 +10653,7 @@ func TestClaudeExecutor_PreservedThinkingRequiresSignedBlock(t *testing.T) {
 }
 
 func TestClaudeExecutor_PreservedThinkingOmittedThinkingSynthesizesAdaptiveBinding(t *testing.T) {
-	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"} {
+	for _, model := range []string{"claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2"} {
 		for _, tc := range []struct {
 			name  string
 			block string
