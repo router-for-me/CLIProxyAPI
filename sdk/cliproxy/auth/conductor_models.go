@@ -243,9 +243,18 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 	isQuotaExceeded := false
 	var suspendReason string
+	var suspendUntil time.Time
 	if state != nil {
-		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
+		if state.Status == StatusDisabled {
 			isSuspended = true
+		} else if blocked, _, retryAfter := availabilityBlock(state.Unavailable, false, state.NextRetryAfter, time.Time{}, now); blocked {
+			// Decide suspension with the same availabilityBlock rule the selector
+			// uses in isAuthBlockedForModel: a transient model cooldown only
+			// suspends the listing while its retry deadline is still in the
+			// future (#7421). Model-level quota stays on the separate
+			// QuotaExceeded flag below.
+			isSuspended = true
+			suspendUntil = retryAfter
 		}
 		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			isQuotaExceeded = true
@@ -260,6 +269,7 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		// When states exist, unmatched models stay schedulable by design, so the
 		// credential-wide fields must not suspend them here either.
 		isSuspended = true
+		suspendUntil = auth.NextRetryAfter
 	}
 	if isSuspended && suspendReason == "" {
 		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
@@ -269,6 +279,7 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		ModelID:       targetModel,
 		Suspended:     isSuspended,
 		SuspendReason: suspendReason,
+		SuspendUntil:  suspendUntil,
 		QuotaExceeded: isQuotaExceeded,
 	}
 }

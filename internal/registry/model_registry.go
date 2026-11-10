@@ -174,6 +174,11 @@ type ModelRegistration struct {
 	Providers map[string]int
 	// SuspendedClients tracks temporarily disabled clients keyed by client ID
 	SuspendedClients map[string]string
+	// SuspendedClientDeadlines records when each suspended client's transient
+	// cooldown ends. A non-zero deadline in the past no longer hides the model,
+	// matching the selector rule (#7421). Clients suspended without a deadline
+	// (e.g. disabled) stay suspended until a projection resumes them.
+	SuspendedClientDeadlines map[string]time.Time
 }
 
 // ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
@@ -693,6 +698,9 @@ func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, mo
 			if !preserveState || providerChanged || oldCounts[id] == 0 {
 				delete(reg.QuotaExceededClients, clientID)
 				delete(reg.SuspendedClients, clientID)
+				if reg.SuspendedClientDeadlines != nil {
+					delete(reg.SuspendedClientDeadlines, clientID)
+				}
 			}
 			if providerChanged && provider != "" {
 				if _, newlyAdded := addedSet[id]; newlyAdded {
@@ -774,12 +782,13 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 	}
 
 	registration := &ModelRegistration{
-		Info:                 cloneModelInfo(model),
-		InfoByProvider:       make(map[string]*ModelInfo),
-		Count:                1,
-		LastUpdated:          now,
-		QuotaExceededClients: make(map[string]*time.Time),
-		SuspendedClients:     make(map[string]string),
+		Info:                     cloneModelInfo(model),
+		InfoByProvider:           make(map[string]*ModelInfo),
+		Count:                    1,
+		LastUpdated:              now,
+		QuotaExceededClients:     make(map[string]*time.Time),
+		SuspendedClients:         make(map[string]string),
+		SuspendedClientDeadlines: make(map[string]time.Time),
 	}
 	if provider != "" {
 		registration.Providers = map[string]int{provider: 1}
@@ -800,6 +809,9 @@ func (r *ModelRegistry) removeModelRegistration(clientID, modelID, provider stri
 	if !preserveState {
 		delete(registration.QuotaExceededClients, clientID)
 		delete(registration.SuspendedClients, clientID)
+		if registration.SuspendedClientDeadlines != nil {
+			delete(registration.SuspendedClientDeadlines, clientID)
+		}
 	}
 	if registration.Count < 0 {
 		registration.Count = 0
@@ -937,6 +949,9 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 			if registration.SuspendedClients != nil {
 				delete(registration.SuspendedClients, clientID)
 			}
+			if registration.SuspendedClientDeadlines != nil {
+				delete(registration.SuspendedClientDeadlines, clientID)
+			}
 
 			if hasProvider && registration.Providers != nil {
 				if count, ok := registration.Providers[provider]; ok {
@@ -1022,6 +1037,9 @@ type ClientModelProjection struct {
 	ModelID       string
 	Suspended     bool
 	SuspendReason string
+	// SuspendUntil optionally bounds the suspension in time. When it passes,
+	// the model is listed again without requiring another projection (#7421).
+	SuspendUntil  time.Time
 	QuotaExceeded bool
 }
 
@@ -1109,8 +1127,22 @@ func (r *ModelRegistry) ApplyClientModelProjections(clientID string, epoch uint6
 			if registration.SuspendedClients == nil {
 				registration.SuspendedClients = make(map[string]string)
 			}
-			if currentReason, ok := registration.SuspendedClients[clientID]; !ok || currentReason != proj.SuspendReason {
+			if registration.SuspendedClientDeadlines == nil {
+				registration.SuspendedClientDeadlines = make(map[string]time.Time)
+			}
+			deadlineChanged := false
+			if currentDeadline, ok := registration.SuspendedClientDeadlines[clientID]; ok {
+				deadlineChanged = !proj.SuspendUntil.Equal(currentDeadline)
+			} else {
+				deadlineChanged = !proj.SuspendUntil.IsZero()
+			}
+			if currentReason, ok := registration.SuspendedClients[clientID]; !ok || currentReason != proj.SuspendReason || deadlineChanged {
 				registration.SuspendedClients[clientID] = proj.SuspendReason
+				if proj.SuspendUntil.IsZero() {
+					delete(registration.SuspendedClientDeadlines, clientID)
+				} else {
+					registration.SuspendedClientDeadlines[clientID] = proj.SuspendUntil
+				}
 				registration.LastUpdated = now
 				changed = true
 			}
@@ -1118,6 +1150,9 @@ func (r *ModelRegistry) ApplyClientModelProjections(clientID string, epoch uint6
 			if registration.SuspendedClients != nil {
 				if _, ok := registration.SuspendedClients[clientID]; ok {
 					delete(registration.SuspendedClients, clientID)
+					if registration.SuspendedClientDeadlines != nil {
+						delete(registration.SuspendedClientDeadlines, clientID)
+					}
 					registration.LastUpdated = now
 					changed = true
 				}
@@ -1352,6 +1387,10 @@ func (r *ModelRegistry) SuspendClientModel(clientID, modelID, reason string) {
 		return
 	}
 	registration.SuspendedClients[clientID] = reason
+	if registration.SuspendedClientDeadlines != nil {
+		// Manual suspensions are open-ended; drop any stale projection deadline.
+		delete(registration.SuspendedClientDeadlines, clientID)
+	}
 	registration.LastUpdated = time.Now()
 	r.invalidateAvailableModelsCacheLocked()
 	if reason != "" {
@@ -1381,6 +1420,9 @@ func (r *ModelRegistry) ResumeClientModel(clientID, modelID string) {
 		return
 	}
 	delete(registration.SuspendedClients, clientID)
+	if registration.SuspendedClientDeadlines != nil {
+		delete(registration.SuspendedClientDeadlines, clientID)
+	}
 	registration.LastUpdated = time.Now()
 	r.invalidateAvailableModelsCacheLocked()
 	log.Debugf("Resumed client %s for model %s", clientID, modelID)
@@ -1519,6 +1561,17 @@ func modelRegistrationAvailability(registration *ModelRegistration, now time.Tim
 	quotaAndSuspended := 0
 	if registration.SuspendedClients != nil {
 		for clientID, reason := range registration.SuspendedClients {
+			if deadline, hasDeadline := registration.SuspendedClientDeadlines[clientID]; hasDeadline && !deadline.IsZero() {
+				if !now.Before(deadline) {
+					// The transient cooldown already ended; the client counts as
+					// available again without waiting for a re-projection (#7421).
+					continue
+				}
+				// Refresh the cached listing exactly when the cooldown ends.
+				if expiresAt.IsZero() || deadline.Before(expiresAt) {
+					expiresAt = deadline
+				}
+			}
 			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
 				quotaAndSuspended++
 			}
@@ -1716,6 +1769,10 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 					if p, okProvider := r.clientProviders[clientID]; !okProvider || p != provider {
 						continue
 					}
+					if deadline, hasDeadline := registration.SuspendedClientDeadlines[clientID]; hasDeadline && !deadline.IsZero() && !now.Before(deadline) {
+						// Transient cooldown ended; the client is available again (#7421).
+						continue
+					}
 					if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
 						quotaAndSuspended++
 					}
@@ -1770,6 +1827,10 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 		}
 		suspendedClients := 0
 		for clientID := range registration.SuspendedClients {
+			if deadline, hasDeadline := registration.SuspendedClientDeadlines[clientID]; hasDeadline && !deadline.IsZero() && !now.Before(deadline) {
+				// Transient cooldown ended; the client is available again (#7421).
+				continue
+			}
 			if quotaTime := registration.QuotaExceededClients[clientID]; quotaTime != nil && now.Before(quotaTime.Add(modelQuotaExceededWindow)) {
 				continue
 			}
