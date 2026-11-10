@@ -14,6 +14,7 @@ func TestLookupStaticModelInfoClaudeVariantsUseCatalogEntry(t *testing.T) {
 		{id: "claude-sonnet-5-5-20261001", family: "claude-sonnet-5-5"},
 		{id: "claude-fable-5[1m]", family: "claude-fable-5"},
 		{id: "claude-fable-5-1[1m]", family: "claude-fable-5-1"},
+		{id: "claude-mythos-5[1m]", family: "claude-mythos-5"},
 		{id: "claude-mythos-5-1[1m]", family: "claude-mythos-5-1"},
 		{id: "claude-mythos-5-2[1m]", family: "claude-mythos-5-2"},
 		{id: "claude-mythos-5-2-20261101", family: "claude-mythos-5-2"},
