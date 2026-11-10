@@ -463,6 +463,16 @@ func claudeModelUsesProgressDisplay(model string) bool {
 		isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model)
 }
 
+func isClaudeMythos51Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	for _, prefix := range []string{"claude-mythos-5-1", "claude-mythos-5.1"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") || strings.HasPrefix(model, prefix+"[") {
+			return true
+		}
+	}
+	return false
+}
+
 func isClaudeMythos52Model(model string) bool {
 	model = claudeCanonicalModel(model)
 	for _, prefix := range []string{"claude-mythos-5-2", "claude-mythos-5.2"} {
@@ -517,9 +527,8 @@ func claudeModelHasPerTurnEffort(model string) bool {
 	return isClaudeOpus55Model(m) ||
 		strings.HasPrefix(m, "claude-fable-5-1") ||
 		isClaudeFable52Model(m) ||
-		strings.HasPrefix(m, "claude-mythos-5-1") ||
-		strings.HasPrefix(m, "claude-mythos-5-2") ||
-		strings.HasPrefix(m, "claude-mythos-5.2") ||
+		isClaudeMythos51Model(m) ||
+		isClaudeMythos52Model(m) ||
 		isClaudeSonnet55Model(m) ||
 		isClaudeHaiku55Model(m)
 }

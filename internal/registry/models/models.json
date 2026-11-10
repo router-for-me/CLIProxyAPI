@@ -339,6 +339,7 @@
     {
       "id": "claude-mythos-5-1",
       "object": "model",
+      "created": 1788220800,
       "owned_by": "anthropic",
       "type": "claude",
       "display_name": "Claude Mythos 5.1",
@@ -366,6 +367,7 @@
     {
       "id": "claude-mythos-5-2",
       "object": "model",
+      "created": 1794250800,
       "owned_by": "anthropic",
       "type": "claude",
       "display_name": "Claude Mythos 5.2",
