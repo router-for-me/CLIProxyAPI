@@ -1933,13 +1933,18 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		} else {
 			result["display_name"] = model.ID
 		}
-		maxInput := model.ContextLength
-		if maxInput <= 0 {
-			maxInput = DefaultClaudeMaxInputTokens
+		// A limit left out because routes sharing the model disagree stays unknown (null): a default
+		// could exceed one of the routes.
+		var maxInput, maxOutput any
+		if !model.ContextLengthUnknown {
+			if maxInput = model.ContextLength; model.ContextLength <= 0 {
+				maxInput = DefaultClaudeMaxInputTokens
+			}
 		}
-		maxOutput := model.MaxCompletionTokens
-		if maxOutput <= 0 {
-			maxOutput = DefaultClaudeMaxOutputTokens
+		if !model.MaxCompletionTokensUnknown {
+			if maxOutput = model.MaxCompletionTokens; model.MaxCompletionTokens <= 0 {
+				maxOutput = DefaultClaudeMaxOutputTokens
+			}
 		}
 		result["max_input_tokens"] = maxInput
 		result["max_tokens"] = maxOutput

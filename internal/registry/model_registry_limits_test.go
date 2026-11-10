@@ -139,3 +139,19 @@ func TestUnknownRouteLimitIsMarked(t *testing.T) {
 		t.Fatal("a single route that declares nothing publishes as declared, without a mark")
 	}
 }
+
+func TestClaudeModelListKeepsUnknownLimitsUnknown(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("catalog", "claude", []*ModelInfo{{ID: "mixed-claude", OwnedBy: "anthropic", Type: "claude", ContextLength: 128_000, MaxCompletionTokens: 8_000}})
+	r.RegisterClient("custom", "claude", []*ModelInfo{{ID: "mixed-claude", OwnedBy: "anthropic", Type: "claude"}})
+	for _, model := range r.GetAvailableModels("claude") {
+		if model["id"] != "mixed-claude" {
+			continue
+		}
+		if model["max_input_tokens"] != nil || model["max_tokens"] != nil {
+			t.Fatalf("limits = %v/%v, want null instead of the 200K/64K defaults", model["max_input_tokens"], model["max_tokens"])
+		}
+		return
+	}
+	t.Fatal("mixed-claude not listed")
+}
