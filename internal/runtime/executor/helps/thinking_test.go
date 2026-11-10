@@ -98,6 +98,38 @@ func TestApplyThinkingWithSourcePayloadPreservesOriginalOnlySummary(t *testing.T
 	}
 }
 
+func TestApplyThinkingWithSourcePayload_AntigravityClaudeThinkingDisplayUpdates(t *testing.T) {
+	source := []byte(`{"model":"gemini-3.8-flash-high","max_tokens":4096,"thinking":{"type":"adaptive","display":"updates"},"messages":[{"role":"user","content":"Hello, think first."}]}`)
+	translated := sdktranslator.TranslateRequest(
+		sdktranslator.FormatClaude,
+		sdktranslator.FormatAntigravity,
+		"gemini-3.8-flash-high",
+		source,
+		false,
+	)
+
+	out, err := helps.ApplyThinkingWithSourcePayload(
+		translated,
+		source,
+		source,
+		"gemini-3.8-flash-high",
+		sdktranslator.FormatClaude.String(),
+		sdktranslator.FormatAntigravity.String(),
+		"antigravity",
+	)
+	if err != nil {
+		t.Fatalf("ApplyThinkingWithSourcePayload() error = %v", err)
+	}
+	include := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+	if !include.Exists() || !include.Bool() {
+		t.Fatalf("includeThoughts not enabled: %s", out)
+	}
+	level := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String()
+	if level != "high" {
+		t.Fatalf("thinkingLevel = %q, want high: %s", level, out)
+	}
+}
+
 func TestApplyThinkingWithSourcePayload_AntigravityResponsesReasoningSummaryAuto(t *testing.T) {
 	source := []byte(`{"model":"gemini-3.8-flash-high","reasoning":{"effort":"low","summary":"auto"},"input":"hi"}`)
 	translated := sdktranslator.TranslateRequest(
