@@ -308,6 +308,60 @@
       ]
     },
     {
+      "id": "claude-mythos-5-1",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Mythos 5.1",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-mythos-5-2",
+      "object": "model",
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Mythos 5.2",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-5-5",
       "native_capabilities": {
         "web_search": true
