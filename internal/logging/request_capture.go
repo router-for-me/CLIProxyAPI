@@ -23,3 +23,11 @@ func DeferredAPIRequestCaptureDisabled(ctx context.Context) bool {
 	disabled, _ := ctx.Value(deferredAPIRequestCaptureDisabledKey{}).(bool)
 	return disabled
 }
+
+// DeferredAPIResponse renders the upstream response attempt sections of an
+// error log from details captured while full request logging is disabled.
+type DeferredAPIResponse interface {
+	// RenderAPIResponse returns the formatted "=== API RESPONSE n ===" attempt
+	// sections, or nil when no upstream response details were captured.
+	RenderAPIResponse() []byte
+}

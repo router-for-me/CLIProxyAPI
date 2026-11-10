@@ -1,8 +1,10 @@
 package helps
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -169,6 +171,154 @@ func TestRecordAPIResponseMetadataStoresHeadersWhenRequestLogDisabled(t *testing
 	if got.Get("X-Upstream-Request-Id") != "upstream-req-1" {
 		t.Fatalf("response header = %q, want %q", got.Get("X-Upstream-Request-Id"), "upstream-req-1")
 	}
+}
+
+func TestDeferredAPIResponseCapturedWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.Config{}
+
+	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{
+		URL:    "https://api.example.com/v1/chat/completions",
+		Method: http.MethodPost,
+		Body:   []byte(`{"model":"grok-4.7"}`),
+	})
+	headers := http.Header{}
+	headers.Set("Content-Type", "text/event-stream")
+	headers.Set("Authorization", "Bearer super-secret-upstream-token")
+	RecordAPIResponseMetadata(ctx, cfg, http.StatusBadGateway, headers)
+	headers.Set("Content-Type", "text/mutated")
+	AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"message.start"}`))
+	AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"message.delta"}`))
+	RecordAPIResponseError(ctx, cfg, errors.New("stream disconnected"))
+
+	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{
+		URL:    "https://api.example.com/v1/chat/completions",
+		Method: http.MethodPost,
+		Body:   []byte(`{"model":"grok-4.7"}`),
+	})
+	RecordAPIResponseError(ctx, cfg, errors.New("retry failed"))
+
+	value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
+	if !exists {
+		t.Fatal("deferred API response was not captured")
+	}
+	deferred, ok := value.(logging.DeferredAPIResponse)
+	if !ok || deferred == nil {
+		t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
+	}
+	rendered := string(deferred.RenderAPIResponse())
+	for _, want := range []string{
+		"=== API RESPONSE 1 ===",
+		"Status: 502",
+		"Content-Type: text/event-stream",
+		`data: {"type":"message.start"}` + "\n" + `data: {"type":"message.delta"}`,
+		"Error: stream disconnected",
+		"Error: stream disconnected\n\n=== API RESPONSE 2 ===",
+		"Error: retry failed",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "super-secret-upstream-token") {
+		t.Fatalf("deferred API response leaked the sensitive header value:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Authorization: Bearer supe...oken") {
+		t.Fatalf("deferred API response lost the masked authorization header:\n%s", rendered)
+	}
+
+	requestValue, _ := ginCtx.Get(logging.DeferredAPIRequestContextKey)
+	requests, _ := requestValue.([]logging.DeferredAPIRequest)
+	if len(requests) != 2 {
+		t.Fatalf("deferred API requests = %d, want 2", len(requests))
+	}
+	for i, want := range []string{"=== API REQUEST 1 ===", "=== API REQUEST 2 ==="} {
+		if !strings.Contains(string(requests[i]()), want) {
+			t.Fatalf("deferred API request %d missing %q", i+1, want)
+		}
+	}
+}
+
+func TestDeferredAPIResponseBodyTruncatedWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	cfg := &config.Config{}
+
+	RecordAPIRequest(ctx, cfg, UpstreamRequestLog{Method: http.MethodPost})
+	RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+	chunk := []byte(strings.Repeat("a", 1024))
+	for range maxDeferredAPIResponseBodyBytes/len(chunk) + 2 {
+		AppendAPIResponseChunk(ctx, cfg, chunk)
+	}
+
+	capture := deferredResponseCaptureFrom(ginCtx)
+	if capture == nil {
+		t.Fatal("deferred API response capture is missing")
+	}
+	if len(capture.attempts) != 1 {
+		t.Fatalf("deferred response attempts = %d, want 1", len(capture.attempts))
+	}
+	attempt := capture.attempts[0]
+	if len(attempt.body) > maxDeferredAPIResponseBodyBytes {
+		t.Fatalf("deferred response body = %d bytes, want at most %d", len(attempt.body), maxDeferredAPIResponseBodyBytes)
+	}
+	if !attempt.bodyTruncated {
+		t.Fatal("deferred response body was not marked as truncated")
+	}
+	rendered := string(capture.RenderAPIResponse())
+	if !strings.Contains(rendered, fmt.Sprintf("[API RESPONSE BODY TRUNCATED: captured first %d bytes]", len(attempt.body))) {
+		t.Fatalf("deferred API response missing truncation marker:\n%s", rendered)
+	}
+	if !bytes.HasPrefix(attempt.body, chunk) {
+		t.Fatal("deferred response body does not start with the first upstream chunk")
+	}
+}
+
+func TestDeferredAPIResponseSkippedForFullLoggingAndDisabledPolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("full request logging uses the regular capture", func(t *testing.T) {
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+		cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+
+		RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream"}})
+		AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"message.start"}`))
+		RecordAPIResponseError(ctx, cfg, errors.New("EOF"))
+
+		if _, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey); exists {
+			t.Fatal("full logging must not retain a deferred API response")
+		}
+		value, exists := ginCtx.Get(apiResponseKey)
+		if !exists {
+			t.Fatal("API_RESPONSE was not captured")
+		}
+		response, _ := value.([]byte)
+		for _, want := range []string{"Status: 200", `data: {"type":"message.start"}`, "Error: EOF"} {
+			if !strings.Contains(string(response), want) {
+				t.Fatalf("API response missing %q:\n%s", want, string(response))
+			}
+		}
+	})
+
+	t.Run("disabled error-only capture retains nothing", func(t *testing.T) {
+		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx := logging.WithDeferredAPIRequestCaptureDisabled(context.WithValue(context.Background(), "gin", ginCtx))
+		cfg := &config.Config{}
+
+		RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream"}})
+		AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"message.start"}`))
+		RecordAPIResponseError(ctx, cfg, errors.New("EOF"))
+
+		for _, key := range []string{logging.DeferredAPIResponseContextKey, apiResponseKey} {
+			if _, exists := ginCtx.Get(key); exists {
+				t.Fatalf("disabled capture retained %s", key)
+			}
+		}
+	})
 }
 
 func TestAPIResponseAttemptsAreSeparated(t *testing.T) {

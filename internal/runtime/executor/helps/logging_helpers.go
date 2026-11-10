@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey                  = "API_REQUEST"
-	apiResponseKey                 = "API_RESPONSE"
-	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
-	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
-	creditsUsedKey                 = "__antigravity_credits_used__"
-	maxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
+	apiAttemptsKey                  = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                   = "API_REQUEST"
+	apiResponseKey                  = "API_RESPONSE"
+	apiWebsocketTimelineKey         = "API_WEBSOCKET_TIMELINE"
+	deferredAPIRequestBytesKey      = "DEFERRED_API_REQUEST_BYTES"
+	creditsUsedKey                  = "__antigravity_credits_used__"
+	maxDeferredAPIRequestBodyBytes  = 32 << 20 // 32 MiB
+	maxDeferredAPIResponseBodyBytes = 64 << 10 // 64 KiB per upstream attempt
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -168,6 +169,159 @@ func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
 		return []byte(builder.String())
 	})
 	ginCtx.Set(logging.DeferredAPIRequestContextKey, requests)
+	// Keep one response slot per upstream attempt so an error log can pair each
+	// deferred request with what the upstream actually returned.
+	deferredResponseCaptureFrom(ginCtx).startAttempt()
+}
+
+// deferredResponseAttempt retains bounded upstream response details for one attempt.
+type deferredResponseAttempt struct {
+	index         int
+	capturedAt    time.Time
+	status        int
+	headers       http.Header
+	body          []byte
+	bodyTruncated bool
+	errors        []string
+}
+
+func (a *deferredResponseAttempt) hasContent() bool {
+	return a.status > 0 || len(a.headers) > 0 || len(a.body) > 0 || a.bodyTruncated || len(a.errors) > 0
+}
+
+// deferredResponseCapture retains bounded upstream response details while full
+// request logging is disabled, so error logs can still show the upstream status,
+// headers and the start of the body. It is rendered only when an error log is
+// actually written and implements logging.DeferredAPIResponse.
+type deferredResponseCapture struct {
+	attempts []*deferredResponseAttempt
+}
+
+func (c *deferredResponseCapture) startAttempt() {
+	c.attempts = append(c.attempts, &deferredResponseAttempt{
+		index:      len(c.attempts) + 1,
+		capturedAt: time.Now(),
+	})
+}
+
+func (c *deferredResponseCapture) latestAttempt() *deferredResponseAttempt {
+	if len(c.attempts) == 0 {
+		c.startAttempt()
+	}
+	return c.attempts[len(c.attempts)-1]
+}
+
+// RenderAPIResponse implements logging.DeferredAPIResponse.
+func (c *deferredResponseCapture) RenderAPIResponse() []byte {
+	var builder strings.Builder
+	for _, attempt := range c.attempts {
+		if attempt == nil || !attempt.hasContent() {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index))
+		builder.WriteString(fmt.Sprintf("Timestamp: %s\n", attempt.capturedAt.Format(time.RFC3339Nano)))
+		builder.WriteString("\n")
+		if attempt.status > 0 {
+			builder.WriteString(fmt.Sprintf("Status: %d\n", attempt.status))
+		}
+		builder.WriteString("Headers:\n")
+		writeHeaders(&builder, attempt.headers)
+		builder.WriteString("\n")
+		if len(attempt.body) > 0 || attempt.bodyTruncated {
+			builder.WriteString("Body:\n")
+			builder.Write(attempt.body)
+			if attempt.bodyTruncated {
+				builder.WriteString(fmt.Sprintf("\n[API RESPONSE BODY TRUNCATED: captured first %d bytes]", len(attempt.body)))
+			}
+			builder.WriteString("\n")
+		}
+		for _, errText := range attempt.errors {
+			builder.WriteString(fmt.Sprintf("Error: %s\n", errText))
+		}
+		builder.WriteString("\n")
+	}
+	if builder.Len() == 0 {
+		return nil
+	}
+	return []byte(builder.String())
+}
+
+// deferredResponseCaptureEnabled reports whether bounded upstream response
+// details should be retained for error-only logging.
+func deferredResponseCaptureEnabled(ctx context.Context, cfg *config.Config) bool {
+	if cfg == nil || cfg.CommercialMode || cfg.RequestLog {
+		return false
+	}
+	return !logging.DeferredAPIRequestCaptureDisabled(ctx)
+}
+
+func deferredResponseCaptureFrom(ginCtx *gin.Context) *deferredResponseCapture {
+	if value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey); exists {
+		if capture, ok := value.(*deferredResponseCapture); ok && capture != nil {
+			return capture
+		}
+	}
+	capture := &deferredResponseCapture{}
+	ginCtx.Set(logging.DeferredAPIResponseContextKey, capture)
+	return capture
+}
+
+func recordDeferredResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	if !deferredResponseCaptureEnabled(ctx, cfg) {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempt := deferredResponseCaptureFrom(ginCtx).latestAttempt()
+	if status > 0 && attempt.status == 0 {
+		attempt.status = status
+	}
+	if attempt.headers == nil && len(headers) > 0 {
+		attempt.headers = headers.Clone()
+	}
+}
+
+func recordDeferredResponseError(ctx context.Context, cfg *config.Config, err error) {
+	if !deferredResponseCaptureEnabled(ctx, cfg) {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempt := deferredResponseCaptureFrom(ginCtx).latestAttempt()
+	attempt.errors = append(attempt.errors, err.Error())
+}
+
+func appendDeferredResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	data := bytes.TrimSpace(chunk)
+	if len(data) == 0 {
+		return
+	}
+	if !deferredResponseCaptureEnabled(ctx, cfg) {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	attempt := deferredResponseCaptureFrom(ginCtx).latestAttempt()
+	remaining := maxDeferredAPIResponseBodyBytes - len(attempt.body)
+	if remaining <= 0 {
+		attempt.bodyTruncated = true
+		return
+	}
+	if len(attempt.body) > 0 && attempt.body[len(attempt.body)-1] != '\n' && data[0] != '\n' && remaining > 1 {
+		attempt.body = append(attempt.body, '\n')
+		remaining--
+	}
+	if len(data) > remaining {
+		data = data[:remaining]
+		attempt.bodyTruncated = true
+	}
+	attempt.body = append(attempt.body, data...)
 }
 
 func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.Time) *strings.Builder {
@@ -195,6 +349,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
+		recordDeferredResponseMetadata(ctx, cfg, status, headers)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -222,7 +377,11 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if err == nil {
+		return
+	}
+	if !requestLogCaptureEnabled(cfg) {
+		recordDeferredResponseError(ctx, cfg, err)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -248,6 +407,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
 	if !requestLogCaptureEnabled(cfg) {
+		appendDeferredResponseChunk(ctx, cfg, chunk)
 		return
 	}
 	data := bytes.TrimSpace(chunk)

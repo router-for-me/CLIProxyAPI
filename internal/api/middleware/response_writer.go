@@ -492,7 +492,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if forceLog && len(apiRequest) == 0 {
 		apiRequest = w.extractDeferredAPIRequest(c)
 	}
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	apiResponse := w.extractAPIResponse(c)
+	if forceLog {
+		apiResponse = w.prependDeferredAPIResponse(c, apiResponse)
+	}
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, apiResponse, apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -540,6 +544,36 @@ func (w *ResponseWriterWrapper) extractDeferredAPIRequest(c *gin.Context) []byte
 		body.Write(buildRequest())
 	}
 	return body.Bytes()
+}
+
+// prependDeferredAPIResponse places the deferred upstream response sections
+// captured for error logs before any directly recorded API response payload.
+func (w *ResponseWriterWrapper) prependDeferredAPIResponse(c *gin.Context, apiResponse []byte) []byte {
+	if c == nil {
+		return apiResponse
+	}
+	value, exists := c.Get(logging.DeferredAPIResponseContextKey)
+	if !exists {
+		return apiResponse
+	}
+	deferred, ok := value.(logging.DeferredAPIResponse)
+	if !ok || deferred == nil {
+		return apiResponse
+	}
+	section := deferred.RenderAPIResponse()
+	if len(section) == 0 {
+		return apiResponse
+	}
+	if len(apiResponse) == 0 {
+		return section
+	}
+	combined := make([]byte, 0, len(section)+len(apiResponse)+1)
+	combined = append(combined, section...)
+	if !bytes.HasSuffix(section, []byte("\n")) {
+		combined = append(combined, '\n')
+	}
+	combined = append(combined, apiResponse...)
+	return combined
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {

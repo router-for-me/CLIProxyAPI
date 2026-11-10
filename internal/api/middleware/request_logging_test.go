@@ -269,6 +269,97 @@ func TestRequestLoggingMiddlewareCapturesLargeErrorRequestAndDeferredAPIRequest(
 	}
 }
 
+func TestRequestLoggingMiddlewareErrorLogIncludesDeferredAPIResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	serveErrorOnlyRequest := func(t *testing.T, logsDir string, handlerStatus int) *httptest.ResponseRecorder {
+		t.Helper()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			executorCtx := context.WithValue(context.Background(), "gin", c)
+			cfg := &config.Config{}
+			helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://api.example.com/v1/chat/completions",
+				Method: http.MethodPost,
+				Body:   []byte(`{"model":"grok-4.7"}`),
+			})
+			helps.RecordAPIResponseMetadata(executorCtx, cfg, http.StatusBadGateway, http.Header{
+				"Content-Type":  []string{"text/event-stream"},
+				"Authorization": []string{"Bearer super-secret-upstream-token"},
+			})
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte(`data: {"type":"message.start"}`))
+			helps.RecordAPIResponseError(executorCtx, cfg, errors.New("stream disconnected before response.completed"))
+			c.JSON(handlerStatus, gin.H{"error": "upstream failed"})
+		})
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"grok-4.7","stream":true}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+
+	readLogs := func(t *testing.T, logsDir string) []byte {
+		t.Helper()
+		entries, errReadDir := os.ReadDir(logsDir)
+		if errReadDir != nil {
+			t.Fatalf("read logs dir: %v", errReadDir)
+		}
+		var content []byte
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".log") {
+				content, errReadDir = os.ReadFile(filepath.Join(logsDir, entry.Name()))
+				if errReadDir != nil {
+					t.Fatalf("read log file: %v", errReadDir)
+				}
+			}
+		}
+		return content
+	}
+
+	t.Run("failure keeps the upstream response in the error log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		response := serveErrorOnlyRequest(t, logsDir, http.StatusInternalServerError)
+		if response.Code != http.StatusInternalServerError {
+			t.Fatalf("response status = %d, want %d", response.Code, http.StatusInternalServerError)
+		}
+		content := readLogs(t, logsDir)
+		if len(content) == 0 {
+			t.Fatal("forced error log was not created")
+		}
+		for _, want := range []string{
+			"=== API REQUEST 1 ===",
+			"=== API RESPONSE 1 ===",
+			"Status: 502",
+			"Content-Type: text/event-stream",
+			`data: {"type":"message.start"}`,
+			"Error: stream disconnected before response.completed",
+		} {
+			if !bytes.Contains(content, []byte(want)) {
+				t.Fatalf("error log missing %q:\n%s", want, string(content))
+			}
+		}
+		if bytes.Contains(content, []byte("super-secret-upstream-token")) {
+			t.Fatalf("error log leaked the sensitive upstream header value:\n%s", string(content))
+		}
+		if !bytes.Contains(content, []byte("Authorization: Bearer supe...oken")) {
+			t.Fatalf("error log lost the masked authorization header:\n%s", string(content))
+		}
+	})
+
+	t.Run("success with request-log off writes no log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		response := serveErrorOnlyRequest(t, logsDir, http.StatusOK)
+		if response.Code != http.StatusOK {
+			t.Fatalf("response status = %d, want %d", response.Code, http.StatusOK)
+		}
+		if content := readLogs(t, logsDir); len(content) != 0 {
+			t.Fatalf("successful request with request-log off must not write a response log, got:\n%s", string(content))
+		}
+	})
+}
+
 func TestRequestLoggingMiddleware_StreamingResponsesUpstreamSections(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
