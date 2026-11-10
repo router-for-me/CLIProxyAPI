@@ -11,7 +11,7 @@
 //	--auths-dir       <path>  Directory containing auth JSON files (default: config auth-dir)
 //	--config          <path>  Config file path                 (default: "config.yaml")
 //	--output          <path>  Output JSON file path             (default: "codex_client_models.json")
-//	--client-version <ver>   Codex client_version query value  (default: "0.154.0")
+//	--client-version <ver>   Codex client_version query value  (default: "0.167.0")
 //	--pretty                 Pretty-print the output JSON      (default: true)
 package main
 
@@ -43,8 +43,8 @@ import (
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.159.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultClientVersion     = "0.167.0"
+	defaultCodexUserAgent    = "codex_cli_rs/0.167.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
 	baselineModelSlug        = "gpt-5.5"
