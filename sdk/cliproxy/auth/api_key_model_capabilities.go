@@ -463,17 +463,21 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 	}
 }
 
+// lookupOpenRouterModel is registry.LookupOpenRouterModel; tests replace it to observe lookups.
+var lookupOpenRouterModel = registry.LookupOpenRouterModel
+
 // withOpenRouterThinking gives a model served through an OpenAI-compatible entry that points at OpenRouter the
 // reasoning efforts OpenRouter publishes for it, instead of the generic default levels. The catalog is read per
 // request, so the levels apply as soon as it has loaded. Configured thinking still wins.
 func withOpenRouterThinking(auth *Auth, info *registry.ModelInfo, upstreamModel string) *registry.ModelInfo {
-	if info == nil || info.ExplicitThinking || info.Thinking == nil || !strings.EqualFold(info.Type, "openai-compatibility") ||
+	if info == nil || info.Thinking == nil || !strings.EqualFold(info.Type, "openai-compatibility") ||
 		auth == nil || auth.Attributes == nil || !util.IsOpenRouterURL(auth.Attributes["base_url"]) {
 		return info
 	}
 	model := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(upstreamModel)).ModelName)
-	published, ok := registry.LookupOpenRouterModel(auth.Attributes["provider_key"], model)
-	if !ok {
+	// The lookup also starts the catalog's refresh once it is stale, so it runs even when configured thinking wins.
+	published, ok := lookupOpenRouterModel(auth.Attributes["provider_key"], model)
+	if !ok || info.ExplicitThinking {
 		return info
 	}
 	support := modelconfig.OpenRouterThinkingSupport(published.ReasoningEfforts)

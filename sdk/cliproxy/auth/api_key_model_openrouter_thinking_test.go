@@ -46,9 +46,19 @@ func TestAttachResolvedAPIKeyModelInfoUsesOpenRouterReasoningEfforts(t *testing.
 	// A thinking suffix on the upstream model doesn't stop the catalog lookup.
 	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "api/claude-opus-5-5", "anthropic/claude-opus-5.5(high)"),
 		"low", "medium", "high", "xhigh", "max")
-	// Configured thinking wins over OpenRouter's efforts.
+	// Configured thinking wins over OpenRouter's efforts, but the lookup that keeps the catalog fresh still runs.
+	var lookedUp []string
+	realLookup := lookupOpenRouterModel
+	lookupOpenRouterModel = func(providerKey, modelID string) (registry.OpenRouterModel, bool) {
+		lookedUp = append(lookedUp, modelID)
+		return realLookup(providerKey, modelID)
+	}
 	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "gpt-6.1-terra", "openai/gpt-6.1-terra"),
 		"low", "high")
+	lookupOpenRouterModel = realLookup
+	if len(lookedUp) != 1 || lookedUp[0] != "openai/gpt-6.1-terra" {
+		t.Fatalf("lookups = %v, want the configured-thinking model looked up", lookedUp)
+	}
 	// Models OpenRouter doesn't list keep the default levels.
 	assertResolvedThinkingLevels(t, manager.attachResolvedAPIKeyModelInfo(cliproxyexecutor.Request{}, auth, "unlisted", "vendor/unlisted"),
 		"low", "medium", "high")

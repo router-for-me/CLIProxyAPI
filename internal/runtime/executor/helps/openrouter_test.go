@@ -270,3 +270,28 @@ func TestOpenRouterPromptCacheOptionsTildeModelsAndSourceMode(t *testing.T) {
 		t.Fatalf("source ttl = %q, want 12h: %s", got, out)
 	}
 }
+
+func TestOpenRouterCacheControlIgnoresNullMarkers(t *testing.T) {
+	out := openRouterCacheControlTestDoc(`{"tools":[{"type":"function","cache_control":null,"function":{"name":"read","cache_control":null}}],
+		"messages":[{"role":"system","content":"rules","cache_control":null},{"role":"user","content":[{"type":"text","text":"hi","cache_control":null}]}]}`,
+		testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system not marked when markers are null: %s", out)
+	}
+	if got := ojson.GetBytes(out, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("latest turn not marked when markers are null: %s", out)
+	}
+}
+
+func TestOpenRouterCacheControlFallsBackPastEmptySystemMessage(t *testing.T) {
+	out := openRouterCacheControlTestDoc(`{"messages":[
+		{"role":"system","content":"static rules"},
+		{"role":"developer","content":"   "},
+		{"role":"user","content":"hi"}]}`, testOpenRouterBaseURL, false, "")
+	if got := ojson.GetBytes(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("earlier system message not marked: %s", out)
+	}
+	if ojson.GetBytes(out, "messages.1.content").Type != ojson.String {
+		t.Fatalf("empty developer message changed: %s", out)
+	}
+}

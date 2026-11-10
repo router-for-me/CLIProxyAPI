@@ -46,8 +46,9 @@ func ApplyOpenRouterCacheControlDoc(doc *ojson.Doc, baseURL string, claudeSource
 	}
 	list := messages.Array()
 	for i := len(list) - 1; i >= 0; i-- {
-		if role := list[i].Get("role").String(); role == "system" || role == "developer" {
-			markOpenAIMessageCacheControlDoc(doc, i, cacheControl)
+		// The last system message with content to mark; an empty one falls back to an earlier one.
+		if role := list[i].Get("role").String(); (role == "system" || role == "developer") &&
+			markOpenAIMessageCacheControlDoc(doc, i, cacheControl) {
 			break
 		}
 	}
@@ -112,12 +113,12 @@ func RequestPromptCacheOptions(payloads ...[]byte) (ttl, mode string) {
 // tools[i].function) or on a message or one of its parts.
 func openAIRequestHasCacheControl(doc *ojson.Doc) bool {
 	for _, tool := range doc.Get("tools").Array() {
-		if tool.Get("cache_control").Exists() || tool.Get("function.cache_control").Exists() {
+		if isCacheControlMarker(tool.Get("cache_control")) || isCacheControlMarker(tool.Get("function.cache_control")) {
 			return true
 		}
 	}
 	for _, msg := range doc.Get("messages").Array() {
-		if msg.Get("cache_control").Exists() {
+		if isCacheControlMarker(msg.Get("cache_control")) {
 			return true
 		}
 		content := msg.Get("content")
@@ -125,12 +126,18 @@ func openAIRequestHasCacheControl(doc *ojson.Doc) bool {
 			continue
 		}
 		for _, part := range content.Array() {
-			if part.Get("cache_control").Exists() {
+			if isCacheControlMarker(part.Get("cache_control")) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// isCacheControlMarker reports whether a cache_control value is a real marker. Clients that serialize the optional
+// field as null (or an empty value) haven't placed a breakpoint.
+func isCacheControlMarker(value ojson.Result) bool {
+	return value.IsObject() && strings.TrimSpace(value.Get("type").String()) != ""
 }
 
 // markOpenAIMessageCacheControlDoc puts cache_control on the message's last text, image or file part; string content
