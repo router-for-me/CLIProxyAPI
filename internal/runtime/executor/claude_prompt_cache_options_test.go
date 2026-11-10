@@ -1001,7 +1001,7 @@ func TestClaudeExecutor_CountTokensUpstream_OAuthRelocatesAffectedSystemPrompts(
 			if len(resp.Payload) == 0 {
 				t.Fatal("expected non-empty countTokensUpstream payload")
 			}
-			if ojson.GetBytes(seenBody, "system").Exists() {
+			if strings.Contains(ojson.GetBytes(seenBody, "system").Raw, "caller guidance") {
 				t.Fatalf("OAuth caller system prompt must not remain top-level: %s", seenBody)
 			}
 			if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != test.wantMessages {

@@ -100,7 +100,8 @@ func renderToolSearchExecutorGolden(t *testing.T) map[string]string {
 // The dev golden was produced by running renderToolSearchExecutorGolden against
 // the executor at origin/dev d739485df, before Codex tool_search support. With
 // upstream.claude.tool-search off every request path must reproduce it, even
-// for credentials that would otherwise use native tool search.
+// for credentials that would otherwise use native tool search. The OAuth count
+// snapshot additionally includes the shared generation prefix used for signed thinking.
 func TestClaudeExecutor_ToolSearchDisabledMatchesDevGolden(t *testing.T) {
 	enableClaudeToolSearchForTest(t, false)
 	if NewClaudeExecutor(&config.Config{}).SupportsNativeToolSearch(nativeToolSearchAuth(nil), "claude-sonnet-4-5") {

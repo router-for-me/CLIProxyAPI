@@ -224,6 +224,15 @@ func IsClaudeSessionDatePinKVActive() bool {
 // without creating or refreshing it. When a KV store is active, pins are stored
 // permanently and retention is ignored; otherwise non-positive retention returns "".
 func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
+	return lookupClaudeSessionDatePin(sessionID, retention, true)
+}
+
+// PreviewClaudeSessionDatePin does not create or populate a local session entry.
+func PreviewClaudeSessionDatePin(sessionID string, retention time.Duration) string {
+	return lookupClaudeSessionDatePin(sessionID, retention, false)
+}
+
+func lookupClaudeSessionDatePin(sessionID string, retention time.Duration, populateCache bool) string {
 	pinKey := ClaudeSessionDatePinKey(sessionID)
 	if pinKey == "" {
 		return ""
@@ -237,7 +246,7 @@ func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) strin
 					return ""
 				}
 				pinned := normalizeClaudePinnedDate(string(raw))
-				if pinned != "" {
+				if pinned != "" && populateCache {
 					storePermanentClaudeSessionDatePin(pinKey, pinned)
 				}
 				return pinned
@@ -325,6 +334,22 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
+}
+
+// PreviewClaudeContinuity reads conversation state without starting a request or refreshing its lifetime.
+func PreviewClaudeContinuity(credentialIdentity, sessionID string) ClaudeContinuityContext {
+	if strings.TrimSpace(credentialIdentity) == "" || strings.TrimSpace(sessionID) == "" {
+		return ClaudeContinuityContext{}
+	}
+	digest := sha256.Sum256([]byte(strings.TrimSpace(credentialIdentity) + "\x00" + strings.TrimSpace(sessionID)))
+	key := hex.EncodeToString(digest[:])
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, found := claudeDiagnosticsState.entries[key]
+	if !found || (!entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt)) {
+		return ClaudeContinuityContext{}
+	}
+	return ClaudeContinuityContext{Key: key, PreviousMessageID: entry.previousMessageID, PreviousRequestID: entry.previousRequestID, PromptID: entry.promptID, PinnedDate: entry.pinnedDate, Initialized: true}
 }
 
 // PinClaudeSessionDate returns the calendar date pinned for a session,

@@ -280,6 +280,10 @@ func resolveClaudeContinuityTagsDoc(
 	confirmedClaudeCode bool,
 	existingPrevReq, existingPromptID string,
 ) (prevReq, promptID string, cCtx helps.ClaudeContinuityContext, ok bool) {
+	return resolveClaudeContinuityTagsForInputDoc(ctx, cfg, auth, incomingHeaders, doc, confirmedClaudeCode, existingPrevReq, existingPromptID, false)
+}
+
+func resolveClaudeContinuityTagsForInputDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, incomingHeaders http.Header, doc *ojson.Doc, confirmedClaudeCode bool, existingPrevReq, existingPromptID string, preview bool) (prevReq, promptID string, cCtx helps.ClaudeContinuityContext, ok bool) {
 	if doc == nil {
 		return "", "", helps.ClaudeContinuityContext{}, false
 	}
@@ -295,9 +299,26 @@ func resolveClaudeContinuityTagsDoc(
 
 	credIdentity := claudeDiagnosticsCredentialIdentity(auth)
 	isNewTurn := isClaudeNewPromptTurnDoc(doc)
-	continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID := helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
-
-	pinnedDate := resolveClaudeSessionPinnedDateDoc(cfg, auth, doc, continuityKey, sessionID)
+	var continuityKey, prevMsgID, storedPrevReq, storedPromptID, pinnedDate string
+	var seq uint64
+	if preview {
+		state := helps.PreviewClaudeContinuity(credIdentity, sessionID)
+		continuityKey, prevMsgID, storedPrevReq, storedPromptID = state.Key, state.PreviousMessageID, state.PreviousRequestID, state.PromptID
+		pinnedDate = state.PinnedDate
+		if claudeSessionDatePinEnabled(cfg) {
+			if date := helps.PreviewClaudeSessionDatePin(sessionID, claudeSessionDatePinRetention(cfg)); date != "" {
+				pinnedDate = date
+			} else if date := claudeCallerCurrentDateReminderDateDoc(doc); date != "" {
+				pinnedDate = date
+			}
+		}
+		if pinnedDate == "" {
+			pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
+		}
+	} else {
+		continuityKey, seq, prevMsgID, storedPrevReq, storedPromptID = helps.BeginClaudeContinuity(credIdentity, sessionID, isNewTurn, existingPromptID)
+		pinnedDate = resolveClaudeSessionPinnedDateDoc(cfg, auth, doc, continuityKey, sessionID)
+	}
 
 	if existingPromptID != "" {
 		promptID = existingPromptID
@@ -2544,63 +2565,7 @@ func applyCloakingInternalDoc(
 		}
 	}
 
-	billingVersion := helps.DefaultClaudeVersion(cfg)
-	workload := getWorkloadFromContext(ctx)
-
-	isProbeOrHelper := isClaudeProbeOrHelperRequestDoc(doc)
-	isSubagent := false
-	prevReq := ""
-	promptID := ""
-	pinnedDate := ""
-	var incomingHeaders http.Header
-	if !isProbeOrHelper {
-		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
-		isSubagent = isClaudeSubagentRequestDoc(incomingHeaders, doc)
-		existingPrevReq, existingPromptID := extractClaudeBillingTagsDoc(doc)
-
-		var cCtx helps.ClaudeContinuityContext
-		var ok bool
-		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTagsDoc(ctx, cfg, auth, incomingHeaders, doc, confirmedClaudeCode, existingPrevReq, existingPromptID)
-		if ok {
-			pinnedDate = cCtx.PinnedDate
-			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil {
-				*continuityCtx = cCtx
-			}
-		}
-	}
-	// Without continuity state (probe/helper traffic, or no session identity)
-	// fall back to the per-request date, which is the pre-pinning behaviour.
-	if pinnedDate == "" {
-		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
-	}
-	if !isProbeOrHelper && claudeSessionDatePinEnabled(cfg) {
-		// Strip a string-form caller reminder before the pipeline turns the
-		// content into blocks, so user text is never dropped with it.
-		stripFirstUserClaudeCodeCurrentDateReminderDoc(doc)
-	}
-
-	turnOrigin := ""
-	if !isProbeOrHelper && !isSubagent {
-		turnOrigin = "human"
-	}
-	turnOriginArgs := []string{turnOrigin}
-	if isExplicit {
-		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
-	}
-	checkSystemInstructionsWithSigningModeAtDoc(
-		doc,
-		settings.strictMode,
-		cchSigning,
-		billingVersion,
-		"cli",
-		workload,
-		pinnedDate,
-		isSubagent,
-		prevReq,
-		promptID,
-		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
-		turnOriginArgs...,
-	)
+	isProbeOrHelper, isSubagent, incomingHeaders := prepareClaudeCloakedConversationDoc(ctx, cfg, auth, doc, confirmedClaudeCode, cchSigning, policy, settings, isExplicit, false)
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
@@ -4399,4 +4364,67 @@ func ensureModelMaxTokensDoc(doc *ojson.Doc, modelID string) bool {
 	}
 
 	return false
+}
+
+// Generation and count_tokens must present the same conversation prefix for signed thinking.
+func prepareClaudeCloakedConversationDoc(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, doc *ojson.Doc, confirmedClaudeCode, cchSigning bool, policy claudeWirePolicy, settings claudeCloakSettings, isExplicit, preview bool) (bool, bool, http.Header) {
+	billingVersion := helps.DefaultClaudeVersion(cfg)
+	workload := getWorkloadFromContext(ctx)
+
+	isProbeOrHelper := isClaudeProbeOrHelperRequestDoc(doc)
+	isSubagent := false
+	prevReq := ""
+	promptID := ""
+	pinnedDate := ""
+	var incomingHeaders http.Header
+	if !isProbeOrHelper {
+		incomingHeaders = resolveIncomingClaudeHeaders(ctx, helps.IncomingHeadersFromContext(ctx))
+		isSubagent = isClaudeSubagentRequestDoc(incomingHeaders, doc)
+		existingPrevReq, existingPromptID := extractClaudeBillingTagsDoc(doc)
+
+		var cCtx helps.ClaudeContinuityContext
+		var ok bool
+		prevReq, promptID, cCtx, ok = resolveClaudeContinuityTagsForInputDoc(ctx, cfg, auth, incomingHeaders, doc, confirmedClaudeCode, existingPrevReq, existingPromptID, preview)
+		if ok {
+			pinnedDate = cCtx.PinnedDate
+			if continuityCtx := helps.ClaudeContinuityContextFromContext(ctx); continuityCtx != nil && !preview {
+				*continuityCtx = cCtx
+			}
+		}
+	}
+	// Without continuity state (probe/helper traffic, or no session identity)
+	// fall back to the per-request date, which is the pre-pinning behaviour.
+	if pinnedDate == "" {
+		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
+	}
+	if !isProbeOrHelper && claudeSessionDatePinEnabled(cfg) {
+		// Strip a string-form caller reminder before the pipeline turns the
+		// content into blocks, so user text is never dropped with it.
+		stripFirstUserClaudeCodeCurrentDateReminderDoc(doc)
+	}
+
+	turnOrigin := ""
+	if !isProbeOrHelper && !isSubagent {
+		turnOrigin = "human"
+	}
+	turnOriginArgs := []string{turnOrigin}
+	if isExplicit {
+		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
+	}
+	checkSystemInstructionsWithSigningModeAtDoc(
+		doc,
+		settings.strictMode,
+		cchSigning,
+		billingVersion,
+		"cli",
+		workload,
+		pinnedDate,
+		isSubagent,
+		prevReq,
+		promptID,
+		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+		turnOriginArgs...,
+	)
+
+	return isProbeOrHelper, isSubagent, incomingHeaders
 }

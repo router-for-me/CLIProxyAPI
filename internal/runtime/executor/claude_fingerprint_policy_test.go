@@ -629,7 +629,7 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintStreamMatchesWirePolicy(t *testi
 	}
 }
 
-func TestClaudeExecutor_ClaudeCodeCLIFingerprintCountTokensKeepsNativeShape(t *testing.T) {
+func TestClaudeExecutor_ClaudeCodeCLIFingerprintCountTokensIncludesGenerationIdentity(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
 	transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -666,13 +666,13 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintCountTokensKeepsNativeShape(t *t
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	for _, field := range []string{"system", "metadata", "context_management", "diagnostics"} {
+	for _, field := range []string{"metadata", "context_management", "diagnostics"} {
 		if got := ojson.GetBytes(seenBody, field); got.Exists() {
 			t.Fatalf("count_tokens %s = %s, want absent", field, got.Raw)
 		}
 	}
-	if strings.Contains(string(seenBody), "cch=") {
-		t.Fatalf("count_tokens body contains CCH: %s", seenBody)
+	if !strings.Contains(ojson.GetBytes(seenBody, "system").Raw, claudeCodeCLIIdentity) {
+		t.Fatal("cloaked counting must include the generation identity")
 	}
 	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); !strings.HasPrefix(got, "mcp__") {
 		t.Fatalf("count_tokens tool name = %q, want OAuth CLI MCP alias after fingerprint-profile opt-in", got)
