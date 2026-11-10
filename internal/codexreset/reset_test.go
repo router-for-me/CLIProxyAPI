@@ -16,6 +16,8 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 var testNow = time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
@@ -36,7 +38,15 @@ type fakeManager struct {
 	status          int
 	readFail        bool
 	beforeConsume   func()
+	closeErr        error
 }
+
+type responseBody struct {
+	io.Reader
+	closeErr error
+}
+
+func (b *responseBody) Close() error { return b.closeErr }
 
 func (m *fakeManager) List() []*coreauth.Auth                { return []*coreauth.Auth{m.auth} }
 func (m *fakeManager) GetByID(string) (*coreauth.Auth, bool) { return m.auth, true }
@@ -83,7 +93,7 @@ func (m *fakeManager) HttpRequest(ctx context.Context, a *coreauth.Auth, req *ht
 	default:
 		return nil, errors.New("unexpected endpoint")
 	}
-	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	return &http.Response{StatusCode: 200, Body: &responseBody{Reader: strings.NewReader(body), closeErr: m.closeErr}}, nil
 }
 
 func creditResponse() string {
@@ -158,6 +168,50 @@ func TestWorkerConfirmedOutcomes(t *testing.T) {
 			confirmed := code == "reset" || code == "already_redeemed"
 			if (m.clear == 1) != confirmed || state.Pending != (code == "unknown") || m.consume != 1 {
 				t.Fatalf("consume=%d clear=%d state=%+v", m.consume, m.clear, state)
+			}
+		})
+	}
+}
+
+func TestWorkerResponseCloseFailuresAreLoggedWithoutChangingRedemption(t *testing.T) {
+	for _, fails := range []bool{false, true} {
+		t.Run(fmt.Sprint(fails), func(t *testing.T) {
+			w, m, key := setup(t, true)
+			const sensitive = "private credential in transport error"
+			if fails {
+				m.closeErr = errors.New(sensitive)
+			}
+			logger := log.StandardLogger()
+			previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+			previousLevel := logger.GetLevel()
+			hook := logtest.NewLocal(logger)
+			logger.SetLevel(log.ErrorLevel)
+			t.Cleanup(func() {
+				logger.ReplaceHooks(previousHooks)
+				logger.SetLevel(previousLevel)
+			})
+			w.Check(context.Background())
+			wantLogs := 0
+			if fails {
+				wantLogs = 3 // Usage, available credits, and confirmed redemption each close their body.
+			}
+			entries := hook.AllEntries()
+			if len(entries) != wantLogs {
+				t.Fatalf("close error logs=%d, want %d", len(entries), wantLogs)
+			}
+			for _, entry := range entries {
+				if entry.Level != log.ErrorLevel || entry.Message == "" || strings.Contains(entry.Message, sensitive) || len(entry.Data) != 0 {
+					t.Fatalf("unsafe close diagnostic: %+v", entry)
+				}
+			}
+			state, _, _, errRead := Read(context.Background(), w.Store, key)
+			if errRead != nil || state.Result != "reset" || state.Pending || m.consume != 1 || m.clear != 1 {
+				t.Fatalf("close failure changed redemption: consume=%d clear=%d state=%+v err=%v", m.consume, m.clear, state, errRead)
+			}
+			w.Now = func() time.Time { return testNow.Add(interval) }
+			w.Check(context.Background())
+			if m.consume != 1 {
+				t.Fatal("close failure retried a confirmed redemption")
 			}
 		})
 	}

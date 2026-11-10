@@ -16,6 +16,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const baseURL = "https://chatgpt.com/backend-api/wham/"
@@ -288,7 +289,12 @@ func (w *Worker) request(ctx context.Context, auth *coreauth.Auth, path, body st
 	if errHTTP != nil {
 		return ojson.Result{}, fmt.Errorf("reset request failed")
 	}
-	defer func() { _ = response.Body.Close() }()
+	defer func() {
+		if errClose := response.Body.Close(); errClose != nil {
+			// Transport error text may contain credentials; keep the diagnostic fixed.
+			log.Error("codex reset: failed to close upstream response body")
+		}
+	}()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		retry := int64(0)
 		value := response.Header.Get("Retry-After")
