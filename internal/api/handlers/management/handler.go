@@ -466,9 +466,10 @@ func (h *Handler) authenticateManagement(clientIP string, localClient bool, prov
 	}
 
 	// Guest keys are random and prefixed, so check them before the slow bcrypt compare.
+	// A guest success must not clear the failure count: it would let a guest
+	// interleave valid requests with guesses at the management key.
 	if allowGuest && strings.HasPrefix(provided, guestKeyPrefix) {
 		if g := h.guests().lookup(provided); g != nil {
-			reset()
 			return g, true, 0, ""
 		}
 	}

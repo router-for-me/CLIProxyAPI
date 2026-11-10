@@ -108,7 +108,12 @@ func authorizeGuest(c *gin.Context, g *guestRecord) bool {
 		return guestAllowed(g, method, rel)
 	}
 	if c.GetBool(PluginRouteContextKey) && strings.HasPrefix(path, managementV0Prefix+"/") {
-		return g.level(pluginRoutesGroup).rank() >= neededLevel(nil, method).rank()
+		need := neededLevel(nil, method)
+		if _, isAuthURL := pluginAuthProviderFromURL(c.Request.URL); isAuthURL {
+			// Starting a login registers an OAuth session, so a GET here is a write.
+			need = GuestLevelEdit
+		}
+		return g.level(pluginRoutesGroup).rank() >= need.rank()
 	}
 	return false
 }

@@ -1,12 +1,13 @@
 package management
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,12 +16,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	backendstore "github.com/router-for-me/CLIProxyAPI/v8/internal/store"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
 	guestKeyPrefix      = "cpg_"
-	guestStoreFileName  = "guest-keys.json"
+	guestStoreFileName  = backendstore.GuestKeysFileName
 	guestPrincipalKey   = "management.guest-principal"
 	maxGuestNameLength  = 64
 	managementV8Prefix  = "/v8/management"
@@ -54,11 +58,11 @@ func (l GuestLevel) rank() int {
 
 // guestRecord is one stored guest key. Only the SHA-256 of the key is kept.
 type guestRecord struct {
-	ID          string                `json:"id"`
-	Name        string                `json:"name"`
-	KeyHash     string                `json:"key-hash"`
-	CreatedAt   time.Time             `json:"created-at"`
-	Permissions map[string]GuestLevel `json:"permissions"`
+	ID          string
+	Name        string
+	KeyHash     string
+	CreatedAt   time.Time
+	Permissions map[string]GuestLevel
 }
 
 func (g *guestRecord) level(group string) GuestLevel {
@@ -91,12 +95,20 @@ func (g *guestRecord) view() guestView {
 	return guestView{ID: g.ID, Name: g.Name, CreatedAt: g.CreatedAt, Permissions: g.fullPermissions()}
 }
 
+// guestKeyPersister is implemented by token stores that mirror the config
+// directory to a backend (PostgreSQL, object storage, git).
+type guestKeyPersister interface {
+	PersistGuestKeys(ctx context.Context) error
+}
+
 // guestStore persists guest keys next to the config file. An empty path keeps
 // them in memory only.
 type guestStore struct {
-	mu    sync.RWMutex
-	path  string
-	items []*guestRecord
+	mu   sync.RWMutex
+	path string
+	// persist mirrors the file to a shared backend after every local write.
+	persist func(ctx context.Context) error
+	items   []*guestRecord
 }
 
 func hashGuestKey(key string) string {
@@ -127,28 +139,111 @@ func loadGuestStore(path string) (*guestStore, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return s, nil
 	}
-	var file struct {
-		Guests []*guestRecord `json:"guests"`
-	}
-	if err = json.Unmarshal(data, &file); err != nil {
+	if s.items, err = decodeGuestRecords(data); err != nil {
 		return nil, err
 	}
-	s.items = file.Guests
 	return s, nil
 }
 
-// saveLocked writes the store atomically. The caller holds s.mu.
-func (s *guestStore) saveLocked() error {
+func decodeGuestRecords(data []byte) ([]*guestRecord, error) {
+	if !ojson.ValidBytes(data) {
+		return nil, errors.New("invalid JSON")
+	}
+	guests := ojson.ParseBytes(data).Get("guests")
+	if !guests.Exists() {
+		return nil, nil
+	}
+	if !guests.IsArray() {
+		return nil, errors.New("guests is not an array")
+	}
+	var items []*guestRecord
+	for i, entry := range guests.Array() {
+		if !entry.IsObject() {
+			return nil, fmt.Errorf("guest %d is not an object", i)
+		}
+		rec := &guestRecord{
+			ID:          entry.Get("id").String(),
+			Name:        entry.Get("name").String(),
+			KeyHash:     entry.Get("key-hash").String(),
+			Permissions: make(map[string]GuestLevel),
+		}
+		if rec.ID == "" || rec.KeyHash == "" {
+			return nil, fmt.Errorf("guest %d lacks an id or key hash", i)
+		}
+		created, err := time.Parse(time.RFC3339Nano, entry.Get("created-at").String())
+		if err != nil {
+			return nil, fmt.Errorf("guest %d has an invalid created-at: %w", i, err)
+		}
+		rec.CreatedAt = created
+		perms := entry.Get("permissions")
+		if perms.Exists() && !perms.IsObject() {
+			return nil, fmt.Errorf("guest %d permissions is not an object", i)
+		}
+		perms.ForEach(func(group, level ojson.Result) bool {
+			rec.Permissions[group.String()] = GuestLevel(level.String())
+			return true
+		})
+		items = append(items, rec)
+	}
+	return items, nil
+}
+
+func encodeGuestRecords(items []*guestRecord) ([]byte, error) {
+	doc := ojson.NewDocString(`{"guests":[]}`)
+	for _, item := range items {
+		rec := ojson.NewDocString(`{}`)
+		perms := ojson.NewDocString(`{}`)
+		for group, level := range item.Permissions {
+			if err := perms.Set(ojson.Escape(group), string(level)); err != nil {
+				return nil, err
+			}
+		}
+		fields := []struct{ path, value string }{
+			{"id", item.ID},
+			{"name", item.Name},
+			{"key-hash", item.KeyHash},
+			{"created-at", item.CreatedAt.Format(time.RFC3339Nano)},
+		}
+		for _, f := range fields {
+			if err := rec.Set(f.path, f.value); err != nil {
+				return nil, err
+			}
+		}
+		if err := rec.SetRaw("permissions", perms.String()); err != nil {
+			return nil, err
+		}
+		if err := doc.SetRaw("guests.-1", rec.String()); err != nil {
+			return nil, err
+		}
+	}
+	return doc.Bytes(), nil
+}
+
+// saveLocked writes the file and mirrors it to the shared backend. The caller
+// holds s.mu.
+func (s *guestStore) saveLocked(ctx context.Context) error {
+	if err := s.writeLocked(); err != nil {
+		return err
+	}
+	if s.persist == nil {
+		return nil
+	}
+	return s.persist(ctx)
+}
+
+// rollbackLocked rewrites the file after a failed save restored s.items.
+func (s *guestStore) rollbackLocked() {
+	if err := s.writeLocked(); err != nil {
+		log.WithError(err).Warn("failed to restore guest key file after a failed save")
+	}
+}
+
+// writeLocked writes the file atomically. The caller holds s.mu.
+func (s *guestStore) writeLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	file := struct {
-		Guests []*guestRecord `json:"guests"`
-	}{Guests: s.items}
-	if file.Guests == nil {
-		file.Guests = []*guestRecord{}
-	}
-	data, err := json.MarshalIndent(file, "", "  ")
+	data, err := encodeGuestRecords(s.items)
 	if err != nil {
 		return err
 	}
@@ -214,14 +309,16 @@ func (s *guestStore) list() []guestView {
 	return out
 }
 
-func (s *guestStore) add(name string, perms map[string]GuestLevel) (*guestRecord, string, error) {
+// add, update and rotate return a view built while the lock is held, so a
+// concurrent change cannot alter what the caller reports.
+func (s *guestStore) add(ctx context.Context, name string, perms map[string]GuestLevel) (guestView, string, error) {
 	id, err := newGuestToken(8)
 	if err != nil {
-		return nil, "", err
+		return guestView{}, "", err
 	}
 	secret, err := newGuestToken(32)
 	if err != nil {
-		return nil, "", err
+		return guestView{}, "", err
 	}
 	key := guestKeyPrefix + secret
 	rec := &guestRecord{
@@ -234,16 +331,17 @@ func (s *guestStore) add(name string, perms map[string]GuestLevel) (*guestRecord
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.items = append(s.items, rec)
-	if err = s.saveLocked(); err != nil {
+	if err = s.saveLocked(ctx); err != nil {
 		s.items = s.items[:len(s.items)-1]
-		return nil, "", err
+		s.rollbackLocked()
+		return guestView{}, "", err
 	}
-	return rec, key, nil
+	return rec.view(), key, nil
 }
 
 var errGuestNotFound = errors.New("guest not found")
 
-func (s *guestStore) update(id string, name *string, perms map[string]GuestLevel) (*guestRecord, error) {
+func (s *guestStore) update(ctx context.Context, id string, name *string, perms map[string]GuestLevel) (guestView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range s.items {
@@ -258,19 +356,20 @@ func (s *guestStore) update(id string, name *string, perms map[string]GuestLevel
 		if perms != nil {
 			item.Permissions = perms
 		}
-		if err := s.saveLocked(); err != nil {
+		if err := s.saveLocked(ctx); err != nil {
 			*item = prev
-			return nil, err
+			s.rollbackLocked()
+			return guestView{}, err
 		}
-		return item, nil
+		return item.view(), nil
 	}
-	return nil, errGuestNotFound
+	return guestView{}, errGuestNotFound
 }
 
-func (s *guestStore) rotate(id string) (*guestRecord, string, error) {
+func (s *guestStore) rotate(ctx context.Context, id string) (guestView, string, error) {
 	secret, err := newGuestToken(32)
 	if err != nil {
-		return nil, "", err
+		return guestView{}, "", err
 	}
 	key := guestKeyPrefix + secret
 	s.mu.Lock()
@@ -281,16 +380,17 @@ func (s *guestStore) rotate(id string) (*guestRecord, string, error) {
 		}
 		prev := item.KeyHash
 		item.KeyHash = hashGuestKey(key)
-		if err = s.saveLocked(); err != nil {
+		if err = s.saveLocked(ctx); err != nil {
 			item.KeyHash = prev
-			return nil, "", err
+			s.rollbackLocked()
+			return guestView{}, "", err
 		}
-		return item, key, nil
+		return item.view(), key, nil
 	}
-	return nil, "", errGuestNotFound
+	return guestView{}, "", errGuestNotFound
 }
 
-func (s *guestStore) remove(id string) error {
+func (s *guestStore) remove(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, item := range s.items {
@@ -302,8 +402,9 @@ func (s *guestStore) remove(id string) error {
 		next = append(next, s.items[:i]...)
 		next = append(next, s.items[i+1:]...)
 		s.items = next
-		if err := s.saveLocked(); err != nil {
+		if err := s.saveLocked(ctx); err != nil {
 			s.items = prev
+			s.rollbackLocked()
 			return err
 		}
 		return nil
@@ -324,6 +425,8 @@ func (h *Handler) guests() *guestStore {
 			// the next save overwrites.
 			h.guestsErr = err
 			store = &guestStore{path: ""}
+		} else if persister, ok := h.tokenStore.(guestKeyPersister); ok && path != "" {
+			store.persist = persister.PersistGuestKeys
 		}
 		h.guestKeys = store
 	})
@@ -386,6 +489,12 @@ func (h *Handler) GetSession(c *gin.Context) {
 		perms[group.ID] = GuestLevelEdit
 	}
 	c.JSON(http.StatusOK, sessionResponse{Role: "admin", Permissions: perms})
+}
+
+// requestCtx keeps the request's values but not its cancellation, so a client
+// that disconnects cannot leave the backend copy behind the local file.
+func requestCtx(c *gin.Context) context.Context {
+	return context.WithoutCancel(c.Request.Context())
 }
 
 func (h *Handler) guestStoreOrFail(c *gin.Context) *guestStore {
@@ -456,12 +565,12 @@ func (h *Handler) CreateGuest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_permissions", "message": err.Error()})
 		return
 	}
-	rec, key, err := store.add(name, perms)
+	rec, key, err := store.add(requestCtx(c), name, perms)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save_failed"})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"guest": rec.view(), "key": key})
+	c.JSON(http.StatusCreated, gin.H{"guest": rec, "key": key})
 }
 
 // PatchGuest renames a guest or changes its permissions.
@@ -493,7 +602,7 @@ func (h *Handler) PatchGuest(c *gin.Context) {
 			return
 		}
 	}
-	rec, err := store.update(c.Param("id"), name, perms)
+	rec, err := store.update(requestCtx(c), c.Param("id"), name, perms)
 	if errors.Is(err, errGuestNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 		return
@@ -502,7 +611,7 @@ func (h *Handler) PatchGuest(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save_failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"guest": rec.view()})
+	c.JSON(http.StatusOK, gin.H{"guest": rec})
 }
 
 // RotateGuestKey replaces a guest's key. The new key is returned once.
@@ -511,7 +620,7 @@ func (h *Handler) RotateGuestKey(c *gin.Context) {
 	if store == nil {
 		return
 	}
-	rec, key, err := store.rotate(c.Param("id"))
+	rec, key, err := store.rotate(requestCtx(c), c.Param("id"))
 	if errors.Is(err, errGuestNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 		return
@@ -520,7 +629,7 @@ func (h *Handler) RotateGuestKey(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "save_failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"guest": rec.view(), "key": key})
+	c.JSON(http.StatusOK, gin.H{"guest": rec, "key": key})
 }
 
 // DeleteGuest removes a guest key.
@@ -529,7 +638,7 @@ func (h *Handler) DeleteGuest(c *gin.Context) {
 	if store == nil {
 		return
 	}
-	err := store.remove(c.Param("id"))
+	err := store.remove(requestCtx(c), c.Param("id"))
 	if errors.Is(err, errGuestNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
 		return

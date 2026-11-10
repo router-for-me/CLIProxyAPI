@@ -153,6 +153,9 @@ func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath stri
 	if err := s.syncConfigFromBucket(ctx, exampleConfigPath); err != nil {
 		return err
 	}
+	if err := s.syncGuestKeysFromBucket(ctx); err != nil {
+		return err
+	}
 	if err := s.syncAuthFromBucket(ctx); err != nil {
 		return err
 	}
