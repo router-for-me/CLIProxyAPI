@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -1284,5 +1285,53 @@ func TestRequestScopedErrors_ResponseBodyProvider_MatchesUnderlyingPayload(t *te
 	a1, _ := m.GetByID("auth-fast-wrapped-1")
 	if !a1.Unavailable || a1.NextRetryAfter.IsZero() {
 		t.Fatal("expected auth1 to be in cooldown when matching ResponseBody()")
+	}
+}
+
+func TestHomeExecutionAttachesRequestScopedErrorConfigToContext(t *testing.T) {
+	cfg := &internalconfig.Config{
+		Home: internalconfig.HomeConfig{Enabled: true},
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			"codex": {
+				{
+					Status: http.StatusNotFound,
+					Match:  []string{"model_not_found_on_route"},
+					Action: RequestScopedActionStop,
+				},
+			},
+		},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+
+	var observedAction string
+	var observedMatched bool
+	exec := &mockCustomErrorExecutor{
+		identifier: "codex",
+		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			err := customStatusError{code: http.StatusNotFound, msg: "model_not_found_on_route"}
+			observedAction, observedMatched = MatchRequestScopedErrorAction(auth, err, RequestScopedErrorConfigFromContext(ctx))
+			return cliproxyexecutor.Response{}, err
+		},
+	}
+	m.RegisterExecutor(exec)
+
+	executions := executionregistry.New()
+	dispatcher := &accountedHomeExecutionDispatcher{
+		auths: []Auth{{
+			ID:         "home-oauth-1",
+			Provider:   "codex",
+			Status:     StatusActive,
+			Attributes: map[string]string{"auth_kind": "oauth"},
+		}},
+	}
+	m.PublishHomeDispatch(dispatcher, executions, 1)
+
+	_, errExec := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5.4"}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !observedMatched || observedAction != RequestScopedActionStop {
+		t.Fatalf("executor context did not match request-scoped rule: matched=%v action=%q", observedMatched, observedAction)
 	}
 }

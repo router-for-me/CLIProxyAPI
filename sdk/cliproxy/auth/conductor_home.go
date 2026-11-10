@@ -1497,6 +1497,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
+		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue
@@ -1508,6 +1509,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			continue
 		}
 		for _, upstreamModel := range models {
+			creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -1563,6 +1565,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
+		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue

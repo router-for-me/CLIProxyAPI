@@ -1517,6 +1517,79 @@ func TestFailFromErrorsCarriesRequestScopedCode(t *testing.T) {
 	if plain.Code != "" {
 		t.Fatalf("upstream model rejection gained request-scoped classification: %+v", plain)
 	}
+
+	rules := []config.RequestScopedErrorRule{
+		{
+			Status: http.StatusNotFound,
+			Match:  []string{"model_not_found"},
+			Action: cliproxyauth.RequestScopedActionStop,
+		},
+		{
+			Status: http.StatusBadRequest,
+			Match:  []string{"force_cool_marker"},
+			Action: cliproxyauth.RequestScopedActionStopAndCooldown,
+		},
+	}
+	authWithMetadataRules := &cliproxyauth.Auth{
+		ID:       "auth-rule-test",
+		Provider: "codex",
+		Metadata: map[string]any{"request_scoped_errors": rules},
+	}
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.4", authWithMetadataRules)
+	var errNotFound error = &cliproxyauth.Error{HTTPStatus: http.StatusNotFound, Message: "model_not_found"}
+	failMatched := reporter.failFromErrors(context.Background(), errNotFound)
+	if failMatched.Code != usage.FailureRequestScopedCode || failMatched.StatusCode != http.StatusNotFound {
+		t.Fatalf("matched request-scoped rule must set fail.Code=%q, got %+v", usage.FailureRequestScopedCode, failMatched)
+	}
+
+	var errForceCool error = &cliproxyauth.Error{HTTPStatus: http.StatusBadRequest, Message: "force_cool_marker"}
+	failCooldown := reporter.failFromErrors(context.Background(), errForceCool)
+	if failCooldown.Code != usage.FailureForceCooldownCode {
+		t.Fatalf("cooldown action rule must set fail.Code=%q, got %+v", usage.FailureForceCooldownCode, failCooldown)
+	}
+
+	// A configured cooldown rule must also override an error that intrinsically implements RequestScopedError.
+	reqScopedForceCool := cliproxyauth.NewRequestScopedError("force_cool_marker", http.StatusBadRequest)
+	if failOverride := reporter.failFromErrors(context.Background(), reqScopedForceCool); failOverride.Code != usage.FailureForceCooldownCode {
+		t.Fatalf("cooldown rule must override intrinsic RequestScopedError: got %+v", failOverride)
+	}
+
+	// Mutating the caller's slice after NewUsageReporter must not affect the reporter's snapshot.
+	rules[0].Match[0] = "mutated_after_creation"
+	failIsolated := reporter.failFromErrors(context.Background(), errNotFound)
+	if failIsolated.Code != usage.FailureRequestScopedCode {
+		t.Fatalf("reporter rule snapshot was mutated by caller slice modification: %+v", failIsolated)
+	}
+
+	oauthAuth := &cliproxyauth.Auth{
+		ID:         "oauth-rule-test",
+		Provider:   "codex",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	cfg := &config.Config{
+		OAuthRequestScopedErrors: map[string][]config.RequestScopedErrorRule{
+			"codex": {
+				{
+					Status: http.StatusNotFound,
+					Match:  []string{"endpoint_unsupported"},
+					Action: cliproxyauth.RequestScopedActionContinue,
+				},
+			},
+		},
+	}
+	ctxWithCfg := cliproxyauth.WithRequestScopedErrorConfig(context.Background(), cfg)
+	oauthReporter := NewUsageReporter(ctxWithCfg, "codex", "gpt-5.4", oauthAuth)
+	// Updating token fingerprint with an OAuth auth that has no per-auth metadata rules
+	// must preserve the OAuth rules resolved from the context config at reporter creation.
+	oauthReporter.UpdateAccessTokenFingerprint(&cliproxyauth.Auth{
+		ID:         "oauth-rule-test",
+		Provider:   "codex",
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "rotated-token"},
+	})
+	failOAuth := oauthReporter.failFromErrors(ctxWithCfg, &cliproxyauth.Error{HTTPStatus: http.StatusNotFound, Message: "endpoint_unsupported"})
+	if failOAuth.Code != usage.FailureRequestScopedCode {
+		t.Fatalf("OAuth request-scoped rule from context config must set fail.Code=%q after token update, got %+v", usage.FailureRequestScopedCode, failOAuth)
+	}
 }
 
 func TestParseClaudeUsageExtractsCacheTTLServerToolsIterationsAndCost(t *testing.T) {
