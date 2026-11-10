@@ -249,6 +249,34 @@ func (m *Manager) Modify(ctx context.Context, id string, expectedEpoch uint64, e
 	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
 }
 
+// UpdateIfGenerationCurrent replaces the stored auth with updated only while
+// the stored generation and registration epoch still equal base's. The
+// comparison runs under the per-auth mutation gate, so a refresh committed
+// after the caller read base is never overwritten by a snapshot taken before it.
+func (m *Manager) UpdateIfGenerationCurrent(ctx context.Context, base *Auth, updated *Auth) (*Auth, bool, error) {
+	if m == nil || base == nil || updated == nil || base.ID == "" || updated.ID != base.ID {
+		return nil, false, nil
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, base.ID)
+	if errMutation != nil {
+		return nil, false, errMutation
+	}
+	defer releaseMutation()
+	m.mu.RLock()
+	current, ok := m.auths[base.ID]
+	matches := ok && current != nil && current.Generation == base.Generation && current.RegistrationEpoch == base.RegistrationEpoch
+	m.mu.RUnlock()
+	if !matches {
+		return nil, false, nil
+	}
+	committedAuth, didCommit, persistCooldown, errUpdate := m.updateInternalLocked(ctx, nil, updated, updateModeReplace)
+	releaseMutation()
+	if errUpdate == nil && didCommit && committedAuth != nil {
+		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
+	}
+	return committedAuth, errUpdate == nil && didCommit && committedAuth != nil, errUpdate
+}
+
 func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil

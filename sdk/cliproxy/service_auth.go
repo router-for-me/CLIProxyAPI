@@ -449,7 +449,23 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		}
 		op = "update"
 		var updated *coreauth.Auth
-		updated, err = s.coreManager.Update(ctx, auth)
+		if auth.Generation > 0 {
+			// A versioned runtime snapshot was checked against existing outside the
+			// mutation gate. Replace it only if nothing committed since, so a refresh
+			// that lands in between keeps its rotated credentials.
+			var committed bool
+			updated, committed, err = s.coreManager.UpdateIfGenerationCurrent(ctx, existing, auth)
+			if err == nil && !committed {
+				log.Debugf("skipping stale auth update for %s: auth changed after gen=%d was checked", auth.ID, existing.Generation)
+				current, okCurrent := s.coreManager.GetByID(auth.ID)
+				if !okCurrent {
+					return nil
+				}
+				return current
+			}
+		} else {
+			updated, err = s.coreManager.Update(ctx, auth)
+		}
 		if err == nil && updated != nil {
 			if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
 				log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
