@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestBuildOpenAICompatibilityConfigModels_InputModalities(t *testing.T) {
@@ -137,5 +138,31 @@ func TestBuildOpenAICompatibilityConfigModels_OpenRouterPublishedReasoningAndOwn
 	models := buildOpenAICompatibilityConfigModels(other)
 	if len(models) != 1 || models[0].OwnedBy != "Other" || strings.Join(models[0].Thinking.Levels, ",") != "low,medium,high" {
 		t.Fatalf("entries not pointing at OpenRouter are unchanged: %+v", models)
+	}
+}
+
+func TestAuthMatchesRefreshedProvidersNormalizesCompatAuths(t *testing.T) {
+	refreshed := map[string]bool{"openai-compatible-openrouter": true}
+	for name, auth := range map[string]*coreauth.Auth{
+		"config":      {Provider: "openai-compatible-openrouter"},
+		"legacy":      {Provider: "openai-compatibility", Attributes: map[string]string{"compat_name": "OpenRouter"}},
+		"providerKey": {Provider: "openai-compatibility", Attributes: map[string]string{"compat_name": "router", "provider_key": "openrouter"}},
+		"label":       {Provider: "openai-compatibility", Label: "OpenRouter"},
+	} {
+		if !authMatchesRefreshedProviders(auth, refreshed) {
+			t.Fatalf("%s auth not refreshed", name)
+		}
+	}
+	for name, auth := range map[string]*coreauth.Auth{
+		"other compat": {Provider: "openai-compatibility", Attributes: map[string]string{"compat_name": "Other"}},
+		"claude":       {Provider: "claude"},
+		"nil":          nil,
+	} {
+		if authMatchesRefreshedProviders(auth, refreshed) {
+			t.Fatalf("%s auth refreshed for an OpenRouter catalog change", name)
+		}
+	}
+	if !authMatchesRefreshedProviders(&coreauth.Auth{Provider: "Claude"}, map[string]bool{"claude": true}) {
+		t.Fatal("provider match must still work")
 	}
 }
