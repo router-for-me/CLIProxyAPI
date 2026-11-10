@@ -37,6 +37,7 @@ type State struct {
 	NextCheckAt         int64  `json:"next_check_at"`
 	LastCheckedAt       int64  `json:"last_checked_at"`
 	LastResetAt         int64  `json:"last_reset_at"`
+	CooldownBefore      int64  `json:"cooldown_before,omitempty"`
 	Result              string `json:"result"`
 	CreditID            string `json:"credit_id,omitempty"`
 	RedeemedCreditID    string `json:"redeemed_credit_id,omitempty"`
@@ -79,6 +80,7 @@ func Read(ctx context.Context, store kvstore.KVClient, key string) (State, []byt
 			AccountKey: value.Get("account_key").String(), Enabled: value.Get("enabled").Bool(),
 			BeforeExpirySeconds: int(value.Get("before_expiry_seconds").Int()),
 			LastResetAt:         value.Get("last_reset_at").Int(),
+			CooldownBefore:      value.Get("cooldown_before").Int(),
 			NextCheckAt:         value.Get("next_check_at").Int(), LastCheckedAt: value.Get("last_checked_at").Int(),
 			Result: value.Get("result").String(), CreditID: value.Get("credit_id").String(),
 			RedeemedCreditID: value.Get("redeemed_credit_id").String(),
@@ -104,7 +106,7 @@ type Manager interface {
 	List() []*coreauth.Auth
 	GetByID(string) (*coreauth.Auth, bool)
 	HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error)
-	ResetQuota(context.Context, string) (*coreauth.Auth, []string, error)
+	ResetQuotaIfUnchanged(context.Context, *coreauth.Auth) (*coreauth.Auth, []string, error)
 }
 
 type Worker struct {
@@ -212,6 +214,7 @@ func (w *Worker) checkAccount(ctx context.Context, state State) {
 		return
 	}
 	latest.Pending, latest.Result, latest.CreditID, latest.RequestID = true, "unknown", creditID, uuid.NewString()
+	latest.CooldownBefore = w.Now().UnixNano()
 	claimed, errClaim := Save(ctx, w.Store, latest, raw, true)
 	if errClaim != nil || !claimed {
 		return
@@ -240,6 +243,11 @@ func (w *Worker) checkAccount(ctx context.Context, state State) {
 
 func (w *Worker) clearCooldown(ctx context.Context, state *State) {
 	matched, clearedAll := false, true
+	cutoff := time.Unix(0, state.CooldownBefore)
+	if state.CooldownBefore == 0 {
+		// Older journals lack a precise pre-POST boundary; preserve same-second updates.
+		cutoff = time.Unix(state.LastResetAt, 0)
+	}
 	// The journal is account-wide, but routing cooldowns belong to each credential.
 	for _, auth := range w.Manager.List() {
 		if AccountKey(auth) != state.AccountKey {
@@ -250,7 +258,21 @@ func (w *Worker) clearCooldown(ctx context.Context, state *State) {
 			continue
 		}
 		matched = true
-		if _, _, errReset := w.Manager.ResetQuota(ctx, auth.ID); errReset != nil {
+		// Never clear newer observations, including activity during the consume request.
+		if !current.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		newer := false
+		for _, model := range current.ModelStates {
+			if model != nil && !model.UpdatedAt.Before(cutoff) {
+				newer = true
+				break
+			}
+		}
+		if newer {
+			continue
+		}
+		if _, _, errReset := w.Manager.ResetQuotaIfUnchanged(ctx, current); errReset != nil {
 			clearedAll = false
 		}
 	}

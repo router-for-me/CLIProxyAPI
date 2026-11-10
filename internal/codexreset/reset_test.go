@@ -39,6 +39,7 @@ type fakeManager struct {
 	status          int
 	readFail        bool
 	beforeConsume   func()
+	onConsume       func()
 	closeErr        error
 }
 
@@ -51,6 +52,13 @@ func (b *responseBody) Close() error { return b.closeErr }
 
 func (m *fakeManager) List() []*coreauth.Auth                { return []*coreauth.Auth{m.auth} }
 func (m *fakeManager) GetByID(string) (*coreauth.Auth, bool) { return m.auth, true }
+func (m *fakeManager) ResetQuotaIfUnchanged(ctx context.Context, expected *coreauth.Auth) (*coreauth.Auth, []string, error) {
+	updated, models, errReset := m.ResetQuota(ctx, expected.ID)
+	if errReset == nil {
+		expected.UpdatedAt = testNow
+	}
+	return updated, models, errReset
+}
 func (m *fakeManager) ResetQuota(context.Context, string) (*coreauth.Auth, []string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -80,6 +88,9 @@ func (m *fakeManager) HttpRequest(ctx context.Context, a *coreauth.Auth, req *ht
 		body = creditResponse()
 	case "/backend-api/wham/rate-limit-reset-credits/consume":
 		m.consume++
+		if m.onConsume != nil {
+			m.onConsume()
+		}
 		raw, _ := io.ReadAll(req.Body)
 		if ojson.GetBytes(raw, "credit_id").String() != "soon" || ojson.GetBytes(raw, "redeem_request_id").String() == "" {
 			return nil, errors.New("missing selected credit or idempotency key")
@@ -320,6 +331,78 @@ func (m *aliasManager) ResetQuota(ctx context.Context, id string) (*coreauth.Aut
 	m.cleared[id]++
 	return m.fakeManager.ResetQuota(ctx, id)
 }
+func (m *aliasManager) ResetQuotaIfUnchanged(ctx context.Context, expected *coreauth.Auth) (*coreauth.Auth, []string, error) {
+	updated, models, errReset := m.ResetQuota(ctx, expected.ID)
+	if errReset == nil {
+		expected.UpdatedAt = testNow
+	}
+	return updated, models, errReset
+}
+
+func TestWorkerCleanupRetryPreservesNewCooldowns(t *testing.T) {
+	for _, modelOnly := range []bool{false, true} {
+		t.Run(fmt.Sprint(modelOnly), func(t *testing.T) {
+			w, m, key := setup(t, true)
+			alias := testAuth("user")
+			alias.ID = "alias"
+			manager := &aliasManager{fakeManager: m, auths: []*coreauth.Auth{m.auth, alias}, failID: alias.ID, cleared: map[string]int{}}
+			w.Manager = manager
+			w.Check(context.Background())
+			state, _, _, errRead := Read(context.Background(), w.Store, key)
+			if errRead != nil || state.Result != "cooldown_pending" || manager.cleared[m.auth.ID] != 1 {
+				t.Fatalf("initial cleanup: state=%+v cleared=%v err=%v", state, manager.cleared, errRead)
+			}
+			if modelOnly {
+				// Exercise older journals without the precise boundary as well.
+				_, raw, exists, _ := Read(context.Background(), w.Store, key)
+				state.CooldownBefore = 0
+				if saved, errSave := Save(context.Background(), w.Store, state, raw, exists); !saved || errSave != nil {
+					t.Fatalf("save older journal: %v", errSave)
+				}
+			}
+			store := w.Store.(*kvstore.BoltStore)
+			if errClose := store.Close(); errClose != nil {
+				t.Fatal(errClose)
+			}
+			reopened, errOpen := kvstore.OpenBoltStore(store.Path())
+			if errOpen != nil {
+				t.Fatal(errOpen)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			w.Store = reopened
+			// A fresh 429 arrives after the reset, while another alias still needs cleanup.
+			observed := testNow.Add(time.Nanosecond)
+			deadline := testNow.Add(time.Hour)
+			if modelOnly {
+				m.auth.ModelStates = map[string]*coreauth.ModelState{"gpt": {UpdatedAt: observed, Unavailable: true, NextRetryAfter: deadline}}
+			} else {
+				m.auth.UpdatedAt, m.auth.Unavailable, m.auth.NextRetryAfter = observed, true, deadline
+			}
+			manager.failID = ""
+			w.Now = func() time.Time { return testNow.Add(interval) }
+			w.Check(context.Background())
+			state, _, _, errRead = Read(context.Background(), w.Store, key)
+			if errRead != nil || state.Result != "reset" || m.consume != 1 || manager.cleared[m.auth.ID] != 1 || manager.cleared[alias.ID] != 1 {
+				t.Fatalf("retry erased new cooldown or repeated redemption: state=%+v cleared=%v consume=%d err=%v", state, manager.cleared, m.consume, errRead)
+			}
+		})
+	}
+}
+
+func TestWorkerPreservesCooldownObservedDuringConsume(t *testing.T) {
+	w, m, key := setup(t, true)
+	started := testNow.Add(123 * time.Nanosecond)
+	w.Now = func() time.Time { return started }
+	m.onConsume = func() {
+		m.auth.UpdatedAt = testNow.Add(500 * time.Millisecond)
+		w.Now = func() time.Time { return testNow.Add(time.Second) }
+	}
+	w.Check(context.Background())
+	state, _, _, errRead := Read(context.Background(), w.Store, key)
+	if errRead != nil || state.Result != "reset" || state.Pending || state.CooldownBefore != started.UnixNano() || m.clear != 0 || m.consume != 1 {
+		t.Fatalf("cleared activity observed after POST started: clear=%d state=%+v err=%v", m.clear, state, errRead)
+	}
+}
 
 func TestWorkerFallsBackOnlyOnReadAuthenticationFailures(t *testing.T) {
 	for _, path := range []string{"usage", "rate-limit-reset-credits", "rate-limit-reset-credits/consume"} {
@@ -440,7 +523,7 @@ func TestWorkerAliasCleanupFailureRetriesWithoutRedemption(t *testing.T) {
 	w.Now = func() time.Time { return testNow.Add(interval) }
 	w.Check(context.Background())
 	state, _, _, errRead = Read(context.Background(), w.Store, key)
-	if errRead != nil || state.Result != "reset" || state.Enabled || state.Pending || m.consume != 1 || manager.cleared["alias"] != 1 || manager.cleared["sibling"] != 2 {
+	if errRead != nil || state.Result != "reset" || state.Enabled || state.Pending || m.consume != 1 || manager.cleared["alias"] != 1 || manager.cleared["sibling"] != 1 {
 		t.Fatalf("cleanup retry spent or failed: consume=%d cleared=%v state=%+v err=%v", m.consume, manager.cleared, state, errRead)
 	}
 }
