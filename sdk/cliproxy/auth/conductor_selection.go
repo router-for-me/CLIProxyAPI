@@ -1347,7 +1347,15 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		if rejectMessage == "" {
 			rejectMessage = "scheduler rejected candidate selection"
 		}
-		return nil, true, wrapRequestStopError(&Error{Code: rejectCode, Message: rejectMessage})
+		rejectErr := &Error{Code: rejectCode, Message: rejectMessage}
+		if len(tried) == 0 {
+			// A reject before any attempt in this request ends the request.
+			return nil, true, wrapRequestStopError(rejectErr)
+		}
+		// A reject after a failed attempt in the same request/round is a
+		// normal pick failure again: the caller returns the previous
+		// attempt's error and the host keeps its request retry rounds.
+		return nil, true, rejectErr
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		keepSelectionID = true

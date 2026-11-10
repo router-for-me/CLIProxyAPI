@@ -2566,6 +2566,215 @@ func TestManagerPluginSchedulerUnhandledWithRejectFlagFallsBack(t *testing.T) {
 	}
 }
 
+func TestManagerPluginSchedulerRejectClassificationByAttemptedAuths(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{provider: "gemini"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+	reg.RegisterClient("auth-b", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-a")
+		reg.UnregisterClient("auth-b")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+	manager.SetPluginScheduler(&fakePluginScheduler{
+		resp: pluginapi.SchedulerPickResponse{
+			Handled:      true,
+			Reject:       true,
+			RejectCode:   "policy_denied",
+			RejectReason: "bound credential is not a candidate",
+		},
+		handled: true,
+	})
+
+	// First pick with nothing attempted yet: the reject ends the request.
+	_, _, _, errFirst := manager.pickNextMixed(context.Background(), []string{"gemini"}, "gemini-2.5-pro", cliproxyexecutor.Options{}, nil)
+	if errFirst == nil {
+		t.Fatal("pickNextMixed(first pick) error = nil, want rejection")
+	}
+	if !isRequestStopError(errFirst) {
+		t.Fatalf("pickNextMixed(first pick) error = %v, want request-stop rejection", errFirst)
+	}
+
+	// Pick after a failed attempt in the same round: the reject is a normal pick failure again.
+	_, _, _, errAfterAttempt := manager.pickNextMixed(context.Background(), []string{"gemini"}, "gemini-2.5-pro", cliproxyexecutor.Options{}, map[string]struct{}{"auth-a": {}})
+	if errAfterAttempt == nil {
+		t.Fatal("pickNextMixed(after attempt) error = nil, want rejection")
+	}
+	if isRequestStopError(errAfterAttempt) {
+		t.Fatalf("pickNextMixed(after attempt) error = %v, want plain pick failure", errAfterAttempt)
+	}
+	var authErr *Error
+	if !errors.As(errAfterAttempt, &authErr) {
+		t.Fatalf("pickNextMixed(after attempt) error type = %T, want *auth.Error", errAfterAttempt)
+	}
+	if authErr.Code != "policy_denied" || authErr.Message != "bound credential is not a candidate" {
+		t.Fatalf("pickNextMixed(after attempt) error = %s: %s, want policy_denied: bound credential is not a candidate", authErr.Code, authErr.Message)
+	}
+}
+
+func TestManagerPluginSchedulerRejectAfterFailedAttemptKeepsRequestRetry(t *testing.T) {
+	t.Run("retry_round_runs_and_succeeds_after_reject", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		manager.SetRetryConfig(1, 0, 0)
+		SetQuotaCooldownDisabled(true)
+		t.Cleanup(func() { SetQuotaCooldownDisabled(false) })
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		reg.RegisterClient("auth-b", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+			reg.UnregisterClient("auth-b")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+
+		execCalls := 0
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				execCalls++
+				if execCalls == 1 {
+					return cliproxyexecutor.Response{}, &Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+				return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			},
+		}
+
+		pickCall := 0
+		scheduler := &fakePluginScheduler{
+			pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				pickCall++
+				if pickCall == 2 {
+					return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectReason: "bound credential no longer available"}, true, nil
+				}
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
+			},
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+		if errExec != nil {
+			t.Fatalf("Execute() error = %v, want nil (retry round must run after plugin reject)", errExec)
+		}
+		if execCalls != 2 {
+			t.Fatalf("execCalls = %d, want 2 (failed attempt plus retry round)", execCalls)
+		}
+		if len(scheduler.requests) != 3 {
+			t.Fatalf("len(scheduler.requests) = %d, want 3 (pick, rejected re-pick, retry round pick)", len(scheduler.requests))
+		}
+	})
+
+	t.Run("returns_previous_attempt_error_instead_of_reject", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		manager.SetRetryConfig(0, 0, 0)
+		SetQuotaCooldownDisabled(true)
+		t.Cleanup(func() { SetQuotaCooldownDisabled(false) })
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		reg.RegisterClient("auth-b", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+		t.Cleanup(func() {
+			reg.UnregisterClient("auth-a")
+			reg.UnregisterClient("auth-b")
+		})
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-a) error = %v", errRegister)
+		}
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(auth-b) error = %v", errRegister)
+		}
+
+		manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+			schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+			execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				return cliproxyexecutor.Response{}, &Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+			},
+		}
+
+		pickCall := 0
+		scheduler := &fakePluginScheduler{
+			pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+				pickCall++
+				if pickCall == 2 {
+					return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectReason: "bound credential no longer available"}, true, nil
+				}
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
+			},
+		}
+		manager.SetPluginScheduler(scheduler)
+
+		_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+		if errExec == nil {
+			t.Fatal("Execute() error = nil, want previous attempt error")
+		}
+		var authErr *Error
+		if !errors.As(errExec, &authErr) {
+			t.Fatalf("Execute() error type = %T, want *auth.Error", errExec)
+		}
+		if authErr.Code != "rate_limited" || authErr.HTTPStatus != http.StatusTooManyRequests {
+			t.Fatalf("Execute() error = %s (status %d), want the previous attempt 429 rate_limited error", authErr.Code, authErr.HTTPStatus)
+		}
+		if len(scheduler.requests) != 2 {
+			t.Fatalf("len(scheduler.requests) = %d, want 2 (pick plus rejected re-pick)", len(scheduler.requests))
+		}
+	})
+}
+
+func TestManagerPluginSchedulerFirstPickRejectStopsRequest(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-a", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-a")
+	})
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	execCalled := false
+	manager.executors["gemini"] = &callbackSchedulerTestExecutor{
+		schedulerTestExecutor: schedulerTestExecutor{provider: "gemini"},
+		execute: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			execCalled = true
+			return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+	}
+
+	scheduler := &fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: true, Reject: true},
+		handled: true,
+	}
+	manager.SetPluginScheduler(scheduler)
+
+	_, errExec := manager.Execute(context.Background(), []string{"gemini"}, cliproxyexecutor.Request{Model: "gemini-2.5-pro"}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("Execute() error = nil, want rejection error")
+	}
+	var authErr *Error
+	if !errors.As(errExec, &authErr) {
+		t.Fatalf("Execute() error type = %T, want *auth.Error", errExec)
+	}
+	if authErr.Code != "auth_unavailable" {
+		t.Fatalf("Execute() error code = %q, want %q", authErr.Code, "auth_unavailable")
+	}
+	if execCalled {
+		t.Fatal("executor was called after first-pick reject")
+	}
+	if len(scheduler.requests) != 1 {
+		t.Fatalf("len(scheduler.requests) = %d, want 1 (request must stop before retry rounds)", len(scheduler.requests))
+	}
+}
+
 func TestManagerPluginSchedulerSelectionID(t *testing.T) {
 	t.Run("single_credential_outer_retry_after_429_yields_distinct_ids_matching_context", func(t *testing.T) {
 		manager := NewManager(nil, &FillFirstSelector{}, nil)
