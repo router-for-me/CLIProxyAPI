@@ -623,6 +623,13 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		return finalizeSessionInfo(info)
 	}
 	clientRequestID := sessionHeaderValue(headers, "X-Client-Request-Id")
+	if parentCandidate == "" {
+		for _, header := range []string{"X-Parent-Session-ID", "X-Parent-ID"} {
+			if parentCandidate = sessionHeaderValue(headers, header); parentCandidate != "" {
+				break
+			}
+		}
+	}
 
 	// 6. Payload inspection
 	if len(payload) > 0 && root.Exists() {

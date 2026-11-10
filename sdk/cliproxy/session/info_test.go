@@ -848,3 +848,23 @@ func TestExtractSessionInfoClientRequestPriorityBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractSessionInfoStableBodyPreservesParentHeaders(t *testing.T) {
+	for _, header := range []string{"X-Parent-Session-ID", "X-Parent-ID", "X-Parent-Id"} {
+		t.Run(header, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("X-Client-Request-Id", "request-one")
+			headers.Set(header, "parent")
+			info, ok := ExtractSessionInfo(headers, []byte(`{"session_id":"child"}`), nil)
+			if !ok || info.SessionID != "session:child" || info.ParentSessionID != "session:parent" || info.AgentName != "subagent" {
+				t.Fatalf("stable child lost its parent: %+v", info)
+			}
+			_, opts := Enrich(cliproxyexecutor.Request{Payload: []byte(`{"session_id":"child"}`)}, cliproxyexecutor.Options{
+				Headers: headers,
+			})
+			if got := opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey]; got != "session:parent" {
+				t.Fatalf("enriched parent = %v, want session:parent", got)
+			}
+		})
+	}
+}
