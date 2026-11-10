@@ -249,8 +249,8 @@ func PrepareAntigravityCompactionSummaryPayloadDoc(doc *ojson.Doc, modelName str
 	if input.IsArray() {
 		var filtered []string
 		for _, item := range input.Array() {
-			itemType := item.Get("type").String()
-			if itemType == "compaction_trigger" || itemType == "additional_tools" {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "compaction_trigger", "additional_tools", "configuration_update":
 				continue
 			}
 			filtered = append(filtered, item.Raw)
@@ -279,6 +279,7 @@ func PrepareAntigravityCompactionSummaryPayloadDoc(doc *ojson.Doc, modelName str
 		"additional_tools",
 		"truncation",
 		"metadata",
+		"text",
 	} {
 		_ = util.DeleteJSONDocIfExists(doc, field)
 	}
