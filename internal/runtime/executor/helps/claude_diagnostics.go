@@ -796,6 +796,12 @@ func IsClaudeProbeOrHelperRequest(body []byte) bool {
 	return isClaudeProbeRequest(body) || isClaudeTitleHelperRequest(body)
 }
 
+// IsClaudeQuotaProbeRequest reports the max_tokens=1 quota probe alone,
+// excluding the session-title helper that IsClaudeProbeOrHelperRequest also covers.
+func IsClaudeQuotaProbeRequest(body []byte) bool {
+	return isClaudeProbeRequest(body)
+}
+
 // IsClaudeSubagentRequest reports whether the incoming request originates from
 // or represents a Claude Code subagent.
 func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
