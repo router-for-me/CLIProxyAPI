@@ -29,10 +29,15 @@ import (
 // runs on an upstream websocket, no frame may claim the local path at all,
 // not even in the window after that socket was lost. "No live websocket
 // channel right now" must never be read as "this turn is HTTP".
+//
+// endedID is the last response whose terminal event this socket forwarded.
+// Codex interrupts the response it is still reading, so its frame can cross
+// that terminal event; such a frame has nothing left to stop.
 type responsesLocalInterrupt struct {
 	mu           sync.Mutex
 	active       bool
 	wsTurnActive bool
+	endedID      string
 	frames       chan []byte
 }
 
@@ -91,9 +96,31 @@ func (s *responsesLocalInterrupt) end() {
 	s.stopClaims()
 }
 
-// deactivate stops new claims once the turn completed.
-func (s *responsesLocalInterrupt) deactivate() {
-	s.stopClaims()
+// deactivate stops new claims once the turn ended and records the response
+// that ended in the same critical section, so no frame can see claims stopped
+// before the ended id is known.
+func (s *responsesLocalInterrupt) deactivate(responseID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.active = false
+	if responseID != "" {
+		s.endedID = responseID
+	}
+	s.mu.Unlock()
+}
+
+// ended reports whether payload targets the response that last ended on this
+// socket. An interrupt for it is a no-op, as on a websocket upstream.
+func (s *responsesLocalInterrupt) ended(payload []byte) bool {
+	if s == nil {
+		return false
+	}
+	responseID := ojson.GetBytesNoCopy(payload, "response_id").String()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return responseID != "" && responseID == s.endedID
 }
 
 // isActive reports whether new frames may still be claimed for the turn.
@@ -177,6 +204,11 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 					continue
 				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.deliver(payload):
 					appendResponsesInterruptDiagnostic(timeline, payload, "local_http")
+					continue
+				case errors.Is(errInterrupt, cliproxyexecutor.ErrNoActiveUpstreamWebsocket) && local.ended(payload):
+					// No reply: Codex reads an error here as the first event of its
+					// next response.create and fails the whole turn.
+					appendResponsesInterruptDiagnostic(timeline, payload, "already_terminal")
 					continue
 				default:
 					appendResponsesInterruptDiagnostic(timeline, payload, "rejected")
