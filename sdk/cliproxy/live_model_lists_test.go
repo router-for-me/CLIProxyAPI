@@ -54,7 +54,7 @@ func TestParseClaudeLiveModelList(t *testing.T) {
 		   "thinking":{"supported":true,"types":{"enabled":{"supported":false},"adaptive":{"supported":true},"disabled":{"supported":false}}}}},
 		{"type":"model","id":"claude-haiku-5-5","display_name":"Claude Haiku 5.5","max_input_tokens":200000,"max_tokens":64000,"capabilities":{}}
 	],"has_more":false,"last_id":"claude-haiku-5-5"}`)
-	list, err := parseClaudeLiveModelList([][]byte{page}, time.Unix(100, 0))
+	list, err := parseClaudeLiveModelList(page, time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +78,11 @@ func TestParseClaudeLiveModelList(t *testing.T) {
 	if haiku := list.extra[1]; haiku.Thinking != nil || strings.Join(haiku.SupportedInputModalities, ",") != "text" {
 		t.Fatalf("haiku = %+v", haiku)
 	}
-	if _, errEmpty := parseClaudeLiveModelList([][]byte{[]byte(`{"data":[]}`)}, time.Now()); errEmpty == nil {
+	if _, errEmpty := parseClaudeLiveModelList([]byte(`{"data":[]}`), time.Now()); errEmpty == nil {
 		t.Fatal("an empty list must not count as a successful fetch")
+	}
+	if _, errMore := parseClaudeLiveModelList([]byte(`{"data":[{"id":"claude-a"}],"has_more":true,"last_id":"claude-a"}`), time.Now()); errMore == nil {
+		t.Fatal("a list that has more pages is incomplete and must not be published")
 	}
 }
 
@@ -419,5 +422,16 @@ func TestFetchFinishingAfterLoginReplacementIsDiscarded(t *testing.T) {
 	liveModelLists.mu.Unlock()
 	if stored {
 		t.Fatal("a list fetched for the replaced account was stored")
+	}
+}
+
+func TestTurningLiveListsOffDropsTheLists(t *testing.T) {
+	resetLiveModelLists()
+	t.Cleanup(resetLiveModelLists)
+	liveModelLists.put("login", liveModelList{identity: "x", ids: map[string]struct{}{"m": {}}, fetchedAt: time.Now()})
+	svc := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
+	svc.refreshLiveModelLists(t.Context(), false)
+	if _, ok := liveModelLists.get("login", "x"); ok {
+		t.Fatal("lists must be dropped while the option is off")
 	}
 }

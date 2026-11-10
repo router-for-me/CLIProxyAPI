@@ -36,7 +36,6 @@ const (
 	liveModelListScanInterval = 10 * time.Minute
 	liveModelListRetry        = 10 * time.Minute
 	liveModelListMaxBody      = 8 << 20
-	liveModelListMaxPages     = 10
 	codexLiveModelListOrigin  = "codex-tui"
 	// Codex filters /models by client_version: each model has a minimal_client_version, and an
 	// older version silently gets a shorter list. CPA isn't the client, so it asks with a version
@@ -308,7 +307,12 @@ func (s *Service) runLiveModelListRefresh(ctx context.Context) {
 // run in parallel and carry no deadline once connected, as for other upstream traffic, so a slow
 // provider only delays its own logins; a login whose fetch is still running is skipped.
 func (s *Service) refreshLiveModelLists(ctx context.Context, force bool) {
-	if !s.liveModelListsEnabled() || s.coreManager == nil {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if !s.liveModelListsEnabled() {
+		// Turned off: drop the lists so turning it on again starts from fresh fetches.
+		liveModelLists.forget(nil)
 		return
 	}
 	present := make(map[string]struct{})
@@ -381,7 +385,11 @@ func (s *Service) fetchLiveModelList(ctx context.Context, auth *coreauth.Auth) (
 		if errDo != nil {
 			return nil, errDo
 		}
-		defer func() { _ = resp.Body.Close() }()
+		defer func() {
+			if errClose := resp.Body.Close(); errClose != nil {
+				log.Debugf("live model list: close %s response body: %v", req.URL.Path, errClose)
+			}
+		}()
 		body, errRead := io.ReadAll(io.LimitReader(resp.Body, liveModelListMaxBody))
 		if errRead != nil {
 			return nil, errRead
@@ -402,25 +410,13 @@ func (s *Service) fetchLiveModelList(ctx context.Context, auth *coreauth.Auth) (
 		}
 		header.Set("Anthropic-Version", "2023-06-01")
 		header.Set("Anthropic-Beta", "oauth-2025-04-20")
-		pages := make([][]byte, 0, 1)
-		after := ""
-		for page := 0; page < liveModelListMaxPages; page++ {
-			query := url.Values{"limit": {"1000"}}
-			if after != "" {
-				query.Set("after_id", after)
-			}
-			body, err := get(base+"/v1/models?"+query.Encode(), header)
-			if err != nil {
-				return liveModelList{}, err
-			}
-			pages = append(pages, body)
-			root := ojson.ParseBytes(body)
-			after = strings.TrimSpace(root.Get("last_id").String())
-			if !root.Get("has_more").Bool() || after == "" {
-				break
-			}
+		// One page of the maximum size holds every Claude model; a list that still has more is
+		// treated as a failed fetch, so a partial list is never published.
+		body, err := get(base+"/v1/models?"+url.Values{"limit": {"1000"}}.Encode(), header)
+		if err != nil {
+			return liveModelList{}, err
 		}
-		return parseClaudeLiveModelList(pages, liveModelListNow())
+		return parseClaudeLiveModelList(body, liveModelListNow())
 	case "codex":
 		// The account list belongs to the outer ChatGPT login: mark the request as a Codex client
 		// one so a use_siwc login still uses its outer token, and name the workspace.
@@ -476,41 +472,43 @@ func errEmptyLiveModelList(provider string) error {
 	return fmt.Errorf("%s returned no models", provider)
 }
 
-// parseClaudeLiveModelList reads GET /v1/models pages: ids plus each model's window, output
-// limit, efforts and input modalities.
-func parseClaudeLiveModelList(pages [][]byte, now time.Time) (liveModelList, error) {
+// parseClaudeLiveModelList reads GET /v1/models: ids plus each model's window, output limit,
+// efforts and input modalities. A page that says it has more is incomplete and rejected.
+func parseClaudeLiveModelList(body []byte, now time.Time) (liveModelList, error) {
 	list := liveModelList{ids: map[string]struct{}{}, fetchedAt: now}
-	for _, body := range pages {
-		if !ojson.ValidBytes(body) {
-			return liveModelList{}, fmt.Errorf("claude model list: invalid JSON")
+	if !ojson.ValidBytes(body) {
+		return liveModelList{}, fmt.Errorf("claude model list: invalid JSON")
+	}
+	root := ojson.ParseBytes(body)
+	if root.Get("has_more").Bool() {
+		return liveModelList{}, fmt.Errorf("claude model list: incomplete (has_more with limit 1000)")
+	}
+	for _, item := range root.Get("data").Array() {
+		id := strings.TrimSpace(item.Get("id").String())
+		if id == "" {
+			continue
 		}
-		for _, item := range ojson.ParseBytes(body).Get("data").Array() {
-			id := strings.TrimSpace(item.Get("id").String())
-			if id == "" {
-				continue
-			}
-			list.ids[strings.ToLower(id)] = struct{}{}
-			caps := item.Get("capabilities")
-			model := &ModelInfo{ID: id, Object: "model", OwnedBy: "anthropic", Type: "claude",
-				DisplayName: item.Get("display_name").String(), ContextLength: int(item.Get("max_input_tokens").Int()),
-				MaxCompletionTokens: int(item.Get("max_tokens").Int()), SupportedInputModalities: []string{"text"},
-				SupportedOutputModalities: []string{"text"}}
-			if created, err := time.Parse(time.RFC3339, item.Get("created_at").String()); err == nil {
-				model.Created = created.Unix()
-			}
-			if caps.Get("image_input.supported").Bool() {
-				model.SupportedInputModalities = append(model.SupportedInputModalities, "image")
-			}
-			levels := liveModelListLevels(func(level string) bool {
-				return caps.Get("effort." + level + ".supported").Bool()
-			})
-			if len(levels) > 0 {
-				model.Thinking = &registry.ThinkingSupport{Levels: levels,
-					ZeroAllowed:    caps.Get("thinking.types.disabled.supported").Bool(),
-					DynamicAllowed: caps.Get("thinking.types.adaptive.supported").Bool()}
-			}
-			list.extra = append(list.extra, model)
+		list.ids[strings.ToLower(id)] = struct{}{}
+		caps := item.Get("capabilities")
+		model := &ModelInfo{ID: id, Object: "model", OwnedBy: "anthropic", Type: "claude",
+			DisplayName: item.Get("display_name").String(), ContextLength: int(item.Get("max_input_tokens").Int()),
+			MaxCompletionTokens: int(item.Get("max_tokens").Int()), SupportedInputModalities: []string{"text"},
+			SupportedOutputModalities: []string{"text"}}
+		if created, err := time.Parse(time.RFC3339, item.Get("created_at").String()); err == nil {
+			model.Created = created.Unix()
 		}
+		if caps.Get("image_input.supported").Bool() {
+			model.SupportedInputModalities = append(model.SupportedInputModalities, "image")
+		}
+		levels := liveModelListLevels(func(level string) bool {
+			return caps.Get("effort." + level + ".supported").Bool()
+		})
+		if len(levels) > 0 {
+			model.Thinking = &registry.ThinkingSupport{Levels: levels,
+				ZeroAllowed:    caps.Get("thinking.types.disabled.supported").Bool(),
+				DynamicAllowed: caps.Get("thinking.types.adaptive.supported").Bool()}
+		}
+		list.extra = append(list.extra, model)
 	}
 	if len(list.ids) == 0 {
 		return liveModelList{}, errEmptyLiveModelList("claude")
