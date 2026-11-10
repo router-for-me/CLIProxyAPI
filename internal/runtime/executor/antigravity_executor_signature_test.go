@@ -236,8 +236,8 @@ func TestAntigravitySensitiveWordsObfuscatesSystemInstructionOnly(t *testing.T) 
 	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"Use proxy safely"}]},"contents":[{"role":"user","parts":[{"text":"proxy remains unchanged"}]}]}}`)
 
 	got := executor.obfuscateSensitiveWords(payload)
-	if systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u200Broxy safely" {
-		t.Fatalf("system instruction = %q, want zero-width obfuscation", systemText)
+	if systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u034Froxy safely" {
+		t.Fatalf("system instruction = %q, want CGJ obfuscation", systemText)
 	}
 	if contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String(); contentText != "proxy remains unchanged" {
 		t.Fatalf("content text = %q, want unchanged", contentText)
@@ -288,9 +288,94 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 
 	body := <-captured
 	got := ojson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
-	want := "You are H\u200Bermes Agent, an intelligent AI assistant created by N\u200Bous Research."
+	want := "You are H\u034Fermes Agent, an intelligent AI assistant created by N\u034Fous R\u034Fesearch."
 	if got != want {
 		t.Fatalf("system instruction = %q, want %q; body=%s", got, want, body)
+	}
+}
+
+func TestAntigravityStreamSensitiveWordsLiteralReplacementAndHotReload(t *testing.T) {
+	captured := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		Antigravity:  config.AntigravityConfig{SensitiveWords: []string{"Claude Code => Claude", "Codex"}},
+		RequestRetry: 1,
+	}
+	executor := NewAntigravityExecutor(cfg)
+	firstMatcher := executor.getSensitiveWordMatcher()
+	if firstMatcher == nil {
+		t.Fatal("expected non-nil initial matcher")
+	}
+	if secondLookup := executor.getSensitiveWordMatcher(); secondLookup != firstMatcher {
+		t.Fatal("expected cached matcher pointer reuse when SensitiveWords is unchanged")
+	}
+
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+
+	runStream := func(instructions string) string {
+		t.Helper()
+		doc := ojson.NewDocString(`{"model":"gemini-3.6-flash-high","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+		if errSet := doc.Set("instructions", instructions); errSet != nil {
+			t.Fatalf("set instructions: %v", errSet)
+		}
+		result, errExecute := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "gemini-3.6-flash-high",
+			Payload: doc.Bytes(),
+		}, opts)
+		if errExecute != nil {
+			t.Fatalf("ExecuteStream() error = %v", errExecute)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("stream chunk error = %v", chunk.Err)
+			}
+		}
+		body := <-captured
+		return ojson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
+	}
+
+	got1 := runStream("Prefer Claude Code or Codex.")
+	want1 := "Prefer Claude or C\u034Fodex."
+	if got1 != want1 {
+		t.Fatalf("first stream system instruction = %q, want %q", got1, want1)
+	}
+
+	cfg.Antigravity.SensitiveWords = []string{
+		"You are Codex, an agent based on GPT-5. => You are a coding assistant.",
+		"Claude Code",
+	}
+	reloadedMatcher := executor.getSensitiveWordMatcher()
+	if reloadedMatcher == nil || reloadedMatcher == firstMatcher {
+		t.Fatal("expected new matcher instance after SensitiveWords hot update")
+	}
+
+	got2 := runStream("You are Codex, an agent based on GPT-5. Built for Claude Code.")
+	want2 := "You are a coding assistant. Built for C\u034Flaude C\u034Fode."
+	if got2 != want2 {
+		t.Fatalf("reloaded stream system instruction = %q, want %q", got2, want2)
 	}
 }
 

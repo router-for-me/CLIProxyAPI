@@ -1197,9 +1197,10 @@ oauth:
 
     # Antigravity provider behavior.
     antigravity:
-      # sensitive-words:              # optional: words to obfuscate with zero-width characters in system instructions
+      # sensitive-words:              # optional: obfuscate (with U+034F) or replace ("target => replacement") sensitive phrases in system instructions
       #   - "API"
       #   - "proxy"
+      #   - "Claude Code => Claude"
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
