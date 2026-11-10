@@ -171,6 +171,8 @@ func TestAggregateModels_UsesUpstreamMaxOutput(t *testing.T) {
 		{UID: "grok-4-7-low", Label: "Grok 4.7 Low", ContextLength: 500000, MaxOutput: 100000, VendorID: 5},
 		{UID: "grok-4-7-high", Label: "Grok 4.7 High", ContextLength: 500000, MaxOutput: 100000, VendorID: 5},
 		{UID: "old-model", Label: "Old Model", ContextLength: 200000},
+		{UID: "mixed-model-low", Label: "Mixed Low", ContextLength: 200000, MaxOutput: 128000},
+		{UID: "mixed-model-high", Label: "Mixed High", ContextLength: 200000},
 	}
 	got := map[string]int{}
 	for _, m := range aggregateModels(raw) {
@@ -181,5 +183,9 @@ func TestAggregateModels_UsesUpstreamMaxOutput(t *testing.T) {
 	}
 	if got["old-model"] != defaultDevinMaxCompletionTokens {
 		t.Fatalf("old-model max_completion_tokens = %d, want default %d", got["old-model"], defaultDevinMaxCompletionTokens)
+	}
+	// A variant without a reported limit counts as the fallback, so the aggregate never exceeds it.
+	if got["mixed-model"] != defaultDevinMaxCompletionTokens {
+		t.Fatalf("mixed-model max_completion_tokens = %d, want fallback %d", got["mixed-model"], defaultDevinMaxCompletionTokens)
 	}
 }

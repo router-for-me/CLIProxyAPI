@@ -588,7 +588,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 				displayName:   cleanDisplayName(r.Label),
 				vendorID:      r.VendorID,
 				contextLength: r.ContextLength,
-				maxOutput:     r.MaxOutput,
+				maxOutput:     maxCompletionTokens(r.MaxOutput),
 				multimodal:    r.Multimodal,
 				levels:        initialLevels,
 			}
@@ -608,9 +608,10 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		if r.ContextLength > entry.contextLength {
 			entry.contextLength = r.ContextLength
 		}
-		// Keep the smallest reported output limit so every variant accepts it.
-		if r.MaxOutput > 0 && (entry.maxOutput == 0 || r.MaxOutput < entry.maxOutput) {
-			entry.maxOutput = r.MaxOutput
+		// Keep the smallest output limit so every variant accepts it. A variant without a reported
+		// limit counts as the fallback, since the executor applies the one aggregate limit to all.
+		if variantMax := maxCompletionTokens(r.MaxOutput); variantMax < entry.maxOutput {
+			entry.maxOutput = variantMax
 		}
 		if level != "" && level != "priority" {
 			entry.levels[level] = struct{}{}
