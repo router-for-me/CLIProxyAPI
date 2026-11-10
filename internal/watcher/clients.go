@@ -94,7 +94,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		parser := w.pluginAuthParser
 		w.clientsMutex.RUnlock()
 
-		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
+		if resolvedAuthDir, errResolveAuthDir := w.resolveAuthDirForConfig(cfg); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
 			entries, errReadDir := os.ReadDir(resolvedAuthDir)
@@ -254,7 +254,7 @@ func (w *Watcher) rereadDiscardedFileSnapshot(auth *coreauth.Auth) {
 
 	w.clientsMutex.Lock()
 	existing := w.currentAuths[auth.ID]
-	if existing == nil || !existing.SameFileSnapshot(auth) {
+	if existing == nil || !existing.SameFileSnapshot(auth) || !w.isPathInCurrentAuthDirLocked(path) {
 		w.clientsMutex.Unlock()
 		return
 	}
@@ -312,6 +312,9 @@ func (w *Watcher) invalidateAuthFileHashLocked(path string) string {
 }
 
 func (w *Watcher) addOrUpdateClientLocked(path string) {
+	if !w.isPathInCurrentAuthDir(path) {
+		return
+	}
 	w.observeAuthFile(path)
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -341,12 +344,13 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 		w.clientsMutex.Unlock()
 		return
 	}
-	cfg := w.config
-	authDir := w.authDir
-	parser := w.pluginAuthParser
-	if w.fileAuthsByPath == nil {
-		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+	if !w.isPathInCurrentAuthDirLocked(normalized) {
+		w.clientsMutex.Unlock()
+		return
 	}
+	cfg := w.config
+	authDir := w.currentAuthDirLocked()
+	parser := w.pluginAuthParser
 	if prev, ok := w.lastAuthHashes[normalized]; ok && prev == curHash {
 		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
 		w.clientsMutex.Unlock()
@@ -359,23 +363,6 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 		if cached := w.lastAuthContents[normalized]; cached != nil {
 			oldAuth = cached.Clone()
 		}
-	}
-
-	// Update caches
-	if w.lastAuthHashes == nil {
-		w.lastAuthHashes = make(map[string]string)
-	}
-	w.lastAuthHashes[normalized] = curHash
-	if cacheAuthContents {
-		if w.lastAuthContents == nil {
-			w.lastAuthContents = make(map[string]*coreauth.Auth)
-		}
-		w.lastAuthContents[normalized] = &newAuth
-	}
-
-	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
 	}
 	w.clientsMutex.Unlock()
 
@@ -403,6 +390,27 @@ func (w *Watcher) addOrUpdateClientLocked(path string) {
 	}
 	newByID := authSliceToMap(generated)
 	w.clientsMutex.Lock()
+	if w.config == nil || !w.isPathInCurrentAuthDirLocked(normalized) || (authDir != "" && !w.sameNormalizedAuthPath(authDir, w.currentAuthDirLocked())) {
+		w.clientsMutex.Unlock()
+		return
+	}
+	if w.fileAuthsByPath == nil {
+		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+	}
+	if w.lastAuthHashes == nil {
+		w.lastAuthHashes = make(map[string]string)
+	}
+	w.lastAuthHashes[normalized] = curHash
+	if cacheAuthContents {
+		if w.lastAuthContents == nil {
+			w.lastAuthContents = make(map[string]*coreauth.Auth)
+		}
+		w.lastAuthContents[normalized] = &newAuth
+	}
+	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
+	for id, a := range w.fileAuthsByPath[normalized] {
+		oldByID[id] = a
+	}
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -426,9 +434,16 @@ func (w *Watcher) removeClient(path string) {
 }
 
 func (w *Watcher) removeClientLocked(path string) {
+	if !w.isPathInCurrentAuthDir(path) {
+		return
+	}
 	w.observeAuthFile(path)
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
+	if !w.isPathInCurrentAuthDirLocked(normalized) {
+		w.clientsMutex.Unlock()
+		return
+	}
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
@@ -504,11 +519,22 @@ func authIDSet(auths map[string]*coreauth.Auth) map[string]*coreauth.Auth {
 	return set
 }
 
+func (w *Watcher) resolveAuthDirForConfig(cfg *config.Config) (string, error) {
+	raw := ""
+	if cfg != nil {
+		raw = strings.TrimSpace(cfg.AuthDir)
+	}
+	if raw == "" {
+		raw = w.currentAuthDir()
+	}
+	return util.ResolveAuthDir(raw)
+}
+
 func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	authFileCount := 0
 	successfulAuthCount := 0
 
-	authDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+	authDir, errResolveAuthDir := w.resolveAuthDirForConfig(cfg)
 	if errResolveAuthDir != nil {
 		log.Errorf("failed to resolve auth directory: %v", errResolveAuthDir)
 		return 0
