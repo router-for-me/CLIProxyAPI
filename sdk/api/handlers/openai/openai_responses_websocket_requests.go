@@ -253,7 +253,11 @@ func inputReplaysPreviousRequest(rawJSON []byte, nextInput ojson.Result, lastReq
 	}
 	previousItems := previousInput.Array()
 	nextItems := nextInput.Array()
-	if len(previousItems) == 0 || len(nextItems) < len(previousItems) {
+	if len(previousItems) == 0 {
+		// An empty input is a prefix of everything, so only an exact empty resend is a replay.
+		return len(nextItems) == 0
+	}
+	if len(nextItems) < len(previousItems) {
 		return false
 	}
 	for i, previousItem := range previousItems {

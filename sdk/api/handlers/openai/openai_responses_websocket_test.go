@@ -5294,6 +5294,29 @@ func TestNormalizeSubsequentRequestFullReplayReplacesTranscript(t *testing.T) {
 	}
 }
 
+func TestNormalizeSubsequentRequestEmptyInputReplay(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","instructions":"say hi","stream":true,"input":[]}`)
+	lastResponseOutput := []byte(`[{"type":"message","role":"assistant","id":"out-1","content":"hi"}]`)
+
+	// Resending the same instruction-only request is a replay: the previous output is not added.
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest([]byte(`{"type":"response.create","model":"test-model","input":[]}`), lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 0 {
+		t.Fatalf("input len = %d, want 0 (replay of an empty input): %s", got, normalized)
+	}
+
+	// New items after an empty previous input are still an incremental turn.
+	normalized, _, errMsg = normalizeResponsesWebsocketRequest([]byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"more"}]}`), lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 2 {
+		t.Fatalf("input len = %d, want 2 (previous output + new item): %s", got, normalized)
+	}
+}
+
 func TestNormalizeSubsequentRequestReplayKeepsPendingToolCalls(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","role":"user","content":"read a file"}]}`)
 	lastResponseOutput := []byte(`[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read","arguments":"{}"}]`)
