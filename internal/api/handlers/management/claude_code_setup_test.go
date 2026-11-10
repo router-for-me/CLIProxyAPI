@@ -1,11 +1,17 @@
 package management
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
@@ -148,5 +154,84 @@ func TestClaudeCodeModelOptionsReturnsAllConfiguredModels(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("missing model %q in %#v", want, models)
 		}
+	}
+}
+
+func TestPutConfigYAMLTriggersConfigReloadHook(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if errWrite := os.WriteFile(cfgPath, []byte("api-keys:\n  - sk-old\n"), 0o600); errWrite != nil {
+		t.Fatalf("write initial config: %v", errWrite)
+	}
+	cfg := &config.Config{}
+	cfg.APIKeys = []string{"sk-old"}
+	h := NewHandler(cfg, cfgPath, nil)
+	reloadCh := make(chan *config.Config, 1)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloadCh <- cfg
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", bytes.NewBufferString("api-keys:\n  - sk-new\n"))
+
+	h.PutConfigYAML(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PutConfigYAML status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case reloaded := <-reloadCh:
+		if len(reloaded.APIKeys) != 1 || reloaded.APIKeys[0] != "sk-new" {
+			t.Fatalf("reloaded APIKeys = %#v, want [\"sk-new\"]", reloaded.APIKeys)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for SetConfigReloadHook after PutConfigYAML")
+	}
+}
+
+func TestPostClaudeCodeSettingsSyncsAuthTokenToAPIKeys(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tmpDir := t.TempDir()
+	origHomeDir := claudeCodeUserHomeDir
+	claudeCodeUserHomeDir = func() (string, error) { return tmpDir, nil }
+	defer func() { claudeCodeUserHomeDir = origHomeDir }()
+
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if errWrite := os.WriteFile(cfgPath, []byte("api-keys:\n  - sk-existing\n"), 0o600); errWrite != nil {
+		t.Fatalf("write initial config: %v", errWrite)
+	}
+	cfg := &config.Config{}
+	cfg.APIKeys = []string{"sk-existing"}
+	h := NewHandler(cfg, cfgPath, nil)
+	reloadCh := make(chan *config.Config, 1)
+	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) {
+		reloadCh <- cfg
+	})
+
+	payloadBytes, _ := json.Marshal(claudeCodeSettingsPayload{
+		Env: map[string]string{
+			"ANTHROPIC_BASE_URL":   "https://cli-proxy-api.daido.dev",
+			"ANTHROPIC_AUTH_TOKEN": "sk-claude-setup-new",
+		},
+	})
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/claude-code-settings", bytes.NewReader(payloadBytes))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.PostClaudeCodeSettings(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PostClaudeCodeSettings status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case reloaded := <-reloadCh:
+		if len(reloaded.APIKeys) != 2 || reloaded.APIKeys[1] != "sk-claude-setup-new" {
+			t.Fatalf("reloaded APIKeys = %#v, want [\"sk-existing\", \"sk-claude-setup-new\"]", reloaded.APIKeys)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for SetConfigReloadHook after PostClaudeCodeSettings")
 	}
 }

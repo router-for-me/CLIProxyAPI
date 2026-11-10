@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -147,19 +148,28 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if WriteConfig(h.configFilePath, body) != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
+		h.mu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
 	h.cfg = newCfg
+	snapshot := h.reloadSnapshotConfigLocked()
+	h.mu.Unlock()
+
+	var reqCtx = context.Background()
+	if c != nil && c.Request != nil {
+		reqCtx = c.Request.Context()
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
+	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
 }
 
 // GetConfigYAML returns the raw config.yaml file bytes without re-encoding.

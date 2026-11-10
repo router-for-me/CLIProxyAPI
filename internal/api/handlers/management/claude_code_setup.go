@@ -129,6 +129,9 @@ func (h *Handler) PostClaudeCodeSettings(c *gin.Context) {
 			return
 		}
 	}
+	if !h.persistClaudeCodeAuthToken(c, payload.Env["ANTHROPIC_AUTH_TOKEN"]) {
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "Claude Code settings updated successfully"})
 }
@@ -462,6 +465,30 @@ func (h *Handler) persistClaudeCodeFilterNaming(c *gin.Context, value bool) bool
 		return true
 	}
 	h.cfg.ClaudeCode.FilterNamingRequests = value
+	snapshot, ok := h.saveConfigAndSnapshotLocked(c)
+	h.mu.Unlock()
+	if !ok {
+		return false
+	}
+	var reqCtx = c.Request.Context()
+	h.reloadConfigAfterManagementSaveAsync(reqCtx, snapshot)
+	return true
+}
+
+func (h *Handler) persistClaudeCodeAuthToken(c *gin.Context, authToken string) bool {
+	trimmed := strings.TrimSpace(authToken)
+	if trimmed == "" || trimmed == claudeCodeFallbackAuthToken || h == nil || h.cfg == nil {
+		return true
+	}
+
+	h.mu.Lock()
+	for _, existing := range h.cfg.APIKeys {
+		if strings.TrimSpace(existing) == trimmed {
+			h.mu.Unlock()
+			return true
+		}
+	}
+	h.cfg.APIKeys = append(h.cfg.APIKeys, trimmed)
 	snapshot, ok := h.saveConfigAndSnapshotLocked(c)
 	h.mu.Unlock()
 	if !ok {
