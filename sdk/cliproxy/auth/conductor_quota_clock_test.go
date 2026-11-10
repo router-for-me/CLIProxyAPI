@@ -112,6 +112,12 @@ func TestQuotaDeadlineUsesWallClock_AuthExplicitRetry(t *testing.T) {
 	if !retryDeadline.Equal(recoverDeadline) {
 		t.Errorf("expected auth NextRetryAfter and Quota.NextRecoverAt to match, got %v and %v", retryDeadline, recoverDeadline)
 	}
+	if !updated.Quota.RecheckUntil.After(retryDeadline) {
+		t.Errorf("expected the original reset to outlive the capped deadline, recheck=%v deadline=%v", updated.Quota.RecheckUntil, retryDeadline)
+	}
+	if retryDeadline.After(time.Now().Add(quotaRecheckInterval + time.Second)) {
+		t.Errorf("capped deadline %v is past the recheck interval", retryDeadline)
+	}
 }
 
 func TestQuotaDeadlineUsesWallClock_AuthFallbackBackoff(t *testing.T) {
