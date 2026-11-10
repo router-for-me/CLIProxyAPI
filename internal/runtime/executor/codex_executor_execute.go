@@ -65,7 +65,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 
-	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslated, req, opts))
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslated, req, opts, auth))
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	helps.SetBoolIfDifferentDoc(doc, "stream", true)
 	_ = doc.Delete("previous_response_id")
@@ -80,7 +80,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if !useSIWC {
 		normalizeCodexInstructionsDoc(doc, helps.IsNativeCodexRequest(req.Payload, opts))
 		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-			ensureImageGenerationToolDoc(doc, baseModel, auth, opts.Headers)
+			checkModel := req.Model
+			if strings.TrimSpace(checkModel) == "" {
+				checkModel = baseModel
+			}
+			ensureImageGenerationToolDoc(doc, checkModel, auth, opts.Headers)
 			if !codexAuthUsesAPIKey(auth) {
 				normalizeCodexImageGenerationToolsDoc(doc)
 			}
