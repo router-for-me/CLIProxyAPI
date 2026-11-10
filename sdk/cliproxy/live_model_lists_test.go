@@ -19,6 +19,7 @@ func resetLiveModelLists() {
 	liveModelLists.mu.Lock()
 	liveModelLists.lists = make(map[string]liveModelList)
 	liveModelLists.nextRetry = make(map[string]time.Time)
+	liveModelLists.inFlight = make(map[string]struct{})
 	liveModelLists.mu.Unlock()
 	liveModelLists.force.Store(false)
 	select {
@@ -159,8 +160,8 @@ func TestApplyLiveModelListLeavesCatalogAlone(t *testing.T) {
 	apiKey := &coreauth.Auth{ID: "claude-key", Provider: "claude", Attributes: map[string]string{"api_key": "sk-test"}}
 	on := &config.Config{}
 	on.Models.LiveLists = true
-	liveModelLists.put("claude-login", liveModelList{ids: map[string]struct{}{"claude-opus-5-5": {}}, fetchedAt: time.Now()})
-	liveModelLists.put("claude-key", liveModelList{ids: map[string]struct{}{"claude-opus-5-5": {}}, fetchedAt: time.Now()})
+	liveModelLists.put("claude-login", liveModelList{identity: liveModelListIdentity(oauth), ids: map[string]struct{}{"claude-opus-5-5": {}}, fetchedAt: time.Now()})
+	liveModelLists.put("claude-key", liveModelList{identity: liveModelListIdentity(apiKey), ids: map[string]struct{}{"claude-opus-5-5": {}}, fetchedAt: time.Now()})
 
 	if got := applyLiveModelList(&config.Config{}, oauth, catalog); len(got) != 2 {
 		t.Fatalf("option off: %v", liveIDs(got))
@@ -186,22 +187,32 @@ func TestLiveModelListDueAndRetry(t *testing.T) {
 	resetLiveModelLists()
 	t.Cleanup(resetLiveModelLists)
 	now := time.Unix(1_000_000, 0)
-	if !liveModelLists.due("a", now) {
+	if !liveModelLists.due("a", "id-1", now) {
 		t.Fatal("never fetched must be due")
 	}
 	liveModelLists.fail("a", now)
-	if liveModelLists.due("a", now.Add(liveModelListRetry/2)) || !liveModelLists.due("a", now.Add(liveModelListRetry)) {
+	if liveModelLists.due("a", "id-1", now.Add(liveModelListRetry/2)) || !liveModelLists.due("a", "id-1", now.Add(liveModelListRetry)) {
 		t.Fatal("failed fetches wait for the retry delay")
 	}
-	list := liveModelList{ids: map[string]struct{}{"x": {}}, fetchedAt: now}
+	list := liveModelList{identity: "id-1", ids: map[string]struct{}{"x": {}}, fetchedAt: now}
 	if !liveModelLists.put("a", list) || liveModelLists.put("a", list) {
 		t.Fatal("put must report changes only")
 	}
-	if liveModelLists.due("a", now.Add(time.Hour)) || !liveModelLists.due("a", now.Add(registry.ModelsRefreshInterval)) {
+	if liveModelLists.due("a", "id-1", now.Add(time.Hour)) || !liveModelLists.due("a", "id-1", now.Add(registry.ModelsRefreshInterval)) {
 		t.Fatal("lists refresh after ModelsRefreshInterval")
 	}
+	if !liveModelLists.due("a", "id-2", now.Add(time.Minute)) {
+		t.Fatal("a list of another account must be refetched at once")
+	}
+	if _, ok := liveModelLists.get("a", "id-2"); ok {
+		t.Fatal("a list of another account must not apply")
+	}
+	if !liveModelLists.start("a") || liveModelLists.start("a") || liveModelLists.due("a", "id-2", now) {
+		t.Fatal("a running fetch must not be started twice")
+	}
+	liveModelLists.finish("a")
 	liveModelLists.forget(map[string]struct{}{})
-	if _, ok := liveModelLists.get("a"); ok {
+	if _, ok := liveModelLists.get("a", "id-1"); ok {
 		t.Fatal("lists of removed logins must be dropped")
 	}
 }
@@ -209,8 +220,12 @@ func TestLiveModelListDueAndRetry(t *testing.T) {
 // liveListExecutor answers HttpRequest like the real executors: it signs the request and sends it.
 type liveListExecutor struct {
 	coreauth.ProviderExecutor
-	provider string
-	calls    atomic.Int32
+	during      func()
+	provider    string
+	calls       atomic.Int32
+	hadDeadline atomic.Bool
+	codexClient atomic.Bool
+	accountID   atomic.Value
 }
 
 func (e *liveListExecutor) Identifier() string { return e.provider }
@@ -221,6 +236,13 @@ func (e *liveListExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexec
 
 func (e *liveListExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	e.calls.Add(1)
+	_, deadline := ctx.Deadline()
+	e.hadDeadline.Store(deadline)
+	e.codexClient.Store(coreauth.IsCodexClientRequest(ctx))
+	e.accountID.Store(req.Header.Get("Chatgpt-Account-Id"))
+	if e.during != nil {
+		e.during()
+	}
 	req.Header.Set("Authorization", "Bearer test")
 	return http.DefaultClient.Do(req.WithContext(ctx))
 }
@@ -249,7 +271,8 @@ func TestRefreshLiveModelListsRegistersCodexLogin(t *testing.T) {
 	executor := &liveListExecutor{provider: "codex"}
 	svc.coreManager.RegisterExecutor(executor)
 	auth, err := svc.coreManager.Register(t.Context(), &coreauth.Auth{ID: "codex-live-test", Provider: "codex",
-		Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro", "base_url": server.URL}})
+		Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "pro", "base_url": server.URL},
+		Metadata:   map[string]any{"account_id": "acct-1", "use_siwc": true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,10 +287,17 @@ func TestRefreshLiveModelListsRegistersCodexLogin(t *testing.T) {
 	refresh := func(force bool) {
 		svc.coreManager.RegisterExecutor(executor)
 		svc.refreshLiveModelLists(t.Context(), force)
+		liveModelLists.fetches.Wait()
 	}
 	refresh(false)
 	if executor.calls.Load() != 1 || version.Load() != codexLiveModelListClientVersion {
 		t.Fatalf("calls=%d client_version=%v", executor.calls.Load(), version.Load())
+	}
+	if executor.hadDeadline.Load() {
+		t.Fatal("the fetch must not carry a deadline")
+	}
+	if !executor.codexClient.Load() || executor.accountID.Load() != "acct-1" {
+		t.Fatalf("codex fetch must use the outer ChatGPT login: codex client=%v account=%v", executor.codexClient.Load(), executor.accountID.Load())
 	}
 	if !reg.ClientSupportsModel(auth.ID, "gpt-brand-new") {
 		t.Fatal("new model from the live list not registered")
@@ -296,5 +326,98 @@ func TestRefreshLiveModelListsRegistersCodexLogin(t *testing.T) {
 	}
 	if !reg.ClientSupportsModel(auth.ID, "gpt-brand-new") {
 		t.Fatal("a failed fetch must keep the previous list")
+	}
+}
+
+func TestSameLiveModelListComparesEveryField(t *testing.T) {
+	base := func() liveModelList {
+		return liveModelList{identity: "a", ids: map[string]struct{}{"m": {}}, extra: []*ModelInfo{{ID: "m", ContextLength: 1,
+			SupportedInputModalities: []string{"text"}, Thinking: &registry.ThinkingSupport{Levels: []string{"low"}}}}}
+	}
+	if !sameLiveModelList(base(), base()) {
+		t.Fatal("equal lists")
+	}
+	for name, change := range map[string]func(*liveModelList){
+		"modalities":  func(l *liveModelList) { l.extra[0].SupportedInputModalities = []string{"text", "image"} },
+		"description": func(l *liveModelList) { l.extra[0].Description = "new" },
+		"created":     func(l *liveModelList) { l.extra[0].Created = 5 },
+		"zero":        func(l *liveModelList) { l.extra[0].Thinking.ZeroAllowed = true },
+		"dynamic":     func(l *liveModelList) { l.extra[0].Thinking.DynamicAllowed = true },
+		"identity":    func(l *liveModelList) { l.identity = "b" },
+	} {
+		changed := base()
+		change(&changed)
+		if sameLiveModelList(base(), changed) {
+			t.Fatalf("%s change not detected", name)
+		}
+	}
+}
+
+func TestLiveModelListIdentity(t *testing.T) {
+	a := &coreauth.Auth{Provider: "claude", Metadata: map[string]any{"email": "a@example.com", "access_token": "t1"}}
+	refreshed := &coreauth.Auth{Provider: "claude", Metadata: map[string]any{"email": "a@example.com", "access_token": "t2"}}
+	other := &coreauth.Auth{Provider: "claude", Metadata: map[string]any{"email": "b@example.com", "access_token": "t1"}}
+	if liveModelListIdentity(a) != liveModelListIdentity(refreshed) {
+		t.Fatal("a token refresh must keep the identity")
+	}
+	if liveModelListIdentity(a) == liveModelListIdentity(other) {
+		t.Fatal("another account must change the identity")
+	}
+	noAccount := &coreauth.Auth{Provider: "meta", Metadata: map[string]any{"access_token": "t1"}}
+	replaced := &coreauth.Auth{Provider: "meta", Metadata: map[string]any{"access_token": "t9"}}
+	if liveModelListIdentity(noAccount) == liveModelListIdentity(replaced) {
+		t.Fatal("without an account field the credential decides")
+	}
+}
+
+func TestReplacedLoginDiscardsTheOldList(t *testing.T) {
+	resetLiveModelLists()
+	t.Cleanup(resetLiveModelLists)
+	cfg := &config.Config{}
+	cfg.Models.LiveLists = true
+	old := &coreauth.Auth{ID: "same-file", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"email": "old@example.com"}}
+	replacement := &coreauth.Auth{ID: "same-file", Provider: "claude", Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"email": "new@example.com"}}
+	liveModelLists.put("same-file", liveModelList{identity: liveModelListIdentity(old), ids: map[string]struct{}{"claude-haiku-5-5": {}}, fetchedAt: time.Now()})
+	catalog := []*ModelInfo{{ID: "claude-haiku-5-5"}, {ID: "claude-opus-5-5"}}
+	if got := applyLiveModelList(cfg, replacement, catalog); len(got) != 2 {
+		t.Fatalf("the old account's list was applied to the new one: %v", liveIDs(got))
+	}
+}
+
+func TestFetchFinishingAfterLoginReplacementIsDiscarded(t *testing.T) {
+	resetLiveModelLists()
+	t.Cleanup(resetLiveModelLists)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"muse-spark-1.3"}]}`))
+	}))
+	defer server.Close()
+	cfg := &config.Config{}
+	cfg.Models.LiveLists = true
+	svc := &Service{cfg: cfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	executor := &liveListExecutor{provider: "meta"}
+	svc.coreManager.RegisterExecutor(executor)
+	auth, err := svc.coreManager.Register(t.Context(), &coreauth.Auth{ID: "meta-file", Provider: "meta",
+		Attributes: map[string]string{"auth_kind": "oauth", "base_url": server.URL}, Metadata: map[string]any{"email": "old@example.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	executor.during = func() {
+		replacement := auth.Clone()
+		replacement.Metadata = map[string]any{"email": "new@example.com"}
+		if _, errUpdate := svc.coreManager.Update(context.Background(), replacement); errUpdate != nil {
+			t.Error(errUpdate)
+		}
+	}
+	svc.refreshLiveModelLists(t.Context(), true)
+	liveModelLists.fetches.Wait()
+	if executor.calls.Load() != 1 {
+		t.Fatalf("calls = %d", executor.calls.Load())
+	}
+	liveModelLists.mu.Lock()
+	_, stored := liveModelLists.lists["meta-file"]
+	liveModelLists.mu.Unlock()
+	if stored {
+		t.Fatal("a list fetched for the replaced account was stored")
 	}
 }

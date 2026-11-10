@@ -2,10 +2,13 @@ package cliproxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,9 +35,9 @@ import (
 const (
 	liveModelListScanInterval = 10 * time.Minute
 	liveModelListRetry        = 10 * time.Minute
-	liveModelListFetchTimeout = 30 * time.Second
 	liveModelListMaxBody      = 8 << 20
 	liveModelListMaxPages     = 10
+	codexLiveModelListOrigin  = "codex-tui"
 	// Codex filters /models by client_version: each model has a minimal_client_version, and an
 	// older version silently gets a shorter list. CPA isn't the client, so it asks with a version
 	// past every minimum to see everything the account has.
@@ -43,6 +46,7 @@ const (
 
 // liveModelList is one login's list as its provider returned it.
 type liveModelList struct {
+	identity  string              // the account the list belongs to (liveModelListIdentity)
 	ids       map[string]struct{} // lower-case ids
 	extra     []*ModelInfo        // provider descriptions, used for ids the catalog lacks
 	fetchedAt time.Time
@@ -52,23 +56,61 @@ type liveModelListStore struct {
 	mu        sync.Mutex
 	lists     map[string]liveModelList // by auth ID
 	nextRetry map[string]time.Time     // by auth ID, after a failed fetch
+	inFlight  map[string]struct{}      // by auth ID
 	wake      chan struct{}
 	force     atomic.Bool
+	fetches   sync.WaitGroup
 }
 
 var liveModelLists = &liveModelListStore{
 	lists:     make(map[string]liveModelList),
 	nextRetry: make(map[string]time.Time),
+	inFlight:  make(map[string]struct{}),
 	wake:      make(chan struct{}, 1),
+}
+
+// liveModelListIdentity names the account behind a login. An auth file can be overwritten with
+// another account under the same ID, so lists are kept per identity, not per ID alone. Logins
+// without a stable account field fall back to a hash of the credential, which only costs an
+// extra fetch after a token refresh.
+func liveModelListIdentity(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	parts := []string{strings.ToLower(strings.TrimSpace(auth.Provider)), liveModelListBaseURL(auth, "")}
+	stable := false
+	for _, key := range []string{"account_id", "email", "user_id"} {
+		value, _ := auth.Metadata[key].(string)
+		if value = strings.TrimSpace(value); value == "" {
+			value = strings.TrimSpace(auth.Attributes[key])
+		}
+		if value != "" {
+			parts = append(parts, key+"="+value)
+			stable = true
+		}
+	}
+	if !stable {
+		token, _ := auth.Metadata["access_token"].(string)
+		if token = strings.TrimSpace(token); token == "" {
+			token = strings.TrimSpace(auth.Attributes["api_key"])
+		}
+		sum := sha256.Sum256([]byte(token))
+		parts = append(parts, "credential="+hex.EncodeToString(sum[:8]))
+	}
+	return strings.Join(parts, "|")
 }
 
 var liveModelListNow = time.Now
 
-func (st *liveModelListStore) get(authID string) (liveModelList, bool) {
+// get returns the login's list if it belongs to the same account.
+func (st *liveModelListStore) get(authID, identity string) (liveModelList, bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	list, ok := st.lists[authID]
-	return list, ok
+	if !ok || list.identity != identity {
+		return liveModelList{}, false
+	}
+	return list, true
 }
 
 // put stores a successful fetch and reports whether the ids or the provider descriptions changed.
@@ -87,15 +129,42 @@ func (st *liveModelListStore) fail(authID string, now time.Time) {
 	st.nextRetry[authID] = now.Add(liveModelListRetry)
 }
 
-// due reports whether a login's list should be fetched now.
-func (st *liveModelListStore) due(authID string, now time.Time) bool {
+// due reports whether a login's list should be fetched now: never fetched, fetched for another
+// account, or older than ModelsRefreshInterval, unless a fetch is running or a failure is waiting
+// for its retry.
+func (st *liveModelListStore) due(authID, identity string, now time.Time) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if retry, failed := st.nextRetry[authID]; failed && now.Before(retry) {
+	if _, running := st.inFlight[authID]; running {
 		return false
 	}
 	list, ok := st.lists[authID]
+	if ok && list.identity != identity {
+		return true
+	}
+	if retry, failed := st.nextRetry[authID]; failed && now.Before(retry) {
+		return false
+	}
 	return !ok || now.Sub(list.fetchedAt) >= registry.ModelsRefreshInterval
+}
+
+// start marks a fetch as running; it reports false if one already is.
+func (st *liveModelListStore) start(authID string) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if _, running := st.inFlight[authID]; running {
+		return false
+	}
+	st.inFlight[authID] = struct{}{}
+	st.fetches.Add(1)
+	return true
+}
+
+func (st *liveModelListStore) finish(authID string) {
+	st.mu.Lock()
+	delete(st.inFlight, authID)
+	st.mu.Unlock()
+	st.fetches.Done()
 }
 
 // forget drops lists of logins that no longer exist.
@@ -125,38 +194,10 @@ func (st *liveModelListStore) request(force bool) {
 	}
 }
 
+// sameLiveModelList compares everything a list publishes: its account, ids and every field of the
+// models it may add.
 func sameLiveModelList(a, b liveModelList) bool {
-	if len(a.ids) != len(b.ids) || len(a.extra) != len(b.extra) {
-		return false
-	}
-	for id := range a.ids {
-		if _, ok := b.ids[id]; !ok {
-			return false
-		}
-	}
-	for i := range a.extra {
-		x, y := a.extra[i], b.extra[i]
-		if x.ID != y.ID || x.ContextLength != y.ContextLength || x.MaxCompletionTokens != y.MaxCompletionTokens ||
-			x.DisplayName != y.DisplayName || !sameThinkingLevels(x.Thinking, y.Thinking) {
-			return false
-		}
-	}
-	return true
-}
-
-func sameThinkingLevels(a, b *registry.ThinkingSupport) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	if len(a.Levels) != len(b.Levels) {
-		return false
-	}
-	for i := range a.Levels {
-		if a.Levels[i] != b.Levels[i] {
-			return false
-		}
-	}
-	return true
+	return a.identity == b.identity && reflect.DeepEqual(a.ids, b.ids) && reflect.DeepEqual(a.extra, b.extra)
 }
 
 // liveModelListProvider returns the provider whose live list applies to auth, or "".
@@ -179,7 +220,7 @@ func applyLiveModelList(cfg *config.Config, auth *coreauth.Auth, models []*Model
 	if cfg == nil || !cfg.Models.LiveLists || cfg.Home.Enabled || provider == "" {
 		return models
 	}
-	list, ok := liveModelLists.get(auth.ID)
+	list, ok := liveModelLists.get(auth.ID, liveModelListIdentity(auth))
 	if !ok {
 		liveModelLists.request(false)
 		return models
@@ -263,6 +304,9 @@ func (s *Service) runLiveModelListRefresh(ctx context.Context) {
 	}
 }
 
+// refreshLiveModelLists starts a fetch for every due login (every login when forced). Fetches
+// run in parallel and carry no deadline once connected, as for other upstream traffic, so a slow
+// provider only delays its own logins; a login whose fetch is still running is skipped.
 func (s *Service) refreshLiveModelLists(ctx context.Context, force bool) {
 	if !s.liveModelListsEnabled() || s.coreManager == nil {
 		return
@@ -276,29 +320,42 @@ func (s *Service) refreshLiveModelLists(ctx context.Context, force bool) {
 			continue
 		}
 		present[auth.ID] = struct{}{}
-		if auth.Disabled || (!force && !liveModelLists.due(auth.ID, liveModelListNow())) {
+		identity := liveModelListIdentity(auth)
+		if auth.Disabled || (!force && !liveModelLists.due(auth.ID, identity, liveModelListNow())) {
+			continue
+		}
+		if !liveModelLists.start(auth.ID) {
 			continue
 		}
 		snapshot := auth.Clone()
-		fetchCtx, cancel := context.WithTimeout(ctx, liveModelListFetchTimeout)
-		list, err := s.fetchLiveModelList(fetchCtx, snapshot)
-		cancel()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			liveModelLists.fail(snapshot.ID, liveModelListNow())
-			log.Warnf("live model list for %s login %s: %v (keeping the previous list)", snapshot.Provider, snapshot.ID, err)
-			continue
-		}
-		if liveModelLists.put(snapshot.ID, list) {
-			if current, ok := s.coreManager.GetByID(snapshot.ID); ok && current != nil && !current.Disabled {
-				s.refreshModelRegistrationForAuth(current)
-			}
-			log.Infof("live model list for %s login %s: %d models", snapshot.Provider, snapshot.ID, len(list.ids))
-		}
+		go func() {
+			defer liveModelLists.finish(snapshot.ID)
+			s.fetchAndRegisterLiveModelList(ctx, snapshot, identity)
+		}()
 	}
 	liveModelLists.forget(present)
+}
+
+func (s *Service) fetchAndRegisterLiveModelList(ctx context.Context, snapshot *coreauth.Auth, identity string) {
+	list, err := s.fetchLiveModelList(ctx, snapshot)
+	if ctx.Err() != nil {
+		return
+	}
+	// The login may have been replaced by another account while the request ran.
+	current, ok := s.coreManager.GetByID(snapshot.ID)
+	if !ok || current == nil || liveModelListIdentity(current) != identity {
+		return
+	}
+	if err != nil {
+		liveModelLists.fail(snapshot.ID, liveModelListNow())
+		log.Warnf("live model list for %s login %s: %v (keeping the previous list)", snapshot.Provider, snapshot.ID, err)
+		return
+	}
+	list.identity = identity
+	if liveModelLists.put(snapshot.ID, list) && !current.Disabled {
+		s.refreshModelRegistrationForAuth(current)
+		log.Infof("live model list for %s login %s: %d models", snapshot.Provider, snapshot.ID, len(list.ids))
+	}
 }
 
 func (s *Service) fetchLiveModelList(ctx context.Context, auth *coreauth.Auth) (liveModelList, error) {
@@ -365,10 +422,17 @@ func (s *Service) fetchLiveModelList(ctx context.Context, auth *coreauth.Auth) (
 		}
 		return parseClaudeLiveModelList(pages, liveModelListNow())
 	case "codex":
+		// The account list belongs to the outer ChatGPT login: mark the request as a Codex client
+		// one so a use_siwc login still uses its outer token, and name the workspace.
+		ctx = coreauth.WithCodexClientRequest(ctx, true)
 		base := liveModelListBaseURL(auth, "https://chatgpt.com/backend-api/codex")
 		header := http.Header{}
+		header.Set("Originator", codexLiveModelListOrigin)
 		if cfg != nil && strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent) != "" {
 			header.Set("User-Agent", strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent))
+		}
+		if accountID, _ := auth.Metadata["account_id"].(string); strings.TrimSpace(accountID) != "" {
+			header.Set("Chatgpt-Account-Id", strings.TrimSpace(accountID))
 		}
 		body, err := get(base+"/models?client_version="+codexLiveModelListClientVersion, header)
 		if err != nil {
