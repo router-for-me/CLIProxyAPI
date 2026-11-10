@@ -2804,7 +2804,7 @@ func TestClaudeExecutor_CountTokensUpstreamConfirmedVSCodePreservesCustomTool(t 
 	}
 }
 
-func TestClaudeExecutor_CountTokensCloakMatchesMeasuredDirectAnthropicShape(t *testing.T) {
+func TestClaudeExecutor_CountTokensCloakIncludesGenerationIdentity(t *testing.T) {
 	var upstreamBody []byte
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		var errRead error
@@ -2821,8 +2821,8 @@ func TestClaudeExecutor_CountTokensCloakMatchesMeasuredDirectAnthropicShape(t *t
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
-		t.Fatalf("cloaked direct count system = %s, want absent", got.Raw)
+	if !strings.Contains(ojson.GetBytes(upstreamBody, "system").Raw, claudeCodeCLIIdentity) {
+		t.Fatal("cloaked count must include the identity sent during generation")
 	}
 	for _, field := range []string{"metadata", "context_management", "diagnostics", "betas"} {
 		if got := ojson.GetBytes(upstreamBody, field); got.Exists() {
@@ -2835,9 +2835,8 @@ func TestClaudeExecutor_CountTokensCloakMatchesMeasuredDirectAnthropicShape(t *t
 }
 
 // TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates asserts
-// that a cloaked direct-Anthropic count_tokens request keeps Claude Code's
-// measured shape (no system field) while still accounting for the caller's
-// system prompt and honouring sensitive-word obfuscation.
+// that cloaked counting includes the caller prompt and honours the same
+// sensitive-word obfuscation as generation.
 func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *testing.T) {
 	const callerSystem = "third party ACMECORP orchestrator rules"
 	const sensitiveWord = "ACMECORP"
@@ -2884,9 +2883,8 @@ func TestClaudeExecutor_CountTokensCloakRelocatesCallerSystemAndObfuscates(t *te
 				t.Fatalf("countTokensUpstream() error = %v", errCount)
 			}
 
-			// Claude Code's count_tokens never carries a system field.
-			if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
-				t.Fatalf("cloaked count system = %s, want absent", got.Raw)
+			if !strings.Contains(ojson.GetBytes(upstreamBody, "system").Raw, claudeCodeCLIIdentity) {
+				t.Fatal("cloaked count must include the generation identity")
 			}
 			// The caller's system prompt must still be counted, relocated into messages.
 			// Compare decoded text so JSON escaping does not affect the assertions.
@@ -2953,8 +2951,8 @@ func TestClaudeExecutor_CountTokensCloakStrictModeDropsCallerSystem(t *testing.T
 	if errCount != nil {
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
-	if got := ojson.GetBytes(upstreamBody, "system"); got.Exists() {
-		t.Fatalf("strict cloaked count system = %s, want absent", got.Raw)
+	if !strings.Contains(ojson.GetBytes(upstreamBody, "system").Raw, claudeCodeCLIIdentity) {
+		t.Fatal("strict cloaked count must retain the generation identity")
 	}
 	if strings.Contains(string(upstreamBody), "secret directive") {
 		t.Fatalf("strict mode must not forward the caller system prompt: %s", upstreamBody)
@@ -10781,5 +10779,128 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 	seenBody, _ := runClaudeExecutorCapture(t, cfg, "", false, "claude-haiku-5-5", preservedThinkingReplayPayload("claude-haiku-5-5"))
 	if ojson.GetBytes(seenBody, "thinking.block_binding").Exists() {
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
+	}
+}
+
+func TestClaudeExecutor_CloakedCountUsesGenerationInput(t *testing.T) {
+	var generation, counted []byte
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		response := `{"id":"msg_count_shape","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+		if strings.Contains(req.URL.Path, "count_tokens") {
+			counted = body
+			response = `{"input_tokens":123}`
+		} else {
+			generation = body
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(response)), Request: req}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{ID: "count-generation-input", Attributes: map[string]string{"api_key": "sk-ant-oat-count-input"}, Metadata: claudeOAuthTestMetadata()}
+	payload := []byte(`{"model":"claude-opus-5-5","max_tokens":32,"system":[{"type":"text","text":"caller instructions"}],"thinking":{"type":"adaptive"},"tools":[{"type":"custom","name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"read a file"},{"role":"assistant","content":[{"type":"thinking","thinking":"inspect it","signature":"` + preservedThinkingTestSignature + `"},{"type":"tool_use","id":"toolu_count","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_count","content":"file content"}]}]}`)
+	executor := NewClaudeExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	if _, errCount := executor.CountTokens(ctx, auth, req, opts); errCount != nil {
+		t.Fatal(errCount)
+	}
+	countedBefore := append([]byte(nil), counted...)
+	if _, errExecute := executor.Execute(ctx, auth, req, opts); errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	if _, errCount := executor.CountTokens(ctx, auth, req, opts); errCount != nil {
+		t.Fatal(errCount)
+	}
+	for _, body := range [][]byte{generation, countedBefore, counted} {
+		signatures := collectThinkingSignatures(t, body)
+		if len(signatures) != 1 || signatures[0] != preservedThinkingTestSignature {
+			t.Fatal("signed thinking history was not preserved")
+		}
+	}
+	// Cache lifetime and billing signatures do not change the conversation being counted.
+	var withoutCache func(any) any
+	withoutCache = func(value any) any {
+		switch typed := value.(type) {
+		case map[string]any:
+			delete(typed, "cache_control")
+			for key, child := range typed {
+				typed[key] = withoutCache(child)
+			}
+		case []any:
+			for index, child := range typed {
+				typed[index] = withoutCache(child)
+			}
+		}
+		return value
+	}
+	for _, countedBody := range [][]byte{countedBefore, counted} {
+		for _, field := range []string{"messages", "tools", "system"} {
+			var generatedValue, countedValue any
+			if errDecode := json.Unmarshal([]byte(ojson.GetBytes(generation, field).Raw), &generatedValue); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if errDecode := json.Unmarshal([]byte(ojson.GetBytes(countedBody, field).Raw), &countedValue); errDecode != nil {
+				t.Fatal(errDecode)
+			}
+			if field == "system" {
+				stripBilling := func(value any) []any {
+					var blocks []any
+					for _, block := range value.([]any) {
+						text, _ := block.(map[string]any)["text"].(string)
+						if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+							blocks = append(blocks, block)
+						}
+					}
+					return blocks
+				}
+				generatedValue, countedValue = stripBilling(generatedValue), stripBilling(countedValue)
+			}
+			want, _ := json.Marshal(withoutCache(generatedValue))
+			got, _ := json.Marshal(withoutCache(countedValue))
+			if !bytes.Equal(got, want) {
+				t.Errorf("count_tokens %s differs from the generated input\ncount=%s\ngeneration=%s", field, got, want)
+			}
+		}
+	}
+}
+
+func TestClaudeExecutor_CloakedCountDoesNotAdvanceConversation(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
+	var counted []byte
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		counted, _ = io.ReadAll(req.Body)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"input_tokens":123}`)), Request: req}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	auth := &cliproxyauth.Auth{ID: "count-read-only", Attributes: map[string]string{"api_key": "sk-ant-oat-count-state"}, Metadata: claudeOAuthTestMetadata()}
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"read a file"}]}`)
+	headers := http.Header{"X-Session-ID": {"count-read-only-session"}}
+	sessionID := helps.ClaudeAgentSessionUUIDForRequest(headers, payload, payload, false)
+	identity := claudeDiagnosticsCredentialIdentity(auth)
+	executor := NewClaudeExecutor(&config.Config{})
+	req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: headers}
+	if _, errCount := executor.CountTokens(ctx, auth, req, opts); errCount != nil {
+		t.Fatal(errCount)
+	}
+	if helps.PreviewClaudeContinuity(identity, sessionID).Initialized {
+		t.Fatal("count_tokens created generation continuity")
+	}
+	key, sequence, _, _, _ := helps.BeginClaudeContinuity(identity, sessionID, true, "")
+	pinned := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	helps.PinClaudeSessionDate(key, sessionID, pinned, claudeSessionDatePinRetention(executor.cfg))
+	if _, errCount := executor.CountTokens(ctx, auth, req, opts); errCount != nil {
+		t.Fatal(errCount)
+	}
+	if !strings.Contains(string(counted), pinned) {
+		t.Fatal("count_tokens ignored the existing session date")
+	}
+	_, nextSequence, _, _, _ := helps.BeginClaudeContinuity(identity, sessionID, false, "")
+	if nextSequence != sequence+1 {
+		t.Fatal("count_tokens advanced generation continuity")
 	}
 }

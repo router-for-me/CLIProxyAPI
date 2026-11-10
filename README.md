@@ -141,6 +141,8 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
+For Claude requests that use cloaking on Anthropic, `/v1/messages/count_tokens` prepares the same conversation and tool names as generation, including the injected system context needed to replay signed thinking. Counting reads existing conversation state without advancing it. Confirmed native Claude Code requests retain their native counting behavior. Use the same client identity and session headers for counting and generation, since different identities can select different request transformations.
+
 ## Getting Started
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)

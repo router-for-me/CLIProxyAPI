@@ -145,7 +145,7 @@ func shouldUseClaudeUpstreamTokenCount(apiKey, baseURL string) bool {
 	return strings.TrimSpace(apiKey) != "" && isAnthropicUpstreamBase(baseURL)
 }
 
-// countTokensUpstream preserves Anthropic's native token-counting contract.
+// countTokensUpstream preserves native counting and projects cloaked requests onto their generation input.
 func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	upstreamModel := e.upstreamModel(baseModel)
@@ -197,11 +197,6 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	}
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
-	// Claude Code's count_tokens carries only model, messages and tools, so the
-	// full Messages cloaking must not run here for any origin. Apply the parts
-	// that still have to hold: relocate the caller's system prompt into messages
-	// so its tokens stay counted, and obfuscate sensitive words exactly like the
-	// Messages path. Kimi opt-in uses the same contract.
 	policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 	cloaked := policy.Cloak
 	explicitCacheMode := isExplicitPromptCacheModeDoc(doc, originalPayload, req.Payload)
@@ -211,7 +206,15 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
-		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
+		if directAnthropic {
+			countContext := helps.WithIncomingHeaders(ctx, incomingHeaders)
+			countContext = helps.WithClaudeSessionID(countContext, claudeSessionID)
+			countContext = helps.WithClaudeExecutionMetadata(countContext, helps.ClaudeRequestHasExecutionMetadata(opts.Metadata, req.Metadata))
+			signing := claudeCCHSigningEnabled(apiKey, claudeCCHUpstreamAnthropic, fp.ProfileClaudeCodeCLI, baseURL+"/v1/messages")
+			prepareClaudeCloakedConversationDoc(countContext, e.cfg, auth, doc, confirmedClaudeCode, signing, policy, settings, explicitCacheMode, true)
+		} else {
+			relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
+		}
 		if len(settings.sensitiveWords) > 0 {
 			helps.ObfuscateSensitiveWordsDoc(doc, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
 		}
@@ -231,7 +234,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	extraBetas = append(extraBetas, claudeTokenCountingBeta)
 	if fp.MCPAlias && cloaked {
 		mcpAliases := resolveClaudeMCPAliasOptions(ctx, opts.Metadata, req.Metadata)
-		prepareClaudeOAuthToolNamesForUpstreamDoc(doc, mcpAliases)
+		if _, errTools := e.prepareClaudeOAuthToolNamesForRequestDoc(doc, mcpAliases); errTools != nil {
+			return cliproxyexecutor.Response{}, errTools
+		}
 	}
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
@@ -247,16 +252,15 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// Elsewhere (Kimi, delegated Anthropic Messages providers) the caller owns its
 	// body by default: a caller that deliberately sends context_management expects
 	// the token count to reflect it, so CPA must not silently rewrite the request.
-	// Only an explicit claude-code-cli profile aligns the shape, and then it aligns
-	// to the measured one: Claude Code 2.1.220 count_tokens carries exactly model,
-	// messages and tools, never a system block.
+	// Native CLI counts omit attribution. Cloaked first-party counts retain the
+	// generated system prefix so historical thinking binds to the same input.
 	alignCLICountTokensShape := fp.ProfileClaudeCodeCLI
 	if directAnthropic || alignCLICountTokensShape {
 		_ = doc.Delete("metadata")
 		_ = doc.Delete("context_management")
 		_ = doc.Delete("diagnostics")
 	}
-	if alignCLICountTokensShape {
+	if alignCLICountTokensShape && !(cloaked && directAnthropic) {
 		stripClaudeCodeAttributionSystemDoc(doc)
 	}
 	// Runs on the finished body: payload rules can rewrite model and messages
