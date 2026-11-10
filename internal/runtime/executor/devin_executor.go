@@ -280,8 +280,11 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		errData, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+		errData, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 		helps.AppendAPIResponseChunk(ctx, e.cfg, errData)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		return resp, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 
@@ -372,9 +375,12 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		errData, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+		errData, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 		_ = httpResp.Body.Close()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, errData)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		return nil, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 

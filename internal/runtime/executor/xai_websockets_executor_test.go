@@ -10,12 +10,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2642,6 +2645,245 @@ func TestApplyXAIWebsocketHeaders_UserAgent(t *testing.T) {
 		headers := applyXAIWebsocketHeaders(context.Background(), nil, auth, "token", "sess-1", clientHeaders)
 		if got := headers.Get("User-Agent"); got != "ws-custom-ua/2.0" {
 			t.Fatalf("User-Agent = %q, want ws-custom-ua/2.0", got)
+		}
+	})
+}
+
+func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	var dials atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dials.Add(1) == 1 {
+			conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+			if errUpgrade != nil {
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			for {
+				if _, _, errRead := conn.ReadMessage(); errRead != nil {
+					return
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "9")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"xai websocket reconnect rate limited"}}`))
+	}))
+	defer server.Close()
+
+	var writes atomic.Int32
+	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+		if writes.Add(1) == 1 {
+			_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
+		}
+	}
+	defer func() { testWebsocketWritePayloadHook = nil }()
+
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-ws-reconnect",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"api_key":    "xai-secret-key",
+			"websockets": "true",
+		},
+	}
+	_, errExec := exec.ExecuteStream(
+		ctx,
+		auth,
+		cliproxyexecutor.Request{
+			Model:   "grok-4",
+			Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"reconnect"}]}`),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAIResponse,
+			Metadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey: "sess-xai-reconnect",
+			},
+		},
+	)
+	if errExec == nil {
+		t.Fatal("expected ExecuteStream reconnect rejection to fail")
+	}
+
+	value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
+	if !exists {
+		t.Fatal("deferred API response was not recorded on websocket reconnect rejection")
+	}
+	deferred, ok := value.(logging.DeferredAPIResponse)
+	if !ok || deferred == nil {
+		t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
+	}
+	rendered := string(deferred.RenderAPIResponse())
+	for _, want := range []string{
+		"=== API RESPONSE 1 ===",
+		"Status: 101",
+		"Error: send:",
+		"=== API RESPONSE 2 ===",
+		"Status: 429",
+		"Retry-After: 9",
+		`{"error":{"message":"xai websocket reconnect rate limited"}}`,
+		"Error: dial_retry:",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
+		}
+	}
+
+	t.Run("reconnect transport failure without HTTP response", func(t *testing.T) {
+		var transportDials atomic.Int32
+		var transportServer *httptest.Server
+		transportServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if transportDials.Add(1) == 1 {
+				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+				if errUpgrade != nil {
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				for {
+					if _, _, errRead := conn.ReadMessage(); errRead != nil {
+						return
+					}
+				}
+			}
+			hijacker, ok := w.(http.Hijacker)
+			if ok {
+				if rawConn, _, errHijack := hijacker.Hijack(); errHijack == nil {
+					_ = rawConn.Close()
+				}
+			}
+		}))
+		defer transportServer.Close()
+
+		var transportWrites atomic.Int32
+		testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+			if transportWrites.Add(1) == 1 {
+				_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
+			}
+		}
+		defer func() { testWebsocketWritePayloadHook = nil }()
+
+		subGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		subCtx := context.WithValue(context.Background(), "gin", subGinCtx)
+		subExec := NewXAIWebsocketsExecutor(&config.Config{})
+		subExec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+		_, errSub := subExec.ExecuteStream(
+			subCtx,
+			&cliproxyauth.Auth{
+				ID:       "xai-ws-transport",
+				Provider: "xai",
+				Attributes: map[string]string{
+					"base_url":   transportServer.URL,
+					"api_key":    "xai-secret-key",
+					"websockets": "true",
+				},
+			},
+			cliproxyexecutor.Request{
+				Model:   "grok-4",
+				Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"reconnect"}]}`),
+			},
+			cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "sess-xai-transport",
+				},
+			},
+		)
+		if errSub == nil {
+			t.Fatal("expected transport reconnect failure")
+		}
+		subVal, ok := subGinCtx.Get(logging.DeferredAPIResponseContextKey)
+		if !ok {
+			t.Fatal("deferred API response missing on transport reconnect failure")
+		}
+		subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+		for _, want := range []string{
+			"=== API RESPONSE 1 ===",
+			"Error: send:",
+			"=== API RESPONSE 2 ===",
+			"Error: dial_retry:",
+		} {
+			if !strings.Contains(subRendered, want) {
+				t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
+			}
+		}
+	})
+
+	t.Run("initial handshake failure with HTTP response records dial error", func(t *testing.T) {
+		for _, invalid101 := range []bool{false, true} {
+			caseName := "status_403"
+			if invalid101 {
+				caseName = "invalid_101"
+			}
+			t.Run(caseName, func(t *testing.T) {
+				initServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if invalid101 {
+						hijacker, ok := w.(http.Hijacker)
+						if !ok {
+							t.Error("hijacker unsupported")
+							return
+						}
+						rawConn, rawBuf, errHijack := hijacker.Hijack()
+						if errHijack != nil {
+							t.Errorf("hijack: %v", errHijack)
+							return
+						}
+						_, _ = rawBuf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: invalid\r\n\r\n")
+						_ = rawBuf.Flush()
+						_ = rawConn.Close()
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":{"message":"initial xai ws forbidden"}}`))
+				}))
+				defer initServer.Close()
+
+				initGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+				initCtx := context.WithValue(context.Background(), "gin", initGinCtx)
+				initExec := NewXAIWebsocketsExecutor(&config.Config{})
+				initExec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+				_, errInit := initExec.ExecuteStream(
+					initCtx,
+					&cliproxyauth.Auth{
+						ID:       "xai-ws-init",
+						Provider: "xai",
+						Attributes: map[string]string{
+							"base_url":   initServer.URL,
+							"api_key":    "xai-secret-key",
+							"websockets": "true",
+						},
+					},
+					cliproxyexecutor.Request{
+						Model:   "grok-4",
+						Payload: []byte(`{"model":"grok-4","input":[{"type":"message","role":"user","content":"init"}]}`),
+					},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+				)
+				if errInit == nil {
+					t.Fatal("expected initial handshake failure")
+				}
+				initVal, ok := initGinCtx.Get(logging.DeferredAPIResponseContextKey)
+				if !ok {
+					t.Fatal("deferred API response missing on initial handshake failure")
+				}
+				initRendered := string(initVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+				wantStatus := "Status: 403"
+				if invalid101 {
+					wantStatus = "Status: 101"
+				}
+				for _, want := range []string{wantStatus, "Error: dial:"} {
+					if !strings.Contains(initRendered, want) {
+						t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
+					}
+				}
+			})
 		}
 	})
 }
