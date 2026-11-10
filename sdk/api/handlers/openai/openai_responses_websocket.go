@@ -39,7 +39,6 @@ const (
 	wsTurnStateHeader                     = "x-codex-turn-state"
 	wsTimelineBodyKey                     = "WEBSOCKET_TIMELINE_OVERRIDE"
 	wsCloseReasonMaxBytes                 = 123
-	wsPingWriteTimeout                    = 5 * time.Second
 	wsHTTPReplayRequiredCloseReason       = "upstream requires HTTP replay"
 	responsesWebsocketUpstreamModeUnknown = ""
 	responsesWebsocketUpstreamModeWS      = "websocket"
@@ -179,7 +178,7 @@ func (w *responsesWebsocketWriter) writePing() error {
 	}
 	// Gorilla serializes control writes. Reserving writeMu for data writes lets
 	// the terminal paths distinguish a blocked data write from a Ping.
-	return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsPingWriteTimeout))
+	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
 }
 
 func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context.CancelCauseFunc, intervals <-chan time.Duration) {
