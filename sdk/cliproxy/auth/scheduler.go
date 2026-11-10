@@ -682,6 +682,11 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	var latestAuthID string
 	var latestAuthErr error
 
+	allClaude := true
+	var earliestClaudeTime time.Time
+	var earliestClaudeID string
+	var earliestClaudeSignals map[string]string
+
 	for _, providerKey := range providers {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
@@ -697,6 +702,18 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		unauthorizedCount += localUnauthorizedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
+		}
+		if localTotal > 0 {
+			localClaude, localClaudeEarliest, localClaudeID, localSignals := shard.claudeCooldownSummaryLocked(providerKey, model, now, predicate)
+			if !localClaude {
+				allClaude = false
+			} else if allClaude && !localClaudeEarliest.IsZero() {
+				if earliestClaudeTime.IsZero() || localClaudeEarliest.Before(earliestClaudeTime) || (localClaudeEarliest.Equal(earliestClaudeTime) && localClaudeID < earliestClaudeID) {
+					earliestClaudeTime = localClaudeEarliest
+					earliestClaudeID = localClaudeID
+					earliestClaudeSignals = localSignals
+				}
+			}
 		}
 		candModelErr, candModelTime, candModelAuthID, candAuthErr, candAuthTime, candAuthAuthID := shard.candidateErrorsLocked(model, predicate)
 		if candModelErr != nil {
@@ -730,7 +747,11 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
+		var claudeSignals map[string]string
+		if allClaude {
+			claudeSignals = earliestClaudeSignals
+		}
+		return newModelCooldownErrorForCandidates(model, "", resetIn, lastCandidateErr, allClaude, claudeSignals)
 	}
 	if unauthorizedCount == total {
 		terminalCause := latestAuthErr
@@ -1475,7 +1496,8 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if resetIn < 0 {
 			resetIn = 0
 		}
-		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
+		claudeCooldown, _, _, claudeSignals := m.claudeCooldownSummaryLocked(provider, model, now, predicate)
+		return newModelCooldownErrorForCandidates(model, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
 	}
 	if unauthorizedCount == total {
 		terminalCause := authErr
@@ -1589,6 +1611,57 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+func (m *modelScheduler) claudeCooldownSummaryLocked(fallbackProvider, model string, now time.Time, predicate func(*scheduledAuth) bool) (bool, time.Time, string, map[string]string) {
+	if m == nil {
+		return false, time.Time{}, "", nil
+	}
+	matched := 0
+	var earliest time.Time
+	var earliestID string
+	var earliestAuth *Auth
+	var earliestSignals map[string]string
+	for _, entry := range m.entries {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		matched++
+		if entry == nil || entry.auth == nil {
+			return false, time.Time{}, "", nil
+		}
+		entryProvider := ""
+		if entry.meta != nil && entry.meta.providerKey != "" {
+			entryProvider = entry.meta.providerKey
+		} else if resolved := executorKeyFromAuth(entry.auth); resolved != "" {
+			entryProvider = resolved
+		} else {
+			entryProvider = strings.ToLower(strings.TrimSpace(fallbackProvider))
+		}
+		if entryProvider != "claude" {
+			return false, time.Time{}, "", nil
+		}
+		checkModel := model
+		if existingModelState(entry.auth, checkModel) == nil && m.modelKey != "" {
+			checkModel = m.modelKey
+		}
+		okClaude, signals := claudeUnifiedCooldownForAuth(entry.auth, checkModel, now)
+		if !okClaude {
+			return false, time.Time{}, "", nil
+		}
+		if entry.state == scheduledStateCooldown && !entry.nextRetryAt.IsZero() {
+			if earliestAuth == nil || entry.nextRetryAt.Before(earliest) || (entry.nextRetryAt.Equal(earliest) && entry.auth.ID < earliestID) {
+				earliest = entry.nextRetryAt
+				earliestID = entry.auth.ID
+				earliestAuth = entry.auth
+				earliestSignals = signals
+			}
+		}
+	}
+	if matched == 0 || earliestAuth == nil {
+		return false, time.Time{}, "", nil
+	}
+	return true, earliest, earliestID, earliestSignals
 }
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.

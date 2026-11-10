@@ -909,7 +909,10 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(candidate *Auth) string {
+				return m.selectionModelForAuth(candidate, routeModel)
+			}, now, clientHeaders...)
+			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -1024,7 +1027,14 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	return newModelCooldownErrorForCandidates(
+		requestedModel,
+		cooldownErr.provider,
+		cooldownErr.resetIn,
+		cooldownErr.cause,
+		cooldownErr.claudeCooldown,
+		cooldownErr.claudeSignals,
+	)
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {

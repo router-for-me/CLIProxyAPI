@@ -355,6 +355,10 @@ type QuotaState struct {
 	// Cooldown transitions must use applyCooldownFields so they cannot replace
 	// this snapshot.
 	Signals map[string]string `json:"signals,omitempty"`
+	// cooldownSignals retains rejected quota headers captured when the active
+	// cooldown was recorded so out-of-order completions cannot overwrite them.
+	cooldownSignals   map[string]string
+	cooldownEvaluated bool
 }
 
 // Clone returns an independent copy of the quota state.
@@ -364,6 +368,12 @@ func (q QuotaState) Clone() QuotaState {
 		copyQuota.Signals = make(map[string]string, len(q.Signals))
 		for key, value := range q.Signals {
 			copyQuota.Signals[key] = value
+		}
+	}
+	if len(q.cooldownSignals) > 0 {
+		copyQuota.cooldownSignals = make(map[string]string, len(q.cooldownSignals))
+		for key, value := range q.cooldownSignals {
+			copyQuota.cooldownSignals[key] = value
 		}
 	}
 	return copyQuota
