@@ -115,6 +115,9 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if useSIWC {
 		applyCodexSIWCWebsocketBodyRulesDoc(doc, hasExplicitInstructions, cliproxyexecutor.Options{KeepTopLevelEffort: thinking.HasThinkingSuffix(req.Model)})
 	}
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		helps.NormalizeCodexCompatToolOutputsDoc(doc, isCompat)
+	}
 	helps.FinalizePayloadDoc(ctx, doc)
 	body = doc.Bytes()
 	upstreamModel := strings.TrimSpace(doc.Get("model").String())

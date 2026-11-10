@@ -923,6 +923,9 @@ type CodexModel struct {
 	// Use this for third-party Responses-compatible endpoints that do not accept
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
+	// API-key requests also fold standalone function_call_output items with string
+	// output and no call reference into user context, independently of MultiAgentV2.
+	// Delegation outputs retain their separate compatibility policy.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
 	// SupportConfigurationUpdate enables configuration_update for this API-key model.

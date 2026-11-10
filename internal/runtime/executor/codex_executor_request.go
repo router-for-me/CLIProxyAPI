@@ -190,6 +190,9 @@ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.F
 	if cache.ID != "" {
 		helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
 	}
+	if auth != nil && auth.AuthKind() == cliproxyauth.AuthKindAPIKey {
+		helps.NormalizeCodexCompatToolOutputsDoc(doc, e.resolveCodexModelIsCompat(auth, req, thinking.ParseSuffix(req.Model).ModelName))
+	}
 	helps.SanitizeCodexInputItemIDsDoc(doc)
 	helps.FinalizePayloadDoc(ctx, doc)
 	var rawJSON []byte
