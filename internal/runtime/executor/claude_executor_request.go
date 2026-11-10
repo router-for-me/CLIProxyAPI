@@ -315,10 +315,20 @@ func isClaudeSonnet5Model(model string) bool {
 	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-") || strings.HasPrefix(model, "claude-sonnet-5[")
 }
 
-// claudeModelUsesProgressDisplay reports the 2.1.280 interactive CLI models that
+func isClaudeFable52Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	for _, prefix := range []string{"claude-fable-5-2", "claude-fable-5.2"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") || strings.HasPrefix(model, prefix+"[") {
+			return true
+		}
+	}
+	return false
+}
+
+// claudeModelUsesProgressDisplay reports the interactive CLI models that
 // send thinking.display=updates unless the caller already chose a display mode.
 func claudeModelUsesProgressDisplay(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
+	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) || isClaudeFable52Model(model) || isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
 }
 
 // applyClaudeCloakThinkingDisplay fills the latest CLI display only when the
@@ -341,7 +351,7 @@ func applyClaudeCloakThinkingDisplay(body []byte, callerOwned bool) []byte {
 }
 
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
+	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1") || isClaudeFable52Model(model)
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
