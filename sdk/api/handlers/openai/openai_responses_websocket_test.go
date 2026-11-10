@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -7626,8 +7627,21 @@ func TestResponsesWebsocketWriterWritePing(t *testing.T) {
 		defer func() { _ = conn.Close() }()
 
 		writer := newResponsesWebsocketWriter(conn)
-		if errPing := writer.writePing(); errPing != nil {
-			t.Errorf("writePing() error = %v, want nil", errPing)
+		// A control Ping must not wait for the mutex used by data writes.
+		writer.writeMu.Lock()
+		pingDone := make(chan error, 1)
+		go func() { pingDone <- writer.writePing() }()
+		select {
+		case errPing := <-pingDone:
+			writer.writeMu.Unlock()
+			if errPing != nil {
+				t.Errorf("writePing() error = %v, want nil", errPing)
+			}
+		case <-time.After(time.Second):
+			writer.writeMu.Unlock()
+			<-pingDone
+			t.Error("Ping waited for the data write mutex")
+			return
 		}
 
 		writer.closing.Store(true)
@@ -7665,6 +7679,78 @@ func TestResponsesWebsocketWriterWritePing(t *testing.T) {
 	case <-pingReceived:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected ping from writer.writePing(), got none")
+	}
+}
+
+func TestResponsesWebsocketKeepAliveUpdatesInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		intervals := make(chan time.Duration, 1)
+		queueResponsesWebsocketKeepAliveInterval(intervals, time.Second)
+		queueResponsesWebsocketKeepAliveInterval(intervals, 20*time.Millisecond)
+
+		pings := 0
+		done := make(chan error, 1)
+		go func() {
+			done <- runResponsesWebsocketKeepAlive(ctx, intervals, func() error {
+				pings++
+				return nil
+			})
+		}()
+
+		synctest.Wait()
+		time.Sleep(20 * time.Millisecond)
+		synctest.Wait()
+		if pings != 1 {
+			t.Fatalf("pings after replacing pending interval = %d, want 1", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 10*time.Millisecond)
+		synctest.Wait()
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if pings != 2 {
+			t.Fatalf("pings after shortening interval = %d, want 2", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 0)
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if pings != 2 {
+			t.Fatalf("pings after disabling keepalive = %d, want 2", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 10*time.Millisecond)
+		synctest.Wait()
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if pings != 3 {
+			t.Fatalf("pings after re-enabling keepalive = %d, want 3", pings)
+		}
+
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("keepalive did not shut down cleanly: %v", err)
+		}
+	})
+}
+
+func TestForwardResponsesWebsocketPreservesPingFailureCause(t *testing.T) {
+	requestCtx, cancelSocket := context.WithCancelCause(context.Background())
+	cancelSocket(net.ErrClosed)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil).WithContext(requestCtx)
+
+	var canceledWith error
+	_, _, _, _, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		c, nil, func(args ...interface{}) {
+			canceledWith, _ = args[0].(error)
+		}, nil, nil, nil, "ping-write-failure",
+	)
+	if !errors.Is(err, net.ErrClosed) || !errors.Is(canceledWith, net.ErrClosed) {
+		t.Fatalf("forward error = %v, cancellation cause = %v, want closed connection", err, canceledWith)
 	}
 }
 

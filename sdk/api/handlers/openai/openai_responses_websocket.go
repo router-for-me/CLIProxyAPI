@@ -39,6 +39,7 @@ const (
 	wsTurnStateHeader                     = "x-codex-turn-state"
 	wsTimelineBodyKey                     = "WEBSOCKET_TIMELINE_OVERRIDE"
 	wsCloseReasonMaxBytes                 = 123
+	wsPingWriteTimeout                    = 5 * time.Second
 	wsHTTPReplayRequiredCloseReason       = "upstream requires HTTP replay"
 	responsesWebsocketUpstreamModeUnknown = ""
 	responsesWebsocketUpstreamModeWS      = "websocket"
@@ -173,15 +174,22 @@ func (w *responsesWebsocketWriter) writePing() error {
 	if w == nil || w.conn == nil {
 		return errors.New("responses websocket: writer is nil")
 	}
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
 	if w.closing.Load() {
 		return websocket.ErrCloseSent
 	}
-	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
+	// Gorilla serializes control writes. Reserving writeMu for data writes lets
+	// the terminal paths distinguish a blocked data write from a Ping.
+	return w.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsPingWriteTimeout))
 }
 
 func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context.CancelCauseFunc, intervals <-chan time.Duration) {
+	if errPing := runResponsesWebsocketKeepAlive(ctx, intervals, w.writePing); errPing != nil {
+		cancel(errPing)
+		_, _ = w.closeWithoutError()
+	}
+}
+
+func runResponsesWebsocketKeepAlive(ctx context.Context, intervals <-chan time.Duration, ping func() error) error {
 	var ticker *time.Ticker
 	var ticks <-chan time.Time
 	defer func() {
@@ -192,7 +200,7 @@ func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case interval := <-intervals:
 			if interval <= 0 {
 				if ticker != nil {
@@ -208,13 +216,20 @@ func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context
 			}
 			ticks = ticker.C
 		case <-ticks:
-			if errPing := w.writePing(); errPing != nil {
-				cancel(errPing)
-				_, _ = w.closeWithoutError()
-				return
+			if errPing := ping(); errPing != nil {
+				return errPing
 			}
 		}
 	}
+}
+
+func queueResponsesWebsocketKeepAliveInterval(intervals chan time.Duration, interval time.Duration) {
+	// A single producer replaces a pending interval without waiting for a Ping write.
+	select {
+	case <-intervals:
+	default:
+	}
+	intervals <- interval
 }
 
 func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error) {
@@ -426,12 +441,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			keepAliveIntervals = make(chan time.Duration, 1)
 			go writer.keepAlive(socketCtx, cancelSocket, keepAliveIntervals)
 		}
-		// Replace a pending interval without waiting for a Ping write.
-		select {
-		case <-keepAliveIntervals:
-		default:
-		}
-		keepAliveIntervals <- interval
+		queueResponsesWebsocketKeepAliveInterval(keepAliveIntervals, interval)
 	}
 	updateKeepAlive()
 	// The reader owns the client socket so an in-flight interrupt is not stuck

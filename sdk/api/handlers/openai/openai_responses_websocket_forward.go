@@ -140,8 +140,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+			cause := context.Cause(c.Request.Context())
+			cancel(cause)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, cause
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
