@@ -45,10 +45,10 @@ func testClaudeExecutorUserAgentFields(t *testing.T, stabilize bool) {
 			for _, testCase := range []struct {
 				userAgent, stabilizedUserAgent string
 			}{
-				{userAgent: "claude-cli/2.1.312 (external, cli)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli)"},
-				{userAgent: "claude-cli/2.1.312 (external, cli, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, workload/cron)"},
-				{userAgent: "claude-cli/2.1.312 (external, cli, future-feature/value, agent-sdk/0.2.133)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, future-feature/value)"},
-				{userAgent: "claude-cli/2.1.312 (external, cli, request-phase/background, agent-sdk/0.2.133, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.312 (external, cli, agent-sdk/0.2.133, request-phase/background, workload/cron)"},
+				{userAgent: "claude-cli/2.1.353 (external, cli)", stabilizedUserAgent: "claude-cli/2.1.353 (external, cli)"},
+				{userAgent: "claude-cli/2.1.353 (external, cli, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.353 (external, cli, workload/cron)"},
+				{userAgent: "claude-cli/2.1.353 (external, cli, future-feature/value, agent-sdk/0.2.133)", stabilizedUserAgent: "claude-cli/2.1.353 (external, cli, agent-sdk/0.2.133, future-feature/value)"},
+				{userAgent: "claude-cli/2.1.353 (external, cli, request-phase/background, agent-sdk/0.2.133, workload/cron)", stabilizedUserAgent: "claude-cli/2.1.353 (external, cli, agent-sdk/0.2.133, request-phase/background, workload/cron)"},
 			} {
 				t.Run(testCase.userAgent, func(t *testing.T) {
 					var upstreamBody []byte
@@ -76,7 +76,7 @@ func testClaudeExecutorUserAgentFields(t *testing.T, stabilize bool) {
 					headers.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
 					auth := &cliproxyauth.Auth{ID: "ua-fields-" + t.Name(), Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{"api_key": "sk-ant-oat-ua-fields"}}
 					executor := NewClaudeExecutor(&config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
-						UserAgent: "claude-cli/2.1.312 (external, cli)", StabilizeDeviceProfile: &stabilize,
+						UserAgent: "claude-cli/2.1.353 (external, cli)", StabilizeDeviceProfile: &stabilize,
 					}})
 					request := cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: payload}
 					options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Headers: headers}
