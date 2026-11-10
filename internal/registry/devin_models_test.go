@@ -450,3 +450,20 @@ func TestValidateDevinModelsJSON_AggregatesThinkingVariants_Issue6141(t *testing
 		t.Fatalf("expected thinking levels %v, got %v", expectedLevels, models[0].Thinking.Levels)
 	}
 }
+
+func TestValidateDevinModelsJSONKeepsTheSmallestVariantOutputLimit(t *testing.T) {
+	payload := []byte(`{
+		"devin": [
+			{"id": "mixed-model-low", "display_name": "Mixed Low", "owned_by": "anthropic", "max_completion_tokens": 128000},
+			{"id": "mixed-model-high", "display_name": "Mixed High", "owned_by": "anthropic", "max_completion_tokens": 64000},
+			{"id": "mixed-model-medium", "display_name": "Mixed Medium", "owned_by": "anthropic"}
+		]
+	}`)
+	models, err := ValidateDevinModelsJSON(payload)
+	if err != nil {
+		t.Fatalf("ValidateDevinModelsJSON failed: %v", err)
+	}
+	if len(models) != 1 || models[0].MaxCompletionTokens != 64000 {
+		t.Fatalf("models = %+v, want one aggregate with the smallest output limit 64000", models)
+	}
+}
