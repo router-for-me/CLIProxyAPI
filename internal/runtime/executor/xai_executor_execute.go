@@ -93,10 +93,12 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 	namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 	var upstreamUsage helps.StreamUsageBuffer
+	sawStreamData := false
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
+		sawStreamData = true
 		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
 		upstreamUsage.ObserveResponsesStream(eventData)
 		prepared.applyPatch.RememberDispatcherEvent(eventData)
@@ -120,6 +122,11 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			case "error", "response.failed":
+				if errTerminal, okTerminal := xaiTerminalFailureErr(eventData); okTerminal {
+					upstreamUsage.PublishFailure(ctx, reporter, errTerminal)
+					return resp, errTerminal
+				}
 			case "response.completed", "response.incomplete":
 				completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 				completedData = xaiNormalizeReasoningSummaryData(completedData)
@@ -153,7 +160,60 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		upstreamUsage.PublishFailure(ctx, reporter, errFinish)
 		return resp, errFinish
 	}
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
+	if !sawStreamData {
+		return resp, newXAIEmptyStreamError()
+	}
+	return resp, newXAIIncompleteStreamError()
+}
+
+// xaiIncompleteStreamMessage reports a 2xx upstream stream that ended without
+// response.completed or response.incomplete. Nothing timed out, so the wording
+// deliberately avoids timeout language.
+const xaiIncompleteStreamMessage = "xai stream error: stream disconnected before response.completed or response.incomplete"
+
+// xaiIncompleteStreamError marks a stream closed without a terminal event as
+// request-scoped so the serving credential is not cooled down for it.
+type xaiIncompleteStreamError struct {
+	statusErr
+}
+
+func newXAIIncompleteStreamError() xaiIncompleteStreamError {
+	return xaiIncompleteStreamError{statusErr: statusErr{
+		code: http.StatusRequestTimeout,
+		msg:  xaiIncompleteStreamMessage,
+	}}
+}
+
+func (xaiIncompleteStreamError) IsRequestScoped() bool {
+	return true
+}
+
+// xaiEmptyStreamError reports a 2xx upstream response whose body carried no
+// SSE events at all.
+type xaiEmptyStreamError struct {
+	statusErr
+}
+
+func newXAIEmptyStreamError() xaiEmptyStreamError {
+	return xaiEmptyStreamError{statusErr: statusErr{
+		code: http.StatusBadGateway,
+		msg:  "xai stream error: upstream returned an empty stream",
+	}}
+}
+
+func (xaiEmptyStreamError) IsRequestScoped() bool {
+	return true
+}
+
+// xaiTerminalFailureErr maps an in-stream error or response.failed event to a
+// statusErr that preserves the upstream error body under a mapped HTTP status,
+// mirroring the Codex executor's terminal failure handling.
+func xaiTerminalFailureErr(eventData []byte) (statusErr, bool) {
+	body, ok := codexTerminalFailureBody(eventData)
+	if !ok {
+		return statusErr{}, false
+	}
+	return xaiStatusErr(codexTerminalFailureStatus(body), body), true
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

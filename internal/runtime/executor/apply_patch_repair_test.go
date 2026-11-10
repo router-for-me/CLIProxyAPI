@@ -615,8 +615,16 @@ func TestApplyPatchRepairOrdinaryEmptyHTTPPassthrough(t *testing.T) {
 				if errExecute != nil || len(response.Payload) != 0 {
 					t.Fatalf("ordinary Kimi response changed: %s %v", response.Payload, errExecute)
 				}
-			} else if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusRequestTimeout {
-				t.Fatalf("ordinary disconnect changed: %v", errExecute)
+			} else {
+				// An empty 2xx xAI stream is a 502 empty-stream failure (issue #7419);
+				// meta keeps its request-timeout disconnect classification.
+				wantStatus := http.StatusRequestTimeout
+				if provider == "xai" {
+					wantStatus = http.StatusBadGateway
+				}
+				if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != wantStatus {
+					t.Fatalf("ordinary disconnect changed: %v", errExecute)
+				}
 			}
 		})
 	}
