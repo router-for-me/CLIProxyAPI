@@ -1249,14 +1249,14 @@ func TestClaudeExecutor_OfficialAPIKeyCloakNeverStripsClaudeCodeIdentity(t *test
 	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
 	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
 	incoming := http.Header{
-		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"User-Agent":     {"claude-cli/2.1.321 (external, cli)"},
 		"X-App":          {"cli"},
 		"Anthropic-Beta": {"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,cache-diagnosis-2026-04-07"},
 		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 		"X-Claude-Code-Session-Id":                  {sessionID},
 		"X-Claude-Code-Request-Class":               {"main"},
-		"X-Stainless-Package-Version":               {"0.112.1"},
-		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.12.1"},
 		"X-Stainless-Os":                            {"MacOS"},
 		"X-Stainless-Arch":                          {"arm64"},
 	}
@@ -1461,13 +1461,13 @@ func TestClaudeExecutor_GlobalDisableClaudeCloakModePreservesConfirmedCallerIden
 	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
 	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
 	incoming := http.Header{
-		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"User-Agent":     {"claude-cli/2.1.321 (external, cli)"},
 		"X-App":          {"cli"},
 		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14"},
 		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
 		"X-Claude-Code-Session-Id":                  {sessionID},
-		"X-Stainless-Package-Version":               {"0.112.1"},
-		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Package-Version":               {"0.128.0"},
+		"X-Stainless-Runtime-Version":               {"v26.12.1"},
 		"X-Stainless-Os":                            {"MacOS"},
 		"X-Stainless-Arch":                          {"arm64"},
 	}
