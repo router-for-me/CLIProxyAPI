@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	KiroStreamingUserAgent  = "aws-sdk-js/1.0.34 ua/2.1 os/windows#10.0.26200 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.34 m/E KiroIDE-0.10.32-kiro-anonymous"
-	KiroStreamingAmzUA      = "aws-sdk-js/1.0.34 KiroIDE-0.10.32-kiro-anonymous"
-	KiroRuntimeUserAgent    = "aws-sdk-js/1.0.0 ua/2.1 os/windows#10.0.26200 lang/js md/nodejs#22.21.1 api/codewhispererruntime#1.0.0 m/N,E KiroIDE-0.10.32-kiro-anonymous"
-	KiroRuntimeAmzUA        = "aws-sdk-js/1.0.0 KiroIDE-0.10.32-kiro-anonymous"
+	KiroDefaultIDEVersion   = "1.4.121"
+	KiroStreamingUserAgent  = "aws-sdk-js/1.0.34 ua/2.1 os/windows#10.0.26200 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.34 m/E KiroIDE-" + KiroDefaultIDEVersion + "-kiro-anonymous"
+	KiroStreamingAmzUA      = "aws-sdk-js/1.0.34 KiroIDE-" + KiroDefaultIDEVersion + "-kiro-anonymous"
+	KiroRuntimeUserAgent    = "aws-sdk-js/1.0.0 ua/2.1 os/windows#10.0.26200 lang/js md/nodejs#22.21.1 api/codewhispererruntime#1.0.0 m/N,E KiroIDE-" + KiroDefaultIDEVersion + "-kiro-anonymous"
+	KiroRuntimeAmzUA        = "aws-sdk-js/1.0.0 KiroIDE-" + KiroDefaultIDEVersion + "-kiro-anonymous"
 	KiroCodeWhispererTarget = "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
 	KiroAmazonQTarget       = "AmazonQDeveloperStreamingService.SendMessage"
 )
