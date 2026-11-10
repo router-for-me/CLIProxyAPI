@@ -10791,6 +10791,10 @@ func TestClaudeExecutor_CloakedCountUsesGenerationInput(t *testing.T) {
 		}
 		response := `{"id":"msg_count_shape","type":"message","role":"assistant","model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
 		if strings.Contains(req.URL.Path, "count_tokens") {
+			betas := strings.Join(helps.HeaderValuesCaseInsensitive(req.Header, "Anthropic-Beta"), ",")
+			if !strings.Contains(betas, claudeMidConvOutputConfigBeta) {
+				t.Error("count_tokens omitted the feature header required by message output_config")
+			}
 			counted = body
 			response = `{"input_tokens":123}`
 		} else {
@@ -10800,7 +10804,7 @@ func TestClaudeExecutor_CloakedCountUsesGenerationInput(t *testing.T) {
 	})
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	auth := &cliproxyauth.Auth{ID: "count-generation-input", Attributes: map[string]string{"api_key": "sk-ant-oat-count-input"}, Metadata: claudeOAuthTestMetadata()}
-	payload := []byte(`{"model":"claude-opus-5-5","max_tokens":32,"system":[{"type":"text","text":"caller instructions"}],"thinking":{"type":"adaptive"},"tools":[{"type":"custom","name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"read a file"},{"role":"assistant","content":[{"type":"thinking","thinking":"inspect it","signature":"` + preservedThinkingTestSignature + `"},{"type":"tool_use","id":"toolu_count","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_count","content":"file content"}]}]}`)
+	payload := []byte(`{"model":"claude-opus-5-5","max_tokens":32,"system":[{"type":"text","text":"caller instructions"}],"thinking":{"type":"adaptive"},"tools":[{"type":"custom","name":"read_file","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"read a file"},{"role":"assistant","output_config":{"effort":"high"},"content":[{"type":"thinking","thinking":"inspect it","signature":"` + preservedThinkingTestSignature + `"},{"type":"tool_use","id":"toolu_count","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_count","content":"file content"}]}]}`)
 	executor := NewClaudeExecutor(&config.Config{})
 	req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}

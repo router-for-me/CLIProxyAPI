@@ -35,6 +35,7 @@ const (
 	claudeContext1MBeta              = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta          = "mid-conversation-system-2026-04-07"
 	claudePerTurnControlBeta         = "per-turn-control-2026-07-01"
+	claudeMidConvOutputConfigBeta    = "mid-conversation-output-config-2026-07-01"
 	claudePerTurnTimingBeta          = "timing-2026-09-09"
 	claudeMidConvToolChangesBeta     = "mid-conversation-tool-changes-2026-07-01"
 	claudeInlineToolsBeta            = "inline-tools-2026-09-15"
@@ -1408,6 +1409,15 @@ func applyClaudeHeadersWithNativeProfile(
 		// mode (cloaked, caller-owned, and confirmed passthrough alike).
 		if ojson.GetBytesNoCopy(body, "thinking.block_binding").Exists() {
 			baseBetas = withClaudeBetaAppended(baseBetas, claudeThinkingBindingBeta)
+		}
+		if countTokens {
+			ojson.GetBytesNoCopy(body, "messages").ForEach(func(_, message ojson.Result) bool {
+				if message.Get("output_config").Exists() {
+					baseBetas = withClaudeBetaAppended(baseBetas, claudeMidConvOutputConfigBeta)
+					return false
+				}
+				return true
+			})
 		}
 		// Operator overrides get the last word over the derived and caller betas:
 		// strip filters without re-sorting, append adds missing names at the end.
