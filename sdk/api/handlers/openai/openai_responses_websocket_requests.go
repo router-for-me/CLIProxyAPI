@@ -112,7 +112,11 @@ func normalizeResponseSubsequentRequest(rawJSON []byte, lastRequest []byte, last
 	// to keep the prompt cache warm, or retrying it), not an incremental append.
 	// Merging it would send the conversation to the upstream twice.
 	if inputReplaysPreviousRequest(rawJSON, nextInput, lastRequest) {
-		normalized := normalizeResponseTranscriptReplacement(rawJSON, lastRequest)
+		replay, errReplay := replayWithPendingToolCalls(rawJSON, nextInput, lastRequest, lastResponseOutput, lastResponsePendingToolCallIDs)
+		if errReplay != nil {
+			return nil, lastRequest, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errReplay}
+		}
+		normalized := normalizeResponseTranscriptReplacement(replay, lastRequest)
 		return normalized, bytes.Clone(normalized), nil
 	}
 
@@ -254,6 +258,54 @@ func inputReplaysPreviousRequest(rawJSON []byte, nextInput ojson.Result, lastReq
 	}
 	for i, previousItem := range previousItems {
 		if !sameJSONValue(previousItem.Raw, nextItems[i].Raw) {
+			return false
+		}
+	}
+	return true
+}
+
+// replayWithPendingToolCalls keeps a replay valid when the previous response ended in tool calls:
+// a replay that answers them without restating the calls themselves would send orphan outputs, so
+// the previous response output goes back between the replayed input and the new items, as an
+// incremental merge does. Replays that restate the calls, or follow a response without pending
+// calls, are returned unchanged.
+func replayWithPendingToolCalls(rawJSON []byte, nextInput ojson.Result, lastRequest []byte, lastResponseOutput []byte, pendingCallIDs []string) ([]byte, error) {
+	if len(pendingCallIDs) == 0 || inputRestatesToolCalls(nextInput, pendingCallIDs) {
+		return rawJSON, nil
+	}
+	previousCount := len(ojson.GetBytesNoCopy(lastRequest, "input").Array())
+	nextItems := nextInput.Array()
+	remainder := make([]string, 0, len(nextItems)-previousCount)
+	for _, item := range nextItems[previousCount:] {
+		remainder = append(remainder, item.Raw)
+	}
+	merged, errMerge := mergeResponsesWebsocketInput(lastRequest, lastResponseOutput, "["+strings.Join(remainder, ",")+"]")
+	if errMerge != nil {
+		return nil, errMerge
+	}
+	doc := ojson.NewDoc(rawJSON)
+	if errSet := doc.SetRawBytes("input", merged); errSet != nil {
+		return nil, errSet
+	}
+	return doc.Bytes(), nil
+}
+
+// inputRestatesToolCalls reports whether input carries the call item of every pending call.
+func inputRestatesToolCalls(input ojson.Result, pendingCallIDs []string) bool {
+	calls := make(map[string]struct{}, len(pendingCallIDs))
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "function_call", "custom_tool_call":
+			if callID := strings.TrimSpace(item.Get("call_id").String()); callID != "" {
+				calls[callID] = struct{}{}
+			}
+		}
+	}
+	for _, callID := range pendingCallIDs {
+		if callID = strings.TrimSpace(callID); callID == "" {
+			continue
+		}
+		if _, ok := calls[callID]; !ok {
 			return false
 		}
 	}

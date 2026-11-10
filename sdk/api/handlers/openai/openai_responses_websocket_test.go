@@ -5294,6 +5294,38 @@ func TestNormalizeSubsequentRequestFullReplayReplacesTranscript(t *testing.T) {
 	}
 }
 
+func TestNormalizeSubsequentRequestReplayKeepsPendingToolCalls(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","role":"user","content":"read a file"}]}`)
+	lastResponseOutput := []byte(`[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read","arguments":"{}"}]`)
+	pending := []string{"call-1"}
+
+	// The replay restates the previous input and answers the call without restating it.
+	raw := `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"},{"type":"function_call_output","call_id":"call-1","output":"data"}]}`
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	items := ojson.GetBytesNoCopy(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("input len = %d, want 3 (input, call, output): %s", len(items), normalized)
+	}
+	for i, want := range []string{"message", "function_call", "function_call_output"} {
+		if got := items[i].Get("type").String(); got != want {
+			t.Fatalf("item %d type = %s, want %s: %s", i, got, want, normalized)
+		}
+	}
+
+	// A replay that restates the call stays as sent.
+	raw = `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"},{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"call-1","output":"data"}]}`
+	normalized, _, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 3 {
+		t.Fatalf("input len = %d, want 3 (sent as is): %s", got, normalized)
+	}
+}
+
 func TestNormalizeSubsequentRequestPartialOverlapStillMerges(t *testing.T) {
 	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[
 		{"type":"message","role":"user","content":"first"},
