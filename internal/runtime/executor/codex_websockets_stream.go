@@ -20,6 +20,9 @@ import (
 )
 
 func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.SourceFormat == sdktranslator.FormatOpenAIDecisions {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /decisions"}
+	}
 	log.Debugf("Executing Codex Websockets stream request with auth ID: %s, model: %s", auth.ID, req.Model)
 	if ctx == nil {
 		ctx = context.Background()

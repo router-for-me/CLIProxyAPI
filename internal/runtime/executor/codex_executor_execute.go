@@ -18,6 +18,9 @@ import (
 )
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.SourceFormat == sdktranslator.FormatOpenAIDecisions {
+		return e.executeDecisions(ctx, auth, req, opts)
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	ctx = helps.WithCodexCommentaryPolicy(ctx, e.cfg)
 	if errExpand := helps.ExpandRecognizedResponsesCompactionCapsules(&req, &opts); errExpand != nil {

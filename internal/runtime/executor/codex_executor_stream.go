@@ -20,6 +20,9 @@ import (
 )
 
 func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.SourceFormat == sdktranslator.FormatOpenAIDecisions {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /decisions"}
+	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	ctx = helps.WithCodexCommentaryPolicy(ctx, e.cfg)
 	if opts.Alt == "responses/compact" {

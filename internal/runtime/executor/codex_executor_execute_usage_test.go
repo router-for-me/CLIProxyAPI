@@ -11,6 +11,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -263,5 +264,37 @@ func TestCodexExecutorExecuteCompactRecordsFinalizedPayloadOverrideReasoningEffo
 	record := capture.await(t)
 	if record.ReasoningEffort != "high" {
 		t.Fatalf("usage record ReasoningEffort = %q, want %q", record.ReasoningEffort, "high")
+	}
+}
+
+func TestCodexExecutorDecisionsPublishesTopLevelUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/decisions" {
+			t.Errorf("upstream path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"model":"gpt-6-luna","answers":[{"type":"predicate","probability":0.9,"name":null}],"usage":{"input_tokens":42,"output_tokens":8,"total_tokens":50,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":10},"output_tokens_details":{"reasoning_tokens":3}}}`)
+	}))
+	t.Cleanup(server.Close)
+	capture := &codexResponseModelUsageCapture{alias: t.Name(), records: make(chan coreusage.Record, 1)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() { coreusage.RegisterNamedPlugin(t.Name(), codexResponseModelNoopUsagePlugin{}) })
+	ctx := coreusage.WithRequestedModelAlias(t.Context(), t.Name())
+	credential := &cliproxyauth.Auth{
+		ID: t.Name(), Provider: "codex",
+		Attributes: map[string]string{"api_key": "openai-key", "base_url": server.URL + "/v1"},
+	}
+	_, err := NewCodexExecutor(&config.Config{}).Execute(ctx, credential, cliproxyexecutor.Request{
+		Model: "gpt-6-luna", Payload: []byte(`{"model":"gpt-6-luna","input":"test","questions":[{"type":"predicate","instructions":"Test?"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIDecisions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := capture.await(t)
+	detail := record.Detail
+	if record.Failed || record.Model != "gpt-6-luna" || detail.InputTokens != 42 || detail.OutputTokens != 8 ||
+		detail.TotalTokens != 50 || detail.CachedTokens != 20 || detail.CacheReadTokens != 20 ||
+		detail.CacheCreationTokens != 10 || detail.ReasoningTokens != 3 {
+		t.Fatalf("Decisions usage = %+v, failed=%t, model=%q", detail, record.Failed, record.Model)
 	}
 }
