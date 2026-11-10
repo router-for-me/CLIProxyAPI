@@ -783,3 +783,68 @@ func TestSessionExtractionClonesStringsAgainstBufferMutation(t *testing.T) {
 		t.Fatalf("CanonicalTurn corrupted after buffer mutation: %+v", turns[0])
 	}
 }
+
+func TestExtractSessionInfoStableBodyBeforeClientRequestID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body, want string
+	}{
+		{"responses", `{"prompt_cache_key":"stable-session","input":"hello"}`, "pck:stable-session"},
+		{"chat", `{"session_id":"stable-session","messages":[{"role":"user","content":"hello"}]}`, "session:stable-session"},
+		{"claude", `{"session_id":"stable-session","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`, "session:stable-session"},
+		{"gemini", `{"cachedContent":"stable-session","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`, "geminicache:stable-session"},
+		{"nested gemini", `{"request":{"sessionId":"stable-session","contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`, "session:stable-session"},
+		{"conversation", `{"conversation":{"id":"stable-session"}}`, "conv:stable-session"},
+		{"legacy conversation", `{"conversation_id":"stable-session"}`, "conv:stable-session"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, requestID := range []string{"request-one", "request-two"} {
+				headers := http.Header{"X-Client-Request-Id": []string{requestID}}
+				info, ok := ExtractSessionInfo(headers, []byte(test.body), nil)
+				if !ok || info.SessionID != test.want {
+					t.Fatalf("request %q: got %+v, want %q", requestID, info, test.want)
+				}
+				otherBody := strings.ReplaceAll(test.body, "stable-session", "other-session")
+				other, ok := ExtractSessionInfo(headers, []byte(otherBody), nil)
+				if !ok || other.SessionID == info.SessionID {
+					t.Fatalf("distinct body sessions pooled: %+v / %+v", info, other)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractSessionInfoClientRequestPriorityBoundaries(t *testing.T) {
+	t.Parallel()
+	for header, want := range map[string]string{
+		"X-Conversation-Id":        "conv:explicit-session",
+		"X-Thread-Id":              "thread:explicit-session",
+		"Session-Id":               "codex:explicit-session",
+		"X-Claude-Code-Session-Id": "claude:explicit-session",
+		"X-Session-ID":             "header:explicit-session",
+	} {
+		t.Run(header, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set(header, "explicit-session")
+			body := []byte(`{"prompt_cache_key":"body-cache","session_id":"body-session"}`)
+			headers.Set("X-Client-Request-Id", "request-one")
+			got, ok := ExtractSessionInfo(headers, body, nil)
+			if !ok || got.SessionID != want {
+				t.Fatalf("explicit header lost priority: %+v, want %q", got, want)
+			}
+		})
+	}
+	for _, body := range []string{
+		`{}`, `{"metadata":{"user_id":"shared-user"}}`,
+		`{"session_id":"bad\nvalue","prompt_cache_key":"` + strings.Repeat("x", 257) + `"}`,
+	} {
+		for _, requestID := range []string{"request-one", "request-two"} {
+			headers := http.Header{"X-Client-Request-Id": []string{requestID}, "X-Parent-Session-ID": []string{"parent"}}
+			info, ok := ExtractSessionInfo(headers, []byte(body), nil)
+			if !ok || info.SessionID != "clientreq:"+requestID || info.ParentSessionID != "clientreq:parent" {
+				t.Fatalf("request fallback or hierarchy changed: %+v", info)
+			}
+		}
+	}
+}

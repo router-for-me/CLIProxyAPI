@@ -865,7 +865,8 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	}
 	if claudeUsesLegacySystemReminderDoc(doc) {
 		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
-	} else if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEndDoc(doc) {
+	} else if keepCallerSystemTopLevel {
+		// API-key placement must not move when an assistant reply arrives.
 		for _, block := range forwardedSystemBlocks {
 			systemBlocks = append(systemBlocks, buildForwardedSystemBlock(block.Text, block, isExplicit))
 		}
@@ -933,7 +934,7 @@ func relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc *ojson.Doc, stric
 		prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc, forwardedSystemBlocks, isExplicit)
 		return true
 	}
-	if keepCallerSystemTopLevel && claudeMidConversationSystemMessagesAtEndDoc(doc) {
+	if keepCallerSystemTopLevel {
 		blocks := make([]string, 0, len(forwardedSystemBlocks))
 		for _, block := range forwardedSystemBlocks {
 			blocks = append(blocks, buildForwardedSystemBlock(block.Text, block, isExplicit))

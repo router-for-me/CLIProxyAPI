@@ -441,7 +441,13 @@ func TestClaudeExecutor_PromptCacheOptionsMode_Explicit_Cloaked_PreservesClientB
 	if ojson.GetBytes(seenBody, "system.0.cache_control").Exists() || ojson.GetBytes(seenBody, "system.1.cache_control").Exists() {
 		t.Fatalf("system blocks should not have automatic cache_control: %s", string(seenBody))
 	}
-	if !ojson.GetBytes(seenBody, "messages.3.content.0.cache_control").Exists() {
+	if got := ojson.GetBytes(seenBody, "messages.#.role").Raw; got != `["user","assistant","user"]` {
+		t.Fatalf("API-key cloaking must keep caller guidance outside history: %s", seenBody)
+	}
+	if got := ojson.GetBytes(seenBody, "messages.2.content.0.text").String(); got != "Specific cached user query" {
+		t.Fatalf("client cached user query changed: %s", seenBody)
+	}
+	if !ojson.GetBytes(seenBody, "messages.2.content.0.cache_control").Exists() {
 		t.Fatalf("client specified cache_control on user turn should be preserved: %s", string(seenBody))
 	}
 }

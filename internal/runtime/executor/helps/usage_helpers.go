@@ -2759,9 +2759,6 @@ func parseClaudeUsageNode(usageNode ojson.Result) usage.Detail {
 	if speed := cloneTrimmedString(usageNode.Get("speed").String()); speed != "" {
 		detail.ResponseServiceTier = speed
 	}
-	if detail.CachedTokens == 0 {
-		detail.CachedTokens = detail.CacheCreationTokens
-	}
 	// raw output_tokens already includes thinking; cache fields are independent
 	// from input_tokens in the Messages API.
 	detail.TotalTokens = detail.InputTokens + rawOutputTokens + detail.CacheReadTokens + detail.CacheCreationTokens

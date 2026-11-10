@@ -648,3 +648,43 @@ func TestEnrich_DoesNotClonePayloadWhenPopulatingOriginalRequest_Issue6101(t *te
 		t.Fatal("Enrich replaced explicitly provided OriginalRequest")
 	}
 }
+
+func TestEnrichStableBodyBeforeClientRequestID(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		format sdktranslator.Format
+		body   string
+		want   string
+	}{
+		{sdktranslator.FormatOpenAIResponse, `{"prompt_cache_key":"stable-session","input":"hello"}`, "pck:stable-session"},
+		{sdktranslator.FormatOpenAI, `{"session_id":"stable-session","messages":[{"role":"user","content":"hello"}]}`, "session:stable-session"},
+		{sdktranslator.FormatClaude, `{"session_id":"stable-session","messages":[{"role":"user","content":"hello"}]}`, "session:stable-session"},
+		{sdktranslator.FormatGemini, `{"cachedContent":"stable-session","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`, "geminicache:stable-session"},
+	} {
+		t.Run(string(test.format), func(t *testing.T) {
+			for _, requestID := range []string{"request-one", "request-two"} {
+				payload := []byte(test.body)
+				req, opts := Enrich(cliproxyexecutor.Request{Payload: payload}, cliproxyexecutor.Options{
+					SourceFormat: test.format,
+					Headers:      http.Header{"X-Client-Request-Id": []string{requestID}},
+					Metadata: map[string]any{
+						cliproxyexecutor.CallerScopeMetadataKey:      "caller-scope",
+						cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:stale",
+					},
+				})
+				for _, metadata := range []map[string]any{req.Metadata, opts.Metadata} {
+					if got := metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey]; got != test.want {
+						t.Fatalf("request %q: canonical ID = %v, want %q", requestID, got, test.want)
+					}
+					if got := DerivedID(metadata); got != "" {
+						t.Fatalf("stale derived ID retained: %q", got)
+					}
+				}
+				info, ok := ExtractSessionInfo(opts.Headers, opts.OriginalRequest, opts.Metadata)
+				if !ok || info.CallerScope != "caller-scope" || info.SessionID != test.want {
+					t.Fatalf("identity or caller scope changed: %+v", info)
+				}
+			}
+		})
+	}
+}

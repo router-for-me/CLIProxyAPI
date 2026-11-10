@@ -368,14 +368,21 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	}
 }
 
-func TestParseClaudeUsageFallsBackCachedTokensToCacheCreation(t *testing.T) {
-	data := []byte(`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`)
-	detail := ParseClaudeUsage(data)
-	if detail.CachedTokens != 19514 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 19514)
-	}
-	if detail.TotalTokens != 22852 {
-		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22852)
+func TestParseClaudeUsageDoesNotCountCacheWritesAsHits(t *testing.T) {
+	for _, data := range []string{
+		`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514}}`,
+		`{"usage":{"input_tokens":3085,"output_tokens":253,"cache_creation_input_tokens":19514,"cache_read_input_tokens":0}}`,
+	} {
+		detail := ParseClaudeUsage([]byte(data))
+		if detail.CachedTokens != 0 || detail.CacheReadTokens != 0 {
+			t.Errorf("cache reads = %d/%d, want 0/0", detail.CachedTokens, detail.CacheReadTokens)
+		}
+		if detail.CacheCreationTokens != 19514 || detail.TotalTokens != 22852 {
+			t.Errorf("cache writes or total changed: %+v", detail)
+		}
+		if detail.TokenBreakdown.Input.CacheReadTokens != 0 || detail.TokenBreakdown.Input.CacheWriteTokens != 19514 {
+			t.Errorf("token breakdown = %+v", detail.TokenBreakdown)
+		}
 	}
 }
 
