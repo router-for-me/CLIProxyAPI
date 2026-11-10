@@ -58,6 +58,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	if c.Request.Method == http.MethodGet {
 		config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 		if !yamlRequest {
+			if IsGuestRequest(c) {
+				// The management section holds the management key hash.
+				deleteConfigV8Path(root, []string{"management"})
+			}
 			if servers := configV8Node(root, v8ICEServersPath); servers != nil && servers.Kind == yaml.SequenceNode {
 				for _, server := range servers.Content {
 					deleteConfigV8Path(server, []string{"username"})
@@ -153,6 +157,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
+	}
+	if IsGuestRequest(c) && !configV8SectionUnchanged(before, root, "management") {
+		c.JSON(http.StatusForbidden, gin.H{"error": guestAccessDeniedMs})
+		return
 	}
 	// Revisions are owned by Home and must not become ordinary editable settings.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {
@@ -376,4 +384,16 @@ func mergeConfigV8Patch(dst, src *yaml.Node) {
 			dst.Content = append(dst.Content, key, value)
 		}
 	}
+}
+
+// configV8SectionUnchanged reports whether a top-level section is identical in both trees.
+func configV8SectionUnchanged(before, after *yaml.Node, section string) bool {
+	var a, b any
+	if node := configV8Node(before, []string{section}); node != nil {
+		_ = node.Decode(&a)
+	}
+	if node := configV8Node(after, []string{section}); node != nil {
+		_ = node.Decode(&b)
+	}
+	return reflect.DeepEqual(a, b)
 }

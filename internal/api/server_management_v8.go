@@ -28,6 +28,13 @@ func (s *Server) registerManagementV8Routes() {
 	}
 
 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
+	v8.GET("/session", s.mgmt.GetSession)
+	v8.GET("/guests", s.mgmt.ListGuests)
+	v8.GET("/guests/routes", s.mgmt.ListGuestRoutes)
+	v8.POST("/guests", s.mgmt.CreateGuest)
+	v8.PATCH("/guests/:id", s.mgmt.PatchGuest)
+	v8.POST("/guests/:id/rotate", s.mgmt.RotateGuestKey)
+	v8.DELETE("/guests/:id", s.mgmt.DeleteGuest)
 	v8.POST("/requests/api-call", s.mgmt.APICall)
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
 	v8.GET("/routing/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
