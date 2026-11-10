@@ -368,6 +368,17 @@ func (s *Service) fetchLiveModelList(ctx context.Context, auth *coreauth.Auth) (
 	if !ok || executor == nil {
 		return liveModelList{}, fmt.Errorf("no %s executor", provider)
 	}
+	// Prepare the credential the way requests do (e.g. Meta mints an API key and learns its base URL
+	// from a DCA token), so the result is stored by the manager and the URL below is the prepared one.
+	if preparer, okPreparer := executor.(coreauth.RequestAuthPreparer); okPreparer {
+		prepared, errPrepare := s.coreManager.PrepareRequestAuth(ctx, preparer, auth)
+		if errPrepare != nil {
+			return liveModelList{}, fmt.Errorf("prepare credentials: %w", errPrepare)
+		}
+		if prepared != nil {
+			auth = prepared
+		}
+	}
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()

@@ -435,3 +435,64 @@ func TestTurningLiveListsOffDropsTheLists(t *testing.T) {
 		t.Fatal("lists must be dropped while the option is off")
 	}
 }
+
+// preparingListExecutor prepares credentials like Meta: the base URL is only known after preparation.
+type preparingListExecutor struct {
+	liveListExecutor
+	preparedURL string
+	prepares    atomic.Int32
+}
+
+func (e *preparingListExecutor) ShouldPrepareRequestAuth(auth *coreauth.Auth) bool {
+	base, _ := auth.Metadata["base_url"].(string)
+	return base != e.preparedURL
+}
+
+func (e *preparingListExecutor) PrepareRequestAuth(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	e.prepares.Add(1)
+	prepared := auth.Clone()
+	if prepared.Metadata == nil {
+		prepared.Metadata = map[string]any{}
+	}
+	prepared.Metadata["base_url"] = e.preparedURL
+	return prepared, nil
+}
+
+func TestLiveModelListFetchUsesPreparedCredentials(t *testing.T) {
+	resetLiveModelLists()
+	t.Cleanup(resetLiveModelLists)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"muse-spark-1.3"}]}`))
+	}))
+	defer server.Close()
+	cfg := &config.Config{}
+	cfg.Models.LiveLists = true
+	svc := &Service{cfg: cfg, coreManager: coreauth.NewManager(nil, nil, nil)}
+	executor := &preparingListExecutor{liveListExecutor: liveListExecutor{provider: "meta"}, preparedURL: server.URL}
+	svc.coreManager.RegisterExecutor(executor)
+	auth, err := svc.coreManager.Register(t.Context(), &coreauth.Auth{ID: "meta-dca", Provider: "meta",
+		Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"email": "a@example.com", "base_url": "http://127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	for i := 0; i < 2; i++ {
+		svc.coreManager.RegisterExecutor(executor)
+		svc.refreshLiveModelLists(t.Context(), true)
+		liveModelLists.fetches.Wait()
+	}
+	if executor.calls.Load() != 2 {
+		t.Fatalf("calls = %d, want 2 fetches against the prepared URL", executor.calls.Load())
+	}
+	if executor.prepares.Load() != 1 {
+		t.Fatalf("prepares = %d, want 1: the prepared credential must be stored, not prepared again", executor.prepares.Load())
+	}
+	current, _ := svc.coreManager.GetByID(auth.ID)
+	if base, _ := current.Metadata["base_url"].(string); base != server.URL {
+		t.Fatalf("stored base_url = %q, want the prepared %q", base, server.URL)
+	}
+	if _, ok := liveModelLists.get(auth.ID, liveModelListIdentity(current)); !ok {
+		t.Fatal("the list fetched with prepared credentials was not stored")
+	}
+}
