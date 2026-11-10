@@ -116,6 +116,7 @@ type readyBucketCursorState struct {
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
 	state := readyViewCursorState{lastPicked: view.lastPicked}
+	state.weightedState.peak = view.weightedState.peak
 	if len(view.weightedState.current) > 0 {
 		state.weightedState.current = make(map[string]int64, len(view.weightedState.current))
 		for authID, current := range view.weightedState.current {
@@ -136,6 +137,9 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 		return
 	}
 	view.lastPicked = state.lastPicked
+	// Keep the prune bound scaled with the shard's historical peak even when credits
+	// cannot be restored, so a later prepare never prunes at the unscaled floor.
+	view.weightedState.peak = max(state.weightedState.peak, len(view.flat))
 	weights := scheduledWeightVector(view.flat)
 	if len(state.weightedState.current) == 0 || weightsConfigChanged(state.weightedState.weights, weights) {
 		return

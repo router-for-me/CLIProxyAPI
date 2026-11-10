@@ -44,11 +44,19 @@ type WeightedRoundRobinSelector struct {
 	states     map[[32]byte]*weightedPoolState
 	stateCount int
 	maxKeys    int
+	// largeStates holds one shared accumulator per route for oversized candidate sets.
+	// Unlike states, it is never flushed wholesale, so large-pool rotation progress
+	// survives churn in the exact-pool cache below.
+	largeStates map[string]*weightedPoolState
 }
 
 type smoothWeightedState struct {
 	current map[string]int64
 	weights map[string]int64
+	// peak is the largest candidate vector ever prepared for this state. Pruning scales
+	// with peak so pools larger than maxSmoothWeightedStateEntries never drop credits for
+	// members that are only transiently absent.
+	peak int
 }
 
 type weightedSelectorStateModelKey struct{}
@@ -1120,8 +1128,9 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 }
 
 // maxSmoothWeightedStateEntries bounds a single accumulator map so credentials that are
-// removed permanently cannot leak entries. Real pools stay far below this bound, so the
-// transient subsets produced by retry exclusions and cooldowns are never pruned.
+// removed permanently cannot leak entries. Pools larger than this bound are still safe:
+// pruning only starts above a limit that scales with the largest pool ever prepared, so
+// retry exclusions and cooldowns never wipe accumulated credits for large pools.
 const maxSmoothWeightedStateEntries = 1024
 
 // prepare syncs the configured weights into the state without discarding accumulated
@@ -1130,6 +1139,9 @@ const maxSmoothWeightedStateEntries = 1024
 // affinity), because discarding credits there would collapse selection onto the first
 // candidate in slice order.
 func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if len(weights) > s.peak {
+		s.peak = len(weights)
+	}
 	if s.current == nil || weightsConfigChanged(s.weights, weights) {
 		s.current = make(map[string]int64, len(weights))
 	}
@@ -1142,10 +1154,24 @@ func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	s.pruneStale(weights)
 }
 
+// smoothWeightedPruneLimit is the entry count above which stale entries may be dropped.
+// The limit scales with the peak pool size so that transient exclusions from a large pool
+// (which shrink the candidate vector far below the registered credential count) can never
+// trigger pruning of the excluded credentials' credits.
+func (s *smoothWeightedState) pruneLimit() int {
+	if limit := 2 * s.peak; limit > maxSmoothWeightedStateEntries {
+		return limit
+	}
+	return maxSmoothWeightedStateEntries
+}
+
 // pruneStale drops entries for credentials outside the current candidate set, but only
-// once a map exceeds the safety bound, so ordinary transient exclusions keep their credits.
+// above the scaled bound, so ordinary transient exclusions keep their credits regardless
+// of pool size. Only long-gone (deregistered) credentials accumulate enough stale entries
+// to cross the bound and get pruned.
 func (s *smoothWeightedState) pruneStale(weights map[string]int64) {
-	if len(s.current) <= maxSmoothWeightedStateEntries && len(s.weights) <= maxSmoothWeightedStateEntries {
+	limit := s.pruneLimit()
+	if len(s.current) <= limit && len(s.weights) <= limit {
 		return
 	}
 	for authID := range s.current {
@@ -2064,6 +2090,18 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
+	}
+}
+
+// ForgetAuth forwards permanent credential removal to the fallback selector so weighted
+// accounting can prune the deregistered credential. Transient unavailability must use
+// InvalidateAuth instead to keep accumulated round-robin credit.
+func (s *SessionAffinitySelector) ForgetAuth(authID string) {
+	if s == nil || authID == "" {
+		return
+	}
+	if forgetter, ok := s.fallback.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
 	}
 }
 
