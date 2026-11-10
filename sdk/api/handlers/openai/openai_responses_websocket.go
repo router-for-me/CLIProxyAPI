@@ -181,6 +181,42 @@ func (w *responsesWebsocketWriter) writePing() error {
 	return w.conn.WriteControl(websocket.PingMessage, nil, time.Time{})
 }
 
+func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context.CancelCauseFunc, intervals <-chan time.Duration) {
+	var ticker *time.Ticker
+	var ticks <-chan time.Time
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case interval := <-intervals:
+			if interval <= 0 {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				ticks = nil
+				continue
+			}
+			if ticker == nil {
+				ticker = time.NewTicker(interval)
+			} else {
+				ticker.Reset(interval)
+			}
+			ticks = ticker.C
+		case <-ticks:
+			if errPing := w.writePing(); errPing != nil {
+				cancel(errPing)
+				_, _ = w.closeWithoutError()
+				return
+			}
+		}
+	}
+}
+
 func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -374,6 +410,30 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	defer cancelSocket(nil)
 	c.Request = c.Request.WithContext(socketCtx)
 	upgradeRequest := c.Request.Clone(socketCtx)
+	// Start Ping at upgrade, before opening an upstream stream can block.
+	var keepAliveIntervals chan time.Duration
+	var keepAliveInterval time.Duration
+	updateKeepAlive := func() {
+		if h == nil {
+			return
+		}
+		interval := handlers.StreamingKeepAliveInterval(h.CurrentConfig())
+		if interval == keepAliveInterval {
+			return
+		}
+		keepAliveInterval = interval
+		if keepAliveIntervals == nil {
+			keepAliveIntervals = make(chan time.Duration, 1)
+			go writer.keepAlive(socketCtx, cancelSocket, keepAliveIntervals)
+		}
+		// Replace a pending interval without waiting for a Ping write.
+		select {
+		case <-keepAliveIntervals:
+		default:
+		}
+		keepAliveIntervals <- interval
+	}
+	updateKeepAlive()
 	// The reader owns the client socket so an in-flight interrupt is not stuck
 	// behind the response currently being forwarded.
 	requestLogEnabled := false
@@ -568,6 +628,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
+		updateKeepAlive()
 		// log.Infof(
 		// 	"responses websocket: downstream_in id=%s type=%d event=%s payload=%s",
 		// 	passthroughSessionID,
