@@ -311,7 +311,7 @@ func claudeCanonicalModel(model string) string {
 	return model
 }
 
-// claudeModelHasPerTurnEffort reports models whose 2.1.280 catalog capability
+// claudeModelHasPerTurnEffort reports models whose 2.1.321 catalog capability
 // per_turn_effort puts per-turn-control-2026-07-01 on every first-party request.
 func isClaudeOpus55Model(model string) bool {
 	model = claudeCanonicalModel(model)
@@ -359,7 +359,7 @@ func isClaudeFable51OnlyModel(model string) bool {
 // prefix fails binding validation unless the request opts into dropping them.
 // See https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
 func isClaudePreservedThinkingModel(model string) bool {
-	return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model) || isClaudeFable51OnlyModel(model)
+	return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model) || isClaudeFable51OnlyModel(model) || isClaudeFable52Model(model)
 }
 
 // claudeThinkingTypeAcceptsBlockBinding reports whether the body's thinking
@@ -502,7 +502,11 @@ func applyClaudeCloakThinkingDisplayDoc(doc *ojson.Doc, callerOwned bool) bool {
 }
 
 func claudeModelHasPerTurnEffort(model string) bool {
-	return isClaudeOpus55Model(model) || strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1")
+	return isClaudeOpus55Model(model) ||
+		strings.HasPrefix(claudeCanonicalModel(model), "claude-fable-5-1") ||
+		isClaudeFable52Model(model) ||
+		isClaudeSonnet55Model(model) ||
+		isClaudeHaiku55Model(model)
 }
 
 // claudeModelHasPerTurnTiming reports models whose catalog lists per_turn_timing.
@@ -510,7 +514,13 @@ func claudeModelHasPerTurnEffort(model string) bool {
 // is set, so the beta follows the body or an explicit caller request.
 func claudeModelHasPerTurnTiming(model string) bool {
 	model = claudeCanonicalModel(model)
-	return claudeModelHasPerTurnEffort(model) || strings.HasPrefix(model, "claude-mythos-5-1")
+	if isClaudeHaiku55Model(model) {
+		return false
+	}
+	return claudeModelHasPerTurnEffort(model) ||
+		strings.HasPrefix(model, "claude-mythos-5-1") ||
+		strings.HasPrefix(model, "claude-mythos-5-2") ||
+		strings.HasPrefix(model, "claude-mythos-5.2")
 }
 
 // claudeIncludePerTurnControl also covers the models Claude Code 2.1.321 sends
@@ -519,8 +529,7 @@ func claudeIncludePerTurnControl(body []byte, requested map[string]bool) bool {
 	if requested[claudePerTurnControlBeta] {
 		return true
 	}
-	model := ojson.GetBytesNoCopy(body, "model").String()
-	return claudeModelHasPerTurnEffort(model) || isClaudeFable52Model(model) || isClaudeSonnet55Model(model) || isClaudeHaiku55Model(model)
+	return claudeModelHasPerTurnEffort(ojson.GetBytesNoCopy(body, "model").String())
 }
 
 func claudeIncludePerTurnTiming(body []byte, requested map[string]bool) bool {
