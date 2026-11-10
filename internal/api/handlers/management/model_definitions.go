@@ -32,6 +32,9 @@ func (h *Handler) RefreshModelDefinitions(c *gin.Context) {
 	}
 
 	result, errRefresh := registry.RefreshModelCatalogsWithPolicy(c.Request.Context(), sources, home)
+	if sources.LiveLists && !home {
+		registry.RequestLiveModelListRefresh()
+	}
 	if errRefresh != nil {
 		c.JSON(http.StatusBadGateway, gin.H{
 			"ok":                false,

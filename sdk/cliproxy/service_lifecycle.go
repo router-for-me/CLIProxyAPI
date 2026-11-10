@@ -236,6 +236,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.registerModelRefreshCallback()
 	if !homeEnabled {
 		go s.runAntigravityModelRefresh(ctx)
+		go s.runLiveModelListRefresh(ctx)
 	}
 
 	select {
