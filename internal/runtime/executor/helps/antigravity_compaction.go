@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	antigravityCompactionCapsulePrefix = "cpa-ag-compact-v1:"
-	antigravityCompactionItemIDPrefix  = "cmp_ag_compact_"
-	fixedCompactionKeySecret           = "CLIProxyAPI"
+	antigravityCompactionCapsulePrefix    = "cpa-ag-compact-v1:"
+	antigravityCompactionItemIDPrefix     = "cmp_ag_compact_"
+	antigravityCompactionResponseIDPrefix = "resp_ag_compact_"
+	fixedCompactionKeySecret              = "CLIProxyAPI"
 )
 
 type antigravityCompactionCapsuleData struct {
@@ -34,6 +35,32 @@ type antigravityCompactionCapsuleData struct {
 // RecognizedAntigravityCompactionCapsule reports whether encrypted content uses the CPA capsule prefix.
 func RecognizedAntigravityCompactionCapsule(encryptedContent string) bool {
 	return strings.HasPrefix(strings.TrimSpace(encryptedContent), antigravityCompactionCapsulePrefix)
+}
+
+// RecognizedResponsesCompactionResponseID reports whether responseID is a locally synthesized CPA compaction response ID.
+func RecognizedResponsesCompactionResponseID(responseID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(responseID), antigravityCompactionResponseIDPrefix)
+}
+
+// HasResponsesCompactionConversationInput reports whether payload carries at least one
+// non-control conversation item in input for local summary compaction.
+func HasResponsesCompactionConversationInput(payload []byte) bool {
+	input := ojson.GetBytesNoCopy(payload, "input")
+	if input.Type == ojson.String {
+		return strings.TrimSpace(input.String()) != ""
+	}
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "compaction_trigger", "additional_tools", "configuration_update":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func isRecognizedCPACompactionItem(item ojson.Result) bool {
@@ -242,6 +269,8 @@ func PrepareAntigravityCompactionSummaryPayloadDoc(doc *ojson.Doc, modelName str
 
 	// Remove fields not needed or incompatible with summary generation
 	for _, field := range []string{
+		"type",
+		"event_id",
 		"stream",
 		"tools",
 		"tool_choice",
