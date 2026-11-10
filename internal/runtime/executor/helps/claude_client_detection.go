@@ -67,6 +67,18 @@ var nativeClaudeEntrypoints = map[string]bool{
 	"claude-vscode": true,
 }
 
+// isClaudeCodeXApp reports whether an X-App header value identifies an
+// official Claude Code client. "cli" marks interactive sessions and "cli-bg"
+// the background sessions started by `claude --bg`, which are otherwise
+// wire-identical to interactive ones. Any other value stays non-native.
+func isClaudeCodeXApp(value string) bool {
+	switch value {
+	case "cli", "cli-bg":
+		return true
+	}
+	return false
+}
+
 func isNativeClaudeEntrypoint(entrypoint string, cfg *config.Config) bool {
 	entrypoint = strings.ToLower(strings.TrimSpace(entrypoint))
 	if entrypoint == "" {
@@ -174,7 +186,7 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 	entrypoint := userAgent.entrypoint
 	subclient := claudeSubclientForEntrypoint(entrypoint, cfg)
 	detection := ClaudeCodeRequestDetection{
-		XAppCLI:         headerValue(headers, "X-App") == "cli",
+		XAppCLI:         isClaudeCodeXApp(headerValue(headers, "X-App")),
 		UserAgent:       validUserAgent && plausibleClaudeCodeVersion(userAgent.version, cfg),
 		BetasPresent:    headerContainsClaudeCodeBeta(headers),
 		Entrypoint:      entrypoint,

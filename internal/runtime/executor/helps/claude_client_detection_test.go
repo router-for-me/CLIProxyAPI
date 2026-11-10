@@ -131,6 +131,39 @@ func TestDetectClaudeCodeRequestRejectsEachMissingMessageSignal(t *testing.T) {
 	}
 }
 
+// Claude Code background sessions (`claude --bg`) send X-App: cli-bg while
+// otherwise remaining wire-identical to interactive sessions, so the X-App
+// signal must accept them exactly like cli. Unrelated values keep failing
+// the native check.
+func TestDetectClaudeCodeRequestAcceptsBackgroundSessionXApp(t *testing.T) {
+	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
+	for _, test := range []struct {
+		name string
+		xApp string
+		want bool
+	}{
+		{name: "interactive cli", xApp: "cli", want: true},
+		{name: "background cli-bg", xApp: "cli-bg", want: true},
+		{name: "prefixed cli-foo", xApp: "cli-foo"},
+		{name: "web", xApp: "web"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := confirmedClaudeCodeHeaders()
+			headers.Set("X-App", test.xApp)
+			detection := DetectClaudeCodeRequest(headers, payload, false)
+			if detection.XAppCLI != test.want {
+				t.Fatalf("XAppCLI = %v, want %v: %#v", detection.XAppCLI, test.want, detection)
+			}
+			if !detection.NativeClient {
+				t.Fatalf("detection = %#v, want the cli entrypoint to stay native", detection)
+			}
+			if detection.StrongSignals != test.want || detection.Confirmed != test.want {
+				t.Fatalf("detection = %#v, want confirmed = %v", detection, test.want)
+			}
+		})
+	}
+}
+
 func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
 	for _, test := range []struct {
