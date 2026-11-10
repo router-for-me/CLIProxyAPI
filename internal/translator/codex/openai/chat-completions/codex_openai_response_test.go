@@ -77,6 +77,102 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 	}
 }
 
+func TestConvertCodexResponseToOpenAI_StreamToolCallPreservesClientModelAlias(t *testing.T) {
+	ctx := context.Background()
+	clientModel := "team/gpt"
+	upstreamModel := "gpt-6.1-sol"
+	originalRequest := []byte(`{"model":"` + clientModel + `","messages":[{"role":"user","content":"lookup"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]}`)
+
+	var param any
+	send := func(event string) [][]byte {
+		return ConvertCodexResponseToOpenAI(ctx, upstreamModel, originalRequest, nil, []byte("data: "+event), &param)
+	}
+
+	out := send(`{"type":"response.created","response":{"id":"resp_alias","created_at":1700000000,"model":"` + upstreamModel + `"}}`)
+	if len(out) != 0 {
+		t.Fatalf("expected no output for response.created, got %d chunks", len(out))
+	}
+
+	var emitted [][]byte
+	for _, event := range []string{
+		`{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_lookup","name":"lookup","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"query\":"}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"\"OpenAI\"}"}`,
+		`{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"query\":\"OpenAI\"}"}`,
+		`{"type":"response.completed","response":{"id":"resp_alias","model":"` + upstreamModel + `","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+	} {
+		emitted = append(emitted, send(event)...)
+	}
+
+	// Announcement, two argument deltas, and the completion chunk.
+	if len(emitted) != 4 {
+		t.Fatalf("expected 4 chunks, got %d: %s", len(emitted), emitted)
+	}
+	for _, chunk := range emitted {
+		if got := ojson.GetBytesNoCopy(chunk, "model").String(); got != clientModel {
+			t.Fatalf("expected model alias %q, got %q; chunk=%s", clientModel, got, chunk)
+		}
+	}
+
+	// Tool-call identity, arguments, and finish reason stay unchanged.
+	if got := ojson.GetBytesNoCopy(emitted[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "lookup" {
+		t.Fatalf("expected tool name lookup, got %q; chunk=%s", got, emitted[0])
+	}
+	if got := ojson.GetBytesNoCopy(emitted[1], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"query":` {
+		t.Fatalf("expected first arguments delta %q, got %q; chunk=%s", `{"query":`, got, emitted[1])
+	}
+	if got := ojson.GetBytesNoCopy(emitted[2], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `"OpenAI"}` {
+		t.Fatalf("expected second arguments delta %q, got %q; chunk=%s", `"OpenAI"}`, got, emitted[2])
+	}
+	if got := ojson.GetBytesNoCopy(emitted[3], "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("expected finish_reason tool_calls, got %q; chunk=%s", got, emitted[3])
+	}
+}
+
+func TestConvertCodexResponseToOpenAINonStream_ToolCallPreservesClientModelAlias(t *testing.T) {
+	ctx := context.Background()
+	clientModel := "team/gpt"
+	upstreamModel := "gpt-6.1-sol"
+	originalRequest := []byte(`{"model":"` + clientModel + `","messages":[{"role":"user","content":"lookup"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_alias","created_at":1700000000,"model":"` + upstreamModel + `","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"output":[{"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"query\":\"OpenAI\"}"}]}}`)
+
+	out := ConvertCodexResponseToOpenAINonStream(ctx, upstreamModel, originalRequest, nil, raw, nil)
+	if got := ojson.GetBytesNoCopy(out, "model").String(); got != clientModel {
+		t.Fatalf("expected model alias %q, got %q; response=%s", clientModel, got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.name").String(); got != "lookup" {
+		t.Fatalf("expected tool name lookup, got %q; response=%s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"query":"OpenAI"}` {
+		t.Fatalf("expected tool arguments %q, got %q; response=%s", `{"query":"OpenAI"}`, got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("expected finish_reason tool_calls, got %q; response=%s", got, out)
+	}
+}
+
+func TestConvertCodexResponseToOpenAI_NoRequestModelFallsBackToUpstreamModel(t *testing.T) {
+	ctx := context.Background()
+	upstreamModel := "gpt-6.1-sol"
+	originalRequest := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	var param any
+	_ = ConvertCodexResponseToOpenAI(ctx, upstreamModel, originalRequest, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_fallback","created_at":1700000000,"model":"`+upstreamModel+`"}}`), &param)
+	out := ConvertCodexResponseToOpenAI(ctx, upstreamModel, originalRequest, nil, []byte(`data: {"type":"response.output_text.delta","delta":"hello"}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if got := ojson.GetBytesNoCopy(out[0], "model").String(); got != upstreamModel {
+		t.Fatalf("expected upstream model %q, got %q; chunk=%s", upstreamModel, got, out[0])
+	}
+
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_fallback","model":"` + upstreamModel + `","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`)
+	nonStream := ConvertCodexResponseToOpenAINonStream(ctx, upstreamModel, originalRequest, nil, raw, nil)
+	if got := ojson.GetBytesNoCopy(nonStream, "model").String(); got != upstreamModel {
+		t.Fatalf("expected upstream model %q, got %q; response=%s", upstreamModel, got, nonStream)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_PreservesURLCitations(t *testing.T) {
 	t.Run("non-stream", func(t *testing.T) {
 		raw := []byte(`{"type":"response.completed","response":{"id":"resp_citation","model":"gpt-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"前🙂"},{"type":"output_text","text":"引用","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":2},{"type":"file_citation","file_id":"file_1","index":0}]}]}]}}`)

@@ -144,8 +144,14 @@ type ConvertCliToOpenAIParams struct {
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
 func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
+		// Prefer the downstream-requested model so translated chunks keep the
+		// client's identifier instead of the routed upstream name.
+		clientModel := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+		if clientModel == "" {
+			clientModel = modelName
+		}
 		*param = &ConvertCliToOpenAIParams{
-			Model:                 modelName,
+			Model:                 clientModel,
 			CreatedAt:             0,
 			ResponseID:            "",
 			FunctionCallIndex:     -1,
@@ -180,19 +186,23 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	if dataType == "response.created" {
 		(*param).(*ConvertCliToOpenAIParams).ResponseID = strings.Clone(rootResult.Get("response.id").String())
 		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
-		(*param).(*ConvertCliToOpenAIParams).Model = strings.Clone(rootResult.Get("response.model").String())
+		// Never overwrite a non-empty client-facing model with the upstream one.
+		if (*param).(*ConvertCliToOpenAIParams).Model == "" {
+			(*param).(*ConvertCliToOpenAIParams).Model = strings.Clone(rootResult.Get("response.model").String())
+		}
 		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
 			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
 		}
 		return [][]byte{}
 	}
 
-	// Extract and set the model version.
+	// Prefer the downstream-requested model for every chunk; fall back to the
+	// upstream event model or the routed model name.
 	cachedModel := (*param).(*ConvertCliToOpenAIParams).Model
-	if modelResult := rootResult.Get("model"); modelResult.Exists() {
-		_ = templateDoc.Set("model", modelResult.String())
-	} else if cachedModel != "" {
+	if cachedModel != "" {
 		_ = templateDoc.Set("model", cachedModel)
+	} else if modelResult := rootResult.Get("model"); modelResult.Exists() {
+		_ = templateDoc.Set("model", modelResult.String())
 	} else if modelName != "" {
 		_ = templateDoc.Set("model", modelName)
 	}
@@ -499,8 +509,10 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 		_ = templateDoc.Set("service_tier", tier)
 	}
 
-	// Extract and set the model version.
-	if modelResult := responseResult.Get("model"); modelResult.Exists() {
+	// Prefer the downstream-requested model; fall back to the upstream model.
+	if clientModel := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON); clientModel != "" {
+		_ = templateDoc.Set("model", clientModel)
+	} else if modelResult := responseResult.Get("model"); modelResult.Exists() {
 		_ = templateDoc.Set("model", modelResult.String())
 	}
 
