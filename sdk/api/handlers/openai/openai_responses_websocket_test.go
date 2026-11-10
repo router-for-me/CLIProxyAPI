@@ -5338,6 +5338,16 @@ func TestNormalizeSubsequentRequestReplayKeepsPendingToolCalls(t *testing.T) {
 		}
 	}
 
+	// An exact resend of the previous request (no output yet) stays as sent: nothing is inserted.
+	raw = `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"}]}`
+	normalized, _, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 1 {
+		t.Fatalf("input len = %d, want 1 (resend kept as sent, no orphan call): %s", got, normalized)
+	}
+
 	// A replay that restates the call stays as sent.
 	raw = `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"},{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"call-1","output":"data"}]}`
 	normalized, _, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
