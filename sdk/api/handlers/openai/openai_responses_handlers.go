@@ -489,14 +489,14 @@ func responsesSSETerminalEvent(eventType string) bool {
 }
 
 func responsesSSEPayloadHasError(payload []byte) bool {
-	var fieldsBuf [4]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "code", "message")
-	for _, result := range fields[:2] {
+	var fieldsBuf [5]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "body.error", "code", "message")
+	for _, result := range fields[:3] {
 		if result.Exists() && result.Type != ojson.Null {
 			return true
 		}
 	}
-	return fields[2].Exists() && fields[3].Exists()
+	return fields[3].Exists() && fields[4].Exists()
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {

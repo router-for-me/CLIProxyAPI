@@ -213,29 +213,31 @@ func codexTerminalFailureStatus(body []byte) int {
 }
 
 func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
-	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
-	var body []byte
+	eventType := helps.CodexResponseEventType(eventData)
+	paths := []string{"error", "body.error", "response.error"}
 	switch eventType {
 	case "error":
-		body = codexTerminalErrorBody(eventData, "error")
-		if len(body) == 0 {
-			body = codexTerminalTopLevelErrorBody(eventData)
-		}
 	case "response.failed":
-		body = codexTerminalErrorBody(eventData, "response.error")
-		if len(body) == 0 {
-			body = codexTerminalErrorBody(eventData, "error")
-		}
+		paths = []string{"response.error", "error", "body.error"}
 	default:
 		return nil, false
 	}
-	if len(body) == 0 {
-		body = []byte(`{"error":{"message":"upstream stream failed without error details"}}`)
+	var doc *ojson.Doc
+	for _, path := range paths {
+		if doc = codexTerminalErrorBody(eventData, path); doc != nil {
+			break
+		}
+	}
+	if doc == nil && eventType == "error" {
+		doc = codexTerminalTopLevelErrorBody(eventData)
+	}
+	if doc == nil {
+		doc = ojson.NewDocString(`{"error":{"message":"upstream stream failed without error details"}}`)
 	}
 	if seq := ojson.GetBytesNoCopy(eventData, "sequence_number"); seq.Exists() {
-		body, _ = ojson.SetBytes(body, "sequence_number", seq.Int())
+		_ = doc.Set("sequence_number", seq.Int())
 	}
-	return body, true
+	return doc.Bytes(), true
 }
 
 func codexTerminalStreamErrShouldHandle(body []byte) bool {
@@ -249,9 +251,9 @@ func codexTerminalStreamErrShouldHandle(body []byte) bool {
 	return ok && code == "thinking_signature_invalid"
 }
 
-func codexTerminalErrorBody(eventData []byte, path string) []byte {
+func codexTerminalErrorBody(eventData []byte, path string) *ojson.Doc {
 	errorResult := ojson.GetBytesNoCopy(eventData, path)
-	if !errorResult.Exists() {
+	if !errorResult.Exists() || errorResult.Type == ojson.Null {
 		return nil
 	}
 	doc := ojson.NewDoc([]byte(`{"error":{}}`))
@@ -282,10 +284,10 @@ func codexTerminalErrorBody(eventData []byte, path string) []byte {
 			_ = doc.Set("error.message", msg+` (Set tool_choice to {"type":"image_generation"}, use a compatible Responses model such as gpt-5.4-mini, or call /v1/images/generations directly.)`)
 		}
 	}
-	return doc.Bytes()
+	return doc
 }
 
-func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
+func codexTerminalTopLevelErrorBody(eventData []byte) *ojson.Doc {
 	message := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "message").String())
 	code := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "code").String())
 	errorType := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "error_type").String())
@@ -314,7 +316,7 @@ func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
 			_ = doc.Set("error.message", errorType)
 		}
 	}
-	return doc.Bytes()
+	return doc
 }
 
 func codexPolicyFallbackMessage(code string) string {
