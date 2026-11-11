@@ -73,6 +73,10 @@ type DevinExecutor struct {
 	matcherMu     sync.RWMutex
 	lastWordsKey  string
 	cachedMatcher *helps.SensitiveWordMatcher
+	// streamIdleTimeout overrides the upstream frame idle watchdog. Zero uses
+	// defaultDevinUpstreamStreamIdle. Tests set a short value; it is not a
+	// request-wide deadline.
+	streamIdleTimeout time.Duration
 }
 
 // NewDevinExecutor creates a new Devin executor instance.
@@ -288,7 +292,9 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 
-	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(httpResp.Body, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
+	watchedBody, stopIdle := watchDevinUpstream(ctx, httpResp.Body, e.devinUpstreamIdleTimeout())
+	defer stopIdle()
+	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(watchedBody, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
 	if respLog != nil || len(interactionsJSON) > 0 {
 		logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
@@ -298,6 +304,14 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		patchDiagnostics = respLog.ApplyPatchDiagnostics
 	}
 	if errConsume != nil {
+		// Empty and stalled turns are retryable upstream failures. Keep their
+		// status instead of rewriting them as apply_patch diagnostics.
+		if isDevinRetryableStreamFailure(errConsume) {
+			if ctx.Err() == nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errConsume)
+			}
+			return resp, errConsume
+		}
 		original := opts.OriginalRequest
 		if len(original) == 0 {
 			original = req.Payload
@@ -968,8 +982,24 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	}
 
 	// 2. Consume streaming Connect-proto frames
+	body, stopIdle := watchDevinUpstream(ctx, body, e.devinUpstreamIdleTimeout())
+	defer stopIdle()
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
+		if errors.Is(errRead, errDevinStreamIdle) {
+			// Abort the open connect read. Before any client payload this error
+			// stays on the bootstrap path so the next credential can run.
+			if ctx.Err() == nil {
+				idleErr := newDevinStreamIdleError()
+				log.Warnf("devin executor: %v", idleErr)
+				if reporter != nil {
+					reporter.PublishFailure(ctx, idleErr)
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, idleErr)
+				emitStreamError(idleErr)
+			}
+			return
+		}
 		if errRead != nil {
 			if errors.Is(errRead, io.EOF) || errors.Is(errRead, net.ErrClosed) || ctx.Err() != nil {
 				break
@@ -1229,6 +1259,20 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 		completionFinishReason = "content_filter"
 	}
 
+	generated := accumulatedThinking.Len() > 0 || accumulatedContent.Len() > 0 || toolCallCount > 0 || len(accumulatedSignature) > 0
+	if ctx.Err() == nil && devinEmptyCompletedTurn(completionStatus, devinOutputTokens(finalUsage), generated) {
+		// Upstream reported a completed turn that never ran. Emit the failure
+		// before interaction.created so failover is still possible.
+		emptyErr := newDevinEmptyCompletionError()
+		log.Warnf("devin executor: %v", emptyErr)
+		if reporter != nil {
+			reporter.PublishFailure(ctx, emptyErr)
+		}
+		helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
+		emitStreamError(emptyErr)
+		return
+	}
+
 	completedDoc := ojson.NewDoc([]byte(`{"event_type":"interaction.completed","interaction":{"id":"","model":"","status":"completed","usage":{"total_input_tokens":0,"total_output_tokens":0,"total_cached_tokens":0}}}`))
 	_ = completedDoc.Set("interaction.id", interactionID)
 	_ = completedDoc.Set("interaction.model", req.Model)
@@ -1376,6 +1420,21 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
 		if errRead != nil {
+			if errors.Is(errRead, errDevinStreamIdle) {
+				respLog := &helps.DevinUpstreamResponseLog{
+					Status:                "stream_idle",
+					FramesCount:           framesCount,
+					Content:               getAllContentText(),
+					Thinking:              strings.Join(thinkingParts, ""),
+					Signature:             string(accumulatedSignature),
+					SignatureType:         signatureType,
+					ToolCalls:             getToolCalls(),
+					Usage:                 finalUsage,
+					UnknownFields:         unknownFields,
+					ApplyPatchDiagnostics: patchDiagnostics,
+				}
+				return nil, respLog, newDevinStreamIdleError()
+			}
 			if errors.Is(errRead, io.EOF) {
 				break
 			}
@@ -1599,6 +1658,24 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 	case 11: // CONTENT_FILTER
 		completionStatus = "incomplete"
 		completionFinishReason = "content_filter"
+	}
+
+	generated := getAllContentText() != "" || len(thinkingParts) > 0 || len(toolCalls) > 0 || len(accumulatedSignature) > 0
+	if devinEmptyCompletedTurn(completionStatus, devinOutputTokens(finalUsage), generated) {
+		emptyErr := newDevinEmptyCompletionError()
+		respLog := &helps.DevinUpstreamResponseLog{
+			Status:                "empty_completion",
+			FramesCount:           framesCount,
+			Content:               getAllContentText(),
+			Thinking:              strings.Join(thinkingParts, ""),
+			Signature:             string(accumulatedSignature),
+			SignatureType:         signatureType,
+			ToolCalls:             toolCalls,
+			Usage:                 finalUsage,
+			UnknownFields:         unknownFields,
+			ApplyPatchDiagnostics: patchDiagnostics,
+		}
+		return nil, respLog, emptyErr
 	}
 
 	outDoc := ojson.NewDoc([]byte(`{"id":"","model":"","status":"completed","steps":[],"usage":{"total_input_tokens":0,"total_output_tokens":0,"total_cached_tokens":0}}`))
