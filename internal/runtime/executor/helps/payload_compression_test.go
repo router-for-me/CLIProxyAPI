@@ -137,3 +137,29 @@ func TestPayloadCompressionExclusionUsesProvider(t *testing.T) {
 		t.Fatal("non-excluded provider must still be compressed")
 	}
 }
+
+func TestPayloadMCPDescriptionCompressionIgnoresMasterToggle(t *testing.T) {
+	filler := "This tool is basically used in order to read a file. " +
+		"It is really important that you actually provide a path."
+	body := []byte(`{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"read","description":"` +
+		filler + `"}}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	// Compression engines are off; the description step is its own flag, so
+	// enabling it alone is enough (upstream's mcpDescriptionCompressionEnabled).
+	cfg := &config.Config{}
+	cfg.Compression.MCPDescriptionEnabled = true
+	out := ApplyPayloadConfigWithRoot(cfg, "gpt-4o", "openai", "", body, body, "gpt-4o", "/v1/chat/completions")
+	got := gjson.GetBytes(out, "tools.0.function.description").String()
+	if got == filler {
+		t.Fatal("tool description must be compressed without the master toggle")
+	}
+	if len(got) >= len(filler) {
+		t.Fatalf("description not shortened: %d >= %d", len(got), len(filler))
+	}
+
+	// Off (the port default) leaves descriptions alone.
+	out = ApplyPayloadConfigWithRoot(&config.Config{}, "gpt-4o", "openai", "", body, body, "gpt-4o", "/v1/chat/completions")
+	if got := gjson.GetBytes(out, "tools.0.function.description").String(); got != filler {
+		t.Fatalf("disabled mcp description compression must leave descriptions alone, got %q", got)
+	}
+}

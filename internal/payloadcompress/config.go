@@ -129,10 +129,14 @@ type Config struct {
 	// proactive threshold or the model context window. Independent of Enabled:
 	// upstream compacts reactively even when the compression engines are off.
 	ContextTrim ContextTrimConfig `yaml:"context-trim" json:"context-trim"`
-	// MCPDescriptionEnabled mirrors upstream's mcpDescriptionCompressionEnabled
-	// (compression/types.ts:429, default true): tool descriptions are compressed
-	// by their own pipeline step, whatever Enabled says. Nil means on.
-	MCPDescriptionEnabled *bool `yaml:"mcp-description-enabled" json:"mcp-description-enabled"`
+	// MCPDescriptionEnabled turns tool-description compression on. It mirrors
+	// upstream's mcpDescriptionCompressionEnabled (compression/types.ts:429) in
+	// that it is its own pipeline step, independent of Enabled. It is opt-in
+	// here: upstream rewrites the descriptions of the MCP tools it owns, while
+	// this port would rewrite descriptions a client authored, where filler
+	// removal can corrupt grammar definitions and markers (see
+	// ApplyMCPDescriptionCompression).
+	MCPDescriptionEnabled bool `yaml:"mcp-description-enabled" json:"mcp-description-enabled"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -157,9 +161,8 @@ type Config struct {
 }
 
 // MCPDescriptionEnabledOn reports whether tool-description compression runs.
-// Unset means on, upstream's default.
 func (c Config) MCPDescriptionEnabledOn() bool {
-	return c.MCPDescriptionEnabled == nil || *c.MCPDescriptionEnabled
+	return c.MCPDescriptionEnabled
 }
 
 // PrefixFreezeConfig mirrors upstream's COMPRESSION_PREFIX_FREEZE_* settings.
