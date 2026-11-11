@@ -285,6 +285,43 @@ func TestContextTrimFixToolPairsResponsesDroppedCallOrphans(t *testing.T) {
 		t.Fatalf("output of a dropped call must be dropped too, got %v", outputIDs)
 	}
 }
+func TestContextTrimFixToolPairsDropsOrphanToolUse(t *testing.T) {
+	// Anthropic tool_use blocks carry "id", not "tool_use_id"; a revert to
+	// tool_use_id here would silently stop dropping orphan tool_use blocks.
+	body := `{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"q"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"g","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}},{"type":"text","text":"mid"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"last"}]}` +
+		`]}`
+	items := ojson.NewDocString(body).Get("messages").Array()
+	fixed := contextTrimFixToolPairs(items)
+	var paired, textKept bool
+	for _, it := range fixed {
+		if it.Get("role").String() != "assistant" {
+			continue
+		}
+		for _, b := range it.Get("content").Array() {
+			id := b.Get("id").String()
+			if id == "t1" {
+				t.Fatalf("orphan tool_use t1 must be dropped")
+			}
+			if id == "t2" {
+				paired = true
+			}
+			if b.Get("type").String() == "text" && b.Get("text").String() == "mid" {
+				textKept = true
+			}
+		}
+	}
+	if !paired {
+		t.Fatalf("paired tool_use t2 must survive")
+	}
+	if !textKept {
+		t.Fatalf("non-tool blocks in the orphan message must survive")
+	}
+}
 
 func TestContextTrimSkipStripThinkingWithBlockBinding(t *testing.T) {
 	// strip_thinking must not remove them; without the binding it must. Only two
