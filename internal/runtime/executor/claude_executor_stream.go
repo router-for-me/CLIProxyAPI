@@ -12,6 +12,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/payloadcompress"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -241,6 +242,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	stripDefaultKimiClaudeCodeAttributionDoc(auth, url, fp.ProfileClaudeCodeCLI, doc)
 	applyClaudePreservedThinkingBindingDoc(doc)
+	// Delegated Anthropic context editing (opt-in) runs after built-in injection,
+	// before user payload rules, which stay the final barrier.
+	if e.cfg != nil && e.cfg.Compression.ContextEditing.Enabled {
+		payloadcompress.ApplyContextEditing(doc,
+			e.cfg.Compression.ContextEditing.TriggerTokens,
+			e.cfg.Compression.ContextEditing.KeepToolUses)
+	}
 	// User rules match the fully prepared business body and are applied only once.
 	touchedPayloadPaths := helps.ApplyPayloadConfigWithTrackedPathsDoc(
 		e.cfg, baseModel, to.String(), from.String(), "", doc, stripTranslatedDefaultMaxTokens(from, originalPayload, originalTranslated),
@@ -251,6 +259,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		diagnosticsState = claudeDiagnosticsRequestState{}
 	}
 	extraBetas, _ = extractAndRemoveBetasDoc(doc)
+	// Gate the beta on the final body after user payload rules: rules that
+	// strip context_management must not leave a dangling beta behind.
+	if doc.Get("context_management").Exists() {
+		extraBetas = append(extraBetas, payloadcompress.ContextEditingBetaHeader)
+	}
 	stripPromptCacheOptionsDoc(doc)
 	bodyForUpstream := doc.Bytes()
 	body = bodyForUpstream
