@@ -469,7 +469,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 	}
 
 	// Pointer-backed booleans (such as cache-user-id, disable-cooling, and oauth-include-create-api-key): explicit values are meaningful and must be preserved.
-	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling" || path[len(path)-1] == "oauth-include-create-api-key") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+	if len(path) > 0 && (path[len(path)-1] == "cache-user-id" || path[len(path)-1] == "disable-cooling" || path[len(path)-1] == "oauth-include-create-api-key" || path[len(path)-1] == "relaxed-system-prompt") && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
 		return false
 	}
 
@@ -601,6 +601,10 @@ func isZeroValueNode(node *yaml.Node) bool {
 		}
 		// Check if all values are zero values (values are at odd indices)
 		for i := 1; i < len(node.Content); i += 2 {
+			// Keep a newly added cloak mapping that only sets this option false.
+			if node.Content[i-1].Value == "relaxed-system-prompt" && node.Content[i].Kind == yaml.ScalarNode && node.Content[i].Tag == "!!bool" {
+				return false
+			}
 			if !isZeroValueNode(node.Content[i]) {
 				return false
 			}
