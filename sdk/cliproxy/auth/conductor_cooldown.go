@@ -1255,7 +1255,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									state.credentialQuotaPropagated = true
 								}
 							}
-						case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
+						case 408, 500, 502, 503, 504, 507, 520, 521, 522, 523, 524, 525, 526:
 							state.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, result.RetryAfter, disableCooling)
 							state.Unavailable = !state.NextRetryAfter.IsZero()
 						default:
@@ -2197,11 +2197,15 @@ func isConfiguredTLSHandshakeTimeoutError(err error) bool {
 	return cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err)
 }
 
-// isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures that
-// should retry under request-retry without cooling the selected credential.
+// isTransientTransportError reports pre-HTTP dial/TLS/DNS/reset failures and
+// upstream proxy retry-buffer exhaustion that should retry under request-retry
+// without cooling the selected credential.
 func isTransientTransportError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if isUpstreamRetryBufferLimitError(err) {
+		return true
 	}
 	// HTTP-status failures stay on the credential/status retry path.
 	if statusCodeFromError(err) != 0 {
@@ -2241,6 +2245,9 @@ func isTransientTransportResultError(err *Error) bool {
 	if err.Code == transientTransportErrorCode {
 		return true
 	}
+	if isUpstreamRetryBufferLimitResultError(err) {
+		return true
+	}
 	if statusCodeFromResult(err) != 0 {
 		return false
 	}
@@ -2253,6 +2260,40 @@ func isTransientTransportResultError(err *Error) bool {
 		return false
 	}
 	return isTransientTransportMessage(err.Message)
+}
+
+func isUpstreamRetryBufferLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status != 0 && status != http.StatusInsufficientStorage {
+		return false
+	}
+	if isUpstreamRetryBufferLimitMessage(err.Error()) {
+		return true
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		return isUpstreamRetryBufferLimitMessage(authErr.Message)
+	}
+	return false
+}
+
+func isUpstreamRetryBufferLimitResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if status != 0 && status != http.StatusInsufficientStorage {
+		return false
+	}
+	return isUpstreamRetryBufferLimitMessage(err.Message)
+}
+
+func isUpstreamRetryBufferLimitMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "exceeded request buffer limit while retrying upstream")
 }
 
 func isTransientSyscallError(err error) bool {
@@ -3242,7 +3283,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			}
 			auth.Quota.NextRecoverAt = next
 			auth.NextRetryAfter = next
-		case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
+		case 408, 500, 502, 503, 504, 507, 520, 521, 522, 523, 524, 525, 526:
 			auth.StatusMessage = "transient upstream error"
 			auth.NextRetryAfter = recoverableFailureRetryAfterWithHint(now, retryAfter, disableCooling)
 			auth.Unavailable = !auth.NextRetryAfter.IsZero()
