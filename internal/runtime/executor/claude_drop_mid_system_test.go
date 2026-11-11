@@ -225,8 +225,16 @@ func TestMidSystemMessageConfigLookupHonorsPrefix(t *testing.T) {
 	if rebuildMidSystemMessageEnabled(cfg, fileAuth) || dropMidSystemMessageEnabled(cfg, fileAuth) {
 		t.Fatal("prefix b auth inherited options from prefix a")
 	}
-	if entry := resolveClaudeKeyConfig(cfg, &cliproxyauth.Auth{Prefix: "c", Attributes: map[string]string{"api_key": "shared-key"}}); entry != nil {
-		t.Fatalf("unknown prefix matched %+v", entry)
+	// A prefix with no entry of its own keeps the pre-existing behaviour and
+	// falls back to the first key and base URL match.
+	unknownPrefix := &cliproxyauth.Auth{Prefix: "c", Attributes: map[string]string{
+		"api_key": "shared-key", "base_url": "https://upstream.example",
+	}}
+	if entry := resolveClaudeKeyConfig(cfg, unknownPrefix); entry == nil || entry.Prefix != "a" {
+		t.Fatalf("unknown prefix resolved to %+v, want the first match (prefix a)", entry)
+	}
+	if !dropMidSystemMessageEnabled(cfg, unknownPrefix) {
+		t.Fatal("unknown prefix lost the key-level drop option")
 	}
 }
 

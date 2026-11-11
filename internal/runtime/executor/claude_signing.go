@@ -646,11 +646,14 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
 			continue
 		}
-		// Entries may share a key and base URL and differ only by prefix.
+		// Entries may share a key and base URL and differ only by prefix, so an
+		// exact prefix match wins. Otherwise keep the earlier behaviour of using
+		// the first key and base URL match, so an auth whose prefix has no entry
+		// of its own still gets the key-level options (cloak and the rest).
 		if strings.TrimSpace(entry.Prefix) == authPrefix {
 			return entry
 		}
-		if authPrefix == "" && fallback == nil {
+		if fallback == nil {
 			fallback = entry
 		}
 	}
