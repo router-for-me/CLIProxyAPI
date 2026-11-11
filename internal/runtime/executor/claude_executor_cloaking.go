@@ -1268,14 +1268,24 @@ func prependClaudeSystemReminderBlocksToFirstUserMessageDoc(doc *ojson.Doc, bloc
 		}
 		return doc.SetRawBytes(contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]")) == nil
 	} else if content.Type == ojson.String {
+		// A string body that is exactly one of the reminders (a replayed request)
+		// counts as already present, the same as a matching text block above.
+		existingText := content.String()
 		rawBlocks := make([]string, 0, len(blocks)+1)
 		for _, b := range blocks {
 			reminderText := claudeCallerSystemReminder(b.Text)
+			if existingText != "" && reminderText == existingText {
+				existingText = ""
+				continue
+			}
 			if isExplicit && b.RawCC != "" {
 				rawBlocks = append(rawBlocks, `{"type":"text","text":`+marshalJSONStringWithoutHTMLEscape(reminderText)+`,"cache_control":`+b.RawCC+`}`)
 			} else {
 				rawBlocks = append(rawBlocks, buildTextBlock(reminderText, nil))
 			}
+		}
+		if len(rawBlocks) == 0 {
+			return false
 		}
 		rawBlocks = append(rawBlocks, buildTextBlock(content.String(), nil))
 		return doc.SetRawBytes(contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]")) == nil
