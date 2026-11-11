@@ -1,7 +1,8 @@
 # Configuration template using the v8 layout.
 # Copy this file to config.yaml and replace the client keys and any enabled examples.
 # Optional upstream credentials and request rules remain commented until configured.
-# Existing legacy configuration files and /v0/management requests remain supported.
+# Existing legacy configuration files still load and /v0/management requests still work;
+# that API is deprecated and no longer maintained.
 # When both spellings of a field are present, the v8 value wins (including false,
 # 0, and empty collections), and the corresponding legacy field is removed on load/save.
 # Legacy-only fields still work. GET requests and config-version: 8 alone do not
@@ -14,7 +15,7 @@ config-version: 8
 # embedded catalogs, and normal mode uses the official remote sources.
 # Failed refreshes retain the last valid catalog; custom sources never fall back
 # to official URLs. Files and URLs are refreshed every 3 hours and on source changes.
-# Home mode never loads the general catalog, even when explicitly configured.
+# Home mode never loads the general or Devin catalogs, even when explicitly configured.
 models:
   catalog: ""
   codex-catalog: ""
@@ -45,8 +46,10 @@ server:
     min-bytes: 1024
 
   # Global token for GitHub requests (for example, release and asset downloads).
-  # A non-empty config token takes precedence over the GITHUB_TOKEN environment variable.
-  # Leave empty to use GITHUB_TOKEN, or unauthenticated requests if neither is set.
+  # A non-empty config token takes precedence over environment fallbacks.
+  # When empty, the token resolves from GITHUB_TOKEN, then github_token, then
+  # GITSTORE_GIT_TOKEN when GITSTORE_GIT_URL points at github.com; otherwise
+  # requests are unauthenticated.
   github-token: ""
 
   # IP addresses or CIDRs of proxies allowed to supply forwarded client IP headers.
@@ -192,7 +195,8 @@ routing:
   # LCP compaction matching requires at least 2 shared trailing turns; clients whose
   # compaction replaces all earlier turns with a summary should send X-Session-ID (or
   # another explicit session ID), or affinity starts a new binding at every compaction.
-  # Automatic failover is always enabled when bound auth becomes unavailable.
+  # Automatic failover is enabled when bound auth becomes unavailable, except with
+  # session-affinity-rebind-on: "never", which keeps the binding and returns the error.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
@@ -304,7 +308,7 @@ requests:
   #   exclusions: []               # Model ids or "provider/model" values that bypass compression.
   #   hard-budget-tokens: 0        # 0 = off. Cap the token count after compression.
   #   quantum-lock: false          # Mask volatile spans in the first system message (caching providers only).
-  #   cache-prefix: compress      # preserve | compress. Compress (the default) rewrites the
+  #   cache-prefix: rewrite       # rewrite (alias: compress; the default) | protect (alias: preserve). Rewrite rewrites the
   #                               # whole body, including the provider-cached prefix: the bytes
   #                               # shrink and stay identical turn over turn, so the provider caches
   #                               # the smaller payload. Preserve is the conservative opt-out: it
@@ -318,7 +322,7 @@ requests:
   #                               # rewrites the system prompt. when-no-cache rewrites it only when
   #                               # nothing is cached: no cache_control marker in the body, and a
   #                               # model that does not cache a prefix automatically (OpenAI, Codex,
-  #                               # Azure, Claude, Gemini and kin do). never rewrites it regardless,
+  #                               # Azure, Claude and kin do). never rewrites it regardless,
   #                               # at the cost of a prompt-cache miss.
   #   prefix-freeze:              # Usage-observed prefix freeze. Off by default.
   #     enabled: false            #   When true, the same system prompt seen threshold times is
@@ -420,8 +424,8 @@ requests:
   #   default: # Default rules only set parameters when they are missing in the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
-  #           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
+  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, openai-response, gemini, claude, codex, antigravity, interactions
+  #           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude, interactions
   #           headers: # all configured request headers must match; values support "*" wildcards
   #             X-Client-Tier: "tenant-*-region-*"
   #           match: # all payload JSON paths must equal the configured values
@@ -437,7 +441,7 @@ requests:
   #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, openai-response, gemini, claude, codex, antigravity, interactions
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
   #   override: # Override rules always set parameters, overwriting any existing values.
@@ -450,7 +454,7 @@ requests:
   #         service_tier: priority
   #     - models:
   #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, openai-response, gemini, claude, codex, antigravity, interactions
   #       params: # JSON path (gjson/sjson syntax) -> value
   #         "reasoning.effort": "high"
   #     - models:
@@ -461,9 +465,9 @@ requests:
   #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
   #     - models:
   #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, openai-response, gemini, claude, codex, antigravity, interactions
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
-  #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+  #         "text.format": "{\"type\":\"json_schema\",\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}"
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
@@ -486,7 +490,7 @@ client:
     # When false (default), only models that natively declare freeform apply_patch advertise it.
     # When true, non-template and bridged models supported by every routing executor also advertise "freeform".
     enable-apply-patch: false
-    # When true, optimize Codex Desktop, codex-tui, and codex_cli_rs requests for multi-agent v2.
+    # When true, optimize Codex Desktop, codex-tui, codex_cli_rs, and codex_exec requests for multi-agent v2.
     # This refreshes Codex spawn_agent model details, removes message parameter encryption,
     # normalizes encrypted agent_message content for Codex, and converts agent_message input
     # into standard user messages for non-Codex upstream protocols.
@@ -809,7 +813,7 @@ upstream:
 #       base-url: "https://example.com/api"         # optional, e.g. https://zenmux.ai/api; falls back to Google Vertex when omitted
 #       proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #       # proxy-url: "direct" # optional: explicit direct connect for this credential
-#       # interactions: true                        # optional: opt into native Vertex Interactions API routing (/v1beta1/interactions). For service account JSON files under auths/, add "interactions": true at the root of the file.
+#       # interactions is per key entry: add it under keys: below, or "interactions": true at the root of a service-account JSON file under auths/.
 #       headers:
 #         X-Custom-Header: "custom-value"
 #         # Values starting with "$" dynamically copy the header value from downstream client requests.
@@ -829,6 +833,7 @@ upstream:
 #       keys:
 #         - api-key: "vk-123..."                        # x-goog-api-key header
 #           weight: 5                                    # optional: weighted-round-robin share; omitted defaults to 1; maximum 1,000,000
+#           interactions: true                          # optional: opt into native Vertex Interactions API routing (/v1beta1/interactions)
 #
 #   # Codex API keys
 #
@@ -1134,13 +1139,14 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels: vertex, aistudio, antigravity, claude, codex, devin, kimi, xai, meta.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
   # client-visible names can become ambiguous across providers. For strict backend pinning, use
   # unique aliases/prefixes or avoid overlapping names.
   # You can repeat the same name with different aliases to expose multiple client model names.
   # Optional per-entry fields:
+  #   openapi: true               # override automatic OpenAI-compatible endpoint selection for this model
   #   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
   #   display-name: "Model Name" # override the human-readable name shown in model catalogs
   #   force-mapping: true         # rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
@@ -1393,7 +1399,8 @@ observability:
     usage-statistics-enabled: false
 
     # How long (in seconds) usage queue items are retained in memory for the Management API.
-    # The local Redis RESP usage output is disabled.
+    # The same retention applies to the Redis RESP usage stream served on the API port
+    # (disabled in Home mode, which forwards usage to the Home control plane).
     # Default: 60. Max: 3600.
     redis-usage-queue-retention-seconds: 60
 
