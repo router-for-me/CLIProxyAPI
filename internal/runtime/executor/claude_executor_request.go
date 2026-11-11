@@ -2595,9 +2595,10 @@ func claudeMCPAliasServer(name string) string {
 
 // recordInlineUnaliasedTool records the name of a tool_addition definition that
 // keeps its own name upstream, including server and client-executed tool types
-// that claudeToolChangeNamePath leaves alone.
+// that claudeToolChangeNamePath leaves alone and definitions sent without
+// tool.type, which claudeIncludeInlineTools also accepts.
 func recordInlineUnaliasedTool(part ojson.Result, forwardMap map[string]string, recordRename func(original, renamed string)) {
-	if part.Get("type").String() != "tool_addition" || part.Get("tool.type").String() != "tool_definition" {
+	if part.Get("type").String() != "tool_addition" || !part.Get("tool.definition").IsObject() {
 		return
 	}
 	name := part.Get("tool.definition.name").String()

@@ -437,18 +437,19 @@ func TestReverseRemapOAuthToolNamesKeepsInlineToolShadowedByUnprefixedAlias(t *t
 	// With this secret "command" draws the tool word "shell", so its unprefixed
 	// alias spells the inline tool "shell_command", which keeps its own name upstream.
 	options := claudeMCPAliasOptions{secret: "collide-2266"}
-	definitions := map[string]string{
-		"custom":          `{"name":"shell_command","input_schema":{"type":"object"}}`,
-		"client-executed": `{"type":"memory_20250818","name":"shell_command"}`,
+	inlineTools := map[string]string{
+		"custom":          `{"type":"tool_definition","definition":{"name":"shell_command","input_schema":{"type":"object"}}}`,
+		"client-executed": `{"type":"tool_definition","definition":{"type":"memory_20250818","name":"shell_command"}}`,
+		"definition-only": `{"definition":{"name":"shell_command","input_schema":{"type":"object"}}}`,
 	}
 	paths := map[string]func([]byte, claudeMCPAliasOptions) ([]byte, map[string]string){
 		"batched":    remapOAuthToolNamesWithOptions,
 		"legacy doc": remapOAuthToolNamesWithOptionsLegacy,
 	}
-	for definitionName, definition := range definitions {
-		body := []byte(`{"tools":[{"name":"command","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":` + definition + `}}]}]}`)
+	for inlineName, inlineTool := range inlineTools {
+		body := []byte(`{"tools":[{"name":"command","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":` + inlineTool + `}]}]}`)
 		for pathName, remap := range paths {
-			t.Run(definitionName+"/"+pathName, func(t *testing.T) {
+			t.Run(inlineName+"/"+pathName, func(t *testing.T) {
 				remapped, reverseMap := remap(body, options)
 				if got := ojson.GetBytes(remapped, "tools.0.name").String(); got != "mcp__loyal_master__shell_command" {
 					t.Fatalf("command alias = %q, want mcp__loyal_master__shell_command", got)
