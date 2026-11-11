@@ -2,6 +2,7 @@ package payloadcompress
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -81,7 +82,8 @@ func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) Conte
 	}
 	limit := ContextTrimLimit(model)
 	if limit <= 0 {
-		// Do not guess; skip quietly.
+		// Upstream resolves a provider default window when the registry has no
+		// entry (e.g. Claude 200000); we skip instead — documented deviation.
 		log.Debugf("context-trim: no context window known for model %q; skipping", model)
 		return st
 	}
@@ -124,26 +126,31 @@ func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) Conte
 	apply("trim_tools", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimToolResults(items, trim.EffectiveToolResultChars())
 	})
-	if contextTrimEstimate(messages) <= target {
+	if tokens <= target {
 		st.finish(tokens)
 		return st
 	}
 	apply("prune_images", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimPruneImages(items, trim.EffectiveKeepLatestImages())
 	})
-	if contextTrimEstimate(messages) <= target {
+	if tokens <= target {
 		st.finish(tokens)
 		return st
 	}
-	apply("strip_thinking", contextTrimThinking)
-	if contextTrimEstimate(messages) <= target {
+	// Anthropic thinking block_binding validation still references preserved
+	// thinking blocks (see applyClaudePreservedThinkingBindingDoc); removing
+	// them would break the request, so skip the layer for bound thinking.
+	if !doc.Get("thinking.block_binding").Exists() {
+		apply("strip_thinking", contextTrimThinking)
+	}
+	if tokens <= target {
 		st.finish(tokens)
 		return st
 	}
 	apply("purify", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimPurify(items, target)
 	})
-	st.finish(contextTrimEstimate(messages))
+	st.finish(tokens)
 	return st
 }
 
@@ -195,7 +202,7 @@ func contextTrimToolResults(items []ojson.Result, maxChars int) ([]ojson.Result,
 		case role == "tool" && content.Type == ojson.String && len(content.String()) > maxChars:
 			raw := content.String()
 			out[i] = resultFromRaw(contextTrimEditItem(item.Raw, func(d *ojson.Doc) {
-				_ = d.Set("content", raw[:maxChars]+contextTrimSuffix)
+				_ = d.Set("content", contextTrimCut(raw, maxChars)+contextTrimSuffix)
 			}))
 			changed = true
 			continue
@@ -208,7 +215,7 @@ func contextTrimToolResults(items []ojson.Result, maxChars int) ([]ojson.Result,
 					if bc := block.Get("content"); bc.Type == ojson.String && len(bc.String()) > maxChars {
 						raw := bc.String()
 						next = append(next, contextTrimEditItem(block.Raw, func(d *ojson.Doc) {
-							_ = d.Set("content", raw[:maxChars]+contextTrimSuffix)
+							_ = d.Set("content", contextTrimCut(raw, maxChars)+contextTrimSuffix)
 						}))
 						itemChanged = true
 						continue
@@ -227,6 +234,19 @@ func contextTrimToolResults(items []ojson.Result, maxChars int) ([]ojson.Result,
 		out[i] = item
 	}
 	return out, changed
+}
+
+// contextTrimCut cuts raw at maxChars on a rune boundary so multi-byte UTF-8
+// is never split mid-character (upstream cuts on UTF-16 code units).
+func contextTrimCut(raw string, maxChars int) string {
+	if len(raw) <= maxChars {
+		return raw
+	}
+	cut := maxChars
+	for cut > 0 && !utf8.RuneStart(raw[cut]) {
+		cut--
+	}
+	return raw[:cut]
 }
 
 // ─── Estimator ────────────────────────────────────────────────────────────
@@ -332,7 +352,9 @@ func contextTrimDataURL(v ojson.Result) bool {
 }
 
 func resultFromRaw(raw string) ojson.Result {
-	return ojson.NewDocString(raw).Get("$")
+	// ojson's Doc.Get cannot address the document root, so wrap the item in
+	// a one-key object and return the nested result.
+	return ojson.NewDocString(`{"v":` + raw + `}`).Get("v")
 }
 
 // ─── Layer 2: prune older inline images ───────────────────────────────────
@@ -679,10 +701,22 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 				toolResultIDs[id] = true
 			}
 		} else {
-			for _, b := range contextTrimBlocks(item) {
-				if b.Get("type").String() == "tool_result" {
-					if id := b.Get("tool_use_id").String(); id != "" {
-						toolResultIDs[id] = true
+			switch item.Get("type").String() {
+			case "function_call":
+				// Codex Responses: calls pair with outputs via call_id.
+				if id := item.Get("call_id").String(); id != "" {
+					toolCallIDs[id] = true
+				}
+			case "function_call_output":
+				if id := item.Get("call_id").String(); id != "" {
+					toolResultIDs[id] = true
+				}
+			default:
+				for _, b := range contextTrimBlocks(item) {
+					if b.Get("type").String() == "tool_result" {
+						if id := b.Get("tool_use_id").String(); id != "" {
+							toolResultIDs[id] = true
+						}
 					}
 				}
 			}
@@ -699,8 +733,12 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 			if id != "" && !toolCallIDs[id] {
 				continue
 			}
+		} else if item.Get("type").String() == "function_call_output" {
+			if id := item.Get("call_id").String(); id != "" && !toolCallIDs[id] {
+				continue
+			}
 		}
-		if role == "assistant" && i != last {
+		if (role == "assistant" || item.Get("type").String() == "function_call") && i != last {
 			// Claude/OpenAI-array tool_use blocks: keep only those with a
 			// surviving result AND adjacent result in the immediately next
 			// message (upstream fixToolPairs + fixToolAdjacency).
@@ -719,6 +757,11 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 							nextResultIDs[id] = true
 						}
 					}
+				}
+			} else if next.Get("type").String() == "function_call_output" {
+				nextResultIDs = map[string]bool{}
+				if id := next.Get("call_id").String(); id != "" {
+					nextResultIDs[id] = true
 				}
 			}
 			raw := item.Raw
@@ -780,6 +823,13 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 				}
 				out = append(out, r)
 				continue
+			}
+			// Codex Responses function_call without an adjacent matching output.
+			if item.Get("type").String() == "function_call" {
+				id := item.Get("call_id").String()
+				if id == "" || nextResultIDs == nil || !nextResultIDs[id] {
+					continue
+				}
 			}
 		}
 		// user/tool_result blocks without a surviving call.

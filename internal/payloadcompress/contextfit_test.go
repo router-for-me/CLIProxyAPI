@@ -3,6 +3,7 @@ package payloadcompress
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
 )
@@ -186,5 +187,54 @@ func TestContextTrimLayerStats(t *testing.T) {
 	}
 	if stats.After >= stats.Before {
 		t.Fatalf("after estimate must shrink: %d -> %d", stats.Before, stats.After)
+	}
+}
+
+func TestContextTrimToolResultCutKeepsUTF8(t *testing.T) {
+	items := ojson.NewDocString(`{"m":[{"role":"tool","content":"` + strings.Repeat("汉", 1000) + `"}]}`).Get("m").Array()
+	out, changed := contextTrimToolResults(items, 2000)
+	if !changed {
+		t.Fatal("tool result must be truncated")
+	}
+	g := out[0].Get("content").String()
+	if !strings.HasSuffix(g, contextTrimSuffix) {
+		t.Fatalf("tool result not truncated: %q", g)
+	}
+	if !utf8.ValidString(g) {
+		t.Fatal("truncated tool result is not valid UTF-8")
+	}
+}
+func TestContextTrimFixToolPairsResponsesOrphans(t *testing.T) {
+	arr := ojson.NewDocString(`{"input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"ok"},` +
+		`{"type":"function_call_output","call_id":"c2","output":"orphan"},` +
+		`{"type":"function_call","call_id":"c3","name":"g","arguments":"{}"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`).Get("input").Array()
+	out := contextTrimFixToolPairs(arr)
+	var callIDs, outputIDs []string
+	for _, it := range out {
+		if it.Get("type").String() == "function_call" {
+			callIDs = append(callIDs, it.Get("call_id").String())
+		}
+		if it.Get("type").String() == "function_call_output" {
+			outputIDs = append(outputIDs, it.Get("call_id").String())
+		}
+	}
+	if strings.Join(callIDs, ",") != "c1" {
+		t.Fatalf("orphan/non-adjacent function_call not cleaned: %v", callIDs)
+	}
+	if strings.Join(outputIDs, ",") != "c1" {
+		t.Fatalf("orphaned function_call_output not cleaned: %v", outputIDs)
+	}
+}
+
+func TestContextTrimSkipStripThinkingWithBlockBinding(t *testing.T) {
+	body := contextTrimBody(contextFitFiller(3000000))
+	body = strings.Replace(body, `,"messages"`, `,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"omit"}},"messages"`, 1)
+	_, stats := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{})
+	for _, layer := range stats.Layers {
+		if layer == "strip_thinking" {
+			t.Fatalf("strip_thinking must be skipped when thinking.block_binding is set, layers: %v", stats.Layers)
+		}
 	}
 }

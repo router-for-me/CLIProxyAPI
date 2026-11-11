@@ -244,9 +244,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	applyClaudePreservedThinkingBindingDoc(doc)
 	// Delegated Anthropic context editing (opt-in) runs after built-in injection,
 	// before user payload rules, which stay the final barrier.
-	contextEditApplied := false
 	if e.cfg != nil && e.cfg.Compression.ContextEditing.Enabled {
-		contextEditApplied = payloadcompress.ApplyContextEditing(doc,
+		payloadcompress.ApplyContextEditing(doc,
 			e.cfg.Compression.ContextEditing.TriggerTokens,
 			e.cfg.Compression.ContextEditing.KeepToolUses)
 	}
@@ -260,7 +259,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		diagnosticsState = claudeDiagnosticsRequestState{}
 	}
 	extraBetas, _ = extractAndRemoveBetasDoc(doc)
-	if contextEditApplied {
+	// Gate the beta on the final body after user payload rules: rules that
+	// strip context_management must not leave a dangling beta behind.
+	if doc.Get("context_management").Exists() {
 		extraBetas = append(extraBetas, payloadcompress.ContextEditingBetaHeader)
 	}
 	stripPromptCacheOptionsDoc(doc)
@@ -296,11 +297,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		claudeSessionID,
 	); errHeaders != nil {
 		return nil, errHeaders
-	}
-	if contextEditApplied {
-		// context_management without its beta is rejected upstream; always emit it.
-		httpReq.Header.Set("Anthropic-Beta", withClaudeBetaAppended(
-			httpReq.Header.Get("Anthropic-Beta"), payloadcompress.ContextEditingBetaHeader))
 	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
