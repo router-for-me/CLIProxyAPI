@@ -72,6 +72,11 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
+	if argvRequestsVersion(os.Args[1:]) {
+		fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "discover" {
 		discoverFlags := flag.NewFlagSet("discover", flag.ExitOnError)
 		timeoutSec := discoverFlags.Int("timeout", 3, "Discovery timeout in seconds")
@@ -82,6 +87,7 @@ func main() {
 		discoverFlags.Func("include", "Comma-separated interface names to scan (overrides default physical LAN filter)", appendCSV(&include))
 		discoverFlags.Func("exclude", "Comma-separated interface names to skip", appendCSV(&exclude))
 		_ = discoverFlags.Parse(os.Args[2:])
+		exitIfUnexpectedOperands(discoverFlags)
 		if !*jsonOut {
 			fmt.Fprintf(os.Stderr, "CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 		}
@@ -165,6 +171,7 @@ func main() {
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
+	versionRequested := flag.Bool("version", false, "Print version and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -203,6 +210,14 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	exitIfUnexpectedOperands(flag.CommandLine)
+	if *versionRequested {
+		// The banner above already printed the version unless stdout is kept clean for JSON.
+		if isJSONDiscover {
+			fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		}
+		os.Exit(0)
+	}
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -600,7 +615,8 @@ func main() {
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
-		return
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -810,24 +826,30 @@ func main() {
 					cancel()
 					<-done
 					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
-					return
+					os.Exit(1)
 				}
 
+				var tuiErr error
 				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
 					restoreIO()
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					tuiErr = errRun
 				} else {
 					restoreIO()
 				}
 
 				cancel()
 				<-done
+				if tuiErr != nil {
+					os.Exit(1)
+				}
 			} else {
 				// Default TUI mode: pure management client.
 				// The proxy server must already be running (locally or remotely).
 				baseURL := resolveManagementBaseURL(managementBaseURL, cfg)
 				if errRun := tui.RunWithBaseURL(baseURL, password, nil, os.Stdout); errRun != nil {
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					os.Exit(1)
 				}
 			}
 		} else {
@@ -964,12 +986,37 @@ func argvEnablesBoolFlag(args []string, name string) bool {
 	return enabled
 }
 
+// argvRequestsVersion reports a version request before plugin flags are
+// registered. The last -version flag wins, like flag.Parse. main also checks
+// the parsed -version value, which covers argv this early scan cannot read.
+func argvRequestsVersion(args []string) bool {
+	if len(args) > 0 && args[0] == "version" {
+		return true
+	}
+	return argvEnablesBoolFlag(args, "version")
+}
+
+func unexpectedOperandsError(operands []string) error {
+	if len(operands) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected arguments: %s", strings.Join(operands, " "))
+}
+
+func exitIfUnexpectedOperands(fs *flag.FlagSet) {
+	if err := unexpectedOperandsError(fs.Args()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fs.Usage()
+		os.Exit(2)
+	}
+}
+
 func argvFlagConsumesValue(name string) bool {
 	switch name {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
-		"tui", "standalone", "local-model":
+		"tui", "standalone", "local-model", "version":
 		return false
 	default:
 		return name != ""
