@@ -28,9 +28,6 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	FinishReason      string
 	Usage             claudeUsageTokens
 	TrailingUsageSent bool
-	// Model is the upstream serving model once a stream event names one.
-	// Later chunks keep it so a fallback is not labeled with the requested model.
-	Model string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	NextToolCallIndex    int
@@ -125,48 +122,43 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 	root := util.ParseGJSONBytesNoCopy(rawJSON)
 	eventType := root.Get("type").String()
-	p := (*param).(*ConvertAnthropicResponseToOpenAIParams)
-	if next := claudeOpenAIServingModel(p.Model, eventType, root); next != p.Model {
-		// The parsed value aliases the current SSE buffer, which the caller may reuse.
-		p.Model = strings.Clone(next)
-	}
 
 	// Base OpenAI streaming response template
 	templateDoc := ojson.NewDoc([]byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`))
 
-	// Prefer the model upstream says is serving. Fall back to the requested name
-	// only when this stream has not reported one yet.
-	if served := claudeOpenAIChunkModel(p.Model, modelName); served != "" {
-		_ = templateDoc.Set("model", served)
+	// Set model
+	if modelName != "" {
+		_ = templateDoc.Set("model", modelName)
 	}
 
 	// Set response ID and creation time
-	if p.ResponseID != "" {
-		_ = templateDoc.Set("id", p.ResponseID)
+	if (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseID != "" {
+		_ = templateDoc.Set("id", (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseID)
 	}
-	if p.CreatedAt > 0 {
-		_ = templateDoc.Set("created", p.CreatedAt)
+	if (*param).(*ConvertAnthropicResponseToOpenAIParams).CreatedAt > 0 {
+		_ = templateDoc.Set("created", (*param).(*ConvertAnthropicResponseToOpenAIParams).CreatedAt)
 	}
 
 	switch eventType {
 	case "message_start":
 		// Initialize response with message metadata when a new message begins
 		if message := root.Get("message"); message.Exists() {
-			p.ResponseID = strings.Clone(message.Get("id").String())
-			p.CreatedAt = time.Now().Unix()
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseID = strings.Clone(message.Get("id").String())
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).CreatedAt = time.Now().Unix()
 
-			_ = templateDoc.Set("id", p.ResponseID)
-			_ = templateDoc.Set("created", p.CreatedAt)
+			_ = templateDoc.Set("id", (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseID)
+			_ = templateDoc.Set("model", modelName)
+			_ = templateDoc.Set("created", (*param).(*ConvertAnthropicResponseToOpenAIParams).CreatedAt)
 
 			// Set initial role to assistant for the response
 			_ = templateDoc.Set("choices.0.delta.role", "assistant")
 
 			// Initialize tool calls accumulator for tracking tool call progress
-			if p.ToolCallsAccumulator == nil {
-				p.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
 			}
-			p.NextToolCallIndex = 0
-			p.Usage.Merge(message.Get("usage"))
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).NextToolCallIndex = 0
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).Usage.Merge(message.Get("usage"))
 		}
 		return [][]byte{templateDoc.Bytes()}
 
@@ -288,14 +280,15 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 	case "message_stop":
 		// Final message event - emit standard OpenAI trailing usage chunk with empty choices array if usage was tracked.
+		p := (*param).(*ConvertAnthropicResponseToOpenAIParams)
 		if p.Usage.HasUsage && !p.TrailingUsageSent {
 			p.TrailingUsageSent = true
 			usageDoc := ojson.NewDoc([]byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[]}`))
 			if p.ResponseID != "" {
 				_ = usageDoc.Set("id", p.ResponseID)
 			}
-			if served := claudeOpenAIChunkModel(p.Model, modelName); served != "" {
-				_ = usageDoc.Set("model", served)
+			if modelName != "" {
+				_ = usageDoc.Set("model", modelName)
 			}
 			if p.CreatedAt > 0 {
 				_ = usageDoc.Set("created", p.CreatedAt)
@@ -332,58 +325,6 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	}
 }
 
-// claudeOpenAIServingModel reports the model that produced this event.
-// message.model is the model named when the message starts. A fallback content
-// block's to.model, and the last fallback_message usage iteration, name the
-// model that continues after a refusal. Events that do not name a model leave
-// previous unchanged.
-func claudeOpenAIServingModel(previous, eventType string, root ojson.Result) string {
-	switch eventType {
-	case "message_start":
-		if model := strings.TrimSpace(root.Get("message.model").String()); model != "" {
-			return model
-		}
-	case "content_block_start":
-		block := root.Get("content_block")
-		if block.Get("type").String() == "fallback" {
-			if model := strings.TrimSpace(block.Get("to.model").String()); model != "" {
-				return model
-			}
-		}
-	case "message_delta":
-		if model := claudeFallbackIterationModel(root.Get("usage.iterations")); model != "" {
-			return model
-		}
-	}
-	return previous
-}
-
-// claudeFallbackIterationModel returns the last fallback_message model.
-// That entry is the model that served the turn, including a final refusal
-// when every fallback also declines.
-func claudeFallbackIterationModel(iterations ojson.Result) string {
-	if !iterations.IsArray() {
-		return ""
-	}
-	served := ""
-	for _, iteration := range iterations.Array() {
-		if iteration.Get("type").String() != "fallback_message" {
-			continue
-		}
-		if model := strings.TrimSpace(iteration.Get("model").String()); model != "" {
-			served = model
-		}
-	}
-	return served
-}
-
-func claudeOpenAIChunkModel(served, requested string) string {
-	if served != "" {
-		return served
-	}
-	return requested
-}
-
 // mapAnthropicStopReasonToOpenAI maps Anthropic stop reasons to OpenAI stop reasons
 func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 	switch anthropicReason {
@@ -409,13 +350,13 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 //
 // Parameters:
 //   - ctx: The context for the request, used for cancellation and timeout handling
-//   - modelName: Requested model, used when the upstream message does not name one
+//   - modelName: The name of the model being used for the response (unused in current implementation)
 //   - rawJSON: The raw JSON response from the Claude Code API
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	rawJSON, _ = translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
 	chunks := make([][]byte, 0)
 
@@ -442,14 +383,13 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 	for _, chunk := range chunks {
 		root := util.ParseGJSONBytesNoCopy(chunk)
 		eventType := root.Get("type").String()
-		model = claudeOpenAIServingModel(model, eventType, root)
 
 		switch eventType {
 		case "message_start":
-			// Extract initial message metadata including ID and input token count.
-			// The serving model is tracked above, including a later fallback hop.
+			// Extract initial message metadata including ID, model, and input token count
 			if message := root.Get("message"); message.Exists() {
 				messageID = message.Get("id").String()
+				model = message.Get("model").String()
 				createdAt = time.Now().Unix()
 				usageTokens.Merge(message.Get("usage"))
 			}
@@ -533,7 +473,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 	// Set basic response fields including message ID, creation time, and model
 	_ = outDoc.Set("id", messageID)
 	_ = outDoc.Set("created", createdAt)
-	_ = outDoc.Set("model", claudeOpenAIChunkModel(model, modelName))
+	_ = outDoc.Set("model", model)
 
 	// Set message content by combining all text parts
 	messageContent := strings.Join(contentParts, "")
