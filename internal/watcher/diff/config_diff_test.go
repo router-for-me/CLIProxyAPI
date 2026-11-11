@@ -469,7 +469,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			},
 		},
 		XAI:    config.XAIConfig{InjectXSearch: true},
-		Claude: config.ClaudeConfig{ToolSearch: true},
+		Claude: config.ClaudeConfig{ToolSearch: true, ServerSideFallback: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -522,6 +522,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, `antigravity.connection-pool.idle-conn-timeout: "30s" -> "10s"`)
 	expectContains(t, details, "xai.inject-x-search: false -> true")
 	expectContains(t, details, "claude.tool-search: false -> true")
+	expectContains(t, details, "claude.server-side-fallback: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")

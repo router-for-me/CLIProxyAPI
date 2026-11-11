@@ -2344,6 +2344,7 @@ type claudeCloakSettings struct {
 	sensitiveWords        []string
 	sensitiveWordsReplace map[string]string
 	cacheUserID           bool
+	serverSideFallback    bool
 }
 
 func (s claudeCloakSettings) buildSensitiveWordMatcher() *helps.SensitiveWordMatcher {
@@ -2474,6 +2475,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		sensitiveWords:        attrWords,
 		sensitiveWordsReplace: attrWordsReplace,
 		cacheUserID:           attrCache,
+		serverSideFallback:    cfg != nil && cfg.Claude.ServerSideFallback,
 	}
 	explicitMode := strings.ToLower(strings.TrimSpace(attrMode))
 	if attrMode != "" {
@@ -2655,14 +2657,13 @@ func applyCloakingInternalDoc(
 		turnOriginArgs...,
 	)
 
-	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
-	// "fallbacks": [{"model": "claude-opus-5"}]
-	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
-	if isClaudeFable51Model(model) && !isProbeOrHelper {
-		if !doc.Get("fallbacks").Exists() {
+	// Inject cross-model server-side refusal fallbacks only when explicitly
+	// enabled via upstream.claude.server-side-fallback.
+	if settings.serverSideFallback && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
+		model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
+		if isClaudeOpus55Model(model) {
+			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
+		} else if isClaudeFable51Model(model) {
 			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 	}

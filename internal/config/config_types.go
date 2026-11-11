@@ -122,6 +122,12 @@ type ClaudeConfig struct {
 	// translation elsewhere, and per-credential search advertising in the Codex
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+	// ServerSideFallback opts cloaked Claude requests into Anthropic server-side
+	// refusal fallback injection (claude-opus-5-5 -> claude-opus-4-8 and
+	// claude-fable-5-1 -> claude-opus-5) when the request body does not already
+	// specify fallbacks. Default false leaves cross-model fallbacks omitted unless
+	// explicitly configured by the caller or payload rules.
+	ServerSideFallback bool `yaml:"server-side-fallback" json:"server-side-fallback"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
 	// this many days in in-memory mode (server.kv-store.disabled: true without
 	// Home), independently of continuity expiry and credential switches. A nil

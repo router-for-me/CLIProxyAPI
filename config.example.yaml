@@ -497,6 +497,16 @@ upstream:
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
 
+    # When true, inject Anthropic server-side refusal fallbacks on cloaked Claude requests
+    # when the request body does not already specify fallbacks (claude-opus-5-5 -> claude-opus-4-8,
+    # claude-fable-5-1 -> claude-opus-5). Default false never opts requests into cross-model
+    # fallback unless the caller or requests.payload rules explicitly provide fallbacks.
+    # When fallback occurs, translated OpenAI Chat Completions and Responses payloads report
+    # the actual serving model and attach structured fallback metadata (choices[0].delta.fallback /
+    # choices[0].message.fallback and fallbacks for Chat; response.fallback and response.fallbacks
+    # for Responses).
+    server-side-fallback: false
+
     # Days to retain the cloaked currentDate pin per session in in-memory mode
     # (server.kv-store.disabled: true without Home), so an idle gap or a credential
     # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
