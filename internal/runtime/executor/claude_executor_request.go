@@ -1255,6 +1255,30 @@ func applyClaudeHeadersWithNativeProfile(
 
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	// #7470: the beta feature set declared through Anthropic-Beta is scoped to
+	// the whole conversation. Rebuilding it from each round's body lets a
+	// per-turn difference (a fast-mode request, a thinking toggle, a dropped
+	// cache marker) change the header mid-session, and upstream then rejects
+	// every later round with a client error. A caller that continues a thread
+	// itself (thread.previous_message_id) already holds the stable header for
+	// that thread: forward it verbatim. Otherwise the session's first round is
+	// remembered through the continuity store and every later round reuses it.
+	// Requests without a session continuation marker keep the per-request
+	// rebuild unchanged.
+	callerThreadContinuation := false
+	sessionBetaPinKey := ""
+	if !wirePolicy.Uncloak && !countTokens {
+		callerThreadContinuation = strings.TrimSpace(ojson.GetBytesNoCopy(body, "thread.previous_message_id").String()) != ""
+		if diagnosticsPrevious := ojson.GetBytesNoCopy(body, "diagnostics.previous_message_id"); diagnosticsPrevious.Exists() &&
+			(diagnosticsPrevious.Type == ojson.Null || strings.TrimSpace(diagnosticsPrevious.String()) != "") {
+			for _, candidate := range sessionIDs {
+				if candidate = strings.TrimSpace(candidate); candidate != "" {
+					sessionBetaPinKey = helps.ClaudeContinuityKey(claudeDiagnosticsCredentialIdentity(auth), candidate)
+					break
+				}
+			}
+		}
+	}
 	if !confirmedClaudeCode && !wirePolicy.Cloak && wirePolicy.ExplicitNever && !wirePolicy.Uncloak {
 		det := helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg)
 		if det.ConfirmedShape {
@@ -1418,6 +1442,14 @@ func applyClaudeHeadersWithNativeProfile(
 		}
 		for _, beta := range hd.AnthropicBetaAppend {
 			emittedBetas = withClaudeBetaAppended(emittedBetas, beta)
+		}
+		// Session stability takes precedence over the per-request rebuild: a
+		// continuation round must not vary the header its conversation started
+		// with (#7470).
+		if callerThreadContinuation && strings.TrimSpace(incomingBetas) != "" {
+			emittedBetas = incomingBetas
+		} else if sessionBetaPinKey != "" {
+			emittedBetas = helps.PinClaudeSessionBetaHeader(sessionBetaPinKey, emittedBetas)
 		}
 
 		if strings.TrimSpace(emittedBetas) == "" {
