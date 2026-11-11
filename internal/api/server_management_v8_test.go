@@ -91,6 +91,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		"GET /v8/management/credentials", "POST /v8/management/credentials", "POST /v8/management/credentials/verify",
 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
 		"POST /v8/management/routing/cooldown/reset",
+		"GET /v8/management/routing/codex-reset-policy", "PUT /v8/management/routing/codex-reset-policy",
 		"POST /v8/management/routing/model-definitions/refresh",
 		"POST /v8/management/models/refresh",
 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
@@ -111,6 +112,15 @@ func TestManagementV8IndependentContract(t *testing.T) {
 			t.Fatalf("%s %s: status=%d body=%s", method, url, response.Code, response.Body.String())
 		}
 		return strings.TrimSpace(response.Body.String())
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		req := httptest.NewRequest(method, "/v8/management/routing/codex-reset-policy", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		response := httptest.NewRecorder()
+		s.engine.ServeHTTP(response, req)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("reset policy allowed an unauthenticated %s: %d", method, response.Code)
+		}
 	}
 	for _, legacy := range []string{"debug", "request-retry", "api-keys", "codex-api-key", "auth-files", "codex-auth-url", "oauth/providers/codex/auth-url", "plugins/test-plugin/config"} {
 		request(http.MethodGet, "/v8/management/"+legacy, "", http.StatusNotFound)

@@ -1043,8 +1043,20 @@ func dedupeStrings(values []string) []string {
 	return out
 }
 
+// ResetQuotaIfUnchanged skips removed, replaced, or mutated observations without side effects.
+func (m *Manager) ResetQuotaIfUnchanged(ctx context.Context, expected *Auth) (*Auth, []string, error) {
+	if expected == nil || expected.RegistrationEpoch == 0 || expected.CredentialVersion == 0 || expected.Generation == 0 {
+		return nil, nil, nil
+	}
+	return m.resetQuota(ctx, expected.ID, expected)
+}
+
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil)
+}
+
+func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -1064,6 +1076,11 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if !ok || auth == nil {
+		m.mu.Unlock()
+		return nil, nil, nil
+	}
+	// Recheck under the same gate/lock as the mutation, not against a stale GetByID clone.
+	if expected != nil && (auth.ID != expected.ID || auth.RegistrationEpoch != expected.RegistrationEpoch || auth.CredentialVersion != expected.CredentialVersion || auth.Generation != expected.Generation) {
 		m.mu.Unlock()
 		return nil, nil, nil
 	}

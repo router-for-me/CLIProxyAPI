@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexreset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -103,6 +104,10 @@ func (s *Service) Run(ctx context.Context) error {
 		})
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
+		go codexreset.Run(ctx, s.coreManager, func() bool {
+			current := s.currentConfig()
+			return current != nil && !current.Home.Enabled
+		})
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
