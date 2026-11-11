@@ -68,11 +68,19 @@ type ContextFitStats struct {
 func ContextTrimLimit(model string) int {
 	if model != "" {
 		if info := registry.LookupModelInfo(model); info != nil {
+			window := 0
 			if info.MaxContextLength > 0 {
-				return info.MaxContextLength
+				window = info.MaxContextLength
+			} else if info.ContextLength > 0 {
+				window = info.ContextLength
 			}
-			if info.ContextLength > 0 {
-				return info.ContextLength
+			if window > 0 {
+				// Upstream compacts against min(window, provider input cap)
+				// (chatCore.ts:1280 getEffectiveCompactionCeiling).
+				if info.InputTokenLimit > 0 && info.InputTokenLimit < window {
+					window = info.InputTokenLimit
+				}
+				return window
 			}
 		}
 	}
@@ -498,35 +506,24 @@ func contextTrimBlocks(item ojson.Result) []ojson.Result {
 
 // contextTrimThinking strips thinking blocks from every assistant turn except
 // the last one, matching upstream compressThinking (contextManager.ts:728 keeps
-// only block.type === "thinking" as a filter target). Role-less "reasoning"
-// items are stripped only when they belong to an older turn: ones positioned
-// after the last user message carry the live tool loop and must be replayed.
+// only block.type === "thinking"; Responses reasoning items are never
+// touched, old turns included (upstream never inspects them).
 func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 	lastAssistant := -1
-	lastUser := -1
 	for i := len(items) - 1; i >= 0; i-- {
 		switch items[i].Get("role").String() {
 		case "assistant":
 			if lastAssistant < 0 {
 				lastAssistant = i
 			}
-		case "user":
-			if lastUser < 0 {
-				lastUser = i
-			}
 		}
-		if lastAssistant >= 0 && lastUser >= 0 {
+		if lastAssistant >= 0 {
 			break
 		}
 	}
 	changed := false
 	out := make([]ojson.Result, 0, len(items))
 	for i, item := range items {
-		// Codex/Responses reasoning items carry no role: keep the live turn's.
-		if item.Get("type").String() == "reasoning" && lastUser >= 0 && i < lastUser {
-			changed = true
-			continue
-		}
 		if item.Get("role").String() != "assistant" || i == lastAssistant {
 			out = append(out, item)
 			continue
@@ -590,20 +587,6 @@ func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 				continue
 			}
 		}
-		// OpenAI chat assistant "reasoning" string. "reasoning_content" is left
-		// alone: upstream does not strip it, and providers that require the
-		// reasoning replay answer a missing field with HTTP 400.
-		raw := item.Raw
-		itemChanged := false
-		if item.Get("reasoning").Exists() && item.Get("reasoning").Type == ojson.String {
-			raw = contextTrimEditItem(raw, func(d *ojson.Doc) { _ = d.Delete("reasoning") })
-			itemChanged = true
-		}
-		if itemChanged {
-			out = append(out, resultFromRaw(raw))
-			changed = true
-			continue
-		}
 		out = append(out, item)
 	}
 	return out, changed
@@ -616,7 +599,7 @@ func contextTrimIsThinkingBlock(b ojson.Result) bool {
 	// Upstream filters "thinking" only (contextManager.ts:744); a redacted
 	// thinking block is an opaque replay token, not reasoning text, so it stays.
 	switch b.Get("type").String() {
-	case "thinking", "reasoning":
+	case "thinking":
 		return true
 	}
 	return false

@@ -439,9 +439,10 @@ func TestContextTrimProactiveThresholdConfig(t *testing.T) {
 	}
 }
 
-func TestContextTrimThinkingKeepsLiveResponsesReasoning(t *testing.T) {
-	// Upstream compressThinking touches role-based messages only, so a reasoning
-	// item in the live tool loop (after the last user message) must survive.
+func TestContextTrimThinkingLeavesResponsesReasoningItems(t *testing.T) {
+	// Upstream compressThinking touches role-based messages only and never
+	// inspects Responses reasoning items, old turns included
+	// (contextManager.ts:728-750).
 	items := ojson.NewDocString(`{"input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]},` +
 		`{"type":"reasoning","summary":[{"type":"summary_text","text":"old turn"}],"encrypted_content":"old"},` +
@@ -451,17 +452,17 @@ func TestContextTrimThinkingKeepsLiveResponsesReasoning(t *testing.T) {
 		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
 		`{"type":"function_call_output","call_id":"c1","output":"ok"}]}`).Get("input").Array()
 	out, changed := contextTrimThinking(items)
-	if !changed {
-		t.Fatal("older-turn reasoning item must still be stripped")
+	if changed {
+		t.Fatalf("reasoning items must not be touched")
 	}
-	if len(out) != 6 {
-		t.Fatalf("want 6 items after stripping the old reasoning item, got %d", len(out))
+	if len(out) != len(items) {
+		t.Fatalf("want all %d items kept, got %d", len(items), len(out))
 	}
-	if enc := out[3].Get("encrypted_content").String(); enc != "live" {
+	if enc := out[1].Get("encrypted_content").String(); enc != "old" {
+		t.Fatalf("old reasoning item must survive, got %q", enc)
+	}
+	if enc := out[4].Get("encrypted_content").String(); enc != "live" {
 		t.Fatalf("live reasoning item must survive, got %q", enc)
-	}
-	if out[4].Get("type").String() != "function_call" || out[5].Get("type").String() != "function_call_output" {
-		t.Fatalf("live tool loop must survive: %v", out)
 	}
 }
 
