@@ -30,6 +30,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ContextEditingConfig toggles Anthropic server-side context editing
+// (clear_tool_uses_20250919), mirroring upstream contextEditing.ts.
+type ContextEditingConfig struct {
+	// Enabled turns delegated context editing on. Off by default.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// TriggerTokens is the input-token threshold that starts provider-side clearing.
+	TriggerTokens int `yaml:"trigger-tokens" json:"trigger-tokens"`
+	// KeepToolUses is how many recent tool uses survive a clearing pass.
+	KeepToolUses int `yaml:"keep-tool-uses" json:"keep-tool-uses"`
+}
+
 // Config mirrors the requests.compression YAML block.
 type Config struct {
 	// Enabled turns context compression on. Off by default.
@@ -57,6 +68,8 @@ type Config struct {
 	// it as a stable cached prefix and preserves it. Opt-in and off by default,
 	// so an unset config never depends on cross-request state.
 	PrefixFreeze PrefixFreezeConfig `yaml:"prefix-freeze" json:"prefix-freeze"`
+	// ContextEditing delegates stale tool-use clearing to Anthropic itself.
+	ContextEditing ContextEditingConfig `yaml:"context-editing" json:"context-editing"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -276,9 +289,11 @@ const (
 )
 
 const (
-	defaultMinBytes              = 4096
-	defaultCombo                 = "standard"
-	defaultPrefixFreezeThreshold = 3
+	defaultMinBytes                 = 4096
+	defaultCombo                    = "standard"
+	defaultPrefixFreezeThreshold    = 3
+	defaultContextEditTriggerTokens = 100000
+	defaultContextEditKeepToolUses  = 3
 )
 
 // DefaultConfig returns the built-in pipeline. It only contains lossless
@@ -479,6 +494,12 @@ func (c *Config) Sanitize() {
 	}
 	if c.PrefixFreeze.Threshold <= 0 {
 		c.PrefixFreeze.Threshold = defaultPrefixFreezeThreshold
+	}
+	if c.ContextEditing.TriggerTokens <= 0 {
+		c.ContextEditing.TriggerTokens = defaultContextEditTriggerTokens
+	}
+	if c.ContextEditing.KeepToolUses <= 0 {
+		c.ContextEditing.KeepToolUses = defaultContextEditKeepToolUses
 	}
 	hadCombos := len(c.Combos) > 0
 	seen := make(map[string]struct{}, len(c.Combos))

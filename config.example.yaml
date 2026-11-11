@@ -326,6 +326,10 @@ requests:
   #                               #   provider the static check does not recognize. It only ever
   #                               #   preserves, so it can never corrupt a payload.
   #     threshold: 3              #   Default: 3, the upstream default.
+  #   context-editing:           # Delegate stale tool-use clearing to Anthropic. Off by default.
+  #     enabled: false            #   Adds a clear_tool_uses_20250919 edit to context_management.
+  #     trigger-tokens: 100000    #   Default: 100000 input tokens before the provider clears.
+  #     keep-tool-uses: 3         #   Default: 3 recent tool uses survive a clearing pass.
   #   live-zone:                   # Reuse the previous turn's compressed prefix. Off by
   #     enabled: false             #   default. Keys on the same session identity that
   #                                #   affinity routing uses (canonical, LCP, execution or
