@@ -619,3 +619,90 @@ func TestConvertClaudeResponseToOpenAI_ReportsZeroReasoningTokensWhenThinkingIsZ
 	}
 	assertReasoningTokens(t, out[0], 0)
 }
+
+func TestConvertClaudeResponseToOpenAI_UsesUpstreamServingModel(t *testing.T) {
+	ctx := context.Background()
+	events := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_fb","model":"claude-opus-4-8","usage":{"input_tokens":4,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"served by 4.8"}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8,"iterations":[{"type":"message","model":"claude-opus-5-5","output_tokens":0},{"type":"fallback_message","model":"claude-opus-4-8","output_tokens":8}]}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+	var param any
+	for i, ev := range events {
+		chunks := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil, ev, &param)
+		for _, chunk := range chunks {
+			if got := ojson.GetBytesNoCopy(chunk, "model").String(); got != "claude-opus-4-8" {
+				t.Fatalf("event %d model = %q, want claude-opus-4-8; chunk=%s", i, got, chunk)
+			}
+		}
+	}
+
+	raw := []byte(`{"id":"msg_fb","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"served by 4.8"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":8}}`)
+	nonStream := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-opus-5-5", nil, nil, raw, nil)
+	if got := ojson.GetBytesNoCopy(nonStream, "model").String(); got != "claude-opus-4-8" {
+		t.Fatalf("non-stream model = %q, want claude-opus-4-8", got)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_MidStreamFallbackUpdatesServingModel(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	first := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil,
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_mid","model":"claude-opus-5-5","usage":{"input_tokens":3,"output_tokens":0}}}`),
+		&param)
+	if got := ojson.GetBytesNoCopy(first[0], "model").String(); got != "claude-opus-5-5" {
+		t.Fatalf("pre-fallback model = %q", got)
+	}
+	partial := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil,
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`),
+		&param)
+	if got := ojson.GetBytesNoCopy(partial[0], "model").String(); got != "claude-opus-5-5" {
+		t.Fatalf("partial model = %q", got)
+	}
+	if chunks := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil,
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"fallback","from":{"model":"claude-opus-5-5"},"to":{"model":"claude-opus-4-8"},"trigger":{"type":"refusal","category":"cyber"}}}`),
+		&param); len(chunks) != 0 {
+		t.Fatalf("fallback boundary emitted %d chunks", len(chunks))
+	}
+	continued := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil,
+		[]byte(`data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"continued"}}`),
+		&param)
+	if got := ojson.GetBytesNoCopy(continued[0], "model").String(); got != "claude-opus-4-8" {
+		t.Fatalf("post-fallback model = %q, chunk=%s", got, continued[0])
+	}
+	usage := ConvertClaudeResponseToOpenAI(ctx, "claude-opus-5-5", nil, nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6,"iterations":[{"type":"message","model":"claude-opus-5-5","output_tokens":1},{"type":"fallback_message","model":"claude-opus-4-8","output_tokens":5}]}}`),
+		&param)
+	if got := ojson.GetBytesNoCopy(usage[0], "model").String(); got != "claude-opus-4-8" {
+		t.Fatalf("usage model = %q", got)
+	}
+
+	sse := []byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_mid\",\"model\":\"claude-opus-5-5\"}}\n" +
+		"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"fallback\",\"to\":{\"model\":\"claude-opus-4-8\"}}}\n" +
+		"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":6,\"iterations\":[{\"type\":\"fallback_message\",\"model\":\"claude-opus-4-8\"}]}}\n")
+	nonStream := ConvertClaudeResponseToOpenAINonStream(ctx, "claude-opus-5-5", nil, nil, sse, nil)
+	if got := ojson.GetBytesNoCopy(nonStream, "model").String(); got != "claude-opus-4-8" {
+		t.Fatalf("non-stream mid-fallback model = %q, payload=%s", got, nonStream)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAI_RefusalKeepsRequestedModel(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	ConvertClaudeResponseToOpenAI(ctx, "alias-opus", nil, nil,
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_no","model":"claude-opus-5-5","usage":{"input_tokens":2,"output_tokens":0}}}`),
+		&param)
+	out := ConvertClaudeResponseToOpenAI(ctx, "alias-opus", nil, nil,
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":0}}`),
+		&param)
+	if len(out) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(out))
+	}
+	if got := ojson.GetBytesNoCopy(out[0], "model").String(); got != "claude-opus-5-5" {
+		t.Fatalf("refusal model = %q, want claude-opus-5-5", got)
+	}
+	if got := ojson.GetBytesNoCopy(out[0], "choices.0.finish_reason").String(); got != "content_filter" {
+		t.Fatalf("refusal finish_reason = %q, want content_filter", got)
+	}
+}

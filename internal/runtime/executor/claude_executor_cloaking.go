@@ -1763,13 +1763,12 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 	currentModel := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
 	// A model rewrite may change the native fallback target. Never override a
 	// caller or payload-rule fallback; only replace one inserted by the cloak.
+	// Opus 5.5 has no implicit different-model target, so a cloak-inserted
+	// fallback is dropped unless the caller or a payload rule owns it.
 	if fableState.injectedFallbacks && !payloadTouchedFallbacks {
 		wantFallback := ""
-		switch {
-		case isClaudeFable51Model(currentModel):
+		if isClaudeFable51Model(currentModel) {
 			wantFallback = "claude-opus-5"
-		case isClaudeOpus55Model(currentModel):
-			wantFallback = "claude-opus-4-8"
 		}
 		if doc.Get("fallbacks.0.model").String() != wantFallback {
 			if doc.Delete("fallbacks") == nil {
@@ -1834,10 +1833,6 @@ func reconcileClaudeCodeFableModelAfterPayloadDoc(
 		return changed
 	}
 
-	if isClaudeOpus55Model(currentModel) && !doc.Get("fallbacks").Exists() && !payloadTouchedFallbacks {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-		changed = true
-	}
 	thinkingType := strings.ToLower(strings.TrimSpace(doc.Get("thinking.type").String()))
 	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
 	// Payload rules can disable thinking without touching display. Remove only
@@ -2657,10 +2652,10 @@ func applyCloakingInternalDoc(
 
 	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
 	// "fallbacks": [{"model": "claude-opus-5"}]
+	// Opus 5.5 does not. A different-model fallback is sent only when the
+	// client or a payload rule sets it, so a refusal from the requested model
+	// stays visible instead of being retried as another model.
 	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
 	if isClaudeFable51Model(model) && !isProbeOrHelper {
 		if !doc.Get("fallbacks").Exists() {
 			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
