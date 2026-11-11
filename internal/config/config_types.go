@@ -687,17 +687,17 @@ type PayloadModelRule struct {
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
 	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
-	Headers map[string]string `yaml:"headers" json:"headers"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers"`
 	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
-	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
+	FromProtocol string `yaml:"from-protocol,omitempty" json:"from-protocol"`
 	// Match requires payload JSON paths to equal the configured values.
-	Match []map[string]any `yaml:"match" json:"match"`
+	Match []map[string]any `yaml:"match,omitempty" json:"match"`
 	// NotMatch requires payload JSON paths to not equal the configured values.
-	NotMatch []map[string]any `yaml:"not-match" json:"not-match"`
+	NotMatch []map[string]any `yaml:"not-match,omitempty" json:"not-match"`
 	// Exist requires payload JSON paths to exist and not be null.
-	Exist []string `yaml:"exist" json:"exist"`
+	Exist []string `yaml:"exist,omitempty" json:"exist"`
 	// NotExist requires payload JSON paths to be missing or null.
-	NotExist []string `yaml:"not-exist" json:"not-exist"`
+	NotExist []string `yaml:"not-exist,omitempty" json:"not-exist"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.

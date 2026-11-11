@@ -57,6 +57,14 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	if generated.Content[0].Kind != yaml.MappingNode {
 		return fmt.Errorf("expected generated root mapping node")
 	}
+	// The merge adds keys the file lacks. Skip those that still hold what parsing the
+	// file yields, such as load-time defaults, so a one-key change writes one key.
+	mergeSource := generated.Content[0]
+	if baseline := parsedConfigNode(data); baseline != nil {
+		mergeSource = deepCopyNode(mergeSource)
+		keepConfiguredAuthDir(mergeSource, baseline, persistCfg.AuthDir)
+		dropUnchangedNewKeys(original.Content[0], mergeSource, baseline)
+	}
 
 	// Keep obsolete roots until v8 migration can preserve them as comments.
 	if !migrating {
@@ -75,7 +83,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
-	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	mergeMappingPreserve(original.Content[0], mergeSource)
 	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
 		return err
 	}
@@ -656,6 +664,69 @@ func reorderSequenceForMerge(dst, src *yaml.Node) {
 	dst.Content = ordered
 }
 
+// parsedConfigNode renders the config that data parses to, or nil when data does not parse.
+func parsedConfigNode(data []byte) *yaml.Node {
+	cfg, errParse := ParseConfigBytes(data)
+	if errParse != nil {
+		return nil
+	}
+	var node yaml.Node
+	if errEncode := node.Encode((*legacyConfig)(cfg)); errEncode != nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	return &node
+}
+
+// keepConfiguredAuthDir writes back the auth-dir spelling from the file, such as
+// "~/.cli-proxy-api", when the runtime auth-dir is only its resolved path.
+func keepConfiguredAuthDir(src, baseline *yaml.Node, runtimeAuthDir string) {
+	srcIdx := findMapKeyIndex(src, "auth-dir")
+	baseIdx := findMapKeyIndex(baseline, "auth-dir")
+	if srcIdx < 0 || baseIdx < 0 {
+		return
+	}
+	configured := baseline.Content[baseIdx+1].Value
+	configuredDir, errConfigured := resolveAuthDirPath(configured)
+	runtimeDir, errRuntime := resolveAuthDirPath(runtimeAuthDir)
+	if errConfigured != nil || errRuntime != nil || configuredDir != runtimeDir {
+		return
+	}
+	src.Content[srcIdx+1].Value = configured
+}
+
+// resolveAuthDirPath resolves authDir like util.ResolveAuthDir, which config cannot import.
+func resolveAuthDirPath(authDir string) (string, error) {
+	if authDir == "" {
+		authDir = DefaultAuthDir
+	}
+	return resolveHomePath(authDir)
+}
+
+// dropUnchangedNewKeys removes the keys from src that dst lacks and whose value equals
+// baseline, and recurses into mappings that all three share.
+func dropUnchangedNewKeys(dst, src, baseline *yaml.Node) {
+	if dst == nil || src == nil || baseline == nil ||
+		dst.Kind != yaml.MappingNode || src.Kind != yaml.MappingNode || baseline.Kind != yaml.MappingNode {
+		return
+	}
+	kept := make([]*yaml.Node, 0, len(src.Content))
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		key, value := src.Content[i], src.Content[i+1]
+		dstIdx := findMapKeyIndex(dst, key.Value)
+		baseIdx := findMapKeyIndex(baseline, key.Value)
+		if baseIdx >= 0 {
+			if dstIdx < 0 && nodesStructurallyEqual(value, baseline.Content[baseIdx+1]) {
+				continue
+			}
+			if dstIdx >= 0 {
+				dropUnchangedNewKeys(dst.Content[dstIdx+1], value, baseline.Content[baseIdx+1])
+			}
+		}
+		kept = append(kept, key, value)
+	}
+	src.Content = kept
+}
+
 func matchSequenceElement(original []*yaml.Node, used []bool, target *yaml.Node) int {
 	if target == nil {
 		return -1
@@ -754,7 +825,10 @@ func nodesStructurallyEqual(a, b *yaml.Node) bool {
 			return false
 		}
 		for i := 0; i+1 < len(a.Content); i += 2 {
-			if !nodesStructurallyEqual(a.Content[i], b.Content[i]) {
+			// Keys compare exactly, tag included: the merge keeps a matched key node, so a
+			// key equal only after trimming or with another type would survive the save.
+			if a.Content[i] == nil || b.Content[i] == nil ||
+				a.Content[i].Value != b.Content[i].Value || a.Content[i].ShortTag() != b.Content[i].ShortTag() {
 				return false
 			}
 			if !nodesStructurallyEqual(a.Content[i+1], b.Content[i+1]) {
