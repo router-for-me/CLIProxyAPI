@@ -208,7 +208,21 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 			mutated = true
 		}
 	}
-
+	// Reactive context-fit trim: ported from upstream's compressContext.
+	// Gated solely on context-trim.enabled, independent of the compression
+	// engines, and applied before user payload rules (final barrier).
+	if cfg.Compression.ContextTrim.EnabledOn() {
+		if fit := payloadcompress.ApplyContextFit(doc, model, cfg.Compression.ContextTrim); len(fit.Layers) > 0 {
+			log.WithFields(log.Fields{
+				"module":          "payloadcompress",
+				"event":           "context_trim",
+				"model":           model,
+				"estimate_before": fit.Before,
+				"estimate_after":  fit.After,
+				"layers":          fit.Layers,
+			}).Infof("context trim: %d -> %d estimated tokens (layers: %v)", fit.Before, fit.After, fit.Layers)
+		}
+	}
 	rules := cfg.Payload
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
 	if hasPayloadRules {

@@ -330,7 +330,12 @@ requests:
   #     enabled: false            #   Adds a clear_tool_uses_20250919 edit to context_management.
   #     trigger-tokens: 100000    #   Default: 100000 input tokens before the provider clears.
   #     keep-tool-uses: 3         #   Default: 3 recent tool uses survive a clearing pass.
-  #   live-zone:                   # Reuse the previous turn's compressed prefix. Off by
+  #   context-trim:              # Reactive context-fit trim (safety pass). ON by default.
+  #     enabled: true            #   Fires when the request exceeds the model context
+  #                              #   window minus the reserve, regardless of `enabled` above.
+  #     reserve-percent: 15      #   Default: 15, share of the window kept for the response.
+  #     tool-result-chars: 2000  #   Default: 2000, per tool_result/tool message body cap.
+  #     keep-latest-images: 2    #   Default: 2, inline base64 images kept during the prune pass.
   #     enabled: false             #   default. Keys on the same session identity that
   #                                #   affinity routing uses (canonical, LCP, execution or
   #                                #   derived), so a request repeating that prefix skips the

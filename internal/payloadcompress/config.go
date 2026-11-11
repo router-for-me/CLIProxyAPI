@@ -41,6 +41,57 @@ type ContextEditingConfig struct {
 	KeepToolUses int `yaml:"keep-tool-uses" json:"keep-tool-uses"`
 }
 
+// ContextTrimConfig gates the reactive context-fit trim (contextfit.go).
+// Enabled is the YAML tri-state: zero (unset) means on, matching upstream
+// where the reactive pass is a safety net independent of the engines.
+type ContextTrimConfig struct {
+	Enabled *bool `yaml:"enabled" json:"enabled"`
+	// ReservePercent is how much of the context window stays unused so the
+	// response still fits. Defaults to 15, upstream's reserveTokens heuristic.
+	ReservePercent int `yaml:"reserve-percent" json:"reserve-percent"`
+	// ToolResultChars caps each tool_result/tool message body. Defaults to
+	// 2000, the upstream trimToolMessages cap.
+	ToolResultChars int `yaml:"tool-result-chars" json:"tool-result-chars"`
+	// KeepLatestImages is how many of the newest inline base64 images survive
+	// the prune pass. Defaults to 2, upstream's keepLatestImages default.
+	KeepLatestImages int `yaml:"keep-latest-images" json:"keep-latest-images"`
+}
+
+// EffectiveReservePercent resolves the reserve percentage with the upstream
+// default and sanity bounds: a huge reserve would make every request trim.
+func (c ContextTrimConfig) EffectiveReservePercent() int {
+	if c.ReservePercent <= 0 {
+		return 15
+	}
+	if c.ReservePercent > 90 {
+		return 90
+	}
+	return c.ReservePercent
+}
+
+// EffectiveToolResultChars resolves the tool-result trim cap; non-positive
+// falls back to the upstream default.
+func (c ContextTrimConfig) EffectiveToolResultChars() int {
+	if c.ToolResultChars <= 0 {
+		return 2000
+	}
+	return c.ToolResultChars
+}
+
+// EffectiveKeepLatestImages resolves the image prune floor; non-positive
+// falls back to the upstream default of 2.
+func (c ContextTrimConfig) EffectiveKeepLatestImages() int {
+	if c.KeepLatestImages <= 0 {
+		return 2
+	}
+	return c.KeepLatestImages
+}
+
+// EnabledOn reports whether the trim pass runs. Unset means on.
+func (c ContextTrimConfig) EnabledOn() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
 // Config mirrors the requests.compression YAML block.
 type Config struct {
 	// Enabled turns context compression on. Off by default.
@@ -70,6 +121,11 @@ type Config struct {
 	PrefixFreeze PrefixFreezeConfig `yaml:"prefix-freeze" json:"prefix-freeze"`
 	// ContextEditing delegates stale tool-use clearing to Anthropic itself.
 	ContextEditing ContextEditingConfig `yaml:"context-editing" json:"context-editing"`
+	// ContextTrim is the reactive context-fit trim: a safety pass, ported from
+	// upstream's compressContext, that runs when the request still exceeds the
+	// model context window minus a reserve. Independent of Enabled: upstream
+	// compacts reactively even when the compression engines are off.
+	ContextTrim ContextTrimConfig `yaml:"context-trim" json:"context-trim"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -500,6 +556,19 @@ func (c *Config) Sanitize() {
 	}
 	if c.ContextEditing.KeepToolUses <= 0 {
 		c.ContextEditing.KeepToolUses = defaultContextEditKeepToolUses
+	}
+	// ContextTrim normalization: zero-values snap to upstream defaults.
+	if c.ContextTrim.ReservePercent <= 0 {
+		c.ContextTrim.ReservePercent = 15
+	}
+	if c.ContextTrim.ReservePercent > 90 {
+		c.ContextTrim.ReservePercent = 90
+	}
+	if c.ContextTrim.ToolResultChars <= 0 {
+		c.ContextTrim.ToolResultChars = 2000
+	}
+	if c.ContextTrim.KeepLatestImages <= 0 {
+		c.ContextTrim.KeepLatestImages = 2
 	}
 	hadCombos := len(c.Combos) > 0
 	seen := make(map[string]struct{}, len(c.Combos))
