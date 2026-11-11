@@ -1,0 +1,1565 @@
+package executor
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
+)
+
+const kimiReasoningUnavailable = "[reasoning unavailable]"
+
+// KimiExecutor is a stateless executor for Kimi API using OpenAI-compatible chat completions.
+type KimiExecutor struct {
+	ClaudeExecutor
+	cfg *config.Config
+}
+
+// NewKimiExecutor creates a new Kimi executor.
+func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
+	return &KimiExecutor{
+		ClaudeExecutor: ClaudeExecutor{
+			cfg:                     cfg,
+			requestLogProvider:      "kimi",
+			upstreamModelNormalizer: normalizeKimiUpstreamModel,
+			oauthToolAliases:        &claudeOAuthToolAliasStore{},
+		},
+		cfg: cfg,
+	}
+}
+
+// Identifier returns the executor identifier.
+func (e *KimiExecutor) Identifier() string { return "kimi" }
+
+// SupportsNativeToolSearch keeps Kimi out of native tool search. Catalog checks
+// see Kimi credentials before their base_url is filled in, so the embedded
+// Claude rule would mistake them for Anthropic's origin.
+func (e *KimiExecutor) SupportsNativeToolSearch(*cliproxyauth.Auth, string) bool { return false }
+
+// RequestToFormat reports the upstream request format used after auth selection.
+func (e *KimiExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
+	if opts.SourceFormat == sdktranslator.FormatClaude {
+		return sdktranslator.FormatClaude
+	}
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		return sdktranslator.FormatOpenAIResponse
+	}
+	return sdktranslator.FormatOpenAI
+}
+
+// PrepareRequest injects Kimi credentials into the outgoing HTTP request.
+func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	if req == nil {
+		return nil
+	}
+	token := kimiCreds(auth)
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	return nil
+}
+
+// HttpRequest injects Kimi credentials into the request and executes it.
+func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, fmt.Errorf("kimi executor: request is nil")
+	}
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	httpReq := req.WithContext(ctx)
+	if err := e.PrepareRequest(httpReq, auth); err != nil {
+		return nil, err
+	}
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	return httpClient.Do(httpReq)
+}
+
+// Execute performs a non-streaming chat completion request to Kimi.
+func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if auth != nil {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+		}
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return claudeResp, errExecute
+		}
+		cacheKimiThinkingReplayResponse(ctx, replayScope, claudeResp.Payload)
+		return claudeResp, nil
+	}
+	if from == sdktranslator.FormatOpenAIResponse {
+		return e.executeResponses(ctx, auth, req, opts)
+	}
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+
+	token := kimiCreds(auth)
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := bytes.Clone(originalPayloadSource)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, false)
+	body, err := helps.TranslateRequestReturningError(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), false, false)
+	if err != nil {
+		return resp, err
+	}
+
+	// Strip kimi- prefix and any [1m] suffix for upstream API
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
+	doc := ojson.NewDoc(body)
+	if err = doc.Set("model", upstreamModel); err != nil {
+		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
+	}
+
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), "kimi", e.Identifier()); err != nil {
+		return resp, err
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	if err = normalizeKimiToolMessageLinksDoc(doc); err != nil {
+		return resp, err
+	}
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
+
+	url := helps.ResolveKimiChatURL(auth)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return resp, err
+	}
+	applyKimiHeadersWithAuth(httpReq, token, false, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("kimi executor: close response body error: %v", errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, errRead := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
+	}
+	data, err := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	reporter.ObserveResponseModel(data)
+	var param any
+	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
+	// the original model name in the response for client compatibility.
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
+	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	if responseFormat == sdktranslator.FormatOpenAIResponse {
+		out = helps.EnsureResponsesUsageDetails(out)
+	}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+// ExecuteStream performs a streaming chat completion request to Kimi.
+func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		if auth != nil {
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+		}
+		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
+		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
+		if errExecute != nil {
+			if replayScope.replayApplied && shouldClearKimiThinkingReplayAfterError(errExecute) {
+				clearKimiThinkingReplayContent(ctx, replayScope)
+			}
+			return nil, errExecute
+		}
+		return wrapKimiThinkingReplayStream(ctx, claudeResult, replayScope), nil
+	}
+	if from == sdktranslator.FormatOpenAIResponse {
+		return e.executeResponsesStream(ctx, auth, req, opts)
+	}
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	token := kimiCreds(auth)
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	to := sdktranslator.FromString("openai")
+	originalPayloadSource := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayloadSource = opts.OriginalRequest
+	}
+	originalPayload := bytes.Clone(originalPayloadSource)
+	originalTranslated := helps.TranslateRequestWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true)
+	body, err := helps.TranslateRequestReturningError(ctx, opts.Headers, e.cfg, from, to, baseModel, bytes.Clone(req.Payload), true, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Strip kimi- prefix and any [1m] suffix for upstream API
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
+	doc := ojson.NewDoc(body)
+	if err = doc.Set("model", upstreamModel); err != nil {
+		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
+	}
+
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), "kimi", e.Identifier()); err != nil {
+		return nil, err
+	}
+
+	if err = doc.Set("stream_options.include_usage", true); err != nil {
+		return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
+	}
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	if err = normalizeKimiToolMessageLinksDoc(doc); err != nil {
+		return nil, err
+	}
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
+
+	url := helps.ResolveKimiChatURL(auth)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyKimiHeadersWithAuth(httpReq, token, true, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return nil, err
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, errRead := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("kimi executor: close response body error: %v", errClose)
+		}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, err
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("kimi executor: close response body error: %v", errClose)
+			}
+		}()
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 1_048_576) // 1MB
+		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
+		var param any
+		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.ObserveResponseModel(line)
+			streamUsage.ObserveOpenAIStream(line)
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(line), &param, claudeInputTokens)
+			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+				return
+			}
+		}
+		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+			return
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			if !streamUsage.PublishFailure(ctx, reporter, errScan) {
+				reporter.PublishFailure(ctx, errScan)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, []byte("[DONE]"), &param, claudeInputTokens)
+		helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		for i := range doneChunks {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	if opts.Alt == "responses/compact" {
+		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeKimiResponsesCompaction(ctx, auth, req, opts)
+	}
+
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	token := kimiCreds(auth)
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	doc := ojson.NewDoc(req.Payload)
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
+	if errSet := doc.Set("model", upstreamModel); errSet != nil {
+		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", errSet)
+	}
+
+	helps.SetBoolIfDifferentDoc(doc, "stream", false)
+
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier()); errThinking != nil {
+		return resp, errThinking
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc); errNormalizePatch != nil {
+		return resp, errNormalizePatch
+	}
+	if _, errNormalizeInput := helps.NormalizeKimiResponsesInputDoc(doc); errNormalizeInput != nil {
+		return resp, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInput)
+	}
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
+
+	url := helps.ResolveKimiResponsesURL(auth)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
+	body := doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if errNewRequest != nil {
+		return resp, errNewRequest
+	}
+	applyKimiHeadersWithAuth(httpReq, token, false, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return resp, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("kimi executor: close response body error: %v", errClose)
+		}
+	}()
+
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, errRead := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
+	}
+
+	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if errRead != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		return resp, errRead
+	}
+	reporter.ObserveResponseModel(data)
+
+	originalRequest := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalRequest = opts.OriginalRequest
+	}
+	bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
+	out, errTransform := bridge.Bridge.TransformNonStream(data)
+	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
+		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+	}
+	if responseFormat != sdktranslator.FormatOpenAIResponse {
+		var param any
+		out = sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatOpenAIResponse, responseFormat, req.Model, originalRequest, body, out, &param)
+		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		}
+	}
+	if usage, ok := helps.ParseCodexUsage(data); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {
+		reporter.Publish(ctx, usage)
+	} else if usage := helps.ParseOpenAIUsage(data); usage.TotalTokens > 0 || usage.InputTokens > 0 {
+		reporter.Publish(ctx, usage)
+	}
+
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	return resp, nil
+}
+
+func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	if opts.Alt == "responses/compact" {
+		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
+	}
+	if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
+	if helps.HasResponsesCompactionTriggerRequest(req, opts) {
+		return e.executeKimiResponsesCompactionStream(ctx, auth, req, opts)
+	}
+
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	token := kimiCreds(auth)
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	doc := ojson.NewDoc(req.Payload)
+	upstreamModel := normalizeKimiUpstreamModel(baseModel)
+	reporter.SetUpstreamModel(upstreamModel)
+	if errSet := doc.Set("model", upstreamModel); errSet != nil {
+		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", errSet)
+	}
+
+	helps.SetBoolIfDifferentDoc(doc, "stream", true)
+
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier()); errThinking != nil {
+		return nil, errThinking
+	}
+
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	requestPath := helps.PayloadRequestPath(opts)
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc); errNormalizePatch != nil {
+		return nil, errNormalizePatch
+	}
+	if _, errNormalizeInputStream := helps.NormalizeKimiResponsesInputDoc(doc); errNormalizeInputStream != nil {
+		return nil, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInputStream)
+	}
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
+
+	url := helps.ResolveKimiResponsesURL(auth)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
+	body := doc.Bytes()
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if errNewRequest != nil {
+		return nil, errNewRequest
+	}
+	applyKimiHeadersWithAuth(httpReq, token, true, auth)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return nil, errDo
+	}
+
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, errRead := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("kimi executor: close response body error: %v", errClose)
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return nil, err
+	}
+
+	out := make(chan cliproxyexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		defer func() {
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("kimi executor: close response body error: %v", errClose)
+			}
+		}()
+
+		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Buffer(nil, 52_428_800)
+		originalRequest := req.Payload
+		if len(opts.OriginalRequest) > 0 {
+			originalRequest = opts.OriginalRequest
+		}
+		bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
+		sendFailure := func(errFailure error) {
+			errFailure = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			reporter.PublishFailure(ctx, errFailure)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errFailure}:
+			case <-ctx.Done():
+			}
+		}
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
+		var param any
+
+		emitTranslatedLine := func(line []byte) bool {
+			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			if responseFormat == sdktranslator.FormatOpenAIResponse {
+				chunkPayload := make([]byte, len(line)+1)
+				copy(chunkPayload, line)
+				chunkPayload[len(line)] = '\n'
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunkPayload}:
+					return true
+				case <-ctx.Done():
+					return false
+				}
+			}
+			chunks := sdktranslator.TranslateStream(ctx, sdktranslator.FormatOpenAIResponse, responseFormat, req.Model, originalRequest, body, line, &param)
+			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case <-ctx.Done():
+					return false
+				}
+			}
+			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+				return false
+			}
+			return true
+		}
+
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			reporter.ObserveResponseModel(line)
+
+			if bytes.HasPrefix(line, dataTag) {
+				dataBytes := bytes.TrimSpace(line[len(dataTag):])
+				eventType := ojson.GetBytesNoCopy(dataBytes, "type").String()
+				if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" {
+					if usage, ok := helps.ParseCodexUsage(dataBytes); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {
+						streamUsage.Observe(usage, true)
+					} else if usage := helps.ParseOpenAIUsage(dataBytes); usage.TotalTokens > 0 || usage.InputTokens > 0 {
+						streamUsage.Observe(usage, true)
+					}
+				}
+			}
+
+			lines, errTransform := bridge.Stream(bytes.Clone(line))
+			if errTransform != nil {
+				reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			}
+			for _, converted := range lines {
+				if !emitTranslatedLine(converted) {
+					return
+				}
+			}
+			if errTransform != nil {
+				sendFailure(errTransform)
+				return
+			}
+		}
+		finishEvents, errFinish := bridge.FinishStream()
+		if errFinish != nil {
+			reporter.PublishFailure(ctx, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
+		for _, event := range finishEvents {
+			if !emitTranslatedLine(event) {
+				return
+			}
+		}
+		if errFinish != nil {
+			sendFailure(errFinish)
+			return
+		}
+
+		if errScan := scanner.Err(); errScan != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx, errScan)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+
+	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func (e *KimiExecutor) executeKimiResponsesCompaction(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var resp cliproxyexecutor.Response
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryPayload := helps.PrepareAntigravityCompactionSummaryPayload(helps.ResponsesCompactionSourcePayload(req, opts), baseModel)
+	summaryReq := cliproxyexecutor.Request{
+		Model:    req.Model,
+		Payload:  summaryPayload,
+		Metadata: req.Metadata,
+	}
+	summaryOpts := opts
+	summaryOpts.Alt = ""
+	summaryOpts.Stream = false
+	summaryOpts.OriginalRequest = nil
+	summaryOpts.SourceFormat = sdktranslator.FormatOpenAIResponse
+	summaryOpts.ResponseFormat = sdktranslator.FormatOpenAIResponse
+
+	summaryResp, errSummary := e.executeResponses(ctx, auth, summaryReq, summaryOpts)
+	if errSummary != nil {
+		return resp, errSummary
+	}
+	respPayload, errBuild := helps.BuildResponsesCompactionResponseFromSummary(baseModel, summaryResp.Payload)
+	if errBuild != nil {
+		return resp, statusErr{code: http.StatusBadGateway, msg: errBuild.Error()}
+	}
+	return cliproxyexecutor.Response{
+		Payload: respPayload,
+		Headers: summaryResp.Headers,
+	}, nil
+}
+
+func (e *KimiExecutor) executeKimiResponsesCompactionStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	summaryResp, errSummary := e.executeKimiResponsesCompaction(ctx, auth, req, opts)
+	if errSummary != nil {
+		return nil, errSummary
+	}
+	chunks, errChunks := helps.BuildResponsesCompactionStreamChunksFromResponse(baseModel, summaryResp.Payload)
+	if errChunks != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: errChunks.Error()}
+	}
+	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
+	for _, chunk := range chunks {
+		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
+	}
+	close(out)
+
+	headers := summaryResp.Headers.Clone()
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	headers.Set("Content-Type", "text/event-stream")
+	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
+}
+
+// CountTokens estimates token count for Kimi requests.
+func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		if errExpand := helps.ExpandResponsesCompactionCapsules(&req, &opts, "kimi"); errExpand != nil {
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+		}
+		var errNormalize error
+		req.Payload, errNormalize = helps.NormalizeApplyPatchResponsesRequest(req.Payload)
+		if errNormalize != nil {
+			return cliproxyexecutor.Response{}, errNormalize
+		}
+	}
+
+	if auth != nil {
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes["base_url"] = helps.ResolveKimiClaudeBaseURL(auth)
+	}
+	return e.ClaudeExecutor.countTokensUpstream(ctx, auth, req, opts)
+}
+
+func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
+		return body, nil
+	}
+	doc := ojson.NewDoc(body)
+	changed, err := normalizeKimiToolMessageLinksChangedDoc(doc)
+	if err != nil || !changed {
+		return body, err
+	}
+	return doc.Bytes(), nil
+}
+
+func normalizeKimiToolMessageLinksDoc(doc *ojson.Doc) error {
+	_, err := normalizeKimiToolMessageLinksChangedDoc(doc)
+	return err
+}
+
+func normalizeKimiToolMessageLinksChangedDoc(doc *ojson.Doc) (bool, error) {
+	if doc == nil || doc.Len() == 0 {
+		return false, nil
+	}
+
+	messages := doc.Get("messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false, nil
+	}
+
+	type messagePatch struct {
+		index        int
+		path         string
+		value        string
+		errorContext string
+	}
+
+	msgs := messages.Array()
+	droppedMessages := make([]bool, len(msgs))
+	patches := make([]messagePatch, 0)
+	pending := make([]string, 0)
+	dropped := 0
+	patched := 0
+	patchedReasoning := 0
+	ambiguous := 0
+	latestReasoning := ""
+	hasLatestReasoning := false
+
+	removePending := func(id string) {
+		for idx := range pending {
+			if pending[idx] != id {
+				continue
+			}
+			pending = append(pending[:idx], pending[idx+1:]...)
+			return
+		}
+	}
+
+	for msgIndex, msg := range msgs {
+		if shouldDropKimiAssistantMessage(msg) {
+			droppedMessages[msgIndex] = true
+			dropped++
+			continue
+		}
+
+		role := strings.TrimSpace(msg.Get("role").String())
+		switch role {
+		case "assistant":
+			reasoning := msg.Get("reasoning_content")
+			if reasoning.Exists() {
+				reasoningText := reasoning.String()
+				if isUsableKimiReasoning(reasoningText) {
+					latestReasoning = reasoningText
+					hasLatestReasoning = true
+				}
+			}
+
+			toolCalls := msg.Get("tool_calls")
+			if toolCalls.Exists() && toolCalls.IsArray() {
+				toolCallItems := toolCalls.Array()
+				if len(toolCallItems) > 0 {
+					if !reasoning.Exists() || !isUsableKimiReasoning(reasoning.String()) {
+						patches = append(patches, messagePatch{
+							index:        msgIndex,
+							path:         "reasoning_content",
+							value:        fallbackAssistantReasoning(msg, hasLatestReasoning, latestReasoning),
+							errorContext: "failed to set assistant reasoning_content",
+						})
+						patchedReasoning++
+					}
+					for _, toolCall := range toolCallItems {
+						id := strings.TrimSpace(toolCall.Get("id").String())
+						if id != "" {
+							pending = append(pending, id)
+						}
+					}
+				}
+			}
+		case "tool":
+			toolCallID := strings.TrimSpace(msg.Get("tool_call_id").String())
+			if toolCallID == "" {
+				toolCallID = strings.TrimSpace(msg.Get("call_id").String())
+				if toolCallID != "" {
+					patches = append(patches, messagePatch{index: msgIndex, path: "tool_call_id", value: toolCallID, errorContext: "failed to set tool_call_id from call_id"})
+					patched++
+				}
+			}
+			if toolCallID == "" {
+				if len(pending) == 1 {
+					toolCallID = pending[0]
+					patches = append(patches, messagePatch{index: msgIndex, path: "tool_call_id", value: toolCallID, errorContext: "failed to infer tool_call_id"})
+					patched++
+				} else if len(pending) > 1 {
+					ambiguous++
+				}
+			}
+			if toolCallID != "" {
+				removePending(toolCallID)
+			}
+		}
+	}
+
+	if dropped > 0 {
+		log.WithField("dropped_assistant_messages", dropped).Debug("kimi executor: dropped empty assistant messages")
+	}
+	if dropped == 0 && len(patches) == 0 {
+		if ambiguous > 0 {
+			log.WithFields(log.Fields{
+				"ambiguous_tool_messages": ambiguous,
+				"pending_tool_calls":      len(pending),
+			}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
+		}
+		return false, nil
+	}
+
+	if dropped == 0 && len(patches) == 1 {
+		patch := patches[0]
+		path := fmt.Sprintf("messages.%d.%s", patch.index, patch.path)
+		if errSet := doc.Set(path, patch.value); errSet != nil {
+			return false, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
+		}
+	} else {
+		messageItems := make([]string, 0, len(msgs)-dropped)
+		patchIndex := 0
+		for msgIndex, msg := range msgs {
+			if droppedMessages[msgIndex] {
+				continue
+			}
+			messageJSON := msg.Raw
+			if patchIndex < len(patches) && patches[patchIndex].index == msgIndex {
+				msgDoc := ojson.NewDocString(messageJSON)
+				for patchIndex < len(patches) && patches[patchIndex].index == msgIndex {
+					patch := patches[patchIndex]
+					if errSet := msgDoc.Set(patch.path, patch.value); errSet != nil {
+						return false, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
+					}
+					patchIndex++
+				}
+				messageJSON = msgDoc.String()
+			}
+			messageItems = append(messageItems, messageJSON)
+		}
+		if errSet := doc.SetRawBytes("messages", helps.JoinRawJSONStrings(messageItems)); errSet != nil {
+			if dropped > 0 {
+				return false, fmt.Errorf("kimi executor: failed to drop empty assistant messages: %w", errSet)
+			}
+			return false, fmt.Errorf("kimi executor: %s: %w", patches[0].errorContext, errSet)
+		}
+	}
+
+	if patched > 0 || patchedReasoning > 0 {
+		log.WithFields(log.Fields{
+			"patched_tool_messages":      patched,
+			"patched_reasoning_messages": patchedReasoning,
+		}).Debug("kimi executor: normalized tool message fields")
+	}
+	if ambiguous > 0 {
+		log.WithFields(log.Fields{
+			"ambiguous_tool_messages": ambiguous,
+			"pending_tool_calls":      len(pending),
+		}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
+	}
+	return true, nil
+}
+
+func shouldDropKimiAssistantMessage(msg ojson.Result) bool {
+	if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+		return false
+	}
+	if hasKimiToolCalls(msg) || hasKimiLegacyFunctionCall(msg) || hasKimiAssistantReasoning(msg) {
+		return false
+	}
+	return isKimiAssistantContentEmpty(msg.Get("content"))
+}
+
+func hasKimiToolCalls(msg ojson.Result) bool {
+	toolCalls := msg.Get("tool_calls")
+	return toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0
+}
+
+func hasKimiLegacyFunctionCall(msg ojson.Result) bool {
+	functionCall := msg.Get("function_call")
+	if !functionCall.Exists() || functionCall.Type == ojson.Null {
+		return false
+	}
+	if functionCall.IsObject() && strings.TrimSpace(functionCall.Raw) == "{}" {
+		return false
+	}
+	return strings.TrimSpace(functionCall.Raw) != ""
+}
+
+func hasKimiAssistantReasoning(msg ojson.Result) bool {
+	reasoning := msg.Get("reasoning_content")
+	return reasoning.Exists() && strings.TrimSpace(reasoning.String()) != ""
+}
+
+func isKimiAssistantContentEmpty(content ojson.Result) bool {
+	if !content.Exists() || content.Type == ojson.Null {
+		return true
+	}
+	if content.Type == ojson.String {
+		return strings.TrimSpace(content.String()) == ""
+	}
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if !isKimiAssistantContentPartEmpty(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func isKimiAssistantContentPartEmpty(part ojson.Result) bool {
+	if !part.Exists() || part.Type == ojson.Null {
+		return true
+	}
+	if part.Type == ojson.String {
+		return strings.TrimSpace(part.String()) == ""
+	}
+	if !part.IsObject() {
+		return false
+	}
+	if text := part.Get("text"); text.Exists() {
+		return strings.TrimSpace(text.String()) == ""
+	}
+	if strings.TrimSpace(part.Get("type").String()) == "text" {
+		return true
+	}
+	return strings.TrimSpace(part.Raw) == "{}"
+}
+
+func isUsableKimiReasoning(reasoning string) bool {
+	trimmed := strings.TrimSpace(reasoning)
+	return trimmed != "" && trimmed != kimiReasoningUnavailable
+}
+
+func fallbackAssistantReasoning(msg ojson.Result, hasLatest bool, latest string) string {
+	if hasLatest && isUsableKimiReasoning(latest) {
+		return latest
+	}
+
+	content := msg.Get("content")
+	if content.Type == ojson.String {
+		if text := strings.TrimSpace(content.String()); text != "" {
+			return text
+		}
+	}
+	if content.IsArray() {
+		parts := make([]string, 0, len(content.Array()))
+		for _, item := range content.Array() {
+			text := strings.TrimSpace(item.Get("text").String())
+			if text == "" {
+				continue
+			}
+			parts = append(parts, text)
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "\n")
+		}
+	}
+
+	return kimiReasoningUnavailable
+}
+
+// Refresh refreshes the Kimi token using the refresh token.
+func (e *KimiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	log.Debugf("kimi executor: refresh called")
+	if refreshed, handled, err := helps.RefreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
+	if auth == nil {
+		return nil, fmt.Errorf("kimi executor: auth is nil")
+	}
+	// Expect refresh_token in metadata for OAuth-based accounts
+	var refreshToken string
+	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["refresh_token"].(string); ok && strings.TrimSpace(v) != "" {
+			refreshToken = v
+		}
+	}
+	if strings.TrimSpace(refreshToken) == "" {
+		// Nothing to refresh
+		return auth, nil
+	}
+
+	domain := kimiauth.ResolveKimiDomainFromAuth(auth)
+	client := kimiauth.NewDeviceFlowClientWithDomainDeviceIDAndProxyURL(e.cfg, domain, resolveKimiDeviceID(auth), auth.ProxyURL)
+	if httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second); httpClient != nil {
+		client.SetHTTPClient(httpClient)
+	}
+	td, err := client.RefreshToken(ctx, refreshToken)
+	if err != nil {
+		return nil, err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = td.AccessToken
+	if td.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	if td.ExpiresAt > 0 {
+		exp := time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		auth.Metadata["expired"] = exp
+	}
+	if currentType, ok := auth.Metadata["type"].(string); !ok || currentType == "" {
+		if kimiauth.IsKimiAIDomain(domain) {
+			auth.Metadata["type"] = "kimi-ai"
+		} else {
+			auth.Metadata["type"] = "kimi"
+		}
+	}
+	if _, ok := auth.Metadata["domain"]; !ok {
+		auth.Metadata["domain"] = domain
+	}
+	if _, ok := auth.Metadata["base_url"]; !ok {
+		auth.Metadata["base_url"] = helps.ResolveKimiBaseURL(auth)
+	}
+	if storage, ok := auth.Storage.(*kimiauth.KimiTokenStorage); ok && storage != nil {
+		newStorage := *storage
+		newStorage.AccessToken = td.AccessToken
+		if td.RefreshToken != "" {
+			newStorage.RefreshToken = td.RefreshToken
+		}
+		if td.ExpiresAt > 0 {
+			newStorage.Expired = time.Unix(td.ExpiresAt, 0).UTC().Format(time.RFC3339)
+		}
+		if newStorage.Domain == "" {
+			newStorage.Domain = domain
+		}
+		if newStorage.BaseURL == "" {
+			newStorage.BaseURL = helps.ResolveKimiBaseURL(auth)
+		}
+		auth.Storage = &newStorage
+	}
+	now := time.Now().Format(time.RFC3339)
+	auth.Metadata["last_refresh"] = now
+	return auth, nil
+}
+
+// applyKimiHeaders sets required headers for Kimi API requests.
+// Headers identify CLIProxyAPI with the current build version.
+func applyKimiHeaders(r *http.Request, token string, stream bool) {
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+token)
+	// Identify requests with the current CLIProxyAPI version.
+	r.Header.Set("User-Agent", "CLIProxyAPI/"+buildinfo.Version)
+	r.Header.Set("X-Msh-Platform", "CLIProxyAPI")
+	r.Header.Set("X-Msh-Version", buildinfo.Version)
+	r.Header.Set("X-Msh-Device-Name", getKimiHostname())
+	r.Header.Set("X-Msh-Device-Model", getKimiDeviceModel())
+	r.Header.Set("X-Msh-Device-Id", getKimiDeviceID())
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+		return
+	}
+	r.Header.Set("Accept", "application/json")
+}
+
+func resolveKimiDeviceIDFromAuth(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+
+	deviceIDRaw, ok := auth.Metadata["device_id"]
+	if !ok {
+		return ""
+	}
+
+	deviceID, ok := deviceIDRaw.(string)
+	if !ok {
+		return ""
+	}
+
+	return strings.TrimSpace(deviceID)
+}
+
+func resolveKimiDeviceIDFromStorage(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+
+	storage, ok := auth.Storage.(*kimiauth.KimiTokenStorage)
+	if !ok || storage == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(storage.DeviceID)
+}
+
+func resolveKimiDeviceID(auth *cliproxyauth.Auth) string {
+	deviceID := resolveKimiDeviceIDFromAuth(auth)
+	if deviceID != "" {
+		return deviceID
+	}
+	return resolveKimiDeviceIDFromStorage(auth)
+}
+
+func applyKimiHeadersWithAuth(r *http.Request, token string, stream bool, auth *cliproxyauth.Auth) {
+	applyKimiHeaders(r, token, stream)
+
+	if deviceID := resolveKimiDeviceID(auth); deviceID != "" {
+		r.Header.Set("X-Msh-Device-Id", deviceID)
+	}
+}
+
+// getKimiHostname returns the machine hostname.
+func getKimiHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
+}
+
+// getKimiDeviceModel returns a device model string matching kimi-cli format.
+func getKimiDeviceModel() string {
+	return fmt.Sprintf("%s %s", runtime.GOOS, runtime.GOARCH)
+}
+
+// getKimiDeviceID returns a stable device ID, matching kimi-cli storage location.
+func getKimiDeviceID() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "cli-proxy-api-device"
+	}
+	// Check kimi-cli's device_id location first (platform-specific)
+	var kimiShareDir string
+	switch runtime.GOOS {
+	case "darwin":
+		kimiShareDir = filepath.Join(homeDir, "Library", "Application Support", "kimi")
+	case "windows":
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			appData = filepath.Join(homeDir, "AppData", "Roaming")
+		}
+		kimiShareDir = filepath.Join(appData, "kimi")
+	default: // linux and other unix-like
+		kimiShareDir = filepath.Join(homeDir, ".local", "share", "kimi")
+	}
+	deviceIDPath := filepath.Join(kimiShareDir, "device_id")
+	if data, err := os.ReadFile(deviceIDPath); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return "cli-proxy-api-device"
+}
+
+// kimiCreds extracts the access token from auth.
+func kimiCreds(a *cliproxyauth.Auth) (token string) {
+	if a == nil {
+		return ""
+	}
+	// Check metadata first (OAuth flow stores tokens here)
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["access_token"].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	// Fallback to attributes (API key style)
+	if a.Attributes != nil {
+		if v := a.Attributes["access_token"]; v != "" {
+			return v
+		}
+		if v := a.Attributes["api_key"]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// stripKimiPrefix removes the "kimi-" prefix from model names for the upstream API.
+func stripKimiPrefix(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(strings.ToLower(model), "kimi-") {
+		return model[5:]
+	}
+	return model
+}
+
+// normalizeKimiUpstreamModel returns the canonical upstream model ID for Kimi.
+// It strips the CLIProxyAPI "kimi-" prefix and any Claude Code "[1m]" context
+// suffix while preserving a trailing thinking suffix (e.g. "(1024)"), so that
+// the upstream API receives IDs such as "k3(1024)" instead of "kimi-k3[1m](1024)".
+// K2.8 and K2.7 Code aliases are remapped to the official Kimi Code model IDs before
+// generic prefix stripping, so already-canonical IDs stay idempotent.
+func normalizeKimiUpstreamModel(model string) string {
+	model = strings.TrimSpace(model)
+	parsed := thinking.ParseSuffix(model)
+	base := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+	if strings.HasSuffix(base, "[1m]") {
+		base = base[:len(base)-len("[1m]")]
+	}
+	var normalized string
+	switch base {
+	case "kimi-k2.8", "k2.8", "kimi-k2.8-code", "k2.8-code", "kimi-k2.8-preview", "k2.8-preview", "kimi-k2.7-code", "k2.7-code", "kimi-for-coding", "for-coding":
+		normalized = "kimi-for-coding"
+	case "kimi-k2.7-code-highspeed", "k2.7-code-highspeed", "kimi-for-coding-highspeed", "for-coding-highspeed":
+		normalized = "kimi-for-coding-highspeed"
+	default:
+		normalized = stripKimiPrefix(base)
+	}
+	if parsed.HasSuffix {
+		return normalized + "(" + parsed.RawSuffix + ")"
+	}
+	return normalized
+}
+
+// normalizeKimiTools normalizes tool and legacy function parameter schemas for Moonshot.
+// It resolves and inlines local $ref pointers, strips $defs / definitions, and ensures
+// parameters root objects declare an explicit type: "object".
+func normalizeKimiTools(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiToolsDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func normalizeKimiToolsDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	changed := normalizeKimiToolListDoc(doc, "tools", true)
+	if normalizeKimiToolListDoc(doc, "functions", false) {
+		changed = true
+	}
+	if input := doc.Get("input"); input.Exists() && input.IsArray() {
+		for idx, item := range input.Array() {
+			switch strings.TrimSpace(item.Get("type").String()) {
+			case "additional_tools", "tool_search_output":
+				if normalizeKimiToolListDoc(doc, fmt.Sprintf("input.%d.tools", idx), true) {
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiToolListDoc(doc, arrayKey, isTools) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func normalizeKimiToolListDoc(doc *ojson.Doc, arrayKey string, isTools bool) bool {
+	if doc == nil {
+		return false
+	}
+	items := doc.Get(arrayKey)
+	normalized, changed := normalizeKimiToolArray(items, isTools)
+	if !changed {
+		return false
+	}
+	return doc.SetRawBytes(arrayKey, normalized) == nil
+}
+
+func normalizeKimiToolArray(items ojson.Result, isTools bool) ([]byte, bool) {
+	if !items.Exists() || !items.IsArray() {
+		return nil, false
+	}
+	arr := items.Array()
+	if len(arr) == 0 {
+		return nil, false
+	}
+
+	changed := false
+	updatedItems := make([]string, 0, len(arr))
+	for _, item := range arr {
+		itemRaw := item.Raw
+		var itemDoc *ojson.Doc
+		ensureItemDoc := func() *ojson.Doc {
+			if itemDoc == nil {
+				itemDoc = ojson.NewDocString(itemRaw)
+			}
+			return itemDoc
+		}
+		if isTools && strings.TrimSpace(item.Get("type").String()) == "namespace" {
+			for _, nestedKey := range []string{"tools", "children"} {
+				if nested := item.Get(nestedKey); nested.Exists() && nested.IsArray() {
+					if normalizedNested, nestedChanged := normalizeKimiToolArray(nested, true); nestedChanged {
+						if errSet := ensureItemDoc().SetRawBytes(nestedKey, normalizedNested); errSet == nil {
+							changed = true
+						}
+					}
+				}
+			}
+		}
+
+		var paramPath string
+		if isTools && item.Get("function.parameters").Exists() {
+			paramPath = "function.parameters"
+		} else if item.Get("parameters").Exists() {
+			paramPath = "parameters"
+		}
+
+		if paramPath != "" {
+			rawParams := item.Get(paramPath)
+			if rawParams.IsObject() {
+				normalizedParams := normalizeKimiParametersSchema(rawParams.Raw)
+				if normalizedParams != rawParams.Raw {
+					if errSet := ensureItemDoc().SetRawBytes(paramPath, []byte(normalizedParams)); errSet == nil {
+						changed = true
+					}
+				}
+			}
+		}
+		if itemDoc != nil {
+			itemRaw = itemDoc.String()
+		}
+		updatedItems = append(updatedItems, itemRaw)
+	}
+
+	if !changed {
+		return nil, false
+	}
+	return helps.JoinRawJSONStrings(updatedItems), true
+}
+
+func normalizeKimiParametersSchema(paramsRaw string) string {
+	if strings.TrimSpace(paramsRaw) == "" {
+		return paramsRaw
+	}
+
+	inlined := util.InlineLocalRefs(paramsRaw)
+	doc := ojson.NewDocString(inlined)
+	changed := inlined != paramsRaw
+
+	if doc.Get("$defs").Exists() {
+		if doc.Delete("$defs") == nil {
+			changed = true
+		}
+	}
+	if doc.Get("definitions").Exists() {
+		if doc.Delete("definitions") == nil {
+			changed = true
+		}
+	}
+	if !doc.Get("type").Exists() {
+		if doc.Set("type", "object") == nil {
+			changed = true
+		}
+	}
+	if !changed {
+		return paramsRaw
+	}
+	return doc.String()
+}
+
+// normalizeKimiTemperature normalizes or strips the temperature parameter for Kimi upstream.
+// Upstream enforces strict temperature values based on thinking mode:
+// - Thinking disabled: only temperature 0.6 is accepted (or absent).
+// - Thinking enabled: only temperature 1.0 is accepted (or absent).
+// If a client specifies an invalid temperature, stripping it allows the upstream
+// to apply its safe model default and avoids a 400 Bad Request error.
+func normalizeKimiTemperature(body []byte) []byte {
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiTemperatureDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func normalizeKimiTemperatureDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tempRes := doc.Get("temperature")
+	if !tempRes.Exists() {
+		return false
+	}
+	thinkingType := doc.Get("thinking.type").String()
+	if strings.EqualFold(thinkingType, "disabled") {
+		if tempRes.Float() != 0.6 {
+			return doc.Delete("temperature") == nil
+		}
+		return false
+	}
+	// Default / enabled thinking requires temperature 1.0.
+	if tempRes.Float() != 1.0 {
+		return doc.Delete("temperature") == nil
+	}
+	return false
+}
+
+// SupportsApplyPatch reports the actual executor contract, independent of its provider name.
+func (e *KimiExecutor) SupportsApplyPatch() bool { return e != nil }
+
+// ForAPIKey preserves Kimi's actual Responses/Chat routing while scoping its config.
+func (e KimiExecutor) ForAPIKey() cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.ForAPIKey()
+	e.ClaudeExecutor = *e.ClaudeExecutor.ForAPIKey().(*ClaudeExecutor)
+	return &e
+}

@@ -1,0 +1,339 @@
+package executor
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+
+	"github.com/MoeForge/moego/ojson"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
+)
+
+type xaiReasoningReplayScope struct {
+	modelName  string
+	sessionKey string
+}
+
+var getXAIReasoningReplayItemsRequired = internalcache.GetXAIReasoningReplayItemsRequired
+
+func (s xaiReasoningReplayScope) valid() bool {
+	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
+}
+
+func applyXAIReasoningReplayCacheRequired(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, xaiReasoningReplayScope, error) {
+	doc := ojson.NewDoc(body)
+	scope, changed, err := applyXAIReasoningReplayCacheRequiredDoc(ctx, from, req, opts, doc)
+	if err != nil || !changed {
+		return body, scope, err
+	}
+	return doc.Bytes(), scope, nil
+}
+
+func applyXAIReasoningReplayCacheRequiredDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (xaiReasoningReplayScope, bool, error) {
+	if doc == nil {
+		return xaiReasoningReplayScope{}, false, nil
+	}
+	scope := xaiReasoningReplayScopeFromRequestDoc(ctx, from, req, opts, doc)
+	if !scope.valid() {
+		return scope, false, nil
+	}
+	items, ok, errReplay := getXAIReasoningReplayItemsRequired(ctx, scope.modelName, scope.sessionKey)
+	if errReplay != nil {
+		log.Warnf("xai reasoning replay cache read failed: %v", errReplay)
+		return scope, false, nil
+	}
+	if !ok {
+		return scope, false, nil
+	}
+	items = filterXAIReasoningReplayItemsForInputDoc(doc, items)
+	if len(items) == 0 {
+		return scope, false, nil
+	}
+	return scope, insertCodexReasoningReplayItemsDoc(doc, items), nil
+}
+
+func xaiReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) xaiReasoningReplayScope {
+	return xaiReasoningReplayScopeFromRequestDoc(ctx, from, req, opts, ojson.NewDoc(body))
+}
+
+func xaiReasoningReplayScopeFromRequestDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) xaiReasoningReplayScope {
+	if !xaiReasoningReplayEnabledForSource(from) {
+		return xaiReasoningReplayScope{}
+	}
+	// End-to-end WebSocket requests use upstream previous_response_id state.
+	// Replaying encrypted reasoning as input as well would duplicate the turn.
+	if cliproxyexecutor.DownstreamWebsocket(ctx) && strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "previous_response_id").String()) != "" {
+		return xaiReasoningReplayScope{}
+	}
+	sessionKey := codexReasoningReplaySessionKeyDoc(ctx, from, req, opts, doc)
+	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	return xaiReasoningReplayScope{
+		modelName:  thinking.ParseSuffix(req.Model).ModelName,
+		sessionKey: sessionKey,
+	}
+}
+
+// xaiReasoningReplayIsolateSessionKey namespaces client-controlled session keys
+// by the downstream CPA API key so two callers cannot share encrypted reasoning
+// or assistant text by reusing prompt_cache_key / window / session headers.
+// Trusted execution session keys keep their existing form. Client-controlled
+// sessions without a caller API key are disabled rather than shared globally.
+func xaiReasoningReplayIsolateSessionKey(ctx context.Context, sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	if strings.HasPrefix(sessionKey, "execution:") {
+		return sessionKey
+	}
+	apiKey := strings.TrimSpace(helps.APIKeyFromContext(ctx))
+	if apiKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	return "caller:" + hex.EncodeToString(sum[:8]) + ":" + sessionKey
+}
+
+func xaiReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
+	return sourceFormatEqual(from, sdktranslator.FormatClaude) ||
+		sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
+}
+
+func canonicalXAIReasoningReplaySignatureKey(rawSignature string) string {
+	sig := signature.SignaturePayloadWithoutProviderPrefix(strings.TrimSpace(rawSignature))
+	if info, err := signature.InspectGrokEncryptedContent(sig); err == nil && info.RouterSuffix != "" {
+		return stripRouterSuffix(sig, info.RouterSuffix)
+	}
+	return sig
+}
+
+func xaiInputHasReasoningEncryptedContent(inputItems []ojson.Result, encryptedContent string) bool {
+	canonicalTarget := canonicalXAIReasoningReplaySignatureKey(encryptedContent)
+	if canonicalTarget == "" {
+		return false
+	}
+	for _, item := range inputItems {
+		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
+			continue
+		}
+		inputEncryptedContent := item.Get("encrypted_content")
+		if inputEncryptedContent.Type != ojson.String {
+			continue
+		}
+		if canonicalXAIReasoningReplaySignatureKey(inputEncryptedContent.String()) == canonicalTarget {
+			return true
+		}
+	}
+	return false
+}
+
+func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte {
+	return filterXAIReasoningReplayItemsForInputResult(ojson.GetBytesNoCopy(body, "input"), items)
+}
+
+func filterXAIReasoningReplayItemsForInputDoc(doc *ojson.Doc, items [][]byte) [][]byte {
+	if doc == nil {
+		return nil
+	}
+	return filterXAIReasoningReplayItemsForInputResult(doc.Get("input"), items)
+}
+
+func filterXAIReasoningReplayItemsForInputResult(input ojson.Result, items [][]byte) [][]byte {
+	if !input.IsArray() {
+		return nil
+	}
+
+	inputItems := input.Array()
+	lastAssistantMessage, hasLastAssistantMessage := xaiInputLastAssistantMessage(inputItems)
+	cachedAssistantMessage, hasCachedAssistantMessage := xaiReplayAssistantMessage(items)
+	assistantMessageMatches := hasLastAssistantMessage && hasCachedAssistantMessage &&
+		xaiAssistantMessageContentEqual(lastAssistantMessage.Get("content"), cachedAssistantMessage.Get("content"))
+	ambiguousAssistantHistory := hasLastAssistantMessage && hasCachedAssistantMessage && !assistantMessageMatches
+	if ambiguousAssistantHistory {
+		return nil
+	}
+	existingCalls := make(map[string]bool)
+	existingOutputs := make(map[string]bool)
+	for _, inputItem := range inputItems {
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
+			callID := strings.TrimSpace(inputItem.Get("call_id").String())
+			if callID != "" {
+				for _, candidate := range codexReplayComparableCallIDs(callID) {
+					existingOutputs[candidate] = true
+				}
+			}
+		}
+		for _, key := range codexReplayToolCallKeys(inputItem) {
+			existingCalls[key] = true
+		}
+	}
+
+	filtered := make([][]byte, 0, len(items))
+	for _, item := range items {
+		itemResult := util.ParseGJSONBytesNoCopy(item)
+		switch strings.TrimSpace(itemResult.Get("type").String()) {
+		case "reasoning":
+			if xaiInputHasReasoningEncryptedContent(inputItems, itemResult.Get("encrypted_content").String()) {
+				continue
+			}
+		case "message":
+			if assistantMessageMatches {
+				continue
+			}
+		case "function_call", "custom_tool_call":
+			keys := codexReplayToolCallKeys(itemResult)
+			if len(keys) == 0 || codexReplayAnyToolCallKeyExists(existingCalls, keys) {
+				continue
+			}
+			hasMatchingOutput := false
+			callID := strings.TrimSpace(itemResult.Get("call_id").String())
+			if callID != "" {
+				for _, candidate := range codexReplayComparableCallIDs(callID) {
+					if existingOutputs[candidate] {
+						hasMatchingOutput = true
+						break
+					}
+				}
+			}
+			if !hasMatchingOutput {
+				continue
+			}
+			for _, key := range keys {
+				existingCalls[key] = true
+			}
+		default:
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func xaiInputLastAssistantMessage(inputItems []ojson.Result) (ojson.Result, bool) {
+	for i := len(inputItems) - 1; i >= 0; i-- {
+		inputItem := inputItems[i]
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		if (itemType != "" && itemType != "message") || !strings.EqualFold(strings.TrimSpace(inputItem.Get("role").String()), "assistant") {
+			continue
+		}
+		return inputItem, true
+	}
+	return ojson.Result{}, false
+}
+
+func xaiReplayAssistantMessage(items [][]byte) (ojson.Result, bool) {
+	for _, item := range items {
+		itemResult := util.ParseGJSONBytesNoCopy(item)
+		if strings.TrimSpace(itemResult.Get("type").String()) == "message" &&
+			strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
+			return itemResult, true
+		}
+	}
+	return ojson.Result{}, false
+}
+
+type xaiAssistantMessagePart struct {
+	partType string
+	value    string
+}
+
+func xaiAssistantMessageContentEqual(left, right ojson.Result) bool {
+	leftParts, leftOK := xaiAssistantMessageParts(left)
+	rightParts, rightOK := xaiAssistantMessageParts(right)
+	if !leftOK || !rightOK || len(leftParts) != len(rightParts) {
+		return false
+	}
+	for i := range leftParts {
+		if leftParts[i] != rightParts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func xaiAssistantMessageParts(content ojson.Result) ([]xaiAssistantMessagePart, bool) {
+	if content.Type == ojson.String {
+		return []xaiAssistantMessagePart{{partType: "output_text", value: content.String()}}, true
+	}
+	if !content.IsArray() {
+		return nil, false
+	}
+	parts := make([]xaiAssistantMessagePart, 0, len(content.Array()))
+	for _, part := range content.Array() {
+		partType := strings.TrimSpace(part.Get("type").String())
+		switch partType {
+		case "output_text":
+			text := part.Get("text")
+			if text.Type != ojson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: text.String()})
+		case "refusal":
+			refusal := part.Get("refusal")
+			if refusal.Type != ojson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: refusal.String()})
+		default:
+			return nil, false
+		}
+	}
+	return parts, len(parts) > 0
+}
+
+func cacheXAIReasoningReplayFromCompleted(ctx context.Context, scope xaiReasoningReplayScope, completedData []byte) {
+	if !scope.valid() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	output := ojson.GetBytesNoCopy(completedData, "response.output")
+	if !output.IsArray() {
+		return
+	}
+	items := make([][]byte, 0, len(output.Array()))
+	for _, item := range output.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "reasoning", "message", "function_call", "custom_tool_call":
+			items = append(items, []byte(item.Raw))
+		default:
+			continue
+		}
+	}
+	switch internalcache.StoreXAIReasoningReplayItems(ctx, scope.modelName, scope.sessionKey, items) {
+	case internalcache.XAIReasoningReplayStored:
+		return
+	case internalcache.XAIReasoningReplayNoReplayableState:
+		// Successful completed turn without cacheable reasoning must not leave
+		// a previous turn's encrypted state to be injected later.
+		if errDelete := internalcache.DeleteXAIReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey); errDelete != nil {
+			log.Warnf("xai reasoning replay cache delete failed after non-replayable completed output: %v", errDelete)
+		}
+	case internalcache.XAIReasoningReplayStoreBackendError:
+		log.Debug("xai reasoning replay cache store backend error; retaining previous entry")
+	default:
+		// Invalid args: nothing to store or clear.
+	}
+}
+
+func clearXAIReasoningReplayAfterCompaction(ctx context.Context, scope xaiReasoningReplayScope) {
+	if !scope.valid() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errDelete := internalcache.DeleteXAIReasoningReplayItemRequired(ctx, scope.modelName, scope.sessionKey); errDelete != nil {
+		log.Warnf("xai reasoning replay cache delete failed after successful compaction: %v", errDelete)
+	}
+}

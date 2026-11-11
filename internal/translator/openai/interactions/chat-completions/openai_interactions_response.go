@@ -1,0 +1,436 @@
+package chat_completions
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+)
+
+type interactionsToOpenAIChatStreamState struct {
+	ID                  string
+	Model               string
+	EnvironmentID       string
+	Created             int64
+	Started             bool
+	Completed           bool
+	SawToolCall         bool
+	StepTypes           map[int]string
+	ToolIDs             map[int]string
+	ToolNames           map[int]string
+	ToolArguments       map[int]*strings.Builder
+	TextByStepIndex     map[int]*strings.Builder
+	ToolCallIndexByStep map[int]int
+	NextToolCallIndex   int
+}
+
+func ConvertInteractionsResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+	_ = ctx
+	_ = originalRequestRawJSON
+	_ = requestRawJSON
+	if param == nil {
+		var local any
+		param = &local
+	}
+	if *param == nil {
+		*param = &interactionsToOpenAIChatStreamState{Model: modelName}
+	}
+	st := (*param).(*interactionsToOpenAIChatStreamState)
+	st.Model = firstNonEmpty(st.Model, modelName)
+	st.ensureMaps()
+	return convertInteractionsEventToOpenAIChat(modelName, rawJSON, st)
+}
+
+func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	_ = ctx
+	_ = originalRequestRawJSON
+	_ = requestRawJSON
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	interaction := root
+	if nested := root.Get("interaction"); nested.Exists() {
+		interaction = nested
+	}
+	outDoc := ojson.NewDocString(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`)
+	_ = outDoc.Set("id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())))
+	_ = outDoc.Set("created", time.Now().Unix())
+	_ = outDoc.Set("model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	steps := interaction.Get("steps")
+	if !steps.Exists() {
+		steps = root.Get("steps")
+	}
+	var textBuilder strings.Builder
+	var reasoningBuilder strings.Builder
+	sawToolCall := false
+	var toolCalls [][]byte
+	steps.ForEach(func(_, step ojson.Result) bool {
+		switch step.Get("type").String() {
+		case "model_output":
+			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
+				textBuilder.WriteString(text)
+			}
+		case "thought":
+			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
+				reasoningBuilder.WriteString(text)
+			}
+		case "function_call":
+			sawToolCall = true
+			forAntigravity := isAntigravityModel(firstNonEmpty(interaction.Get("model").String(), modelName))
+			toolCalls = append(toolCalls, openAIChatToolCallFromInteractions(step, ojson.Result{}, forAntigravity))
+		}
+		return true
+	})
+	if textBuilder.Len() > 0 {
+		_ = outDoc.Set("choices.0.message.content", textBuilder.String())
+	}
+	if reasoningBuilder.Len() > 0 {
+		_ = outDoc.Set("choices.0.message.reasoning_content", reasoningBuilder.String())
+	}
+	if len(toolCalls) > 0 {
+		translatorcommon.SetRawArrayItemsDoc(outDoc, "choices.0.message.tool_calls", toolCalls)
+	}
+	if sawToolCall {
+		_ = outDoc.Set("choices.0.message.content", nil)
+		_ = outDoc.Set("choices.0.finish_reason", "tool_calls")
+	}
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	interactionFinishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if interactionFinishReason == "content_filter" {
+		_ = outDoc.Set("choices.0.finish_reason", "content_filter")
+	} else if status == "incomplete" || interactionFinishReason == "length" || interactionFinishReason == "max_tokens" {
+		_ = outDoc.Set("choices.0.finish_reason", "length")
+	}
+	if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String(), root.Get("interaction.environment_id").String()); envID != "" {
+		_ = outDoc.Set("environment_id", envID)
+	}
+	setOpenAIChatUsageFromInteractionsDoc(outDoc, "usage", translatorcommon.InteractionsUsage(root))
+	return outDoc.Bytes()
+}
+
+func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *interactionsToOpenAIChatStreamState) [][]byte {
+	payload := openAIChatInteractionsPayload(rawJSON)
+	if len(payload) == 0 || bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return nil
+	}
+	root := util.ParseGJSONBytesNoCopy(payload)
+	if !root.Exists() {
+		return nil
+	}
+	switch root.Get("event_type").String() {
+	case "interaction.created":
+		interaction := root.Get("interaction")
+		st.ID = strings.Clone(firstNonEmpty(interaction.Get("id").String(), st.ID))
+		st.Model = strings.Clone(firstNonEmpty(interaction.Get("model").String(), st.Model, modelName))
+		if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String()); envID != "" {
+			st.EnvironmentID = strings.Clone(envID)
+		}
+		return ensureOpenAIChatStarted(nil, st)
+	case "step.start":
+		return interactionsStepStartToOpenAIChat(modelName, root, st)
+	case "step.delta":
+		return interactionsStepDeltaToOpenAIChat(modelName, root, st)
+	case "interaction.completed", "finish":
+		interaction := root.Get("interaction")
+		if envID := firstNonEmpty(interaction.Get("environment_id").String(), root.Get("environment_id").String(), interaction.Get("environment.id").String(), root.Get("environment.id").String()); envID != "" {
+			st.EnvironmentID = strings.Clone(envID)
+		}
+		return appendOpenAIChatCompleted(nil, root, st)
+	case "response.failed", "interaction.failed":
+		return interactionsFailedToOpenAIChat(root)
+	case "done":
+		return nil
+	}
+	return nil
+}
+
+func interactionsStepStartToOpenAIChat(modelName string, root ojson.Result, st *interactionsToOpenAIChatStreamState) [][]byte {
+	_ = modelName
+	out := ensureOpenAIChatStarted(nil, st)
+	index := int(root.Get("index").Int())
+	step := root.Get("step")
+	stepType := step.Get("type").String()
+	st.StepTypes[index] = strings.Clone(stepType)
+	switch stepType {
+	case "function_call":
+		st.SawToolCall = true
+		toolCallIndex := st.NextToolCallIndex
+		if existingIndex, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = existingIndex
+		} else {
+			st.ToolCallIndexByStep[index] = toolCallIndex
+			st.NextToolCallIndex++
+		}
+		st.ToolIDs[index] = strings.Clone(firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", toolCallIndex)))
+		name := step.Get("name").String()
+		if isAntigravityModel(modelName) || (st != nil && isAntigravityModel(st.Model)) {
+			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+		}
+		st.ToolNames[index] = strings.Clone(name)
+		if st.ToolArguments[index] == nil {
+			st.ToolArguments[index] = &strings.Builder{}
+		}
+		if args := step.Get("arguments"); args.Exists() && strings.TrimSpace(args.Raw) != "{}" {
+			st.ToolArguments[index].WriteString(jsonStringValue(args, "{}"))
+		}
+		return append(out, openAIChatToolCallStartChunk(st, index))
+	default:
+		return out
+	}
+}
+
+func interactionsStepDeltaToOpenAIChat(modelName string, root ojson.Result, st *interactionsToOpenAIChatStreamState) [][]byte {
+	_ = modelName
+	index := int(root.Get("index").Int())
+	delta := root.Get("delta")
+	out := ensureOpenAIChatStarted(nil, st)
+	switch delta.Get("type").String() {
+	case "thought_summary":
+		text := firstNonEmpty(delta.Get("content.text").String(), delta.Get("text").String())
+		if text == "" {
+			return out
+		}
+		return append(out, openAIChatDeltaChunk(st, "reasoning_content", text))
+	case "arguments_delta":
+		args := delta.Get("arguments").String()
+		if st.ToolArguments[index] == nil {
+			st.ToolArguments[index] = &strings.Builder{}
+		}
+		st.ToolArguments[index].WriteString(args)
+		return append(out, openAIChatToolCallArgumentsChunk(st, index, args))
+	default:
+		text := delta.Get("text").String()
+		if text == "" {
+			return out
+		}
+		if st.TextByStepIndex[index] == nil {
+			st.TextByStepIndex[index] = &strings.Builder{}
+		}
+		st.TextByStepIndex[index].WriteString(text)
+		return append(out, openAIChatDeltaChunk(st, "content", text))
+	}
+}
+
+func ensureOpenAIChatStarted(out [][]byte, st *interactionsToOpenAIChatStreamState) [][]byte {
+	if st.Started {
+		return out
+	}
+	chunkDoc := openAIChatBaseChunkDoc(st)
+	_ = chunkDoc.Set("choices.0.delta.role", "assistant")
+	st.Started = true
+	return append(out, chunkDoc.Bytes())
+}
+
+func appendOpenAIChatCompleted(out [][]byte, root ojson.Result, st *interactionsToOpenAIChatStreamState) [][]byte {
+	if st.Completed {
+		return out
+	}
+	out = ensureOpenAIChatStarted(out, st)
+	chunkDoc := openAIChatBaseChunkDoc(st)
+	finishReason := "stop"
+	if st.SawToolCall {
+		finishReason = "tool_calls"
+	}
+	interaction := root.Get("interaction")
+	status := firstNonEmpty(interaction.Get("status").String(), root.Get("status").String())
+	interactionFinishReason := firstNonEmpty(interaction.Get("finish_reason").String(), root.Get("finish_reason").String())
+	if interactionFinishReason == "content_filter" {
+		finishReason = "content_filter"
+	} else if status == "incomplete" || interactionFinishReason == "length" || interactionFinishReason == "max_tokens" {
+		finishReason = "length"
+	}
+	_ = chunkDoc.Set("choices.0.finish_reason", finishReason)
+	setOpenAIChatUsageFromInteractionsDoc(chunkDoc, "usage", translatorcommon.InteractionsUsage(root))
+	st.Completed = true
+	return append(out, chunkDoc.Bytes())
+}
+
+func interactionsFailedToOpenAIChat(root ojson.Result) [][]byte {
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	msg := errNode.Get("message").String()
+	if msg == "" {
+		msg = "upstream error occurred"
+	}
+	code := errNode.Get("code").String()
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "server_error"
+	}
+
+	errorDoc := ojson.NewDocString(`{"error":{"message":"","type":"","code":""}}`)
+	_ = errorDoc.Set("error.message", msg)
+	_ = errorDoc.Set("error.type", errType)
+	if code != "" {
+		_ = errorDoc.Set("error.code", code)
+	} else {
+		_ = errorDoc.Delete("error.code")
+	}
+	return [][]byte{errorDoc.Bytes()}
+}
+
+func openAIChatBaseChunkDoc(st *interactionsToOpenAIChatStreamState) *ojson.Doc {
+	chunkDoc := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{},"finish_reason":null}]}`)
+	_ = chunkDoc.Set("id", firstNonEmpty(st.ID, fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())))
+	_ = chunkDoc.Set("created", openAIChatCreated(st))
+	_ = chunkDoc.Set("model", st.Model)
+	if st != nil && st.EnvironmentID != "" {
+		_ = chunkDoc.Set("environment_id", st.EnvironmentID)
+	}
+	return chunkDoc
+}
+
+func openAIChatDeltaChunk(st *interactionsToOpenAIChatStreamState, field, value string) []byte {
+	chunkDoc := openAIChatBaseChunkDoc(st)
+	_ = chunkDoc.Set("choices.0.delta."+field, value)
+	return chunkDoc.Bytes()
+}
+
+func openAIChatToolCallStartChunk(st *interactionsToOpenAIChatStreamState, index int) []byte {
+	chunkDoc := openAIChatBaseChunkDoc(st)
+	toolCallIndex := index
+	if st != nil && st.ToolCallIndexByStep != nil {
+		if idx, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = idx
+		}
+	}
+	toolCallDoc := ojson.NewDocString(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
+	_ = toolCallDoc.Set("index", toolCallIndex)
+	_ = toolCallDoc.Set("id", firstNonEmpty(st.ToolIDs[index], fmt.Sprintf("call_%d", toolCallIndex)))
+	_ = toolCallDoc.Set("function.name", st.ToolNames[index])
+	_ = chunkDoc.SetRawBytes("choices.0.delta.tool_calls.-1", toolCallDoc.Bytes())
+	return chunkDoc.Bytes()
+}
+
+func openAIChatToolCallArgumentsChunk(st *interactionsToOpenAIChatStreamState, index int, arguments string) []byte {
+	chunkDoc := openAIChatBaseChunkDoc(st)
+	toolCallIndex := index
+	if st != nil && st.ToolCallIndexByStep != nil {
+		if idx, ok := st.ToolCallIndexByStep[index]; ok {
+			toolCallIndex = idx
+		}
+	}
+	toolCallDoc := ojson.NewDocString(`{"index":0,"function":{"arguments":""}}`)
+	_ = toolCallDoc.Set("index", toolCallIndex)
+	_ = toolCallDoc.Set("function.arguments", arguments)
+	_ = chunkDoc.SetRawBytes("choices.0.delta.tool_calls.-1", toolCallDoc.Bytes())
+	return chunkDoc.Bytes()
+}
+
+func openAIChatToolCallFromInteractions(step, fallbackArgs ojson.Result, forAntigravity bool) []byte {
+	toolCallDoc := ojson.NewDocString(`{"id":"","type":"function","function":{"name":"","arguments":"{}"}}`)
+	callID := firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), "call_0")
+	_ = toolCallDoc.Set("id", callID)
+	name := step.Get("name").String()
+	if forAntigravity {
+		name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+	}
+	_ = toolCallDoc.Set("function.name", name)
+	args := step.Get("arguments")
+	if !args.Exists() {
+		args = fallbackArgs
+	}
+	_ = toolCallDoc.Set("function.arguments", jsonStringValue(args, "{}"))
+	return toolCallDoc.Bytes()
+}
+
+func setOpenAIChatUsageFromInteractionsDoc(outDoc *ojson.Doc, path string, usage ojson.Result) {
+	if !usage.Exists() {
+		return
+	}
+	if value, ok := interactionsUsageInt(usage, "input_tokens", "total_input_tokens"); ok {
+		_ = outDoc.Set(path+".prompt_tokens", value)
+	}
+	if value, ok := interactionsUsageInt(usage, "output_tokens", "total_output_tokens"); ok {
+		_ = outDoc.Set(path+".completion_tokens", value)
+	}
+	if value, ok := interactionsUsageInt(usage, "total_tokens"); ok {
+		_ = outDoc.Set(path+".total_tokens", value)
+	}
+	if value, ok := interactionsUsageInt(usage, "cached_tokens", "total_cached_tokens"); ok {
+		_ = outDoc.Set(path+".prompt_tokens_details.cached_tokens", value)
+	}
+	if value, ok := interactionsUsageInt(usage, "reasoning_tokens", "total_thought_tokens"); ok {
+		_ = outDoc.Set(path+".completion_tokens_details.reasoning_tokens", value)
+	}
+}
+
+func interactionsUsageInt(root ojson.Result, paths ...string) (int64, bool) {
+	for _, path := range paths {
+		if value := root.Get(path); value.Exists() {
+			return value.Int(), true
+		}
+	}
+	return 0, false
+}
+
+func interactionsContentTextsForOpenAIChat(content ojson.Result) []string {
+	if !content.Exists() {
+		return nil
+	}
+	if content.Type == ojson.String {
+		return []string{content.String()}
+	}
+	var out []string
+	content.ForEach(func(_, part ojson.Result) bool {
+		if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
+			out = append(out, text)
+		}
+		return true
+	})
+	return out
+}
+
+func openAIChatInteractionsPayload(rawJSON []byte) []byte {
+	trimmed := bytes.TrimSpace(rawJSON)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
+		return trimmed
+	}
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		return bytes.TrimSpace(trimmed[len("data:"):])
+	}
+	var dataLines [][]byte
+	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))
+		}
+	}
+	if len(dataLines) > 0 {
+		return bytes.Join(dataLines, []byte("\n"))
+	}
+	return trimmed
+}
+
+func openAIChatCreated(st *interactionsToOpenAIChatStreamState) int64 {
+	if st.Created == 0 {
+		st.Created = time.Now().Unix()
+	}
+	return st.Created
+}
+
+func (st *interactionsToOpenAIChatStreamState) ensureMaps() {
+	if st.StepTypes == nil {
+		st.StepTypes = make(map[int]string)
+	}
+	if st.ToolIDs == nil {
+		st.ToolIDs = make(map[int]string)
+	}
+	if st.ToolNames == nil {
+		st.ToolNames = make(map[int]string)
+	}
+	if st.ToolArguments == nil {
+		st.ToolArguments = make(map[int]*strings.Builder)
+	}
+	if st.TextByStepIndex == nil {
+		st.TextByStepIndex = make(map[int]*strings.Builder)
+	}
+	if st.ToolCallIndexByStep == nil {
+		st.ToolCallIndexByStep = make(map[int]int)
+	}
+}

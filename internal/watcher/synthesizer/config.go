@@ -1,0 +1,560 @@
+package synthesizer
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+)
+
+// ConfigSynthesizer generates Auth entries from configuration API keys.
+// It handles Gemini, Interactions, Claude, Codex, xAI, OpenAI-compat, and Vertex-compat providers.
+type ConfigSynthesizer struct{}
+
+// NewConfigSynthesizer creates a new ConfigSynthesizer instance.
+func NewConfigSynthesizer() *ConfigSynthesizer {
+	return &ConfigSynthesizer{}
+}
+
+// authProxyConnectionPool converts a per-credential pool override from config into
+// the SDK representation carried on the auth record. Values are copied so the auth
+// snapshot never aliases a live config field.
+func authProxyConnectionPool(pool *config.ProxyConnectionPoolConfig) *coreauth.ProxyConnectionPoolOverride {
+	if pool == nil {
+		return nil
+	}
+	out := &coreauth.ProxyConnectionPoolOverride{IdleConnTimeout: pool.IdleConnTimeout}
+	if pool.Enabled != nil {
+		enabled := *pool.Enabled
+		out.Enabled = &enabled
+	}
+	if pool.MaxIdleConnsPerHost != nil {
+		maxIdle := *pool.MaxIdleConnsPerHost
+		out.MaxIdleConnsPerHost = &maxIdle
+	}
+	// A block without fields is still the opt-in: it asks for the pool defaults. It
+	// must therefore stay non-nil, or an operator writing `connection-pool: {}` (or
+	// inheriting an empty group block) would silently get no pooling at all.
+	return out
+}
+
+// openAICompatConnectionPool resolves the pool override for one OpenAI-compatible
+// key: the per-key block wins field by field, so a key that overrides only one value
+// keeps inheriting the provider-group default for the rest.
+// OpenAICompatConnectionPool resolves the effective connection-pool config for an OpenAI-compatible entry.
+func OpenAICompatConnectionPool(compat *config.OpenAICompatibility, entry *config.OpenAICompatibilityAPIKey) *config.ProxyConnectionPoolConfig {
+	return openAICompatConnectionPool(compat, entry)
+}
+
+func openAICompatConnectionPool(compat *config.OpenAICompatibility, entry *config.OpenAICompatibilityAPIKey) *config.ProxyConnectionPoolConfig {
+	var group *config.ProxyConnectionPoolConfig
+	if compat != nil {
+		group = compat.ConnectionPool
+	}
+	if entry == nil || entry.ConnectionPool == nil {
+		return group
+	}
+	merged := *entry.ConnectionPool
+	if group != nil {
+		if merged.Enabled == nil {
+			merged.Enabled = group.Enabled
+		}
+		if strings.TrimSpace(merged.IdleConnTimeout) == "" {
+			merged.IdleConnTimeout = group.IdleConnTimeout
+		}
+		if merged.MaxIdleConnsPerHost == nil {
+			merged.MaxIdleConnsPerHost = group.MaxIdleConnsPerHost
+		}
+	}
+	return &merged
+}
+
+func addWeightToAttrs(weight *int, attrs map[string]string) {
+	if weight == nil {
+		return
+	}
+	normalized := *weight
+	if normalized <= 0 {
+		normalized = 0
+	}
+	attrs[coreauth.AttributeWeight] = strconv.Itoa(normalized)
+}
+
+// Synthesize generates Auth entries from config API keys.
+func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
+	out := make([]*coreauth.Auth, 0, 32)
+	if ctx == nil || ctx.Config == nil {
+		return out, nil
+	}
+	if errValidate := ctx.Config.ValidateCredentialWeights(); errValidate != nil {
+		return nil, fmt.Errorf("synthesize config API key auths: %w", errValidate)
+	}
+
+	// Gemini API Keys
+	out = append(out, s.synthesizeGeminiKeys(ctx)...)
+	// Native Interactions API Keys
+	out = append(out, s.synthesizeInteractionsKeys(ctx)...)
+	// Claude API Keys
+	out = append(out, s.synthesizeClaudeKeys(ctx)...)
+	// Codex API Keys
+	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// xAI API Keys
+	out = append(out, s.synthesizeXAIKeys(ctx)...)
+	// Meta API Keys
+	out = append(out, s.synthesizeMetaKeys(ctx)...)
+	// OpenAI-compat
+	out = append(out, s.synthesizeOpenAICompat(ctx)...)
+	// Vertex-compat
+	out = append(out, s.synthesizeVertexCompat(ctx)...)
+
+	return out, nil
+}
+
+// synthesizeGeminiKeys creates Auth entries for Gemini API keys.
+func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.GeminiKey, "gemini:apikey", "gemini", "gemini-apikey", constant.Gemini)
+}
+
+// synthesizeInteractionsKeys creates Auth entries for native Interactions API keys.
+func (s *ConfigSynthesizer) synthesizeInteractionsKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.InteractionsKey, "gemini-interactions:apikey", "interactions", "interactions-apikey", constant.GeminiInteractions)
+}
+
+func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, entries []config.GeminiKey, idKind, sourceName, label, provider string) []*coreauth.Auth {
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		key := strings.TrimSpace(entry.APIKey)
+		base := strings.TrimSpace(entry.BaseURL)
+		if key == "" && base == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		idParts := []string{key, base, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers)}
+		if poolID := config.FormatConnectionPoolDedupID(entry.ConnectionPool); poolID != "" {
+			idParts = append(idParts, poolID)
+		}
+		id, token := idGen.Next(idKind, idParts...)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:%s[%s]", sourceName, token),
+			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
+		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   provider,
+			Label:      label,
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+
+			ProxyConnectionPool: authProxyConnectionPool(entry.ConnectionPool),
+		}
+		ApplyAuthExcludedModelsMeta(a, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeClaudeKeys creates Auth entries for Claude API keys.
+func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
+	for i := range cfg.ClaudeKey {
+		ck := cfg.ClaudeKey[i]
+		key := strings.TrimSpace(ck.APIKey)
+		base := strings.TrimSpace(ck.BaseURL)
+		if key == "" && base == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(ck.Prefix)
+		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		idParts := []string{key, base, proxyURL, prefix, config.FormatSortedHeaders(ck.Headers)}
+		if poolID := config.FormatConnectionPoolDedupID(ck.ConnectionPool); poolID != "" {
+			idParts = append(idParts, poolID)
+		}
+		id, token := idGen.Next("claude:apikey", idParts...)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:claude[%s]", token),
+			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		metadata := map[string]any{}
+		if ck.DisableCooling != nil {
+			metadata["disable_cooling"] = *ck.DisableCooling
+		}
+		addRequestRetryToMetadata(ck.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(ck.RequestScopedErrors, metadata)
+		if ck.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(ck.Priority)
+		}
+		addWeightToAttrs(ck.Weight, attrs)
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if ck.RebuildMidSystemMessage {
+			attrs["rebuild_mid_system_message"] = "true"
+		}
+		if ck.NativeToolSearch {
+			attrs["native_tool_search"] = "true"
+		}
+		if profile := strings.ToLower(strings.TrimSpace(ck.FingerprintProfile)); profile != "" {
+			attrs["fingerprint_profile"] = profile
+		}
+		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(ck.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "claude",
+			Label:      "claude-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+
+			ProxyConnectionPool: authProxyConnectionPool(ck.ConnectionPool),
+		}
+		ApplyAuthExcludedModelsMeta(a, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeCodexKeys creates Auth entries for Codex API keys.
+func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.CodexKey, "codex")
+}
+
+// synthesizeXAIKeys creates Auth entries for xAI API keys.
+func (s *ConfigSynthesizer) synthesizeXAIKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.XAIKey, "xai")
+}
+
+// synthesizeMetaKeys creates Auth entries for Meta API keys.
+func (s *ConfigSynthesizer) synthesizeMetaKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	return s.synthesizeCodexStyleKeys(ctx, ctx.Config.MetaKey, "meta")
+}
+
+func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entries []config.CodexKey, provider string) []*coreauth.Auth {
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
+		key := strings.TrimSpace(entry.APIKey)
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if key == "" && baseURL == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		idParts := []string{key, baseURL, proxyURL, prefix, config.FormatSortedHeaders(entry.Headers)}
+		if poolID := config.FormatConnectionPoolDedupID(entry.ConnectionPool); poolID != "" {
+			idParts = append(idParts, poolID)
+		}
+		id, token := idGen.Next(provider+":apikey", idParts...)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:%s[%s]", provider, token),
+			"config_index": strconv.Itoa(i),
+		}
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		metadata := map[string]any{}
+		if entry.DisableCooling != nil {
+			metadata["disable_cooling"] = *entry.DisableCooling
+		}
+		addRequestRetryToMetadata(entry.RequestRetry, metadata)
+		addRequestScopedErrorsToMetadata(entry.RequestScopedErrors, metadata)
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		addWeightToAttrs(entry.Weight, attrs)
+		if baseURL != "" {
+			attrs["base_url"] = baseURL
+		}
+		if entry.Websockets {
+			attrs["websockets"] = "true"
+		}
+		if provider == "codex" && entry.AlphaSearch {
+			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
+		}
+		if provider == "codex" && entry.DisableCodexCloaking != nil {
+			attrs[coreauth.AttributeCodexDisableCloaking] = strconv.FormatBool(*entry.DisableCodexCloaking)
+		}
+		if hash := diff.ComputeCodexModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:                  id,
+			Provider:            provider,
+			Label:               provider + "-apikey",
+			Prefix:              prefix,
+			Status:              coreauth.StatusActive,
+			ProxyURL:            strings.TrimSpace(entry.ProxyURL),
+			Attributes:          attrs,
+			Metadata:            metadata,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+			ProxyConnectionPool: authProxyConnectionPool(entry.ConnectionPool),
+		}
+		ApplyAuthExcludedModelsMeta(a, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeOpenAICompat creates Auth entries for OpenAI-compatible providers.
+func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0)
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
+		prefix := strings.TrimSpace(compat.Prefix)
+		providerName := strings.ToLower(strings.TrimSpace(compat.Name))
+		if providerName == "" {
+			providerName = "openai-compatibility"
+		}
+		internalProviderKey := util.OpenAICompatibleProviderKey(providerName)
+		base := strings.TrimSpace(compat.BaseURL)
+		disableCooling := compat.DisableCooling
+
+		// Handle new APIKeyEntries format (preferred)
+		createdEntries := 0
+		for j := range compat.APIKeyEntries {
+			entry := &compat.APIKeyEntries[j]
+			key := strings.TrimSpace(entry.APIKey)
+			proxyURL := strings.TrimSpace(entry.ProxyURL)
+			effectivePool := openAICompatConnectionPool(compat, entry)
+			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+			idParts := []string{key, base, proxyURL}
+			if poolID := config.FormatConnectionPoolDedupID(effectivePool); poolID != "" {
+				idParts = append(idParts, poolID)
+			}
+			id, token := idGen.Next(idKind, idParts...)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":     base,
+				"compat_name":  compat.Name,
+				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
+			}
+			metadata := map[string]any{}
+			if disableCooling != nil {
+				metadata["disable_cooling"] = *disableCooling
+			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
+			if compat.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			addWeightToAttrs(entry.Weight, attrs)
+			if key != "" {
+				attrs["api_key"] = key
+			}
+			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(compat.Headers, attrs)
+			a := &coreauth.Auth{
+				ID:                  id,
+				Provider:            internalProviderKey,
+				Label:               compat.Name,
+				Prefix:              prefix,
+				Status:              coreauth.StatusActive,
+				ProxyURL:            proxyURL,
+				Attributes:          attrs,
+				Metadata:            metadata,
+				CreatedAt:           now,
+				UpdatedAt:           now,
+				ProxyConnectionPool: authProxyConnectionPool(openAICompatConnectionPool(compat, entry)),
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
+			createdEntries++
+		}
+		// Fallback: create entry without API key if no APIKeyEntries
+		if createdEntries == 0 {
+			effectivePool := openAICompatConnectionPool(compat, nil)
+			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
+			idParts := []string{base}
+			if poolID := config.FormatConnectionPoolDedupID(effectivePool); poolID != "" {
+				idParts = append(idParts, poolID)
+			}
+			id, token := idGen.Next(idKind, idParts...)
+			attrs := map[string]string{
+				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
+				"base_url":     base,
+				"compat_name":  compat.Name,
+				"provider_key": internalProviderKey,
+				"config_index": strconv.Itoa(i),
+			}
+			metadata := map[string]any{}
+			if disableCooling != nil {
+				metadata["disable_cooling"] = *disableCooling
+			}
+			addRequestRetryToMetadata(compat.RequestRetry, metadata)
+			addRequestScopedErrorsToMetadata(compat.RequestScopedErrors, metadata)
+			if compat.Priority != 0 {
+				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
+				attrs["models_hash"] = hash
+			}
+			addConfigHeadersToAttrs(compat.Headers, attrs)
+			a := &coreauth.Auth{
+				ID:                  id,
+				Provider:            internalProviderKey,
+				Label:               compat.Name,
+				Prefix:              prefix,
+				Status:              coreauth.StatusActive,
+				Attributes:          attrs,
+				Metadata:            metadata,
+				CreatedAt:           now,
+				UpdatedAt:           now,
+				ProxyConnectionPool: authProxyConnectionPool(openAICompatConnectionPool(compat, nil)),
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
+			}
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// synthesizeVertexCompat creates Auth entries for Vertex-compatible providers.
+func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.VertexCompatAPIKey))
+	for i := range cfg.VertexCompatAPIKey {
+		compat := &cfg.VertexCompatAPIKey[i]
+		providerName := "vertex"
+		base := strings.TrimSpace(compat.BaseURL)
+
+		key := strings.TrimSpace(compat.APIKey)
+		prefix := strings.TrimSpace(compat.Prefix)
+		proxyURL := strings.TrimSpace(compat.ProxyURL)
+		idKind := "vertex:apikey"
+		idParts := []string{key, base, proxyURL}
+		if poolID := config.FormatConnectionPoolDedupID(compat.ConnectionPool); poolID != "" {
+			idParts = append(idParts, poolID)
+		}
+		id, token := idGen.Next(idKind, idParts...)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
+			"base_url":     base,
+			"provider_key": providerName,
+			"config_index": strconv.Itoa(i),
+		}
+		if compat.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(compat.Priority)
+		}
+		addWeightToAttrs(compat.Weight, attrs)
+		if key != "" {
+			attrs["api_key"] = key
+		}
+		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		if compat.OpenAPI != nil {
+			attrs["openapi"] = strconv.FormatBool(*compat.OpenAPI)
+		}
+		if loc := strings.TrimSpace(compat.OpenAPILocation); loc != "" {
+			attrs["openapi_location"] = loc
+		}
+		if compat.Interactions != nil && *compat.Interactions {
+			attrs["interactions"] = "true"
+		}
+		addConfigHeadersToAttrs(compat.Headers, attrs)
+		metadata := map[string]any{}
+		if compat.DisableCooling != nil {
+			metadata["disable_cooling"] = *compat.DisableCooling
+		}
+		addRequestRetryToMetadata(compat.RequestRetry, metadata)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   providerName,
+			Label:      "vertex-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			Metadata:   metadata,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+
+			ProxyConnectionPool: authProxyConnectionPool(compat.ConnectionPool),
+		}
+		ApplyAuthExcludedModelsMeta(a, compat.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}

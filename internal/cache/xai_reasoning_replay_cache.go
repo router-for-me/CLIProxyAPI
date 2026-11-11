@@ -1,0 +1,412 @@
+package cache
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/MoeForge/moego/ojson"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	// XAIReasoningReplayCacheTTL limits how long encrypted reasoning replay
+	// items stay in process memory.
+	XAIReasoningReplayCacheTTL = 1 * time.Hour
+
+	// XAIReasoningReplayCacheMaxEntries bounds process memory for replay
+	// continuity. Oldest entries are evicted first.
+	XAIReasoningReplayCacheMaxEntries = 10240
+
+	// XAIReasoningReplayCacheEvictBatchSize leaves headroom after the cache
+	// reaches capacity so high write volume does not rescan the map every turn.
+	XAIReasoningReplayCacheEvictBatchSize = 128
+)
+
+type xaiReasoningReplayEntry struct {
+	Items     [][]byte
+	Timestamp time.Time
+}
+
+var (
+	xaiReasoningReplayMu      sync.Mutex
+	xaiReasoningReplayEntries = make(map[string]xaiReasoningReplayEntry)
+)
+
+type xaiReasoningReplayKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts homekv.KVSetOptions) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
+}
+
+var currentXAIReasoningReplayKVClient = func() (xaiReasoningReplayKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
+
+// CacheXAIReasoningReplayItem stores a final Grok reasoning item for stateless
+// replay. The stored item is normalized to the minimal shape accepted by
+// Responses input replay.
+func CacheXAIReasoningReplayItem(modelName, sessionKey string, item []byte) bool {
+	return CacheXAIReasoningReplayItems(modelName, sessionKey, [][]byte{item})
+}
+
+// CacheXAIReasoningReplayItems stores the final Grok assistant output items
+// needed to replay a stateless next turn.
+func CacheXAIReasoningReplayItems(modelName, sessionKey string, items [][]byte) bool {
+	return CacheXAIReasoningReplayItemsBestEffort(context.Background(), modelName, sessionKey, items)
+}
+
+// XAIReasoningReplayStoreStatus reports why a completed-turn cache write
+// succeeded or failed so callers can decide whether to keep prior entries.
+type XAIReasoningReplayStoreStatus int
+
+const (
+	// XAIReasoningReplayStoreInvalidArgs means model/session were empty.
+	XAIReasoningReplayStoreInvalidArgs XAIReasoningReplayStoreStatus = iota
+	// XAIReasoningReplayStored means a valid reasoning batch was written.
+	XAIReasoningReplayStored
+	// XAIReasoningReplayNoReplayableState means the completed output had no
+	// cacheable reasoning batch (for example reasoning disabled).
+	XAIReasoningReplayNoReplayableState
+	// XAIReasoningReplayStoreBackendError means normalize succeeded but the
+	// storage backend failed; previous entries should be retained.
+	XAIReasoningReplayStoreBackendError
+)
+
+// CacheXAIReasoningReplayItemsBestEffort stores replay items for completed response paths.
+func CacheXAIReasoningReplayItemsBestEffort(ctx context.Context, modelName, sessionKey string, items [][]byte) bool {
+	return StoreXAIReasoningReplayItems(ctx, modelName, sessionKey, items) == XAIReasoningReplayStored
+}
+
+// StoreXAIReasoningReplayItems stores replay items and distinguishes empty
+// completed state from backend failures.
+func StoreXAIReasoningReplayItems(ctx context.Context, modelName, sessionKey string, items [][]byte) XAIReasoningReplayStoreStatus {
+	key := xaiReasoningReplayCacheKey(modelName, sessionKey)
+	if key == "" {
+		return XAIReasoningReplayStoreInvalidArgs
+	}
+	normalized, ok := normalizeXAIReasoningReplayItems(items)
+	if !ok {
+		return XAIReasoningReplayNoReplayableState
+	}
+	if client, homeMode, errClient := currentXAIReasoningReplayKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errClient)
+			return XAIReasoningReplayStoreBackendError
+		}
+		raw, errMarshal := marshalReasoningReplayRawJSONArray(normalized)
+		if errMarshal != nil {
+			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errMarshal)
+			return XAIReasoningReplayStoreBackendError
+		}
+		written, errSet := client.KVSet(ctx, xaiReasoningReplayKVKey(modelName, sessionKey), raw, homekv.KVSetOptions{EX: XAIReasoningReplayCacheTTL})
+		if errSet != nil {
+			log.Errorf("home kv best-effort xai reasoning replay set failed prefix=cpa:xai:*: %v", errSet)
+			return XAIReasoningReplayStoreBackendError
+		}
+		if !written {
+			return XAIReasoningReplayStoreBackendError
+		}
+		return XAIReasoningReplayStored
+	}
+
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	xaiReasoningReplayMu.Lock()
+	defer xaiReasoningReplayMu.Unlock()
+	xaiReasoningReplayEntries[key] = xaiReasoningReplayEntry{
+		Items:     normalized,
+		Timestamp: now,
+	}
+	if len(xaiReasoningReplayEntries) > XAIReasoningReplayCacheMaxEntries {
+		evictOldestXAIReasoningReplayEntriesLocked(XAIReasoningReplayCacheEvictBatchSize)
+	}
+	return XAIReasoningReplayStored
+}
+
+// GetXAIReasoningReplayItem retrieves a normalized reasoning replay item.
+func GetXAIReasoningReplayItem(modelName, sessionKey string) ([]byte, bool) {
+	items, ok := GetXAIReasoningReplayItems(modelName, sessionKey)
+	if !ok || len(items) == 0 {
+		return nil, false
+	}
+	return items[0], true
+}
+
+// GetXAIReasoningReplayItems retrieves normalized assistant output items.
+func GetXAIReasoningReplayItems(modelName, sessionKey string) ([][]byte, bool) {
+	items, ok, err := GetXAIReasoningReplayItemsRequired(context.Background(), modelName, sessionKey)
+	if err == nil {
+		return items, ok
+	}
+	return nil, false
+}
+
+// GetXAIReasoningReplayItemsRequired retrieves replay items for request-time paths.
+func GetXAIReasoningReplayItemsRequired(ctx context.Context, modelName, sessionKey string) ([][]byte, bool, error) {
+	key := xaiReasoningReplayCacheKey(modelName, sessionKey)
+	if key == "" {
+		return nil, false, nil
+	}
+	client, homeMode, errClient := currentXAIReasoningReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return nil, false, errClient
+		}
+		raw, found, errGet := client.KVGet(ctx, xaiReasoningReplayKVKey(modelName, sessionKey))
+		if errGet != nil || !found {
+			return nil, false, errGet
+		}
+		homeItems, errUnmarshal := unmarshalReasoningReplayRawJSONArray(raw)
+		if errUnmarshal != nil {
+			log.Warnf("xai reasoning replay KV decode failed (please upgrade CLIProxyAPI): %v", errUnmarshal)
+			return nil, false, errUnmarshal
+		}
+		if _, errExpire := client.KVExpire(ctx, xaiReasoningReplayKVKey(modelName, sessionKey), XAIReasoningReplayCacheTTL); errExpire != nil {
+			log.Warnf("home kv xai reasoning replay expire failed prefix=cpa:xai:*: %v", errExpire)
+		}
+		return cloneXAIReasoningReplayItems(homeItems), true, nil
+	}
+
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	xaiReasoningReplayMu.Lock()
+	defer xaiReasoningReplayMu.Unlock()
+	entry, ok := xaiReasoningReplayEntries[key]
+	if !ok {
+		return nil, false, nil
+	}
+	if now.Sub(entry.Timestamp) > XAIReasoningReplayCacheTTL {
+		delete(xaiReasoningReplayEntries, key)
+		return nil, false, nil
+	}
+	entry.Timestamp = now
+	xaiReasoningReplayEntries[key] = entry
+	return cloneXAIReasoningReplayItems(entry.Items), true, nil
+}
+
+// DeleteXAIReasoningReplayItem removes one replay item after upstream rejects
+// it or the caller otherwise knows it is stale.
+func DeleteXAIReasoningReplayItem(modelName, sessionKey string) {
+	if errDelete := DeleteXAIReasoningReplayItemRequired(context.Background(), modelName, sessionKey); errDelete != nil {
+		return
+	}
+}
+
+// DeleteXAIReasoningReplayItemRequired removes one replay item for request-time paths.
+func DeleteXAIReasoningReplayItemRequired(ctx context.Context, modelName, sessionKey string) error {
+	key := xaiReasoningReplayCacheKey(modelName, sessionKey)
+	if key == "" {
+		return nil
+	}
+	client, homeMode, errClient := currentXAIReasoningReplayKVClient()
+	if homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, xaiReasoningReplayKVKey(modelName, sessionKey))
+		return errDel
+	}
+	xaiReasoningReplayMu.Lock()
+	delete(xaiReasoningReplayEntries, key)
+	xaiReasoningReplayMu.Unlock()
+	return nil
+}
+
+// ClearXAIReasoningReplayCache clears all xAI reasoning replay state.
+func ClearXAIReasoningReplayCache() {
+	xaiReasoningReplayMu.Lock()
+	xaiReasoningReplayEntries = make(map[string]xaiReasoningReplayEntry)
+	xaiReasoningReplayMu.Unlock()
+}
+
+func xaiReasoningReplayCacheKey(modelName, sessionKey string) string {
+	modelName = strings.TrimSpace(modelName)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if modelName == "" || sessionKey == "" {
+		return ""
+	}
+	// The session key is the continuity boundary. Keep this independent from
+	// the selected upstream xAI credential so auth failover can preserve replay.
+	return strings.Join([]string{"xai-reasoning-replay", modelName, sessionKey}, "\x00")
+}
+
+func xaiReasoningReplayKVKey(modelName, sessionKey string) string {
+	return "cpa:xai:reasoning-replay:" + homekv.HashKeyPart(strings.TrimSpace(modelName)) + ":" + homekv.HashKeyPart(strings.TrimSpace(sessionKey))
+}
+
+func normalizeXAIReasoningReplayItems(items [][]byte) ([][]byte, bool) {
+	normalized := make([][]byte, 0, len(items))
+	hasReplayAnchor := false
+	for _, item := range items {
+		normalizedItem, ok := normalizeXAIReasoningReplayItem(item)
+		if ok {
+			normalized = append(normalized, normalizedItem)
+			switch strings.TrimSpace(ojson.GetBytesNoCopy(normalizedItem, "type").String()) {
+			case "reasoning", "function_call", "custom_tool_call":
+				hasReplayAnchor = true
+			}
+		}
+	}
+	return normalized, hasReplayAnchor
+}
+
+func normalizeXAIReasoningReplayItem(item []byte) ([]byte, bool) {
+	itemResult := util.ParseGJSONBytesNoCopy(item)
+	switch strings.TrimSpace(itemResult.Get("type").String()) {
+	case "reasoning":
+		return normalizeXAIReasoningReplayReasoningItem(itemResult)
+	case "message":
+		return normalizeXAIReasoningReplayMessageItem(itemResult)
+	case "function_call":
+		return normalizeXAIReasoningReplayFunctionCallItem(itemResult)
+	case "custom_tool_call":
+		return normalizeXAIReasoningReplayCustomToolCallItem(itemResult)
+	default:
+		return nil, false
+	}
+}
+
+func normalizeXAIReasoningReplayReasoningItem(itemResult ojson.Result) ([]byte, bool) {
+	encryptedContentResult := itemResult.Get("encrypted_content")
+	if encryptedContentResult.Type != ojson.String {
+		return nil, false
+	}
+	encryptedContent := encryptedContentResult.String()
+	if encryptedContent != strings.TrimSpace(encryptedContent) {
+		return nil, false
+	}
+	if _, err := signature.InspectGrokEncryptedContent(encryptedContent); err != nil {
+		return nil, false
+	}
+
+	normalized := []byte(`{"type":"reasoning","summary":[],"content":null}`)
+	normalized, _ = ojson.SetBytes(normalized, "encrypted_content", encryptedContent)
+	return normalized, true
+}
+
+func normalizeXAIReasoningReplayMessageItem(itemResult ojson.Result) ([]byte, bool) {
+	if !strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
+		return nil, false
+	}
+	content := itemResult.Get("content")
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return nil, false
+	}
+
+	doc := ojson.NewDocString(`{"type":"message","role":"assistant","content":[]}`)
+	for _, part := range content.Array() {
+		partType := strings.TrimSpace(part.Get("type").String())
+		var nextPart []byte
+		switch partType {
+		case "output_text":
+			textValue := part.Get("text")
+			if textValue.Type != ojson.String {
+				continue
+			}
+			nextPart = []byte(`{"type":"output_text","text":""}`)
+			nextPart, _ = ojson.SetBytes(nextPart, "text", textValue.String())
+		case "refusal":
+			// Responses API refusal parts use the "refusal" field, not "text".
+			refusalValue := part.Get("refusal")
+			if refusalValue.Type != ojson.String {
+				continue
+			}
+			nextPart = []byte(`{"type":"refusal","refusal":""}`)
+			nextPart, _ = ojson.SetBytes(nextPart, "refusal", refusalValue.String())
+		default:
+			continue
+		}
+		if errSet := doc.SetRawBytes("content.-1", nextPart); errSet != nil {
+			return nil, false
+		}
+	}
+	if len(doc.Get("content").Array()) == 0 {
+		return nil, false
+	}
+	return doc.Bytes(), true
+}
+
+func normalizeXAIReasoningReplayFunctionCallItem(itemResult ojson.Result) ([]byte, bool) {
+	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	name := strings.TrimSpace(itemResult.Get("name").String())
+	arguments := itemResult.Get("arguments")
+	if callID == "" || name == "" || arguments.Type != ojson.String {
+		return nil, false
+	}
+
+	doc := ojson.NewDocString(`{"type":"function_call"}`)
+	_ = doc.Set("call_id", callID)
+	_ = doc.Set("name", name)
+	_ = doc.Set("arguments", arguments.String())
+	return doc.Bytes(), true
+}
+
+func normalizeXAIReasoningReplayCustomToolCallItem(itemResult ojson.Result) ([]byte, bool) {
+	callID := strings.TrimSpace(itemResult.Get("call_id").String())
+	name := strings.TrimSpace(itemResult.Get("name").String())
+	input := itemResult.Get("input")
+	if callID == "" || name == "" || !input.Exists() {
+		return nil, false
+	}
+
+	doc := ojson.NewDocString(`{"type":"custom_tool_call","status":"completed"}`)
+	if status := strings.TrimSpace(itemResult.Get("status").String()); status != "" {
+		_ = doc.Set("status", status)
+	}
+	_ = doc.Set("call_id", callID)
+	_ = doc.Set("name", name)
+	if input.Type == ojson.String {
+		_ = doc.Set("input", input.String())
+	} else {
+		_ = doc.SetRaw("input", input.Raw)
+	}
+	return doc.Bytes(), true
+}
+
+func cloneXAIReasoningReplayItems(items [][]byte) [][]byte {
+	cloned := make([][]byte, 0, len(items))
+	for _, item := range items {
+		cloned = append(cloned, append([]byte(nil), item...))
+	}
+	return cloned
+}
+
+func evictOldestXAIReasoningReplayEntriesLocked(count int) {
+	if count <= 0 || len(xaiReasoningReplayEntries) == 0 {
+		return
+	}
+	type candidate struct {
+		key       string
+		timestamp time.Time
+	}
+	candidates := make([]candidate, 0, len(xaiReasoningReplayEntries))
+	for key, entry := range xaiReasoningReplayEntries {
+		candidates = append(candidates, candidate{key: key, timestamp: entry.Timestamp})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].timestamp.Before(candidates[j].timestamp)
+	})
+	if count > len(candidates) {
+		count = len(candidates)
+	}
+	for i := 0; i < count; i++ {
+		delete(xaiReasoningReplayEntries, candidates[i].key)
+	}
+}
+
+func purgeExpiredXAIReasoningReplayCache(now time.Time) {
+	xaiReasoningReplayMu.Lock()
+	for key, entry := range xaiReasoningReplayEntries {
+		if now.Sub(entry.Timestamp) > XAIReasoningReplayCacheTTL {
+			delete(xaiReasoningReplayEntries, key)
+		}
+	}
+	xaiReasoningReplayMu.Unlock()
+}

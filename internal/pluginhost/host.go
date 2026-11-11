@@ -1,0 +1,1488 @@
+package pluginhost
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
+)
+
+type loadedPlugin struct {
+	id               string
+	path             string
+	version          string
+	name             string
+	configYAML       []byte
+	plugin           pluginapi.Plugin
+	registered       bool
+	needsRecovery    bool
+	client           pluginClient
+	callbackInstance *hostCallbackInstance
+}
+
+type modelExecutor interface {
+	ExecuteModel(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage)
+	ExecuteModelStream(context.Context, handlers.ModelExecutionRequest) (handlers.ModelExecutionStream, *interfaces.ErrorMessage)
+}
+
+type pluginUnloadTarget struct {
+	id               string
+	name             string
+	path             string
+	version          string
+	client           pluginClient
+	callbackInstance *hostCallbackInstance
+}
+
+type pluginLoadRequest struct {
+	result            chan pluginLoadResult
+	cleanupStarted    bool
+	closed            bool // Protected by Host.mu; rejects callbacks arriving after cleanup starts.
+	callbackInstances map[*hostCallbackInstance]struct{}
+}
+
+type pluginLoadResult struct {
+	loaded      *loadedPlugin
+	plugin      pluginapi.Plugin
+	initialized bool
+	err         error
+}
+
+type Host struct {
+	applyMu                  chan struct{}
+	mu                       sync.Mutex
+	loader                   pluginLoader
+	loaded                   map[string]*loadedPlugin
+	retired                  map[string][]*loadedPlugin
+	loading                  map[string]*pluginLoadRequest
+	fused                    map[string]string
+	pluginFileVersions       map[string]string
+	activePluginVersions     map[string]string
+	activePluginPaths        map[string]string
+	cleanupFilesPending      bool
+	runtimeConfig            *config.Config
+	authManager              *coreauth.Manager
+	modelExecutor            modelExecutor
+	modelClientIDs           map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.
+	executorModelClientIDs   map[string]struct{}
+	modelProviders           map[string]string
+	modelProviderSets        map[string][]string
+	authCredentialProviders  map[string]map[string]string
+	modelRegistrations       map[string]pluginModelRegistration
+	pluginModelRegistrations map[string][]pluginModelRegistration
+	providerModels           map[string][]*registryModelInfo
+	executorProviders        map[string]struct{}
+	accessProviderKeys       map[string]struct{}
+	commandLineFlags         map[string]commandLineFlagRecord
+	commandLineHits          map[string]struct{}
+	managementRoutes         map[string]managementRouteRecord
+	resourceRoutes           map[string]resourceRouteRecord
+	streams                  *streamBridge
+	httpStreams              *hostHTTPStreamBridge
+	httpOperations           *hostHTTPOperationBridge
+	modelStreams             *modelStreamBridge
+	callbackContexts         *callbackContextRegistry
+	usageStates              map[string]*pluginUsageState
+	maxPendingUsageRecords   int
+	snapshot                 atomic.Value
+	// loadCleanupDoneHook, set by tests, runs after a late load cleanup dropped its load token.
+	loadCleanupDoneHook func()
+	// usageDrainWaitHook, set by tests, runs when beginUsageReplacement waits for admitted usage calls to drain.
+	usageDrainWaitHook func(pluginID string)
+	// usageBackpressureWaitHook, set by tests, runs when dispatchPluginUsageRecord blocks on a full pending queue.
+	usageBackpressureWaitHook func(pluginID string)
+}
+
+func New() *Host {
+	h := &Host{
+		applyMu:                  make(chan struct{}, 1),
+		loader:                   defaultPluginLoader(),
+		loaded:                   make(map[string]*loadedPlugin),
+		retired:                  make(map[string][]*loadedPlugin),
+		loading:                  make(map[string]*pluginLoadRequest),
+		fused:                    make(map[string]string),
+		pluginFileVersions:       make(map[string]string),
+		activePluginVersions:     make(map[string]string),
+		activePluginPaths:        make(map[string]string),
+		cleanupFilesPending:      true,
+		modelClientIDs:           make(map[string]struct{}),
+		executorModelClientIDs:   make(map[string]struct{}),
+		modelProviders:           make(map[string]string),
+		modelProviderSets:        make(map[string][]string),
+		authCredentialProviders:  make(map[string]map[string]string),
+		modelRegistrations:       make(map[string]pluginModelRegistration),
+		pluginModelRegistrations: make(map[string][]pluginModelRegistration),
+		providerModels:           make(map[string][]*registryModelInfo),
+		executorProviders:        make(map[string]struct{}),
+		accessProviderKeys:       make(map[string]struct{}),
+		commandLineFlags:         make(map[string]commandLineFlagRecord),
+		commandLineHits:          make(map[string]struct{}),
+		managementRoutes:         make(map[string]managementRouteRecord),
+		resourceRoutes:           make(map[string]resourceRouteRecord),
+		streams:                  newStreamBridge(),
+		httpStreams:              newHostHTTPStreamBridge(),
+		httpOperations:           newHostHTTPOperationBridge(),
+		modelStreams:             newModelStreamBridge(),
+		callbackContexts:         newCallbackContextRegistry(),
+		usageStates:              make(map[string]*pluginUsageState),
+	}
+	h.snapshot.Store(emptySnapshot())
+	return h
+}
+
+func NewForTest(loader pluginLoader) *Host {
+	h := New()
+	h.loader = loader
+	return h
+}
+
+func (h *Host) SetModelExecutor(executor modelExecutor) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.modelExecutor = executor
+	h.mu.Unlock()
+}
+
+func (h *Host) currentModelExecutor() modelExecutor {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	executor := h.modelExecutor
+	h.mu.Unlock()
+	return executor
+}
+
+func (h *Host) Snapshot() *Snapshot {
+	if h == nil {
+		return emptySnapshot()
+	}
+	raw := h.snapshot.Load()
+	if snap, ok := raw.(*Snapshot); ok && snap != nil {
+		return snap
+	}
+	return emptySnapshot()
+}
+
+// PluginLoaded reports whether a plugin is still active in the host runtime.
+func (h *Host) PluginLoaded(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.loaded[id]
+	if ok {
+		return true
+	}
+	return len(h.retired[id]) > 0
+}
+
+// PluginBusy reports whether a plugin is active in the host runtime or being loaded.
+func (h *Host) PluginBusy(id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.loaded[id]; ok {
+		return true
+	}
+	if len(h.retired[id]) > 0 {
+		return true
+	}
+	_, ok := h.loading[id]
+	return ok
+}
+
+func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
+	if h == nil || !h.lockApply(ctx) {
+		return
+	}
+	defer h.unlockApply()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return
+	}
+
+	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
+	if errRuntimeConfig != nil {
+		log.WithError(errRuntimeConfig).Error("failed to apply plugin runtime config")
+		return
+	}
+	h.mu.Lock()
+	h.runtimeConfig = cfg
+	h.mu.Unlock()
+
+	if !rc.Enabled {
+		h.detachUnselectedPlugins(ctx, nil)
+		h.mu.Lock()
+		h.managementRoutes = make(map[string]managementRouteRecord)
+		h.resourceRoutes = make(map[string]resourceRouteRecord)
+		h.rebuildActivePluginMapsLocked(nil)
+		h.snapshot.Store(emptySnapshot())
+		h.mu.Unlock()
+		h.refreshThinkingProviders(nil)
+		return
+	}
+
+	desiredVersions := desiredPluginVersions(rc.Items)
+	files, errSelect := selectPluginFiles(rc.Dir, desiredVersions)
+	if errSelect != nil {
+		log.Warnf("pluginhost: failed to select plugin files: %v", errSelect)
+		h.mu.Lock()
+		h.managementRoutes = make(map[string]managementRouteRecord)
+		h.resourceRoutes = make(map[string]resourceRouteRecord)
+		h.rebuildActivePluginMapsLocked(nil)
+		h.snapshot.Store(emptySnapshot())
+		h.mu.Unlock()
+		h.refreshThinkingProviders(nil)
+		return
+	}
+	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
+	h.detachUnselectedPlugins(ctx, enabledPluginIDs(files, rc.Items))
+
+	records := make([]capabilityRecord, 0, len(files))
+	loadedFiles := make([]pluginFile, 0, len(files))
+	hotReloadLogs := make([]log.Fields, 0)
+	readyUsagePluginIDs := make([]string, 0)
+	defer func() {
+		for _, id := range readyUsagePluginIDs {
+			h.finishUsageReplacement(id)
+		}
+	}()
+	for _, file := range files {
+		item, ok := rc.Items[file.ID]
+		if !ok {
+			item = defaultRuntimeItemConfig(file.ID)
+		}
+		if !item.Enabled {
+			continue
+		}
+		h.mu.Lock()
+		lp := h.loaded[file.ID]
+		var replaced *loadedPlugin
+		if lp != nil && cleanPluginPath(lp.path) != cleanPluginPath(file.Path) {
+			replaced = lp
+			lp = nil
+		}
+		_, disabled := h.fused[file.ID]
+		h.mu.Unlock()
+		if disabled && replaced == nil {
+			continue
+		}
+
+		loadedNow := false
+		var hotReloadFields log.Fields
+		var plugin pluginapi.Plugin
+		registeredNow := false
+		if lp == nil {
+			request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+			h.mu.Lock()
+			if _, loading := h.loading[file.ID]; loading {
+				h.mu.Unlock()
+				continue
+			}
+			h.loading[file.ID] = request
+			h.mu.Unlock()
+
+			if replaced != nil {
+				if !h.beginUsageReplacement(ctx, file.ID) {
+					h.clearLoadingRequest(file.ID, request)
+					if !h.isPluginUnrecovered(replaced) {
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+					}
+					return
+				}
+				_, proceedQuiesce := h.callQuiesceWithOutcome(ctx, replaced)
+				if errContext := ctx.Err(); errContext != nil {
+					h.clearLoadingRequest(file.ID, request)
+					if _, _, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+					}
+					return
+				}
+				if !proceedQuiesce {
+					h.clearLoadingRequest(file.ID, request)
+					if rollbackRecord, rollbackFile, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						records = append(records, rollbackRecord)
+						loadedFiles = append(loadedFiles, rollbackFile)
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+						h.finishUsageReplacement(file.ID)
+					}
+					continue
+				}
+			}
+			h.startPluginLoad(ctx, file, item, request)
+
+			loadResult, completed := h.waitForPluginLoad(ctx, request)
+			if !completed {
+				if replaced == nil {
+					h.cleanupCanceledPluginLoad(file.ID, request)
+				} else {
+					h.cleanupCanceledPluginLoadAndWait(file.ID, request)
+					if _, _, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+					}
+				}
+				return
+			}
+			if loadResult.err != nil || (replaced != nil && !loadResult.initialized) {
+				if replaced == nil {
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				} else {
+					h.cleanupPluginLoadAndWait(file.ID, request, loadResult.loaded)
+					if rollbackRecord, rollbackFile, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						records = append(records, rollbackRecord)
+						loadedFiles = append(loadedFiles, rollbackFile)
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+						h.finishUsageReplacement(file.ID)
+					}
+				}
+				if loadResult.err != nil {
+					log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
+				}
+				continue
+			}
+
+			h.mu.Lock()
+			if h.loading[file.ID] != request {
+				h.mu.Unlock()
+				h.discardLoadedPlugin(loadResult.loaded)
+				if replaced != nil {
+					if _, _, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+					}
+				}
+				return
+			}
+			if errContext := ctx.Err(); errContext != nil {
+				h.mu.Unlock()
+				if replaced == nil {
+					h.cleanupPluginLoad(file.ID, request, loadResult.loaded)
+				} else {
+					h.cleanupPluginLoadAndWait(file.ID, request, loadResult.loaded)
+					if _, _, okRollback := h.rollbackReplacement(replaced, item); okRollback {
+						readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+					}
+				}
+				return
+			}
+			delete(h.loading, file.ID)
+			lp = loadResult.loaded
+			if replaced != nil {
+				hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
+				h.retireLoadedPluginLocked(replaced)
+				delete(h.fused, file.ID)
+				h.removePluginRuntimeStateLocked(file.ID)
+			}
+			h.loaded[file.ID] = lp
+			loadedNow = true
+			plugin = loadResult.plugin
+			registeredNow = loadResult.initialized
+			h.mu.Unlock()
+			log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
+		}
+
+		if !registeredNow {
+			if loadedNow {
+				continue
+			}
+			var okCall bool
+			plugin, okCall = h.callRegister(ctx, lp, item)
+			if !okCall {
+				continue
+			}
+		}
+		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
+		h.mu.Lock()
+		if lp != nil {
+			lp.name = strings.TrimSpace(plugin.Metadata.Name)
+			if strings.TrimSpace(lp.version) == "" {
+				lp.version = strings.TrimSpace(plugin.Metadata.Version)
+			}
+		}
+		h.mu.Unlock()
+		if loadedNow {
+			log.WithFields(pluginLogFieldsFromMetadata(file.ID, plugin.Metadata, file.Path)).Info("pluginhost: plugin registered")
+		}
+		if hotReloadFields != nil {
+			hotReloadLogs = append(hotReloadLogs, hotReloadFields)
+		}
+		record := capabilityRecord{
+			id:       file.ID,
+			path:     file.Path,
+			version:  file.Version,
+			priority: item.Priority,
+			meta:     plugin.Metadata,
+			plugin:   plugin,
+		}
+		h.updateActivePluginRecord(record)
+		readyUsagePluginIDs = append(readyUsagePluginIDs, file.ID)
+		records = append(records, record)
+		loadedFiles = append(loadedFiles, file)
+	}
+
+	sortRecords(records)
+	h.mu.Lock()
+	cleanupFiles := h.cleanupFilesPending
+	if len(loadedFiles) > 0 {
+		h.cleanupFilesPending = false
+	}
+	h.rebuildActivePluginMapsLocked(records)
+	h.snapshot.Store(&Snapshot{enabled: true, records: records, quotaSupportedProviders: make(map[string][]string)})
+	h.mu.Unlock()
+	for _, id := range readyUsagePluginIDs {
+		h.finishUsageReplacement(id)
+	}
+	readyUsagePluginIDs = nil
+	h.refreshThinkingProviders(records)
+	for _, fields := range hotReloadLogs {
+		log.WithFields(fields).Info("pluginhost: plugin hot reloaded")
+	}
+	if cleanupFiles && len(loadedFiles) > 0 {
+		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, loadedFiles); errCleanup != nil {
+			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
+		}
+	}
+}
+
+func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
+	if h == nil || instance == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	h.mu.Lock()
+	if request := h.loading[pluginID]; request != nil {
+		if request.callbackInstances == nil {
+			request.callbackInstances = make(map[*hostCallbackInstance]struct{})
+		}
+		request.callbackInstances[instance] = struct{}{}
+		if request.closed {
+			instance.closed.Store(true)
+		}
+	}
+	h.mu.Unlock()
+}
+
+func markPluginLoadClosedLocked(request *pluginLoadRequest) []*hostCallbackInstance {
+	if request == nil {
+		return nil
+	}
+	request.closed = true
+	instances := make([]*hostCallbackInstance, 0, len(request.callbackInstances))
+	for instance := range request.callbackInstances {
+		instance.closed.Store(true)
+		instances = append(instances, instance)
+	}
+	return instances
+}
+
+func (h *Host) closeHostHTTPCallbackInstances(pluginID string, instances []*hostCallbackInstance) {
+	for _, instance := range instances {
+		h.closeHostHTTPCallbackInstance(pluginID, instance)
+	}
+}
+
+func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtimeItemConfig, request *pluginLoadRequest) {
+	if h == nil || request == nil || request.result == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		client, errOpen := h.loader.Open(file, h)
+		if errOpen != nil {
+			request.result <- pluginLoadResult{err: errOpen}
+			return
+		}
+		if client == nil {
+			request.result <- pluginLoadResult{err: fmt.Errorf("plugin loader returned nil client")}
+			return
+		}
+		guardedClient := newGuardedPluginClient(client)
+		loaded := &loadedPlugin{
+			id:               file.ID,
+			path:             file.Path,
+			version:          file.Version,
+			client:           guardedClient,
+			callbackInstance: pluginCallbackInstance(guardedClient),
+		}
+		plugin, okCall := h.callRegister(ctx, loaded, item)
+		request.result <- pluginLoadResult{loaded: loaded, plugin: plugin, initialized: okCall}
+	}()
+}
+
+func (h *Host) waitForPluginLoad(ctx context.Context, request *pluginLoadRequest) (pluginLoadResult, bool) {
+	if h == nil || request == nil || request.result == nil {
+		return pluginLoadResult{}, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case result := <-request.result:
+		return result, true
+	case <-ctx.Done():
+		return pluginLoadResult{}, false
+	}
+}
+
+func (h *Host) cleanupCanceledPluginLoad(id string, request *pluginLoadRequest) {
+	if h == nil || request == nil || request.result == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
+	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
+
+	go func() {
+		result := <-request.result
+		h.finishPluginLoadCleanup(id, request, result.loaded)
+	}()
+}
+
+func (h *Host) cleanupCanceledPluginLoadAndWait(id string, request *pluginLoadRequest) {
+	if h == nil || request == nil || request.result == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
+	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
+
+	result := <-request.result
+	h.discardLoadedPlugin(result.loaded)
+	h.clearLoadingRequest(id, request)
+}
+
+// cleanupPluginLoad retains the matching load token until the client has physically
+// shut down, preventing a replacement ApplyConfig from opening a second client.
+func (h *Host) cleanupPluginLoad(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
+	if h == nil || request == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
+	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
+
+	h.finishPluginLoadCleanup(id, request, loaded)
+}
+
+func (h *Host) cleanupPluginLoadAndWait(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
+	if h == nil || request == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] != request || request.cleanupStarted {
+		h.mu.Unlock()
+		return
+	}
+	request.cleanupStarted = true
+	instances := markPluginLoadClosedLocked(request)
+	h.mu.Unlock()
+	h.closeHostHTTPCallbackInstances(id, instances)
+
+	h.discardLoadedPlugin(loaded)
+	h.clearLoadingRequest(id, request)
+}
+
+func (h *Host) finishPluginLoadCleanup(id string, request *pluginLoadRequest, loaded *loadedPlugin) {
+	go func() {
+		h.discardLoadedPlugin(loaded)
+		h.clearLoadingRequest(id, request)
+		if h.loadCleanupDoneHook != nil {
+			h.loadCleanupDoneHook()
+		}
+	}()
+}
+
+func (h *Host) clearLoadingRequest(id string, request *pluginLoadRequest) {
+	if h == nil || request == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.loading[id] == request {
+		delete(h.loading, id)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Host) discardLoadedPlugin(loaded *loadedPlugin) {
+	if loaded == nil || loaded.client == nil {
+		return
+	}
+	h.closeHostHTTPCallbackInstance(loaded.id, loaded.callbackInstance)
+	shutdownPluginClient(context.Background(), loaded.client)
+}
+
+func (h *Host) withLoadedPluginFallbacks(files []pluginFile, items map[string]runtimeItemConfig, desired map[string]string) []pluginFile {
+	if h == nil || len(desired) == 0 {
+		return files
+	}
+	selected := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		id := strings.TrimSpace(file.ID)
+		if id != "" {
+			selected[id] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(desired))
+	for id := range desired {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range ids {
+		if _, ok := selected[id]; ok {
+			continue
+		}
+		if item, ok := items[id]; ok && !item.Enabled {
+			continue
+		}
+		lp := h.loaded[id]
+		if lp == nil || strings.TrimSpace(lp.path) == "" {
+			continue
+		}
+		files = append(files, pluginFile{
+			ID:      id,
+			Path:    lp.path,
+			Version: strings.TrimSpace(lp.version),
+		})
+		selected[id] = struct{}{}
+	}
+	return files
+}
+
+// UnloadPlugin removes one plugin from the active runtime.
+// The plugin image itself stays mapped for the lifetime of the process.
+func (h *Host) UnloadPlugin(id string) bool {
+	return h.UnloadPluginContext(context.Background(), id)
+}
+
+// UnloadPluginContext detaches a plugin from the runtime before waiting for its
+// active calls. Physical client cleanup continues after cancellation if needed.
+func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" || !h.lockApply(ctx) {
+		return false
+	}
+	defer h.unlockApply()
+	return h.detachPlugin(ctx, id)
+}
+
+// detachPlugin shuts down one loaded plugin. Caller must hold the apply lock.
+func (h *Host) detachPlugin(ctx context.Context, id string) bool {
+	if h == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	targets := make([]pluginUnloadTarget, 0)
+	h.mu.Lock()
+	lp := h.loaded[id]
+	if lp != nil {
+		targets = append(targets, pluginUnloadTarget{id: lp.id, name: lp.name, path: lp.path, version: lp.version, client: lp.client, callbackInstance: lp.callbackInstance})
+	}
+	for _, retired := range h.retired[id] {
+		if retired == nil {
+			continue
+		}
+		targets = append(targets, pluginUnloadTarget{id: retired.id, name: retired.name, path: retired.path, version: retired.version, client: retired.client, callbackInstance: retired.callbackInstance})
+	}
+	request := h.loading[id]
+	instances := markPluginLoadClosedLocked(request)
+	if len(targets) == 0 && request == nil {
+		h.mu.Unlock()
+		return false
+	}
+	delete(h.loaded, id)
+	delete(h.retired, id)
+	delete(h.fused, id)
+	delete(h.activePluginVersions, id)
+	delete(h.activePluginPaths, id)
+	for _, target := range targets {
+		delete(h.pluginFileVersions, cleanPluginPath(target.path))
+	}
+	records, enabled := h.snapshotWithoutPluginLocked(id)
+	h.removePluginRuntimeStateLocked(id)
+	h.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	h.mu.Unlock()
+
+	h.clearUsageReplacement(id)
+	h.closeHostHTTPCallbackInstances(id, instances)
+	if len(targets) == 0 {
+		h.closeHostHTTPPluginResources(id, nil)
+	}
+	if request != nil {
+		h.cleanupCanceledPluginLoad(id, request)
+	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
+	h.refreshThinkingProviders(records)
+	h.RegisterFrontendAuthProviders()
+	for _, target := range targets {
+		if target.client != nil {
+			shutdownPluginClient(ctx, target.client)
+		}
+		log.WithFields(pluginLogFields(target.id, target.name, target.version, target.path)).Info("pluginhost: plugin unloaded")
+	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
+	return true
+}
+
+// detachUnselectedPlugins stops plugins that are no longer enabled. nil keeps none.
+// Caller must hold the apply lock.
+func (h *Host) detachUnselectedPlugins(ctx context.Context, selected map[string]struct{}) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	ids := make([]string, 0, len(h.loaded)+len(h.retired)+len(h.loading))
+	for id := range h.loaded {
+		ids = append(ids, id)
+	}
+	for id := range h.retired {
+		ids = append(ids, id)
+	}
+	for id := range h.loading {
+		ids = append(ids, id)
+	}
+	h.mu.Unlock()
+	sort.Strings(ids)
+
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := selected[id]; ok {
+			continue
+		}
+		h.detachPlugin(ctx, id)
+	}
+}
+
+func enabledPluginIDs(files []pluginFile, items map[string]runtimeItemConfig) map[string]struct{} {
+	ids := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		id := strings.TrimSpace(file.ID)
+		if id == "" {
+			continue
+		}
+		item, ok := items[id]
+		if !ok {
+			item = defaultRuntimeItemConfig(id)
+		}
+		if !item.Enabled {
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+	return ids
+}
+
+// ShutdownAll removes active plugin capabilities and detaches all plugins.
+// Plugin images stay mapped for the lifetime of the process.
+func (h *Host) ShutdownAll() {
+	h.ShutdownAllContext(context.Background())
+}
+
+// ShutdownAllContext detaches all plugin runtime state without waiting beyond ctx
+// for active plugin calls to complete.
+func (h *Host) ShutdownAllContext(ctx context.Context) {
+	if h == nil || !h.lockApply(ctx) {
+		return
+	}
+	defer h.unlockApply()
+
+	targets := make([]pluginUnloadTarget, 0)
+	var loading map[string]*pluginLoadRequest
+	loadingInstances := make(map[string][]*hostCallbackInstance)
+	h.mu.Lock()
+	loading = make(map[string]*pluginLoadRequest, len(h.loading))
+	for id, request := range h.loading {
+		loading[id] = request
+		loadingInstances[id] = markPluginLoadClosedLocked(request)
+	}
+	for _, lp := range h.loaded {
+		if lp == nil || lp.client == nil {
+			continue
+		}
+		targets = append(targets, pluginUnloadTarget{
+			id:               lp.id,
+			name:             lp.name,
+			path:             lp.path,
+			version:          lp.version,
+			client:           lp.client,
+			callbackInstance: lp.callbackInstance,
+		})
+	}
+	for _, retiredPlugins := range h.retired {
+		for _, lp := range retiredPlugins {
+			if lp == nil || lp.client == nil {
+				continue
+			}
+			targets = append(targets, pluginUnloadTarget{
+				id:               lp.id,
+				name:             lp.name,
+				path:             lp.path,
+				version:          lp.version,
+				client:           lp.client,
+				callbackInstance: lp.callbackInstance,
+			})
+		}
+	}
+	h.loaded = make(map[string]*loadedPlugin)
+	h.retired = make(map[string][]*loadedPlugin)
+	h.modelClientIDs = make(map[string]struct{})
+	h.executorModelClientIDs = make(map[string]struct{})
+	h.modelProviders = make(map[string]string)
+	h.modelProviderSets = make(map[string][]string)
+	h.authCredentialProviders = make(map[string]map[string]string)
+	h.modelRegistrations = make(map[string]pluginModelRegistration)
+	h.pluginModelRegistrations = make(map[string][]pluginModelRegistration)
+	h.providerModels = make(map[string][]*registryModelInfo)
+	h.executorProviders = make(map[string]struct{})
+	h.commandLineFlags = make(map[string]commandLineFlagRecord)
+	h.commandLineHits = make(map[string]struct{})
+	h.managementRoutes = make(map[string]managementRouteRecord)
+	h.resourceRoutes = make(map[string]resourceRouteRecord)
+	h.pluginFileVersions = make(map[string]string)
+	h.activePluginVersions = make(map[string]string)
+	h.activePluginPaths = make(map[string]string)
+	h.snapshot.Store(emptySnapshot())
+	h.mu.Unlock()
+
+	h.clearAllUsageReplacements()
+	for id, instances := range loadingInstances {
+		h.closeHostHTTPCallbackInstances(id, instances)
+	}
+	for _, target := range targets {
+		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
+	}
+	if h.httpOperations != nil {
+		h.httpOperations.cancelAll()
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
+	}
+	h.refreshThinkingProviders(nil)
+	h.RegisterFrontendAuthProviders()
+	for id, request := range loading {
+		h.cleanupCanceledPluginLoad(id, request)
+	}
+	for _, target := range targets {
+		shutdownPluginClient(ctx, target.client)
+		log.WithFields(pluginLogFields(target.id, target.name, target.version, target.path)).Info("pluginhost: plugin unloaded")
+	}
+	if h.httpOperations != nil {
+		h.httpOperations.cancelAll()
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closeAll()
+	}
+	if h.modelStreams != nil {
+		h.modelStreams.closeAll()
+	}
+}
+
+func (h *Host) lockApply(ctx context.Context) bool {
+	if h == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case h.applyMu <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case h.applyMu <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (h *Host) unlockApply() {
+	<-h.applyMu
+}
+
+func shutdownPluginClient(ctx context.Context, client pluginClient) {
+	if client == nil {
+		return
+	}
+	if guarded, ok := client.(*guardedPluginClient); ok {
+		guarded.ShutdownContext(ctx)
+		return
+	}
+	client.Shutdown()
+}
+
+func cleanPluginPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+func (h *Host) retireLoadedPluginLocked(lp *loadedPlugin) {
+	if h == nil || lp == nil {
+		return
+	}
+	h.retired[lp.id] = append(h.retired[lp.id], lp)
+}
+
+func (h *Host) recordCurrent(record capabilityRecord) bool {
+	return h.pluginIdentityCurrent(record.id, record.path, record.version)
+}
+
+func (h *Host) pluginIdentityCurrent(id string, path string, version string) bool {
+	if h == nil {
+		return false
+	}
+	version = strings.TrimSpace(version)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	path = cleanPluginPath(path)
+	if path == "" || h.activePluginPaths[id] != path {
+		return false
+	}
+	activePathVersion, okVersion := h.pluginFileVersions[path]
+	if !okVersion || activePathVersion != version {
+		return false
+	}
+	return h.activePluginVersions[id] == version
+}
+
+func (h *Host) snapshotWithoutPluginLocked(id string) ([]capabilityRecord, bool) {
+	raw := h.snapshot.Load()
+	snap, _ := raw.(*Snapshot)
+	if snap == nil || len(snap.records) == 0 {
+		return nil, snap != nil && snap.enabled
+	}
+	records := make([]capabilityRecord, 0, len(snap.records))
+	for _, record := range snap.records {
+		if record.id == id {
+			continue
+		}
+		records = append(records, record)
+	}
+	return records, snap.enabled
+}
+
+func (h *Host) removePluginRuntimeStateLocked(id string) {
+	for key, record := range h.managementRoutes {
+		if record.pluginID == id {
+			delete(h.managementRoutes, key)
+		}
+	}
+	for key, record := range h.resourceRoutes {
+		if record.pluginID == id {
+			delete(h.resourceRoutes, key)
+		}
+	}
+	for name, record := range h.commandLineFlags {
+		if record.pluginID == id {
+			delete(h.commandLineFlags, name)
+			delete(h.commandLineHits, name)
+		}
+	}
+	affectedProviders := make(map[string]struct{})
+	if registration, ok := h.modelRegistrations[id]; ok && registration.provider != "" {
+		affectedProviders[registration.provider] = struct{}{}
+	}
+	for _, registration := range h.pluginModelRegistrations[id] {
+		if registration.provider != "" {
+			affectedProviders[registration.provider] = struct{}{}
+		}
+	}
+	if provider := normalizeProviderID(h.modelProviders[id]); provider != "" {
+		affectedProviders[provider] = struct{}{}
+	}
+	for _, provider := range h.modelProviderSets[id] {
+		if normalized := normalizeProviderID(provider); normalized != "" {
+			affectedProviders[normalized] = struct{}{}
+		}
+	}
+	delete(h.modelProviders, id)
+	delete(h.modelProviderSets, id)
+	delete(h.authCredentialProviders, id)
+	delete(h.modelRegistrations, id)
+	delete(h.pluginModelRegistrations, id)
+	for provider := range affectedProviders {
+		delete(h.providerModels, provider)
+	}
+	if len(affectedProviders) > 0 {
+		for _, registration := range h.snapshotModelRegistrationsLocked() {
+			if registration.hasExecutor {
+				continue
+			}
+			if _, ok := affectedProviders[registration.provider]; ok {
+				appendModelsForProvider(h.providerModels, registration.provider, registration.models)
+			}
+		}
+	}
+}
+
+func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
+	h.pluginFileVersions = make(map[string]string, len(records))
+	h.activePluginVersions = make(map[string]string, len(records))
+	h.activePluginPaths = make(map[string]string, len(records))
+	for _, record := range records {
+		id := strings.TrimSpace(record.id)
+		path := cleanPluginPath(record.path)
+		if id == "" || path == "" {
+			continue
+		}
+		h.pluginFileVersions[path] = strings.TrimSpace(record.version)
+		h.activePluginVersions[id] = strings.TrimSpace(record.version)
+		h.activePluginPaths[id] = path
+	}
+}
+
+func (h *Host) callQuiesce(ctx context.Context, lp *loadedPlugin) bool {
+	quiesced, _ := h.callQuiesceWithOutcome(ctx, lp)
+	return quiesced
+}
+
+func (h *Host) isPluginUnrecovered(lp *loadedPlugin) bool {
+	if h == nil || lp == nil {
+		return false
+	}
+	h.mu.Lock()
+	unrecovered := lp.needsRecovery
+	h.mu.Unlock()
+	return unrecovered
+}
+
+func (h *Host) pluginNeedsUsageRecovery(pluginID string) bool {
+	if h == nil {
+		return false
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return false
+	}
+	h.mu.Lock()
+	lp := h.loaded[pluginID]
+	unrecovered := lp != nil && lp.needsRecovery
+	h.mu.Unlock()
+	return unrecovered
+}
+
+func (h *Host) setPluginNeedsRecovery(lp *loadedPlugin, needsRecovery bool) {
+	if h == nil || lp == nil {
+		return
+	}
+	h.mu.Lock()
+	lp.needsRecovery = needsRecovery
+	h.mu.Unlock()
+}
+
+func (h *Host) callQuiesceWithOutcome(ctx context.Context, lp *loadedPlugin) (quiesced bool, proceed bool) {
+	if h == nil || lp == nil || lp.client == nil {
+		return false, false
+	}
+	callDone := make(chan struct{})
+	callCtx, finishCall := withPluginCallFinish(ctx, func() {
+		close(callDone)
+	})
+	errQuiesce, okCall := h.safePluginAction(callCtx, lp.id, pluginabi.MethodPluginQuiesce, func() error {
+		defer finishCall()
+		_, errCall := callPlugin[rpcEmptyResponse](callCtx, lp.client, pluginabi.MethodPluginQuiesce, rpcEmptyResponse{})
+		return errCall
+	})
+	finishCall()
+	<-callDone
+	if errQuiesce != nil {
+		logQuiesceError(lp.id, errQuiesce)
+	}
+	if !okCall {
+		h.setPluginNeedsRecovery(lp, true)
+		return false, false
+	}
+	if errQuiesce == nil {
+		h.setPluginNeedsRecovery(lp, true)
+		return true, true
+	}
+	if quiesceUnsupported(errQuiesce) {
+		return false, true
+	}
+	h.setPluginNeedsRecovery(lp, true)
+	return false, false
+}
+
+func logQuiesceError(id string, errQuiesce error) {
+	entry := log.WithError(errQuiesce).WithField("plugin_id", id)
+	switch {
+	case quiesceUnsupported(errQuiesce):
+		entry.Debug("pluginhost: plugin quiesce unsupported")
+	case errors.Is(errQuiesce, context.Canceled), errors.Is(errQuiesce, context.DeadlineExceeded):
+		entry.Debug("pluginhost: plugin quiesce canceled")
+	default:
+		entry.Warn("pluginhost: plugin quiesce failed")
+	}
+}
+
+func quiesceUnsupported(errQuiesce error) bool {
+	if errQuiesce == nil {
+		return false
+	}
+	var errRPC rpcError
+	if errors.As(errQuiesce, &errRPC) {
+		switch strings.ToLower(strings.TrimSpace(errRPC.Code)) {
+		case "unknown_method", "method_not_found", "unsupported_method":
+			return true
+		}
+	}
+	if errors.Is(errQuiesce, errors.ErrUnsupported) {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(errQuiesce.Error()))
+	for _, indication := range []string{
+		"unknown method",
+		"method not found",
+		"unsupported method",
+		"method unsupported",
+		"method is not supported",
+		"method not supported",
+	} {
+		if strings.Contains(message, indication) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (capabilityRecord, pluginFile, bool) {
+	if h == nil || lp == nil {
+		return capabilityRecord{}, pluginFile{}, false
+	}
+	h.mu.Lock()
+	configYAML := bytes.Clone(lp.configYAML)
+	previousPlugin := lp.plugin
+	needsRecovery := lp.needsRecovery
+	h.mu.Unlock()
+	if len(configYAML) > 0 {
+		item.ConfigYAML = configYAML
+	}
+
+	plugin, okCall := h.callRegister(context.Background(), lp, item)
+	if okCall {
+		h.mu.Lock()
+		delete(h.fused, lp.id)
+		h.mu.Unlock()
+	} else if !needsRecovery {
+		plugin = previousPlugin
+	} else {
+		h.removeActivePluginRecord(lp.id)
+		return capabilityRecord{}, pluginFile{}, false
+	}
+	if !validPlugin(plugin) || h.isPluginFused(lp.id) {
+		h.removeActivePluginRecord(lp.id)
+		return capabilityRecord{}, pluginFile{}, false
+	}
+	record := capabilityRecord{
+		id:       lp.id,
+		path:     lp.path,
+		version:  lp.version,
+		priority: item.Priority,
+		meta:     plugin.Metadata,
+		plugin:   plugin,
+	}
+	h.updateActivePluginRecord(record)
+	return record, pluginFile{
+		ID:      lp.id,
+		Path:    lp.path,
+		Version: lp.version,
+	}, true
+}
+
+func (h *Host) removeActivePluginRecord(id string) {
+	if h == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if oldPath := h.activePluginPaths[id]; oldPath != "" {
+		delete(h.pluginFileVersions, oldPath)
+	}
+	delete(h.activePluginPaths, id)
+	delete(h.activePluginVersions, id)
+	records, enabled := h.snapshotWithoutPluginLocked(id)
+	h.snapshot.Store(&Snapshot{
+		enabled:                 enabled,
+		records:                 records,
+		quotaSupportedProviders: make(map[string][]string),
+	})
+}
+
+func (h *Host) updateActivePluginRecord(record capabilityRecord) {
+	if h == nil {
+		return
+	}
+	id := strings.TrimSpace(record.id)
+	path := cleanPluginPath(record.path)
+	version := strings.TrimSpace(record.version)
+	if id == "" || path == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.pluginFileVersions == nil {
+		h.pluginFileVersions = make(map[string]string)
+	}
+	if h.activePluginVersions == nil {
+		h.activePluginVersions = make(map[string]string)
+	}
+	if h.activePluginPaths == nil {
+		h.activePluginPaths = make(map[string]string)
+	}
+	if oldPath := h.activePluginPaths[id]; oldPath != "" && oldPath != path {
+		delete(h.pluginFileVersions, oldPath)
+	}
+	h.pluginFileVersions[path] = version
+	h.activePluginVersions[id] = version
+	h.activePluginPaths[id] = path
+
+	raw := h.snapshot.Load()
+	snap, _ := raw.(*Snapshot)
+	enabled := true
+	var existing []capabilityRecord
+	if snap != nil {
+		enabled = snap.enabled
+		existing = snap.records
+	}
+	updated := make([]capabilityRecord, 0, len(existing)+1)
+	replaced := false
+	for _, item := range existing {
+		if item.id == id {
+			updated = append(updated, record)
+			replaced = true
+			continue
+		}
+		updated = append(updated, item)
+	}
+	if !replaced {
+		updated = append(updated, record)
+	}
+	sortRecords(updated)
+	h.snapshot.Store(&Snapshot{
+		enabled:                 enabled,
+		records:                 updated,
+		quotaSupportedProviders: make(map[string][]string),
+	})
+}
+
+func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
+	if lp == nil {
+		return pluginapi.Plugin{}, false
+	}
+
+	method := pluginabi.MethodPluginRegister
+	h.mu.Lock()
+	registered := lp.registered
+	h.mu.Unlock()
+	if registered {
+		method = pluginabi.MethodPluginReconfigure
+	}
+
+	callDone := make(chan struct{})
+	callCtx := ctx
+	finishCall := func() {}
+	if registered {
+		callCtx, finishCall = withPluginCallFinish(ctx, func() {
+			close(callDone)
+		})
+	} else {
+		close(callDone)
+	}
+	plugin, okCall := h.safePluginCall(callCtx, lp.id, method, func() pluginapi.Plugin {
+		defer finishCall()
+		plugin, errRegister := registerRPCPlugin(callCtx, h, lp.id, lp.client, method, item.ConfigYAML)
+		if errRegister != nil {
+			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
+			return pluginapi.Plugin{}
+		}
+		return plugin
+	})
+	finishCall()
+	<-callDone
+	if !okCall {
+		return pluginapi.Plugin{}, false
+	}
+	h.mu.Lock()
+	lp.registered = true
+	h.mu.Unlock()
+	if !validPlugin(plugin) {
+		log.Warnf("pluginhost: plugin %s returned invalid metadata or no capabilities", lp.id)
+		return pluginapi.Plugin{}, false
+	}
+	plugin.Metadata = clonePluginMetadata(plugin.Metadata)
+	h.mu.Lock()
+	lp.name = strings.TrimSpace(plugin.Metadata.Name)
+	if strings.TrimSpace(lp.version) == "" {
+		lp.version = strings.TrimSpace(plugin.Metadata.Version)
+	}
+	lp.configYAML = bytes.Clone(item.ConfigYAML)
+	lp.plugin = plugin
+	lp.needsRecovery = false
+	h.mu.Unlock()
+	return plugin, true
+}
+
+func (h *Host) safePluginAction(ctx context.Context, id, method string, fn func() error) (err error, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(id, method, recovered)
+			err = nil
+			ok = false
+		}
+	}()
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err(), false
+		default:
+		}
+	}
+	return fn(), true
+}
+
+func (h *Host) safePluginCall(ctx context.Context, id, method string, fn func() pluginapi.Plugin) (out pluginapi.Plugin, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(id, method, recovered)
+			out = pluginapi.Plugin{}
+			ok = false
+		}
+	}()
+
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return pluginapi.Plugin{}, false
+		default:
+		}
+	}
+	return fn(), true
+}
+
+func validPlugin(plugin pluginapi.Plugin) bool {
+	if strings.TrimSpace(plugin.Metadata.Name) == "" {
+		return false
+	}
+	if strings.TrimSpace(plugin.Metadata.Version) == "" {
+		return false
+	}
+	if strings.TrimSpace(plugin.Metadata.Author) == "" {
+		return false
+	}
+	if strings.TrimSpace(plugin.Metadata.GitHubRepository) == "" {
+		return false
+	}
+	caps := plugin.Capabilities
+	return caps.ModelRegistrar != nil ||
+		caps.ModelProvider != nil ||
+		hasAuthProviderCap(caps) ||
+		caps.FrontendAuthProvider != nil ||
+		caps.Scheduler != nil ||
+		caps.ModelRouter != nil ||
+		caps.Executor != nil ||
+		caps.RequestTranslator != nil ||
+		caps.RequestNormalizer != nil ||
+		caps.RequestInterceptor != nil ||
+		caps.RequestBodyPatcherBefore != nil ||
+		caps.RequestBodyPatcherAfter != nil ||
+		caps.RequestLifecyclePlugin != nil ||
+		caps.ResponseTranslator != nil ||
+		caps.ResponseBeforeTranslator != nil ||
+		caps.ResponseAfterTranslator != nil ||
+		caps.ResponseInterceptor != nil ||
+		caps.StreamChunkInterceptor != nil ||
+		caps.WebSocketResponseObserver != nil ||
+		caps.ThinkingApplier != nil ||
+		caps.UsagePlugin != nil ||
+		caps.CommandLinePlugin != nil ||
+		caps.ManagementAPI != nil ||
+		caps.QuotaProvider != nil
+}
+
+func typeName(v any) string {
+	return fmt.Sprintf("%T", v)
+}

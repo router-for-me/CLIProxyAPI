@@ -1,0 +1,88 @@
+package executor
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+)
+
+func TestCodexExecutorExecuteStreamSanitizesOverlongInputItemIDs(t *testing.T) {
+	longReasoningItemID := "rs_" + strings.Repeat("a", 64)
+	longCallItemID := strings.Repeat("grok-call-item-", 6)
+	longOutputItemID := strings.Repeat("grok-output-item-", 6)
+	longBase64MessageID := "msg_" + strings.Repeat("A", 30) + "+/" + strings.Repeat("A", 414)
+	encryptedContent := validOpenAIResponsesReasoningEncryptedContentForTest()
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read body: %v", errRead)
+		}
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll}})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","stream":true,"input":[` +
+			`{"type":"reasoning","id":"` + longReasoningItemID + `","encrypted_content":"` + encryptedContent + `","summary":[]},` +
+			`{"type":"function_call","id":"` + longCallItemID + `","call_id":"call-1","name":"lookup","arguments":"{}"},` +
+			`{"type":"function_call_output","id":"` + longOutputItemID + `","call_id":"call-1","output":"ok"},` +
+			`{"type":"message","id":"` + longBase64MessageID + `","role":"assistant","content":[{"type":"output_text","text":"Hello"}]},` +
+			`{"type":"message","id":"item_74ec40c883248ebb4885ec84","role":"user","content":"continue"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	if input := ojson.GetBytes(gotBody, "input").Array(); len(input) != 4 {
+		t.Fatalf("upstream input length = %d, want 4: %s", len(input), gotBody)
+	}
+	if gotType := ojson.GetBytes(gotBody, "input.0.type").String(); gotType != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", gotType, gotBody)
+	}
+
+	for index, testCase := range []struct {
+		path       string
+		originalID string
+	}{
+		{path: "input.0.id", originalID: longCallItemID},
+		{path: "input.1.id", originalID: longOutputItemID},
+		{path: "input.2.id", originalID: longBase64MessageID},
+	} {
+		actual := ojson.GetBytes(gotBody, testCase.path).String()
+		if len([]rune(actual)) > 64 || actual == testCase.originalID {
+			t.Fatalf("input.%d.id was not shortened to at most 64 characters: %q", index, actual)
+		}
+		if strings.ContainsAny(actual, "+/") {
+			t.Fatalf("input.%d.id still contains + or /: %q", index, actual)
+		}
+	}
+	if got := ojson.GetBytes(gotBody, "input.0.call_id").String(); got != "call-1" {
+		t.Fatalf("function call_id = %q, want call-1", got)
+	}
+	if got := ojson.GetBytes(gotBody, "input.1.call_id").String(); got != "call-1" {
+		t.Fatalf("function call output call_id = %q, want call-1", got)
+	}
+	if got := ojson.GetBytes(gotBody, "input.3.id").String(); got != "msg_item_74ec40c883248ebb4885ec84" {
+		t.Fatalf("message input item ID was not normalized: %q", got)
+	}
+}

@@ -1,0 +1,1542 @@
+// Package openai provides HTTP handlers for OpenAIResponses API endpoints.
+// This package implements the OpenAIResponses-compatible API interface, including model listing
+// and chat completion functionality. It supports both streaming and non-streaming responses,
+// and manages a pool of clients to interact with backend services.
+// The handlers translate OpenAIResponses API requests to the appropriate backend format and
+// convert responses back to OpenAIResponses-compatible format.
+package openai
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/MoeForge/moego/ojson"
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+)
+
+func writeResponsesSSEChunk(w io.Writer, chunk []byte) error {
+	if w == nil || len(chunk) == 0 {
+		return nil
+	}
+	if n, errWrite := w.Write(chunk); errWrite != nil {
+		return errWrite
+	} else if n != len(chunk) {
+		return io.ErrShortWrite
+	}
+	if bytes.HasSuffix(chunk, []byte("\n\n")) || bytes.HasSuffix(chunk, []byte("\r\n\r\n")) {
+		return nil
+	}
+	suffix := []byte("\n\n")
+	if bytes.HasSuffix(chunk, []byte("\r\n")) {
+		suffix = []byte("\r\n")
+	} else if bytes.HasSuffix(chunk, []byte("\n")) {
+		suffix = []byte("\n")
+	}
+	if n, errWrite := w.Write(suffix); errWrite != nil {
+		return errWrite
+	} else if n != len(suffix) {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// flushResponsesSSE preserves middleware behavior and transport flush errors.
+func flushResponsesSSE(w http.ResponseWriter) error {
+	return httpwire.FlushResponse(w)
+}
+
+type responsesSSEFramer struct {
+	pending              []byte
+	nextFramePrefix      []byte
+	nextFieldSuffix      []byte
+	syntheticBreaks      []int
+	outputItems          map[int][]byte
+	outputOrder          []int
+	unindexedOutputItems [][]byte
+	lastEvent            string
+	terminalEvent        string
+	terminalError        *interfaces.ErrorMessage
+	failureEvent         string
+	isCodexClient        bool
+	dataFrames           int
+	writeErr             error
+	canComplete          func() bool
+}
+
+func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
+	if len(chunk) == 0 || f.terminalEvent != "" {
+		return
+	}
+	if len(f.nextFieldSuffix) > 0 {
+		trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+		_, complete, _ := responsesSSEChunkField(trimmed)
+		lastLine := bytes.TrimSpace(f.nextFramePrefix[bytes.LastIndexByte(f.nextFramePrefix, '\n')+1:])
+		if complete && len(lastLine) > 0 && !bytes.HasPrefix(lastLine, []byte("data:")) {
+			f.nextFramePrefix = append(f.nextFramePrefix, f.nextFieldSuffix...)
+			f.nextFieldSuffix = nil
+		} else {
+			f.nextFieldSuffix = append(f.nextFieldSuffix, chunk...)
+			trimmed = bytes.TrimLeft(f.nextFieldSuffix, " \t\r\n")
+			_, _, partial := responsesSSEChunkField(trimmed)
+			if partial {
+				return
+			}
+			chunk = f.nextFieldSuffix
+			f.nextFieldSuffix = nil
+		}
+	}
+	if len(f.nextFramePrefix) > 0 {
+		payload, found := responsesSSEDataPayload(f.nextFramePrefix)
+		if found && json.Valid(payload) && ojson.GetBytesNoCopy(payload, "type").String() == "" &&
+			!responsesSSEHasField(f.nextFramePrefix, []byte("event:")) && responsesSSEFrameLen(f.nextFramePrefix) == 0 {
+			trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+			field, complete, partial := responsesSSEChunkField(trimmed)
+			lastLine := bytes.TrimSpace(f.nextFramePrefix[bytes.LastIndexByte(f.nextFramePrefix, '\n')+1:])
+			_, _, lastPartial := responsesSSEChunkField(lastLine)
+			if complete && lastPartial {
+				joined := append(bytes.Clone(lastLine), trimmed...)
+				joinedField, joinedComplete, _ := responsesSSEChunkField(joined)
+				if joinedComplete && (joinedField == "event" || joinedField == "data" || joinedField == "id" || joinedField == "retry" ||
+					(field != "" && field != "event" && field != "data" && field != "id" && field != "retry")) {
+					complete = false
+				}
+			}
+			newFieldPrefix := bytes.HasPrefix(lastLine, []byte("data:"))
+			for _, prefix := range [][]byte{[]byte("event:"), []byte("data:"), []byte("id:"), []byte("retry:")} {
+				newFieldPrefix = newFieldPrefix || (len(trimmed) < len(prefix) && bytes.HasPrefix(prefix, trimmed))
+			}
+			if partial && newFieldPrefix {
+				f.nextFieldSuffix = append(f.nextFieldSuffix, chunk...)
+				return
+			}
+			if complete && !bytes.HasSuffix(f.nextFramePrefix, []byte("\n")) && !bytes.HasSuffix(f.nextFramePrefix, []byte("\r")) &&
+				chunk[0] != '\n' && chunk[0] != '\r' {
+				f.nextFramePrefix = append(f.nextFramePrefix, '\n')
+			}
+		}
+		f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+		chunk = f.nextFramePrefix
+		f.nextFramePrefix = nil
+	}
+	if responsesSSEHasEmptyEventData(f.pending) {
+		trimmed := bytes.TrimLeft(chunk, " \t\r\n")
+		field, complete, partial := responsesSSEChunkField(trimmed)
+		if partial {
+			f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+			return
+		}
+		newFrame := complete && field != "data"
+		if complete && field == "data" {
+			payload, _ := responsesSSEDataPayload(trimmed)
+			valid := json.Valid(payload)
+			if !valid && !bytes.Equal(payload, []byte("[DONE]")) && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+			hasEvent := responsesSSEHasField(trimmed, []byte("event:"))
+			if valid && hasEvent && responsesSSEEventName(trimmed) == "" && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+			newFrame = bytes.Equal(payload, []byte("[DONE]")) ||
+				(valid && (ojson.GetBytesNoCopy(payload, "type").String() != "" || hasEvent))
+			if valid && !newFrame && responsesSSEFrameLen(trimmed) == 0 {
+				f.nextFramePrefix = append(f.nextFramePrefix, chunk...)
+				return
+			}
+		}
+		if newFrame {
+			f.writeFrame(w, f.pending)
+			f.pending = f.pending[:0]
+			f.syntheticBreaks = f.syntheticBreaks[:0]
+			if f.terminalEvent != "" {
+				return
+			}
+		}
+	}
+	if responsesSSEStartsNewDataFrame(f.pending, chunk) {
+		f.writeFrame(w, f.pending)
+		f.pending = f.pending[:0]
+		f.syntheticBreaks = f.syntheticBreaks[:0]
+		if f.terminalEvent != "" {
+			return
+		}
+	}
+	f.pending = responsesSSEAppendChunk(f.pending, &f.syntheticBreaks, chunk)
+	for {
+		frameLen := responsesSSEFrameLen(f.pending)
+		if frameLen == 0 {
+			break
+		}
+		f.writeFrame(w, f.pending[:frameLen])
+		copy(f.pending, f.pending[frameLen:])
+		f.pending = f.pending[:len(f.pending)-frameLen]
+		f.syntheticBreaks = responsesSSEConsumeBreaks(f.syntheticBreaks, frameLen)
+		if f.terminalEvent != "" {
+			f.pending = f.pending[:0]
+			return
+		}
+	}
+	if len(bytes.TrimSpace(f.pending)) == 0 {
+		f.pending = f.pending[:0]
+		f.syntheticBreaks = f.syntheticBreaks[:0]
+		return
+	}
+	if len(f.pending) == 0 || responsesSSEHasEmptyEventData(f.pending) || !responsesSSECanEmitWithoutDelimiter(f.pending) {
+		return
+	}
+	f.writeFrame(w, f.pending)
+	f.pending = f.pending[:0]
+	f.syntheticBreaks = f.syntheticBreaks[:0]
+}
+
+func (f *responsesSSEFramer) Flush(w io.Writer) {
+	if len(f.nextFieldSuffix) > 0 {
+		if responsesSSENeedsLineBreak(f.nextFramePrefix, f.nextFieldSuffix) {
+			f.nextFramePrefix = append(f.nextFramePrefix, '\n')
+		}
+		f.nextFramePrefix = append(f.nextFramePrefix, f.nextFieldSuffix...)
+		f.nextFieldSuffix = nil
+	}
+	if len(f.nextFramePrefix) > 0 {
+		trimmed := bytes.TrimLeft(f.nextFramePrefix, " \t\r\n")
+		_, _, partial := responsesSSEChunkField(trimmed)
+		if partial && !bytes.HasPrefix([]byte("data"), trimmed) {
+			f.writeFrame(w, f.pending)
+			f.pending = f.pending[:0]
+			f.syntheticBreaks = f.syntheticBreaks[:0]
+		}
+		f.pending = responsesSSEAppendChunk(f.pending, &f.syntheticBreaks, f.nextFramePrefix)
+		f.nextFramePrefix = nil
+	}
+	if len(f.pending) == 0 || f.terminalEvent != "" {
+		return
+	}
+	if len(bytes.TrimSpace(f.pending)) == 0 {
+		f.pending = f.pending[:0]
+		return
+	}
+	frame := responsesSSERecoverJSONFrame(f.pending, f.syntheticBreaks)
+	if !responsesSSECanFlushWithoutDelimiter(frame) {
+		f.pending = f.pending[:0]
+		return
+	}
+	f.writeFrame(w, frame)
+	f.pending = f.pending[:0]
+	f.syntheticBreaks = f.syntheticBreaks[:0]
+}
+
+func (f *responsesSSEFramer) writeFrame(w io.Writer, frame []byte) {
+	if f.writeErr == nil {
+		f.writeErr = writeResponsesSSEChunk(w, f.repairFrame(responsesSSERecoverJSONFrame(frame, f.syntheticBreaks)))
+	}
+}
+
+func (f *responsesSSEFramer) shouldFilterPrivateEvent(streamEvent, payloadType string) bool {
+	check := func(name string) bool {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return false
+		}
+		if responsesSSEErrorEvent(name) {
+			return false
+		}
+
+		// Always filter internal WebSocket timing telemetry and Meta subscription usage from SSE streams.
+		if strings.HasPrefix(name, "responsesapi.") || name == "response.subscription_usage" {
+			return true
+		}
+
+		// If official Codex client, preserve codex.response.metadata but filter rate limits.
+		if f != nil && f.isCodexClient {
+			if name == "codex.rate_limits" {
+				return true
+			}
+			return false
+		}
+
+		// For standard Responses API clients: filter any codex.* private events, and the Codex
+		// backend's moderation metadata, which is not a public Responses event: clients that parse
+		// a closed event list fail on it.
+		if strings.HasPrefix(name, "codex.") || name == "response.metadata" {
+			return true
+		}
+
+		return false
+	}
+
+	return check(streamEvent) || check(payloadType)
+}
+
+func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
+	payload, ok := responsesSSEDataPayload(frame)
+	streamEvent := responsesSSEEventName(frame)
+	if streamEvent != "" && f.shouldFilterPrivateEvent(streamEvent, "") {
+		return nil
+	}
+	if !ok || len(payload) == 0 {
+		return frame
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		f.dataFrames++
+		return frame
+	}
+	payloadType := ojson.GetBytesNoCopy(payload, "type").String()
+	if f.shouldFilterPrivateEvent(streamEvent, payloadType) {
+		return nil
+	}
+	if !json.Valid(payload) {
+		return frame
+	}
+
+	f.dataFrames++
+
+	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
+		if payloadType != "" {
+			f.lastEvent = sanitizeResponsesStreamEventName(payloadType)
+		}
+		return f.repairErrorPayload(payload)
+	}
+	eventType := payloadType
+	if responsesSSETerminalEvent(streamEvent) {
+		eventType = streamEvent
+	} else if eventType == "" {
+		eventType = streamEvent
+	}
+	if eventType != "" {
+		f.lastEvent = sanitizeResponsesStreamEventName(eventType)
+	}
+	if responsesSSEErrorEvent(eventType) {
+		return f.repairErrorPayload(payload)
+	}
+	if responsesSSETerminalEvent(eventType) {
+		f.terminalEvent = eventType
+	}
+
+	switch eventType {
+	case "response.output_item.done":
+		f.recordOutputItem(payload)
+	case "response.completed":
+		repaired := f.repairCompletedPayload(payload)
+		if !bytes.Equal(repaired, payload) {
+			return responsesSSEFrameWithData(frame, repaired)
+		}
+	}
+	return frame
+}
+
+func responsesSSEPayloadErrorMessage(payload []byte) *interfaces.ErrorMessage {
+	status := http.StatusBadGateway
+	var candidatesBuf [6]ojson.Result
+	candidates := ojson.GetManyBytesNoCopy(candidatesBuf[:0], payload, "status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code")
+	foundStatus := false
+	for _, res := range candidates {
+		candidate := int(res.Int())
+		if candidate >= http.StatusBadRequest && candidate <= 599 {
+			status = candidate
+			foundStatus = true
+			break
+		}
+	}
+	if !foundStatus {
+		status = responsesSSEPayloadErrorStatus(payload)
+	}
+	errPayload := responsesAnnotateImageGenerationComplexityPayload(payload)
+	return sanitizeResponsesStreamErrorMessage(&interfaces.ErrorMessage{StatusCode: status, Error: fmt.Errorf("%s", errPayload)})
+}
+
+func responsesAnnotateImageGenerationComplexityPayload(payload []byte) []byte {
+	if len(payload) == 0 || !ojson.ValidBytes(payload) {
+		return payload
+	}
+	for _, basePath := range []string{"error", "response.error"} {
+		errObj := ojson.GetBytesNoCopy(payload, basePath)
+		if !errObj.IsObject() {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(errObj.Get("type").String()), "image_generation_user_error") {
+			continue
+		}
+		msg := strings.TrimSpace(errObj.Get("message").String())
+		param := strings.ToLower(strings.TrimSpace(errObj.Get("param").String()))
+		if (param == "complexity" || strings.Contains(strings.ToLower(msg), "complexity")) && !strings.Contains(msg, "/v1/images/generations") {
+			doc := ojson.NewDoc(payload)
+			_ = doc.Set(basePath+".message", msg+` (Set tool_choice to {"type":"image_generation"}, use a compatible Responses model such as gpt-5.4-mini, or call /v1/images/generations directly.)`)
+			return doc.Bytes()
+		}
+	}
+	return payload
+}
+
+func responsesSSEPayloadErrorStatus(payload []byte) int {
+	var fieldsBuf [4]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error.type", "response.error.type", "error.code", "response.error.code")
+	errorType := strings.ToLower(strings.TrimSpace(fields[0].String()))
+	if errorType == "" {
+		errorType = strings.ToLower(strings.TrimSpace(fields[1].String()))
+	}
+	errorCode := strings.ToLower(strings.TrimSpace(fields[2].String()))
+	if errorCode == "" {
+		errorCode = strings.ToLower(strings.TrimSpace(fields[3].String()))
+	}
+	switch {
+	case errorCode == "cyber_policy":
+		return http.StatusBadRequest
+	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
+		return http.StatusNotFound
+	case errorType == "authentication_error", errorCode == "invalid_api_key", errorCode == "unauthorized":
+		return http.StatusUnauthorized
+	case errorType == "permission_error", errorCode == "forbidden", errorCode == "permission_denied":
+		return http.StatusForbidden
+	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
+		return http.StatusTooManyRequests
+	case errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
+		return http.StatusBadRequest
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func (f *responsesSSEFramer) repairErrorPayload(payload []byte) []byte {
+	errMsg := responsesSSEPayloadErrorMessage(payload)
+	status := errMsg.StatusCode
+	f.terminalError = errMsg
+	isResponseFailedPayload := ojson.GetBytesNoCopy(payload, "type").String() == "response.failed"
+	failureEvent := f.failureEvent
+	if isResponseFailedPayload || failureEvent == "response.failed" {
+		failureEvent = "response.failed"
+	} else {
+		failureEvent = "error"
+	}
+	f.terminalEvent = failureEvent
+	errText := responsesStreamErrorText(errMsg, status)
+	seq := 0
+	if s := ojson.GetBytesNoCopy(payload, "sequence_number"); s.Exists() {
+		seq = int(s.Int())
+	} else if origSeq := ojson.Get(errText, "sequence_number"); origSeq.Exists() {
+		seq = int(origSeq.Int())
+	} else if f != nil && f.dataFrames > 0 {
+		seq = f.dataFrames - 1
+	}
+	if failureEvent == "response.failed" {
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
+		if isResponseFailedPayload && ojson.GetBytesNoCopy(payload, "response").IsObject() {
+			repaired := f.repairCompletedPayload(payload)
+			respDoc := ojson.NewDoc([]byte(ojson.GetBytesNoCopy(repaired, "response").Raw))
+			_ = respDoc.Set("status", "failed")
+			if sanitizedErr := ojson.GetBytesNoCopy(chunk, "response.error"); sanitizedErr.Exists() {
+				_ = respDoc.SetRawBytes("error", []byte(sanitizedErr.Raw))
+			}
+			envDoc := ojson.NewDoc([]byte(`{"type":"response.failed","sequence_number":0,"response":{}}`))
+			_ = envDoc.Set("sequence_number", seq)
+			if errSet := envDoc.SetRawBytes("response", respDoc.Bytes()); errSet == nil {
+				chunk = envDoc.Bytes()
+			}
+		}
+		return []byte(fmt.Sprintf("event: response.failed\ndata: %s\n\n", chunk))
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
+	return []byte(fmt.Sprintf("event: error\ndata: %s\n\n", chunk))
+}
+
+func responsesSSEErrorEvent(eventType string) bool {
+	switch eventType {
+	case "response.failed", "response.error", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func responsesSSETerminalEvent(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.incomplete", "response.failed", "response.done", "response.error", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func responsesSSEPayloadHasError(payload []byte) bool {
+	var fieldsBuf [4]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "code", "message")
+	for _, result := range fields[:2] {
+		if result.Exists() && result.Type != ojson.Null {
+			return true
+		}
+	}
+	return fields[2].Exists() && fields[3].Exists()
+}
+
+func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
+	var payload []byte
+	found := false
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		trimmed := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		data := bytes.TrimSpace(trimmed[len("data:"):])
+		if found {
+			payload = append(payload, '\n')
+		}
+		payload = append(payload, data...)
+		found = true
+	}
+	return payload, found
+}
+
+func responsesSSERecoverJSONFrame(frame []byte, syntheticBreaks []int) []byte {
+	if len(syntheticBreaks) == 0 {
+		return frame
+	}
+	payload, found := responsesSSEDataPayload(frame)
+	if found && json.Valid(payload) {
+		return frame
+	}
+
+	// Consider only newlines inserted at chunk boundaries when recovering invalid JSON.
+	positions := make([]int, 0, len(syntheticBreaks))
+	for _, pos := range syntheticBreaks {
+		if pos >= 0 && pos < len(frame) && frame[pos] == '\n' {
+			positions = append(positions, pos)
+		}
+	}
+	try := func(candidate []byte) []byte {
+		recovered, ok := responsesSSEDataPayload(candidate)
+		if !ok || !json.Valid(recovered) {
+			return nil
+		}
+		return responsesSSEFrameWithData(candidate, recovered)
+	}
+	for i, pos := range positions {
+		if i == 8 {
+			break
+		}
+		candidate := make([]byte, 0, len(frame)-1)
+		candidate = append(candidate, frame[:pos]...)
+		candidate = append(candidate, frame[pos+1:]...)
+		if recovered := try(candidate); recovered != nil {
+			return recovered
+		}
+	}
+	if len(positions) > 1 {
+		candidate := make([]byte, 0, len(frame)-len(positions))
+		start := 0
+		for _, pos := range positions {
+			candidate = append(candidate, frame[start:pos]...)
+			start = pos + 1
+		}
+		candidate = append(candidate, frame[start:]...)
+		if recovered := try(candidate); recovered != nil {
+			return recovered
+		}
+	}
+	return frame
+}
+
+func responsesSSEAppendChunk(pending []byte, syntheticBreaks *[]int, chunk []byte) []byte {
+	if responsesSSENeedsLineBreak(pending, chunk) {
+		*syntheticBreaks = append(*syntheticBreaks, len(pending))
+		pending = append(pending, '\n')
+	}
+	return append(pending, chunk...)
+}
+
+func responsesSSEConsumeBreaks(syntheticBreaks []int, consumed int) []int {
+	remaining := syntheticBreaks[:0]
+	for _, pos := range syntheticBreaks {
+		if pos >= consumed {
+			remaining = append(remaining, pos-consumed)
+		}
+	}
+	return remaining
+}
+
+func responsesSSEFrameWithData(frame, payload []byte) []byte {
+	var out bytes.Buffer
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	for _, line := range bytes.Split(payload, []byte("\n")) {
+		out.WriteString("data: ")
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	out.WriteByte('\n')
+	return out.Bytes()
+}
+
+func (f *responsesSSEFramer) recordOutputItem(payload []byte) {
+	var fieldsBuf [2]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "item", "output_index")
+	item := fields[0]
+	if !item.Exists() || !item.IsObject() || item.Get("type").String() == "" {
+		return
+	}
+
+	if outputIndex := fields[1]; outputIndex.Exists() {
+		index := int(outputIndex.Int())
+		if f.outputItems == nil {
+			f.outputItems = make(map[int][]byte)
+		}
+		if _, exists := f.outputItems[index]; !exists {
+			f.outputOrder = append(f.outputOrder, index)
+		}
+		f.outputItems[index] = append([]byte(nil), item.Raw...)
+		return
+	}
+
+	f.unindexedOutputItems = append(f.unindexedOutputItems, append([]byte(nil), item.Raw...))
+}
+
+func (f *responsesSSEFramer) repairCompletedPayload(payload []byte) []byte {
+	if len(f.outputOrder) == 0 && len(f.unindexedOutputItems) == 0 {
+		return payload
+	}
+	output := ojson.GetBytesNoCopy(payload, "response.output")
+	if output.Exists() && (!output.IsArray() || len(output.Array()) > 0) {
+		return payload
+	}
+
+	var outputJSON bytes.Buffer
+	outputJSON.WriteByte('[')
+	indexes := append([]int(nil), f.outputOrder...)
+	sort.Ints(indexes)
+	written := 0
+	for _, index := range indexes {
+		item, ok := f.outputItems[index]
+		if !ok {
+			continue
+		}
+		if written > 0 {
+			outputJSON.WriteByte(',')
+		}
+		outputJSON.Write(item)
+		written++
+	}
+	for _, item := range f.unindexedOutputItems {
+		if written > 0 {
+			outputJSON.WriteByte(',')
+		}
+		outputJSON.Write(item)
+		written++
+	}
+	outputJSON.WriteByte(']')
+
+	repaired, err := ojson.SetRawBytes(payload, "response.output", outputJSON.Bytes())
+	if err != nil {
+		return payload
+	}
+	return repaired
+}
+
+func responsesSSEFrameLen(chunk []byte) int {
+	if len(chunk) == 0 {
+		return 0
+	}
+	lf := bytes.Index(chunk, []byte("\n\n"))
+	crlf := bytes.Index(chunk, []byte("\r\n\r\n"))
+	switch {
+	case lf < 0:
+		if crlf < 0 {
+			return 0
+		}
+		return crlf + 4
+	case crlf < 0:
+		return lf + 2
+	case lf < crlf:
+		return lf + 2
+	default:
+		return crlf + 4
+	}
+}
+
+func responsesSSENeedsMoreData(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return false
+	}
+	return responsesSSEHasField(trimmed, []byte("event:")) && !responsesSSEHasField(trimmed, []byte("data:"))
+}
+
+func responsesSSEHasField(chunk []byte, prefix []byte) bool {
+	s := chunk
+	for len(s) > 0 {
+		line := s
+		if i := bytes.IndexByte(s, '\n'); i >= 0 {
+			line = s[:i]
+			s = s[i+1:]
+		} else {
+			s = nil
+		}
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 || responsesSSENeedsMoreData(trimmed) ||
+		!responsesSSEHasField(trimmed, []byte("event:")) || !responsesSSEHasField(trimmed, []byte("data:")) {
+		return false
+	}
+	return responsesSSEDataLinesValid(trimmed)
+}
+
+func responsesSSEChunkField(chunk []byte) (name string, complete, partial bool) {
+	if len(chunk) == 0 {
+		return "", false, false
+	}
+	for i, b := range chunk {
+		if b == ':' || b == '\n' || b == '\r' {
+			return string(chunk[:i]), true, false
+		}
+		if !(b >= 'a' && b <= 'z') && !(b >= 'A' && b <= 'Z') && !(b >= '0' && b <= '9') && b != '-' && b != '_' && b != '.' {
+			return "", false, false
+		}
+	}
+	return "", false, true
+}
+
+func responsesSSEHasEmptyEventData(chunk []byte) bool {
+	if !responsesSSEHasField(chunk, []byte("event:")) {
+		return false
+	}
+	payload, found := responsesSSEDataPayload(chunk)
+	return found && len(bytes.TrimSpace(payload)) == 0
+}
+
+func responsesSSECanFlushWithoutDelimiter(chunk []byte) bool {
+	trimmed := bytes.TrimSpace(chunk)
+	return len(trimmed) > 0 && responsesSSEHasField(trimmed, []byte("data:")) && responsesSSEDataLinesValid(trimmed)
+}
+
+func responsesSSEStartsNewDataFrame(pending, chunk []byte) bool {
+	trimmedPending := bytes.TrimSpace(pending)
+	if len(trimmedPending) == 0 || responsesSSEHasField(trimmedPending, []byte("event:")) ||
+		!responsesSSEHasField(trimmedPending, []byte("data:")) || !responsesSSEDataLinesValid(trimmedPending) {
+		return false
+	}
+	trimmedChunk := bytes.TrimLeft(chunk, " \t\r\n")
+	return bytes.HasPrefix(trimmedChunk, []byte("data:"))
+}
+
+func responsesSSEEventName(frame []byte) string {
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if bytes.HasPrefix(trimmed, []byte("event:")) {
+			return strings.TrimSpace(string(trimmed[len("event:"):]))
+		}
+	}
+	return ""
+}
+
+func responsesSSEDataLinesValid(chunk []byte) bool {
+	payload, found := responsesSSEDataPayload(chunk)
+	if !found {
+		return true
+	}
+	payload = bytes.TrimSpace(payload)
+	return len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload)
+}
+
+func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
+	if len(pending) == 0 || len(chunk) == 0 {
+		return false
+	}
+	if bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) {
+		return false
+	}
+	if chunk[0] == '\n' || chunk[0] == '\r' {
+		return false
+	}
+	trimmed := bytes.TrimLeft(chunk, " \t")
+	if len(trimmed) == 0 {
+		return false
+	}
+	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
+		if bytes.HasPrefix(trimmed, prefix) {
+			return !responsesSSEDataEndsInsideJSONString(pending)
+		}
+	}
+	return false
+}
+
+func responsesSSEDataEndsInsideJSONString(chunk []byte) bool {
+	payload, found := responsesSSEDataPayload(chunk)
+	payload = bytes.TrimSpace(payload)
+	if !found || len(payload) == 0 || (payload[0] != '{' && payload[0] != '[' && payload[0] != '"') {
+		return false
+	}
+	inString := false
+	escaped := false
+	for _, b := range payload {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString && b == '\\' {
+			escaped = true
+			continue
+		}
+		if b == '"' {
+			inString = !inString
+		}
+	}
+	return inString
+}
+
+// OpenAIResponsesAPIHandler contains the handlers for OpenAIResponses API endpoints.
+// It holds a pool of clients to interact with the backend service.
+type OpenAIResponsesAPIHandler struct {
+	*handlers.BaseAPIHandler
+	AccessManager *sdkaccess.Manager
+}
+
+// NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
+// It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
+//
+// Parameters:
+//   - apiHandlers: The base API handlers instance
+//
+// Returns:
+//   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
+func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
+	return &OpenAIResponsesAPIHandler{
+		BaseAPIHandler: apiHandlers,
+	}
+}
+
+// HandlerType returns the identifier for this handler implementation.
+func (h *OpenAIResponsesAPIHandler) HandlerType() string {
+	return OpenaiResponse
+}
+
+// Models returns the OpenAIResponses-compatible model metadata supported by this handler.
+func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
+	// Get dynamic models from the global registry
+	modelRegistry := registry.GetGlobalRegistry()
+	return modelRegistry.GetAvailableModels("openai")
+}
+
+// OpenAIResponsesModels handles the /v1/models endpoint.
+// It returns a list of available AI models with their capabilities
+// and specifications in OpenAIResponses-compatible format.
+func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"object": "list",
+		"data":   h.Models(),
+	})
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2ToolsDoc(c *gin.Context, doc *ojson.Doc) bool {
+	if h == nil || doc == nil {
+		return false
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil {
+		return false
+	}
+
+	requestCtx := context.Background()
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+	}
+	requestCtx = context.WithValue(requestCtx, "gin", c)
+
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestHeaders = c.Request.Header
+	}
+	homeEnabled := h.AuthManager != nil && h.AuthManager.HomeEnabled()
+	changed, prepared := multiagentv2.PrepareCodexMultiAgentV2ToolsDoc(
+		doc,
+		requestCtx,
+		requestHeaders,
+		cfg.Client.Codex.OptimizeMultiAgentV2,
+		homeEnabled,
+	)
+	if prepared && c != nil {
+		c.Set(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey, true)
+	}
+	return changed
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
+	if len(payload) == 0 {
+		doc := ojson.NewDoc(nil)
+		h.prepareCodexMultiAgentV2ToolsDoc(c, doc)
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !h.prepareCodexMultiAgentV2ToolsDoc(c, doc) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegationDoc(c *gin.Context, doc *ojson.Doc) bool {
+	if h == nil || doc == nil {
+		return false
+	}
+	cfg := h.CurrentConfig()
+	if cfg == nil || !cfg.CodexOrphanDelegationCompatibility {
+		return false
+	}
+	requestCtx := context.Background()
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+		requestHeaders = c.Request.Header
+	}
+	requestCtx = context.WithValue(requestCtx, "gin", c)
+	return multiagentv2.RewriteCodexOrphanDelegationInputDoc(doc, requestCtx, requestHeaders, true)
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context, payload []byte) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !h.prepareCodexOrphanDelegationDoc(c, doc) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+func (h *OpenAIResponsesAPIHandler) prepareCodexRequestPayload(c *gin.Context, payload []byte) []byte {
+	doc := ojson.NewDoc(payload)
+	toolsChanged := h.prepareCodexMultiAgentV2ToolsDoc(c, doc)
+	orphanChanged := h.prepareCodexOrphanDelegationDoc(c, doc)
+	toolOutputChanged := translatorcommon.SanitizeOrphanResponsesToolOutputsDoc(doc)
+	if len(payload) == 0 || (!toolsChanged && !orphanChanged && !toolOutputChanged) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// Responses handles the /v1/responses endpoint.
+// It determines whether the request is for a streaming or non-streaming response
+// and calls the appropriate handler based on the model provider.
+//
+// Parameters:
+//   - c: The Gin context containing the HTTP request and response
+func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+	rawJSON, err := handlers.ReadRequestBody(c)
+	// If data retrieval fails, return a 400 Bad Request error.
+	if err != nil {
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	rawJSON = h.prepareCodexRequestPayload(c, rawJSON)
+
+	// Check if the client requested a streaming response.
+	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
+	if streamResult.Type == ojson.True {
+		h.handleStreamingResponse(c, rawJSON)
+	} else {
+		h.handleNonStreamingResponse(c, rawJSON)
+	}
+
+}
+
+func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
+	rawJSON, err := handlers.ReadRequestBody(c)
+	if err != nil {
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
+	doc := ojson.NewDoc(rawJSON)
+	orphanChanged := h.prepareCodexOrphanDelegationDoc(c, doc)
+	toolOutputChanged := translatorcommon.SanitizeOrphanResponsesToolOutputsDoc(doc)
+
+	streamResult := doc.Get("stream")
+	if streamResult.Type == ojson.True {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported for compact responses",
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+	streamDeleted := false
+	if streamResult.Exists() {
+		_ = doc.Delete("stream")
+		streamDeleted = true
+	}
+	if orphanChanged || toolOutputChanged || streamDeleted {
+		rawJSON = doc.Bytes()
+	}
+
+	c.Header("Content-Type", "application/json")
+	modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+// handleNonStreamingResponse handles non-streaming chat completion responses
+// for Gemini models. It selects a client from the pool, sends the request, and
+// aggregates the response before sending it back to the client in OpenAIResponses format.
+//
+// Parameters:
+//   - c: The Gin context containing the HTTP request and response
+//   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
+func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+	c.Header("Content-Type", "application/json")
+
+	modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	_, _ = c.Writer.Write(resp)
+	cliCancel()
+}
+
+// handleStreamingResponse handles streaming responses for Gemini models.
+// It establishes a streaming connection with the backend service and forwards
+// the response chunks to the client in real-time using Server-Sent Events.
+//
+// Parameters:
+//   - c: The Gin context containing the HTTP request and response
+//   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
+func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+	// Get the http.Flusher interface to manually flush the response.
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Streaming not supported",
+				Type:    "server_error",
+			},
+		})
+		return
+	}
+
+	// New core execution path
+	modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
+	deliveryCtx, finishDelivery := usage.WithStreamDelivery(context.Background())
+	defer finishDelivery(context.Canceled)
+	cliCtx, cancelExecution := h.GetContextWithCancel(h, c, deliveryCtx)
+	cliCancel := func(err error) {
+		finishDelivery(err)
+		cancelExecution(err)
+	}
+	setSSEHeaders := func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+	}
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	writeKeepAlive := func() bool {
+		commitSSE()
+		if errWrite := writeResponsesSSEChunk(c.Writer, []byte(": keep-alive\n\n")); errWrite != nil {
+			cliCancel(errWrite)
+			return false
+		}
+		if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+			cliCancel(errFlush)
+			return false
+		}
+		return true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
+		c, cliCtx, cliCancel, h.HandlerType(), modelName, rawJSON, "", keepAliveC, writeKeepAlive,
+	)
+	if !okBootstrap {
+		return
+	}
+	upstreamHeaders = resolvedHeaders
+
+	isCodexClient := isCodexResponsesClientRequest(c)
+	failureEvent := "error"
+	if isCodexClient {
+		failureEvent = "response.failed"
+	}
+	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+	var initialOutput bytes.Buffer
+
+	// Peek at the first complete SSE data frame.
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			cliCancel(c.Request.Context().Err())
+			return
+		case errMsg, ok := <-errChan:
+			if !ok {
+				// Err channel closed cleanly; wait for data channel.
+				errChan = nil
+				continue
+			}
+			framer.Flush(&initialOutput)
+			if committed || framer.dataFrames > 0 {
+				stopKeepAlive()
+				safeErrMsg := sanitizeResponsesStreamErrorMessage(errMsg)
+				commitSSE()
+				if initialOutput.Len() > 0 {
+					if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
+						cliCancel(errWrite)
+						return
+					}
+					if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+						cliCancel(errFlush)
+						return
+					}
+				}
+				if safeErrMsg == nil {
+					cliCancel(nil)
+					return
+				}
+				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+				pendingErrors <- safeErrMsg
+				close(pendingErrors)
+				h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
+				return
+			}
+			// Upstream failed before SSE was committed. Return JSON with HTTP status.
+			safeErrMsg := sanitizeResponsesInitialErrorMessage(errMsg)
+			h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), safeErrMsg)
+			h.WriteErrorResponse(c, safeErrMsg)
+			if safeErrMsg != nil {
+				cliCancel(safeErrMsg.Error)
+			} else {
+				cliCancel(nil)
+			}
+			return
+		case chunk, ok := <-dataChan:
+			if !ok {
+				framer.Flush(&initialOutput)
+				errMsg, hasPendingError := handlers.PendingStreamError(errChan)
+				if !hasPendingError && framer.terminalEvent == "" {
+					message := "upstream stream closed before first payload"
+					if framer.dataFrames > 0 {
+						message = "upstream stream closed before a terminal event"
+					}
+					errMsg = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("%s", message)}
+				}
+				if committed || framer.dataFrames > 0 {
+					errMsg = sanitizeResponsesStreamErrorMessage(errMsg)
+				} else {
+					errMsg = sanitizeResponsesInitialErrorMessage(errMsg)
+				}
+
+				if committed || framer.dataFrames > 0 {
+					stopKeepAlive()
+					commitSSE()
+					if initialOutput.Len() > 0 {
+						if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
+							cliCancel(errWrite)
+							return
+						}
+						if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+							cliCancel(errFlush)
+							return
+						}
+					}
+					if framer.terminalError != nil {
+						h.logResponsesStreamError(c, framer, framer.terminalError)
+						cliCancel(framer.terminalError.Error)
+						return
+					}
+					if errMsg == nil {
+						cliCancel(nil)
+						return
+					}
+					pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+					pendingErrors <- errMsg
+					close(pendingErrors)
+					h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, framer)
+					return
+				}
+
+				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+				h.WriteErrorResponse(c, errMsg)
+				if errMsg != nil {
+					cliCancel(errMsg.Error)
+				} else {
+					cliCancel(nil)
+				}
+				return
+			}
+
+			framer.WriteChunk(&initialOutput, chunk)
+			if framer.dataFrames == 0 {
+				continue
+			}
+
+			stopKeepAlive()
+			commitSSE()
+			if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
+				cliCancel(errWrite)
+				return
+			}
+			if errFlush := flushResponsesSSE(c.Writer); errFlush != nil {
+				cliCancel(errFlush)
+				return
+			}
+			if framer.terminalError != nil {
+				h.logResponsesStreamError(c, framer, framer.terminalError)
+				cliCancel(framer.terminalError.Error)
+				return
+			}
+
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			return
+		case <-keepAliveC:
+			if !writeKeepAlive() {
+				return
+			}
+		}
+	}
+}
+
+// isCodexResponsesClientRequest limits the alternate terminal event to official Codex clients.
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if multiagentv2.IsCodexClientUserAgent(c.GetHeader("User-Agent")) {
+		return true
+	}
+
+	switch originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator"))); originator {
+	case "codex desktop", "codex-tui", "codex_cli_rs":
+		return true
+	default:
+		return strings.HasPrefix(originator, "codex desktop/") || strings.HasPrefix(originator, "codex-tui/") || strings.HasPrefix(originator, "codex_cli_rs/")
+	}
+}
+
+const (
+	responsesStreamErrorMessageLimit = 2048
+	responsesStreamErrorFieldLimit   = 256
+)
+
+var (
+	responsesStreamSensitiveValuePattern = regexp.MustCompile(`(?i)((?:"?(?:api[_-]?key|access[_-]?token|token|authorization|secret)"?)\s*[=:]\s*"?)([^\s"&,;}]+)`)
+	responsesStreamBearerPattern         = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+)
+
+func truncateResponsesStreamErrorText(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
+}
+
+func redactResponsesStreamErrorText(text string) string {
+	text = responsesStreamSensitiveValuePattern.ReplaceAllString(text, `${1}[REDACTED]`)
+	return responsesStreamBearerPattern.ReplaceAllString(text, "Bearer [REDACTED]")
+}
+
+func sanitizeResponsesStreamEventName(eventName string) string {
+	return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(strings.TrimSpace(eventName)), responsesStreamErrorFieldLimit)
+}
+
+func isResponsesStreamSensitiveKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	k = strings.ReplaceAll(k, "-", "_")
+	if strings.Contains(k, "tokens") || strings.Contains(k, "token_count") || strings.Contains(k, "token_limit") || strings.Contains(k, "token_usage") {
+		return false
+	}
+	switch k {
+	case "authorization", "secret", "password", "passwd", "api_key", "apikey", "token", "access_token", "refresh_token", "id_token", "auth_token", "session_token", "api_token", "client_secret", "client_key":
+		return true
+	}
+	return strings.HasSuffix(k, "_secret") ||
+		strings.HasSuffix(k, "_password") ||
+		strings.HasSuffix(k, "_api_key") ||
+		strings.HasSuffix(k, "_token")
+}
+
+func sanitizeResponsesStreamErrorNode(val any) any {
+	switch v := val.(type) {
+	case string:
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(v), responsesStreamErrorMessageLimit)
+	case map[string]any:
+		cleaned := make(map[string]any, len(v))
+		for k, item := range v {
+			if isResponsesStreamSensitiveKey(k) {
+				cleaned[k] = "[REDACTED]"
+				continue
+			}
+			cleaned[k] = sanitizeResponsesStreamErrorNode(item)
+		}
+		return cleaned
+	case []any:
+		cleaned := make([]any, len(v))
+		for i, item := range v {
+			cleaned[i] = sanitizeResponsesStreamErrorNode(item)
+		}
+		return cleaned
+	default:
+		return val
+	}
+}
+
+func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) string {
+	text := http.StatusText(status)
+	if errMsg != nil && errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
+		text = strings.TrimSpace(errMsg.Error.Error())
+	}
+	trimmed := strings.TrimSpace(text)
+	if !json.Valid([]byte(trimmed)) {
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
+	}
+
+	var root map[string]any
+	dec := json.NewDecoder(bytes.NewReader([]byte(trimmed)))
+	dec.UseNumber()
+	if errUnmarshal := dec.Decode(&root); errUnmarshal != nil {
+		return truncateResponsesStreamErrorText(redactResponsesStreamErrorText(trimmed), responsesStreamErrorMessageLimit)
+	}
+
+	errorNode, hasError := root["error"].(map[string]any)
+	if !hasError {
+		if resp, ok := root["response"].(map[string]any); ok {
+			errorNode, hasError = resp["error"].(map[string]any)
+		}
+	}
+
+	if hasError {
+		cleanedError := sanitizeResponsesStreamErrorNode(errorNode)
+		out := map[string]any{
+			"error": cleanedError,
+		}
+		if seq, ok := root["sequence_number"]; ok {
+			out["sequence_number"] = seq
+		}
+		data, errMarshal := json.Marshal(out)
+		if errMarshal == nil {
+			return string(data)
+		}
+	}
+
+	cleanedRoot := sanitizeResponsesStreamErrorNode(root)
+	data, errMarshal := json.Marshal(cleanedRoot)
+	if errMarshal == nil {
+		return string(data)
+	}
+	return http.StatusText(status)
+}
+
+type responsesStreamSanitizedError struct {
+	message string
+	cause   error
+}
+
+func (e *responsesStreamSanitizedError) Error() string { return e.message }
+func (e *responsesStreamSanitizedError) Unwrap() error { return e.cause }
+
+func sanitizeResponsesInitialErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg != nil && errMsg.DirectResponse {
+		return errMsg
+	}
+	return sanitizeResponsesStreamErrorMessage(errMsg)
+}
+
+func sanitizeResponsesStreamErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if errMsg == nil {
+		return nil
+	}
+	status := errMsg.StatusCode
+	if status < http.StatusBadRequest || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	safe := *errMsg
+	safe.StatusCode = status
+	safe.Error = &responsesStreamSanitizedError{message: responsesStreamErrorText(errMsg, status), cause: errMsg.Error}
+	safe.DirectResponse = false
+	safe.Body = nil
+	return &safe
+}
+
+func (h *OpenAIResponsesAPIHandler) logResponsesStreamError(c *gin.Context, framer *responsesSSEFramer, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil {
+		return
+	}
+	status := errMsg.StatusCode
+	if status < http.StatusBadRequest || status > 599 {
+		status = http.StatusInternalServerError
+	}
+	lastEvent := "none"
+	if framer != nil && framer.lastEvent != "" {
+		lastEvent = framer.lastEvent
+	}
+	errText := responsesStreamErrorText(errMsg, status)
+	h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), &interfaces.ErrorMessage{
+		StatusCode: status,
+		Error:      fmt.Errorf("responses stream terminated after %s: %s", lastEvent, errText),
+	})
+}
+
+func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, framer *responsesSSEFramer) {
+	if framer == nil {
+		framer = &responsesSSEFramer{}
+	}
+	if isCodexResponsesClientRequest(c) {
+		framer.failureEvent = "response.failed"
+		framer.isCodexClient = true
+	} else {
+		framer.failureEvent = "error"
+		framer.isCodexClient = false
+	}
+	// Initial frames have already been written and flushed by the caller.
+	if framer.writeErr != nil {
+		cancel(framer.writeErr)
+		return
+	}
+	if framer.canComplete != nil && framer.canComplete() && framer.terminalEvent == "response.completed" && framer.terminalError == nil {
+		if errMsg, pending := handlers.PendingStreamError(errs); pending {
+			h.logResponsesStreamError(c, framer, sanitizeResponsesStreamErrorMessage(errMsg))
+		}
+		cancel(nil)
+		return
+	}
+	writeTerminalError := func(errMsg *interfaces.ErrorMessage) {
+		framer.Flush(c.Writer)
+		if errMsg == nil {
+			return
+		}
+		status := http.StatusInternalServerError
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		errText := responsesStreamErrorText(errMsg, status)
+		h.logResponsesStreamError(c, framer, errMsg)
+		if framer.terminalEvent != "" {
+			return
+		}
+		seq := 0
+		if framer != nil {
+			seq = framer.dataFrames
+		}
+		if origSeq := ojson.Get(errText, "sequence_number"); origSeq.Exists() {
+			seq = int(origSeq.Int())
+		}
+		if isCodexResponsesClientRequest(c) {
+			chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, seq)
+			_, _ = fmt.Fprintf(c.Writer, "\nevent: response.failed\ndata: %s\n\n", string(chunk))
+			return
+		}
+		chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, seq)
+		_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+	}
+
+	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		NormalizeTerminalError: sanitizeResponsesStreamErrorMessage,
+		Flush:                  func() error { return flushResponsesSSE(c.Writer) },
+		WriteChunk: func(chunk []byte) {
+			framer.WriteChunk(c.Writer, chunk)
+		},
+		ChunkDone: func() bool {
+			return framer.canComplete != nil && framer.canComplete() && framer.terminalEvent == "response.completed" && framer.writeErr == nil
+		},
+		ChunkError: func() *interfaces.ErrorMessage {
+			if framer.writeErr != nil {
+				return &interfaces.ErrorMessage{Error: framer.writeErr}
+			}
+			if framer.terminalError != nil {
+				h.logResponsesStreamError(c, framer, framer.terminalError)
+			}
+			return framer.terminalError
+		},
+		WriteTerminalError: writeTerminalError,
+		CloseError: func() *interfaces.ErrorMessage {
+			framer.Flush(c.Writer)
+			if framer.writeErr != nil {
+				return &interfaces.ErrorMessage{Error: framer.writeErr}
+			}
+			if framer.terminalError != nil {
+				return framer.terminalError
+			}
+			if framer.terminalEvent != "" {
+				return nil
+			}
+			lastEvent := framer.lastEvent
+			if lastEvent == "" {
+				lastEvent = "none"
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before a terminal event (last event: %s)", lastEvent),
+			}
+		},
+		WriteDone: func() {
+			framer.Flush(c.Writer)
+			_, _ = c.Writer.Write([]byte("\n"))
+		},
+	})
+}

@@ -1,0 +1,254 @@
+package gemini
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/MoeForge/moego/ojson"
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+)
+
+const interactionsAgentAuthSelectionModel = "gemini-2.5-flash"
+
+type interactionsRequestTarget struct {
+	Model  string
+	Agent  string
+	Stream bool
+}
+
+func parseInteractionsRequestTarget(rawJSON []byte) (interactionsRequestTarget, error) {
+	if !ojson.ValidBytes(rawJSON) {
+		return interactionsRequestTarget{}, fmt.Errorf("invalid JSON body")
+	}
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	model := strings.Clone(strings.TrimSpace(root.Get("model").String()))
+	agent := strings.Clone(strings.TrimSpace(root.Get("agent").String()))
+	if model == "" && agent == "" {
+		return interactionsRequestTarget{}, fmt.Errorf("request requires exactly one of model or agent")
+	}
+	if model != "" && agent != "" {
+		return interactionsRequestTarget{}, fmt.Errorf("request requires exactly one of model or agent")
+	}
+	streamNode := root.Get("stream")
+	stream := false
+	if streamNode.Exists() {
+		if !streamNode.IsBool() {
+			return interactionsRequestTarget{}, fmt.Errorf("stream must be a boolean")
+		}
+		stream = streamNode.Bool()
+	}
+	return interactionsRequestTarget{Model: model, Agent: agent, Stream: stream}, nil
+}
+
+func prepareInteractionsExecutionTarget(rawJSON []byte, target interactionsRequestTarget) (string, []byte) {
+	if target.Agent != "" {
+		return target.Agent, rawJSON
+	}
+	model := normalizeGeminiModelResourceName(target.Model)
+	if model == target.Model {
+		return model, rawJSON
+	}
+	updatedRawJSON, errSet := ojson.SetBytes(rawJSON, "model", model)
+	if errSet != nil {
+		return model, rawJSON
+	}
+	return model, updatedRawJSON
+}
+
+func normalizeGeminiModelResourceName(model string) string {
+	model = strings.TrimSpace(model)
+	if strings.HasPrefix(model, "models/") && len(model) > len("models/") {
+		return strings.TrimPrefix(model, "models/")
+	}
+	return model
+}
+
+func buildInteractionsExecutionRequest(target interactionsRequestTarget, modelName string, rawJSON []byte, alt string) handlers.ProtocolExecutionRequest {
+	forcedProvider := ""
+	authSelectionModel := ""
+	if target.Agent != "" {
+		forcedProvider = GeminiInteractions
+		authSelectionModel = interactionsAgentAuthSelectionModel
+	}
+	return handlers.ProtocolExecutionRequest{
+		EntryProtocol:      Interactions,
+		ExitProtocol:       Interactions,
+		ForcedProvider:     forcedProvider,
+		AuthSelectionModel: authSelectionModel,
+		Model:              modelName,
+		Stream:             target.Stream,
+		Body:               rawJSON,
+		Alt:                alt,
+	}
+}
+
+// Interactions handles POST /v1beta/interactions.
+func (h *GeminiAPIHandler) Interactions(c *gin.Context) {
+	rawJSON, errRead := c.GetRawData()
+	if errRead != nil {
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: errRead.Error(), Type: "invalid_request_error"}})
+		return
+	}
+	target, errParse := parseInteractionsRequestTarget(rawJSON)
+	if errParse != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: errParse.Error(), Type: "invalid_request_error"}})
+		return
+	}
+
+	modelName, resolvedRawJSON := prepareInteractionsExecutionTarget(rawJSON, target)
+	rawJSON = resolvedRawJSON
+
+	alt := h.GetAlt(c)
+	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	defer cliCancel(nil)
+
+	req := buildInteractionsExecutionRequest(target, modelName, rawJSON, alt)
+	if target.Stream {
+		h.handleInteractionsStream(c, cliCtx, cliCancel, req)
+		return
+	}
+	h.handleInteractionsNonStream(c, cliCtx, cliCancel, req)
+}
+
+func (h *GeminiAPIHandler) handleInteractionsNonStream(c *gin.Context, cliCtx context.Context, cliCancel handlers.APIHandlerCancelFunc, req handlers.ProtocolExecutionRequest) {
+	c.Header("Content-Type", "application/json")
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	resp, errMsg := h.ExecuteProtocolWithAuthManager(cliCtx, req)
+	stopKeepAlive()
+	if errMsg != nil {
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), resp.Headers)
+	_, _ = c.Writer.Write(resp.Body)
+}
+
+func (h *GeminiAPIHandler) handleInteractionsStream(c *gin.Context, cliCtx context.Context, cliCancel handlers.APIHandlerCancelFunc, req handlers.ProtocolExecutionRequest) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Streaming not supported", Type: "server_error"}})
+		return
+	}
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	var stream handlers.ModelExecutionStream
+	var errMsg *interfaces.ErrorMessage
+	if keepAliveC == nil {
+		stream, errMsg = h.ExecuteProtocolStreamWithAuthManager(cliCtx, req)
+	} else {
+		type protocolStreamResult struct {
+			stream handlers.ModelExecutionStream
+			errMsg *interfaces.ErrorMessage
+		}
+		resultChan := make(chan protocolStreamResult, 1)
+		go func() {
+			s, e := h.ExecuteProtocolStreamWithAuthManager(cliCtx, req)
+			resultChan <- protocolStreamResult{stream: s, errMsg: e}
+		}()
+		for waiting := true; waiting; {
+			select {
+			case <-c.Request.Context().Done():
+				cliCancel(c.Request.Context().Err())
+				<-resultChan
+				return
+			case res := <-resultChan:
+				stream, errMsg = res.stream, res.errMsg
+				waiting = false
+			case <-keepAliveC:
+				commitSSE()
+				_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+				flusher.Flush()
+			}
+		}
+	}
+	stopKeepAlive()
+	if errMsg != nil {
+		if committed {
+			pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+			pendingErrors <- errMsg
+			close(pendingErrors)
+			h.forwardInteractionsStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors)
+			return
+		}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+	upstreamHeaders = stream.Headers
+	commitSSE()
+	data := make(chan []byte)
+	errs := make(chan *interfaces.ErrorMessage, 1)
+	go func() {
+		defer close(data)
+		defer close(errs)
+		for chunk := range stream.Chunks {
+			if chunk.Err != nil {
+				errs <- &interfaces.ErrorMessage{StatusCode: chunk.Err.StatusCode, Error: chunk.Err}
+				return
+			}
+			if len(chunk.Payload) > 0 {
+				data <- chunk.Payload
+			}
+		}
+	}()
+	h.forwardInteractionsStream(c, flusher, func(err error) { cliCancel(err) }, data, errs)
+}
+
+func (h *GeminiAPIHandler) forwardInteractionsStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+		WriteChunk: func(chunk []byte) {
+			if len(chunk) == 0 {
+				return
+			}
+			trimmed := bytes.TrimSpace(chunk)
+			if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) {
+				_, _ = c.Writer.Write(chunk)
+			} else {
+				_, _ = c.Writer.Write([]byte("data: "))
+				_, _ = c.Writer.Write(chunk)
+			}
+			if !bytes.HasSuffix(chunk, []byte("\n\n")) {
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			}
+		},
+		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			if errMsg == nil {
+				return
+			}
+			h.LoggingAPIResponseError(c, errMsg)
+			status := http.StatusInternalServerError
+			if errMsg.StatusCode > 0 {
+				status = errMsg.StatusCode
+			}
+			errText := http.StatusText(status)
+			if errMsg.Error != nil && errMsg.Error.Error() != "" {
+				errText = errMsg.Error.Error()
+			}
+			body := handlers.BuildErrorResponseBody(status, errText)
+			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
+		},
+	})
+}

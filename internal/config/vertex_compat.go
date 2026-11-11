@@ -1,0 +1,153 @@
+package config
+
+import (
+	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+)
+
+// VertexCompatKey represents the configuration for Vertex AI-compatible API keys.
+// This supports third-party services that use Vertex AI-style endpoint paths
+// (/publishers/google/models/{model}:streamGenerateContent) but authenticate
+// with simple API keys instead of Google Cloud service account credentials.
+//
+// Example services: zenmux.ai and similar Vertex-compatible providers.
+type VertexCompatKey struct {
+	// APIKey is the authentication key for accessing the Vertex-compatible API.
+	// Maps to the x-goog-api-key header.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Weight controls proportional selection under weighted-round-robin.
+	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
+	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`
+
+	// Prefix optionally namespaces model aliases for this credential (e.g., "teamA/vertex-pro").
+	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// BaseURL optionally overrides the Vertex-compatible API endpoint.
+	// When it contains a "/publishers/" segment it is used as the full resource
+	// prefix (e.g. "https://aiplatform.googleapis.com/v1/projects/{p}/locations/{l}/publishers/google/models")
+	// and the executor only appends "/{model}:{action}". Otherwise "/v1" is
+	// inserted if absent, then "/publishers/google/models" is appended; a
+	// trailing version segment like "/v1" or "/v1beta1" is never duplicated.
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+
+	// ProxyURL optionally overrides the global proxy for this API key.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// ConnectionPool configures upstream connection reuse for this credential.
+	// Omitted disables pooling (preserving the fresh-transport-per-request default);
+	// pools stay per credential, so opting in never shares connections with another key.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
+	// Headers optionally adds extra HTTP headers for requests sent with this key.
+	// Commonly used for cookies, user-agent, and other authentication headers.
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+
+	// Models defines the model configurations including aliases for routing.
+	Models []VertexCompatModel `yaml:"models,omitempty" json:"models,omitempty"`
+
+	// ExcludedModels lists model IDs that should be excluded for this provider.
+	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling overrides the global cooling policy for this credential when set.
+	// True disables auth/model cooldowns; false explicitly enables them.
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry optionally overrides the global request-retry for this credential.
+	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// Interactions optionally enables native Vertex Interactions API routing for this key.
+	Interactions *bool `yaml:"interactions,omitempty" json:"interactions,omitempty"`
+
+	// OpenAPI overrides automatic OpenAI-compatible endpoint selection.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
+	// OpenAPILocation overrides the location used for OpenAPI requests.
+	OpenAPILocation string `yaml:"openapi-location,omitempty" json:"openapi-location,omitempty"`
+}
+
+func (k VertexCompatKey) GetAPIKey() string   { return k.APIKey }
+func (k VertexCompatKey) GetBaseURL() string  { return k.BaseURL }
+func (k VertexCompatKey) GetPrefix() string   { return k.Prefix }
+func (k VertexCompatKey) GetProxyURL() string { return k.ProxyURL }
+
+// VertexCompatModel represents a model configuration for Vertex compatibility,
+// including the actual model name and its alias for API routing.
+type VertexCompatModel struct {
+	// Name is the actual model name used by the external provider.
+	Name string `yaml:"name" json:"name"`
+
+	// Alias is the model name alias that clients will use to reference this model.
+	Alias string `yaml:"alias" json:"alias"`
+
+	// DisplayName is the optional human-readable name shown in model catalogs.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
+	// ForceMapping rewrites upstream response model fields back to Alias.
+	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+
+	// OpenAPI overrides endpoint selection for this model.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
+	// Thinking configures the thinking/reasoning capability for this model.
+	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
+}
+
+func (m VertexCompatModel) GetOpenAPI() *bool { return m.OpenAPI }
+
+func (m VertexCompatModel) GetName() string        { return m.Name }
+func (m VertexCompatModel) GetAlias() string       { return m.Alias }
+func (m VertexCompatModel) GetDisplayName() string { return m.DisplayName }
+func (m VertexCompatModel) GetForceMapping() bool  { return m.ForceMapping }
+func (m VertexCompatModel) GetThinking() *registry.ThinkingSupport {
+	return m.Thinking
+}
+
+// SanitizeVertexCompatKeys deduplicates and normalizes Vertex-compatible API key credentials.
+func (cfg *Config) SanitizeVertexCompatKeys() {
+	if cfg == nil {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.VertexCompatAPIKey))
+	out := cfg.VertexCompatAPIKey[:0]
+	for i := range cfg.VertexCompatAPIKey {
+		entry := cfg.VertexCompatAPIKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.OpenAPILocation = strings.TrimSpace(entry.OpenAPILocation)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+
+		// Sanitize models: remove entries without valid model name
+		sanitizedModels := make([]VertexCompatModel, 0, len(entry.Models))
+		for _, model := range entry.Models {
+			model.Alias = strings.TrimSpace(model.Alias)
+			model.Name = strings.TrimSpace(model.Name)
+			if model.Name != "" {
+				sanitizedModels = append(sanitizedModels, model)
+			}
+		}
+		entry.Models = sanitizedModels
+
+		// Use API key + base URL + connection-pool settings as uniqueness key
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL + "\x00" + FormatConnectionPoolDedupID(entry.ConnectionPool)
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.VertexCompatAPIKey = out
+}
