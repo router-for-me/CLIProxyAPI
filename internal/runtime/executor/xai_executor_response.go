@@ -1556,7 +1556,12 @@ func xaiTerminalFailureStatus(eventData []byte, doc *ojson.Doc) int {
 		strings.Contains(errorMsg, "included free usage"):
 		return http.StatusTooManyRequests
 	case errorCode == "cyber_policy",
+		errorCode == "cyber_policy_violation",
+		errorCode == "bio_policy",
+		errorCode == "misalignment_policy_violation",
+		errorCode == "invalid_prompt",
 		errorCode == "content_policy_violation",
+		errorCode == "image_content_policy_violation",
 		errorType == "invalid_request_error",
 		errorType == "invalid_request",
 		errorType == "bad_request_error",

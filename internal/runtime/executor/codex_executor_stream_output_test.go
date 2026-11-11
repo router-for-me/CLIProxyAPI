@@ -562,6 +562,21 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name:       "bio policy",
+			event:      `{"type":"error","error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "bio policy response.failed without type or message",
+			event:      `{"type":"response.failed","sequence_number":3,"response":{"id":"resp_bio","status":"failed","error":{"code":"bio_policy","message":"   "}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "misalignment policy violation without type",
+			event:      `{"type":"response.failed","sequence_number":3,"response":{"id":"resp_misalign","status":"failed","error":{"code":"misalignment_policy_violation","message":"This request violated the misalignment policy."}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			name:       "authentication",
 			event:      `{"type":"response.failed","response":{"error":{"type":"authentication_error","code":"invalid_api_key","message":"Invalid token."}}}`,
 			wantStatus: http.StatusUnauthorized,

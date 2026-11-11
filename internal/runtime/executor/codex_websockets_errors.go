@@ -87,16 +87,31 @@ func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
 	doc := ojson.NewDoc([]byte(`{}`))
 	_ = doc.Set("status", status)
 
+	fillBlankErrorMessage := func() {
+		if strings.TrimSpace(doc.Get("error.message").String()) != "" {
+			return
+		}
+		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
+			_ = doc.Set("error.message", codexPolicyFallbackMessage(code))
+		} else if errType := strings.TrimSpace(doc.Get("error.type").String()); errType != "" {
+			_ = doc.Set("error.message", errType)
+		} else {
+			_ = doc.Set("error.message", http.StatusText(status))
+		}
+	}
+
 	if bodyNode := ojson.GetBytesNoCopy(payload, "body"); bodyNode.Exists() {
 		_ = doc.SetRawBytes("body", []byte(bodyNode.Raw))
 		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() {
 			_ = doc.SetRawBytes("error", []byte(bodyErrorNode.Raw))
+			fillBlankErrorMessage()
 			return doc.Bytes()
 		}
 	}
 
 	if errNode := ojson.GetBytesNoCopy(payload, "error"); errNode.Exists() {
 		_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+		fillBlankErrorMessage()
 		return doc.Bytes()
 	}
 

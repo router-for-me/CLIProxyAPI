@@ -342,3 +342,37 @@ func TestBuildOpenAIResponsesStreamChunksMapAnthropicPromptTooLongToContextLengt
 		t.Fatalf("unrelated invalid_request_error unexpectedly gained code: %v", otherPayload.Response.Error)
 	}
 }
+
+func TestBuildOpenAIResponsesStreamErrorChunk_BodyErrorLayoutAndBlankPolicyFallback(t *testing.T) {
+	bodyWrapped := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusBadRequest,
+		`{"type":"error","body":{"error":{"code":"bio_policy","message":"   "}},"sequence_number":9}`,
+		1,
+	)
+	var chunk openAIResponsesStreamErrorChunk
+	if err := json.Unmarshal(bodyWrapped, &chunk); err != nil {
+		t.Fatalf("unmarshal error chunk: %v (%s)", err, bodyWrapped)
+	}
+	if chunk.SequenceNumber != 9 {
+		t.Fatalf("sequence_number = %d, want 9", chunk.SequenceNumber)
+	}
+	if chunk.Error["code"] != "bio_policy" {
+		t.Fatalf("error.code = %v, want bio_policy", chunk.Error["code"])
+	}
+	if chunk.Error["message"] != "This content was flagged for possible biological risk." {
+		t.Fatalf("error.message = %v, want official bio_policy fallback", chunk.Error["message"])
+	}
+
+	genericPolicy := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusBadRequest,
+		`{"error":{"code":"content_policy_violation","message":"   "}}`,
+		2,
+	)
+	var genericChunk openAIResponsesStreamErrorChunk
+	if err := json.Unmarshal(genericPolicy, &genericChunk); err != nil {
+		t.Fatalf("unmarshal generic policy chunk: %v", err)
+	}
+	if genericChunk.Error["message"] != "content_policy_violation" {
+		t.Fatalf("error.message = %v, want content_policy_violation", genericChunk.Error["message"])
+	}
+}

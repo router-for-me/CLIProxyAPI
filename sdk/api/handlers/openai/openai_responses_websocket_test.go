@@ -2785,6 +2785,12 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "bio policy at 502",
+			status: http.StatusBadGateway,
+			body:   `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+			want:   true,
+		},
+		{
 			name:   "context length exceeded at 500",
 			status: http.StatusInternalServerError,
 			body:   `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too long"}}`,

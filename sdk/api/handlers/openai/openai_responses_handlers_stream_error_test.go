@@ -480,6 +480,12 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 			wantExposed: true,
 		},
 		{
+			name:        "bio policy behind bad gateway status",
+			status:      http.StatusBadGateway,
+			message:     `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+			wantExposed: true,
+		},
+		{
 			name:        "context length exceeded behind bad gateway status",
 			status:      http.StatusBadGateway,
 			message:     `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window."}}`,

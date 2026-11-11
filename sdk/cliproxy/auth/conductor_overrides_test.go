@@ -1458,6 +1458,10 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		HTTPStatus: http.StatusBadGateway,
 		Message:    `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}`,
 	}
+	bioPolicyErr := &Error{
+		HTTPStatus: http.StatusBadGateway,
+		Message:    `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+	}
 	// A frame/payload that exceeds the upstream size limit fails identically on
 	// every credential, so it must not rotate or punish the pool.
 	tooLargeErr := &Error{
@@ -1502,6 +1506,7 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		{name: "non-streaming bad request", err: badRequestErr, wantStatus: http.StatusBadRequest},
 		{name: "streaming bad request", stream: true, err: badRequestErr, wantStatus: http.StatusBadRequest},
 		{name: "streaming cyber policy", provider: "codex", stream: true, err: cyberPolicyErr, wantStatus: http.StatusBadGateway},
+		{name: "streaming bio policy", provider: "codex", stream: true, err: bioPolicyErr, wantStatus: http.StatusBadGateway},
 		{name: "non-streaming message too big", provider: "codex", err: tooLargeErr, wantStatus: http.StatusRequestEntityTooLarge},
 		{name: "streaming message too big", provider: "codex", stream: true, err: tooLargeErr, wantStatus: http.StatusRequestEntityTooLarge},
 		{name: "non-streaming plain bad request", err: plainBadRequestErr, wantStatus: http.StatusBadRequest},

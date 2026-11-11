@@ -189,7 +189,13 @@ func codexTerminalFailureStatus(body []byte) int {
 	errorType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
 	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
 	switch {
-	case errorCode == "cyber_policy":
+	case errorCode == "cyber_policy",
+		errorCode == "cyber_policy_violation",
+		errorCode == "bio_policy",
+		errorCode == "misalignment_policy_violation",
+		errorCode == "invalid_prompt",
+		errorCode == "content_policy_violation",
+		errorCode == "image_content_policy_violation":
 		return http.StatusBadRequest
 	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
 		return http.StatusNotFound
@@ -261,7 +267,7 @@ func codexTerminalErrorBody(eventData []byte, path string) []byte {
 	}
 	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
 		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
-			_ = doc.Set("error.message", code)
+			_ = doc.Set("error.message", codexPolicyFallbackMessage(code))
 		}
 	}
 	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
@@ -303,12 +309,27 @@ func codexTerminalTopLevelErrorBody(eventData []byte) []byte {
 	}
 	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
 		if code != "" {
-			_ = doc.Set("error.message", code)
+			_ = doc.Set("error.message", codexPolicyFallbackMessage(code))
 		} else if errorType != "" {
 			_ = doc.Set("error.message", errorType)
 		}
 	}
 	return doc.Bytes()
+}
+
+func codexPolicyFallbackMessage(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "bio_policy":
+		return "This content was flagged for possible biological risk."
+	case "cyber_policy", "cyber_policy_violation":
+		return "This request has been flagged for possible cybersecurity risk."
+	case "misalignment_policy_violation":
+		return "This request was blocked due to a misalignment policy violation."
+	case "invalid_prompt":
+		return "Invalid request."
+	default:
+		return code
+	}
 }
 
 func codexTerminalErrorIsContextLength(body []byte) bool {

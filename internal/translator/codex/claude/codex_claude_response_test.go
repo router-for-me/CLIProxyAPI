@@ -99,6 +99,46 @@ func TestConvertCodexResponseToClaude_StreamCyberPolicyError(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamBioPolicyError(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+	out := string(outputs[0])
+	if !strings.Contains(out, "event: error\n") {
+		t.Fatalf("expected Claude SSE error event, got: %q", out)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(out, "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", out)
+	}
+	if got := payload.Get("type").String(); got != "error" {
+		t.Fatalf("type = %q, want error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "This content was flagged for possible biological risk." {
+		t.Fatalf("error.message = %q. Payload: %s", got, payload.Raw)
+	}
+
+	for _, code := range []string{"content_policy_violation", "image_content_policy_violation"} {
+		var subParam any
+		subOut := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"code":"`+code+`","message":""}}`), &subParam)
+		if len(subOut) != 1 {
+			t.Fatalf("code %s: expected 1 chunk, got %d", code, len(subOut))
+		}
+		subPayload, subOK := firstClaudeStreamPayloadForEvent(string(subOut[0]), "error")
+		if !subOK || subPayload.Get("error.type").String() != "invalid_request_error" || subPayload.Get("error.message").String() != code {
+			t.Fatalf("code %s: unexpected payload %s", code, subPayload.Raw)
+		}
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamErrorTypeFallbackMessage(t *testing.T) {
 	ctx := context.Background()
 	var param any
