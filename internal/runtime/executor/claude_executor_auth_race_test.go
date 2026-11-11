@@ -68,9 +68,11 @@ func TestClaudeExecutorPrepareRequestAuthIsRaceFreeOnSharedCredential(t *testing
 // produced the reported data races.
 func TestClaudeExecutorSharedCredentialMetadataReadersUseOneLock(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "claude-race-all-readers", Metadata: map[string]any{
-		"access_token":          "sk-ant-oat-race-probe",
-		"cloak_mode":            "always",
-		"cloak_sensitive_words": "secret",
+		"access_token":                "sk-ant-oat-race-probe",
+		"cloak_mode":                  "always",
+		"cloak_relaxed_system_prompt": true,
+		"cloak_sensitive_words":       "secret",
+		"credential_options":          map[string]any{"cloak": map[string]any{"relaxed-system-prompt": true}},
 	}}
 
 	var wg sync.WaitGroup
@@ -89,7 +91,8 @@ func TestClaudeExecutorSharedCredentialMetadataReadersUseOneLock(t *testing.T) {
 				_, _ = claudeCreds(auth)
 				return
 			}
-			_, _, _, _ = getCloakConfigFromAuth(auth)
+			_, _, _, _, _ = getCloakConfigFromAuth(auth)
+			_, _, _, _, _, _, _ = claudeauth.ReadMetadataHomeCloak(&auth.Metadata)
 		}(i)
 	}
 	close(start)

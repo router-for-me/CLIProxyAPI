@@ -189,6 +189,22 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// ReadMetadataBool reads a bool-valued metadata entry under the metadata lock.
+// The second return value reports whether the key contains a JSON boolean.
+func ReadMetadataBool(metadata *map[string]any, key string) (bool, bool) {
+	if metadata == nil {
+		return false, false
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return false, false
+	}
+	value, ok := (*metadata)[key].(bool)
+	return value, ok
+}
+
 // ReadMetadataStringMap reads a map[string]string metadata entry under the metadata
 // lock, copying out string pairs from either map[string]string or map[string]any.
 func ReadMetadataStringMap(metadata *map[string]any, key string) map[string]string {
@@ -317,34 +333,38 @@ func ReadMetadataStringSlice(metadata *map[string]any, key string) []string {
 func ReadMetadataHomeCloak(metadata *map[string]any) (
 	mode string,
 	strictMode bool,
+	relaxedSystemPrompt *bool,
 	sensitiveWords []string,
 	sensitiveWordsReplace map[string]string,
 	cacheUserID *bool,
 	present bool,
 ) {
 	if metadata == nil {
-		return "", false, nil, nil, nil, false
+		return "", false, nil, nil, nil, nil, false
 	}
 	claudeDevicePoolMu.Lock()
 	defer claudeDevicePoolMu.Unlock()
 
 	if *metadata == nil {
-		return "", false, nil, nil, nil, false
+		return "", false, nil, nil, nil, nil, false
 	}
 	opts, ok := (*metadata)["credential_options"].(map[string]any)
 	if !ok || opts == nil {
-		return "", false, nil, nil, nil, false
+		return "", false, nil, nil, nil, nil, false
 	}
 	rawCloak, exists := opts["cloak"]
 	if !exists || rawCloak == nil {
-		return "", false, nil, nil, nil, false
+		return "", false, nil, nil, nil, nil, false
 	}
 	cloakMap, ok := rawCloak.(map[string]any)
 	if !ok {
-		return "", false, nil, nil, nil, false
+		return "", false, nil, nil, nil, nil, false
 	}
 	mode, _ = cloakMap["mode"].(string)
 	strictMode, _ = cloakMap["strict-mode"].(bool)
+	if enabled, ok := cloakMap["relaxed-system-prompt"].(bool); ok {
+		relaxedSystemPrompt = &enabled
+	}
 	sensitiveWords = copyStringSliceFromAny(cloakMap["sensitive-words"])
 	sensitiveWordsReplace = copyStringMapFromAny(cloakMap["sensitive-words-replace"])
 	if rawCache, hasCache := cloakMap["cache-user-id"]; hasCache {
@@ -353,7 +373,7 @@ func ReadMetadataHomeCloak(metadata *map[string]any) (
 			cacheUserID = &cacheCopy
 		}
 	}
-	return mode, strictMode, sensitiveWords, sensitiveWordsReplace, cacheUserID, true
+	return mode, strictMode, relaxedSystemPrompt, sensitiveWords, sensitiveWordsReplace, cacheUserID, true
 }
 
 // StoreMetadataString writes a string-valued metadata entry under the metadata
