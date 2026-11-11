@@ -112,6 +112,15 @@ const (
 	// throws away.
 	proxyPoolDefaultIdleConnTimeout = 300 * time.Second
 
+	// claudePoolDefaultIdleConnTimeout is the idle timeout for credentials pooled
+	// through claude.connection-pool. Paths behind NATs and transparent proxies were
+	// measured silently dropping idle connections to api.anthropic.com after
+	// 300s while 60s and 180s still worked (#7357, #7465). Such a drop has no
+	// FIN/RST, so TCP keepalive answered by a local proxy cannot detect it and only
+	// this client-side timer avoids reusing a dead connection. 90s matches
+	// net/http's DefaultTransport and kept ~86% of measured request gaps reusable.
+	claudePoolDefaultIdleConnTimeout = 90 * time.Second
+
 	// proxyPoolDefaultMaxIdleConnsPerHost mirrors net/http's
 	// DefaultMaxIdleConnsPerHost, so enabling the pool never retains more idle
 	// sockets per upstream host than the standard library default.
@@ -228,7 +237,7 @@ func pooledProxyTransport(proxyURL string, cfg *config.Config, auth *cliproxyaut
 // false when the credential did not opt in or its proxy setting cannot be pooled, so
 // the caller keeps its historical transport.
 func pooledTransport(kind proxyPoolKind, proxyURL string, cfg *config.Config, auth *cliproxyauth.Auth, build func() (*http.Transport, error)) (*http.Transport, bool) {
-	settings, enabled := resolveProxyPoolSettings(auth)
+	settings, defaultIdle, enabled := resolvePoolSettingsForKind(kind, cfg, auth)
 	if !enabled {
 		return nil, false
 	}
@@ -246,7 +255,7 @@ func pooledTransport(kind proxyPoolKind, proxyURL string, cfg *config.Config, au
 			return nil, false
 		}
 	}
-	idle := proxyPoolDefaultIdleConnTimeout
+	idle := defaultIdle
 	invalidIdle := ""
 	if raw := strings.TrimSpace(settings.IdleConnTimeout); raw != "" {
 		if d, err := time.ParseDuration(raw); err == nil {
@@ -302,7 +311,7 @@ func pooledTransport(kind proxyPoolKind, proxyURL string, cfg *config.Config, au
 			return nil, fmt.Errorf("build returned no transport")
 		}
 		if invalidIdle != "" {
-			log.Warnf("proxy connection pool: invalid idle-conn-timeout %q, using %s", invalidIdle, proxyPoolDefaultIdleConnTimeout)
+			log.Warnf("proxy connection pool: invalid idle-conn-timeout %q, using %s", invalidIdle, defaultIdle)
 		}
 		tr.IdleConnTimeout = idle
 		tr.MaxIdleConnsPerHost = max
@@ -346,6 +355,59 @@ func resolveProxyPoolSettings(auth *cliproxyauth.Auth) (config.ProxyConnectionPo
 		IdleConnTimeout:     strings.TrimSpace(override.IdleConnTimeout),
 		MaxIdleConnsPerHost: override.MaxIdleConnsPerHost,
 	}, true
+}
+
+// resolvePoolSettingsForKind resolves a credential's pool settings for one transport
+// kind together with the idle timeout that applies when none is configured. A
+// credential's own connection-pool block always wins. Without one, a Claude
+// credential on the Claude Code transport falls back to claude.connection-pool.
+func resolvePoolSettingsForKind(kind proxyPoolKind, cfg *config.Config, auth *cliproxyauth.Auth) (config.ProxyConnectionPoolConfig, time.Duration, bool) {
+	if kind == proxyPoolKindClaudeCode && proxyPoolOverride(auth) == nil {
+		settings, enabled := resolveClaudeProviderPoolSettings(cfg, auth)
+		return settings, claudePoolDefaultIdleConnTimeout, enabled
+	}
+	settings, enabled := resolveProxyPoolSettings(auth)
+	return settings, proxyPoolDefaultIdleConnTimeout, enabled
+}
+
+// resolveClaudeProviderPoolSettings resolves claude.connection-pool for a Claude
+// credential without its own block. Unlike a per-key block, a zero or negative
+// idle-conn-timeout or max-idle-conns-per-host leaves pooling off instead of
+// disabling keep-alives, so those values keep the default Claude Code transport
+// (and its native Connection: keep-alive header) unchanged.
+func resolveClaudeProviderPoolSettings(cfg *config.Config, auth *cliproxyauth.Auth) (config.ProxyConnectionPoolConfig, bool) {
+	if cfg == nil || cfg.Claude.ConnectionPool == nil || auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return config.ProxyConnectionPoolConfig{}, false
+	}
+	pool := cfg.Claude.ConnectionPool
+	if pool.Enabled != nil && !*pool.Enabled {
+		return config.ProxyConnectionPoolConfig{}, false
+	}
+	idle := strings.TrimSpace(pool.IdleConnTimeout)
+	if d, errParse := time.ParseDuration(idle); idle != "" && errParse == nil && d <= 0 {
+		return config.ProxyConnectionPoolConfig{}, false
+	}
+	if pool.MaxIdleConnsPerHost != nil && *pool.MaxIdleConnsPerHost <= 0 {
+		return config.ProxyConnectionPoolConfig{}, false
+	}
+	return config.ProxyConnectionPoolConfig{
+		Enabled:             pool.Enabled,
+		IdleConnTimeout:     idle,
+		MaxIdleConnsPerHost: pool.MaxIdleConnsPerHost,
+	}, true
+}
+
+// ClaudeUpstreamConnectionReuse reports whether claude.connection-pool pools this
+// credential's Claude Code connections. The Claude executor drains completed
+// streams only then, so streamed connections otherwise close right after
+// message_stop. A credential with its own connection-pool block keeps its current
+// behavior: only its non-streamed connections are reused.
+func ClaudeUpstreamConnectionReuse(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if proxyPoolOverride(auth) != nil {
+		return false
+	}
+	_, enabled := resolveClaudeProviderPoolSettings(cfg, auth)
+	return enabled
 }
 
 func proxyPoolOverride(auth *cliproxyauth.Auth) *cliproxyauth.ProxyConnectionPoolOverride {

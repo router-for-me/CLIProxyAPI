@@ -348,7 +348,8 @@ func claudeCodeDialer(proxyURL string) proxy.Dialer {
 }
 
 // pooledClaudeCodeTransport returns the credential-scoped Claude Code uTLS transport
-// when the credential opted into pooling, or nil so the caller keeps the historical
+// when the credential opted into pooling (its own connection-pool block, or
+// claude.connection-pool for a Claude credential), or nil so the caller keeps the historical
 // shared per-proxy transport. Per credential pooling matters here because this
 // transport is otherwise shared by every key that uses the same proxy, which mixes
 // distinct identities on one connection and ignores the key's pool settings.
@@ -378,8 +379,10 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 	// unpooled API keys never park idle connections that intermediate NATs or
 	// transparent proxies may silently drop, while keeping DisableKeepAlives false
 	// so net/http does not overwrite the native Connection: keep-alive wire header.
-	// Credentials that explicitly opt into connection-pool override MaxIdleConnsPerHost
-	// and IdleConnTimeout in pooledTransport.
+	// Credentials that explicitly opt into connection-pool (their own block, or
+	// claude.connection-pool for Claude credentials without one) get a
+	// credential-scoped copy with MaxIdleConnsPerHost and IdleConnTimeout set in
+	// pooledTransport.
 	transport := &http.Transport{
 		ForceAttemptHTTP2:   false,
 		MaxIdleConnsPerHost: -1,
