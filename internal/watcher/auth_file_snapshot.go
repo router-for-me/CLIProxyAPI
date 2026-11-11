@@ -2,10 +2,10 @@ package watcher
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authpublication"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -36,7 +36,7 @@ func (w *Watcher) SnapshotAuthFile(path string) ([]*coreauth.Auth, error) {
 	}
 	authDir = filepath.Clean(absoluteAuthDir)
 	path = filepath.Clean(absolutePath)
-	data, errReadFile := os.ReadFile(path)
+	data, errReadFile := authpublication.ReadFile(path)
 	if errReadFile != nil {
 		return nil, fmt.Errorf("read auth file: %w", errReadFile)
 	}

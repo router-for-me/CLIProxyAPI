@@ -19,7 +19,8 @@ import (
 
 // CodexAuthenticator implements the OAuth login flow for Codex accounts.
 type CodexAuthenticator struct {
-	CallbackPort int
+	CallbackPort     int
+	deviceHTTPClient *http.Client
 }
 
 // NewCodexAuthenticator constructs a Codex authenticator with default settings.

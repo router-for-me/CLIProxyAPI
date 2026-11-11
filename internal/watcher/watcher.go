@@ -4,7 +4,6 @@ package watcher
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +39,8 @@ type Watcher struct {
 	watchedAuthDir             string
 	config                     *config.Config
 	clientsMutex               sync.RWMutex
+	authWatchMu                sync.RWMutex
+	watchedAuthDirs            map[string]struct{}
 	authRescanMu               sync.Mutex
 	configReloadMu             sync.Mutex
 	configReloadTimer          *time.Timer
@@ -226,7 +227,7 @@ func (w *Watcher) isPathInAuthDir(path, authDir string) bool {
 	if normalizedPath == "" || normalizedDir == "" {
 		return false
 	}
-	return w.sameNormalizedAuthPath(filepath.Dir(normalizedPath), normalizedDir)
+	return !w.sameNormalizedAuthPath(normalizedPath, normalizedDir) && !isPrivateAuthPath(normalizedDir, normalizedPath)
 }
 
 func (w *Watcher) isPathInCurrentAuthDirLocked(path string) bool {
