@@ -1,6 +1,9 @@
 package helps
 
 import (
+	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,5 +122,93 @@ func TestClaudeProviderConnectionPoolScope(t *testing.T) {
 	// The standard transport kind ignores the Claude switch.
 	if tr := pooledProxyTransport("direct", cfg, claudeOAuthAuth("claude-oauth", "refresh-a")); tr == nil || tr.MaxIdleConnsPerHost != 0 {
 		t.Fatalf("standard transport for OAuth credential was pooled: %+v", tr)
+	}
+}
+
+// TestCredentialScopedConnectionProbe pins that only a request routed through the
+// credential-scoped Claude Code transport is reported as reusable. The requests use
+// a cancelled context, so no connection is dialed.
+func TestCredentialScopedConnectionProbe(t *testing.T) {
+	tests := []struct {
+		name string
+		pool *config.ProxyConnectionPoolConfig
+		url  string
+		want bool
+	}{
+		{name: "pooled Anthropic request", pool: &config.ProxyConnectionPoolConfig{}, url: "https://api.anthropic.com/v1/messages", want: true},
+		{name: "shared Claude Code transport", pool: nil, url: "https://api.anthropic.com/v1/messages"},
+		{name: "custom base URL takes the shared standard transport", pool: &config.ProxyConnectionPoolConfig{}, url: "http://127.0.0.1:9/v1/messages"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ResetProxyTransports()
+			t.Cleanup(ResetProxyTransports)
+			client := NewUtlsHTTPClient(context.Background(), claudePoolConfig(tt.pool), claudeOAuthAuth("claude-oauth", "refresh-a"), 0)
+
+			probeCtx, scoped := WithCredentialScopedConnectionProbe(context.Background())
+			ctx, cancel := context.WithCancel(probeCtx)
+			cancel()
+			req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, tt.url, nil)
+			if errReq != nil {
+				t.Fatalf("NewRequest() error = %v", errReq)
+			}
+			if resp, errRoundTrip := client.Transport.RoundTrip(req); errRoundTrip == nil {
+				_ = resp.Body.Close()
+				t.Fatal("RoundTrip() with a cancelled context succeeded")
+			}
+			if got := scoped(); got != tt.want {
+				t.Fatalf("credential-scoped = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCredentialScopedConnectionProbeFollowsRedirect pins that the probe reflects the
+// final hop: a redirect from the credential-scoped Anthropic transport to a custom
+// host is served by the shared standard transport, so the response is not reusable.
+func TestCredentialScopedConnectionProbeFollowsRedirect(t *testing.T) {
+	respond := func(req *http.Request, status int, location string) *http.Response {
+		resp := &http.Response{StatusCode: status, Header: http.Header{}, Body: http.NoBody, Request: req}
+		if location != "" {
+			resp.Header.Set("Location", location)
+		}
+		return resp
+	}
+	anthropic := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/redirect" {
+			return respond(req, http.StatusTemporaryRedirect, "https://custom.example/v1/messages"), nil
+		}
+		return respond(req, http.StatusOK, ""), nil
+	})
+	shared := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return respond(req, http.StatusOK, ""), nil
+	})
+	client := &http.Client{Transport: &fallbackRoundTripper{anthropic: anthropic, anthropicScoped: true, chrome: shared, fallback: shared}}
+
+	tests := []struct {
+		url        string
+		wantURL    string
+		wantScoped bool
+	}{
+		{url: "https://api.anthropic.com/v1/messages", wantURL: "https://api.anthropic.com/v1/messages", wantScoped: true},
+		{url: "https://api.anthropic.com/redirect", wantURL: "https://custom.example/v1/messages", wantScoped: false},
+	}
+	for _, tt := range tests {
+		probeCtx, scoped := WithCredentialScopedConnectionProbe(context.Background())
+		req, errReq := http.NewRequestWithContext(probeCtx, http.MethodPost, tt.url, strings.NewReader(`{}`))
+		if errReq != nil {
+			t.Fatalf("NewRequest() error = %v", errReq)
+		}
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			t.Fatalf("Do(%s) error = %v", tt.url, errDo)
+		}
+		_ = resp.Body.Close()
+		if got := resp.Request.URL.String(); got != tt.wantURL {
+			t.Fatalf("final URL = %s, want %s", got, tt.wantURL)
+		}
+		if got := scoped(); got != tt.wantScoped {
+			t.Fatalf("%s: credential-scoped = %t, want %t", tt.url, got, tt.wantScoped)
+		}
 	}
 }

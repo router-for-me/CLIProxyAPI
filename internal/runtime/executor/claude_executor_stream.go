@@ -273,10 +273,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// even though the downstream handler cancels ctx as soon as Chunks closes.
 	// Without it, the request keeps ctx and the connection closes right after
 	// message_stop, which is the default short-lived Claude Code transport.
-	reuseUpstream := helps.ClaudeUpstreamConnectionReuse(e.cfg, auth)
+	// Reuse also requires that the client actually sent the request over a
+	// credential-scoped transport: a custom base URL takes the shared standard
+	// transport, where a drained connection could serve another credential.
 	upstreamCtx, detachUpstream, releaseUpstream := ctx, func() bool { return false }, func() {}
-	if reuseUpstream {
-		upstreamCtx, detachUpstream, releaseUpstream = helps.NewDetachableContext(ctx)
+	credentialScoped := func() bool { return false }
+	if helps.ClaudeUpstreamConnectionReuse(e.cfg, auth) {
+		var probeCtx context.Context
+		probeCtx, credentialScoped = helps.WithCredentialScopedConnectionProbe(ctx)
+		upstreamCtx, detachUpstream, releaseUpstream = helps.NewDetachableContext(probeCtx)
 	}
 	streamStarted := false
 	defer func() {
@@ -369,6 +374,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	streamStarted = true
+	reuseUpstream := credentialScoped()
+	if !reuseUpstream {
+		detachUpstream = func() bool { return false }
+	}
 	go func() {
 		// detached is set once message_stop has been observed and the upstream
 		// request was detached from downstream cancellation in time.

@@ -145,9 +145,18 @@ func newKeepaliveHarness(t *testing.T, release <-chan struct{}, holdSeparator bo
 	return h
 }
 
+// keepaliveScopedRoundTripper marks the harness transport as credential-scoped.
+type keepaliveScopedRoundTripper struct{ http.RoundTripper }
+
+func (keepaliveScopedRoundTripper) CredentialScoped() {}
+
 func (h *keepaliveHarness) start(ctx context.Context) <-chan cliproxyexecutor.StreamChunk {
 	h.t.Helper()
-	ctx = context.WithValue(ctx, "cliproxy.roundtripper", h.transport)
+	if h.transport != nil {
+		// The harness transport serves one credential, like a pooled Claude Code
+		// transport, so the executor may drain its streams for reuse.
+		ctx = context.WithValue(ctx, "cliproxy.roundtripper", http.RoundTripper(keepaliveScopedRoundTripper{h.transport}))
+	}
 	ctx = httptrace.WithClientTrace(ctx, h.trace)
 	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}],"stream":true}`)
 	if h.format == sdktranslator.FormatOpenAIResponse {
@@ -577,4 +586,36 @@ func (b *keepaliveReleaseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
 	b.read += n
 	return n, err
+}
+
+// TestClaudeExecutor_ExecuteStream_ProviderPoolKeepsCredentialsApart covers a
+// Claude key on a custom base URL with claude.connection-pool on. Such a request
+// does not use the credential-scoped Claude Code transport but the shared standard
+// one, so the executor must not drain its stream: a pooled connection there could
+// serve another credential. The terminator is never released, so only an executor
+// drain could keep the connection open instead of letting net/http close it.
+func TestClaudeExecutor_ExecuteStream_ProviderPoolKeepsCredentialsApart(t *testing.T) {
+	release := make(chan struct{})
+	h := newKeepaliveHarness(t, release, false)
+	// Registered after the harness, so it runs before server.Close and lets a
+	// wrongly running drain finish when the test fails.
+	t.Cleanup(func() { close(release) })
+	// Without an injected round tripper the request takes the production path.
+	h.transport = nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, key := range []string{"key-a", "key-b"} {
+		h.auth = &cliproxyauth.Auth{ID: key, Provider: "claude", Attributes: map[string]string{
+			"api_key":  key,
+			"base_url": h.server.URL,
+		}}
+		h.drainChunks(h.start(ctx))
+		h.waitSettled()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if got := h.newConns.Load(); got != 2 || len(h.reused) != 2 || h.reused[1] {
+		t.Fatalf("upstream connections = %d, want 2 unshared (GotConn reused = %v)", got, h.reused)
+	}
 }

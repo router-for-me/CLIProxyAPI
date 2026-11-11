@@ -399,9 +399,11 @@ func resolveClaudeProviderPoolSettings(cfg *config.Config, auth *cliproxyauth.Au
 
 // ClaudeUpstreamConnectionReuse reports whether claude.connection-pool pools this
 // credential's Claude Code connections. The Claude executor drains completed
-// streams only then, so streamed connections otherwise close right after
-// message_stop. A credential with its own connection-pool block keeps its current
-// behavior: only its non-streamed connections are reused.
+// streams only then, and only when WithCredentialScopedConnectionProbe confirms the
+// request actually used the credential-scoped transport; streamed connections
+// otherwise close right after message_stop. A credential with its own
+// connection-pool block keeps its current behavior: only its non-streamed
+// connections are reused.
 func ClaudeUpstreamConnectionReuse(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	if proxyPoolOverride(auth) != nil {
 		return false
