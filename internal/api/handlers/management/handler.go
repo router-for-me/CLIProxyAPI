@@ -40,6 +40,10 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
+	servingHost             string
+	servingPort             int
+	servingTLS              config.TLSConfig
+	appliedSourceHash       string
 	mu                      sync.Mutex
 	authStatusMu            sync.Mutex
 	reloadMu                sync.Mutex
@@ -84,6 +88,15 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+	}
+	if h.cfg != nil {
+		// The listener host, port, and TLS settings are fixed for the lifetime
+		// of the process, so remember the served values a save must be compared
+		// against. The startup load also names the first applied revision.
+		h.servingHost = h.cfg.Host
+		h.servingPort = h.cfg.Port
+		h.servingTLS = h.cfg.TLS
+		h.appliedSourceHash = h.cfg.SourceHash
 	}
 	h.startAttemptCleanup()
 	return h
@@ -139,6 +152,11 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 		return
 	}
 	h.cfg = cloned
+	if cloned.SourceHash != "" {
+		// A file-backed configuration was published to the running process, so
+		// its source hash names the revision that is now in effect.
+		h.appliedSourceHash = cloned.SourceHash
+	}
 }
 
 // configSnapshot reads h.cfg under h.mu, for code that runs outside the request holding it.
@@ -230,6 +248,34 @@ func (h *Handler) reloadSnapshotConfigLocked() configReloadSnapshot {
 		cfg:        h.cfg.CloneForRuntime(),
 		generation: h.reloadGeneration,
 	}
+}
+
+// restartRequiredFieldsLocked lists the listener and transport security fields
+// whose saved values differ from the ones this process serves. The listener
+// host, port, and TLS settings are fixed at startup and never hot-rebind, so a
+// restart is required before the saved values take effect. Callers must hold
+// h.mu.
+func (h *Handler) restartRequiredFieldsLocked(saved *config.Config) []string {
+	if h == nil || saved == nil {
+		return nil
+	}
+	var fields []string
+	if saved.Host != h.servingHost {
+		fields = append(fields, "server.host")
+	}
+	if saved.Port != h.servingPort {
+		fields = append(fields, "server.port")
+	}
+	if saved.TLS.Enable != h.servingTLS.Enable {
+		fields = append(fields, "server.tls.enable")
+	}
+	if saved.TLS.Cert != h.servingTLS.Cert {
+		fields = append(fields, "server.tls.cert")
+	}
+	if saved.TLS.Key != h.servingTLS.Key {
+		fields = append(fields, "server.tls.key")
+	}
+	return fields
 }
 
 // saveConfigAndSnapshotLocked saves h.cfg and returns a full runtime config snapshot.

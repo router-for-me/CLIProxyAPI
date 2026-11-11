@@ -204,13 +204,31 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	// disk. If it cannot be read back, omit the ETag instead of guessing one.
 	// Like Home, SourceHash keeps its runtime owner and is published by the
 	// reload, so it is not overwritten on next here.
+	savedRevision := ""
 	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
-		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
+		savedRevision = config.ComputeSourceHash(saved)
+		c.Header("ETag", configV8ETag(savedRevision))
 	}
+	// The applied revision is the one the running process published (startup
+	// load or a completed reload); it can lag the saved revision because the
+	// post-save reload is asynchronous. Listener and transport security fields
+	// never hot-rebind, so changed ones are reported as restart-required.
+	appliedRevision := h.appliedSourceHash
+	restartRequired := h.restartRequiredFieldsLocked(next)
 	h.cfg = next
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})
+	response := gin.H{"status": "ok", "config-version": 8}
+	if savedRevision != "" {
+		response["saved-revision"] = savedRevision
+	}
+	if appliedRevision != "" {
+		response["applied-revision"] = appliedRevision
+	}
+	if len(restartRequired) > 0 {
+		response["restart-required"] = restartRequired
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // configV8ETag renders a config source hash as a strong ETag.
