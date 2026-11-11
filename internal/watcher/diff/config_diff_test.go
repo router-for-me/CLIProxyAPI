@@ -839,3 +839,56 @@ func TestBuildConfigChangeDetails_KVStore(t *testing.T) {
 		t.Fatalf("whitespace-only path difference produced changes: %v", unchanged)
 	}
 }
+
+func TestBuildConfigChangeDetails_SensitiveWordsReplace(t *testing.T) {
+	oldCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitiveWordsReplace: map[string]string{"Codex": "Assistant"},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitiveWordsReplace: map[string]string{"a": "b"}},
+		}},
+	}
+	newCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitiveWordsReplace: map[string]string{"Codex": "Assistant", "GPT-5": "Model"},
+		},
+		Devin: config.DevinConfig{
+			SensitiveWordsReplace: map[string]string{"Claude Code": "Devin"},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitiveWordsReplace: map[string]string{"a": "c"}},
+		}},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "antigravity.sensitive-words-replace: 1 -> 2")
+	expectContains(t, changes, "devin.sensitive-words-replace: 0 -> 1")
+	expectContains(t, changes, "claude[0].cloak.sensitive-words-replace: 1 -> 1")
+
+	emptyA := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{}}}}
+	emptyB := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{}}}},
+	}
+	if noDiff := BuildConfigChangeDetails(emptyA, emptyB); len(noDiff) != 0 {
+		t.Fatalf("expected no diff between nil and empty SensitiveWordsReplace maps, got %v", noDiff)
+	}
+
+	emptyValOld := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}}}},
+	}
+	emptyValNew := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}}}},
+	}
+	emptyValChanges := BuildConfigChangeDetails(emptyValOld, emptyValNew)
+	expectContains(t, emptyValChanges, "antigravity.sensitive-words-replace: 1 -> 1")
+	expectContains(t, emptyValChanges, "devin.sensitive-words-replace: 1 -> 1")
+	expectContains(t, emptyValChanges, "claude[0].cloak.sensitive-words-replace: 1 -> 1")
+}

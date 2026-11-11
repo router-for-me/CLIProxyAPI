@@ -189,6 +189,47 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// ReadMetadataStringMap reads a map[string]string metadata entry under the metadata
+// lock, copying out string pairs from either map[string]string or map[string]any.
+func ReadMetadataStringMap(metadata *map[string]any, key string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	switch typed := (*metadata)[key].(type) {
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, v := range typed {
+			out[k] = v
+		}
+		return out
+	case map[string]any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, rawVal := range typed {
+			if strVal, ok := rawVal.(string); ok {
+				out[k] = strVal
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // StoreMetadataString writes a string-valued metadata entry under the metadata
 // lock, initializing the map when needed. Empty values are skipped so callers can
 // forward optional fields without erasing a previously resolved value.

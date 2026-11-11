@@ -830,6 +830,8 @@ upstream:
 #             sensitive-words:             # optional: words to obfuscate with zero-width characters
 #               - "API"
 #               - "proxy"
+#             sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement")
+#               "Claude Code": "Claude"
 #             cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #             # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
 #
@@ -1202,9 +1204,11 @@ oauth:
 
     # Antigravity provider behavior.
     antigravity:
-      # sensitive-words:              # optional: words to obfuscate with zero-width characters in system instructions
+      # sensitive-words:              # optional: words to obfuscate with combining grapheme joiners (U+034F) in system instructions
       #   - "API"
       #   - "proxy"
+      # sensitive-words-replace:      # optional: literal sensitive-word replacements ("target": "replacement") in system instructions
+      #   "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
@@ -1227,6 +1231,8 @@ oauth:
     #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
     #     - "API"
     #     - "proxy"
+    #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
+    #     "Claude Code": "Claude"
 
 # Image and video behavior.
 multimedia:

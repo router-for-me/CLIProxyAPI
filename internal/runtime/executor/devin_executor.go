@@ -2697,15 +2697,23 @@ func (e *DevinExecutor) getSensitiveWords() []string {
 	return nil
 }
 
+func (e *DevinExecutor) getSensitiveWordsReplace() map[string]string {
+	if e != nil && e.cfg != nil && len(e.cfg.Devin.SensitiveWordsReplace) > 0 {
+		return e.cfg.Devin.SensitiveWordsReplace
+	}
+	return nil
+}
+
 func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	if e == nil {
 		return nil
 	}
 	words := e.getSensitiveWords()
-	if len(words) == 0 {
+	replacements := e.getSensitiveWordsReplace()
+	if len(words) == 0 && len(replacements) == 0 {
 		return nil
 	}
-	key := strings.Join(words, "\x00")
+	key := helps.SensitiveWordConfigCacheKey(words, replacements)
 	e.matcherMu.RLock()
 	if e.lastWordsKey == key {
 		m := e.cachedMatcher
@@ -2720,7 +2728,7 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 		return e.cachedMatcher
 	}
 	e.lastWordsKey = key
-	e.cachedMatcher = helps.BuildSensitiveWordMatcher(words)
+	e.cachedMatcher = helps.BuildSensitiveWordMatcherWithReplacements(words, replacements)
 	return e.cachedMatcher
 }
 

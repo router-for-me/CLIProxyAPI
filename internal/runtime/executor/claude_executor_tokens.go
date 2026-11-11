@@ -213,8 +213,8 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 			}
 		}
 		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
-		if len(settings.sensitiveWords) > 0 {
-			helps.ObfuscateSensitiveWordsDoc(doc, helps.BuildSensitiveWordMatcher(settings.sensitiveWords))
+		if matcher := settings.buildSensitiveWordMatcher(); matcher != nil {
+			helps.ObfuscateSensitiveWordsDoc(doc, matcher)
 		}
 	} else if policy.Uncloak {
 		uncloakClaudeCodePayloadDoc(doc, confirmedClaudeCode)

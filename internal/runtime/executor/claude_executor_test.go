@@ -5889,6 +5889,87 @@ func TestApplyCloaking_PreservesConfiguredStrictModeAndSensitiveWordsWhenModeOmi
 	}
 }
 
+func TestClaudeCloakSensitiveWordsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`claude-api-key:
+  - api-key: "key-replace-123"
+    cloak:
+      mode: "always"
+      sensitive-words:
+        - "proxy"
+      sensitive-words-replace:
+        "Claude Code": "Claude Assistant"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-replace-123"}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"Use Claude Code through proxy."}]}]}`)
+
+	out, cloaked, errCloaking := applyCloaking(
+		context.Background(),
+		cfg,
+		auth,
+		payload,
+		"key-replace-123",
+		false,
+		false,
+	)
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
+	if !cloaked {
+		t.Fatal("applyCloaking() cloaked = false, want true")
+	}
+	content := ojson.GetBytes(out, "messages.0.content").Array()
+	got := content[len(content)-1].Get("text").String()
+	want := "Use Claude Assistant through p\u200Broxy."
+	if got != want {
+		t.Fatalf("user message = %q, want %q", got, want)
+	}
+}
+
+func TestClaudeOAuthMetadataSensitiveWordsReplaceAndDisabledCloaking(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-oat-replace-test"},
+		Metadata: map[string]any{
+			"cloak_mode": "always",
+			"cloak_sensitive_words_replace": map[string]any{
+				"You are Codex, an agent based on GPT-5.": "You are a coding assistant.",
+			},
+		},
+	}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"You are Codex, an agent based on GPT-5."}]}]}`)
+	out, cloaked, errCloak := applyCloaking(context.Background(), &config.Config{}, auth, payload, "sk-ant-oat-replace-test", false, false)
+	if errCloak != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloak)
+	}
+	if !cloaked {
+		t.Fatal("expected cloaked = true")
+	}
+	content := ojson.GetBytes(out, "messages.0.content").Array()
+	if got := content[len(content)-1].Get("text").String(); got != "You are a coding assistant." {
+		t.Fatalf("rewritten message = %q, want %q", got, "You are a coding assistant.")
+	}
+
+	authNever := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":                       "key-never-replace",
+			"cloak_mode":                    "never",
+			"cloak_sensitive_words_replace": `{"Codex":"Assistant"}`,
+		},
+	}
+	outNever, didCloakNever, errNever := applyCloaking(context.Background(), &config.Config{}, authNever, payload, "key-never-replace", false, false)
+	if errNever != nil {
+		t.Fatalf("applyCloaking(never) error = %v", errNever)
+	}
+	if didCloakNever {
+		t.Fatal("expected cloaked = false when cloak_mode=never")
+	}
+	if !strings.Contains(string(outNever), "You are Codex, an agent based on GPT-5.") {
+		t.Fatalf("disabled cloaking should preserve cleartext, got: %s", outNever)
+	}
+}
+
 func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
 		APIKey: "sk-ant-oat-opus55-test", Cloak: &config.CloakConfig{},
