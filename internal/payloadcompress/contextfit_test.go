@@ -206,6 +206,7 @@ func TestContextTrimToolResultCutKeepsUTF8(t *testing.T) {
 }
 func TestContextTrimFixToolPairsResponsesOrphans(t *testing.T) {
 	arr := ojson.NewDocString(`{"input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"c4","name":"f","arguments":"{}"},` +
 		`{"type":"function_call_output","call_id":"c1","output":"ok"},` +
 		`{"type":"function_call_output","call_id":"c2","output":"orphan"},` +
 		`{"type":"function_call","call_id":"c3","name":"g","arguments":"{}"},` +
@@ -228,13 +229,100 @@ func TestContextTrimFixToolPairsResponsesOrphans(t *testing.T) {
 	}
 }
 
-func TestContextTrimSkipStripThinkingWithBlockBinding(t *testing.T) {
-	body := contextTrimBody(contextFitFiller(3000000))
-	body = strings.Replace(body, `,"messages"`, `,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"omit"}},"messages"`, 1)
-	_, stats := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{})
-	for _, layer := range stats.Layers {
-		if layer == "strip_thinking" {
-			t.Fatalf("strip_thinking must be skipped when thinking.block_binding is set, layers: %v", stats.Layers)
+func TestContextTrimFixToolPairsResponsesParallel(t *testing.T) {
+	// Parallel calls arrive as a run of function_calls followed by a run of
+	// outputs; upstream groups them into one assistant tool_calls message, so
+	// all of them must survive together.
+	arr := ojson.NewDocString(`{"input":[` +
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"c2","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"ok"},` +
+		`{"type":"function_call_output","call_id":"c2","output":"ok"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`).Get("input").Array()
+	out := contextTrimFixToolPairs(arr)
+	var callIDs, outputIDs []string
+	for _, it := range out {
+		if it.Get("type").String() == "function_call" {
+			callIDs = append(callIDs, it.Get("call_id").String())
+		}
+		if it.Get("type").String() == "function_call_output" {
+			outputIDs = append(outputIDs, it.Get("call_id").String())
 		}
 	}
+	if strings.Join(callIDs, ",") != "c1,c2" {
+		t.Fatalf("parallel function_calls must all survive: %v", callIDs)
+	}
+	if strings.Join(outputIDs, ",") != "c1,c2" {
+		t.Fatalf("parallel function_call_outputs must all survive: %v", outputIDs)
+	}
+}
+
+func TestContextTrimFixToolPairsResponsesDroppedCallOrphans(t *testing.T) {
+	// c2 has no output in its run, so it is dropped; its output placed after
+	// the user turn must not survive as an orphan. The trailing c3 has no
+	// output at all and is rejected by Responses for the same reason.
+	arr := ojson.NewDocString(`{"input":[` +
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call","call_id":"c2","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"ok"},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
+		`{"type":"function_call_output","call_id":"c2","output":"late"},` +
+		`{"type":"function_call","call_id":"c3","name":"g","arguments":"{}"}]}`).Get("input").Array()
+	out := contextTrimFixToolPairs(arr)
+	var callIDs, outputIDs []string
+	for _, it := range out {
+		if it.Get("type").String() == "function_call" {
+			callIDs = append(callIDs, it.Get("call_id").String())
+		}
+		if it.Get("type").String() == "function_call_output" {
+			outputIDs = append(outputIDs, it.Get("call_id").String())
+		}
+	}
+	if strings.Join(callIDs, ",") != "c1" {
+		t.Fatalf("only the call with an adjacent output survives, got %v", callIDs)
+	}
+	if strings.Join(outputIDs, ",") != "c1" {
+		t.Fatalf("output of a dropped call must be dropped too, got %v", outputIDs)
+	}
+}
+
+func TestContextTrimSkipStripThinkingWithBlockBinding(t *testing.T) {
+	// strip_thinking must not remove them; without the binding it must. Only two
+	// non-system turns here, so purify cannot shrink anything and the surviving
+	// non-last assistant thinking block stays observable.
+	body := `{"model":"devin/swe-1-6-slow","messages":[` +
+		`{"role":"system","content":"sys"},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"` + contextFitFiller(3000000) + `"},{"type":"text","text":"using tool"}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]}]}`
+	bound := strings.Replace(body, `,"messages"`, `,"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"omit"}},"messages"`, 1)
+	doc, stats := contextFitOnDoc(t, bound, "devin/swe-1-6-slow", ContextTrimConfig{})
+	if stats.applied("strip_thinking") {
+		t.Fatalf("strip_thinking must be skipped when thinking.block_binding is set, layers: %v", stats.Layers)
+	}
+	if !contextTrimHasThinkingBlock(doc) {
+		t.Fatalf("bound thinking block must survive trim, layers: %v", stats.Layers)
+	}
+
+	plain, plainStats := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{})
+	if !plainStats.applied("strip_thinking") {
+		t.Fatalf("strip_thinking must run without block_binding, layers: %v", plainStats.Layers)
+	}
+	if contextTrimHasThinkingBlock(plain) {
+		t.Fatalf("unbound thinking block must be stripped, layers: %v", plainStats.Layers)
+	}
+}
+
+func contextTrimHasThinkingBlock(doc *ojson.Doc) bool {
+	messages := doc.Get("messages")
+	if !messages.IsArray() {
+		return false
+	}
+	for _, m := range messages.Array() {
+		for _, b := range contextTrimBlocks(m) {
+			if contextTrimIsThinkingBlock(b) {
+				return true
+			}
+		}
+	}
+	return false
 }

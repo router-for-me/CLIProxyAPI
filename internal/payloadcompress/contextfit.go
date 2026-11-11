@@ -672,6 +672,37 @@ func contextTrimIsToolResultCarrier(item ojson.Result) bool {
 	return true
 }
 
+// contextTrimResponsesKeepCalls returns the call_ids of Codex Responses
+// function_call items that can be kept: a run of consecutive (parallel) calls
+// pairs as one unit with the run of function_call_output items that follows it,
+// and a call without an output there is rejected by the Responses API.
+func contextTrimResponsesKeepCalls(items []ojson.Result) map[string]bool {
+	keep := map[string]bool{}
+	for i := 0; i < len(items); {
+		if items[i].Get("type").String() != "function_call" {
+			i++
+			continue
+		}
+		end := i
+		for end < len(items) && items[end].Get("type").String() == "function_call" {
+			end++
+		}
+		outputs := map[string]bool{}
+		for k := end; k < len(items) && items[k].Get("type").String() == "function_call_output"; k++ {
+			if id := items[k].Get("call_id").String(); id != "" {
+				outputs[id] = true
+			}
+		}
+		for _, call := range items[i:end] {
+			if id := call.Get("call_id").String(); id != "" && outputs[id] {
+				keep[id] = true
+			}
+		}
+		i = end
+	}
+	return keep
+}
+
 // contextTrimFixToolPairs keeps tool_use/tool_result pairs consistent after
 // the tail slice: tool_result/tool messages whose call vanished are dropped,
 // orphan tool_use blocks are removed (except on the last message), empty
@@ -679,6 +710,7 @@ func contextTrimIsToolResultCarrier(item ojson.Result) bool {
 func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 	toolCallIDs := map[string]bool{}
 	toolResultIDs := map[string]bool{}
+	survivingCalls := contextTrimResponsesKeepCalls(items)
 	for _, item := range items {
 		role := item.Get("role").String()
 		if role == "assistant" {
@@ -703,8 +735,10 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 		} else {
 			switch item.Get("type").String() {
 			case "function_call":
-				// Codex Responses: calls pair with outputs via call_id.
-				if id := item.Get("call_id").String(); id != "" {
+				// Codex Responses: calls pair with outputs via call_id. Only the
+				// calls that survive contextTrimResponsesKeepCalls count as live,
+				// so a dropped call orphans its own output in the pass below.
+				for id := range survivingCalls {
 					toolCallIDs[id] = true
 				}
 			case "function_call_output":
@@ -738,7 +772,15 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 				continue
 			}
 		}
-		if (role == "assistant" || item.Get("type").String() == "function_call") && i != last {
+		if item.Get("type").String() == "function_call" {
+			// Parallel function_calls form one unit with the outputs after
+			// them; contextTrimResponsesKeepCalls already decided survival.
+			if survivingCalls[item.Get("call_id").String()] {
+				out = append(out, item)
+			}
+			continue
+		}
+		if role == "assistant" && i != last {
 			// Claude/OpenAI-array tool_use blocks: keep only those with a
 			// surviving result AND adjacent result in the immediately next
 			// message (upstream fixToolPairs + fixToolAdjacency).
@@ -757,11 +799,6 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 							nextResultIDs[id] = true
 						}
 					}
-				}
-			} else if next.Get("type").String() == "function_call_output" {
-				nextResultIDs = map[string]bool{}
-				if id := next.Get("call_id").String(); id != "" {
-					nextResultIDs[id] = true
 				}
 			}
 			raw := item.Raw
@@ -795,7 +832,7 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 				keepBlocks := make([]string, 0, len(blocks))
 				blockChanged := false
 				for _, b := range blocks {
-					id := b.Get("tool_use_id").String()
+					id := b.Get("id").String()
 					if b.Get("type").String() == "tool_use" &&
 						id != "" && (!toolResultIDs[id] || nextResultIDs == nil || !nextResultIDs[id]) {
 						blockChanged = true
@@ -823,13 +860,6 @@ func contextTrimFixToolPairs(items []ojson.Result) []ojson.Result {
 				}
 				out = append(out, r)
 				continue
-			}
-			// Codex Responses function_call without an adjacent matching output.
-			if item.Get("type").String() == "function_call" {
-				id := item.Get("call_id").String()
-				if id == "" || nextResultIDs == nil || !nextResultIDs[id] {
-					continue
-				}
 			}
 		}
 		// user/tool_result blocks without a surviving call.
