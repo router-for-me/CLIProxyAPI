@@ -5970,6 +5970,125 @@ func TestClaudeOAuthMetadataSensitiveWordsReplaceAndDisabledCloaking(t *testing.
 	}
 }
 
+func TestHomeV8ClaudeCloakCredentialOptions(t *testing.T) {
+	// Pure credential_options.cloak WITHOUT duplicate cloak_* attributes or top-level metadata,
+	// isolating resolveClaudeKeyCloakConfig's Home path directly.
+	optionsOnlyAuth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":   "sk-ant-home-key",
+			"auth_kind": cliproxyauth.AuthKindAPIKey,
+		},
+		Metadata: map[string]any{
+			"credential_options": map[string]any{
+				"cloak": map[string]any{
+					"sensitive-words":         []any{"ACME, Inc."},
+					"sensitive-words-replace": map[string]any{"You are Codex, an agent based on GPT-5.": "You are a coding assistant."},
+				},
+			},
+		},
+	}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"You are Codex, an agent based on GPT-5. Contact ACME, Inc. or Beta Inc."}]}]}`)
+
+	// 1. Omitted cloak.mode must respect shared DisableClaudeCloakMode=true.
+	cfgDisabled := &config.Config{
+		Home:                   config.HomeConfig{Enabled: true},
+		DisableClaudeCloakMode: true,
+	}
+	outDisabled, didCloakDisabled, errDisabled := applyCloaking(context.Background(), cfgDisabled, optionsOnlyAuth, payload, "sk-ant-home-key", false, false)
+	if errDisabled != nil {
+		t.Fatalf("applyCloaking(disabled) error = %v", errDisabled)
+	}
+	if didCloakDisabled {
+		t.Fatalf("expected didCloak=false when DisableClaudeCloakMode=true and cloak.mode is omitted, got body=%s", outDisabled)
+	}
+
+	// 2. When DisableClaudeCloakMode=false, credential_options.cloak alone enables cloaking
+	// and preserves comma-containing sensitive-words without splitting on ','.
+	cfgEnabled := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+	}
+	outEnabled, didCloakEnabled, errEnabled := applyCloaking(context.Background(), cfgEnabled, optionsOnlyAuth, payload, "sk-ant-home-key", false, false)
+	if errEnabled != nil {
+		t.Fatalf("applyCloaking(enabled) error = %v", errEnabled)
+	}
+	if !didCloakEnabled {
+		t.Fatal("expected didCloak=true when Home credential_options.cloak is present")
+	}
+	content := ojson.GetBytes(outEnabled, "messages.0.content").Array()
+	gotText := content[len(content)-1].Get("text").String()
+	wantText := "You are a coding assistant. Contact A\u200BCME, Inc. or Beta Inc."
+	if gotText != wantText {
+		t.Fatalf("rewritten text = %q, want %q", gotText, wantText)
+	}
+
+	// 3. Empty cloak block (cloak: {}) enables CLI cloaking when DisableClaudeCloakMode=false,
+	// and stays disabled when DisableClaudeCloakMode=true.
+	emptyCloakAuth := &cliproxyauth.Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-empty-cloak", "auth_kind": cliproxyauth.AuthKindAPIKey},
+		Metadata:   map[string]any{"credential_options": map[string]any{"cloak": map[string]any{}}},
+	}
+	if _, didEmptyEnabled, errEmpty := applyCloaking(context.Background(), cfgEnabled, emptyCloakAuth, payload, "sk-ant-empty-cloak", false, false); errEmpty != nil || !didEmptyEnabled {
+		t.Fatalf("empty cloak block with DisableClaudeCloakMode=false: didCloak=%v, err=%v", didEmptyEnabled, errEmpty)
+	}
+	if _, didEmptyDisabled, errEmptyDis := applyCloaking(context.Background(), cfgDisabled, emptyCloakAuth, payload, "sk-ant-empty-cloak", false, false); errEmptyDis != nil || didEmptyDisabled {
+		t.Fatalf("empty cloak block with DisableClaudeCloakMode=true: didCloak=%v, err=%v", didEmptyDisabled, errEmptyDis)
+	}
+
+	// 4. Explicit mode="always" in credential_options.cloak overrides DisableClaudeCloakMode=true.
+	explicitAlwaysAuth := &cliproxyauth.Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-explicit-always", "auth_kind": cliproxyauth.AuthKindAPIKey},
+		Metadata:   map[string]any{"credential_options": map[string]any{"cloak": map[string]any{"mode": "always"}}},
+	}
+	if _, didExplicit, errExplicit := applyCloaking(context.Background(), cfgDisabled, explicitAlwaysAuth, payload, "sk-ant-explicit-always", false, false); errExplicit != nil || !didExplicit {
+		t.Fatalf("explicit mode=always failed to override DisableClaudeCloakMode=true: didCloak=%v, err=%v", didExplicit, errExplicit)
+	}
+
+	// 5. Standalone mode (Home.Enabled == false) ignores Home-only credential_options.cloak,
+	// while []string cloak_sensitive_words in OAuth metadata works concurrently under claudeDevicePoolMu.
+	_, didCloakStandalone, errStandalone := applyCloaking(context.Background(), &config.Config{}, explicitAlwaysAuth, payload, "sk-ant-explicit-always", false, false)
+	if errStandalone != nil || didCloakStandalone {
+		t.Fatalf("standalone mode consumed Home credential_options.cloak: didCloak=%v, err=%v", didCloakStandalone, errStandalone)
+	}
+	oauthSliceAuth := &cliproxyauth.Auth{
+		Provider:   "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-slice", "auth_kind": cliproxyauth.AuthKindOAuth},
+		Metadata: map[string]any{
+			"cloak_mode":            "always",
+			"cloak_sensitive_words": []string{"ACME, Inc."},
+		},
+	}
+	outSlice, didSlice, errSlice := applyCloaking(context.Background(), cfgEnabled, oauthSliceAuth, payload, "sk-ant-oat-slice", false, false)
+	if errSlice != nil || !didSlice {
+		t.Fatalf("oauth slice applyCloaking: did=%v err=%v", didSlice, errSlice)
+	}
+	sliceBlocks := ojson.GetBytes(outSlice, "messages.0.content").Array()
+	if got := sliceBlocks[len(sliceBlocks)-1].Get("text").String(); !strings.Contains(got, "A\u200BCME, Inc.") || strings.Contains(got, "Beta I\u200Bnc.") {
+		t.Fatalf("unexpected []string sensitive-words obfuscation: %q", got)
+	}
+
+	// Concurrent metadata lock test across StoreDeviceIDPool, ReadMetadataHomeCloak,
+	// ReadMetadataStringSlice, and ReadMetadataStringMap.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			claudeauth.StoreDeviceIDPool(&optionsOnlyAuth.Metadata, []string{"device-1"})
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		_, _, words, repls, _, ok := claudeauth.ReadMetadataHomeCloak(&optionsOnlyAuth.Metadata)
+		if !ok || len(words) != 1 || len(repls) != 1 {
+			t.Fatalf("ReadMetadataHomeCloak concurrent read failed: ok=%v words=%v repls=%v", ok, words, repls)
+		}
+		_ = claudeauth.ReadMetadataStringSlice(&oauthSliceAuth.Metadata, "cloak_sensitive_words")
+		_ = claudeauth.ReadMetadataStringMap(&optionsOnlyAuth.Metadata, "cloak_sensitive_words_replace")
+	}
+	<-done
+}
+
 func TestApplyCloaking_Opus55FallbackOnlyForUnconfirmedClients(t *testing.T) {
 	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
 		APIKey: "sk-ant-oat-opus55-test", Cloak: &config.CloakConfig{},

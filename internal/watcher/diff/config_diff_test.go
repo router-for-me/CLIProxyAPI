@@ -891,4 +891,18 @@ func TestBuildConfigChangeDetails_SensitiveWordsReplace(t *testing.T) {
 	expectContains(t, emptyValChanges, "antigravity.sensitive-words-replace: 1 -> 1")
 	expectContains(t, emptyValChanges, "devin.sensitive-words-replace: 1 -> 1")
 	expectContains(t, emptyValChanges, "claude[0].cloak.sensitive-words-replace: 1 -> 1")
+
+	nilCloakOld := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "k1"}}}
+	addedCloakNew := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "k1",
+		Cloak:  &config.CloakConfig{SensitiveWords: []string{"API"}, SensitiveWordsReplace: map[string]string{"a": "b"}},
+	}}}
+	expectContains(t, BuildConfigChangeDetails(nilCloakOld, addedCloakNew), "claude[0].cloak: added")
+	expectContains(t, BuildConfigChangeDetails(addedCloakNew, nilCloakOld), "claude[0].cloak: removed")
+
+	sameLenWordsNew := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "k1",
+		Cloak:  &config.CloakConfig{SensitiveWords: []string{"proxy"}, SensitiveWordsReplace: map[string]string{"a": "b"}},
+	}}}
+	expectContains(t, BuildConfigChangeDetails(addedCloakNew, sameLenWordsNew), "claude[0].cloak.sensitive-words: 1 -> 1")
 }

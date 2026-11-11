@@ -82,7 +82,9 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 
 	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
 
-	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
+	if metaWords := claudeauth.ReadMetadataStringSlice(&auth.Metadata, "cloak_sensitive_words"); len(metaWords) > 0 {
+		sensitiveWords = metaWords
+	} else if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
 		for i := range sensitiveWords {
 			sensitiveWords[i] = strings.TrimSpace(sensitiveWords[i])

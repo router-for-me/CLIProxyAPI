@@ -817,7 +817,7 @@ upstream:
 #           rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #           native-tool-search: false # optional: default is false; when true, trust this key's custom base-url with Anthropic native tool search (defer_loading + tool_reference) for Codex tool_search; requires upstream.claude.tool-search: true
 #           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
-#             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
+#             mode: "auto"                 # omitted inherits shared default; explicit "auto": cloak only when client is not Claude Code
 #                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
 #                                          # "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity/billing attribution
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
@@ -1228,7 +1228,7 @@ oauth:
 
     # Devin provider behavior.
     # devin:
-    #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
+    #   sensitive-words:             # optional: words to remove matching lines in system prompts
     #     - "API"
     #     - "proxy"
     #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
