@@ -241,6 +241,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
 	engine.Use(s.exampleAPIKeySafeModeMiddleware())
+	// Forward client-owned Anthropic credentials after the server-wide gates above.
+	engine.Use(s.claudeOAuthPassthroughMiddleware(s.newDefaultAnthropicPassthroughProxy()))
 
 	// Setup routes
 	s.setupRoutes()
@@ -268,7 +270,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create HTTP server
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:           wrapUnconsumedRequestBodyHandler(s.claudeOAuthPassthroughHandler(engine, newAnthropicPassthroughProxy(anthropicPassthroughTarget))),
+		Handler:           wrapUnconsumedRequestBodyHandler(engine),
 		ReadHeaderTimeout: muxSniffDeadline,
 	}
 
