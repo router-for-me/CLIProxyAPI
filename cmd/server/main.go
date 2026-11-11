@@ -72,6 +72,11 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
+	if argvRequestsVersion(os.Args[1:]) {
+		fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "discover" {
 		discoverFlags := flag.NewFlagSet("discover", flag.ExitOnError)
 		timeoutSec := discoverFlags.Int("timeout", 3, "Discovery timeout in seconds")
@@ -82,6 +87,7 @@ func main() {
 		discoverFlags.Func("include", "Comma-separated interface names to scan (overrides default physical LAN filter)", appendCSV(&include))
 		discoverFlags.Func("exclude", "Comma-separated interface names to skip", appendCSV(&exclude))
 		_ = discoverFlags.Parse(os.Args[2:])
+		exitIfUnexpectedOperands(discoverFlags)
 		if !*jsonOut {
 			fmt.Fprintf(os.Stderr, "CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
 		}
@@ -165,6 +171,7 @@ func main() {
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
+	flag.Bool("version", false, "Print version and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -203,6 +210,7 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	exitIfUnexpectedOperands(flag.CommandLine)
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -600,7 +608,8 @@ func main() {
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
-		return
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -810,24 +819,30 @@ func main() {
 					cancel()
 					<-done
 					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
-					return
+					os.Exit(1)
 				}
 
+				var tuiErr error
 				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
 					restoreIO()
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					tuiErr = errRun
 				} else {
 					restoreIO()
 				}
 
 				cancel()
 				<-done
+				if tuiErr != nil {
+					os.Exit(1)
+				}
 			} else {
 				// Default TUI mode: pure management client.
 				// The proxy server must already be running (locally or remotely).
 				baseURL := resolveManagementBaseURL(managementBaseURL, cfg)
 				if errRun := tui.RunWithBaseURL(baseURL, password, nil, os.Stdout); errRun != nil {
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+					os.Exit(1)
 				}
 			}
 		} else {
@@ -964,12 +979,56 @@ func argvEnablesBoolFlag(args []string, name string) bool {
 	return enabled
 }
 
+func argvRequestsVersion(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if i == 0 && arg == "version" {
+			return true
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		flagName, value, hasValue := splitArgvFlag(arg)
+		if flagName == "version" {
+			if !hasValue {
+				return true
+			}
+			parsed, errParse := strconv.ParseBool(value)
+			return errParse == nil && parsed
+		}
+		if !hasValue && argvFlagConsumesValue(flagName) {
+			if i+1 < len(args) && args[i+1] != "--" {
+				i++
+			}
+		}
+	}
+	return false
+}
+
+func unexpectedOperandsError(operands []string) error {
+	if len(operands) == 0 {
+		return nil
+	}
+	return fmt.Errorf("unexpected arguments: %s", strings.Join(operands, " "))
+}
+
+func exitIfUnexpectedOperands(fs *flag.FlagSet) {
+	if err := unexpectedOperandsError(fs.Args()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		fs.Usage()
+		os.Exit(2)
+	}
+}
+
 func argvFlagConsumesValue(name string) bool {
 	switch name {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
-		"tui", "standalone", "local-model":
+		"tui", "standalone", "local-model", "version":
 		return false
 	default:
 		return name != ""
