@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -277,6 +279,11 @@ func mergeAuthSaveDelta(target, before, after *Auth, preserveConcurrent bool) {
 				if d.IsNil() {
 					d.Set(reflect.MakeMap(d.Type()))
 				}
+				if field.Name == "ModelStates" && newValue.IsValid() && !newValue.IsNil() {
+					if ms, ok := newValue.Interface().(*ModelState); ok {
+						newValue = reflect.ValueOf(ms.Clone())
+					}
+				}
 				d.SetMapIndex(key, newValue)
 			}
 			continue
@@ -284,6 +291,39 @@ func mergeAuthSaveDelta(target, before, after *Auth, preserveConcurrent bool) {
 		if !preserveConcurrent {
 			d.Set(n)
 		}
+	}
+	mergeRuntimeCooldownSaveDelta(target, before, after, preserveConcurrent)
+}
+
+func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurrent bool) {
+	if target == nil || before == nil || after == nil {
+		return
+	}
+	if !after.forceCooldownUntil.Equal(before.forceCooldownUntil) && (!preserveConcurrent || target.forceCooldownUntil.Equal(before.forceCooldownUntil)) {
+		target.forceCooldownUntil = after.forceCooldownUntil
+	}
+	if !after.credQuotaForceUntil.Equal(before.credQuotaForceUntil) && (!preserveConcurrent || target.credQuotaForceUntil.Equal(before.credQuotaForceUntil)) {
+		target.credQuotaForceUntil = after.credQuotaForceUntil
+	}
+	if after.forceCooldownSeeded != before.forceCooldownSeeded && (!preserveConcurrent || target.forceCooldownSeeded == before.forceCooldownSeeded) {
+		target.forceCooldownSeeded = after.forceCooldownSeeded
+	}
+	if after.cooldownRecordedSeq != before.cooldownRecordedSeq && (!preserveConcurrent || target.cooldownRecordedSeq == before.cooldownRecordedSeq) {
+		target.cooldownRecordedSeq = after.cooldownRecordedSeq
+	}
+	if !maps.Equal(after.Quota.cooldownSignals, before.Quota.cooldownSignals) && (!preserveConcurrent || maps.Equal(target.Quota.cooldownSignals, before.Quota.cooldownSignals)) {
+		target.Quota.cooldownSignals = maps.Clone(after.Quota.cooldownSignals)
+	}
+	if after.Quota.cooldownEvaluated != before.Quota.cooldownEvaluated && (!preserveConcurrent || target.Quota.cooldownEvaluated == before.Quota.cooldownEvaluated) {
+		target.Quota.cooldownEvaluated = after.Quota.cooldownEvaluated
+	}
+	if (before.Unavailable || before.Quota.Exceeded) &&
+		after.Unavailable == before.Unavailable &&
+		after.NextRetryAfter.Equal(before.NextRetryAfter) &&
+		!target.Unavailable && target.NextRetryAfter.IsZero() &&
+		(!target.Quota.Exceeded || target.Quota.NextRecoverAt.IsZero()) {
+		target.forceCooldownUntil = time.Time{}
+		target.credQuotaForceUntil = time.Time{}
 	}
 }
 

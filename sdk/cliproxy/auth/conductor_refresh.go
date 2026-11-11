@@ -1014,13 +1014,34 @@ func applyDevinQuotaRestoration(auth, existing *Auth, now time.Time) bool {
 		}
 		resetModelState(state, now)
 	}
-	auth.Status = StatusActive
-	auth.StatusMessage = ""
-	auth.LastError = nil
-	auth.Unavailable = false
-	auth.NextRetryAfter = time.Time{}
+	independentForce := effectiveAuthForceUntil(existing)
+	auth.credQuotaForceUntil = time.Time{}
+	auth.forceCooldownSeeded = true
+	if independentForce.After(now) {
+		auth.forceCooldownUntil = independentForce
+		auth.Unavailable = true
+		auth.NextRetryAfter = independentForce
+		auth.Status = StatusError
+		if isForceCooldownError(existing.LastError) {
+			auth.LastError = cloneError(existing.LastError)
+			auth.StatusMessage = existing.StatusMessage
+		} else {
+			auth.LastError = nil
+			auth.StatusMessage = ErrorCodeForceCooldown
+		}
+	} else {
+		auth.forceCooldownUntil = time.Time{}
+		auth.Status = StatusActive
+		auth.StatusMessage = ""
+		auth.LastError = nil
+		auth.Unavailable = false
+		auth.NextRetryAfter = time.Time{}
+	}
 	if len(auth.ModelStates) > 0 {
 		updateAggregatedAvailability(auth, now)
+		if auth.Unavailable && auth.Status == StatusActive {
+			auth.Status = StatusError
+		}
 	}
 	return true
 }
