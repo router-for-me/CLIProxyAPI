@@ -21,6 +21,8 @@ func TestArgvRequestsVersion(t *testing.T) {
 		{name: "subcommand", args: []string{"version"}, want: true},
 		{name: "assigned true", args: []string{"--version=true"}, want: true},
 		{name: "assigned false", args: []string{"--version=false"}, want: false},
+		{name: "last flag wins", args: []string{"--version=false", "--version"}, want: true},
+		{name: "last flag wins false", args: []string{"--version", "--version=false"}, want: false},
 		{name: "after config", args: []string{"--config", "config.yaml", "--version"}, want: true},
 		{name: "stops at terminator", args: []string{"--", "--version"}, want: false},
 		{name: "not a flag", args: []string{"--config", "config.yaml"}, want: false},

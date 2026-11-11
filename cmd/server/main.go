@@ -171,7 +171,7 @@ func main() {
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
-	flag.Bool("version", false, "Print version and exit")
+	versionRequested := flag.Bool("version", false, "Print version and exit")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -211,6 +211,13 @@ func main() {
 	// Parse the command-line flags.
 	flag.Parse()
 	exitIfUnexpectedOperands(flag.CommandLine)
+	if *versionRequested {
+		// The banner above already printed the version unless stdout is kept clean for JSON.
+		if isJSONDiscover {
+			fmt.Printf("CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate)
+		}
+		os.Exit(0)
+	}
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -979,33 +986,14 @@ func argvEnablesBoolFlag(args []string, name string) bool {
 	return enabled
 }
 
+// argvRequestsVersion reports a version request before plugin flags are
+// registered. The last -version flag wins, like flag.Parse. main also checks
+// the parsed -version value, which covers argv this early scan cannot read.
 func argvRequestsVersion(args []string) bool {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			break
-		}
-		if i == 0 && arg == "version" {
-			return true
-		}
-		if arg == "-" || !strings.HasPrefix(arg, "-") {
-			break
-		}
-		flagName, value, hasValue := splitArgvFlag(arg)
-		if flagName == "version" {
-			if !hasValue {
-				return true
-			}
-			parsed, errParse := strconv.ParseBool(value)
-			return errParse == nil && parsed
-		}
-		if !hasValue && argvFlagConsumesValue(flagName) {
-			if i+1 < len(args) && args[i+1] != "--" {
-				i++
-			}
-		}
+	if len(args) > 0 && args[0] == "version" {
+		return true
 	}
-	return false
+	return argvEnablesBoolFlag(args, "version")
 }
 
 func unexpectedOperandsError(operands []string) error {
