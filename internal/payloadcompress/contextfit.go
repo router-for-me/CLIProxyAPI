@@ -6,17 +6,19 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	log "github.com/sirupsen/logrus"
 )
 
 // Reactive context-fit trim, a port of upstream OmniRoute's compressContext
-// safety pass (open-sse/services/contextManager.ts): when the estimated
-// message tokens exceed the model context window minus a reserve, run the
-// lossless-ish layers in upstream order (trim tool results, prune old inline
-// images, strip thinking from non-last assistant turns) and fall back to an
-// aggressive purify of the history if the body is still over target. The pass
-// is independent of the optional prompt-compression engines and gated solely
-// on compression.context-trim.enabled (default on, like upstream).
+// safety pass (open-sse/services/contextManager.ts) driven by the two-pass
+// structure of chatCore.ts:1925-2085. The proactive pass fires when the
+// messages-only estimate exceeds the proactive threshold and trims to it; the
+// last-resort pass fires only when the whole input (messages, tools, system,
+// instructions) still reaches the ceiling and trims to ceiling minus the tools
+// reserve and one token. Layers run in upstream order (trim tool results, prune
+// old inline images, strip thinking from non-last assistant turns), with an
+// aggressive purify of the history as the last layer. The pass is independent
+// of the optional prompt-compression engines and gated solely on
+// compression.context-trim.enabled (default on, like upstream).
 
 // Constants extracted from upstream contextManager.ts.
 const (
@@ -28,49 +30,76 @@ const (
 	// Rough chars-per-token ratio for the trigger estimate (CHARS_PER_TOKEN).
 	// This is a trigger heuristic, not a tokenizer.
 	contextTrimCharsPerToken = 4
-	// Reserve clamp: upstream clamps the 15% default to [256, 16000] tokens.
-	contextTrimMinReserve  = 256
-	contextTrimMaxReserve  = 16000
-	contextTrimPlaceholder = "[Earlier image removed to fit context window]"
-	contextTrimSuffix      = "\n... [truncated]"
+	contextTrimPlaceholder   = "[Earlier image removed to fit context window]"
+	contextTrimSuffix        = "\n... [truncated]"
 	// Byte-stable: no per-request counts so the system prompt prefix stays
 	// cacheable across a growing conversation (upstream #14600).
 	contextTrimDropNotice = "[Context trimmed: older messages were removed to fit the context window]"
+	// Upstream writes this into an assistant turn left with no content after the
+	// thinking strip (contextManager.ts:745).
+	contextTrimThinkingPlaceholder = "[thinking compressed]"
 	// Upstream keeps this many newest inline images.
 	contextTrimDefaultKeepImages = 2
+	// Upstream getTokenLimit fallbacks (DEFAULT_LIMITS, contextManager.ts:13) for
+	// a model the registry does not know.
+	contextTrimFallbackClaude  = 200000
+	contextTrimFallbackGemini  = 1000000
+	contextTrimFallbackCodex   = 400000
+	contextTrimFallbackDefault = 128000
+	// Which pass fired, recorded on ContextFitStats.Pass.
+	contextTrimPassProactive  = "proactive"
+	contextTrimPassLastResort = "last_resort"
 )
 
 // ContextFitStats reports what the reactive trim did for one request.
 type ContextFitStats struct {
 	Applied bool
-	Limit   int // resolved context window; 0 means unknown (pass skipped)
-	Before  int // estimated message tokens before the pass
-	After   int // estimated message tokens after the pass
+	Limit   int    // resolved context window
+	Pass    string // proactive, last_resort, or "proactive,last_resort"
+	Before  int    // estimated message tokens before the passes
+	After   int    // estimated message tokens after the passes
 	Layers  []string
 }
 
 // ContextTrimLimit resolves the context window for a model from the registry:
 // the explicit per-model MaxContextLength override wins over ContextLength.
-// Zero means the registry has no window data for the model.
+// A model the registry does not know falls back to upstream's provider defaults
+// (contextManager.ts resolveTokenLimit), so the pass still runs.
 func ContextTrimLimit(model string) int {
-	if model == "" {
-		return 0
+	if model != "" {
+		if info := registry.LookupModelInfo(model); info != nil {
+			if info.MaxContextLength > 0 {
+				return info.MaxContextLength
+			}
+			if info.ContextLength > 0 {
+				return info.ContextLength
+			}
+		}
 	}
-	info := registry.LookupModelInfo(model)
-	if info == nil {
-		return 0
-	}
-	if info.MaxContextLength > 0 {
-		return info.MaxContextLength
-	}
-	return info.ContextLength
+	return contextTrimFallbackLimit(model)
 }
 
-// ApplyContextFit runs the reactive context-trim pass over the doc in place.
+// contextTrimFallbackLimit is the tail of upstream resolveTokenLimit: a window
+// hinted by the model name, then the generic 128000 catch-all.
+func contextTrimFallbackLimit(model string) int {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "claude"):
+		return contextTrimFallbackClaude
+	case strings.Contains(m, "gemini"):
+		return contextTrimFallbackGemini
+	case strings.Contains(m, "gpt"), strings.Contains(m, "o1"),
+		strings.Contains(m, "o3"), strings.Contains(m, "o4"),
+		strings.Contains(m, "codex"):
+		return contextTrimFallbackCodex
+	}
+	return contextTrimFallbackDefault
+}
+
+// ApplyContextFit runs the reactive context-trim passes over the doc in place.
 // Supported shapes (detected by top-level array key, provider-final at this
-// stage): Anthropic/OpenAI chat "messages", Codex Responses "input",
-// Gemini "contents". Any other shape is a clean no-op, as is a model without
-// registry window data.
+// stage): Anthropic/OpenAI chat "messages", Codex Responses "input", Gemini
+// "contents". Any other shape is a clean no-op.
 func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) ContextFitStats {
 	var st ContextFitStats
 	if doc == nil {
@@ -81,35 +110,54 @@ func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) Conte
 		model = m
 	}
 	limit := ContextTrimLimit(model)
-	if limit <= 0 {
-		// Upstream resolves a provider default window when the registry has no
-		// entry (e.g. Claude 200000); we skip instead — documented deviation.
-		log.Debugf("context-trim: no context window known for model %q; skipping", model)
-		return st
-	}
 	path, messages := contextTrimArray(doc)
 	if messages == nil {
 		return st
 	}
 	st.Limit = limit
-	reserve := limit * trim.EffectiveReservePercent() / 100
-	if reserve < contextTrimMinReserve {
-		reserve = contextTrimMinReserve
+	// Pass 1 target: floor((ceiling - tools reserve) * ratio), floored at 1.
+	threshold := (limit - contextTrimToolsReserve(doc)) * trim.EffectiveProactiveThresholdPercent() / 100
+	if threshold < 1 {
+		threshold = 1
 	}
-	if reserve > contextTrimMaxReserve {
-		reserve = contextTrimMaxReserve
+	st.Before = contextTrimEstimate(messages)
+	if st.Before > threshold {
+		st.notePass(contextTrimPassProactive)
+		messages = contextTrimLayers(doc, path, messages, threshold, trim, &st)
 	}
-	if reserve >= limit {
-		reserve = limit - 1
+	// Pass 2: last resort against the concrete input budget, not the threshold.
+	total := contextTrimEstimate(messages) + contextTrimToolsReserve(doc) +
+		contextTrimMeasure(doc.Get("system")) + contextTrimMeasure(doc.Get("instructions"))
+	if total >= limit {
+		target := limit - contextTrimToolsReserve(doc) - 1
+		if target < 1 {
+			target = 1
+		}
+		st.notePass(contextTrimPassLastResort)
+		messages = contextTrimLayers(doc, path, messages, target, trim, &st)
 	}
-	target := limit - reserve
+	st.finish(contextTrimEstimate(messages))
+	return st
+}
 
+// contextTrimToolsReserve is upstream's `estimateTokens(body.tools)`: the whole
+// tools array measured as text. Pass 1 subtracts it from the ceiling before
+// applying the proactive ratio (chatCore.ts:1945).
+func contextTrimToolsReserve(doc *ojson.Doc) int {
+	tools := doc.Get("tools")
+	if !tools.IsArray() {
+		return 0
+	}
+	return (len(tools.Raw) + contextTrimCharsPerToken - 1) / contextTrimCharsPerToken
+}
+
+// contextTrimLayers applies the upstream layer chain in order and stops as soon
+// as the message estimate fits target. Applied layers are recorded on st.
+func contextTrimLayers(doc *ojson.Doc, path string, messages []ojson.Result, target int, trim ContextTrimConfig, st *ContextFitStats) []ojson.Result {
 	tokens := contextTrimEstimate(messages)
-	st.Before = tokens
 	if tokens <= target {
-		return st
+		return messages
 	}
-
 	apply := func(name string, layer func([]ojson.Result) ([]ojson.Result, bool)) {
 		next, changed := layer(messages)
 		if !changed {
@@ -120,22 +168,19 @@ func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) Conte
 		st.Layers = append(st.Layers, name)
 		tokens = contextTrimEstimate(messages)
 	}
-
 	// Upstream layer order: trim tools, prune images, compress thinking,
 	// then last-resort purify.
 	apply("trim_tools", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimToolResults(items, trim.EffectiveToolResultChars())
 	})
 	if tokens <= target {
-		st.finish(tokens)
-		return st
+		return messages
 	}
 	apply("prune_images", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimPruneImages(items, trim.EffectiveKeepLatestImages())
 	})
 	if tokens <= target {
-		st.finish(tokens)
-		return st
+		return messages
 	}
 	// Anthropic thinking block_binding validation still references preserved
 	// thinking blocks (see applyClaudePreservedThinkingBindingDoc); removing
@@ -144,14 +189,21 @@ func ApplyContextFit(doc *ojson.Doc, model string, trim ContextTrimConfig) Conte
 		apply("strip_thinking", contextTrimThinking)
 	}
 	if tokens <= target {
-		st.finish(tokens)
-		return st
+		return messages
 	}
 	apply("purify", func(items []ojson.Result) ([]ojson.Result, bool) {
 		return contextTrimPurify(items, target)
 	})
-	st.finish(tokens)
-	return st
+	return messages
+}
+
+// notePass records which pass fired; a request can fire both.
+func (s *ContextFitStats) notePass(pass string) {
+	if s.Pass == "" {
+		s.Pass = pass
+		return
+	}
+	s.Pass += "," + pass
 }
 
 func (s *ContextFitStats) finish(tokens int) {
@@ -444,22 +496,34 @@ func contextTrimBlocks(item ojson.Result) []ojson.Result {
 
 // ─── Layer 3: strip thinking from non-last assistant turns ────────────────
 
-// contextTrimThinking removes thinking/reasoning blocks from every assistant
-// turn except the last one. Codex "reasoning" items without a role follow the
-// same rule.
+// contextTrimThinking strips thinking blocks from every assistant turn except
+// the last one, matching upstream compressThinking (contextManager.ts:728 keeps
+// only block.type === "thinking" as a filter target). Role-less "reasoning"
+// items are stripped only when they belong to an older turn: ones positioned
+// after the last user message carry the live tool loop and must be replayed.
 func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 	lastAssistant := -1
+	lastUser := -1
 	for i := len(items) - 1; i >= 0; i-- {
-		if items[i].Get("role").String() == "assistant" {
-			lastAssistant = i
+		switch items[i].Get("role").String() {
+		case "assistant":
+			if lastAssistant < 0 {
+				lastAssistant = i
+			}
+		case "user":
+			if lastUser < 0 {
+				lastUser = i
+			}
+		}
+		if lastAssistant >= 0 && lastUser >= 0 {
 			break
 		}
 	}
 	changed := false
 	out := make([]ojson.Result, 0, len(items))
 	for i, item := range items {
-		// Codex-style orphan reasoning items.
-		if item.Get("type").String() == "reasoning" && i != lastAssistant {
+		// Codex/Responses reasoning items carry no role: keep the live turn's.
+		if item.Get("type").String() == "reasoning" && lastUser >= 0 && i < lastUser {
 			changed = true
 			continue
 		}
@@ -485,7 +549,9 @@ func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 			}
 			raw := contextTrimEditItem(item.Raw, func(d *ojson.Doc) {
 				if len(next) == 0 {
-					_ = d.Set("content", "")
+					// Upstream marks a thinking-only turn instead of emptying it
+					// (contextManager.ts:745); empty assistant content is rejected.
+					_ = d.Set("content", contextTrimThinkingPlaceholder)
 				} else {
 					_ = d.SetRaw("content", "["+strings.Join(next, ",")+"]")
 				}
@@ -514,7 +580,7 @@ func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 				}
 				raw := contextTrimEditItem(item.Raw, func(d *ojson.Doc) {
 					if len(next) == 0 {
-						_ = d.Set("content.parts", `[]`)
+						_ = d.SetRaw("content.parts", `[{"text":"`+contextTrimThinkingPlaceholder+`"}]`)
 					} else {
 						_ = d.SetRaw("content.parts", "["+strings.Join(next, ",")+"]")
 					}
@@ -524,13 +590,11 @@ func contextTrimThinking(items []ojson.Result) ([]ojson.Result, bool) {
 				continue
 			}
 		}
-		// OpenAI chat assistant "reasoning_content" / "reasoning" strings.
+		// OpenAI chat assistant "reasoning" string. "reasoning_content" is left
+		// alone: upstream does not strip it, and providers that require the
+		// reasoning replay answer a missing field with HTTP 400.
 		raw := item.Raw
 		itemChanged := false
-		if item.Get("reasoning_content").Exists() {
-			raw = contextTrimEditItem(raw, func(d *ojson.Doc) { _ = d.Delete("reasoning_content") })
-			itemChanged = true
-		}
 		if item.Get("reasoning").Exists() && item.Get("reasoning").Type == ojson.String {
 			raw = contextTrimEditItem(raw, func(d *ojson.Doc) { _ = d.Delete("reasoning") })
 			itemChanged = true
@@ -549,8 +613,10 @@ func contextTrimIsThinkingBlock(b ojson.Result) bool {
 	if !b.IsObject() {
 		return false
 	}
+	// Upstream filters "thinking" only (contextManager.ts:744); a redacted
+	// thinking block is an opaque replay token, not reasoning text, so it stays.
 	switch b.Get("type").String() {
-	case "thinking", "redacted_thinking", "reasoning":
+	case "thinking", "reasoning":
 		return true
 	}
 	return false
