@@ -50,6 +50,7 @@ type PostgresStore struct {
 	persistAuthFn      func(ctx context.Context, relID string, data []byte) error
 	refreshSchemaMu    sync.Mutex
 	refreshSchemaReady bool
+	refreshClaims      sync.Map
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.

@@ -44,11 +44,31 @@ type WeightedRoundRobinSelector struct {
 	states     map[[32]byte]*weightedPoolState
 	stateCount int
 	maxKeys    int
+	// largeStates holds one shared dynamic accumulator per (route, priority, transport)
+	// bucket once a pool exceeds maxExactWeightedPoolMembers, preserving rotation credits
+	// across transient retry exclusions and cooldowns.
+	largeStates map[string]*weightedPoolState
+	largeOrder  []string
+}
+
+// UnwrapWeightedRoundRobinSelector extracts the underlying *WeightedRoundRobinSelector
+// from a bare selector or a SessionAffinitySelector wrapper.
+func UnwrapWeightedRoundRobinSelector(selector Selector) *WeightedRoundRobinSelector {
+	if weighted, ok := selector.(*WeightedRoundRobinSelector); ok {
+		return weighted
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		if weighted, okFallback := affinity.fallback.(*WeightedRoundRobinSelector); okFallback {
+			return weighted
+		}
+	}
+	return nil
 }
 
 type smoothWeightedState struct {
 	current map[string]int64
 	weights map[string]int64
+	peak    int
 }
 
 type weightedSelectorStateModelKey struct{}
@@ -1119,9 +1139,10 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 	return picked, nil
 }
 
-// maxSmoothWeightedStateEntries bounds a single accumulator map so credentials that are
-// removed permanently cannot leak entries. Real pools stay far below this bound, so the
-// transient subsets produced by retry exclusions and cooldowns are never pruned.
+// maxSmoothWeightedStateEntries is the floor bound on a single accumulator map so
+// permanently removed credentials cannot leak entries on small pools. Larger pools scale
+// their prune bound with the historical peak size (2*peak) so transient retry exclusions
+// and cooldowns never wipe accumulated credits.
 const maxSmoothWeightedStateEntries = 1024
 
 // prepare syncs the configured weights into the state without discarding accumulated
@@ -1130,6 +1151,9 @@ const maxSmoothWeightedStateEntries = 1024
 // affinity), because discarding credits there would collapse selection onto the first
 // candidate in slice order.
 func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if len(weights) > s.peak {
+		s.peak = len(weights)
+	}
 	if s.current == nil || weightsConfigChanged(s.weights, weights) {
 		s.current = make(map[string]int64, len(weights))
 	}
@@ -1142,10 +1166,18 @@ func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	s.pruneStale(weights)
 }
 
+func (s *smoothWeightedState) pruneLimit() int {
+	if scaled := 2 * s.peak; scaled > maxSmoothWeightedStateEntries {
+		return scaled
+	}
+	return maxSmoothWeightedStateEntries
+}
+
 // pruneStale drops entries for credentials outside the current candidate set, but only
-// once a map exceeds the safety bound, so ordinary transient exclusions keep their credits.
+// once a map exceeds the scaled safety bound, so transient exclusions keep their credits.
 func (s *smoothWeightedState) pruneStale(weights map[string]int64) {
-	if len(s.current) <= maxSmoothWeightedStateEntries && len(s.weights) <= maxSmoothWeightedStateEntries {
+	limit := s.pruneLimit()
+	if len(s.current) <= limit && len(s.weights) <= limit {
 		return
 	}
 	for authID := range s.current {
@@ -1235,6 +1267,28 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 	}
 	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
+	}
+	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
+		next := authForce
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(next) {
+			next = auth.Quota.NextRecoverAt
+		}
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, stateNext := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && stateNext.After(next) {
+					next = stateNext
+				}
+			}
+		}
+		return true, blockReasonCooldown, next
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		credNext := auth.Quota.NextRecoverAt
@@ -2064,6 +2118,30 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
+	}
+}
+
+// ForgetAuth forwards permanent credential removal to the fallback selector so
+// weighted round-robin accounting can prune deregistered credentials without
+// disturbing credits of transiently excluded credentials.
+func (s *SessionAffinitySelector) ForgetAuth(authID string) {
+	s.ForgetAuthUpTo(authID, ^uint64(0), ^uint64(0))
+}
+
+// ForgetAuthUpTo forwards epoch-gated permanent credential removal to the fallback selector
+// so delayed removals never evict a newly re-registered credential with the same ID.
+func (s *SessionAffinitySelector) ForgetAuthUpTo(authID string, maxEpoch, maxGen uint64) {
+	if s == nil || authID == "" {
+		return
+	}
+	if epochForgetter, ok := s.fallback.(interface {
+		ForgetAuthUpTo(string, uint64, uint64)
+	}); ok && epochForgetter != nil {
+		epochForgetter.ForgetAuthUpTo(authID, maxEpoch, maxGen)
+		return
+	}
+	if forgetter, ok := s.fallback.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
 	}
 }
 

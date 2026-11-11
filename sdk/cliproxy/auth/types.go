@@ -151,7 +151,10 @@ type Auth struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq uint64    `json:"-"`
+	forceCooldownUntil  time.Time `json:"-"`
+	credQuotaForceUntil time.Time `json:"-"`
+	forceCooldownSeeded bool      `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -400,7 +403,9 @@ type ModelState struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq uint64 `json:"-"`
+	cooldownRecordedSeq uint64    `json:"-"`
+	forceCooldownUntil  time.Time `json:"-"`
+	forceCooldownSeeded bool      `json:"-"`
 	// credentialQuotaShadow holds this model's independent (own-failure)
 	// cooldown layer while the outer fields present the auth-level
 	// credential quota propagated over it, so quota restoration can drop

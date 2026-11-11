@@ -45,6 +45,9 @@ func (j *FileRefreshJournal) RefreshClaim(ctx context.Context, key string) (bool
 		return false, errMkdir
 	}
 	if errSync := syncRefreshClaimDirectories(path); errSync != nil {
+		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			log.Warnf("remove unsynced refresh claim: %v", errRemove)
+		}
 		return false, errSync
 	}
 	return true, nil
@@ -99,6 +102,28 @@ func (j *FileRefreshJournal) RefreshComplete(ctx context.Context, key string, re
 		return errRename
 	}
 	return syncRefreshDirectory(path)
+}
+
+func (j *FileRefreshJournal) RefreshRelease(ctx context.Context, key string) error {
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	path, errPath := j.path(key)
+	if errPath != nil {
+		return errPath
+	}
+	if _, errStat := os.Stat(filepath.Join(path, "receipt")); errStat == nil {
+		return fmt.Errorf("refresh receipt already exists")
+	} else if !errors.Is(errStat, os.ErrNotExist) {
+		return errStat
+	}
+	if errRemove := os.Remove(path); errRemove != nil {
+		if errors.Is(errRemove, os.ErrNotExist) {
+			return nil
+		}
+		return errRemove
+	}
+	return syncRefreshDirectory(filepath.Dir(path))
 }
 
 // Sync every directory entry that can have been created by MkdirAll before
