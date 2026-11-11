@@ -208,6 +208,20 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 			mutated = true
 		}
 	}
+	// MCP tool-description compression: upstream's mcpDescriptionCompressionEnabled
+	// step (default on) runs whatever the compression engines are set to, so it
+	// is gated by its own flag and sits outside compressionEnabled.
+	if root == "" && cfg.Compression.MCPDescriptionEnabledOn() {
+		if n := payloadcompress.ApplyMCPDescriptionCompression(doc); n > 0 {
+			mutated = true
+			log.WithFields(log.Fields{
+				"module": "payloadcompress",
+				"event":  "mcp_description_compress",
+				"model":  model,
+				"tools":  n,
+			}).Debugf("mcp description compression: %d tool descriptions shortened", n)
+		}
+	}
 	// Reactive context-fit trim: ported from upstream's compressContext.
 	// Gated solely on context-trim.enabled, independent of the compression
 	// engines, and applied before user payload rules (final barrier).
@@ -217,10 +231,12 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 				"module":          "payloadcompress",
 				"event":           "context_trim",
 				"model":           model,
+				"pass":            fit.Pass,
+				"context_limit":   fit.Limit,
 				"estimate_before": fit.Before,
 				"estimate_after":  fit.After,
 				"layers":          fit.Layers,
-			}).Infof("context trim: %d -> %d estimated tokens (layers: %v)", fit.Before, fit.After, fit.Layers)
+			}).Infof("context trim (%s pass): %d -> %d estimated tokens (layers: %v)", fit.Pass, fit.Before, fit.After, fit.Layers)
 		}
 	}
 	rules := cfg.Payload

@@ -331,11 +331,19 @@ requests:
   #     trigger-tokens: 100000    #   Default: 100000 input tokens before the provider clears.
   #     keep-tool-uses: 3         #   Default: 3 recent tool uses survive a clearing pass.
   #   context-trim:              # Reactive context-fit trim (safety pass). ON by default.
-  #     enabled: true            #   Fires when the request exceeds the model context
-  #                              #   window minus the reserve, regardless of `enabled` above.
-  #     reserve-percent: 15      #   Default: 15, share of the window kept for the response.
+  #     enabled: true            #   Two passes, regardless of `enabled` above: the proactive
+  #                              #   pass fires when the message estimate exceeds the threshold
+  #                              #   below, the last-resort pass when the whole input still
+  #                              #   reaches the model context window.
+  #     proactive-threshold-percent: 70 # Default: 70, upstream's proactive ratio applied to
+  #                              #   (window - tool-schema tokens).
   #     tool-result-chars: 2000  #   Default: 2000, per tool_result/tool message body cap.
   #     keep-latest-images: 2    #   Default: 2, inline base64 images kept during the prune pass.
+  #   mcp-description-enabled: false # Compress filler out of tool descriptions. Off by default
+  #                              # here (upstream defaults it on for its own MCP tools): it is its
+  #                              # own step, so it runs whatever `enabled` above says, but a
+  #                              # client-authored description can carry grammar markers it must
+  #                              # not rewrite.
   #   live-zone:                   # Reuse the previous turn's compressed prefix. Off by
   #     enabled: false             #   default. Keys on the same session identity that
   #                                #   affinity routing uses (canonical, LCP, execution or

@@ -46,9 +46,11 @@ type ContextEditingConfig struct {
 // where the reactive pass is a safety net independent of the engines.
 type ContextTrimConfig struct {
 	Enabled *bool `yaml:"enabled" json:"enabled"`
-	// ReservePercent is how much of the context window stays unused so the
-	// response still fits. Defaults to 15, upstream's reserveTokens heuristic.
-	ReservePercent int `yaml:"reserve-percent" json:"reserve-percent"`
+	// ProactiveThresholdPercent is the pass-1 trigger: the share of the window
+	// (minus the tools reserve) the messages estimate may reach before the
+	// proactive trim fires. Defaults to 70, upstream's
+	// PROACTIVE_COMPRESSION_DEFAULT_RATIO (0.7).
+	ProactiveThresholdPercent int `yaml:"proactive-threshold-percent" json:"proactive-threshold-percent"`
 	// ToolResultChars caps each tool_result/tool message body. Defaults to
 	// 2000, the upstream trimToolMessages cap.
 	ToolResultChars int `yaml:"tool-result-chars" json:"tool-result-chars"`
@@ -57,16 +59,17 @@ type ContextTrimConfig struct {
 	KeepLatestImages int `yaml:"keep-latest-images" json:"keep-latest-images"`
 }
 
-// EffectiveReservePercent resolves the reserve percentage with the upstream
-// default and sanity bounds: a huge reserve would make every request trim.
-func (c ContextTrimConfig) EffectiveReservePercent() int {
-	if c.ReservePercent <= 0 {
-		return 15
+// EffectiveProactiveThresholdPercent resolves the pass-1 ratio with the upstream
+// default and a sanity bound: 100 would never leave the pass room to trigger
+// before the last-resort ceiling.
+func (c ContextTrimConfig) EffectiveProactiveThresholdPercent() int {
+	if c.ProactiveThresholdPercent <= 0 {
+		return 70
 	}
-	if c.ReservePercent > 90 {
-		return 90
+	if c.ProactiveThresholdPercent > 99 {
+		return 99
 	}
-	return c.ReservePercent
+	return c.ProactiveThresholdPercent
 }
 
 // EffectiveToolResultChars resolves the tool-result trim cap; non-positive
@@ -122,10 +125,18 @@ type Config struct {
 	// ContextEditing delegates stale tool-use clearing to Anthropic itself.
 	ContextEditing ContextEditingConfig `yaml:"context-editing" json:"context-editing"`
 	// ContextTrim is the reactive context-fit trim: a safety pass, ported from
-	// upstream's compressContext, that runs when the request still exceeds the
-	// model context window minus a reserve. Independent of Enabled: upstream
-	// compacts reactively even when the compression engines are off.
+	// upstream's compressContext, that runs when the request exceeds the
+	// proactive threshold or the model context window. Independent of Enabled:
+	// upstream compacts reactively even when the compression engines are off.
 	ContextTrim ContextTrimConfig `yaml:"context-trim" json:"context-trim"`
+	// MCPDescriptionEnabled turns tool-description compression on. It mirrors
+	// upstream's mcpDescriptionCompressionEnabled (compression/types.ts:429) in
+	// that it is its own pipeline step, independent of Enabled. It is opt-in
+	// here: upstream rewrites the descriptions of the MCP tools it owns, while
+	// this port would rewrite descriptions a client authored, where filler
+	// removal can corrupt grammar definitions and markers (see
+	// ApplyMCPDescriptionCompression).
+	MCPDescriptionEnabled bool `yaml:"mcp-description-enabled" json:"mcp-description-enabled"`
 	// DefaultCombo names the combo used when no other combo matches the model.
 	DefaultCombo string `yaml:"default-combo" json:"default-combo"`
 	// Combos lists named, ordered engine pipelines.
@@ -147,6 +158,11 @@ type Config struct {
 	// in the first system message with stable placeholders plus a value tail.
 	// before the engines run and restores them afterwards. Off by default.
 	QuantumLock bool `yaml:"quantum-lock" json:"quantum-lock"`
+}
+
+// MCPDescriptionEnabledOn reports whether tool-description compression runs.
+func (c Config) MCPDescriptionEnabledOn() bool {
+	return c.MCPDescriptionEnabled
 }
 
 // PrefixFreezeConfig mirrors upstream's COMPRESSION_PREFIX_FREEZE_* settings.
@@ -558,12 +574,6 @@ func (c *Config) Sanitize() {
 		c.ContextEditing.KeepToolUses = defaultContextEditKeepToolUses
 	}
 	// ContextTrim normalization: zero-values snap to upstream defaults.
-	if c.ContextTrim.ReservePercent <= 0 {
-		c.ContextTrim.ReservePercent = 15
-	}
-	if c.ContextTrim.ReservePercent > 90 {
-		c.ContextTrim.ReservePercent = 90
-	}
 	if c.ContextTrim.ToolResultChars <= 0 {
 		c.ContextTrim.ToolResultChars = 2000
 	}

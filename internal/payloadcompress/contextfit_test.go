@@ -56,8 +56,8 @@ func TestContextTrimDefaults(t *testing.T) {
 	if !cfg.ContextTrim.EnabledOn() {
 		t.Fatalf("context trim must default to enabled")
 	}
-	if got := cfg.ContextTrim.EffectiveReservePercent(); got != 15 {
-		t.Fatalf("reserve percent default = %d, want 15", got)
+	if got := cfg.ContextTrim.EffectiveProactiveThresholdPercent(); got != 70 {
+		t.Fatalf("proactive threshold default = %d, want 70", got)
 	}
 	if got := cfg.ContextTrim.EffectiveToolResultChars(); got != 2000 {
 		t.Fatalf("tool result chars default = %d, want 2000", got)
@@ -79,14 +79,22 @@ func TestContextTrimNoopUnderLimit(t *testing.T) {
 	}
 }
 
-func TestContextTrimUnknownModelSkips(t *testing.T) {
+func TestContextTrimUnknownModelUsesFallbackWindow(t *testing.T) {
+	// Upstream resolves a provider default window (resolveTokenLimit), so an
+	// unknown model still trims instead of skipping.
 	body := strings.Replace(contextTrimBody(contextFitFiller(3000000)), `"model":"devin/swe-1-6-slow",`, ``, 1)
 	doc, stats := contextFitOnDoc(t, body, "no-such-model-anywhere", ContextTrimConfig{})
-	if len(stats.Layers) != 0 || stats.Before != 0 {
-		t.Fatalf("unknown model must skip the pass, stats %+v", stats)
+	if stats.Limit != contextTrimFallbackDefault {
+		t.Fatalf("unknown model limit = %d, want %d", stats.Limit, contextTrimFallbackDefault)
 	}
-	if doc.Get("messages").Array()[1].Get("content.0.thinking").String() == "" {
-		t.Fatalf("unknown model must leave the body unchanged")
+	if stats.Pass != contextTrimPassProactive || !stats.applied("trim_tools") {
+		t.Fatalf("unknown model must trim on the fallback window, stats %+v", stats)
+	}
+	if stats.After >= stats.Before {
+		t.Fatalf("fallback trim did not shrink the body: %d -> %d", stats.Before, stats.After)
+	}
+	if doc.Get("messages").Array()[2].Get("content.0.content").String() == "" {
+		t.Fatalf("tool result untouched on the fallback window")
 	}
 }
 
@@ -285,6 +293,43 @@ func TestContextTrimFixToolPairsResponsesDroppedCallOrphans(t *testing.T) {
 		t.Fatalf("output of a dropped call must be dropped too, got %v", outputIDs)
 	}
 }
+func TestContextTrimFixToolPairsDropsOrphanToolUse(t *testing.T) {
+	// Anthropic tool_use blocks carry "id", not "tool_use_id"; a revert to
+	// tool_use_id here would silently stop dropping orphan tool_use blocks.
+	body := `{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"q"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"g","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ok"}]},` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}},{"type":"text","text":"mid"}]},` +
+		`{"role":"user","content":[{"type":"text","text":"last"}]}` +
+		`]}`
+	items := ojson.NewDocString(body).Get("messages").Array()
+	fixed := contextTrimFixToolPairs(items)
+	var paired, textKept bool
+	for _, it := range fixed {
+		if it.Get("role").String() != "assistant" {
+			continue
+		}
+		for _, b := range it.Get("content").Array() {
+			id := b.Get("id").String()
+			if id == "t1" {
+				t.Fatalf("orphan tool_use t1 must be dropped")
+			}
+			if id == "t2" {
+				paired = true
+			}
+			if b.Get("type").String() == "text" && b.Get("text").String() == "mid" {
+				textKept = true
+			}
+		}
+	}
+	if !paired {
+		t.Fatalf("paired tool_use t2 must survive")
+	}
+	if !textKept {
+		t.Fatalf("non-tool blocks in the orphan message must survive")
+	}
+}
 
 func TestContextTrimSkipStripThinkingWithBlockBinding(t *testing.T) {
 	// strip_thinking must not remove them; without the binding it must. Only two
@@ -325,4 +370,141 @@ func contextTrimHasThinkingBlock(doc *ojson.Doc) bool {
 		}
 	}
 	return false
+}
+
+// contextTrimToolsJSON builds a tools array whose JSON is about n bytes, so its
+// text estimate is roughly n/4 tokens (upstream's estimateTokens(body.tools)).
+func contextTrimToolsJSON(n int) string {
+	desc := `{"type":"function","name":"read_file","description":"` + contextFitFiller(n) + `"}`
+	return `[` + desc + `]`
+}
+
+func TestContextTrimProactiveThresholdUsesToolsReserve(t *testing.T) {
+	// 540000 chars of messages estimate at ~135004 tokens. The plain 70% of a
+	// 200000 window is 140000, so a tools-free body stays below the proactive
+	// threshold; a 20000-token tools reserve lowers it to 126000 and the pass
+	// fires, exactly as upstream chatCore.ts:1945 computes it.
+	msgs := `[{"role":"user","content":"` + contextFitFiller(540000) + `"}]`
+	withoutTools := `{"model":"devin/swe-1-6-slow","messages":` + msgs + `}`
+	_, plain := contextFitOnDoc(t, withoutTools, "devin/swe-1-6-slow", ContextTrimConfig{})
+	if plain.Pass != "" {
+		t.Fatalf("tools-free body must stay under the proactive threshold, pass %q", plain.Pass)
+	}
+	withTools := `{"model":"devin/swe-1-6-slow","tools":` + contextTrimToolsJSON(80000) + `,"messages":` + msgs + `}`
+	_, reserved := contextFitOnDoc(t, withTools, "devin/swe-1-6-slow", ContextTrimConfig{})
+	if reserved.Pass != contextTrimPassProactive {
+		t.Fatalf("tools reserve must lower the threshold and fire the proactive pass, pass %q", reserved.Pass)
+	}
+}
+
+func TestContextTrimLastResortPass(t *testing.T) {
+	// Small message history, but the whole input (instructions are counted like
+	// upstream estimateFinalInputTokenBreakdown) reaches the ceiling: only the
+	// last-resort pass can fire.
+	body := `{"model":"devin/swe-1-6-slow","instructions":"` + contextFitFiller(800000) +
+		`","messages":[{"role":"user","content":"hello"}]}`
+	_, stats := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{})
+	if stats.Pass != contextTrimPassLastResort {
+		t.Fatalf("pass = %q, want %q", stats.Pass, contextTrimPassLastResort)
+	}
+	if stats.Limit != 200000 {
+		t.Fatalf("limit = %d, want 200000", stats.Limit)
+	}
+}
+
+func TestContextTrimBothPasses(t *testing.T) {
+	// Messages over the proactive threshold, and tools plus system push the whole
+	// input past the ceiling after that pass: both passes fire, in order.
+	msgs := `[{"role":"user","content":"task"},` +
+		`{"role":"assistant","content":"` + contextFitFiller(400000) + `"},` +
+		`{"role":"user","content":"` + contextFitFiller(400000) + `"},` +
+		`{"role":"user","content":"final"}]`
+	body := `{"model":"devin/swe-1-6-slow","system":"` + contextFitFiller(150000) +
+		`","tools":` + contextTrimToolsJSON(360000) + `,"messages":` + msgs + `}`
+	_, stats := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{})
+	want := contextTrimPassProactive + "," + contextTrimPassLastResort
+	if stats.Pass != want {
+		t.Fatalf("pass = %q, want %q", stats.Pass, want)
+	}
+}
+
+func TestContextTrimProactiveThresholdConfig(t *testing.T) {
+	// A higher ratio means later trimming: the same body that fires at 70% does
+	// not fire at 95%.
+	msgs := `[{"role":"user","content":"` + contextFitFiller(540000) + `"}]`
+	body := `{"model":"devin/swe-1-6-slow","tools":` + contextTrimToolsJSON(80000) + `,"messages":` + msgs + `}`
+	_, later := contextFitOnDoc(t, body, "devin/swe-1-6-slow", ContextTrimConfig{ProactiveThresholdPercent: 95})
+	if later.Pass != "" {
+		t.Fatalf("95%% threshold must not fire on a 135k estimate, pass %q", later.Pass)
+	}
+}
+
+func TestContextTrimThinkingLeavesResponsesReasoningItems(t *testing.T) {
+	// Upstream compressThinking touches role-based messages only and never
+	// inspects Responses reasoning items, old turns included
+	// (contextManager.ts:728-750).
+	items := ojson.NewDocString(`{"input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"old"}]},` +
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"old turn"}],"encrypted_content":"old"},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"now"}]},` +
+		`{"type":"reasoning","summary":[{"type":"summary_text","text":"live"}],"encrypted_content":"live"},` +
+		`{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"c1","output":"ok"}]}`).Get("input").Array()
+	out, changed := contextTrimThinking(items)
+	if changed {
+		t.Fatalf("reasoning items must not be touched")
+	}
+	if len(out) != len(items) {
+		t.Fatalf("want all %d items kept, got %d", len(items), len(out))
+	}
+	if enc := out[1].Get("encrypted_content").String(); enc != "old" {
+		t.Fatalf("old reasoning item must survive, got %q", enc)
+	}
+	if enc := out[4].Get("encrypted_content").String(); enc != "live" {
+		t.Fatalf("live reasoning item must survive, got %q", enc)
+	}
+}
+
+func TestContextTrimThinkingPlaceholderForThinkingOnlyTurn(t *testing.T) {
+	// Upstream writes "[thinking compressed]" instead of empty content
+	// (contextManager.ts:745): empty assistant content can be rejected.
+	items := ojson.NewDocString(`{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"q"}]},` +
+		`{"role":"assistant","content":[{"type":"thinking","thinking":"secret"}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]}]}`).Get("messages").Array()
+	out, changed := contextTrimThinking(items)
+	if !changed || len(out) != 3 {
+		t.Fatalf("thinking-only turn must be rewritten, not dropped: changed=%v len=%d", changed, len(out))
+	}
+	if got := out[1].Get("content").String(); got != contextTrimThinkingPlaceholder {
+		t.Fatalf("content = %q, want %q", got, contextTrimThinkingPlaceholder)
+	}
+}
+
+func TestContextTrimThinkingKeepsReasoningContentAndRedacted(t *testing.T) {
+	// Upstream strips block.type "thinking" only: reasoning_content and
+	// redacted_thinking must be replayed for providers that require them.
+	items := ojson.NewDocString(`{"messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"q"}]},` +
+		`{"role":"assistant","reasoning_content":"keep me","content":[` +
+		`{"type":"thinking","thinking":"secret"},` +
+		`{"type":"redacted_thinking","data":"opaque"},` +
+		`{"type":"text","text":"answer"}]},` +
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]}]}`).Get("messages").Array()
+	out, changed := contextTrimThinking(items)
+	if !changed {
+		t.Fatal("thinking block must be stripped")
+	}
+	msg := out[1]
+	if got := msg.Get("reasoning_content").String(); got != "keep me" {
+		t.Fatalf("reasoning_content = %q, want it preserved", got)
+	}
+	var kinds []string
+	for _, b := range msg.Get("content").Array() {
+		kinds = append(kinds, b.Get("type").String())
+	}
+	if strings.Join(kinds, ",") != "redacted_thinking,text" {
+		t.Fatalf("content blocks = %v, want redacted_thinking,text", kinds)
+	}
 }
