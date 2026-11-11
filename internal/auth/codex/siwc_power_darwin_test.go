@@ -75,3 +75,25 @@ func TestSIWCRefreshDoesNotConsumeGrantWhenPowerStateUnavailable(t *testing.T) {
 		t.Fatalf("power-state error was lost: %v", errRefresh)
 	}
 }
+
+func TestSIWCRetryTreatsUnavailablePowerStateAsDeferral(t *testing.T) {
+	previous := ReadSIWCSystemState
+	t.Cleanup(func() { ReadSIWCSystemState = previous })
+	errProbe := errors.New("power-state probe unavailable")
+	probes := 0
+	ReadSIWCSystemState = func(context.Context) ([]byte, error) {
+		probes++
+		return nil, errProbe
+	}
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("token request sent without a known power state")
+		return nil, nil
+	})}}
+	_, errRefresh := auth.RefreshSIWCTokensWithRetry(context.Background(), "refresh", "oaiapp_probe", "", 3)
+	if !errors.Is(errRefresh, errProbe) || !errors.Is(errRefresh, ErrSIWCRefreshDeferred) {
+		t.Fatalf("unavailable power state must surface as a deferral: %v", errRefresh)
+	}
+	if probes != 1 {
+		t.Fatalf("deferral was retried: %d probes", probes)
+	}
+}
