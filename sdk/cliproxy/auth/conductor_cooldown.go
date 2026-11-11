@@ -979,6 +979,12 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	return changed
 }
 
+// isActiveForceCooldown reports whether the state carries an unexpired force_cooldown
+// that must survive config reloads even when cooling is disabled for the provider.
+func isActiveForceCooldown(lastError *Error, nextRetryAfter time.Time, now time.Time) bool {
+	return lastError != nil && lastError.Code == ErrorCodeForceCooldown && nextRetryAfter.After(now)
+}
+
 func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if auth == nil {
 		return false
@@ -990,15 +996,24 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	auth.forceCooldownUntil = time.Time{}
 	auth.credQuotaForceUntil = time.Time{}
 	auth.cooldownRecordedSeq = 0
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
-		auth.Unavailable = false
-		auth.NextRetryAfter = time.Time{}
-		applyCooldownFields(&auth.Quota, QuotaState{})
-		auth.UpdatedAt = now
-		changed = true
+	// Active force cooldowns (request-scoped continue/stop-and-cooldown) must survive
+	// config reloads even when disable-cooling is set: MarkResult deliberately overrides
+	// disableCooling for that error code, so erasing it here would silently re-select
+	// credentials the scheduler just cooled down.
+	if !isActiveForceCooldown(auth.LastError, auth.NextRetryAfter, now) {
+		if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+			auth.Unavailable = false
+			auth.NextRetryAfter = time.Time{}
+			applyCooldownFields(&auth.Quota, QuotaState{})
+			auth.UpdatedAt = now
+			changed = true
+		}
 	}
 	for _, state := range auth.ModelStates {
 		if state == nil {
+			continue
+		}
+		if isActiveForceCooldown(state.LastError, state.NextRetryAfter, now) {
 			continue
 		}
 		state.forceCooldownUntil = time.Time{}
