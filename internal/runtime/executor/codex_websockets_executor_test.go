@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2641,14 +2643,18 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		// Wait until server confirms pong was received before allowing write to finish.
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2669,11 +2675,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 
 		// Start server reader loop so server processes control frames.
 		readErrCh := make(chan error, 1)
+		payloadReceived := make(chan struct{})
 		go func() {
+			signaled := false
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					readErrCh <- errRead
 					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2681,13 +2693,13 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 		// Wait until client has entered writeMessage and is actively holding writeMu.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress holding writeMu.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("session-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still blocked in the hook.
 		select {
@@ -2695,15 +2707,25 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_WithSession(t *testing.T) {
 			if got != "session-ping" {
 				t.Errorf("unexpected pong payload: got %q, want session-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress")
+			return
+		}
+
+		// The held client write is released together with the pong. Wait until the
+		// request frame arrives before writing the terminal event and closing.
+		select {
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong")
 			return
 		}
 
 		// Now send terminal response.
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -2741,13 +2763,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while payload write was held in hook")
 		}
 	}
@@ -2766,10 +2792,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
 		go func() {
+			signaled := false
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2777,13 +2809,13 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 		// Wait until client has entered writeMessage on sessionless path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("sessionless-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("sessionless-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still in progress.
 		select {
@@ -2791,14 +2823,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_Sessionless(t *testing.T) {
 			if got != "sessionless-ping" {
 				t.Errorf("unexpected pong payload: got %q, want sessionless-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on sessionless connection")
+			return
+		}
+
+		select {
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong on sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -2833,13 +2873,17 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	serverPongCh := make(chan string, 1)
 	inWriteHook := make(chan struct{})
+	var inWriteHookOnce sync.Once
 	pongDeliveredDuringWrite := make(chan struct{})
+	var pongDeliveredOnce sync.Once
+	serverDone := make(chan struct{})
+	defer close(serverDone)
 
 	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		close(inWriteHook)
+		inWriteHookOnce.Do(func() { close(inWriteHook) })
 		select {
 		case <-pongDeliveredDuringWrite:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for pong delivery while nonstream payload write was held in hook")
 		}
 	}
@@ -2858,10 +2902,16 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			return nil
 		})
 
+		payloadReceived := make(chan struct{})
 		go func() {
+			signaled := false
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
+				}
+				if !signaled {
+					signaled = true
+					close(payloadReceived)
 				}
 			}
 		}()
@@ -2869,13 +2919,13 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 		// Wait until client has entered writeMessage on nonstream path.
 		select {
 		case <-inWriteHook:
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			t.Errorf("timed out waiting for client write hook")
 			return
 		}
 
 		// Upstream sends Ping WHILE client payload write is in progress.
-		_ = conn.WriteControl(websocket.PingMessage, []byte("nonstream-sessionless-ping"), time.Now().Add(time.Second))
+		_ = conn.WriteControl(websocket.PingMessage, []byte("nonstream-sessionless-ping"), time.Now().Add(5*time.Second))
 
 		// Server asserts Pong arrives while client write is still in progress.
 		select {
@@ -2883,14 +2933,22 @@ func TestCodexWebsockets_KeepalivePingDuringUpload_NonstreamSessionless(t *testi
 			if got != "nonstream-sessionless-ping" {
 				t.Errorf("unexpected pong payload: got %q, want nonstream-sessionless-ping", got)
 			}
-			close(pongDeliveredDuringWrite)
-		case <-time.After(2 * time.Second):
+			pongDeliveredOnce.Do(func() { close(pongDeliveredDuringWrite) })
+		case <-time.After(5 * time.Second):
 			t.Errorf("pong was not received while payload write was in progress on nonstream sessionless connection")
+			return
+		}
+
+		select {
+		case <-payloadReceived:
+		case <-time.After(5 * time.Second):
+			t.Errorf("timed out waiting for client payload after pong on nonstream sessionless connection")
 			return
 		}
 
 		respPayload := []byte(`{"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[]}}`)
 		_ = conn.WriteMessage(websocket.TextMessage, respPayload)
+		<-serverDone
 	}))
 	defer server.Close()
 
@@ -3288,5 +3346,210 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "reason=send_error") {
 		t.Fatalf("expected reason=send_error in log output, got: %s", logOutput)
+	}
+}
+
+func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			var dials atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if dials.Add(1) == 1 {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "11")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"message":"codex websocket reconnect forbidden"}}`))
+			}))
+			defer server.Close()
+
+			var writes atomic.Int32
+			testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+				if writes.Add(1) == 1 {
+					_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
+				}
+			}
+			defer func() { testWebsocketWritePayloadHook = nil }()
+
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			exec := NewCodexWebsocketsExecutor(&config.Config{
+				SDKConfig: config.SDKConfig{
+					DisableImageGeneration: config.DisableImageGenerationAll,
+				},
+			})
+			auth := &cliproxyauth.Auth{
+				ID:         "codex-ws-reconnect",
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.6-sol",
+				Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"reconnect"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "sess-codex-reconnect-" + name,
+				},
+			}
+
+			var errExec error
+			if stream {
+				_, errExec = exec.ExecuteStream(ctx, auth, req, opts)
+			} else {
+				_, errExec = exec.Execute(ctx, auth, req, opts)
+			}
+			if errExec == nil {
+				t.Fatal("expected reconnect upgrade rejection to fail")
+			}
+
+			value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !exists {
+				t.Fatal("deferred API response was not recorded on codex websocket reconnect rejection")
+			}
+			deferred, ok := value.(logging.DeferredAPIResponse)
+			if !ok || deferred == nil {
+				t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
+			}
+			rendered := string(deferred.RenderAPIResponse())
+			for _, want := range []string{
+				"=== API RESPONSE 1 ===",
+				"Status: 101",
+				"Error: send:",
+				"=== API RESPONSE 2 ===",
+				"Status: 403",
+				"Retry-After: 11",
+				`{"error":{"message":"codex websocket reconnect forbidden"}}`,
+				"Error: dial_retry:",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
+				}
+			}
+
+			var transportDials atomic.Int32
+			transportServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if transportDials.Add(1) == 1 {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+				if hijacker, ok := w.(http.Hijacker); ok {
+					if rawConn, _, errHijack := hijacker.Hijack(); errHijack == nil {
+						_ = rawConn.Close()
+					}
+				}
+			}))
+			defer transportServer.Close()
+
+			writes.Store(0)
+			subGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			subCtx := context.WithValue(context.Background(), "gin", subGinCtx)
+			subAuth := &cliproxyauth.Auth{
+				ID:         "codex-ws-transport-" + name,
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": transportServer.URL},
+			}
+			subOpts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "sess-codex-transport-" + name,
+				},
+			}
+			if stream {
+				_, errExec = exec.ExecuteStream(subCtx, subAuth, req, subOpts)
+			} else {
+				_, errExec = exec.Execute(subCtx, subAuth, req, subOpts)
+			}
+			if errExec == nil {
+				t.Fatal("expected transport reconnect failure")
+			}
+			subVal, ok := subGinCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !ok {
+				t.Fatal("deferred API response missing on transport reconnect failure")
+			}
+			subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+			for _, want := range []string{
+				"=== API RESPONSE 1 ===",
+				"Error: send:",
+				"=== API RESPONSE 2 ===",
+				"Error: dial_retry:",
+			} {
+				if !strings.Contains(subRendered, want) {
+					t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
+				}
+			}
+
+			initServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Error("hijacker unsupported")
+					return
+				}
+				rawConn, rawBuf, errHijack := hijacker.Hijack()
+				if errHijack != nil {
+					t.Errorf("hijack: %v", errHijack)
+					return
+				}
+				_, _ = rawBuf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: invalid\r\n\r\n")
+				_ = rawBuf.Flush()
+				_ = rawConn.Close()
+			}))
+			defer initServer.Close()
+
+			initGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			initCtx := context.WithValue(context.Background(), "gin", initGinCtx)
+			initAuth := &cliproxyauth.Auth{
+				ID:         "codex-ws-init-" + name,
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": initServer.URL},
+			}
+			initOpts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+			}
+			if stream {
+				_, errExec = exec.ExecuteStream(initCtx, initAuth, req, initOpts)
+			} else {
+				_, errExec = exec.Execute(initCtx, initAuth, req, initOpts)
+			}
+			if errExec == nil {
+				t.Fatal("expected initial invalid-101 handshake to fail")
+			}
+			initVal, ok := initGinCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !ok {
+				t.Fatal("deferred API response missing on initial invalid-101 handshake")
+			}
+			initRendered := string(initVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+			for _, want := range []string{"Status: 101", "Error: dial:"} {
+				if !strings.Contains(initRendered, want) {
+					t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
+				}
+			}
+		})
 	}
 }

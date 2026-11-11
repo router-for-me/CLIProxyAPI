@@ -46,7 +46,14 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	isCompat := helps.APIKeyModelIsCompat(req)
 	targetModel := resolveMetaSignatureTargetModel(baseModel, req, opts)
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, targetModel, originalPayload, stream, isCompat)
-	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+	origDoc := ojson.NewDoc(originalTranslated)
+	origChanged := helps.SetStringIfDifferentDoc(origDoc, "model", baseModel)
+	if syncMetaPromptCacheRetentionDoc(origDoc, originalPayload) {
+		origChanged = true
+	}
+	if origChanged {
+		originalTranslated = origDoc.Bytes()
+	}
 	body, err := helps.TranslateRequestReturningError(ctx, opts.Headers, e.cfg, from, to, targetModel, bytes.Clone(req.Payload), stream, isCompat)
 	if err != nil {
 		return nil, err
@@ -62,7 +69,7 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
 	_ = doc.Delete("generate")
-	_ = doc.Delete("prompt_cache_retention")
+	syncMetaPromptCacheRetentionDoc(doc, req.Payload)
 	_ = doc.Delete("safety_identifier")
 	_ = doc.Delete("stream_options")
 	_ = doc.Delete("client_metadata")
@@ -93,6 +100,33 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 		originalPayload: originalPayload,
 		body:            body,
 	}, nil
+}
+
+// syncMetaPromptCacheRetentionDoc preserves an explicit non-empty string
+// prompt_cache_retention supplied by the caller without injecting a default,
+// and removes null, blank, or non-string values before user payload rules run.
+func syncMetaPromptCacheRetentionDoc(doc *ojson.Doc, source []byte) bool {
+	if doc == nil {
+		return false
+	}
+	if retention := extractMetaPromptCacheRetention(source); retention != "" {
+		return helps.SetStringIfDifferentDoc(doc, "prompt_cache_retention", retention)
+	}
+	if !doc.Get("prompt_cache_retention").Exists() {
+		return false
+	}
+	return doc.Delete("prompt_cache_retention") == nil
+}
+
+func extractMetaPromptCacheRetention(source []byte) string {
+	if len(source) == 0 {
+		return ""
+	}
+	val := ojson.GetBytesNoCopy(source, "prompt_cache_retention")
+	if val.Type != ojson.String {
+		return ""
+	}
+	return strings.TrimSpace(val.String())
 }
 
 func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -149,11 +183,11 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))

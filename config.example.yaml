@@ -170,15 +170,32 @@ routing:
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, soonest-reset
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
+  # Sticky requests (including inherited and LCP bindings) also consume weighted credits
+  # without moving existing bindings. Compensation is scoped to each eligible credential set;
+  # priority tiers, transport preferences, and retry/cooldown subsets do not share credits.
+  # Pinned requests use the eligible pool before pinning, within the pinned credential
+  # priority tier and transport class, even when session-affinity is disabled.
+  # Returning to a pool resumes its retained credits.
+  # Settled credits are capped at +/-32 times the eligible pool total; ratios are approximate.
+  # In-flight offsets are preserved until the pool settles, regardless of commit order.
+  # Sticky requests keep their bindings but stop adding compensation when the full
+  # credit delta cannot fit the cap; new sessions keep earning credit to avoid starvation.
+  # Credits are process-local and reset on restart or selector replacement.
+  # In Home mode, compatible Home versions charge retained WS turns from usage after completion;
+  # CPA preserves the retained credential and concurrency slot instead of redispatching each turn.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # soonest-reset prefers the credential whose longest quota window (Codex weekly, Claude 7d)
   # resets soonest, so allowance that would expire unused is spent first. Reset times come from
   # upstream response headers. A credential with no observation yet (e.g. after a restart) is sent one request
   # per hour to learn its reset; credentials whose window already reset are used last, in fill-first order.
   # Enable universal session-sticky routing for all clients.
-  # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-  # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-  # execution or derived session identity, and the existing first-message hash fallback.
+  # Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers
+  # are preferred, followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+  # execution session identity, Merkle LCP prefix/compaction matching, derived session
+  # identity, and the existing first-message hash fallback.
+  # LCP compaction matching requires at least 2 shared trailing turns; clients whose
+  # compaction replaces all earlier turns with a summary should send X-Session-ID (or
+  # another explicit session ID), or affinity starts a new binding at every compaction.
   # Automatic failover is always enabled when bound auth becomes unavailable.
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
@@ -286,7 +303,7 @@ requests:
   #   default: # Default rules only set parameters when they are missing in the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #           from-protocol: "responses" # restricts the rule to the source protocol, options: openai, responses, gemini, claude
   #           headers: # all configured request headers must match; values support "*" wildcards
   #             X-Client-Tier: "tenant-*-region-*"
@@ -300,10 +317,15 @@ requests:
   #             - "metadata.disable_payload"
   #       params: # JSON path (gjson/sjson syntax) -> value
   #         "generationConfig.thinkingConfig.thinkingBudget": 32768
+  #     - models:
+  #         - name: "muse-*"
+  #           protocol: "meta"
+  #       params:
+  #         prompt_cache_retention: "24h" # opt into Meta's 24h prompt cache when the client omits prompt_cache_retention
   #   default-raw: # Default raw rules set parameters using raw JSON when missing (must be valid JSON).
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "generationConfig.responseJsonSchema": "{\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"}}}"
   #   override: # Override rules always set parameters, overwriting any existing values.
@@ -316,7 +338,7 @@ requests:
   #         service_tier: priority
   #     - models:
   #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> value
   #         "reasoning.effort": "high"
   #     - models:
@@ -327,13 +349,13 @@ requests:
   #   override-raw: # Override raw rules always set parameters using raw JSON (must be valid JSON).
   #     - models:
   #         - name: "gpt-*" # Supports wildcards (e.g., "gpt-*")
-  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
-  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity
+  #           protocol: "gemini" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
   #         - "generationConfig.thinkingConfig.thinkingBudget"
   #         - "generationConfig.responseJsonSchema"
@@ -479,6 +501,16 @@ upstream:
     # Default false keeps the translation and catalog behavior that predate tool_search support.
     tool-search: false
 
+    # When true, inject Anthropic server-side refusal fallbacks on cloaked Claude requests
+    # when the request body does not already specify fallbacks (claude-opus-5-5 -> claude-opus-4-8,
+    # claude-fable-5-1 -> claude-opus-5). Default false never opts requests into cross-model
+    # fallback unless the caller or requests.payload rules explicitly provide fallbacks.
+    # When fallback occurs, translated OpenAI Chat Completions and Responses payloads report
+    # the actual serving model and attach structured fallback metadata (choices[0].delta.fallback /
+    # choices[0].message.fallback and fallbacks for Chat; response.fallback and response.fallbacks
+    # for Responses).
+    server-side-fallback: false
+
     # Days to retain the cloaked currentDate pin per session in in-memory mode
     # (server.kv-store.disabled: true without Home), so an idle gap or a credential
     # switch cannot re-anchor the date and invalidate earlier thinking signatures and the
@@ -518,9 +550,9 @@ upstream:
     # the same exact software baseline rather than learning newer client versions (unless the
     # credential resolves to cloak_mode: never, which preserves the confirmed caller's headers).
     # header-defaults:
-    #   user-agent: "claude-cli/2.1.280 (external, cli)"
-    #   package-version: "0.112.1"
-    #   runtime-version: "v26.3.0"
+    #   user-agent: "claude-cli/2.1.321 (external, cli)"
+    #   package-version: "0.128.0"
+    #   runtime-version: "v26.12.1"
     #   os: "MacOS"
     #   arch: "arm64"
     #   timeout: "600"
@@ -735,6 +767,7 @@ upstream:
 #           max-context-length: 1048576 # optional: override Codex client context window metadata
 #           force-mapping: true    # optional: rewrite response model fields back to the alias
 #           # Preserve thinking blocks with empty signatures for compatible upstreams.
+#           # Also handle compaction_trigger requests with local summary compaction instead of forwarding them upstream.
 #           # client.codex.optimize-multi-agent-v2 applies to both OAuth and API-key credentials.
 #           is-compat: false
 #           # Optional: enable configuration_update for this API-key model; omitted defaults to false.
@@ -798,7 +831,7 @@ upstream:
 #           rebuild-mid-system-message: false # optional: default is false; when true, move messages with role "system" into the top-level Claude system field
 #           native-tool-search: false # optional: default is false; when true, trust this key's custom base-url with Anthropic native tool search (defer_loading + tool_reference) for Codex tool_search; requires upstream.claude.tool-search: true
 #           cloak:                         # optional: explicitly enable request cloaking for non-Claude-Code clients
-#             mode: "auto"                 # "auto" (default inside this block): cloak only when client is not Claude Code
+#             mode: "auto"                 # omitted inherits shared default; explicit "auto": cloak only when client is not Claude Code
 #                                          # "always": cloak every unconfirmed client; confirmed native Claude Code still passes through
 #                                          # "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity/billing attribution
 #             # This "cloak" block applies to this api-keys.claude key entry only. For Claude OAuth
@@ -811,6 +844,8 @@ upstream:
 #             sensitive-words:             # optional: words to obfuscate with zero-width characters
 #               - "API"
 #               - "proxy"
+#             sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement")
+#               "Claude Code": "Claude"
 #             cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #             # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
 #
@@ -1183,9 +1218,11 @@ oauth:
 
     # Antigravity provider behavior.
     antigravity:
-      # sensitive-words:              # optional: words to obfuscate with zero-width characters in system instructions
+      # sensitive-words:              # optional: words to obfuscate with combining grapheme joiners (U+034F) in system instructions
       #   - "API"
       #   - "proxy"
+      # sensitive-words-replace:      # optional: literal sensitive-word replacements ("target": "replacement") in system instructions
+      #   "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
@@ -1205,9 +1242,11 @@ oauth:
 
     # Devin provider behavior.
     # devin:
-    #   sensitive-words:             # optional: words to obfuscate with zero-width characters in system instructions and prompts
+    #   sensitive-words:             # optional: words to remove matching lines in system prompts
     #     - "API"
     #     - "proxy"
+    #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
+    #     "Claude Code": "Claude"
 
 # Image and video behavior.
 multimedia:

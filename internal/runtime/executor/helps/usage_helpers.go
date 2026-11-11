@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -32,6 +33,7 @@ type UsageReporter struct {
 	requestID            string
 	traceID              string
 	selectionID          string
+	homeSelection        *usage.HomeSelection
 	provider             string
 	baseURL              string
 	executorType         string
@@ -41,6 +43,7 @@ type UsageReporter struct {
 	authIndex            string
 	authMu               sync.RWMutex
 	accessTokenHash      string
+	requestScopedRules   []internalconfig.RequestScopedErrorRule
 	authType             string
 	apiKey               string
 	accessProvider       string
@@ -131,6 +134,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestID:       uuid.NewString(),
 		traceID:         traceID,
 		selectionID:     usage.SelectionIDFromContext(ctx),
+		homeSelection:   usage.HomeSelectionFromContext(ctx),
 		provider:        provider,
 		baseURL:         baseURL,
 		model:           model,
@@ -152,6 +156,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
+		reporter.requestScopedRules = cliproxyauth.ResolveRequestScopedErrorRules(auth, cliproxyauth.RequestScopedErrorConfigFromContext(ctx))
 	}
 	return reporter
 }
@@ -200,9 +205,25 @@ func (r *UsageReporter) UpdateAccessTokenFingerprint(auth *cliproxyauth.Auth) {
 	if r == nil {
 		return
 	}
+	var updatedRules []internalconfig.RequestScopedErrorRule
+	if auth != nil {
+		updatedRules = cliproxyauth.ResolveRequestScopedErrorRules(auth, nil)
+	}
 	r.authMu.Lock()
 	r.accessTokenHash = authAccessTokenSHA256(auth)
+	if len(updatedRules) > 0 {
+		r.requestScopedRules = updatedRules
+	}
 	r.authMu.Unlock()
+}
+
+func (r *UsageReporter) requestScopedErrorRules() []internalconfig.RequestScopedErrorRule {
+	if r == nil {
+		return nil
+	}
+	r.authMu.RLock()
+	defer r.authMu.RUnlock()
+	return r.requestScopedRules
 }
 
 func (r *UsageReporter) accessTokenFingerprint() string {
@@ -542,15 +563,22 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 	}
 	rec := r.buildRecordForModel(model, detail, false, usage.Failure{})
 	rec.RequestID = uuid.NewString()
+	if rec.HomeSelection != nil {
+		// Split billing details do not represent another scheduled request.
+		// Mark them separately without changing the primary usage metadata.
+		selection := *rec.HomeSelection
+		selection.Additional = true
+		rec.HomeSelection = &selection
+	}
 	return rec, true
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+	r.publishWithOutcome(ctx, usage.Detail{}, true, r.failFromErrors(ctx, errs...))
 }
 
 func (r *UsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, errs ...error) {
-	r.publishWithOutcome(ctx, detail, true, failFromErrors(errs...))
+	r.publishWithOutcome(ctx, detail, true, r.failFromErrors(ctx, errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -680,6 +708,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		RequestID:            r.requestID,
 		TraceID:              r.traceID,
 		SelectionID:          r.selectionID,
+		HomeSelection:        r.homeSelection,
 		Provider:             r.provider,
 		BaseURL:              r.baseURL,
 		ExecutorType:         r.executorType,
@@ -711,7 +740,15 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 }
 
+func (r *UsageReporter) failFromErrors(_ context.Context, errs ...error) usage.Failure {
+	return failFromErrorsWithRules(r.requestScopedErrorRules(), errs...)
+}
+
 func failFromErrors(errs ...error) usage.Failure {
+	return failFromErrorsWithRules(nil, errs...)
+}
+
+func failFromErrorsWithRules(rules []internalconfig.RequestScopedErrorRule, errs ...error) usage.Failure {
 	for _, err := range errs {
 		if err == nil {
 			continue
@@ -732,6 +769,12 @@ func failFromErrors(errs ...error) usage.Failure {
 		}
 		if truncatedErr, ok := errors.AsType[cliproxyexecutor.StreamTruncatedError](err); ok && truncatedErr != nil && truncatedErr.IsStreamTruncated() {
 			fail.Code = usage.FailureStreamTruncatedCode
+		} else if action, okAction := cliproxyauth.MatchRequestScopedErrorRules(rules, err); okAction {
+			if action == cliproxyauth.RequestScopedActionStop || action == cliproxyauth.RequestScopedActionContinue {
+				fail.Code = usage.FailureRequestScopedCode
+			} else if action == cliproxyauth.RequestScopedActionStopAndCooldown || action == cliproxyauth.RequestScopedActionContinueAndCooldown {
+				fail.Code = usage.FailureForceCooldownCode
+			}
 		} else if requestErr, ok := errors.AsType[cliproxyexecutor.RequestScopedError](err); ok && requestErr != nil && requestErr.IsRequestScoped() {
 			fail.Code = usage.FailureRequestScopedCode
 		}
@@ -1343,7 +1386,7 @@ func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
 		return
 	}
 	payload := jsonPayload(line)
-	if b.responseModel == "" && len(payload) > 0 {
+	if len(payload) > 0 {
 		if model, _ := extractClaudeResponseModelEvent(payload); model != "" {
 			b.responseModel = model
 		}

@@ -796,6 +796,12 @@ func IsClaudeProbeOrHelperRequest(body []byte) bool {
 	return isClaudeProbeRequest(body) || isClaudeTitleHelperRequest(body)
 }
 
+// IsClaudeQuotaProbeRequest reports the max_tokens=1 quota probe alone,
+// excluding the session-title helper that IsClaudeProbeOrHelperRequest also covers.
+func IsClaudeQuotaProbeRequest(body []byte) bool {
+	return isClaudeProbeRequest(body)
+}
+
 // IsClaudeSubagentRequest reports whether the incoming request originates from
 // or represents a Claude Code subagent.
 func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
@@ -832,6 +838,9 @@ func ClaudePayloadHas1hTTL(payload []byte) bool {
 	// escaped, so a payload without that token cannot match.
 	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !ojson.ValidBytes(payload) {
 		return false
+	}
+	if topCC := ojson.GetBytesNoCopy(payload, "cache_control"); topCC.IsObject() && topCC.Get("ttl").String() == "1h" {
+		return true
 	}
 	has1h := false
 	checkBlock := func(item ojson.Result) bool {
