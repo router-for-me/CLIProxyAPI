@@ -1425,10 +1425,17 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		backoff := time.Second
+		if errors.Is(err, codex.ErrSIWCRefreshDeferred) {
+			backoff = refreshCheckInterval
+		}
+		retryAfter := now.Add(backoff)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			if current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(now) {
-				current.NextRefreshAfter = now.Add(time.Second)
+			pendingJob := m.refreshJobs[id]
+			isJobPending := pendingJob != nil && current.NextRefreshAfter.Equal(pendingJob.pendingUntil)
+			if isJobPending || current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(retryAfter) {
+				current.NextRefreshAfter = retryAfter
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {

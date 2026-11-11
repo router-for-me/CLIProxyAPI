@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -33,5 +34,53 @@ func TestUnknownRefreshOutcomeRequiresRecoveryWithoutDiscardingAccess(t *testing
 		if executor.RefreshCalls() != 1 {
 			t.Fatalf("scheduled refresh replayed: calls=%d", executor.RefreshCalls())
 		}
+	}
+}
+
+func TestAutoRefreshDeferralDoesNotClearPendingBackoffToZero(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	deferredErr := fmt.Errorf("Codex renewal deferred until interactive macOS wake: %w", codex.ErrSIWCRefreshDeferred)
+	executor := &unauthorizedRefreshExecutor{id: "codex", refreshErr: deferredErr}
+	manager.RegisterExecutor(executor)
+
+	now := time.Now()
+	auth := &Auth{
+		ID:       "wake-deferred-job",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"access_token":  "valid-access",
+			"refresh_token": "ordinary-refresh",
+			"expired":       now.Add(24 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	registered, errRegister := manager.Register(ctx, auth)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	loop := newAuthAutoRefreshLoop(manager, refreshCheckInterval, 1)
+	job := manager.markRefreshPending(loop, registered.ID, registered.RegistrationEpoch, now)
+	if job == nil {
+		t.Fatal("expected pending refresh job")
+	}
+	if !manager.beginRefreshJob(ctx, job) {
+		t.Fatal("expected refresh job to start")
+	}
+	_, errRefresh := manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+	if errRefresh == nil {
+		t.Fatal("expected deferred refresh error")
+	}
+	manager.finishRefreshJob(job, time.Time{}, false)
+
+	updated, ok := manager.GetByID(registered.ID)
+	if !ok || updated == nil {
+		t.Fatal("credential missing after deferred refresh")
+	}
+	if updated.RequiresSignIn || updated.RejectedRefreshToken != "" {
+		t.Fatalf("wake deferral marked credential as requiring sign-in: %+v", updated)
+	}
+	if updated.NextRefreshAfter.IsZero() || !updated.NextRefreshAfter.After(now) {
+		t.Fatalf("NextRefreshAfter = %v, want a positive backoff after %v to avoid a tight loop", updated.NextRefreshAfter, now)
 	}
 }
