@@ -277,12 +277,17 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		}
 	}
 
+	forceUntil := effectiveAuthForceUntil(auth)
+	if forceUntil.After(now) {
+		isSuspended = true
+	}
+
 	var authFallbackUntil time.Time
 	if len(auth.ModelStates) == 0 {
 		// With no per-model states, scheduling falls back to the credential-wide
 		// cooldown (isAuthBlockedForModel); the projection must agree with it.
-		// When states exist, unmatched models stay schedulable by design, so the
-		// credential-wide fields must not suspend them here either.
+		// With per-model states, ordinary aggregate fields must not suspend
+		// unmatched models; explicit auth-level force cooldowns still apply.
 		if blocked, _, retryAfter := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
 			isSuspended = true
 			if retryAfter.IsZero() {
@@ -318,6 +323,9 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		}
 		if suspendReason == "" {
 			suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+		}
+		if forceUntil.After(suspendUntil) {
+			suspendUntil = forceUntil
 		}
 	}
 	if openEnded || !isSuspended {
