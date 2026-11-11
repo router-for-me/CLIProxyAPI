@@ -2600,6 +2600,32 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return original, true, nil
 	}
 
+	// The model sometimes drops the "mcp__<server>__" prefix and calls only the
+	// tool component, such as "dog_shell_command". Restore it only when a virtual
+	// server prefix turns it into exactly one declared alias. A tool word can also
+	// start a real tool name ("shell" in "shell_command"), so a declared original
+	// name is always forwarded as itself.
+	if !strings.HasPrefix(name, "mcp__") {
+		for _, original := range resolver.exact {
+			if original == name {
+				return "", false, nil
+			}
+		}
+		matchedOriginal := ""
+		matchCount := 0
+		for server := range resolver.servers {
+			if original, ok := resolver.exact["mcp__"+server+"__"+name]; ok {
+				matchedOriginal = original
+				matchCount++
+			}
+		}
+		if matchCount == 1 {
+			log.Debugf("claude oauth mcp alias: recovered unprefixed tool name %q as %q", name, matchedOriginal)
+			return matchedOriginal, true, nil
+		}
+		return "", false, nil
+	}
+
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
 		return "", false, nil

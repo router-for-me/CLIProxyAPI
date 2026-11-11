@@ -379,6 +379,60 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 	}
 }
 
+func TestReverseRemapOAuthToolNamesRestoresUnprefixedAlias(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"shell_command","input_schema":{"type":"object"}},{"name":"Task","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "unprefixed-caller"})
+	shellParts, ok := parseClaudeMCPAlias(ojson.GetBytes(remapped, "tools.0.name").String())
+	if !ok {
+		t.Fatalf("shell alias is invalid: %q", ojson.GetBytes(remapped, "tools.0.name").String())
+	}
+	unprefixed := shellParts.toolID + "_" + shellParts.semantic
+	wrongWord := "zzzz_" + shellParts.semantic
+
+	response := []byte(fmt.Sprintf(`{"content":[
+		{"type":"tool_use","id":"toolu_1","name":%q,"input":{}},
+		{"type":"tool_use","id":"toolu_2","name":"Task","input":{}},
+		{"type":"tool_use","id":"toolu_3","name":%q,"input":{}}
+	]}`, unprefixed, wrongWord))
+	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+	}
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "shell_command" {
+		t.Fatalf("unprefixed alias %q restored to %q, want shell_command", unprefixed, got)
+	}
+	if got := ojson.GetBytes(restored, "content.1.name").String(); got != "Task" {
+		t.Fatalf("original tool name changed to %q, want Task", got)
+	}
+	if got := ojson.GetBytes(restored, "content.2.name").String(); got != wrongWord {
+		t.Fatalf("unprefixed name with an unknown tool word = %q, want %q forwarded unchanged", got, wrongWord)
+	}
+
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, unprefixed))
+	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+	}
+	if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "shell_command" {
+		t.Fatalf("stream unprefixed alias restored to %q, want shell_command", got)
+	}
+
+	// "command" drew the tool word "shell", so its unprefixed alias spells the
+	// declared tool "shell_command", which must keep its own name.
+	collidingMap := map[string]string{
+		"mcp__abandon_ability__shell_command":      "command",
+		"mcp__abandon_ability__able_shell_command": "shell_command",
+	}
+	collision := []byte(`{"content":[{"type":"tool_use","id":"toolu_1","name":"shell_command","input":{}}]}`)
+	restored, errReverse = reverseRemapOAuthToolNames(collision, collidingMap)
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() collision error = %v", errReverse)
+	}
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "shell_command" {
+		t.Fatalf("declared tool name shell_command restored to %q, want it unchanged", got)
+	}
+}
+
 func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
