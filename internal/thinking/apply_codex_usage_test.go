@@ -179,21 +179,66 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdateTargetRouting(t *test
 func TestApplyConfigurationUpdateRouting(t *testing.T) {
 	const model = "configured-responses"
 	tests := []struct {
-		name       string
-		body       string
-		format     string
-		suffix     string
-		supported  bool
-		noThinking bool
-		skipEffort bool
-		wantEffort string
-		wantInput  string
-		wantSame   bool
+		name        string
+		body        string
+		format      string
+		suffix      string
+		supported   bool
+		noThinking  bool
+		allowNone   bool
+		userDefined bool
+		skipEffort  bool
+		wantEffort  string
+		wantInput   string
+		wantSame    bool
 	}{
 		{
 			name:      "supported native request preserves baseline and updates byte for byte",
 			body:      `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]}`,
 			supported: true, wantEffort: "xhigh", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`, wantSame: true,
+		},
+		{
+			name:      "supported native request clamps disabled baseline",
+			body:      `{"reasoning":{"effort":"none","summary":"auto","other":7},"input":[{"role":"user","content":"ok"}]}`,
+			supported: true, wantEffort: "low", wantInput: `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported native request clamps each update without collapsing history",
+			body:      `{"reasoning":{"effort":"xhigh","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"none","summary":"detailed"},"tools":[]},{"role":"user","content":"first"},{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"assistant","content":"reply"},{"type":"configuration_update","reasoning":{"effort":"none"}},{"role":"user","content":"last"}]}`,
+			supported: true, wantEffort: "xhigh", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low","summary":"detailed"},"tools":[]},{"role":"user","content":"first"},{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"assistant","content":"reply"},{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"last"}]`,
+		},
+		{
+			name:      "supported native request clamps baseline without changing auto update",
+			body:      `{"reasoning":{"effort":"none","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"auto"}},{"role":"user","content":"ok"}]}`,
+			supported: true, wantEffort: "low", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"auto"}},{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported native suffix still clamps disabled updates",
+			body:      `{"reasoning":{"effort":"invalid","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}},{"role":"user","content":"ok"}]}`,
+			supported: true, suffix: "high", wantEffort: "high", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:       "supported openai-response alias clamps disabled baseline",
+			body:       `{"reasoning":{"effort":"none"},"input":[{"role":"user","content":"ok"}]}`,
+			format:     "openai-response",
+			supported:  true,
+			wantEffort: "low",
+			wantInput:  `[{"role":"user","content":"ok"}]`,
+		},
+		{
+			name:      "supported native request preserves allowed none",
+			body:      `{"reasoning":{"effort":"none"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
+			supported: true, allowNone: true, wantEffort: "none", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"none"}}]`, wantSame: true,
+		},
+		{
+			name:      "supported native request without thinking metadata preserves none",
+			body:      `{"reasoning":{"effort":"none"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
+			supported: true, noThinking: true, wantEffort: "none", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"none"}}]`, wantSame: true,
+		},
+		{
+			name:      "user-defined native request preserves none",
+			body:      `{"reasoning":{"effort":"none"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
+			supported: true, userDefined: true, wantEffort: "none", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"none"}}]`, wantSame: true,
 		},
 		{
 			name:      "supported no-effort request remains unchanged",
@@ -290,10 +335,13 @@ func TestApplyConfigurationUpdateRouting(t *testing.T) {
 				format = "codex"
 			}
 			thinkingSupport := &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}
+			if tc.allowNone {
+				thinkingSupport.Levels = append(thinkingSupport.Levels, "none")
+			}
 			if tc.noThinking {
 				thinkingSupport = nil
 			}
-			info := &registry.ModelInfo{ID: model, Type: "codex", SupportConfigurationUpdate: tc.supported, Thinking: thinkingSupport}
+			info := &registry.ModelInfo{ID: model, Type: "codex", SupportConfigurationUpdate: tc.supported, Thinking: thinkingSupport, UserDefined: tc.userDefined}
 			body := []byte(tc.body)
 			applied, err := thinking.ApplyThinkingWithModelInfo(body, body, model+suffixForTest(tc.suffix), format, format, "codex", info)
 			if err != nil {
@@ -347,6 +395,7 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 
 	tests := []struct {
 		name         string
+		wantBody     string
 		body         string
 		wantEffort   string
 		wantLevel    thinking.ThinkingLevel
@@ -379,9 +428,10 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel,
 		},
 		{
-			name:       "update disables thinking",
+			name:       "unsupported disabled update is clamped",
 			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
-			wantEffort: "none", wantMode: thinking.ModeNone, wantBaseline: thinking.LevelHigh,
+			wantEffort: "low", wantMode: thinking.ModeLevel, wantLevel: thinking.LevelLow, wantBaseline: thinking.LevelHigh,
+			wantBody: `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`,
 		},
 	}
 	for _, tc := range tests {
@@ -408,8 +458,12 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 					if err != nil {
 						t.Fatalf("ApplyThinking() error = %v", err)
 					}
-					if !bytes.Equal(applied, body) {
-						t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
+					wantBody := body
+					if tc.wantBody != "" {
+						wantBody = []byte(tc.wantBody)
+					}
+					if !bytes.Equal(applied, wantBody) {
+						t.Fatalf("native Responses body = %s, want %s", applied, wantBody)
 					}
 					if got := thinking.ExtractTranslatedReasoningEffort(applied, "codex"); got != tc.wantEffort {
 						t.Errorf("effective effort = %q, want %q", got, tc.wantEffort)
@@ -425,8 +479,12 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 								continue
 							}
 							found = true
+							wantMode, wantLevel := tc.wantMode, tc.wantLevel
+							if tc.wantBody != "" && message == "thinking: original config from request |" {
+								wantMode, wantLevel = thinking.ModeNone, ""
+							}
 							if entry.Level != log.DebugLevel || entry.Data["provider"] != "codex" || entry.Data["model"] != "gpt-6-sol" ||
-								entry.Data["mode"] != tc.wantMode || entry.Data["budget"] != 0 || entry.Data["level"] != tc.wantLevel {
+								entry.Data["mode"] != wantMode || entry.Data["budget"] != 0 || entry.Data["level"] != wantLevel {
 								t.Errorf("unexpected native Responses log %q fields: %v", message, entry.Data)
 							}
 							baseline, hasBaseline := entry.Data["baseline_level"]
@@ -488,5 +546,46 @@ func TestCrossMethodDocMutationsAndThinking(t *testing.T) {
 	out := doc.Bytes()
 	if ojson.GetBytesNoCopy(out, "extra").Exists() {
 		t.Fatalf("expected extra to be deleted in %s", string(out))
+	}
+}
+
+type nativeResponsesPluginApplier struct {
+	bodies [][]byte
+}
+
+func (a *nativeResponsesPluginApplier) Apply(body []byte, _ thinking.ThinkingConfig, _ *registry.ModelInfo) ([]byte, error) {
+	a.bodies = append(a.bodies, bytes.Clone(body))
+	return body, nil
+}
+
+func TestApplyThinkingNativeResponsesPreservesPluginApplierRouting(t *testing.T) {
+	const provider = "native-responses-plugin-test"
+	applier := &nativeResponsesPluginApplier{}
+	if !thinking.RegisterPluginProvider(provider, provider, 0, applier) {
+		t.Fatal("register plugin thinking applier")
+	}
+	t.Cleanup(func() { thinking.UnregisterPluginProviders(provider) })
+	body := []byte(`{"model":"gpt-6-sol","reasoning":{"effort":"none"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}},{"role":"user","content":"hi"}]}`)
+	for _, suffix := range []string{"", "(high)"} {
+		t.Run("suffix="+suffix, func(t *testing.T) {
+			applier.bodies = nil
+			out, err := thinking.ApplyThinking(body, "gpt-6-sol"+suffix, "openai-response", "codex", provider)
+			if err != nil {
+				t.Fatalf("ApplyThinking() error = %v", err)
+			}
+			if !bytes.Equal(out, body) {
+				t.Fatalf("plugin payload changed: got %s, want %s", out, body)
+			}
+			wantCalls := 0
+			if suffix != "" {
+				wantCalls = 1
+			}
+			if len(applier.bodies) != wantCalls {
+				t.Fatalf("plugin calls = %d, want %d; bodies=%q", len(applier.bodies), wantCalls, applier.bodies)
+			}
+			if wantCalls == 1 && !bytes.Equal(applier.bodies[0], body) {
+				t.Fatalf("plugin received %s, want full payload %s", applier.bodies[0], body)
+			}
+		})
 	}
 }
