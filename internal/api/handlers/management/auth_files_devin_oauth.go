@@ -136,6 +136,9 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 	log.Info("Devin authentication successful")
 }
 
+// readDevinOAuthCallbackFile is a variable so tests can simulate read errors.
+var readDevinOAuthCallbackFile = os.ReadFile
+
 func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCallbackFilePayload, error) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -146,7 +149,7 @@ func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCall
 		if ctx.Err() != nil {
 			return nil, errors.New("Timeout waiting for OAuth callback")
 		}
-		data, errRead := os.ReadFile(path)
+		data, errRead := readDevinOAuthCallbackFile(path)
 		if errRead == nil {
 			var result oauthCallbackFilePayload
 			if errDecode := json.Unmarshal(data, &result); errDecode != nil {
@@ -154,9 +157,10 @@ func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCall
 			}
 			return &result, nil
 		}
-		if !errors.Is(errRead, os.ErrNotExist) {
-			return nil, errors.New("Failed to read OAuth callback")
-		}
+		// Retry on any read error, like the other OAuth flows do. The file may not
+		// exist yet, or it may be briefly unreadable: on Windows a read that lands
+		// while the callback handler renames the file into place fails with a
+		// sharing violation. The context deadline and session state bound the wait.
 		select {
 		case <-ctx.Done():
 			return nil, errors.New("Timeout waiting for OAuth callback")

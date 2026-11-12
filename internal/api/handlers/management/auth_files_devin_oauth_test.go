@@ -128,7 +128,10 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 			t.Fatal("PKCE challenge does not match verifier")
 		}
 	case <-time.After(devinOAuthTestWait):
-		t.Fatal("token exchange did not start")
+		// Report the session status: it carries the reason when the flow gave up.
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/get-auth-status?state="+start.State, nil))
+		t.Fatalf("token exchange did not start, session status: %s", w.Body.String())
 	}
 
 	deadline := time.NewTimer(devinOAuthTestWait)
@@ -257,5 +260,35 @@ func TestWaitDevinOAuthCallbackExpiredContext(t *testing.T) {
 	_, errWait := waitDevinOAuthCallback(ctx, filepath.Join(t.TempDir(), "missing.oauth"), state)
 	if errWait == nil || errWait.Error() != "Timeout waiting for OAuth callback" {
 		t.Fatalf("error = %v", errWait)
+	}
+}
+
+func TestWaitDevinOAuthCallbackRetriesTransientReadError(t *testing.T) {
+	const state = "devin-transient-read-error"
+	RegisterOAuthSession(state, "devin")
+	defer CompleteOAuthSession(state)
+
+	// On Windows a read that lands while the callback handler renames the file
+	// into place fails with a sharing violation. The next read succeeds.
+	reads := 0
+	originalRead := readDevinOAuthCallbackFile
+	readDevinOAuthCallbackFile = func(string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			return nil, errors.New("the process cannot access the file because it is being used by another process")
+		}
+		return []byte(`{"state":"` + state + `","code":"code"}`), nil
+	}
+	t.Cleanup(func() { readDevinOAuthCallbackFile = originalRead })
+
+	result, errWait := waitDevinOAuthCallback(context.Background(), filepath.Join(t.TempDir(), "callback.oauth"), state)
+	if errWait != nil {
+		t.Fatalf("transient read error ended the login: %v", errWait)
+	}
+	if result.Code != "code" || result.State != state {
+		t.Fatalf("unexpected callback: %+v", result)
+	}
+	if reads != 2 {
+		t.Fatalf("reads = %d, want 2", reads)
 	}
 }
