@@ -120,7 +120,11 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 </tr>
 <tr>
 <td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="DeepSider API" width="150"></a></td>
-<td><b><a href="https://origincoder.com/">OriginCoder</a> 低延迟、高稳定、高并发的企业级 AI 网关</b>，<b>Claude Max 与 GPT Pro 号池全部自建自营，不降智池价格为官方的 3–4 折，池内降智状态实时公开可查</b>，一个入口接入 <b>GPT、Claude、Grok、Gemini-4-Carbon、DeepSeek 等国内外模型</b>，适配 <b>Claude Code</b> 等编程工具，多种渠道支持 <b>AI 对话、编程、生图与视频生成</b>，海外正规运营，自 <b>2025 年 8 月运营至今，已服务 1.5 万+ 客户</b>，费率公开、<b>无超额费、10 元起充</b>，后台 <b>7×24 小时监测、号池冗余、多节点自动切换</b>，保障高峰期访问稳定，<a href="https://origincoder.com/monitor">服务状态公开可查</a>，<b>不保存用户会话内容，保护隐私安全</b>，支持<b>对公支付与企业开票</b>，客服 <b>3 分钟内响应</b>、技术团队 <b>24 小时值守</b>，国内用户可通过<a href="https://cn.origincoder.com">国内加速入口</a>访问。</td>
+<td><strong><a href="https://origincoder.com">OriginCoder</a>｜低延迟、高稳定、高并发的企业级 AI 网关</strong>，<strong>Claude Max 与 GPT Pro 号池全部自建自营，不降智池价格为官方的 3–4 折，池内降智状态实时公开可查</strong>，支持 <strong>GPT、Claude、Grok、Gemini-4-Carbon、DeepSeek 等国内外主流模型</strong>，可直接用于 <strong>Claude Code、Codex</strong> 等编程工具，支持 <strong>AI 对话、编程辅助、图像生成和视频生成</strong>，海外正规运营，自 <strong>2025 年 8 月运营至今，已服务 1.5 万+ 客户</strong>，费率公开、<strong>无超额费、10 元起充</strong>，后台 <strong>7×24 小时监测、号池冗余、多节点自动切换</strong>，保障高峰期访问稳定，<a href="https://origincoder.com/monitor">服务状态公开可查</a>，<strong>不保存用户会话内容，保护隐私安全</strong>，支持<strong>对公支付与企业开票</strong>，客服 <strong>3 分钟内响应</strong>、技术团队 <strong>24 小时值守</strong>，国内用户可通过<a href="https://cn.origincoder.com">国内加速入口</a>访问。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
+<td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜国内版 OpenRouter，一个 API 接入国内外主流大模型。</strong> 覆盖 <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong>，多供应商智能选路、故障自动切换，<strong>失败请求不收费，价格公开、账单可复算</strong>。适配 Claude Code、Codex 等编程工具，支持 <strong><a href="https://visioncoder.cn/me/keys">CC Switch 和 WorkBuddy 一键导入</a></strong>。企业统一采购，按席位下发订阅套餐、收回再分配，支持对公转账与开票。<strong>供应商入驻开放：上架线路，按质量拿流量；月结对公、用量可查，用户侧计费开票交给平台。</strong> 更有 <a href="https://visioncoder.cn/challenge">VibeCoding 挑战赛</a>，每期奖励合计 <strong>2,350 元加油包</strong>，一等奖 <strong>1,000 元加油包</strong>。</td>
 </tr>
 </tbody>
 </table>
