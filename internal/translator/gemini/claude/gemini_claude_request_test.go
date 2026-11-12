@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
-	"github.com/tidwall/gjson"
 )
 
 func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
@@ -37,12 +37,12 @@ func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	if got := gjson.GetBytes(output, "toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
+	if got := ojson.GetBytesNoCopy(output, "toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
 		t.Fatalf("Expected toolConfig.functionCallingConfig.mode 'ANY', got '%s'", got)
 	}
-	allowed := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+	allowed := ojson.GetBytesNoCopy(output, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
 	if len(allowed) != 1 || allowed[0].String() != "json" {
-		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
+		t.Fatalf("Expected allowedFunctionNames ['json'], got %s", ojson.GetBytesNoCopy(output, "toolConfig.functionCallingConfig.allowedFunctionNames").Raw)
 	}
 }
 
@@ -55,13 +55,13 @@ func TestConvertClaudeRequestToGemini_StringSystemInstruction(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	if got := gjson.GetBytes(output, "systemInstruction.parts.0.text").String(); got != "Be concise" {
+	if got := ojson.GetBytesNoCopy(output, "systemInstruction.parts.0.text").String(); got != "Be concise" {
 		t.Fatalf("Expected systemInstruction text %q, got %q", "Be concise", got)
 	}
-	if gjson.GetBytes(output, "systemInstruction.role").Exists() {
-		t.Fatalf("Expected systemInstruction.role to not exist, got %q", gjson.GetBytes(output, "systemInstruction.role").String())
+	if ojson.GetBytesNoCopy(output, "systemInstruction.role").Exists() {
+		t.Fatalf("Expected systemInstruction.role to not exist, got %q", ojson.GetBytesNoCopy(output, "systemInstruction.role").String())
 	}
-	if gjson.GetBytes(output, "system_instruction").Exists() {
+	if ojson.GetBytesNoCopy(output, "system_instruction").Exists() {
 		t.Fatalf("Legacy system_instruction field should not be emitted: %s", output)
 	}
 }
@@ -89,7 +89,7 @@ func TestConvertClaudeRequestToGemini_ImageContent(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) != 2 {
 		t.Fatalf("Expected 2 parts, got %d", len(parts))
 	}
@@ -117,9 +117,9 @@ func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) 
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	parts := gjson.GetBytes(output, "systemInstruction.parts").Array()
+	parts := ojson.GetBytesNoCopy(output, "systemInstruction.parts").Array()
 	if len(parts) != 2 {
-		t.Fatalf("Expected 2 system parts after attribution strip, got %d: %s", len(parts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
+		t.Fatalf("Expected 2 system parts after attribution strip, got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "systemInstruction.parts").Raw)
 	}
 	if got := parts[0].Get("text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
 		t.Fatalf("Unexpected first system part: %q", got)
@@ -127,8 +127,8 @@ func TestConvertClaudeRequestToGemini_StripsClaudeCodeAttribution(t *testing.T) 
 	if got := parts[1].Get("text").String(); got != "User system prompt" {
 		t.Fatalf("Unexpected second system part: %q", got)
 	}
-	if gjson.GetBytes(output, `systemInstruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
-		t.Fatalf("Claude Code attribution block was forwarded: %s", gjson.GetBytes(output, "systemInstruction.parts").Raw)
+	if ojson.GetBytesNoCopy(output, `systemInstruction.parts.#(text%"x-anthropic-billing-header:*")`).Exists() {
+		t.Fatalf("Claude Code attribution block was forwarded: %s", ojson.GetBytesNoCopy(output, "systemInstruction.parts").Raw)
 	}
 }
 
@@ -145,13 +145,13 @@ func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	if systemContent := gjson.GetBytes(output, `contents.#(role=="system")`); systemContent.Exists() {
+	if systemContent := ojson.GetBytesNoCopy(output, `contents.#(role=="system")`); systemContent.Exists() {
 		t.Fatalf("system role should not be emitted in contents: %s", systemContent.Raw)
 	}
 
-	contents := gjson.GetBytes(output, "contents").Array()
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
 	if len(contents) != 1 {
-		t.Fatalf("Expected consecutive user and message-level system turns to be merged into a single user turn, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+		t.Fatalf("Expected consecutive user and message-level system turns to be merged into a single user turn, got %d: %s", len(contents), ojson.GetBytesNoCopy(output, "contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
 		t.Fatalf("Expected first content role user, got %q", got)
@@ -170,9 +170,9 @@ func TestConvertClaudeRequestToGemini_ConvertsMessageSystemRoleToUserContent(t *
 		t.Fatalf("Unexpected array message-level system content text: %q", got)
 	}
 
-	systemInstructionParts := gjson.GetBytes(output, "systemInstruction.parts").Array()
+	systemInstructionParts := ojson.GetBytesNoCopy(output, "systemInstruction.parts").Array()
 	if len(systemInstructionParts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), ojson.GetBytesNoCopy(output, "systemInstruction.parts").Raw)
 	}
 	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
@@ -192,13 +192,13 @@ func TestConvertClaudeRequestToGemini_MessageLevelDeveloperInstructionsBecomeMer
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	if devContent := gjson.GetBytes(output, `contents.#(role=="developer")`); devContent.Exists() {
+	if devContent := ojson.GetBytesNoCopy(output, `contents.#(role=="developer")`); devContent.Exists() {
 		t.Fatalf("developer role should not be emitted in contents: %s", devContent.Raw)
 	}
 
-	contents := gjson.GetBytes(output, "contents").Array()
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
 	if len(contents) != 1 {
-		t.Fatalf("Expected consecutive user and developer turns to be merged into a single user turn, got %d: %s", len(contents), gjson.GetBytes(output, "contents").Raw)
+		t.Fatalf("Expected consecutive user and developer turns to be merged into a single user turn, got %d: %s", len(contents), ojson.GetBytesNoCopy(output, "contents").Raw)
 	}
 	if got := contents[0].Get("role").String(); got != "user" {
 		t.Fatalf("Expected first content role user, got %q", got)
@@ -217,9 +217,9 @@ func TestConvertClaudeRequestToGemini_MessageLevelDeveloperInstructionsBecomeMer
 		t.Fatalf("Unexpected array developer content text: %q", got)
 	}
 
-	systemInstructionParts := gjson.GetBytes(output, "systemInstruction.parts").Array()
+	systemInstructionParts := ojson.GetBytesNoCopy(output, "systemInstruction.parts").Array()
 	if len(systemInstructionParts) != 1 {
-		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), gjson.GetBytes(output, "systemInstruction.parts").Raw)
+		t.Fatalf("Expected only top-level system parts, got %d: %s", len(systemInstructionParts), ojson.GetBytesNoCopy(output, "systemInstruction.parts").Raw)
 	}
 	if got := systemInstructionParts[0].Get("text").String(); got != "Top-level rules" {
 		t.Fatalf("Unexpected first system part: %q", got)
@@ -261,7 +261,7 @@ func TestConvertClaudeRequestToGemini_PreservesToolPairingWithInterveningSystemM
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, output)
 	}
 
-	contents := gjson.GetBytes(output, "contents").Array()
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 merged contents (user, model, user), got %d: %s", len(contents), output)
 	}
@@ -309,7 +309,7 @@ func TestConvertClaudeRequestToGemini_SkipsEmptyTextParts(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("Expected 1 part after skipping empty text, got %d: %s", len(parts), output)
 	}
@@ -346,22 +346,151 @@ func TestConvertClaudeRequestToGemini_StructuredToolResult(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	fr := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+	fr := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse")
 	if !fr.Exists() {
-		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "contents").Raw)
+		t.Fatalf("expected functionResponse part, contents=%s", ojson.GetBytesNoCopy(output, "contents").Raw)
 	}
 	// The text block must remain structured JSON, not a double-encoded string blob.
 	if got := fr.Get("response.result.text").String(); got != "alpha" {
 		t.Fatalf("expected structured result text 'alpha', got result=%s", fr.Get("response.result").Raw)
 	}
-	// The image block must be emitted as a separate inline_data part, not embedded in result.
-	img := gjson.GetBytes(output, "contents.1.parts.1.inline_data")
-	if got := img.Get("mime_type").String(); got != "image/png" {
-		t.Fatalf("expected image mime type 'image/png', got '%s'", got)
+	parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("expected 1 part (functionResponse with nested inlineData), got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+	}
+	// The image block must be nested under functionResponse.parts as inlineData, not emitted as a sibling part.
+	img := fr.Get("parts.0.inlineData")
+	if !img.Exists() {
+		t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got %s", fr.Raw)
+	}
+	if got := img.Get("mimeType").String(); got != "image/png" {
+		t.Fatalf("expected image mimeType 'image/png', got '%s'", got)
 	}
 	if got := img.Get("data").String(); got != "aGVsbG8=" {
 		t.Fatalf("expected image data 'aGVsbG8=', got '%s'", got)
 	}
+}
+
+func TestConvertClaudeRequestToGemini_ToolResultImagesNestedInFunctionResponseParts(t *testing.T) {
+	t.Run("image-only tool_result nests inlineData under functionResponse.parts", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash-high",
+			"messages": [
+				{
+					"role": "assistant",
+					"content": [
+						{"type": "tool_use", "id": "toolu_read_img", "name": "Read", "input": {"file_path": "/tmp/photo.png"}}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "toolu_read_img",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUg=="}}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output, err := ConvertClaudeRequestToGemini("gemini-3.8-flash-high", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+		if len(parts) != 1 {
+			t.Fatalf("expected 1 part in tool response turn, got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+		}
+		fr := parts[0].Get("functionResponse")
+		if got := fr.Get("name").String(); got != "Read" {
+			t.Fatalf("functionResponse.name = %q, want Read", got)
+		}
+		if got := fr.Get("response.result").String(); got != "" {
+			t.Fatalf("functionResponse.response.result = %q, want empty string", got)
+		}
+		img := fr.Get("parts.0.inlineData")
+		if !img.Exists() {
+			t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got: %s", fr.Raw)
+		}
+		if got := img.Get("mimeType").String(); got != "image/png" {
+			t.Fatalf("mimeType = %q, want image/png", got)
+		}
+		if got := img.Get("data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
+			t.Fatalf("data = %q, want iVBORw0KGgoAAAANSUhEUg==", got)
+		}
+	})
+
+	t.Run("multiple images and parallel aligned tool_results stay bound to their own functionResponse", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash-high",
+			"messages": [
+				{
+					"role": "assistant",
+					"content": [
+						{"type": "tool_use", "id": "call_a", "name": "Read", "input": {"file_path": "/tmp/a.png"}},
+						{"type": "tool_use", "id": "call_b", "name": "Read", "input": {"file_path": "/tmp/b.jpg"}}
+					]
+				},
+				{
+					"role": "user",
+					"content": [
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_b",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "DATA_B1"}},
+								{"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "DATA_B2"}}
+							]
+						},
+						{
+							"type": "tool_result",
+							"tool_use_id": "call_a",
+							"content": [
+								{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "DATA_A1"}}
+							]
+						}
+					]
+				}
+			]
+		}`)
+
+		output, err := ConvertClaudeRequestToGemini("gemini-3.8-flash-high", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		parts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
+		if len(parts) != 2 {
+			t.Fatalf("expected 2 functionResponse parts, got %d: %s", len(parts), ojson.GetBytesNoCopy(output, "contents.1").Raw)
+		}
+
+		frA := parts[0].Get("functionResponse")
+		if got := frA.Get("id").String(); got != "call_a" {
+			t.Fatalf("first functionResponse.id = %q, want call_a", got)
+		}
+		frAParts := frA.Get("parts").Array()
+		if len(frAParts) != 1 || frAParts[0].Get("inlineData.mimeType").String() != "image/png" || frAParts[0].Get("inlineData.data").String() != "DATA_A1" {
+			t.Fatalf("unexpected call_a functionResponse.parts: %s", frA.Raw)
+		}
+
+		frB := parts[1].Get("functionResponse")
+		if got := frB.Get("id").String(); got != "call_b" {
+			t.Fatalf("second functionResponse.id = %q, want call_b", got)
+		}
+		frBParts := frB.Get("parts").Array()
+		if len(frBParts) != 2 {
+			t.Fatalf("expected 2 nested image parts for call_b, got %d: %s", len(frBParts), frB.Raw)
+		}
+		if frBParts[0].Get("inlineData.mimeType").String() != "image/jpeg" || frBParts[0].Get("inlineData.data").String() != "DATA_B1" {
+			t.Fatalf("unexpected call_b image 0: %s", frBParts[0].Raw)
+		}
+		if frBParts[1].Get("inlineData.mimeType").String() != "image/webp" || frBParts[1].Get("inlineData.data").String() != "DATA_B2" {
+			t.Fatalf("unexpected call_b image 1: %s", frBParts[1].Raw)
+		}
+	})
 }
 
 func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixedText(t *testing.T) {
@@ -384,8 +513,8 @@ func TestConvertClaudeRequestToGemini_AlignsPermutedParallelToolResultsWithMixed
 	}`)
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3.7-flash-high", inputJSON, false)
-	callParts := gjson.GetBytes(output, "contents.0.parts").Array()
-	responseParts := gjson.GetBytes(output, "contents.1.parts").Array()
+	callParts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
+	responseParts := ojson.GetBytesNoCopy(output, "contents.1.parts").Array()
 	if len(callParts) != 3 || len(responseParts) != 5 {
 		t.Fatalf("translated parts = %d calls and %d response-turn parts; output=%s", len(callParts), len(responseParts), output)
 	}
@@ -435,9 +564,9 @@ func TestConvertClaudeRequestToGemini_StringToolResult(t *testing.T) {
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
 
-	fr := gjson.GetBytes(output, "contents.1.parts.0.functionResponse")
+	fr := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse")
 	if !fr.Exists() {
-		t.Fatalf("expected functionResponse part, contents=%s", gjson.GetBytes(output, "contents").Raw)
+		t.Fatalf("expected functionResponse part, contents=%s", ojson.GetBytesNoCopy(output, "contents").Raw)
 	}
 	// String content must not be double-encoded: result should be exactly "alpha".
 	if got := fr.Get("response.result").String(); got != "alpha" {
@@ -471,7 +600,7 @@ func TestConvertClaudeRequestToGemini_ToolResultWithTrailingSystemReminderReorde
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
 
-	contents := gjson.GetBytes(output, "contents").Array()
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
 	if len(contents) != 3 {
 		t.Fatalf("expected 3 contents turns, got %d: %s", len(contents), output)
 	}
@@ -554,15 +683,15 @@ func TestConvertClaudeRequestToGemini_ToolStrictMapsToValidatedMode(t *testing.T
 			}`, tt.toolChoice)
 
 			result, _ := ConvertClaudeRequestToGemini("gemini-3.8-flash", []byte(inputJSON), false)
-			if gjson.GetBytes(result, "tools.0.functionDeclarations.0.strict").Exists() {
+			if ojson.GetBytesNoCopy(result, "tools.0.functionDeclarations.0.strict").Exists() {
 				t.Fatalf("strict must be removed from functionDeclarations: %s", result)
 			}
-			mode := gjson.GetBytes(result, "toolConfig.functionCallingConfig.mode").String()
+			mode := ojson.GetBytesNoCopy(result, "toolConfig.functionCallingConfig.mode").String()
 			if mode != tt.expectedMode {
 				t.Fatalf("expected toolConfig.functionCallingConfig.mode = %q, got %q. Output: %s", tt.expectedMode, mode, result)
 			}
 			if len(tt.allowedNames) > 0 {
-				allowed := gjson.GetBytes(result, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
+				allowed := ojson.GetBytesNoCopy(result, "toolConfig.functionCallingConfig.allowedFunctionNames").Array()
 				if len(allowed) != len(tt.allowedNames) {
 					t.Fatalf("expected %d allowedFunctionNames, got %d", len(tt.allowedNames), len(allowed))
 				}
@@ -595,7 +724,7 @@ func TestConvertClaudeRequestToGemini_ToolStrictMapsToValidatedMode(t *testing.T
 			]
 		}`)
 		result, _ := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
-		mode := gjson.GetBytes(result, "toolConfig.functionCallingConfig.mode").String()
+		mode := ojson.GetBytesNoCopy(result, "toolConfig.functionCallingConfig.mode").String()
 		if mode != "VALIDATED" {
 			t.Fatalf("expected mode = 'VALIDATED' for mixed tools, got %q", mode)
 		}
@@ -620,7 +749,7 @@ func TestConvertClaudeRequestToGemini_ToolStrictMapsToValidatedMode(t *testing.T
 			]
 		}`)
 		result, _ := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
-		if gjson.GetBytes(result, "toolConfig").Exists() {
+		if ojson.GetBytesNoCopy(result, "toolConfig").Exists() {
 			t.Fatalf("expected toolConfig not to be set when no strict tools and no tool_choice, got: %s", result)
 		}
 	})
@@ -654,11 +783,11 @@ func TestConvertClaudeRequestToGemini_ParametersJsonSchema_PreservesAdditionalPr
 	}`)
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-2.5-flash", inputJSON, false)
-	schema := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
+	schema := ojson.GetBytesNoCopy(output, "tools.0.functionDeclarations.0.parametersJsonSchema")
 	if !schema.Exists() {
 		t.Fatalf("parametersJsonSchema missing. Output: %s", output)
 	}
-	if got := schema.Get("additionalProperties"); !got.Exists() || got.Type != gjson.False {
+	if got := schema.Get("additionalProperties"); !got.Exists() || got.Type != ojson.False {
 		t.Fatalf("additionalProperties should be preserved as false, got: %v. Schema: %s", got, schema.Raw)
 	}
 	if got := schema.Get("properties.recipient.pattern"); !got.Exists() || got.String() != "^(alice|bob)$" {
@@ -700,8 +829,8 @@ func TestConvertClaudeRequestToGemini_FunctionResponseJSONRef(t *testing.T) {
 	}`)
 
 	output, _ := ConvertClaudeRequestToGemini("gemini-3.8-flash", inputJSON, false)
-	result := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.result")
-	if result.Type != gjson.String {
+	result := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse.response.result")
+	if result.Type != ojson.String {
 		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
 	}
 	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
@@ -730,14 +859,14 @@ func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.
 		]
 	}`)
 	pdfOut, _ := ConvertClaudeRequestToGemini("gemini-2.5-pro", pdfInput, false)
-	pdfParts := gjson.GetBytes(pdfOut, "contents.0.parts").Array()
+	pdfParts := ojson.GetBytesNoCopy(pdfOut, "contents.0.parts").Array()
 	if len(pdfParts) == 0 {
 		t.Fatalf("expected non-empty parts for base64 document, got: %s", string(pdfOut))
 	}
-	if gotMime := gjson.GetBytes(pdfOut, "contents.0.parts.0.inline_data.mime_type").String(); gotMime != "application/pdf" {
+	if gotMime := ojson.GetBytesNoCopy(pdfOut, "contents.0.parts.0.inline_data.mime_type").String(); gotMime != "application/pdf" {
 		t.Fatalf("expected inline_data.mime_type application/pdf, got %q (output: %s)", gotMime, string(pdfOut))
 	}
-	if gotData := gjson.GetBytes(pdfOut, "contents.0.parts.0.inline_data.data").String(); gotData != "JVBERi0xLjQK" {
+	if gotData := ojson.GetBytesNoCopy(pdfOut, "contents.0.parts.0.inline_data.data").String(); gotData != "JVBERi0xLjQK" {
 		t.Fatalf("expected inline_data.data JVBERi0xLjQK, got %q (output: %s)", gotData, string(pdfOut))
 	}
 
@@ -762,7 +891,7 @@ func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.
 		]
 	}`)
 	mixedOut, _ := ConvertClaudeRequestToGemini("gemini-2.5-pro", mixedInput, false)
-	mixedParts := gjson.GetBytes(mixedOut, "contents.0.parts").Array()
+	mixedParts := ojson.GetBytesNoCopy(mixedOut, "contents.0.parts").Array()
 	if len(mixedParts) != 2 {
 		t.Fatalf("expected 2 parts for mixed text + document, got %d (output: %s)", len(mixedParts), string(mixedOut))
 	}
@@ -802,7 +931,7 @@ func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.
 		]
 	}`)
 	interleavedOut, _ := ConvertClaudeRequestToGemini("gemini-2.5-pro", interleavedInput, false)
-	interleavedParts := gjson.GetBytes(interleavedOut, "contents.0.parts").Array()
+	interleavedParts := ojson.GetBytesNoCopy(interleavedOut, "contents.0.parts").Array()
 	if len(interleavedParts) != 3 {
 		t.Fatalf("expected 3 parts for interleaved documents, got %d (output: %s)", len(interleavedParts), string(interleavedOut))
 	}
@@ -823,7 +952,7 @@ func TestConvertClaudeRequestToGemini_Issue5960_DocumentPreservation(t *testing.
 		]
 	}`)
 	unsupportedOut, _ := ConvertClaudeRequestToGemini("gemini-2.5-pro", unsupportedInput, false)
-	contents := gjson.GetBytes(unsupportedOut, "contents").Array()
+	contents := ojson.GetBytesNoCopy(unsupportedOut, "contents").Array()
 	if len(contents) != 0 {
 		t.Fatalf("expected 0 contents turns instead of empty parts turn, got: %s", string(unsupportedOut))
 	}
@@ -838,7 +967,7 @@ func TestConvertClaudeRequestToGemini_ContainerUploadKeepsOtherText(t *testing.T
 		]}]
 	}`)
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) != 1 || parts[0].Get("text").String() != "keep me" {
 		t.Fatalf("text was dropped with the file: %s", output)
 	}
@@ -877,7 +1006,7 @@ func TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped(t *
 		]}]
 	}`)
 	output, _ := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) != 1 || parts[0].Get("text").String() != "keep me" {
 		t.Fatalf("old skip paths changed the turn: %s", output)
 	}

@@ -1256,8 +1256,8 @@ func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t 
 	close(loseFirst)
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
-		t.Fatal("second subscription did not start after heartbeat loss")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("second subscription did not start after heartbeat loss and backoff")
 	}
 	service.homeMu.Lock()
 	exposedRegistry := service.homeRegistry
@@ -1342,12 +1342,12 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	}
 	firstPreAck := <-preAckAttempts
 	secondPreAck := <-preAckAttempts
-	if retryDelay := secondPreAck.Sub(firstPreAck); retryDelay < 75*time.Millisecond {
-		t.Fatalf("pre-ACK retry delay = %v, want at least 75ms", retryDelay)
+	if retryDelay := secondPreAck.Sub(firstPreAck); retryDelay < homeSubscriberRetryInitial {
+		t.Fatalf("pre-ACK retry delay = %v, want at least %s after the prior published failure", retryDelay, homeSubscriberRetryInitial)
 	}
 	select {
 	case <-finalSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(5 * homeSubscriberRetryInitial):
 		t.Fatal("subscriber did not retry after pre-ACK rejections")
 	}
 	service.homeMu.Lock()
@@ -1660,8 +1660,8 @@ func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
-		t.Fatal("subscriber did not retry after ambiguous dispatch drain")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("subscriber did not retry after ambiguous dispatch drain and backoff")
 	}
 	service.homeMu.Lock()
 	exposedRegistry := service.homeRegistry
@@ -1725,8 +1725,8 @@ func TestServiceBacksOffAfterRepeatedPreAckFailures(t *testing.T) {
 
 	firstAttempt := <-attempts
 	secondAttempt := <-attempts
-	if retryDelay := secondAttempt.Sub(firstAttempt); retryDelay < 75*time.Millisecond {
-		t.Fatalf("pre-ACK retry delay = %v, want at least 75ms", retryDelay)
+	if retryDelay := secondAttempt.Sub(firstAttempt); retryDelay < homeSubscriberRetryInitial/2 {
+		t.Fatalf("pre-ACK retry delay = %v, want at least %s", retryDelay, homeSubscriberRetryInitial/2)
 	}
 	cancel()
 	select {
@@ -1804,8 +1804,8 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationWithoutDrainingRegi
 	}
 	select {
 	case <-secondConfig:
-	case <-time.After(time.Second):
-		t.Fatal("subscriber did not retry after heartbeat loss")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("subscriber did not retry after heartbeat loss and backoff")
 	}
 	service.homeMu.Lock()
 	currentRegistry := service.homeRegistry
@@ -2963,6 +2963,46 @@ func TestServiceApplyConfigRuntimeSessionAffinityRebindOnChangeRecreatesSelector
 	changedSelector := manager.Selector()
 	if changedSelector == initialSelector {
 		t.Fatal("changing SessionAffinityRebindOn should recreate selector")
+	}
+
+	neverCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "never",
+	}})
+	if !service.applyConfigRuntime(context.Background(), neverCfg, false) {
+		t.Fatal("never config runtime apply failed")
+	}
+	neverSelector := manager.Selector()
+	if neverSelector == changedSelector {
+		t.Fatal("changing SessionAffinityRebindOn to never should recreate selector")
+	}
+
+	sameNeverCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: " NEVER ",
+	}})
+	if !service.applyConfigRuntime(context.Background(), sameNeverCfg, false) {
+		t.Fatal("same never config runtime apply failed")
+	}
+	if manager.Selector() != neverSelector {
+		t.Fatal("equivalent never SessionAffinityRebindOn should preserve selector")
+	}
+
+	backToAnyCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "any",
+	}})
+	if !service.applyConfigRuntime(context.Background(), backToAnyCfg, false) {
+		t.Fatal("back to any config runtime apply failed")
+	}
+	if manager.Selector() == neverSelector {
+		t.Fatal("changing SessionAffinityRebindOn from never to any should recreate selector")
 	}
 }
 

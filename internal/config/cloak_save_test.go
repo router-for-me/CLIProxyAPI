@@ -295,3 +295,79 @@ claude-api-key:
 		t.Errorf("saved YAML lost 'allow-remote: true'; got:\n%s", savedText)
 	}
 }
+
+func TestSaveConfigPreserveComments_SensitiveWordsReplaceEmptyValueAndPruning(t *testing.T) {
+	for _, v8Layout := range []bool{false, true} {
+		name := "legacy"
+		initialYAML := "port: 8317\nclaude-api-key:\n  - api-key: sk-ant-test\n"
+		if v8Layout {
+			name = "v8"
+			initialYAML = "config-version: 8\nserver:\n  port: 8317\napi-keys:\n  claude:\n    - name: claude-1\n      keys:\n        - api-key: sk-ant-test\n"
+		}
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if errWrite := os.WriteFile(configPath, []byte(initialYAML), 0o600); errWrite != nil {
+				t.Fatalf("os.WriteFile() error = %v", errWrite)
+			}
+			cfg, errLoad := LoadConfigOptional(configPath, false)
+			if errLoad != nil {
+				t.Fatalf("initial LoadConfigOptional() error = %v", errLoad)
+			}
+
+			// Step 1: Save empty-string deletion entries in all three scopes.
+			cfg.Antigravity.SensitiveWordsReplace = map[string]string{
+				"You are Codex, an agent based on GPT-5.": "",
+				"TempAntigrav": "Keep",
+			}
+			cfg.Devin.SensitiveWordsReplace = map[string]string{
+				"DropDevinPhrase": "",
+			}
+			cfg.ClaudeKey[0].Cloak = &CloakConfig{
+				SensitiveWordsReplace: map[string]string{
+					"DropClaudePhrase": "",
+					"OldClaudeTarget":  "OldRepl",
+				},
+			}
+			if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+				t.Fatalf("SaveConfigPreserveComments() step 1 error = %v", errSave)
+			}
+			reloaded, errReload := LoadConfigOptional(configPath, false)
+			if errReload != nil {
+				t.Fatalf("reload step 1 error = %v", errReload)
+			}
+			if val, ok := reloaded.Antigravity.SensitiveWordsReplace["You are Codex, an agent based on GPT-5."]; !ok || val != "" {
+				t.Fatalf("Antigravity empty replacement lost: %#v", reloaded.Antigravity.SensitiveWordsReplace)
+			}
+			if val, ok := reloaded.Devin.SensitiveWordsReplace["DropDevinPhrase"]; !ok || val != "" {
+				t.Fatalf("Devin empty replacement lost: %#v", reloaded.Devin.SensitiveWordsReplace)
+			}
+			if reloaded.ClaudeKey[0].Cloak == nil {
+				t.Fatal("Claude Cloak is nil after step 1")
+			}
+			if val, ok := reloaded.ClaudeKey[0].Cloak.SensitiveWordsReplace["DropClaudePhrase"]; !ok || val != "" {
+				t.Fatalf("Claude empty replacement lost: %#v", reloaded.ClaudeKey[0].Cloak.SensitiveWordsReplace)
+			}
+
+			// Step 2: Prune individual keys and clear Devin replacements completely.
+			delete(reloaded.Antigravity.SensitiveWordsReplace, "TempAntigrav")
+			reloaded.Devin.SensitiveWordsReplace = nil
+			delete(reloaded.ClaudeKey[0].Cloak.SensitiveWordsReplace, "OldClaudeTarget")
+			if errSave2 := SaveConfigPreserveComments(configPath, reloaded); errSave2 != nil {
+				t.Fatalf("SaveConfigPreserveComments() step 2 error = %v", errSave2)
+			}
+			reloaded2, errReload2 := LoadConfigOptional(configPath, false)
+			if errReload2 != nil {
+				t.Fatalf("reload step 2 error = %v", errReload2)
+			}
+			if _, exists := reloaded2.Antigravity.SensitiveWordsReplace["TempAntigrav"]; exists {
+				t.Fatalf("deleted Antigravity key persisted: %#v", reloaded2.Antigravity.SensitiveWordsReplace)
+			}
+			if len(reloaded2.Devin.SensitiveWordsReplace) != 0 {
+				t.Fatalf("cleared Devin replacements persisted: %#v", reloaded2.Devin.SensitiveWordsReplace)
+			}
+			if _, exists := reloaded2.ClaudeKey[0].Cloak.SensitiveWordsReplace["OldClaudeTarget"]; exists {
+				t.Fatalf("deleted Claude replacement key persisted: %#v", reloaded2.ClaudeKey[0].Cloak.SensitiveWordsReplace)
+			}
+		})
+	}
+}

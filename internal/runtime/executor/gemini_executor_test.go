@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
@@ -17,7 +18,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCapGeminiMaxOutputTokensUsesOutputTokenLimit(t *testing.T) {
@@ -25,10 +25,10 @@ func TestCapGeminiMaxOutputTokensUsesOutputTokenLimit(t *testing.T) {
 
 	out := capGeminiMaxOutputTokens(body, "gemini-3.1-pro-preview")
 
-	if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 65536 {
+	if got := ojson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 65536 {
 		t.Fatalf("maxOutputTokens = %d, want 65536", got)
 	}
-	if got := gjson.GetBytes(out, "generationConfig.temperature").Float(); got != 0.2 {
+	if got := ojson.GetBytes(out, "generationConfig.temperature").Float(); got != 0.2 {
 		t.Fatalf("temperature = %v, want 0.2", got)
 	}
 }
@@ -57,7 +57,7 @@ func TestCapGeminiMaxOutputTokensLeavesAllowedOrUnknown(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := capGeminiMaxOutputTokens(tt.body, tt.model)
-			if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != tt.want {
+			if got := ojson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != tt.want {
 				t.Fatalf("maxOutputTokens = %d, want %d", got, tt.want)
 			}
 		})
@@ -71,7 +71,7 @@ func TestGeminiExecutorExecuteCapsMaxOutputTokensBeforeUpstream(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read request body: %v", err)
 		}
-		upstreamMaxOutputTokens = gjson.GetBytes(body, "generationConfig.maxOutputTokens").Int()
+		upstreamMaxOutputTokens = ojson.GetBytes(body, "generationConfig.maxOutputTokens").Int()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
 	}))
@@ -124,7 +124,7 @@ func TestGeminiExecutorExecutePrependsLeadingUser(t *testing.T) {
 	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	contents := ojson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
@@ -157,7 +157,7 @@ func TestGeminiExecutorExecutePrependsLeadingUserForIssue4959ResponsesHistory(t 
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	assertIssue4959LeadingUserContents(t, gjson.GetBytes(upstreamBody, "contents").Array())
+	assertIssue4959LeadingUserContents(t, ojson.GetBytes(upstreamBody, "contents").Array())
 }
 
 func TestGeminiExecutorExecuteAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
@@ -189,7 +189,7 @@ func TestGeminiExecutorExecuteAppendsTrailingUserForTrailingModelTurn(t *testing
 	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	contents := ojson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
@@ -228,7 +228,7 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	if !cliproxyexecutor.UpstreamAttempted(ctx) {
 		t.Fatal("CountTokens() did not mark the HTTP request as an upstream attempt")
 	}
-	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	contents := ojson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("countTokens roles malformed: %s", upstreamBody)
 	}
@@ -243,7 +243,7 @@ func TestGeminiExecutorCountTokensPrependsLeadingUser(t *testing.T) {
 	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
 		t.Fatalf("Execute(countTokens) error = %v", errExecute)
 	}
-	contents = gjson.GetBytes(upstreamBody, "contents").Array()
+	contents = ojson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("Execute(countTokens) roles malformed: %s", upstreamBody)
 	}
@@ -281,7 +281,7 @@ func TestGeminiExecutorAppliesPayloadRulesAfterLeadingUserNormalization(t *testi
 	if _, errExecute := executor.Execute(context.Background(), auth, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	contents := gjson.GetBytes(upstreamBody, "contents").Array()
+	contents := ojson.GetBytes(upstreamBody, "contents").Array()
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("upstream roles malformed: %s", upstreamBody)
 	}
@@ -336,10 +336,10 @@ func TestGeminiExecutorInteractionsWithGeminiAPIKeyUsesGeminiEndpoint(t *testing
 	if gotRevision != "" {
 		t.Fatalf("Api-Revision = %q, want empty for Gemini protocol request", gotRevision)
 	}
-	if !gjson.GetBytes(upstreamBody, "contents.0.parts.0.text").Exists() {
+	if !ojson.GetBytes(upstreamBody, "contents.0.parts.0.text").Exists() {
 		t.Fatalf("contents text missing from translated Gemini body: %s", string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "input").Exists() {
+	if ojson.GetBytes(upstreamBody, "input").Exists() {
 		t.Fatalf("raw interactions input exists in translated Gemini body: %s", string(upstreamBody))
 	}
 }
@@ -355,7 +355,7 @@ func TestGeminiExecutorNativeInteractionsUsesInteractionsEndpoint(t *testing.T) 
 		if errRead != nil {
 			t.Fatalf("read request body: %v", errRead)
 		}
-		gotModelExists = gjson.GetBytes(body, "model").Exists()
+		gotModelExists = ojson.GetBytes(body, "model").Exists()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
 	}))
@@ -390,7 +390,7 @@ func TestGeminiExecutorNativeInteractionsUsesInteractionsEndpoint(t *testing.T) 
 	if gotModelExists {
 		t.Fatal("model field exists for agent-only request, want absent")
 	}
-	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "interaction_1" {
+	if got := ojson.GetBytes(resp.Payload, "id").String(); got != "interaction_1" {
 		t.Fatalf("response id = %q, want interaction_1", got)
 	}
 }
@@ -438,13 +438,13 @@ func TestGeminiExecutorNativeInteractionsTranslatesOpenAIResponsesRequest(t *tes
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "input.0.type").String(); got != "user_input" {
+	if got := ojson.GetBytes(upstreamBody, "input.0.type").String(); got != "user_input" {
 		t.Fatalf("input.0.type = %q, want user_input. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
 		t.Fatalf("thinking_level = %q, want high. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "ok" {
+	if got := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "ok" {
 		t.Fatalf("response text = %q, want ok. Payload: %s", got, string(resp.Payload))
 	}
 }
@@ -506,7 +506,7 @@ func TestGeminiExecutorNativeInteractionsPayloadRulesUseResponsesFromProtocol(t 
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "detailed" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "detailed" {
 		t.Fatalf("thinking_summaries = %q, want detailed. Body: %s", got, string(upstreamBody))
 	}
 }
@@ -561,29 +561,29 @@ func TestGeminiExecutorNativeInteractionsTranslatesOpenAIChatRequest(t *testing.
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
-		if gjson.GetBytes(chunk.Payload, "choices.0.delta.tool_calls.0.function.name").String() == "get_weather" {
+		if ojson.GetBytes(chunk.Payload, "choices.0.delta.tool_calls.0.function.name").String() == "get_weather" {
 			toolStart = chunk.Payload
 		}
 	}
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "今天北京的天气怎么样？" {
+	if got := ojson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "今天北京的天气怎么样？" {
 		t.Fatalf("translated request text = %q. Body: %s", got, string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "messages").Exists() {
+	if ojson.GetBytes(upstreamBody, "messages").Exists() {
 		t.Fatalf("raw OpenAI messages should not be sent upstream: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
+	if got := ojson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
 		t.Fatalf("translated tool type = %q, want function. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.tool_choice").String(); got != "auto" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.tool_choice").String(); got != "auto" {
 		t.Fatalf("translated tool choice = %q, want auto. Body: %s", got, string(upstreamBody))
 	}
 	if toolStart == nil {
 		t.Fatal("OpenAI tool call chunk not found")
 	}
-	if got := gjson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
+	if got := ojson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
 		t.Fatalf("tool call id = %q, want call_1. Payload: %s", got, string(toolStart))
 	}
 }
@@ -639,10 +639,10 @@ func TestGeminiExecutorNativeInteractionsPayloadDefaultsUseTranslatedOpenAIChatS
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.temperature").Float(); got != 0.2 {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.temperature").Float(); got != 0.2 {
 		t.Fatalf("temperature = %v, want 0.2. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.top_p").Float(); got != 0.8 {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.top_p").Float(); got != 0.8 {
 		t.Fatalf("top_p = %v, want default 0.8. Body: %s", got, string(upstreamBody))
 	}
 }
@@ -698,23 +698,23 @@ func TestGeminiExecutorNativeInteractionsTranslatesGeminiStreamResponse(t *testi
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
-		if gjson.GetBytes(chunk.Payload, "event_type").Exists() {
+		if ojson.GetBytes(chunk.Payload, "event_type").Exists() {
 			t.Fatalf("interactions payload leaked to Gemini response: %s", string(chunk.Payload))
 		}
-		if gjson.GetBytes(chunk.Payload, "candidates.0.content.parts.0.functionCall").Exists() {
+		if ojson.GetBytes(chunk.Payload, "candidates.0.content.parts.0.functionCall").Exists() {
 			callChunk = chunk.Payload
 		}
-		if gjson.GetBytes(chunk.Payload, "candidates.0.finishReason").Exists() {
+		if ojson.GetBytes(chunk.Payload, "candidates.0.finishReason").Exists() {
 			finishChunk = chunk.Payload
 		}
 	}
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if gjson.GetBytes(upstreamBody, "contents").Exists() {
+	if ojson.GetBytes(upstreamBody, "contents").Exists() {
 		t.Fatalf("raw Gemini contents should not be sent upstream: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "今天北京的天气怎么样？" {
+	if got := ojson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "今天北京的天气怎么样？" {
 		t.Fatalf("translated request text = %q. Body: %s", got, string(upstreamBody))
 	}
 	if chunkCount != 2 {
@@ -723,28 +723,28 @@ func TestGeminiExecutorNativeInteractionsTranslatesGeminiStreamResponse(t *testi
 	if callChunk == nil {
 		t.Fatal("Gemini functionCall chunk not found")
 	}
-	if got := gjson.GetBytes(callChunk, "candidates.0.content.parts.0.functionCall.name").String(); got != "get_weather" {
+	if got := ojson.GetBytes(callChunk, "candidates.0.content.parts.0.functionCall.name").String(); got != "get_weather" {
 		t.Fatalf("functionCall.name = %q, want get_weather. Payload: %s", got, string(callChunk))
 	}
-	if got := gjson.GetBytes(callChunk, "candidates.0.content.parts.0.functionCall.args.location").String(); got != "北京" {
+	if got := ojson.GetBytes(callChunk, "candidates.0.content.parts.0.functionCall.args.location").String(); got != "北京" {
 		t.Fatalf("functionCall.args.location = %q, want 北京. Payload: %s", got, string(callChunk))
 	}
-	if got := gjson.GetBytes(callChunk, "candidates.0.content.parts.0.thoughtSignature").String(); got != "sig_1" {
+	if got := ojson.GetBytes(callChunk, "candidates.0.content.parts.0.thoughtSignature").String(); got != "sig_1" {
 		t.Fatalf("thoughtSignature = %q, want sig_1. Payload: %s", got, string(callChunk))
 	}
 	if finishChunk == nil {
 		t.Fatal("Gemini finish chunk not found")
 	}
-	if got := gjson.GetBytes(finishChunk, "candidates.0.finishReason").String(); got != "STOP" {
+	if got := ojson.GetBytes(finishChunk, "candidates.0.finishReason").String(); got != "STOP" {
 		t.Fatalf("finishReason = %q, want STOP. Payload: %s", got, string(finishChunk))
 	}
-	if got := gjson.GetBytes(finishChunk, "usageMetadata.promptTokenCount").Int(); got != 2 {
+	if got := ojson.GetBytes(finishChunk, "usageMetadata.promptTokenCount").Int(); got != 2 {
 		t.Fatalf("promptTokenCount = %d, want 2. Payload: %s", got, string(finishChunk))
 	}
-	if got := gjson.GetBytes(finishChunk, "usageMetadata.candidatesTokenCount").Int(); got != 3 {
+	if got := ojson.GetBytes(finishChunk, "usageMetadata.candidatesTokenCount").Int(); got != 3 {
 		t.Fatalf("candidatesTokenCount = %d, want 3. Payload: %s", got, string(finishChunk))
 	}
-	if got := gjson.GetBytes(finishChunk, "usageMetadata.totalTokenCount").Int(); got != 5 {
+	if got := ojson.GetBytes(finishChunk, "usageMetadata.totalTokenCount").Int(); got != 5 {
 		t.Fatalf("totalTokenCount = %d, want 5. Payload: %s", got, string(finishChunk))
 	}
 }
@@ -812,19 +812,19 @@ func TestGeminiExecutorNativeInteractionsTranslatesClaudeRequest(t *testing.T) {
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
+	if got := ojson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
 		t.Fatalf("translated request text = %q, want hi. Body: %s", got, string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "messages").Exists() {
+	if ojson.GetBytes(upstreamBody, "messages").Exists() {
 		t.Fatalf("raw Claude messages should not be sent upstream: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
+	if got := ojson.GetBytes(upstreamBody, "tools.0.type").String(); got != "function" {
 		t.Fatalf("translated tool type = %q, want function. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
+	if got := ojson.GetBytes(resp.Payload, "content.0.text").String(); got != "ok" {
 		t.Fatalf("response text = %q, want ok. Payload: %s", got, string(resp.Payload))
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.output_tokens").Int(); got != 1 {
+	if got := ojson.GetBytes(resp.Payload, "usage.output_tokens").Int(); got != 1 {
 		t.Fatalf("response output tokens = %d, want 1. Payload: %s", got, string(resp.Payload))
 	}
 }
@@ -869,7 +869,7 @@ func TestGeminiExecutorNativeInteractionsStripsClaudeToolIDsBeforeUpstream(t *te
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 
-	inputs := gjson.GetBytes(upstreamBody, "input").Array()
+	inputs := ojson.GetBytes(upstreamBody, "input").Array()
 	if len(inputs) == 0 {
 		t.Fatalf("upstream input missing: %s", upstreamBody)
 	}
@@ -968,7 +968,7 @@ func TestGeminiExecutorNativeInteractionsStripsPassthroughInputIDsBeforeUpstream
 				t.Fatalf("Execute() error = %v", errExecute)
 			}
 
-			inputs := gjson.GetBytes(upstreamBody, "input").Array()
+			inputs := ojson.GetBytes(upstreamBody, "input").Array()
 			if len(inputs) != 3 {
 				t.Fatalf("upstream input count = %d, want 3. Body: %s", len(inputs), upstreamBody)
 			}
@@ -982,19 +982,19 @@ func TestGeminiExecutorNativeInteractionsStripsPassthroughInputIDsBeforeUpstream
 					}
 				}
 			}
-			if got := gjson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
+			if got := ojson.GetBytes(upstreamBody, "input.0.content.0.text").String(); got != "hi" {
 				t.Fatalf("user text = %q, want hi. Body: %s", got, upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "input.1.id").String(); got != "toolu_1" {
+			if got := ojson.GetBytes(upstreamBody, "input.1.id").String(); got != "toolu_1" {
 				t.Fatalf("function_call id = %q, want toolu_1. Body: %s", got, upstreamBody)
 			}
-			if gjson.GetBytes(upstreamBody, "input.1.call_id").Exists() {
+			if ojson.GetBytes(upstreamBody, "input.1.call_id").Exists() {
 				t.Fatalf("function_call call_id must be omitted. Body: %s", upstreamBody)
 			}
-			if got := gjson.GetBytes(upstreamBody, "input.2.call_id").String(); got != "toolu_1" {
+			if got := ojson.GetBytes(upstreamBody, "input.2.call_id").String(); got != "toolu_1" {
 				t.Fatalf("function_result call_id = %q, want toolu_1. Body: %s", got, upstreamBody)
 			}
-			if gjson.GetBytes(upstreamBody, "input.2.id").Exists() {
+			if ojson.GetBytes(upstreamBody, "input.2.id").Exists() {
 				t.Fatalf("function_result id must be omitted. Body: %s", upstreamBody)
 			}
 		})
@@ -1033,19 +1033,19 @@ func TestGeminiExecutorNativeInteractionsAppliesThinkingSuffix(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "gemini-3.1-flash-lite" {
+	if got := ojson.GetBytes(upstreamBody, "model").String(); got != "gemini-3.1-flash-lite" {
 		t.Fatalf("model = %q, want gemini-3.1-flash-lite. Body: %s", got, string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "generationConfig").Exists() {
+	if ojson.GetBytes(upstreamBody, "generationConfig").Exists() {
 		t.Fatalf("generationConfig exists, want Interactions snake_case only. Body: %s", string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "generation_config.thinking_config").Exists() {
+	if ojson.GetBytes(upstreamBody, "generation_config.thinking_config").Exists() {
 		t.Fatalf("thinking_config exists, want native Interactions fields. Body: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
 		t.Fatalf("thinking_level = %q, want high. Body: %s", got, string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").Exists() {
+	if ojson.GetBytes(upstreamBody, "generation_config.thinking_summaries").Exists() {
 		t.Fatalf("thinking_summaries should be absent without explicit summary intent. Body: %s", string(upstreamBody))
 	}
 }
@@ -1082,16 +1082,16 @@ func TestGeminiExecutorNativeInteractionsPreservesThinkingProtocolFields(t *test
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if gjson.GetBytes(upstreamBody, "generationConfig").Exists() {
+	if ojson.GetBytes(upstreamBody, "generationConfig").Exists() {
 		t.Fatalf("generationConfig exists, want Interactions snake_case only. Body: %s", string(upstreamBody))
 	}
-	if gjson.GetBytes(upstreamBody, "generation_config.thinking_config").Exists() {
+	if ojson.GetBytes(upstreamBody, "generation_config.thinking_config").Exists() {
 		t.Fatalf("thinking_config exists, want native Interactions fields. Body: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
 		t.Fatalf("thinking_level = %q, want high. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "auto" {
+	if got := ojson.GetBytes(upstreamBody, "generation_config.thinking_summaries").String(); got != "auto" {
 		t.Fatalf("thinking_summaries = %q, want auto. Body: %s", got, string(upstreamBody))
 	}
 }
@@ -1234,7 +1234,7 @@ func TestGeminiExecutorNativeInteractionsStreamParsesUsage(t *testing.T) {
 			t.Fatalf("chunk = %q, want complete SSE frame", string(chunk.Payload))
 		}
 		payload := geminiInteractionsSSEPayload(chunk.Payload)
-		if gjson.GetBytes(payload, "event_type").String() == "interaction.completed" {
+		if ojson.GetBytes(payload, "event_type").String() == "interaction.completed" {
 			completed = payload
 		}
 	}
@@ -1244,13 +1244,13 @@ func TestGeminiExecutorNativeInteractionsStreamParsesUsage(t *testing.T) {
 	if completed == nil {
 		t.Fatal("interaction.completed chunk not found")
 	}
-	if got := gjson.GetBytes(completed, "interaction.usage.total_input_tokens").Int(); got != 2 {
+	if got := ojson.GetBytes(completed, "interaction.usage.total_input_tokens").Int(); got != 2 {
 		t.Fatalf("total_input_tokens = %d, want 2", got)
 	}
-	if got := gjson.GetBytes(completed, "interaction.usage.total_output_tokens").Int(); got != 3 {
+	if got := ojson.GetBytes(completed, "interaction.usage.total_output_tokens").Int(); got != 3 {
 		t.Fatalf("total_output_tokens = %d, want 3", got)
 	}
-	if got := gjson.GetBytes(completed, "interaction.usage.total_tokens").Int(); got != 5 {
+	if got := ojson.GetBytes(completed, "interaction.usage.total_tokens").Int(); got != 5 {
 		t.Fatalf("total_tokens = %d, want 5", got)
 	}
 }
@@ -1296,13 +1296,13 @@ func TestGeminiExecutorNativeInteractionsClaudeStreamPreservesToolSignature(t *t
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
 		payload := geminiInteractionsSSEPayload(chunk.Payload)
-		switch gjson.GetBytes(payload, "type").String() {
+		switch ojson.GetBytes(payload, "type").String() {
 		case "content_block_start":
-			if gjson.GetBytes(payload, "content_block.type").String() == "tool_use" {
+			if ojson.GetBytes(payload, "content_block.type").String() == "tool_use" {
 				toolStart = payload
 			}
 		case "content_block_delta":
-			if gjson.GetBytes(payload, "delta.type").String() == "input_json_delta" {
+			if ojson.GetBytes(payload, "delta.type").String() == "input_json_delta" {
 				toolDelta = payload
 			}
 		case "message_stop":
@@ -1312,10 +1312,10 @@ func TestGeminiExecutorNativeInteractionsClaudeStreamPreservesToolSignature(t *t
 	if toolStart == nil {
 		t.Fatal("tool content_block_start chunk not found")
 	}
-	if got := gjson.GetBytes(toolStart, "content_block.signature").String(); got != "sig_1" {
+	if got := ojson.GetBytes(toolStart, "content_block.signature").String(); got != "sig_1" {
 		t.Fatalf("tool signature = %q, want sig_1. Payload: %s", got, string(toolStart))
 	}
-	if got := gjson.GetBytes(toolDelta, "delta.partial_json").String(); got != `{"location":"北京"}` {
+	if got := ojson.GetBytes(toolDelta, "delta.partial_json").String(); got != `{"location":"北京"}` {
 		t.Fatalf("tool partial_json = %q, want location payload. Payload: %s", got, string(toolDelta))
 	}
 	if messageStop == nil {
@@ -1487,7 +1487,7 @@ func TestGeminiExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testi
 	if !okStatus || status.StatusCode() != http.StatusBadGateway {
 		t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
 	}
-	if got := gjson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
+	if got := ojson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
 		t.Fatalf("Execute() error.type = %q, want api_error. Error: %s", got, errExec.Error())
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
@@ -1774,6 +1774,95 @@ func TestGeminiExecutorPromptFeedbackBlockWithoutCandidatesReturnsError(t *testi
 		wrappedBlocked := `{"response":{"promptFeedback":{"blockReason":"SAFETY","blockReasonMessage":"blocked"}}}`
 		if msg, blocked := geminiPromptBlockErrorMessage([]byte(wrappedBlocked)); !blocked || msg != "upstream blocked the prompt: SAFETY - blocked" {
 			t.Fatalf("geminiPromptBlockErrorMessage(wrapped) = (%q, %v), wantSAFETY blocked true", msg, blocked)
+		}
+	})
+
+	t.Run("mid_stream_gemini_filter_block_returns_400_request_fault", func(t *testing.T) {
+		thoughtFrame := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"thinking"}]}}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":10,"totalTokenCount":110},"modelVersion":"gemini-4-argon-b","responseId":"resp-1"}}`
+		filterFrame := `{"response":{"candidates":[{"content":{"parts":[{"text":"This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + thoughtFrame + "\n\ndata: " + filterFrame + "\n\n"))
+		}))
+		defer server.Close()
+
+		exec := NewGeminiExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID:       t.Name(),
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":  "test-key",
+				"base_url": server.URL,
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   "gemini-4-argon-high",
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+		}
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		var streamErr error
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				streamErr = chunk.Err
+			}
+		}
+		if streamErr == nil {
+			t.Fatal("ExecuteStream() chunk.Err = nil, want 400 filter block error")
+		}
+		streamStatus, okStatus := streamErr.(interface{ StatusCode() int })
+		if !okStatus || streamStatus.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 400", streamErr, streamErr)
+		}
+	})
+
+	t.Run("mid_stream_quoted_filter_notice_followed_by_completion_succeeds", func(t *testing.T) {
+		filterFrame := `{"response":{"candidates":[{"content":{"parts":[{"text":"This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."}]}}]}}`
+		finalFrame := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" (quoted above)"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"totalTokenCount":17},"modelVersion":"gemini-4-argon-b","responseId":"resp-2"}}`
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: " + filterFrame + "\n\ndata: " + finalFrame + "\n\n"))
+		}))
+		defer server.Close()
+
+		exec := NewGeminiExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID:       t.Name(),
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":  "test-key",
+				"base_url": server.URL,
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   "gemini-4-argon-high",
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"quote notice"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+		}
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		var payloadCount int
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("unexpected stream error: %v", chunk.Err)
+			}
+			if len(chunk.Payload) > 0 {
+				payloadCount++
+			}
+		}
+		if payloadCount < 2 {
+			t.Fatalf("expected both quoted chunk and completion chunk, got %d", payloadCount)
 		}
 	})
 }

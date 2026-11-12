@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestUserTurnDropsRefusesAnEmptiedTurnEvenWhenOtherTurnsRemain(t *testing.T) {
@@ -130,7 +130,7 @@ func TestInteractionsAttachmentType(t *testing.T) {
 		`{"type":"image_url","image_url":{"url":""}}`: "image_url",
 	}
 	for raw, want := range cases {
-		if got := InteractionsAttachmentType(gjson.Parse(raw)); got != want {
+		if got := InteractionsAttachmentType(ojson.Parse(raw)); got != want {
 			t.Fatalf("InteractionsAttachmentType(%s) = %q, want %q", raw, got, want)
 		}
 	}
@@ -172,7 +172,7 @@ func TestIsInteractionsInstructionStep(t *testing.T) {
 		{`"plain string"`, false, false},
 	}
 	for _, tc := range cases {
-		if got := IsInteractionsInstructionStep(gjson.Parse(tc.raw), tc.inherited); got != tc.want {
+		if got := IsInteractionsInstructionStep(ojson.Parse(tc.raw), tc.inherited); got != tc.want {
 			t.Fatalf("IsInteractionsInstructionStep(%s, %v) = %v, want %v", tc.raw, tc.inherited, got, tc.want)
 		}
 	}

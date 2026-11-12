@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestIssue5190ToolNamesAcrossChatAndResponses(t *testing.T) {
@@ -20,7 +20,7 @@ func TestIssue5190ToolNamesAcrossChatAndResponses(t *testing.T) {
 			}
 			request := sdktranslator.TranslateRequest(format, sdktranslator.FormatInteractions, model, original, false)
 			for i, upstream := range []string{"external_read_file", "external_external_read_file"} {
-				if got := gjson.GetBytes(request, fmt.Sprintf("tools.%d.name", i)).String(); got != upstream {
+				if got := ojson.GetBytes(request, fmt.Sprintf("tools.%d.name", i)).String(); got != upstream {
 					t.Fatalf("upstream tool=%q want=%q: %s", got, upstream, request)
 				}
 				name := []string{"read_file", "external_read_file"}[i]
@@ -31,7 +31,7 @@ func TestIssue5190ToolNamesAcrossChatAndResponses(t *testing.T) {
 				if format == sdktranslator.FormatOpenAIResponse {
 					path = "output.0.name"
 				}
-				if got := gjson.GetBytes(out, path).String(); got != name {
+				if got := ojson.GetBytes(out, path).String(); got != name {
 					t.Errorf("nonstream tool=%q want=%q: %s", got, name, out)
 				}
 				param = nil
@@ -50,7 +50,7 @@ func TestIssue5190ToolNamesAcrossChatAndResponses(t *testing.T) {
 							if format == sdktranslator.FormatOpenAIResponse {
 								path = "item.name"
 							}
-							if got := gjson.Get(line, path); got.Exists() {
+							if got := ojson.Get(line, path); got.Exists() {
 								found = true
 								if got.String() != name {
 									t.Errorf("stream tool=%q want=%q: %s", got.String(), name, line)

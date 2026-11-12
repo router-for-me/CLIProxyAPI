@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertOpenAIResponsesRequestToAntigravity_ExposesClientToolSearch(t *testing.T) {
@@ -26,10 +27,10 @@ func TestConvertOpenAIResponsesRequestToAntigravity_ExposesClientToolSearch(t *t
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	root := gjson.ParseBytes(out)
+	root := util.ParseGJSONBytesNoCopy(out)
 
 	names := make([]string, 0)
-	root.Get("request.tools.0.functionDeclarations").ForEach(func(_, declaration gjson.Result) bool {
+	root.Get("request.tools.0.functionDeclarations").ForEach(func(_, declaration ojson.Result) bool {
 		names = append(names, declaration.Get("name").String())
 		return true
 	})
@@ -53,18 +54,25 @@ func TestConvertAntigravityResponseToOpenAIResponses_ToolSearchCall(t *testing.T
 	chunk := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool_search","args":{"query":"fixture"}}}]},"finishReason":"STOP"}],"responseId":"resp_ag_tool_search"}}`)
 
 	var param any
-	var done gjson.Result
-	for _, output := range ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", originalRequest, nil, chunk, &param) {
-		payload := string(output)
-		if idx := strings.Index(payload, "data:"); idx >= 0 {
-			data := gjson.Parse(payload[idx+len("data:"):])
-			if data.Get("type").String() == "response.output_item.done" {
-				done = data
+	var added, done, completed ojson.Result
+	for _, frame := range [][]byte{chunk, []byte("data: [DONE]")} {
+		for _, output := range ConvertAntigravityResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", originalRequest, nil, frame, &param) {
+			payload := string(output)
+			if idx := strings.Index(payload, "data:"); idx >= 0 {
+				data := ojson.Parse(payload[idx+len("data:"):])
+				switch data.Get("type").String() {
+				case "response.output_item.added":
+					added = data
+				case "response.output_item.done":
+					done = data
+				case "response.completed":
+					completed = data
+				}
 			}
 		}
 	}
-	if !done.Exists() {
-		t.Fatalf("missing response.output_item.done event")
+	if !added.Exists() || !done.Exists() || !completed.Exists() {
+		t.Fatalf("missing tool_search_call lifecycle events: added=%v done=%v completed=%v", added.Exists(), done.Exists(), completed.Exists())
 	}
 	if got := done.Get("item.type").String(); got != "tool_search_call" {
 		t.Fatalf("item type = %q, want tool_search_call; raw: %s", got, done.Raw)
@@ -74,5 +82,34 @@ func TestConvertAntigravityResponseToOpenAIResponses_ToolSearchCall(t *testing.T
 	}
 	if got := done.Get("item.execution").String(); got != "client" {
 		t.Fatalf("item execution = %q", got)
+	}
+	callID := done.Get("item.call_id").String()
+	if callID == "" || added.Get("item.call_id").String() != callID || completed.Get("response.output.0.call_id").String() != callID {
+		t.Fatalf("call_id must be non-empty and stable across events")
+	}
+	wantItemID := "tsc_" + callID
+	for _, test := range []struct {
+		label string
+		item  ojson.Result
+	}{
+		{label: "added", item: added.Get("item")},
+		{label: "done", item: done.Get("item")},
+		{label: "completed", item: completed.Get("response.output.0")},
+	} {
+		if got := test.item.Get("id").String(); got != wantItemID {
+			t.Fatalf("%s id = %q, want %q; raw: %s", test.label, got, wantItemID, test.item.Raw)
+		}
+	}
+
+	nonStreamRaw := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"tool_search","args":{"query":"fixture"}}}]},"finishReason":"STOP"}],"responseId":"resp_ag_tool_search_nonstream"}}`)
+	nonStreamOut := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.8-flash-high", originalRequest, nil, nonStreamRaw, nil)
+	nonStreamItem := ojson.GetBytesNoCopy(nonStreamOut, "output.0")
+	if got := nonStreamItem.Get("type").String(); got != "tool_search_call" {
+		t.Fatalf("non-stream item type = %q, want tool_search_call; raw: %s", got, nonStreamOut)
+	}
+	if nonStreamCallID := nonStreamItem.Get("call_id").String(); nonStreamCallID == "" {
+		t.Fatalf("non-stream call_id must be non-empty: %s", nonStreamItem.Raw)
+	} else if got := nonStreamItem.Get("id").String(); got != "tsc_"+nonStreamCallID {
+		t.Fatalf("non-stream id = %q, want %q; raw: %s", got, "tsc_"+nonStreamCallID, nonStreamItem.Raw)
 	}
 }

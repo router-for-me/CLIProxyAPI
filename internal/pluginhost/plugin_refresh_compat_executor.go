@@ -57,6 +57,10 @@ func UnwrapPluginRefreshCompatExecutor(executor coreauth.ProviderExecutor) (core
 	return wrapper.inner, true
 }
 
+func (e *pluginRefreshCompatExecutor) UsesConfig(cfg *config.Config) bool {
+	return e != nil && e.cfg == cfg
+}
+
 func (e *pluginRefreshCompatExecutor) Identifier() string {
 	if e == nil {
 		return ""
