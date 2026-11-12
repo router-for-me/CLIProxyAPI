@@ -1391,6 +1391,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
 			if current.LastError.Code == "refresh_outcome_unknown" {
 				current.StatusMessage = current.LastError.Message
+				if current.Status != StatusDisabled {
+					// Job completion reschedules this recovery state, so retain a positive delay.
+					current.NextRefreshAfter = checkNow.Add(refreshCheckInterval)
+				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
