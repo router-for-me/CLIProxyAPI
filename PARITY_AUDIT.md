@@ -11,17 +11,17 @@ Report format at the end of this file.
 
 | role | path | ref |
 |---|---|---|
-| upstream (source of truth) | `/home/igy/projects/OmniRoute` | `cheap/release/v3.8.53` = `b2a64106c9` |
-| port (under audit) | `/home/igy/orca/workspaces/CLIProxyAPI/viperfish` | `lite-tool-cap-and-rtk-command` = `dc0f4e5b`, PR #8 |
+| upstream (source of truth) | `/home/igy/projects/OmniRoute` | `cheap/release/v3.8.54` = `5a5894a776` |
+| port (under audit) | `/home/igy/orca/workspaces/CLIProxyAPI/rockling` | `DarknessKiller/deeper-not-bigger-task` = `8f0f9bed` |
 
 Upstream remote is named `cheap` = `https://github.com/cheaper-inference/OmniRoute`.
-The local checkout `HEAD` is `f73b76958f`, which is **older** than `cheap/release/v3.8.53`.
+The local checkout `HEAD` is `f73b76958f`, which is **older** than `cheap/release/v3.8.54`.
 Always compare against the ref, never against the working tree:
 
 ```bash
 cd /home/igy/projects/OmniRoute
-git log --oneline HEAD..cheap/release/v3.8.53 -- open-sse/services/compression/
-git show cheap/release/v3.8.53:open-sse/services/compression/lite.ts
+git log --oneline HEAD..cheap/release/v3.8.54 -- open-sse/services/compression/
+git show cheap/release/v3.8.54:open-sse/services/compression/lite.ts
 ```
 
 Port: `internal/payloadcompress/`, 12 files, ~5660 lines including tests.
@@ -89,6 +89,43 @@ Measurement and ops: `harness/`, `eval/`, `stats.ts` (329),
 Known dead code, do not port: `cachingAware.ts`'s `deterministicOnly` and the
 intensity-downgrade path are computed and never consumed anywhere in production.
 
+Live-zone cache preservation (`preserveRawPrefixOnMiss`, upstream `e6ab3cc5ea`):
+upstream sends a cold or mismatched live-zone prefix **raw** for OpenCode-lane
+providers (`opencode` / `opencode-zen` / `opencode-go`, plus a
+`deepseek-v4.1-flash` model regex) so the conversation's first request does not
+disturb the provider's implicit prefix cache. Verdict: ✅ not applicable here,
+for three independent reasons. The port has no OpenCode lane (no executor, no
+provider identifier, nothing in non-test code). `payloadcompress` never receives
+provider identity at all: `payload_helpers.go:60` passes `protocol` (the wire
+format, `"openai"`/`"claude"`) as the provider argument, so lane detection is
+unreachable without new plumbing. And the guard exists upstream because stacked
+lite/session-dedup can retroactively rewrite already-sent tool results, whereas
+the port's live zone is off by default and its engines hold a tested
+append-stability contract (`TestApplyIsAppendStable`) plus `cache-prefix:
+protect`. If an OpenCode lane is ever added, port this guard with it.
+
+Two more cache-awareness verdicts from the same sweep, both ✅ correct to omit:
+
+- **`cachingAware.ts` strategy downgrade** (`getCacheAwareStrategy`: silently
+  rewriting `aggressive`/`ultra` to `standard` on a caching provider). The port
+  runs the configured lossy pipeline as written. Downgrading silently would
+  contradict the port's explicit-config model, which is the whole point of
+  shipping combos the user named. `skipSystemPrompt` is already stricter here
+  (default `always`), and `deterministicOnly` is dead upstream code.
+- **Prompt-cache-eligibility classification** (`providerSupportsCaching`,
+  `providerUsesAutomaticPrefixCaching`, `isOpenCodeLane`). Unreachable for the
+  same reason as the guard above: the package never sees a provider id. The port
+  uses a model-slug prefix heuristic (`prefixfreeze.go:68`) instead, which errs
+  toward recognizing too much — a false positive costs only protection, never
+  correctness. Port the classification only *with* provider identity, not alone.
+
+One upstream gate is genuinely absent but harmless here: upstream disables the
+live zone entirely under a global hard budget (`liveZone.ts:605`) because its
+budget is engine-fed and needs the complete history. This port's budget is a
+post-pass over the entire assembled body (`compress.go:333`), so it still sees
+every message; a reused prefix cannot hide history from it. Add the gate only if
+the budget ever moves inside the engines.
+
 ## Judgement calls already made
 
 1. **`liveZone.ts` ported, off by default (upstream default).** It is a per-session
@@ -146,7 +183,7 @@ building a pipeline.
 Comparison method: compare **ratios**, not bytes. Compare per-message shrink, not
 just totals, or a single diverging message hides inside an equal total.
 
-## Numbers as of `dc0f4e5b`
+## Numbers as of `dc0f4e5b` (272 commits behind `8f0f9bed`; ratios not re-measured since)
 
 Input: `min.json`, 67343 bytes, 25 messages, Claude Code shape, one `cache_control`
 breakpoint at the tail, tool output is `go test ./...` noise with ANSI.
@@ -288,3 +325,26 @@ Known open items for that last section, to confirm or refute:
   that stubs a file read once the same path is read or written later. Supports
   Anthropic `tool_use`/`tool_result` blocks and OpenAI `tool_calls`/`role: tool`.
   Chat shape only, like upstream; idempotent.
+- MCP tool-result truncation keeps JSON parseable (`mcp_json_truncate.go`, ported
+  from upstream 616dc5bebc): a valid JSON result over `maxTextChars` has its
+  `content` string/blocks shrunk and is re-serialized with `truncated: true` and
+  the pagination hint; a result that cannot shrink in place gets the bounded
+  `{truncated, hint, originalChars, preview}` envelope. A head slice of the
+  serialized string is never emitted.
+- Marker-protocol note (`protocol_note.go`, ported from 616dc5bebc): one leading
+  `system` note explaining any `[CCR retrieve hash=...]` / `[dedup:ref sha=...]`
+  marker in the final body. Runs after the inflation guard, so its fixed size
+  never counts against it, and a dedup marker is explained even when CCR replaced
+  nothing. Names the retrieve tool exactly as the client advertised it. A byte
+  scan short-circuits bodies with no marker, preserving the zero-alloc fast path.
+  The note is prepended once, on the turn a marker first appears; that turn is one
+  prompt-cache miss, the same class as min-bytes crossing mid-session, and every
+  later turn stays a strict prefix-extension.
+  The note covers both conversation shapes engines rewrite: chat `messages` and
+  Responses `input[]` (`bodyConvItems`). Upstream gets this for free because its
+  body adapter turns `input[]` into `messages` before the engines and restores an
+  injected note as a `{type:"message",role:"system"}` item; the port has no
+  adapter, so the note pass reads and writes `input[]` itself, emitting the typed
+  item shape Responses requires. Before this, a Responses body got a dedup marker
+  with no note explaining it. Gemini `contents` is deliberately excluded:
+  upstream's adapter maps only those two shapes.

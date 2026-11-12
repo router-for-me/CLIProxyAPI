@@ -1,6 +1,7 @@
 package payloadcompress
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -70,6 +71,16 @@ func (e mcpAccessibilityEngine) compress(text string) (string, bool) {
 		maxChars = mcpDefaultMaxTextChars
 	}
 
+	// JSON-aware path: a valid JSON tool result must stay valid. Parse the RAW
+	// text before the line pipeline, which would otherwise corrupt it, and fall
+	// back to the bounded preview envelope when the content cannot shrink.
+	if charLen(text) > maxChars && json.Valid([]byte(text)) {
+		if truncated, ok := mcpTruncateJSON(text, maxChars); ok {
+			return truncated, truncated != text
+		}
+		return mcpBuildJSONEnvelope(text, maxChars), true
+	}
+
 	lines := strings.Split(text, "\n")
 	kept := lines[:0]
 	for _, line := range lines {
@@ -88,11 +99,8 @@ func (e mcpAccessibilityEngine) compress(text string) (string, bool) {
 		}
 		head := string([]rune(out)[:headSize])
 		omitted := charLen(out) - charLen(head)
-		out = fmt.Sprintf(
-			"%s\n\n... [truncated %d chars by OmniRoute MCP filter. "+
-				"Page is large; ask user to scroll/navigate to a specific section, or click an element with the refs shown above]",
-			head, omitted,
-		)
+		out = fmt.Sprintf("%s\n\n... [truncated %d chars by OmniRoute MCP filter. %s",
+			head, omitted, mcpTruncationHint)
 	}
 	return out, out != text
 }

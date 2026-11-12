@@ -40,15 +40,13 @@ func TestCCRReplacesLargeBlock(t *testing.T) {
 
 	doc := ojson.NewDocString(string(got))
 	messages := doc.Get("messages")
-	if !messages.IsArray() || len(messages.Array()) != 2 {
-		t.Fatalf("expected protocol message plus user message, got %s", got)
-	}
-	first := messages.Array()[0]
-	if first.Get("role").String() != "system" || !strings.Contains(first.Get("content").String(), ccrProtocolMarker) {
-		t.Fatalf("expected injected protocol instruction, got %s", first.Raw)
+	// Upstream 616dc5bebc: the engine only replaces blocks; the protocol note is
+	// added by the pipeline step, so one message (the rewritten user turn) remains.
+	if !messages.IsArray() || len(messages.Array()) != 1 {
+		t.Fatalf("expected the user message alone, got %s", got)
 	}
 
-	user := messages.Array()[1].Get("content").String()
+	user := messages.Array()[0].Get("content").String()
 	marker := regexp.MustCompile(`\[CCR retrieve hash=[0-9a-f]{24} chars=\d+\]`)
 	match := marker.FindString(user)
 	if match == "" {
@@ -101,10 +99,11 @@ func TestCCRSkipsSmallAndToolMessages(t *testing.T) {
 func TestCCRNoDoubleInstruction(t *testing.T) {
 	ccrResetStore()
 	body := ccrTestBody(strings.Repeat("long block ", 100), true)
-	once := newCCREngine().applyBody(body)
-	twice := newCCREngine().applyBody(once)
-	if strings.Count(string(twice), ccrProtocolMarker) != 1 {
-		t.Fatalf("protocol instruction injected more than once: %s", twice)
+	once := applyMarkerProtocolNote(newCCREngine().applyBody(body))
+	// A replayed prior turn carries the note, which must suppress a second one.
+	twice := applyMarkerProtocolNote(newCCREngine().applyBody(once))
+	if got := strings.Count(string(twice), ccrProtocolSentinel); got != 1 {
+		t.Fatalf("protocol note injected %d times: %s", got, twice)
 	}
 }
 

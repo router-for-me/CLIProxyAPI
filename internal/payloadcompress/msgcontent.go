@@ -160,9 +160,27 @@ func bodyMessageItems(body []byte) (*ojson.Doc, []ojson.Result, bool) {
 	return doc, messages.Array(), true
 }
 
+// bodyConvItems locates the conversation array the engines rewrite: chat
+// `messages` or Responses `input`. Gemini `contents` is excluded because
+// upstream's body adapter maps only these two shapes.
+func bodyConvItems(body []byte) (*ojson.Doc, string, []ojson.Result, bool) {
+	doc := ojson.NewDocString(string(body))
+	for _, path := range []string{"messages", "input"} {
+		if arr := doc.Get(path); arr.IsArray() {
+			return doc, path, arr.Array(), true
+		}
+	}
+	return nil, "", nil, false
+}
+
 // setBodyMessages writes the rewritten message raws back.
 func setBodyMessages(doc *ojson.Doc, raws []string) ([]byte, bool) {
-	if err := doc.SetRaw("messages", "["+strings.Join(raws, ",")+"]"); err != nil {
+	return setBodyArray(doc, "messages", raws)
+}
+
+// setBodyArray writes raws back to the conversation array at path.
+func setBodyArray(doc *ojson.Doc, path string, raws []string) ([]byte, bool) {
+	if err := doc.SetRaw(path, "["+strings.Join(raws, ",")+"]"); err != nil {
 		return nil, false
 	}
 	return []byte(doc.String()), true

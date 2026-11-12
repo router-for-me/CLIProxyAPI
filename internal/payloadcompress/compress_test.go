@@ -555,6 +555,14 @@ func TestApplyIsAppendStable(t *testing.T) {
 		for i, message := range parsed.Messages {
 			cur[i] = string(message.Content)
 		}
+		// The marker-protocol note is prepended once, on the turn a dedup/CCR
+		// marker first appears, and then persists (a replayed turn carries it and
+		// its sentinel suppresses a second). That is one cache miss on that turn,
+		// the same class as min-bytes crossing mid-session; every later turn must
+		// again be a strict prefix-extension.
+		if len(cur) > 0 && strings.Contains(cur[0], ccrProtocolSentinel) {
+			cur = cur[1:]
+		}
 		for i, before := range prev {
 			if i >= len(cur) || cur[i] != before {
 				t.Fatalf("turn %d: message %d changed after appending a turn\nbefore: %q\nafter:  %q",

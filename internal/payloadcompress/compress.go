@@ -340,7 +340,14 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	if len(out) >= inBodyLen || !json.Valid(out) {
 		stats.Saved = nil
 		stats.BytesOut = inBodyLen
-		return inBody, stats
+		// The guard reverted the compression, but a marker already present in the
+		// original body (a prior turn's note was trimmed away, a caller-supplied
+		// history) still has to be explained. Its fixed size must never count
+		// against the guard, so it is added after the decision.
+		if cfg.Shadow {
+			return inBody, stats
+		}
+		return applyMarkerProtocolNote(inBody), stats
 	}
 	stats.BytesOut = len(out)
 	if cfg.Shadow {
@@ -348,7 +355,7 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	}
 	liveZoneStore(cfg, model, sessionID, body, s.segs, texts)
 	stats.Applied = true
-	return out, stats
+	return applyMarkerProtocolNote(out), stats
 }
 
 // engineStep pairs one pipeline entry with its per-step options.
@@ -443,7 +450,10 @@ func comboHasEngine(combo *Combo, name string) bool {
 func finishPrepass(cfg Config, combo *Combo, inBody, out []byte, stats Stats) ([]byte, Stats) {
 	if bytes.Equal(out, inBody) || len(out) >= len(inBody) {
 		stats.BytesOut = len(inBody)
-		return inBody, stats
+		if cfg.Shadow {
+			return inBody, stats
+		}
+		return applyMarkerProtocolNote(inBody), stats
 	}
 	stats.BytesOut = len(out)
 	if stats.Saved == nil {
@@ -458,7 +468,7 @@ func finishPrepass(cfg Config, combo *Combo, inBody, out []byte, stats Stats) ([
 		return inBody, stats
 	}
 	stats.Applied = true
-	return out, stats
+	return applyMarkerProtocolNote(out), stats
 }
 
 // readLifecycleEnabled reports whether the read-lifecycle step opted in. The

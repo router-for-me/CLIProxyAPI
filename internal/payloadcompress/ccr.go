@@ -16,10 +16,8 @@ import (
 const (
 	ccrDefaultMinChars        = 600
 	ccrMarkerPreambleChars    = 200
-	ccrProtocolMarker         = "[CCR protocol]"
 	ccrRetrieveToolName       = "omniroute_ccr_retrieve"
-	ccrProtocolInstruction    = ccrProtocolMarker + " This conversation uses content-compression-retrieve (CCR). When you see a marker like `[CCR retrieve hash=<24hex> chars=N]` in a message, it means the full original text (N characters) was stored and replaced with this marker to save space — call the `" + ccrRetrieveToolName + "` tool with that hash to get the original text back verbatim. Copy the hash EXACTLY as written — all 24 hexadecimal characters, never truncated, abbreviated, or reformatted — a single wrong character will make the retrieval fail. If you instead see a marker like `[dedup:ref sha=...]`, it means that content already appeared earlier in this conversation — look back in the message history for it; do NOT call omniroute_ccr_retrieve for a dedup reference."
-	ccrRetrieveToolSeparators = "__./:"
+	ccrRetrieveToolSeparators = "__./:_"
 )
 
 type ccrEngine struct{}
@@ -68,9 +66,6 @@ func (ccrEngine) applyBody(body []byte) (out []byte) {
 	}
 	if replaced == 0 {
 		return body
-	}
-	if !ccrHasProtocolInstruction(items) {
-		raws = append([]string{ccrInstructionMessage()}, raws...)
 	}
 	newBody, ok := setBodyMessages(doc, raws)
 	if !ok {
@@ -134,32 +129,6 @@ func ccrSkipMessage(item ojson.Result) bool {
 		}
 	}
 	return true
-}
-
-func ccrHasProtocolInstruction(items []ojson.Result) bool {
-	for _, item := range items {
-		content := item.Get("content")
-		if content.Type == ojson.String {
-			if strings.Contains(content.String(), ccrProtocolMarker) {
-				return true
-			}
-			continue
-		}
-		if !content.IsArray() {
-			continue
-		}
-		for _, part := range content.Array() {
-			if strings.Contains(part.Get("text").String(), ccrProtocolMarker) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func ccrInstructionMessage() string {
-	raw := appendJSONString([]byte(`{"role":"system","content":`), ccrProtocolInstruction)
-	return string(append(raw, '}'))
 }
 
 // ccrCallerSupportsRetrieve proves via tools[] that the caller can resolve a
