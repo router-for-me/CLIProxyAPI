@@ -482,6 +482,13 @@ upstream:
     # than cooling down the entire credential across all sibling models.
     # Default: false
     model-level-cooling: false
+    # When true, serve HTTP downstream Codex requests through the websocket executor
+    # when the selected credential enables websockets. Requests arriving over a
+    # downstream websocket keep their existing routing; credentials without
+    # websockets keep using the HTTP/SSE transport. A websocket upgrade rejection
+    # (HTTP 426) falls back to the HTTP executor when no execution lifecycle is bound.
+    # Default: false
+    serve-http-over-websockets: false
 
   claude:
     # When true, scope quota cooldowns to the requested model rather than cooling down

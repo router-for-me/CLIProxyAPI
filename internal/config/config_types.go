@@ -337,6 +337,12 @@ type CodexConfig struct {
 	// ResponseSteering enables full-duplex Codex WebSockets, bound to one
 	// upstream model/account/socket for their entire lifetime. Default is false.
 	ResponseSteering bool `yaml:"response-steering" json:"response-steering"`
+	// ServeHTTPOverWebsockets routes HTTP downstream Codex requests through the
+	// websocket executor when the selected credential enables websockets.
+	// Credentials without websockets keep using the HTTP/SSE transport, and a
+	// websocket upgrade rejection (HTTP 426) falls back to the HTTP executor
+	// when no execution lifecycle is bound. Default is false.
+	ServeHTTPOverWebsockets bool `yaml:"serve-http-over-websockets" json:"serve-http-over-websockets"`
 	// SignInWithChatGPTIdentifier configures the identifier (agent_name_hint and User-Agent prefix)
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
