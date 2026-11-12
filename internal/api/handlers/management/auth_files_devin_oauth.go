@@ -64,7 +64,7 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	authSvc := newDevinOAuthService(cfg)
 	authURL := authSvc.BuildAuthorizationURL(redirectURI, pkceCodes.CodeChallenge, state)
-	RegisterOAuthSessionWithProxy(state, "devin", sessionProxyURL)
+	receipt := oauthSessions.RegisterWithProxy(state, "devin", sessionProxyURL)
 	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
 	bindOAuthSessionTarget(c, state, respPayload)
 	// Do not inherit the HTTP request cancellation: login continues after returning the URL.
@@ -73,26 +73,32 @@ func (h *Handler) RequestDevinToken(c *gin.Context) {
 	if cfg != nil {
 		authDir = cfg.AuthDir
 	}
-	go h.completeDevinOAuth(ctx, authDir, state, pkceCodes.CodeVerifier, authSvc)
+	go h.completeDevinOAuth(ctx, authDir, state, pkceCodes.CodeVerifier, authSvc, receipt)
 	c.JSON(http.StatusOK, respPayload)
 }
 
-func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVerifier string, authSvc devinOAuthService) {
+func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVerifier string, authSvc devinOAuthService, expected ...*oauthCallbackReceipt) {
 	sessionProxyURL := GetOAuthSessionProxyURL(state)
+	var receipt *oauthCallbackReceipt
+	if len(expected) != 0 {
+		receipt = expected[0]
+	} else {
+		var errReceipt error
+		receipt, errReceipt = oauthSessions.callbackForPending(state, "devin")
+		if errReceipt != nil {
+			return
+		}
+	}
+	fail := func(message string) { oauthSessions.SetError(state, message, receipt) }
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	go watchOAuthSessionCancel(ctx, cancel, state, "devin")
 
 	waitFile := filepath.Join(authDir, fmt.Sprintf(".oauth-devin-%s.oauth", state))
-	defer func() {
-		if errRemove := os.Remove(waitFile); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
-			log.Warn("failed to remove Devin OAuth callback file")
-		}
-	}()
-	result, errWait := waitDevinOAuthCallback(ctx, waitFile, state)
+	result, errWait := waitDevinOAuthCallback(ctx, waitFile, state, receipt)
 	if errWait != nil {
 		if IsOAuthSessionPending(state, "devin") {
-			SetOAuthSessionError(state, errWait.Error())
+			fail(errWait.Error())
 		}
 		return
 	}
@@ -100,15 +106,15 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 		return
 	}
 	if result.State != state {
-		SetOAuthSessionError(state, "State code error")
+		fail("State code error")
 		return
 	}
 	if result.Error != "" {
-		SetOAuthSessionError(state, "Devin authorization denied")
+		fail("Devin authorization denied")
 		return
 	}
 	if strings.TrimSpace(result.Code) == "" {
-		SetOAuthSessionError(state, "Missing authorization code")
+		fail("Missing authorization code")
 		return
 	}
 
@@ -116,7 +122,7 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 	if errExchange != nil || strings.TrimSpace(token) == "" {
 		// Upstream errors can contain tokens or authorization codes; never expose them.
 		if IsOAuthSessionPending(state, "devin") {
-			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
+			fail("Failed to exchange authorization code for tokens")
 		}
 		return
 	}
@@ -126,17 +132,27 @@ func (h *Handler) completeDevinOAuth(ctx context.Context, authDir, state, codeVe
 	record, errRecord := authSvc.CreateAuthRecord(ctx, token)
 	if errRecord != nil {
 		if IsOAuthSessionPending(state, "devin") {
-			SetOAuthSessionError(state, "Failed to create Devin authentication record")
+			fail("Failed to create Devin authentication record")
 		}
 		return
 	}
-	if _, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "devin", sessionProxyURL, record, "Failed to save authentication tokens", false); !okSaved {
+	if _, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "devin", sessionProxyURL, record, "Failed to save authentication tokens", false, receipt); !okSaved {
 		return
 	}
 	log.Info("Devin authentication successful")
 }
 
-func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCallbackFilePayload, error) {
+func waitDevinOAuthCallback(ctx context.Context, path, state string, expected ...*oauthCallbackReceipt) (*oauthCallbackFilePayload, error) {
+	var receipt *oauthCallbackReceipt
+	if len(expected) != 0 {
+		receipt = expected[0]
+	} else {
+		var errReceipt error
+		receipt, errReceipt = oauthSessions.callbackForPending(state, "devin")
+		if errReceipt != nil {
+			return nil, errReceipt
+		}
+	}
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -146,7 +162,7 @@ func waitDevinOAuthCallback(ctx context.Context, path, state string) (*oauthCall
 		if ctx.Err() != nil {
 			return nil, errors.New("Timeout waiting for OAuth callback")
 		}
-		data, errRead := os.ReadFile(path)
+		data, errRead := receipt.consume(path)
 		if errRead == nil {
 			var result oauthCallbackFilePayload
 			if errDecode := json.Unmarshal(data, &result); errDecode != nil {

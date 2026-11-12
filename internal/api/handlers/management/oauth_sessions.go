@@ -50,6 +50,7 @@ type oauthRecoveryTarget struct {
 }
 
 type oauthSession struct {
+	callback        *oauthCallbackReceipt
 	Provider        string
 	Status          string
 	Source          string
@@ -76,10 +77,13 @@ type oauthSession struct {
 }
 
 type oauthSessionStore struct {
-	mu           sync.RWMutex
-	ttl          time.Duration
-	completedTTL time.Duration
-	sessions     map[string]oauthSession
+	mu               sync.RWMutex
+	ttl              time.Duration
+	completedTTL     time.Duration
+	sessions         map[string]oauthSession
+	retiredCallbacks map[string]*oauthCallbackReceipt
+	// Set before concurrent use; observes cleanup admission without replacing file work.
+	beforeCallbackCleanup func()
 }
 
 func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
@@ -97,35 +101,52 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	}
 }
 
-func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
+// Expiry is swept on store access. Callers release the store lock before
+// joining cleanup, which can still wait for an expired session's admitted writer.
+func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) []*oauthCallbackReceipt {
+	var cleanup []*oauthCallbackReceipt
 	for state, session := range s.sessions {
 		if (session.Completed || (!session.Committing && !session.SIWCCommitting)) && !session.ExpiresAt.IsZero() && now.After(session.ExpiresAt) {
 			if session.SIWC != nil {
 				session.SIWC.cancel()
 			}
+			cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 			delete(s.sessions, state)
 		}
 	}
+	return cleanup
 }
 
 func (s *oauthSessionStore) Register(state, provider string) {
 	s.RegisterWithProxy(state, provider, "")
 }
 
-func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) {
+func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) *oauthCallbackReceipt {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	proxyURL = strings.TrimSpace(proxyURL)
 	if state == "" || provider == "" {
-		return
+		return nil
 	}
+	receipt := &oauthCallbackReceipt{state: state}
+	receipt.mu.Lock()
+	defer receipt.mu.Unlock()
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
+	if prior, ok := s.sessions[state]; ok {
+		cleanup = append(cleanup, s.closeCallbackLocked(prior.callback))
+	}
+	cleanup = append(cleanup, s.retiredCallbacks[state])
 	s.sessions[state] = oauthSession{
+		callback:  receipt,
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourceBuiltin,
@@ -133,6 +154,7 @@ func (s *oauthSessionStore) RegisterWithProxy(state, provider, proxyURL string) 
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
+	return receipt
 }
 
 func (s *oauthSessionStore) RegisterPlugin(state, provider string, metadata map[string]any) error {
@@ -149,16 +171,25 @@ func (s *oauthSessionStore) RegisterPluginWithProxy(state, provider string, meta
 	if errState := ValidateOAuthState(state); errState != nil {
 		return errState
 	}
+	receipt := &oauthCallbackReceipt{state: state}
+	receipt.mu.Lock()
+	defer receipt.mu.Unlock()
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	if _, ok := s.sessions[state]; ok {
 		return errOAuthSessionExists
 	}
+	cleanup = append(cleanup, s.retiredCallbacks[state])
 	s.sessions[state] = oauthSession{
+		callback:  receipt,
 		Provider:  provider,
 		Status:    "",
 		Source:    oauthSessionSourcePlugin,
@@ -170,7 +201,7 @@ func (s *oauthSessionStore) RegisterPluginWithProxy(state, provider string, meta
 	return nil
 }
 
-func (s *oauthSessionStore) SetError(state, message string) {
+func (s *oauthSessionStore) SetError(state, message string, expected ...*oauthCallbackReceipt) {
 	state = strings.TrimSpace(state)
 	message = strings.TrimSpace(message)
 	if state == "" {
@@ -182,21 +213,26 @@ func (s *oauthSessionStore) SetError(state, message string) {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Committing {
+	if !ok || !matchesOAuthCallbackGeneration(session, expected) || session.Completed || session.Committing {
 		return
 	}
 	session.Status = redactSessionProxyInString(message, session.ProxyURL)
 	session.ProxyURL = ""
 	session.SIWCCommitting = false
 	session.ExpiresAt = now.Add(s.ttl)
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	s.sessions[state] = session
 }
 
-func (s *oauthSessionStore) FailCommit(state, message string) {
+func (s *oauthSessionStore) FailCommit(state, message string, expected ...*oauthCallbackReceipt) {
 	state = strings.TrimSpace(state)
 	message = strings.TrimSpace(message)
 	if state == "" {
@@ -208,11 +244,15 @@ func (s *oauthSessionStore) FailCommit(state, message string) {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok || !matchesOAuthCallbackGeneration(session, expected) || session.Completed {
 		return
 	}
 	session.Status = redactSessionProxyInString(message, session.ProxyURL)
@@ -220,6 +260,7 @@ func (s *oauthSessionStore) FailCommit(state, message string) {
 	session.Committing = false
 	session.SIWCCommitting = false
 	session.ExpiresAt = now.Add(s.ttl)
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	s.sessions[state] = session
 }
 
@@ -235,9 +276,13 @@ func (s *oauthSessionStore) FailPendingPoll(state, message string) (errStatus st
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	session, exists := s.sessions[state]
 	if !exists {
 		return "", false, false, false
@@ -254,19 +299,20 @@ func (s *oauthSessionStore) FailPendingPoll(state, message string) (errStatus st
 	session.Status = redactSessionProxyInString(message, session.ProxyURL)
 	session.ProxyURL = ""
 	session.ExpiresAt = now.Add(s.ttl)
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	s.sessions[state] = session
 	return session.Status, false, false, true
 }
 
-func (s *oauthSessionStore) Complete(state string) {
-	s.CompleteWithAuth(state, "")
+func (s *oauthSessionStore) Complete(state string, expected ...*oauthCallbackReceipt) {
+	s.CompleteWithAuth(state, "", expected...)
 }
 
-func (s *oauthSessionStore) CompleteWithAuth(state, authID string) {
-	s.CompleteWithOutcome(state, authID, "", strings.TrimSpace(authID) != "", strings.TrimSpace(authID) != "", false, 0, 0, 0, 0, "", "")
+func (s *oauthSessionStore) CompleteWithAuth(state, authID string, expected ...*oauthCallbackReceipt) {
+	s.CompleteWithOutcome(state, authID, "", strings.TrimSpace(authID) != "", strings.TrimSpace(authID) != "", false, 0, 0, 0, 0, "", "", expected...)
 }
 
-func (s *oauthSessionStore) CompleteWithOutcome(state, authID, savedGrantHash string, saved, adopted, baselineExisted bool, baselineVersion, baselineEpoch, adoptedVersion, adoptedEpoch uint64, adoptErr, verifyErr string) {
+func (s *oauthSessionStore) CompleteWithOutcome(state, authID, savedGrantHash string, saved, adopted, baselineExisted bool, baselineVersion, baselineEpoch, adoptedVersion, adoptedEpoch uint64, adoptErr, verifyErr string, expected ...*oauthCallbackReceipt) {
 	state = strings.TrimSpace(state)
 	authID = strings.TrimSpace(authID)
 	if state == "" {
@@ -275,11 +321,18 @@ func (s *oauthSessionStore) CompleteWithOutcome(state, authID, savedGrantHash st
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
+	if retired := s.retiredCallbacks[state]; retired != nil && (len(expected) == 0 || retired == expected[0]) {
+		cleanup = append(cleanup, retired)
+	}
 	session, ok := s.sessions[state]
-	if !ok || session.Completed {
+	if !ok || !matchesOAuthCallbackGeneration(session, expected) || session.Completed {
 		return
 	}
 	session.Status = ""
@@ -300,6 +353,7 @@ func (s *oauthSessionStore) CompleteWithOutcome(state, authID, savedGrantHash st
 	session.SIWCCommitting = false
 	session.Completed = true
 	session.ExpiresAt = now.Add(s.completedTTL)
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	s.sessions[state] = session
 }
 
@@ -358,9 +412,13 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	removed := 0
 	for state, session := range s.sessions {
 		if session.SIWC == nil && !session.Completed && !session.Committing && !session.SIWCCommitting && strings.EqualFold(session.Provider, provider) && (source == "" || session.Source == source) {
@@ -371,6 +429,7 @@ func (s *oauthSessionStore) CompleteProvider(provider string, source string) int
 			session.SIWCCommitting = false
 			session.Completed = true
 			session.ExpiresAt = now.Add(s.completedTTL)
+			cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 			s.sessions[state] = session
 			removed++
 		}
@@ -383,9 +442,14 @@ func (s *oauthSessionStore) Get(state string) (oauthSession, bool) {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
+	cleanup = append(cleanup, s.retiredCallbacks[state])
 	session, ok := s.sessions[state]
 	session.Metadata = cloneOAuthSessionMetadata(session.Metadata)
 	return session, ok
@@ -397,9 +461,13 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
 	if !ok {
 		return false
@@ -413,7 +481,7 @@ func (s *oauthSessionStore) IsPending(state, provider string) bool {
 	return strings.EqualFold(session.Provider, provider)
 }
 
-func (s *oauthSessionStore) claimCommit(state, provider string) bool {
+func (s *oauthSessionStore) claimCommit(state, provider string, expected ...*oauthCallbackReceipt) bool {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" {
@@ -422,17 +490,22 @@ func (s *oauthSessionStore) claimCommit(state, provider string) bool {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	session, ok := s.sessions[state]
-	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
+	if !ok || !matchesOAuthCallbackGeneration(session, expected) || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
 		return false
 	}
 	if provider != "" && !strings.EqualFold(session.Provider, provider) {
 		return false
 	}
 	session.Committing = true
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	s.sessions[state] = session
 	return true
 }
@@ -453,9 +526,14 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 	now := time.Now()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
+	cleanup = append(cleanup, s.retiredCallbacks[state])
 	session, ok := s.sessions[state]
 	if !ok || session.Completed || session.Status != "" || session.Committing || session.SIWCCommitting {
 		return false
@@ -464,6 +542,7 @@ func (s *oauthSessionStore) Cancel(state string) bool {
 		session.SIWC.cancel()
 		session.SIWC.pkce = nil
 	}
+	cleanup = append(cleanup, s.closeCallbackLocked(session.callback))
 	delete(s.sessions, state)
 	return true
 }
@@ -699,10 +778,18 @@ type oauthCallbackFilePayload struct {
 	Error string `json:"error"`
 }
 
+// WriteOAuthCallbackFile participates in receipt ownership for a registered
+// session. Standalone files remain supported, but do not authorize consumption
+// by a session registered later.
 func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string) (string, error) {
 	canonicalProvider, err := NormalizeOAuthCallbackProvider(provider)
 	if err != nil {
 		return "", err
+	}
+	if _, exists := oauthSessions.Get(state); exists {
+		return oauthSessions.publishCallback(state, canonicalProvider, func() (string, error) {
+			return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+		})
 	}
 	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }
@@ -766,8 +853,7 @@ func WriteOAuthCallbackFileForPendingSession(authDir, provider, state, code, err
 	if session, ok := oauthSessions.Get(state); ok && session.SIWC != nil {
 		return "", ErrSIWCCallbackRequiresV8
 	}
-	if !IsOAuthSessionPending(state, canonicalProvider) {
-		return "", errOAuthSessionNotPending
-	}
-	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	return oauthSessions.publishCallback(state, canonicalProvider, func() (string, error) {
+		return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
+	})
 }
