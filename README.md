@@ -119,6 +119,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
 <td>Thanks to <a href="https://x.com/chenju_ai">陈局 (Chenju)</a> for sponsoring this project! Probably the only slot here that won't ask you to sign up — no signup link, no promo code. Just raising a glass to the maintainers, because good open source deserves to be paid for. Come shoot the breeze on X: <a href="https://x.com/chenju_ai">@chenju_ai</a></td>
 </tr>
+<tr>
+<td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
+<td>Access leading AI models like GPT, Claude, Gemini, and DeepSeek—all in one place. We connect through official channels from major providers, with no shared account pools or reverse engineering. Save up to 71% compared with official rates. Track your usage in real time with transparent billing, and access AI at a lower cost. <a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI">Try DeepSider API</a>.</td>
+</tr>
 </tbody>
 </table>
 
