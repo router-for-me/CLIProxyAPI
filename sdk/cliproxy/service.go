@@ -104,6 +104,9 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// ownedProviderExecutors is copied and validated by Build, then immutable.
+	ownedProviderExecutors map[string]coreauth.ProviderExecutor
+
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 
