@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -213,6 +214,62 @@ func TestDevinStatusError_HTTP429WeeklyQuotaUsesResetWhenAuthKnown(t *testing.T)
 	}
 }
 
+// With oauth.providers.devin.model-level-cooling, quota exhaustion cools down
+// only the requested model, until the quota reset: Devin keeps serving the
+// models it does not meter (swe-2), so they must stay selectable.
+func TestDevinQuotaExhaustedError_ModelLevelCoolingStaysModelScopedWithResetRetryAfter(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	auth := devinTestAuthWithQuotaResets(now.Add(24*time.Hour), now.Add(6*24*time.Hour))
+	e := &DevinExecutor{cfg: &config.Config{Devin: config.DevinConfig{ModelLevelCooling: true}}}
+
+	err := devinStreamTrailerErrorWith(t, e, auth, "failed_precondition", "Your weekly usage quota has been exhausted.")
+
+	se, ok := err.(statusErr)
+	if !ok {
+		t.Fatalf("stream error type = %T, want statusErr (err=%v)", err, err)
+	}
+	if se.code != http.StatusTooManyRequests {
+		t.Fatalf("code = %d, want 429", se.code)
+	}
+	if se.IsCredentialScoped() {
+		t.Fatalf("model-level cooling must keep quota exhaustion model-scoped, got credential-scoped: %+v", se)
+	}
+	if se.RetryAfter() == nil {
+		t.Fatal("model-scoped quota exhaustion must keep the reset-based RetryAfter, got nil")
+	}
+	want := 6 * 24 * time.Hour
+	if got := *se.RetryAfter(); got < want-time.Minute || got > want+time.Minute {
+		t.Fatalf("RetryAfter = %v, want ~%v (weekly reset)", got, want)
+	}
+}
+
+func TestDevinModelScopedQuotaError(t *testing.T) {
+	retryAfter := 3 * time.Hour
+	quota := statusErr{code: http.StatusTooManyRequests, msg: "Your daily usage quota has been exhausted.", credentialScoped: true, retryAfter: &retryAfter}
+	transient := statusErr{code: http.StatusTooManyRequests, msg: "resource exhausted"}
+
+	off := &DevinExecutor{cfg: &config.Config{}}
+	if got := off.modelScopedQuotaError(quota); !got.IsCredentialScoped() {
+		t.Fatal("default must keep quota exhaustion credential-scoped (issue #6690)")
+	}
+	var nilExecutor *DevinExecutor
+	if got := nilExecutor.modelScopedQuotaError(quota); !got.IsCredentialScoped() {
+		t.Fatal("nil executor must keep quota exhaustion credential-scoped")
+	}
+
+	on := &DevinExecutor{cfg: &config.Config{Devin: config.DevinConfig{ModelLevelCooling: true}}}
+	got := on.modelScopedQuotaError(quota)
+	if got.IsCredentialScoped() {
+		t.Fatal("model-level cooling must clear the credential scope")
+	}
+	if got.RetryAfter() == nil || *got.RetryAfter() != retryAfter {
+		t.Fatalf("RetryAfter = %v, want %v", got.RetryAfter(), retryAfter)
+	}
+	if got := on.modelScopedQuotaError(transient); got.IsCredentialScoped() || got.RetryAfter() != nil {
+		t.Fatalf("a transient 429 must pass through unchanged, got %+v", got)
+	}
+}
+
 func devinTestAuthWithQuotaResets(daily, weekly time.Time) *cliproxyauth.Auth {
 	auth := &cliproxyauth.Auth{ID: "devin-quota-auth", Provider: "devin"}
 	auth.Quota.Signals = map[string]string{
@@ -230,11 +287,15 @@ func devinTestAuthWithQuotaResets(daily, weekly time.Time) *cliproxyauth.Auth {
 
 func devinStreamTrailerError(t *testing.T, auth *cliproxyauth.Auth, code, message string) error {
 	t.Helper()
+	return devinStreamTrailerErrorWith(t, &DevinExecutor{}, auth, code, message)
+}
+
+func devinStreamTrailerErrorWith(t *testing.T, e *DevinExecutor, auth *cliproxyauth.Auth, code, message string) error {
+	t.Helper()
 	trailer := fmt.Sprintf(`{"error":{"code":%q,"message":%q}}`, code, message)
 	var buf bytes.Buffer
 	buf.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(trailer)))
 
-	e := &DevinExecutor{}
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	opts := cliproxyexecutor.Options{
 		SourceFormat:    sdktranslator.FormatOpenAI,

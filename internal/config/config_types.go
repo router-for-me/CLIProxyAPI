@@ -227,6 +227,12 @@ type DevinConfig struct {
 
 	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules for system prompts.
 	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
+
+	// ModelLevelCooling scopes Devin daily/weekly usage quota cooldowns to the requested model
+	// rather than cooling down the entire credential. Devin keeps serving the models it does not
+	// meter (for example swe-2) after the usage quota is exhausted, so a credential-wide cooldown
+	// also blocks models that would still answer.
+	ModelLevelCooling bool `yaml:"model-level-cooling,omitempty" json:"model-level-cooling,omitempty"`
 }
 
 // ProxyConnectionPoolConfig configures upstream connection reuse for one api-key

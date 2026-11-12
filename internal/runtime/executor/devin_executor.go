@@ -287,10 +287,13 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		}
-		return resp, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
+		return resp, e.modelScopedQuotaError(newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth))
 	}
 
 	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(httpResp.Body, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
+	if quotaErr, ok := errConsume.(statusErr); ok {
+		errConsume = e.modelScopedQuotaError(quotaErr)
+	}
 	if respLog != nil || len(interactionsJSON) > 0 {
 		logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
@@ -409,7 +412,7 @@ func (e *DevinExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		}
-		return nil, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
+		return nil, e.modelScopedQuotaError(newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth))
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1094,7 +1097,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 						return
 					}
 				}
-				trailerErr := devinTrailerStatusError(code, errTrailer.Error(), auth)
+				trailerErr := e.modelScopedQuotaError(devinTrailerStatusError(code, errTrailer.Error(), auth))
 				publishDevinUsageFailure(ctx, reporter, finalUsage, trailerErr)
 				log.Warnf("devin executor: trailer error (%d): %v", code, errTrailer)
 				helps.RecordAPIResponseError(ctx, e.cfg, trailerErr)
@@ -2894,6 +2897,21 @@ func supplementSignaturesFromOriginal(original []byte, prompts []helps.DevinProm
 			}
 		}
 	}
+}
+
+func (e *DevinExecutor) modelLevelCooling() bool {
+	return e != nil && e.cfg != nil && e.cfg.Devin.ModelLevelCooling
+}
+
+// modelScopedQuotaError applies oauth.providers.devin.model-level-cooling to a
+// quota exhaustion error: the cooldown stays on the requested model, keeping its
+// reset-based RetryAfter, so models Devin does not meter remain selectable on
+// the same credential. Other errors are returned unchanged.
+func (e *DevinExecutor) modelScopedQuotaError(err statusErr) statusErr {
+	if err.credentialScoped && e.modelLevelCooling() {
+		err.credentialScoped = false
+	}
+	return err
 }
 
 func (e *DevinExecutor) getSensitiveWords() []string {
