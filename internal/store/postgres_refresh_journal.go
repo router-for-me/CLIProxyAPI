@@ -32,6 +32,9 @@ func (s *PostgresStore) RefreshClaim(ctx context.Context, key string) (bool, err
 		return false, errInsert
 	}
 	count, errCount := result.RowsAffected()
+	if errCount == nil && count == 1 {
+		s.refreshClaims.Store(key, struct{}{})
+	}
 	return count == 1, errCount
 }
 
@@ -80,6 +83,7 @@ func (s *PostgresStore) RefreshRead(ctx context.Context, key string) ([]byte, er
 }
 
 func (s *PostgresStore) RefreshComplete(ctx context.Context, key string, receipt []byte) error {
+	s.refreshClaims.Delete(key)
 	result, errUpdate := s.db.ExecContext(ctx, "UPDATE "+s.refreshTable()+" SET receipt = $2 WHERE id = $1 AND receipt IS NULL", key, receipt)
 	if errUpdate != nil {
 		return errUpdate
@@ -92,4 +96,34 @@ func (s *PostgresStore) RefreshComplete(ctx context.Context, key string, receipt
 		return fmt.Errorf("refresh receipt already completed or claim missing")
 	}
 	return nil
+}
+
+func (s *PostgresStore) RefreshRelease(ctx context.Context, key string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("postgres refresh journal is unavailable")
+	}
+	if _, owned := s.refreshClaims.LoadAndDelete(key); !owned {
+		return fmt.Errorf("refresh claim is not owned by this store")
+	}
+	tx, errBegin := s.db.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return errBegin
+	}
+	defer func() {
+		if errRollback := tx.Rollback(); errRollback != nil && !errors.Is(errRollback, sql.ErrTxDone) {
+			log.Warnf("postgres refresh release: rollback: %v", errRollback)
+		}
+	}()
+	result, errDelete := tx.ExecContext(ctx, "DELETE FROM "+s.refreshTable()+" WHERE id = $1 AND receipt IS NULL", key)
+	if errDelete != nil {
+		return errDelete
+	}
+	count, errCount := result.RowsAffected()
+	if errCount != nil {
+		return errCount
+	}
+	if count != 1 {
+		return fmt.Errorf("refresh receipt already completed or claim missing")
+	}
+	return tx.Commit()
 }

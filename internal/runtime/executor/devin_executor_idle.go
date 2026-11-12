@@ -4,12 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 // defaultDevinUpstreamStreamIdle aborts a Devin connect stream when no frame
@@ -19,10 +16,7 @@ import (
 // emits nothing, and never closes the stream.
 const defaultDevinUpstreamStreamIdle = 90 * time.Second
 
-const (
-	devinEmptyCompletionMessage = "devin stream error: completed interaction produced no output"
-	devinStreamIdleMessage      = "devin stream error: upstream stream stalled without frames"
-)
+const devinStreamIdleMessage = "devin stream error: upstream stream stalled without frames"
 
 // errDevinStreamIdle is the reader-level signal for an idle abort. Callers map
 // it to a 502 status error so credential failover can rotate before any
@@ -43,45 +37,8 @@ func (e *DevinExecutor) devinUpstreamIdleTimeout() time.Duration {
 	return defaultDevinUpstreamStreamIdle
 }
 
-func newDevinEmptyCompletionError() statusErr {
-	return statusErr{code: http.StatusBadGateway, msg: devinEmptyCompletionMessage}
-}
-
-func newDevinStreamIdleError() statusErr {
-	return statusErr{code: http.StatusBadGateway, msg: devinStreamIdleMessage}
-}
-
-// isDevinRetryableStreamFailure reports the empty-turn and idle-stall errors
-// that must fail over as themselves. They are not request-scoped and not
-// stream-truncated, so another credential can run the same request.
-func isDevinRetryableStreamFailure(err error) bool {
-	var failure statusErr
-	if !errors.As(err, &failure) {
-		return false
-	}
-	if failure.code != http.StatusBadGateway {
-		return false
-	}
-	switch failure.msg {
-	case devinEmptyCompletionMessage, devinStreamIdleMessage:
-		return true
-	default:
-		return false
-	}
-}
-
-// devinEmptyCompletedTurn reports a connect stream whose terminal state says
-// the turn completed without producing any output. A real reply, thought,
-// tool call, or signature is not empty even when usage omits output tokens.
-func devinEmptyCompletedTurn(status string, outputTokens int64, generated bool) bool {
-	return status == "completed" && outputTokens == 0 && !generated
-}
-
-func devinOutputTokens(usage *helps.DevinUsage) int64 {
-	if usage == nil {
-		return 0
-	}
-	return usage.CompletionTokens
+func newDevinStreamIdleError() devinTransientStreamError {
+	return newDevinTransientStreamError(devinStreamIdleMessage, errDevinStreamIdle)
 }
 
 // devinStreamIdleWatch closes the upstream body when a read makes no progress

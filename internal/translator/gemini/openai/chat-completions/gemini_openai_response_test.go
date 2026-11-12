@@ -198,6 +198,12 @@ func TestConvertGeminiResponseToOpenAI_NonStopFinishReasonsMapToContentFilter(t 
 			wantFinishReason: "content_filter",
 			wantNativeReason: "prohibited_content",
 		},
+		{
+			name:             "MAX_TOKENS",
+			upstreamReason:   "MAX_TOKENS",
+			wantFinishReason: "length",
+			wantNativeReason: "max_tokens",
+		},
 	}
 
 	for _, tc := range cases {

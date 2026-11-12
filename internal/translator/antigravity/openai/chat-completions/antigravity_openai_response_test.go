@@ -77,10 +77,15 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "max_tokens"
+	// Verify finish_reason is "length" (the OpenAI value for an output token limit)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
-	if fr != "max_tokens" {
-		t.Errorf("Expected finish_reason 'max_tokens', got: %s", fr)
+	if fr != "length" {
+		t.Errorf("Expected finish_reason 'length', got: %s", fr)
+	}
+	// Verify native_finish_reason preserves the upstream value
+	nfr := ojson.GetBytesNoCopy(result2[0], "choices.0.native_finish_reason").String()
+	if nfr != "max_tokens" {
+		t.Errorf("Expected native_finish_reason 'max_tokens', got: %s", nfr)
 	}
 }
 
@@ -96,7 +101,7 @@ func TestToolCallTakesPriorityOverMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "tool_calls" (takes priority over max_tokens)
+	// Verify finish_reason is "tool_calls" (takes priority over upstream MAX_TOKENS)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
 	if fr != "tool_calls" {
 		t.Errorf("Expected finish_reason 'tool_calls', got: %s", fr)

@@ -61,6 +61,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <table>
 <tbody>
 <tr>
+<td width="180"><a href="https://www.aicodemirror.ai/register?invitecode=TJNAIF"><img src="./assets/aicodemirror.png" alt="AICodeMirror" width="150"></a></td>
+<td>Thanks to AICodeMirror for sponsoring this project! AICodeMirror provides official high-stability relay services for Claude Code / Codex / Gemini, with enterprise-grade concurrency, fast invoicing, and 24/7 dedicated technical support. Claude Code / Codex / Gemini official channels at 38% / 2% / 9% of original price, with extra discounts on top-ups! AICodeMirror offers special benefits for CLIProxyAPI users: register via <a href="https://www.aicodemirror.ai/register?invitecode=TJNAIF">this link</a> to enjoy 20% off your first top-up, and enterprise customers can get up to 25% off!</td>
+</tr>
+<tr>
 <td width="180"><a href="https://apikey.fan/register?aff=CLIProxyAPI"><img src="./assets/apikey.png" alt="APIKEY.FUN" width="150"></a></td>
 <td>Thanks to APIKEY.FUN for sponsoring this project! APIKEY.FUN is a professional enterprise-grade AI relay platform dedicated to providing stable, efficient, and low-cost AI model API access for enterprises and individual developers. The platform supports popular mainstream models such as Claude, OpenAI, and Gemini, with prices as low as 7% of the official price. Register through this project's <a href="https://apikey.fan/register?aff=CLIProxyAPI">exclusive link</a> to enjoy a special <b>permanent 5% top-up discount</b>.</td>
 </tr>
@@ -114,6 +118,10 @@ PackyCode provides special discounts for our software users: register using <a h
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
 <td>Thanks to <a href="https://x.com/chenju_ai">陈局 (Chenju)</a> for sponsoring this project! Probably the only slot here that won't ask you to sign up — no signup link, no promo code. Just raising a glass to the maintainers, because good open source deserves to be paid for. Come shoot the breeze on X: <a href="https://x.com/chenju_ai">@chenju_ai</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
+<td>Access leading AI models like GPT, Claude, Gemini, and DeepSeek—all in one place. We connect through official channels from major providers, with no shared account pools or reverse engineering. Save up to 71% compared with official rates. Track your usage in real time with transparent billing, and access AI at a lower cost. <a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI">Try DeepSider API</a>.</td>
 </tr>
 </tbody>
 </table>
