@@ -316,7 +316,12 @@ func TestServerRejectsIncompleteUnauthenticatedRequestBodiesPromptly(t *testing.
 						_ = conn.Close()
 					}()
 
-					if errDeadline := conn.SetDeadline(time.Now().Add(500 * time.Millisecond)); errDeadline != nil {
+					// The server writes its request log before it responds. Under heavy
+					// parallel test I/O, Windows can stall opening the request body temp
+					// file for several seconds, so this is a generous failure bound, not
+					// an expected latency. The server has no body read timeout, so one
+					// that waits for the missing body still fails here.
+					if errDeadline := conn.SetDeadline(time.Now().Add(15 * time.Second)); errDeadline != nil {
 						t.Fatalf("set deadline: %v", errDeadline)
 					}
 					if _, errWrite := conn.Write([]byte(tc.rawRequest)); errWrite != nil {

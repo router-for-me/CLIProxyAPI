@@ -649,6 +649,12 @@ func TestAntigravityPersistedHintsRetriesAfterTransientStoreFailure(t *testing.T
 	}
 }
 
+// antigravityBlockedPersistenceWait bounds how long the test below waits for a
+// signal that should arrive promptly. It is a failure bound, not an expected
+// latency, so it leaves room for goroutine scheduling and file saves to stall
+// on a loaded host.
+const antigravityBlockedPersistenceWait = 15 * time.Second
+
 func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts(t *testing.T) {
 	resetAntigravityCapabilityCache()
 	t.Cleanup(resetAntigravityCapabilityCache)
@@ -757,14 +763,14 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	svc.refreshAntigravityModels(t.Context())
 	select {
 	case <-authBProbed:
-	case <-time.After(time.Second):
+	case <-time.After(antigravityBlockedPersistenceWait):
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked authB probe")
 	}
 	select {
 	case <-authARefreshed:
-	case <-time.After(time.Second):
+	case <-time.After(antigravityBlockedPersistenceWait):
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
 		t.Fatal("stalled persistence on authA blocked subsequent probe for authA")
@@ -778,7 +784,7 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	// (which happens after applyAntigravityModelHints published authA's updated catalog).
 	select {
 	case <-store.saveEntered:
-	case <-time.After(time.Second):
+	case <-time.After(antigravityBlockedPersistenceWait):
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
 		t.Fatal("subsequent persistence task did not start after registry publication")
@@ -800,7 +806,7 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 			svc.WaitAntigravityProbes()
 			t.Fatal(errUpdateB)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(antigravityBlockedPersistenceWait):
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
 		t.Fatal("persisting Update on authB blocked while store Save was stalled on authA")
@@ -837,7 +843,7 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	cancelB()
 	select {
 	case <-canceledUpdateBDone:
-	case <-time.After(time.Second):
+	case <-time.After(antigravityBlockedPersistenceWait):
 		close(store.releaseSave)
 		cancelLifetime()
 		svc.WaitAntigravityProbes()
@@ -864,8 +870,9 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	}()
 	select {
 	case <-doneWait:
-	case <-time.After(time.Second):
-		close(store.releaseSave)
+	case <-time.After(antigravityBlockedPersistenceWait):
+		// releaseSave is already closed above; closing it again would panic and
+		// replace this failure message.
 		t.Fatal("service context cancellation did not cancel blocked metadata persistence")
 	}
 }

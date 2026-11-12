@@ -21,6 +21,11 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+// devinOAuthTestWait is a failure bound, not an expected latency: the flow
+// checks for its callback file every 500ms and saves the credential to disk,
+// and both stall for seconds on a loaded host.
+const devinOAuthTestWait = 15 * time.Second
+
 type fakeDevinOAuthService struct {
 	exchange func(context.Context, string, string) (string, error)
 	create   func(context.Context, string) (*coreauth.Auth, error)
@@ -122,11 +127,11 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 		if base64.RawURLEncoding.EncodeToString(digest[:]) != query.Get("code_challenge") {
 			t.Fatal("PKCE challenge does not match verifier")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(devinOAuthTestWait):
 		t.Fatal("token exchange did not start")
 	}
 
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(devinOAuthTestWait)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()

@@ -980,19 +980,38 @@ func TestHandleEventConfigChangeSchedulesReload(t *testing.T) {
 	}
 
 	var reloads int32
+	reloaded := make(chan struct{}, 1)
 	w := &Watcher{
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) {
+			atomic.AddInt32(&reloads, 1)
+			select {
+			case reloaded <- struct{}{}:
+			default:
+			}
+		},
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Write})
 
-	time.Sleep(400 * time.Millisecond)
-	if atomic.LoadInt32(&reloads) != 1 {
-		t.Fatalf("expected config change to trigger reload once, got %d", reloads)
+	// Wait for the debounced reload itself instead of sleeping a fixed interval:
+	// a loaded host can fire the debounce timer late.
+	select {
+	case <-reloaded:
+	case <-time.After(15 * time.Second):
+		t.Fatal("config change did not trigger a reload")
+	}
+	// The reload holds configApplyMu until it returns, so taking it here means
+	// the reload is no longer using config.yaml or the auth dir when TempDir
+	// cleanup runs, which Windows requires.
+	w.configApplyMu.Lock()
+	got := atomic.LoadInt32(&reloads)
+	w.configApplyMu.Unlock()
+	if got != 1 {
+		t.Fatalf("expected config change to trigger reload once, got %d", got)
 	}
 }
 
