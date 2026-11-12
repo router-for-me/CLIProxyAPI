@@ -320,8 +320,22 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 		// Do not rebuild a malformed target from a separate source update.
 		return modified, nil
 	}
+	var nativeOriginalConfig, nativeOriginalBaseline ThinkingConfig
+	if nativeResponses {
+		if log.IsLevelEnabled(log.DebugLevel) {
+			nativeOriginalConfig = extractCodexUsageConfigDoc(doc, docValid)
+			nativeOriginalBaseline = extractCodexConfigFromGetter(doc.Get)
+		}
+		if !isPluginApplier {
+			changed, err := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, fromFormat, providerFormat, applier, !suffixResult.HasSuffix)
+			modified = modified || changed
+			if err != nil {
+				return modified, err
+			}
+		}
+	}
 	if nativeResponses && !suffixResult.HasSuffix {
-		// Native Responses keeps the top-level baseline and in-turn updates as-is.
+		// Keep the baseline and each in-turn update separate after validation.
 		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
 			if config := extractCodexUsageConfigDoc(doc, docValid); hasThinkingConfig(config) {
 				fields := log.Fields{
@@ -335,7 +349,17 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 					fields["baseline_level"] = baseline.Level
 				}
 				entry := log.WithFields(fields)
-				entry.Debug("thinking: original config from request |")
+				originalFields := log.Fields{
+					"provider": providerFormat,
+					"model":    modelInfo.ID,
+					"mode":     nativeOriginalConfig.Mode,
+					"budget":   nativeOriginalConfig.Budget,
+					"level":    nativeOriginalConfig.Level,
+				}
+				if nativeOriginalBaseline.Mode == ModeLevel {
+					originalFields["baseline_level"] = nativeOriginalBaseline.Level
+				}
+				log.WithFields(originalFields).Debug("thinking: original config from request |")
 				entry.Debug("thinking: processed config to apply |")
 			}
 		}

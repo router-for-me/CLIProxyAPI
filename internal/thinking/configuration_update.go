@@ -1,9 +1,11 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 func isResponsesFormat(format string) bool {
@@ -169,4 +171,58 @@ func stripResponsesEffortDoc(doc *ojson.Doc, docValid bool) bool {
 		_ = doc.Delete("reasoning")
 	}
 	return true
+}
+
+// normalizeNativeResponsesEffortDoc clamps unsupported disabled efforts without
+// collapsing in-turn updates into the request's baseline. Other native values
+// stay untouched, including historical efforts from earlier model settings.
+func normalizeNativeResponsesEffortDoc(doc *ojson.Doc, docValid bool, modelInfo *registry.ModelInfo, fromFormat, toFormat string, applier ProviderApplier, includeBaseline bool) (bool, error) {
+	if !docValid || modelInfo == nil || modelInfo.Thinking == nil || IsUserDefinedModel(modelInfo) {
+		return false, nil
+	}
+	modified := false
+	normalize := func(path string, value ojson.Result) error {
+		if value.Type != ojson.String || strings.ToLower(strings.TrimSpace(value.String())) != "none" {
+			return nil
+		}
+		config := ThinkingConfig{Mode: ModeNone, Budget: 0}
+		validated, err := ValidateConfig(config, modelInfo, fromFormat, toFormat, false)
+		if err != nil {
+			return err
+		}
+		if validated == nil || *validated == config {
+			return nil
+		}
+		// Use the provider's canonical output without applying it to unrelated
+		// reasoning fields or serializing the full request for each update.
+		effortDoc := ojson.NewDocString("{}")
+		effortDocValid := true
+		if _, errApply := invokeProviderApplierOnDoc(applier, effortDoc, &effortDocValid, *validated, modelInfo); errApply != nil {
+			return errApply
+		}
+		effort := effortDoc.Get("reasoning.effort")
+		if effort.Type == ojson.String && effort.String() != value.String() {
+			if errSet := doc.Set(path, effort.String()); errSet != nil {
+				return errSet
+			}
+			modified = true
+		}
+		return nil
+	}
+	if includeBaseline {
+		if err := normalize("reasoning.effort", doc.Get("reasoning.effort")); err != nil {
+			return modified, err
+		}
+	}
+	var errUpdate error
+	input := doc.Get("input")
+	if input.IsArray() {
+		input.ForEach(func(index, item ojson.Result) bool {
+			if item.Get("type").String() == "configuration_update" {
+				errUpdate = normalize("input."+strconv.FormatInt(index.Int(), 10)+".reasoning.effort", item.Get("reasoning.effort"))
+			}
+			return errUpdate == nil
+		})
+	}
+	return modified, errUpdate
 }
