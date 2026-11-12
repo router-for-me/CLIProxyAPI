@@ -93,10 +93,14 @@ func (usage geminiResponsesUsage) JSON() []byte {
 }
 
 func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails []byte) {
-	if strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") {
+	switch strings.ToUpper(strings.TrimSpace(finishReason)) {
+	case "MAX_TOKENS":
 		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "MALFORMED_RESPONSE", "MALFORMED_FUNCTION_CALL":
+		return "response.incomplete", "incomplete", []byte(`{"reason":"content_filter"}`)
+	default:
+		return "response.completed", "completed", nil
 	}
-	return "response.completed", "completed", nil
 }
 
 type geminiToResponsesState struct {

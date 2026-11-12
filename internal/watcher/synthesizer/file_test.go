@@ -1207,4 +1207,40 @@ func TestFileSynthesizerRecordsIncompleteFiles(t *testing.T) {
 			t.Fatal("unreadable auth file must be recorded in IncompleteFiles")
 		}
 	})
+
+	t.Run("unreadable_directory", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("requires Unix file permissions and a non-root user")
+		}
+		dir := t.TempDir()
+		t.Cleanup(func() {
+			if errChmod := os.Chmod(dir, 0o700); errChmod != nil {
+				t.Error(errChmod)
+			}
+		})
+		if errChmod := os.Chmod(dir, 0); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		if _, errReadDir := os.ReadDir(dir); !errors.Is(errReadDir, fs.ErrPermission) {
+			t.Fatalf("ReadDir() error = %v, want fs.ErrPermission", errReadDir)
+		}
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if _, ok := ctx.IncompleteFiles[dir]; !ok {
+			t.Fatal("unreadable auth directory must be recorded in IncompleteFiles")
+		}
+	})
+
+	t.Run("missing_directory", func(t *testing.T) {
+		missingDir := filepath.Join(t.TempDir(), "missing")
+		ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: missingDir}
+		if _, errSynthesize := NewFileSynthesizer().Synthesize(ctx); errSynthesize != nil {
+			t.Fatal(errSynthesize)
+		}
+		if len(ctx.IncompleteFiles) != 0 {
+			t.Fatalf("missing auth directory must not be recorded in IncompleteFiles, got %#v", ctx.IncompleteFiles)
+		}
+	})
 }

@@ -420,12 +420,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
-	// Chat Completions has no failed-response object: Claude's
-	// model_context_window_exceeded becomes an HTTP 400 context_length_exceeded
-	// error, a request fault that is not retried on another credential.
-	if responseFormat == sdktranslator.FormatOpenAI && gjson.GetBytes(out, "error.code").String() == "context_length_exceeded" {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: string(out)}
-	}
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }

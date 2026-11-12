@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -427,6 +428,41 @@ func TestParseClaudeStreamUsage_MessageStart(t *testing.T) {
 	}
 	if detail.CachedTokens != 355598 {
 		t.Errorf("cached tokens = %d, want 355598", detail.CachedTokens)
+	}
+}
+
+func TestParseClaudeUsageReportsSpeedAsResponseServiceTier(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"usage":{"input_tokens":10,"output_tokens":5,"speed":"fast"}}`, "fast"},
+		{`{"usage":{"input_tokens":10,"output_tokens":5,"speed":"standard"}}`, "standard"},
+		{`{"usage":{"input_tokens":10,"output_tokens":5}}`, ""},
+	} {
+		if got := ParseClaudeUsage([]byte(tc.body)).ResponseServiceTier; got != tc.want {
+			t.Errorf("%s: ResponseServiceTier = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+// The speed can arrive on message_start while message_delta carries only the
+// final output count; the merged stream usage must keep it.
+func TestStreamUsageBufferObserveClaudeStream_KeepsSpeedAcrossDelta(t *testing.T) {
+	for _, tc := range []struct{ start, delta, want string }{
+		{`"speed":"fast"`, ``, "fast"},
+		{``, `,"speed":"fast"`, "fast"},
+		{``, ``, ""},
+	} {
+		var buffer StreamUsageBuffer
+		start := `data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5","usage":{"input_tokens":20,"output_tokens":1`
+		if tc.start != "" {
+			start += "," + tc.start
+		}
+		buffer.ObserveClaudeStream([]byte(start + `}}}`))
+		buffer.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15` + tc.delta + `}}`))
+		detail, ok := buffer.Detail()
+		if !ok || detail.ResponseServiceTier != tc.want || detail.OutputTokens != 15 || detail.InputTokens != 20 {
+			t.Errorf("start %q delta %q: got tier %q in=%d out=%d ok=%v, want tier %q in=20 out=15",
+				tc.start, tc.delta, detail.ResponseServiceTier, detail.InputTokens, detail.OutputTokens, ok, tc.want)
+		}
 	}
 }
 
@@ -880,9 +916,71 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 
 	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":"priority"}`), "openai")
 
-	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3, ResponseServiceTier: "default"}, false)
 	if record.ServiceTier != "auto" {
 		t.Fatalf("service tier = %q, want %q", record.ServiceTier, "auto")
+	}
+	if record.EffectiveServiceTier != "priority" {
+		t.Fatalf("effective service tier = %q, want %q", record.EffectiveServiceTier, "priority")
+	}
+	if record.ResponseServiceTier != "default" {
+		t.Fatalf("response service tier = %q, want %q", record.ResponseServiceTier, "default")
+	}
+}
+
+func TestUsageReporterExtractsEffectiveServiceTierFromOutboundShapes(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{name: "top level", payload: `{"service_tier":"priority"}`, want: "priority"},
+		{name: "antigravity request envelope", payload: `{"request":{"service_tier":"priority"}}`, want: "priority"},
+		{name: "interaction envelope", payload: `{"interaction":{"service_tier":"standard"}}`, want: "standard"},
+		{name: "missing", payload: `{"model":"gpt-5.4"}`, want: ""},
+		{name: "invalid json", payload: `{"service_tier":`, want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reporter := NewUsageReporter(context.Background(), "openai", "gpt-5.4", nil)
+			reporter.SetTranslatedRequestMetadata([]byte(tt.payload), "openai")
+			record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+			if record.EffectiveServiceTier != tt.want {
+				t.Fatalf("effective service tier = %q, want %q", record.EffectiveServiceTier, tt.want)
+			}
+		})
+	}
+}
+
+func TestUsageReporterCapturesEffectiveServiceTierAfterPayloadOverride(t *testing.T) {
+	cfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+				Params: map[string]any{"service_tier": "priority"},
+			}},
+		},
+	}
+	finalPayload := ApplyPayloadConfigWithRequest(
+		cfg,
+		"gpt-6-astra",
+		"codex",
+		"openai",
+		"",
+		[]byte(`{"model":"gpt-6-astra"}`),
+		nil,
+		"gpt-6-astra",
+		"/v1/chat/completions",
+		nil,
+	)
+
+	ctx := usage.WithServiceTier(context.Background(), "auto")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-6-astra", nil)
+	reporter.SetTranslatedRequestMetadata(finalPayload, "codex")
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1, ResponseServiceTier: "default"}, false)
+	if record.ServiceTier != "auto" || record.EffectiveServiceTier != "priority" || record.ResponseServiceTier != "default" {
+		t.Fatalf("tiers = requested:%q effective:%q response:%q", record.ServiceTier, record.EffectiveServiceTier, record.ResponseServiceTier)
 	}
 }
 

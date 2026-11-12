@@ -438,7 +438,7 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 				auth.Metadata[antigravityPersistedHintsMetaKey] = persistedHints
 			}
 		}
-		if !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
+		if !auth.HasFileSnapshot() && !existing.Disabled && existing.Status != coreauth.StatusDisabled && !auth.Disabled && auth.Status != coreauth.StatusDisabled {
 			auth.LastRefreshedAt = existing.LastRefreshedAt
 			auth.NextRefreshAfter = existing.NextRefreshAfter
 			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
@@ -449,8 +449,13 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		var updated *coreauth.Auth
 		updated, err = s.coreManager.Update(ctx, auth)
 		if err == nil && updated != nil {
-			if updated.Generation == existing.Generation {
+			if auth.HasFileSnapshot() || updated.Generation == existing.Generation {
 				log.Debugf("skipping stale auth update for %s: incoming snapshot did not advance generation (gen=%d)", auth.ID, existing.Generation)
+				if auth.HasFileSnapshot() {
+					if w := s.currentWatcher(); w != nil {
+						w.RereadDiscardedFileSnapshot(auth)
+					}
+				}
 				return updated
 			}
 			auth = updated

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,8 +132,10 @@ func CleanJSONSchemaForGeminiJSONSchema(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
-	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools)
-	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems)
+	// Phase 0: Normalize malformed schemas (e.g. bare property maps and boolean required from MCP tools).
+	// For JSON Schema, defer array placeholders until refs and conjunctions are known. A target
+	// without items may rely on its reference siblings to constrain the elements.
+	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems && !options.preserveStandardConstraints)
 
 	// Phase 1: Convert and add hints. Every cleaner removes $defs/definitions later, so local
 	// references must be expanded here for every route; otherwise nested fields are lost.
@@ -150,13 +153,20 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		jsonStr = moveNotToDescription(jsonStr)
 	}
 
-	// Phase 2: Flatten complex structures
+	// Phase 2: Flatten complex structures. Once a JSON Schema contains a conjunction,
+	// local shape assumptions are unsafe in ancestors, siblings, and descendants alike.
+	preserveConjunctions := options.preserveStandardConstraints && hasSchemaConjunction(jsonStr)
 	jsonStr = mergeConditionals(jsonStr)
-	jsonStr = mergeAllOf(jsonStr)
-	if options.flattenUnions {
-		jsonStr = flattenAnyOfOneOf(jsonStr, options.preserveStandardConstraints, options.flattenMultiBranchUnions)
+	if !options.preserveStandardConstraints {
+		// The JSON Schema carrier must keep conjunctions, including ref sibling conflicts.
+		jsonStr = mergeAllOf(jsonStr)
 	}
-	jsonStr = flattenTypeArrays(jsonStr, options.antigravitySemantics)
+	if !preserveConjunctions {
+		if options.flattenUnions {
+			jsonStr = flattenAnyOfOneOf(jsonStr, options.preserveStandardConstraints, options.flattenMultiBranchUnions)
+		}
+		jsonStr = flattenTypeArrays(jsonStr, options.antigravitySemantics)
+	}
 
 	// Phase 3: Cleanup
 	jsonStr = removeUnsupportedKeywords(jsonStr, options)
@@ -169,9 +179,11 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		// Keep that harmless metadata policy without losing Antigravity's native nullable support.
 		jsonStr = removeKeywords(jsonStr, []string{"title"})
 	}
-	jsonStr = cleanupRequiredFields(jsonStr)
-	jsonStr = sanitizeObjectProperties(jsonStr)
-	jsonStr = sanitizeArrayItems(jsonStr, options.addMissingArrayItems)
+	if !preserveConjunctions {
+		jsonStr = cleanupRequiredFields(jsonStr)
+		jsonStr = sanitizeObjectProperties(jsonStr)
+		jsonStr = sanitizeArrayItems(jsonStr, options.addMissingArrayItems)
+	}
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if options.addPlaceholder {
 		jsonStr = addEmptySchemaPlaceholder(jsonStr)
@@ -180,9 +192,8 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	return jsonStr
 }
 
-// sanitizeObjectProperties ensures that any schema node declaring "properties" has "type": "object".
-// Gemini's protobuf validator enforces a strict field predicate on properties and required ($type == Type.OBJECT);
-// if type is missing or not object, it is normalized to object so nested properties and required fields remain valid.
+// sanitizeObjectProperties normalizes native Schema object declarations. The caller skips this
+// pass for JSON Schema conjunctions, where local properties do not imply an object type.
 func sanitizeObjectProperties(jsonStr string) string {
 	paths := findPaths(jsonStr, "properties")
 	sortByDepth(paths)
@@ -205,12 +216,9 @@ func sanitizeObjectProperties(jsonStr string) string {
 	return jsonStr
 }
 
-// sanitizeArrayItems ensures that any schema node declaring "items" has "type": "array", and
-// (when addMissing is set) that array-typed nodes still missing "items" after reference
-// inlining receive the placeholder Phase 0 adds. Phase 0 cannot add it before inlining: on a
-// $ref node the placeholder would clobber the referenced definition's real items.
-// Gemini's protobuf validator enforces a strict field predicate on items ($type == Type.ARRAY);
-// if type is missing, it is inferred as array; if type is explicitly a non-array, items is removed.
+// sanitizeArrayItems normalizes native Schema arrays and supplies missing items placeholders.
+// The caller skips this pass for JSON Schema conjunctions, where element and instance types
+// may be constrained elsewhere and synthesizing local fields can make the intersection impossible.
 func sanitizeArrayItems(jsonStr string, addMissing bool) string {
 	paths := findPaths(jsonStr, "items")
 	sortByDepth(paths)
@@ -532,12 +540,9 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 		}
 	}
 
-	// 2. If node has a "properties" map, recursively repair all properties inside it
+	// 2. Repair declared properties without inferring a type before refs are expanded.
+	// Final sanitization handles native object schemas once the conjunction context is known.
 	if propsVal, ok := clone["properties"].(map[string]any); ok {
-		if _, hasType := clone["type"]; !hasType {
-			clone["type"] = "object"
-			modified = true
-		}
 		repairedProps, promotedReqs, propsMod := repairPropertyMap(propsVal, addMissingArrayItems)
 		if propsMod {
 			clone["properties"] = repairedProps
@@ -756,8 +761,8 @@ func mergeStringSlices(existing, promoted []string) []string {
 }
 
 // InlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
-// receives its own copy as long as the expansion budget lasts, sibling keywords override the
-// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+// receives its own copy as long as the expansion budget lasts, conflicting sibling assertions
+// remain conjunctive, and cycles terminate as a typed hint instead of recursing forever.
 func InlineLocalRefs(jsonStr string) string {
 	return inlineLocalRefs(jsonStr)
 }
@@ -772,8 +777,8 @@ const maxInlinedSchemaBytes = 256 * 1024
 const maxFallbackDescriptionBytes = 512
 
 // inlineLocalRefs resolves JSON Pointer references against the original schema. Every reference
-// receives its own copy as long as the expansion budget lasts, sibling keywords override the
-// referenced definition, and cycles terminate as a typed hint instead of recursing forever.
+// receives its own copy as long as the expansion budget lasts, conflicting sibling assertions
+// remain conjunctive, and cycles terminate as a typed hint instead of recursing forever.
 func inlineLocalRefs(jsonStr string) string {
 	return inlineLocalRefsRooted(jsonStr, nil, false)
 }
@@ -888,24 +893,22 @@ func resolveSchemaRoot(root any, state *refResolveState, forClean bool) any {
 		}
 	}
 
-	// A root-level reference expands into the whole referenced schema; its siblings were resolved
-	// above and must override the target, mirroring resolveLocalRefs.
+	// A root-level reference and its already resolved siblings use the same conjunction rules
+	// as nested references. Keep document declarations outside any generated allOf branches.
 	if ref, hasRef := rootMap["$ref"].(string); hasRef && strings.HasPrefix(ref, "#/") {
 		if target, okTarget := resolveJSONPointer(rootMap, ref); okTarget {
 			if size := targetExpansionSize(target, forClean); size <= state.budget {
 				state.budget -= size
 				active := map[string]bool{ref: true}
 				if targetMap, okMap := resolveLocalRefs(rootMap, target, active, state, false, forClean).(map[string]any); okMap {
-					merged := make(map[string]any, len(targetMap)+len(out))
-					for _, key := range sortedKeys(targetMap) {
-						merged[key] = targetMap[key]
+					delete(out, "$ref")
+					delete(out, "$defs")
+					delete(out, "definitions")
+					delete(out, "$schema")
+					out = mergeInlinedRefSchemas(targetMap, out)
+					if dialect, exists := rootMap["$schema"]; exists {
+						out["$schema"] = dialect
 					}
-					for _, key := range sortedKeys(out) {
-						if key != "$ref" {
-							merged[key] = out[key]
-						}
-					}
-					out = merged
 				} else {
 					out = resolveRefFallback(rootMap, out, target, ref, make(map[string]bool), state, forClean)
 				}
@@ -1093,13 +1096,7 @@ func resolveLocalRefs(root, value any, active map[string]bool, state *refResolve
 					resolvedTarget := resolveLocalRefs(root, target, active, state, false, forClean)
 					delete(active, ref)
 					if targetMap, okTarget := resolvedTarget.(map[string]any); okTarget {
-						out := make(map[string]any, len(targetMap)+len(node))
-						for _, key := range sortedKeys(targetMap) {
-							if forClean && (key == "$defs" || key == "definitions") {
-								continue // dropped with every other definitions container when cleaning
-							}
-							out[key] = targetMap[key]
-						}
+						siblings := make(map[string]any, len(node))
 						for _, key := range sortedKeys(node) {
 							if key == "$ref" {
 								continue
@@ -1107,9 +1104,9 @@ func resolveLocalRefs(root, value any, active map[string]bool, state *refResolve
 							if forClean && (key == "$defs" || key == "definitions") {
 								continue
 							}
-							out[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
+							siblings[key] = resolveSchemaEntry(root, key, node[key], active, state, forClean)
 						}
-						return out
+						return mergeInlinedRefSchemas(targetMap, siblings)
 					}
 				}
 			}
@@ -1126,6 +1123,62 @@ func resolveLocalRefs(root, value any, active map[string]bool, state *refResolve
 	default:
 		return value
 	}
+}
+
+// mergeInlinedRefSchemas keeps both complete schemas when assertions collide. Merging only
+// the conflicting keyword would change the scope of properties/additionalProperties and other
+// interacting keywords. Annotation siblings may still override the target's annotations.
+func mergeInlinedRefSchemas(target, siblings map[string]any) map[string]any {
+	if len(siblings) > 0 && (target["unevaluatedProperties"] != nil || target["unevaluatedItems"] != nil) {
+		return conjoinInlinedRefSchemas(target, siblings)
+	}
+	// These assertions depend on adjacent keywords in their own schema. Even equal values
+	// must not inherit property declarations, tuple prefixes, or match counts across a ref.
+	for _, pair := range [][2]string{
+		{"additionalProperties", "properties"},
+		{"additionalProperties", "patternProperties"},
+		{"additionalProperties", "additionalProperties"},
+		{"items", "prefixItems"},
+		{"contains", "contains"},
+		{"contains", "minContains"},
+		{"contains", "maxContains"},
+	} {
+		if (target[pair[0]] != nil && siblings[pair[1]] != nil) || (siblings[pair[0]] != nil && target[pair[1]] != nil) {
+			return conjoinInlinedRefSchemas(target, siblings)
+		}
+	}
+	out := make(map[string]any, len(target)+len(siblings))
+	for key, value := range target {
+		out[key] = value
+	}
+	for key, value := range siblings {
+		switch key {
+		case "title", "description", "default", "example", "examples", "$comment", "deprecated", "readOnly", "writeOnly":
+			// Annotations do not relax validation constraints.
+		default:
+			if previous, exists := target[key]; exists && !reflect.DeepEqual(previous, value) {
+				return conjoinInlinedRefSchemas(target, siblings)
+			}
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// conjoinInlinedRefSchemas replaces $ref with an allOf applicator without moving its siblings.
+// In particular, sibling unevaluatedProperties/unevaluatedItems must still see annotations
+// produced by the reference target, while the target's own evaluation scope stays isolated.
+func conjoinInlinedRefSchemas(target, siblings map[string]any) map[string]any {
+	out := make(map[string]any, len(siblings)+1)
+	for key, value := range siblings {
+		out[key] = value
+	}
+	branches := []any{target}
+	if existing, ok := siblings["allOf"].([]any); ok {
+		branches = append(branches, existing...)
+	}
+	out["allOf"] = branches
+	return out
 }
 
 // resolveRefFallback degrades a reference that cannot be expanded (cycle or exhausted budget) to
@@ -1995,6 +2048,15 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 			return true
 		})
 	}
+}
+
+func hasSchemaConjunction(jsonStr string) bool {
+	for _, path := range findPaths(jsonStr, "allOf") {
+		if gjson.Get(jsonStr, path).IsArray() {
+			return true
+		}
+	}
+	return false
 }
 
 func cleanupRequiredFields(jsonStr string) string {

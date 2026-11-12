@@ -212,6 +212,7 @@ type Client struct {
 	clusterNodes         []clusterNode
 	reconnectFailures    int
 	balance              clusterBalanceState
+	latency              *clusterLatencyHistory
 }
 
 func New(homeCfg config.HomeConfig) *Client {
@@ -240,9 +241,11 @@ func (c *Client) NewLifetime() *Client {
 		instanceID:           c.instanceID,
 		legacyMembership:     c.legacyMembership,
 		balance:              c.balance,
+		latency:              c.latency,
 	}
 	next.balance.registered = false
 	next.balance.unsupported = false
+	next.balance.latencySupported = false
 	next.recoveryState.Store(c.recoveryState.Load())
 	if next.balance.moving {
 		next.homeCfg.Host = next.balance.target.IP
@@ -540,10 +543,31 @@ func (c *Client) ensureClients() error {
 }
 
 func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
-	tlsConfig, errTLS := c.homeTLSConfigLocked(addr)
+	options, tlsSettings := c.redisOptionsSnapshotLocked(addr)
+	tlsConfig, errTLS := newHomeTLSConfig(tlsSettings, "")
 	if errTLS != nil {
 		return nil, errTLS
 	}
+	options.TLSConfig = tlsConfig
+	options.Dialer = c.trackedRedisDialer(redis.NewDialer(options))
+	return options, nil
+}
+
+// redisOptionsSnapshotLocked copies only values; certificate IO can run after releasing c.mu.
+func (c *Client) redisOptionsSnapshotLocked(addr string) (*redis.Options, config.HomeTLSConfig) {
+	tlsSettings := c.homeCfg.TLS
+	serverName := strings.TrimSpace(tlsSettings.ServerName)
+	if serverName == "" {
+		if tlsSettings.UseTargetServerName {
+			serverName = hostFromAddress(addr)
+		} else {
+			serverName = strings.TrimSpace(c.seedHost)
+		}
+	}
+	if serverName == "" {
+		serverName = strings.TrimSpace(c.homeCfg.Host)
+	}
+	tlsSettings.ServerName = serverName
 	dialTimeout := homeRedisOperationTimeout
 	readTimeout := homeRedisOperationTimeout
 	writeTimeout := homeRedisOperationTimeout
@@ -564,7 +588,6 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	}
 	options := &redis.Options{
 		Addr:                  addr,
-		TLSConfig:             tlsConfig,
 		DialTimeout:           dialTimeout,
 		ReadTimeout:           readTimeout,
 		WriteTimeout:          writeTimeout,
@@ -572,8 +595,7 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
 	}
-	options.Dialer = c.trackedRedisDialer(redis.NewDialer(options))
-	return options, nil
+	return options, tlsSettings
 }
 
 type homeDispatchConn struct {
@@ -648,21 +670,6 @@ func cloneRedisOptions(options *redis.Options) *redis.Options {
 		cloned.MaintNotificationsConfig = &maintNotifications
 	}
 	return &cloned
-}
-
-func (c *Client) homeTLSConfigLocked(addr string) (*tls.Config, error) {
-	serverName := strings.TrimSpace(c.homeCfg.TLS.ServerName)
-	if serverName == "" {
-		if c.homeCfg.TLS.UseTargetServerName {
-			serverName = hostFromAddress(addr)
-		} else {
-			serverName = strings.TrimSpace(c.seedHost)
-		}
-	}
-	if serverName == "" {
-		serverName = strings.TrimSpace(c.homeCfg.Host)
-	}
-	return newHomeTLSConfig(c.homeCfg.TLS, serverName)
 }
 
 func hostFromAddress(addr string) string {
@@ -1430,7 +1437,7 @@ func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID 
 	conn := cmd.Conn()
 	defer func() {
 		if errClose := conn.Close(); errClose != nil {
-			log.WithError(errClose).Debug("Home auth dispatch connection close failed")
+			log.Debugf("Home auth dispatch connection close failed: %v", errClose)
 		}
 	}()
 	if errProbe := conn.Ping(ctx).Err(); errProbe != nil {
@@ -1941,7 +1948,7 @@ func (c *Client) promoteSubscription() {
 	c.mu.Unlock()
 	if commandClient != nil {
 		if errClose := commandClient.Close(); errClose != nil {
-			log.WithError(errClose).Warn("Home bootstrap command client close failed")
+			log.Warnf("Home bootstrap command client close failed: %v", errClose)
 		}
 	}
 }
@@ -2041,12 +2048,39 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 	receiveCtx, cancelReceive := context.WithCancelCause(ctx)
 	events := make(chan any, 16)
 	receiveDone := make(chan struct{})
+	c.mu.Lock()
+	if c.latency == nil {
+		c.latency = &clusterLatencyHistory{entries: make(map[string]clusterLatencyEntry)}
+	}
+	sampler := &clusterRTTSampler{history: c.latency, node: clusterNode{IP: c.homeCfg.Host, Port: c.homeCfg.Port}}
+	c.mu.Unlock()
+	failReceive := func(errReceive error) {
+		if !errors.Is(context.Cause(receiveCtx), ErrRebalanceRequested) {
+			if ctx.Err() == nil {
+				if c.heartbeatOK.Load() {
+					c.markMembershipTakeoverEligible()
+				}
+				c.releaseFenced.Store(true)
+			}
+			// Graceful cancellation stops new work but keeps final releases available until Close.
+			c.dispatchFenced.Store(true)
+		}
+		c.heartbeatOK.Store(false)
+		cancelReceive(errReceive)
+	}
 	stopReceive := context.AfterFunc(receiveCtx, func() { _ = pubsub.Close() })
+	latencyDone := make(chan struct{})
+	go func() {
+		defer close(latencyDone)
+		if errLatency := c.runClusterLatency(receiveCtx, pubsub, sampler); errLatency != nil {
+			failReceive(errLatency)
+		}
+	}()
 	go func() {
 		defer close(receiveDone)
 		for {
 			_, timeout := c.subscriptionParameters()
-			event, errReceive := pubsub.ReceiveTimeout(receiveCtx, timeout)
+			event, errReceive := receiveSubscriptionEvent(receiveCtx, pubsub, sampler, timeout)
 			if errReceive == nil {
 				select {
 				case events <- event:
@@ -2058,18 +2092,7 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 					errReceive = fmt.Errorf("Home subscription consumer backlog exceeded")
 				}
 			}
-			if !errors.Is(context.Cause(receiveCtx), ErrRebalanceRequested) {
-				if ctx.Err() == nil {
-					if c.heartbeatOK.Load() {
-						c.markMembershipTakeoverEligible()
-					}
-					c.releaseFenced.Store(true)
-				}
-				// Graceful cancellation stops new work but keeps final releases available until Close.
-				c.dispatchFenced.Store(true)
-			}
-			c.heartbeatOK.Store(false)
-			cancelReceive(errReceive)
+			failReceive(errReceive)
 			return
 		}
 	}()
@@ -2078,6 +2101,8 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 		stopReceive()
 		_ = pubsub.Close()
 		<-receiveDone
+		<-latencyDone
+		sampler.expire(time.Now(), true)
 	}()
 	endReceiveFailure := func(err error) error {
 		if cause := context.Cause(receiveCtx); cause != nil {
@@ -2133,11 +2158,33 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 			}
 		case *redis.Pong:
 			c.resetReconnectFailures()
-		case *redis.Subscription:
-			continue
 		default:
 			log.Debugf("home subscription returned unsupported message type %T", event)
 		}
+	}
+}
+
+// receiveSubscriptionEvent consumes telemetry without extending the heartbeat deadline.
+func receiveSubscriptionEvent(ctx context.Context, pubsub *redis.PubSub, sampler *clusterRTTSampler, timeout time.Duration) (any, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, os.ErrDeadlineExceeded
+		}
+		event, errReceive := pubsub.ReceiveTimeout(ctx, remaining)
+		if errReceive != nil {
+			return nil, errReceive
+		}
+		if _, ok := event.(*redis.Subscription); ok {
+			return nil, fmt.Errorf("unexpected Home subscription ACK after initialization")
+		}
+		if pong, ok := event.(*redis.Pong); ok && pong != nil && strings.HasPrefix(pong.Payload, "home-rtt/") {
+			// Timestamp before consumer callbacks, and also exclude stale or duplicate telemetry from liveness.
+			sampler.pong(pong.Payload, time.Now())
+			continue
+		}
+		return event, nil
 	}
 }
 
@@ -2174,7 +2221,7 @@ func (c *Client) endConfigSubscriberLifetimeWithSubscription(err error, subscrip
 	}
 	if subscription != nil {
 		if errClose := subscription.Close(); errClose != nil {
-			log.WithError(errClose).Debugf("Home subscription close after %s", reason)
+			log.Debugf("Home subscription close after %s: %v", reason, errClose)
 		}
 	}
 	if !c.managedLifetime() {
@@ -2186,7 +2233,7 @@ func (c *Client) endConfigSubscriberLifetimeWithSubscription(err error, subscrip
 // StartConfigSubscriber is retained for callers that do not need the lifetime error.
 func (c *Client) StartConfigSubscriber(ctx context.Context, onConfig func([]byte) error) {
 	if errRun := c.RunConfigSubscriberLifetime(ctx, onConfig, nil); errRun != nil && !errors.Is(errRun, context.Canceled) {
-		log.WithError(errRun).Warn("Home config subscription lifetime ended")
+		log.Warnf("Home config subscription lifetime ended: %v", errRun)
 	}
 }
 

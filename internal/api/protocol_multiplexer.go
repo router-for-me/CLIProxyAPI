@@ -60,6 +60,21 @@ func (s *Server) acceptMuxConnections(listener net.Listener, httpListener *muxLi
 
 // routeMuxConnection performs per-connection protocol detection and routing.
 func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			var remoteAddr net.Addr
+			if conn != nil {
+				remoteAddr = conn.RemoteAddr()
+			}
+			log.Errorf("panic while routing connection from %v: %v", remoteAddr, recovered)
+			if conn != nil {
+				if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					log.Errorf("failed to close connection after panic: %v", errClose)
+				}
+			}
+		}
+	}()
+
 	// Set a read deadline so that idle connections that never send bytes do not
 	// leak goroutines and file descriptors. The deadline is cleared once the
 	// connection is successfully routed to its handler.
@@ -82,12 +97,11 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 				}
 				return
 			}
+			_ = conn.SetReadDeadline(time.Time{})
 			if errPut := httpListener.Put(tlsConn); errPut != nil {
 				if errClose := conn.Close(); errClose != nil {
 					log.Errorf("failed to close connection after HTTP routing failure: %v", errClose)
 				}
-			} else {
-				_ = conn.SetReadDeadline(time.Time{})
 			}
 			return
 		}
@@ -115,11 +129,10 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 		return
 	}
 
+	_ = conn.SetReadDeadline(time.Time{})
 	if errPut := httpListener.Put(&bufferedConn{Conn: conn, reader: reader}); errPut != nil {
 		if errClose := conn.Close(); errClose != nil {
 			log.Errorf("failed to close connection after HTTP routing failure: %v", errClose)
 		}
-	} else {
-		_ = conn.SetReadDeadline(time.Time{})
 	}
 }

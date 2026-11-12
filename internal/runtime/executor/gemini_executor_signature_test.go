@@ -352,6 +352,69 @@ func TestGeminiExecutorExecute_UnsignedRequestNotCorrupted(t *testing.T) {
 	}
 }
 
+func TestGeminiExecutorExecute_ClaudeToolCallsSeparatedByTextKeepBypassSignatures(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "test-api-key",
+			"base_url": server.URL,
+		},
+	}
+
+	req := cliproxyexecutor.Request{
+		Model: "gemini-4-argon",
+		Payload: []byte(`{
+			"model": "gemini-4-argon",
+			"max_tokens": 16,
+			"tools": [{"name": "Read", "description": "read file", "input_schema": {"type": "object", "properties": {"p": {"type": "string"}}}}],
+			"messages": [
+				{"role": "user", "content": "read files"},
+				{"role": "assistant", "content": [
+					{"type": "tool_use", "id": "t1", "name": "Read", "input": {"p": "/x1"}},
+					{"type": "text", "text": "more"},
+					{"type": "tool_use", "id": "t2", "name": "Read", "input": {"p": "/x2"}}
+				]},
+				{"role": "user", "content": [
+					{"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+					{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}
+				]}
+			]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+	}
+
+	_, err := executor.Execute(context.Background(), auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(upstreamBody, "contents.1.parts.0.thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("first functionCall thoughtSignature = %q, want %q; upstreamBody=%s",
+			got, internalsignature.GeminiSkipThoughtSignatureValidator, upstreamBody)
+	}
+	if got := gjson.GetBytes(upstreamBody, "contents.1.parts.1.text").String(); got != "more" {
+		t.Fatalf("middle text part = %q, want 'more'; upstreamBody=%s", got, upstreamBody)
+	}
+	if got := gjson.GetBytes(upstreamBody, "contents.1.parts.2.thoughtSignature").String(); got != internalsignature.GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("functionCall after text thoughtSignature = %q, want %q; upstreamBody=%s",
+			got, internalsignature.GeminiSkipThoughtSignatureValidator, upstreamBody)
+	}
+}
+
 func geminiRequestWithThinkingSignature(sig string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	req := cliproxyexecutor.Request{
 		Model: "gemini-2.5-flash",

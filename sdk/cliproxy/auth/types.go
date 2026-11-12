@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
@@ -170,6 +171,8 @@ func (a *Auth) BindFileSnapshot(path string, data []byte) {
 	a.fileSnapshotDigest = digest
 }
 
+const invalidatedFileSnapshotDigest = "invalidated"
+
 // ClearFileSnapshot removes any unversioned file-observation binding once the
 // Auth is committed to runtime state or normalized for comparison.
 func (a *Auth) ClearFileSnapshot() {
@@ -180,16 +183,43 @@ func (a *Auth) ClearFileSnapshot() {
 	a.fileSnapshotDigest = ""
 }
 
+// InvalidateFileSnapshot marks an unversioned file snapshot as discarded so a
+// subsequent re-read of identical or reformatted file content is not suppressed.
+func (a *Auth) InvalidateFileSnapshot() {
+	if !a.HasFileSnapshot() {
+		return
+	}
+	a.fileSnapshotDigest = invalidatedFileSnapshotDigest
+}
+
 // HasFileSnapshot reports whether this Auth is an unversioned file-synthesized
 // snapshot bound to a specific file observation digest.
 func (a *Auth) HasFileSnapshot() bool {
 	return a != nil && a.Generation == 0 && a.RegistrationEpoch == 0 && a.fileSnapshotDigest != ""
 }
 
+// FileSnapshotPath returns the backing file path bound to this file snapshot.
+func (a *Auth) FileSnapshotPath() string {
+	if a == nil {
+		return ""
+	}
+	path := strings.TrimSpace(a.fileSnapshotPath)
+	if path == "" && a.Attributes != nil {
+		path = strings.TrimSpace(a.Attributes[AttributePath])
+		if path == "" {
+			path = strings.TrimSpace(a.Attributes[AttributeSource])
+		}
+	}
+	return path
+}
+
 // SameFileSnapshot reports whether two unversioned file snapshots observed the
 // same canonical file content.
 func (a *Auth) SameFileSnapshot(other *Auth) bool {
 	if !a.HasFileSnapshot() || !other.HasFileSnapshot() {
+		return false
+	}
+	if a.fileSnapshotDigest == invalidatedFileSnapshotDigest || other.fileSnapshotDigest == invalidatedFileSnapshotDigest {
 		return false
 	}
 	return a.fileSnapshotDigest == other.fileSnapshotDigest && a.fileSnapshotPath == other.fileSnapshotPath
@@ -202,13 +232,7 @@ func (a *Auth) FileSnapshotMatchesDisk() bool {
 	if !a.HasFileSnapshot() {
 		return true
 	}
-	path := strings.TrimSpace(a.fileSnapshotPath)
-	if path == "" && a.Attributes != nil {
-		path = strings.TrimSpace(a.Attributes[AttributePath])
-		if path == "" {
-			path = strings.TrimSpace(a.Attributes[AttributeSource])
-		}
-	}
+	path := a.FileSnapshotPath()
 	if path == "" {
 		return false
 	}
@@ -813,6 +837,66 @@ func IsCodexUseSIWC(a *Auth) bool {
 		}
 	}
 	return enabled
+}
+
+// IsCodexClientUserAgent reports whether userAgent identifies a Codex client.
+func IsCodexClientUserAgent(userAgent string) bool {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	if ua == "" {
+		return false
+	}
+	return strings.Contains(ua, "codex-desktop") ||
+		strings.Contains(ua, "codex desktop") ||
+		strings.Contains(ua, "codex-rs") ||
+		strings.Contains(ua, "codex_cli_rs") ||
+		strings.Contains(ua, "codex-tui") ||
+		strings.Contains(ua, "codex_exec")
+}
+
+func headerValueFromHTTPHeader(headers http.Header, name string) string {
+	if headers == nil {
+		return ""
+	}
+	if value := strings.TrimSpace(headers.Get(name)); value != "" {
+		return value
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+// IsCodexClientRequest reports whether the request originates from a Codex client.
+func IsCodexClientRequest(ctx context.Context, clientHeaders ...http.Header) bool {
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if IsCodexClientUserAgent(headerValueFromHTTPHeader(ginCtx.Request.Header, "User-Agent")) {
+				return true
+			}
+		}
+	}
+	for _, headers := range clientHeaders {
+		if IsCodexClientUserAgent(headerValueFromHTTPHeader(headers, "User-Agent")) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCodexUseSIWCForRequest reports whether a request should use the nested SIWC credential section.
+// Requests from Codex clients ignore use_siwc and always use non-SIWC credentials.
+func IsCodexUseSIWCForRequest(ctx context.Context, a *Auth, clientHeaders ...http.Header) bool {
+	if IsCodexClientRequest(ctx, clientHeaders...) {
+		return false
+	}
+	return IsCodexUseSIWC(a)
 }
 
 // OuterExpirationTime extracts the outer credential expiration timestamp, ignoring the nested "siwc" section.

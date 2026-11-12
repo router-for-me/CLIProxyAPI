@@ -353,6 +353,41 @@ func TestValidateGeminiThoughtSignatures_RejectsSentinelOutsideFirstFunctionCall
 	}
 }
 
+func TestValidateGeminiThoughtSignatures_CallAfterTextStartsNewGroup(t *testing.T) {
+	t.Run("rejects_unsigned_call_after_text", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"id": "call-1", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"},
+					{"text": "more"},
+					{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}}
+				]
+			}]
+		}`)
+		err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true})
+		if err == nil || !strings.Contains(err.Error(), "missing thoughtSignature on first functionCall") {
+			t.Fatalf("expected missing thoughtSignature error on call after text, got %v", err)
+		}
+	})
+
+	t.Run("accepts_sentinel_on_call_after_text", func(t *testing.T) {
+		input := []byte(`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"id": "call-1", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"},
+					{"text": "more"},
+					{"functionCall": {"id": "call-2", "name": "read_file", "args": {}}, "thoughtSignature": "skip_thought_signature_validator"}
+				]
+			}]
+		}`)
+		if err := ValidateGeminiThoughtSignatures(input, GeminiThoughtSignatureValidationOptions{AllowBypassSentinel: true}); err != nil {
+			t.Fatalf("expected sentinel on call after text to be valid, got %v", err)
+		}
+	})
+}
+
 func TestValidateGeminiThoughtSignatures_RejectsNonCanonicalNestedSignature(t *testing.T) {
 	signature := testGemini3ThoughtSignature([]byte{0x01, 0x0c, 0x39})
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"first","args":{},"thoughtSignature":"` + signature + `"}}]}]}`)

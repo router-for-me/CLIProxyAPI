@@ -24,7 +24,7 @@ func TestClaudeResponsesServerToolStopReason(t *testing.T) {
 		{reason: " PAUSE_TURN ", status: "completed", endTurn: "false"},
 		{reason: "max_tokens", status: "incomplete", detail: `{"reason":"max_output_tokens"}`},
 		{reason: "refusal", status: "incomplete", detail: `{"reason":"content_filter"}`},
-		{reason: "model_context_window_exceeded", status: "failed", event: "response.failed", errCode: "context_length_exceeded"},
+		{reason: "model_context_window_exceeded", status: "incomplete", detail: `{"reason":"max_output_tokens"}`},
 		{reason: "end_turn", status: "completed"},
 		{reason: "tool_use", status: "completed"},
 		{reason: "stop_sequence", status: "completed"},

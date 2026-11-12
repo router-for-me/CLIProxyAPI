@@ -465,7 +465,8 @@ upstream:
     # timeout is a fallback and
     # verified native OS/arch values remain client-supplied. When stabilize-device-profile is
     # enabled, OS/arch are pinned to the values below and cached profiles remain constrained to
-    # the same exact software baseline rather than learning newer client versions.
+    # the same exact software baseline rather than learning newer client versions (unless the
+    # credential resolves to cloak_mode: never, which preserves the confirmed caller's headers).
     # header-defaults:
     #   user-agent: "claude-cli/2.1.280 (external, cli)"
     #   package-version: "0.112.1"

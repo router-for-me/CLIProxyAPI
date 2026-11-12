@@ -37,17 +37,22 @@ type ConvertCodexResponseToClaudeParams struct {
 	BlockIndex               int
 	HasTextDelta             bool
 	TextBlockOpen            bool
-	ThinkingBlockOpen        bool
-	ThinkingSignature        string
-	ThinkingSummarySeen      bool
-	WebSearchToolUseIDs      map[string]struct{}
-	WebSearchToolResultIDs   map[string]struct{}
-	LastWebSearchToolUseID   string
-	FunctionCalls            map[string]*codexFunctionCallStream
-	FunctionCallQueue        []*codexFunctionCallStream
-	ActiveFunctionCall       *codexFunctionCallStream
-	LastFunctionCall         *codexFunctionCallStream
-	DeferredStreamEvents     [][]byte
+	// CommentaryMessageOpen is set while the current `message` output item carries
+	// phase "commentary": a preamble GPT-5.x emits before its final_answer item.
+	// Its text goes into a thinking block, so clients that render or speak text
+	// blocks get the answer once instead of the preamble followed by the answer.
+	CommentaryMessageOpen  bool
+	ThinkingBlockOpen      bool
+	ThinkingSignature      string
+	ThinkingSummarySeen    bool
+	WebSearchToolUseIDs    map[string]struct{}
+	WebSearchToolResultIDs map[string]struct{}
+	LastWebSearchToolUseID string
+	FunctionCalls          map[string]*codexFunctionCallStream
+	FunctionCallQueue      []*codexFunctionCallStream
+	ActiveFunctionCall     *codexFunctionCallStream
+	LastFunctionCall       *codexFunctionCallStream
+	DeferredStreamEvents   [][]byte
 }
 
 type codexFunctionCallStream struct {
@@ -115,6 +120,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = translatorcommon.AppendSSEEventBytes(output, "message_start", template, 2)
 	case "response.reasoning_summary_part.added":
 		output = append(output, stopCodexTextBlock(params)...)
+		output = append(output, finalizeCodexCommentaryBlock(params)...)
+		params.CommentaryMessageOpen = false
 		// Codex splits a single reasoning item into several summary parts, but only
 		// output_item.done carries that item's final encrypted_content. Keep one
 		// thinking block open for the whole item and separate the parts with a blank
@@ -127,6 +134,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		params.ThinkingSummarySeen = true
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		output = append(output, stopCodexTextBlock(params)...)
+		output = append(output, finalizeCodexCommentaryBlock(params)...)
+		params.CommentaryMessageOpen = false
 		output = append(output, startCodexThinkingBlock(params)...)
 		output = append(output, appendCodexThinkingDelta(params, rootResult.Get("delta").String())...)
 		params.ThinkingSummarySeen = true
@@ -134,12 +143,23 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		// Intentionally does not close the thinking block: it stays open until
 		// output_item.done delivers the reasoning item's final encrypted_content.
 	case "response.content_part.added":
-		output = append(output, finalizeCodexThinkingBlock(params)...)
 		if rootResult.Get("part.type").String() == "output_text" {
-			output = append(output, startCodexTextBlock(params)...)
+			if params.CommentaryMessageOpen {
+				output = append(output, startCodexThinkingBlock(params)...)
+			} else {
+				output = append(output, finalizeCodexThinkingBlock(params)...)
+				output = append(output, startCodexTextBlock(params)...)
+			}
+		} else {
+			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
 	case "response.output_text.delta":
 		params.HasTextDelta = true
+		if params.CommentaryMessageOpen {
+			output = append(output, startCodexThinkingBlock(params)...)
+			output = append(output, appendCodexThinkingDelta(params, rootResult.Get("delta").String())...)
+			break
+		}
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, startCodexTextBlock(params)...)
 		template = []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
@@ -149,7 +169,11 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 	case "response.content_part.done":
 		if rootResult.Get("part.type").String() == "output_text" {
-			output = append(output, stopCodexTextBlock(params)...)
+			if params.CommentaryMessageOpen {
+				output = append(output, finalizeCodexCommentaryBlock(params)...)
+			} else {
+				output = append(output, stopCodexTextBlock(params)...)
+			}
 		}
 	case "response.web_search_call.searching", "response.web_search_call.completed", "response.web_search_call.in_progress":
 		// Wait for populated web_search_call items on output_item.done.
@@ -181,9 +205,17 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		itemResult := rootResult.Get("item")
 		itemType := itemResult.Get("type").String()
 		switch itemType {
+		case "message":
+			// Each message item streams its own text; a later item's done fallback
+			// must not be skipped because an earlier item had deltas.
+			output = append(output, finalizeCodexThinkingBlock(params)...)
+			output = append(output, stopCodexTextBlock(params)...)
+			params.HasTextDelta = false
+			params.CommentaryMessageOpen = itemResult.Get("phase").String() == "commentary"
 		case "function_call":
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 			output = append(output, stopCodexTextBlock(params)...)
+			params.CommentaryMessageOpen = false
 
 			call := recordCodexFunctionCall(params, rootResult, itemResult)
 			updateCodexFunctionCallIdentity(params, call, rootResult, itemResult)
@@ -196,6 +228,7 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			// A previous reasoning item that never reported output_item.done must not
 			// leak its still-open block into this one.
 			output = append(output, finalizeCodexThinkingBlock(params)...)
+			params.CommentaryMessageOpen = false
 			params.ThinkingSummarySeen = false
 			// Kept only as a fallback for streams whose output_item.done omits
 			// encrypted_content; it is a pre-content snapshot, never the final value.
@@ -208,7 +241,15 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		itemType := itemResult.Get("type").String()
 		switch itemType {
 		case "message":
+			commentary := params.CommentaryMessageOpen || itemResult.Get("phase").String() == "commentary"
+			defer func() {
+				params.CommentaryMessageOpen = false
+				params.HasTextDelta = false
+			}()
 			if params.HasTextDelta {
+				if commentary {
+					output = append(output, finalizeCodexCommentaryBlock(params)...)
+				}
 				return [][]byte{output}
 			}
 			contentResult := itemResult.Get("content")
@@ -229,6 +270,16 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			if text == "" {
 				return [][]byte{output}
 			}
+			if commentary {
+				// Whole on done, nothing streamed: emit it as thinking.
+				output = append(output, finalizeCodexThinkingBlock(params)...)
+				output = append(output, stopCodexTextBlock(params)...)
+				params.CommentaryMessageOpen = true
+				output = append(output, startCodexThinkingBlock(params)...)
+				output = append(output, appendCodexThinkingDelta(params, text)...)
+				output = append(output, finalizeCodexCommentaryBlock(params)...)
+				return [][]byte{output}
+			}
 
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 			output = append(output, startCodexTextBlock(params)...)
@@ -239,7 +290,6 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 
 			output = append(output, stopCodexTextBlock(params)...)
-			params.HasTextDelta = true
 		case "function_call":
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 			output = append(output, stopCodexTextBlock(params)...)
@@ -253,6 +303,8 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 			output = appendCodexFunctionCallQueue(output, params, originalRequestRawJSON)
 		case "reasoning":
 			output = append(output, stopCodexTextBlock(params)...)
+			output = append(output, finalizeCodexCommentaryBlock(params)...)
+			params.CommentaryMessageOpen = false
 			if signature := itemResult.Get("encrypted_content").String(); signature != "" {
 				params.ThinkingSignature = signature
 			}
@@ -409,15 +461,19 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					contentBlocks = append(contentBlocks, block)
 				}
 			case "message":
+				// A "commentary" phase message is the model's preamble, not its answer:
+				// relay it as thinking so text consumers see the final_answer alone.
+				blockType := "text"
+				if item.Get("phase").String() == "commentary" {
+					blockType = "thinking"
+				}
 				if content := item.Get("content"); content.Exists() {
 					if content.IsArray() {
 						content.ForEach(func(_, part gjson.Result) bool {
 							if part.Get("type").String() == "output_text" {
 								text := part.Get("text").String()
 								if text != "" {
-									block := []byte(`{"type":"text","text":""}`)
-									block, _ = sjson.SetBytes(block, "text", text)
-									contentBlocks = append(contentBlocks, block)
+									contentBlocks = append(contentBlocks, codexMessageTextBlock(blockType, text))
 								}
 							}
 							return true
@@ -425,9 +481,7 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 					} else {
 						text := content.String()
 						if text != "" {
-							block := []byte(`{"type":"text","text":""}`)
-							block, _ = sjson.SetBytes(block, "text", text)
-							contentBlocks = append(contentBlocks, block)
+							contentBlocks = append(contentBlocks, codexMessageTextBlock(blockType, text))
 						}
 					}
 				}
@@ -903,6 +957,29 @@ func startCodexTextBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	return translatorcommon.AppendSSEEventBytes(nil, "content_block_start", template, 2)
 }
 
+// finalizeCodexCommentaryBlock closes the thinking block that carries a commentary
+// message. A reasoning item's encrypted_content never belongs to it, so no
+// signature_delta is emitted even if one is pending for a later reasoning item.
+func finalizeCodexCommentaryBlock(params *ConvertCodexResponseToClaudeParams) []byte {
+	if !params.CommentaryMessageOpen || !params.ThinkingBlockOpen {
+		return nil
+	}
+	return finalizeCodexThinkingBlock(params)
+}
+
+// codexMessageTextBlock builds a non-stream content block: {"type":"text","text":...}
+// or, for a commentary message, {"type":"thinking","thinking":...}.
+func codexMessageTextBlock(blockType, text string) []byte {
+	if blockType == "thinking" {
+		block := []byte(`{"type":"thinking","thinking":""}`)
+		block, _ = sjson.SetBytes(block, "thinking", text)
+		return block
+	}
+	block := []byte(`{"type":"text","text":""}`)
+	block, _ = sjson.SetBytes(block, "text", text)
+	return block
+}
+
 func stopCodexTextBlock(params *ConvertCodexResponseToClaudeParams) []byte {
 	if !params.TextBlockOpen {
 		return nil
@@ -992,11 +1069,12 @@ func finalizeCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) []by
 	}
 
 	output := make([]byte, 0, 256)
-	if params.ThinkingSignature != "" {
+	if !params.CommentaryMessageOpen && params.ThinkingSignature != "" {
 		signatureDelta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":""}}`)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "index", params.BlockIndex)
 		signatureDelta, _ = sjson.SetBytes(signatureDelta, "delta.signature", params.ThinkingSignature)
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", signatureDelta, 2)
+		params.ThinkingSignature = ""
 	}
 
 	contentBlockStop := []byte(`{"type":"content_block_stop","index":0}`)
