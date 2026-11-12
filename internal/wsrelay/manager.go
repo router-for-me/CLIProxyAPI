@@ -20,6 +20,14 @@ type Manager struct {
 	upgrader  websocket.Upgrader
 	sessions  map[string]*session
 	sessMutex sync.RWMutex
+	// keyLocks serializes auth emissions per provider key: an install's
+	// onConnected Add and an owner disconnect's onDisconnected Delete each
+	// validate ownership and emit while holding the key's lock, so a stale
+	// emission can never land after a newer session's Delete. Entries are
+	// reference counted: the default provider factory hands every connection
+	// a fresh random key, so unreferenced entries must be reclaimed or a
+	// long-running gateway would grow the map without bound.
+	keyLocks map[string]*keyLockEntry
 
 	providerFactory func(*http.Request) (string, error)
 	onConnected     func(string)
@@ -53,6 +61,7 @@ func NewManager(opts Options) *Manager {
 	mgr := &Manager{
 		path:     path,
 		sessions: make(map[string]*session),
+		keyLocks: make(map[string]*keyLockEntry),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -141,6 +150,13 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	if s.provider == "" {
 		s.provider = strings.ToLower(s.id)
 	}
+	// The key lock serializes this install's ownership check and Add emission
+	// against the previous session's disconnect Delete and any competing
+	// install, so the last emission for a key always belongs to its live
+	// session (#5392, #5520 review).
+	key := strings.ToLower(strings.TrimSpace(s.provider))
+	lock := m.acquireKeyLock(s.provider)
+	lock.mu.Lock()
 	m.sessMutex.Lock()
 	var replaced *session
 	if existing, ok := m.sessions[s.provider]; ok {
@@ -149,11 +165,17 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	m.sessions[s.provider] = s
 	m.sessMutex.Unlock()
 
+	// Suppress a stale connect: if a newer session already replaced this one,
+	// its own onConnected is authoritative and this Add must not fire. The
+	// check is under the key lock, so the emission is atomic with ownership.
+	if m.onConnected != nil && m.session(s.provider) == s {
+		m.onConnected(s.provider)
+	}
+	lock.mu.Unlock()
+	m.releaseKeyLock(lock, key)
+
 	if replaced != nil {
 		replaced.cleanup(errors.New("replaced by new connection"))
-	}
-	if m.onConnected != nil {
-		m.onConnected(s.provider)
 	}
 
 	go s.run(context.Background())
@@ -177,19 +199,88 @@ func (m *Manager) session(provider string) *session {
 	return s
 }
 
+// keyLockEntry is one provider key's emission lock with its live-user count.
+type keyLockEntry struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// acquireKeyLock returns the provider key's lock entry and takes one reference
+// on it. The reference must be released with releaseKeyLock after the final
+// Unlock, so the entry can be removed once no session or callback can reach it.
+func (m *Manager) acquireKeyLock(provider string) *keyLockEntry {
+	key := strings.ToLower(strings.TrimSpace(provider))
+	m.sessMutex.Lock()
+	if m.keyLocks == nil {
+		m.keyLocks = make(map[string]*keyLockEntry)
+	}
+	e := m.keyLocks[key]
+	if e == nil {
+		e = &keyLockEntry{}
+		m.keyLocks[key] = e
+	}
+	e.refs++
+	m.sessMutex.Unlock()
+	return e
+}
+
+// releaseKeyLock drops one reference from the entry and removes it from the
+// map when it was the last one. The entry is only deletable after its lock has
+// been unlocked, so a concurrent acquirer either takes a reference on this
+// entry or replaces a fully released one.
+func (m *Manager) releaseKeyLock(e *keyLockEntry, key string) {
+	if e == nil {
+		return
+	}
+	m.sessMutex.Lock()
+	e.refs--
+	if e.refs <= 0 && m.keyLocks[key] == e {
+		delete(m.keyLocks, key)
+	}
+	m.sessMutex.Unlock()
+}
+
 func (m *Manager) handleSessionClosed(s *session, cause error) {
 	if s == nil {
 		return
 	}
 	key := strings.ToLower(strings.TrimSpace(s.provider))
+	// A session that no longer owns the key was replaced by a live one: the
+	// replacement's own emissions are authoritative and this callback emits
+	// nothing, so it needs no per-key serialization.
+	m.sessMutex.Lock()
+	cur, owned := m.sessions[key]
+	owner := owned && cur == s
+	if owner {
+		delete(m.sessions, key)
+	} else if owned {
+		cause = errors.New("replaced by new connection")
+	}
+	m.sessMutex.Unlock()
+	if !owner {
+		if m.onDisconnected != nil {
+			m.onDisconnected(s.provider, cause)
+		}
+		return
+	}
+	// Owner disconnect: validate ownership and emit the Delete under the key
+	// lock so it can never follow a newer session's Add (#5392, #5520 review).
+	// The callback runs while holding the per-key lock, not the global session
+	// lock, so same-key manager calls from the callback must not be made.
+	lock := m.acquireKeyLock(key)
+	lock.mu.Lock()
 	m.sessMutex.Lock()
 	if cur, ok := m.sessions[key]; ok && cur == s {
 		delete(m.sessions, key)
+	} else if ok {
+		cause = errors.New("replaced by new connection")
 	}
 	m.sessMutex.Unlock()
 	if m.onDisconnected != nil {
 		m.onDisconnected(s.provider, cause)
 	}
+	lock.mu.Unlock()
+	m.releaseKeyLock(lock, key)
 }
 
 func randomProviderName() string {
