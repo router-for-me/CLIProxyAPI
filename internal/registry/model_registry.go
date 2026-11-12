@@ -1658,7 +1658,7 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	models := make([]map[string]any, 0, len(r.models))
 	var expiresAt time.Time
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		available, registrationExpiresAt := modelRegistrationAvailability(registration, now)
 		if !registrationExpiresAt.IsZero() && (expiresAt.IsZero() || registrationExpiresAt.Before(expiresAt)) {
 			expiresAt = registrationExpiresAt
@@ -1667,13 +1667,59 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 			continue
 		}
 
-		model := r.convertModelToMap(registration.Info, handlerType)
+		modelInfo := registration.Info
+		if handlerType == "openai" && registration.Info != nil {
+			modelInfo = cloneModelInfo(registration.Info)
+			modelInfo.ContextLength, modelInfo.MaxContextLength, modelInfo.MaxCompletionTokens = r.aggregatedModelTokenLimitsLocked(modelID)
+			modelInfo.InputTokenLimit = 0
+			modelInfo.OutputTokenLimit = 0
+		}
+
+		model := r.convertModelToMap(modelInfo, handlerType)
 		if model != nil {
 			models = append(models, model)
 		}
 	}
 
 	return models, expiresAt
+}
+
+// aggregatedModelTokenLimitsLocked computes conservative minimum context length,
+// max context length, and max completion tokens across all registered clients for the model
+// in a single pass over clientModelInfos.
+func (r *ModelRegistry) aggregatedModelTokenLimitsLocked(modelID string) (contextLength, maxContextLength, maxCompletionTokens int) {
+	if r == nil || modelID == "" {
+		return 0, 0, 0
+	}
+
+	for _, clientModels := range r.clientModelInfos {
+		info := clientModels[modelID]
+		if info == nil {
+			continue
+		}
+
+		ctxLen := info.ContextLength
+		if ctxLen <= 0 {
+			ctxLen = info.InputTokenLimit
+		}
+		if ctxLen > 0 && (contextLength == 0 || ctxLen < contextLength) {
+			contextLength = ctxLen
+		}
+
+		maxCtxLen := info.MaxContextLength
+		if maxCtxLen > 0 && (maxContextLength == 0 || maxCtxLen < maxContextLength) {
+			maxContextLength = maxCtxLen
+		}
+
+		maxCompl := info.MaxCompletionTokens
+		if maxCompl <= 0 {
+			maxCompl = info.OutputTokenLimit
+		}
+		if maxCompl > 0 && (maxCompletionTokens == 0 || maxCompl < maxCompletionTokens) {
+			maxCompletionTokens = maxCompl
+		}
+	}
+	return contextLength, maxContextLength, maxCompletionTokens
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -1990,14 +2036,22 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.ContextLength > 0 {
-			result["context_length"] = model.ContextLength
+		contextLength := model.ContextLength
+		if contextLength <= 0 {
+			contextLength = model.InputTokenLimit
+		}
+		if contextLength > 0 {
+			result["context_length"] = contextLength
 		}
 		if model.MaxContextLength > 0 {
 			result["max_context_length"] = model.MaxContextLength
 		}
-		if model.MaxCompletionTokens > 0 {
-			result["max_completion_tokens"] = model.MaxCompletionTokens
+		maxCompletionTokens := model.MaxCompletionTokens
+		if maxCompletionTokens <= 0 {
+			maxCompletionTokens = model.OutputTokenLimit
+		}
+		if maxCompletionTokens > 0 {
+			result["max_completion_tokens"] = maxCompletionTokens
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
