@@ -13,6 +13,7 @@ const (
 	headerTunnelRole = "X-Tunnel-Role"
 	headerTunnelUUID = "X-Tunnel-UUID"
 	headerTunnelName = "X-Tunnel-Name"
+	headerTunnelType = "X-Tunnel-Type"
 )
 
 // ServeHTTP authenticates access.api-keys, validates device identity, upgrades
@@ -62,6 +63,15 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, errName.Error())
 		return
 	}
+	var serverType string
+	if role == RoleServer {
+		var errType error
+		serverType, errType = NormalizeAndValidateType(firstNonEmptyTrimmed(query.Get("type"), r.Header.Get(headerTunnelType)))
+		if errType != nil {
+			writeJSONError(w, http.StatusBadRequest, errType.Error())
+			return
+		}
+	}
 
 	reservation, reserveStatus := h.reserveUUID(apiKey, uuid)
 	if reserveStatus != 0 {
@@ -92,7 +102,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	guardedWriter.conn.postUpgrade.Store(true)
-	p := newPeer(h, apiKey, uuid, name, role, conn, h.sendQueueSize, h.maxPeerQueuedBytes)
+	p := newPeer(h, apiKey, uuid, name, serverType, role, conn, h.sendQueueSize, h.maxPeerQueuedBytes)
 	h.commitPeer(p, reservation)
 }
 

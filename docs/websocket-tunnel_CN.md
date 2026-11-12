@@ -23,10 +23,10 @@ CLIProxyAPI 内置支持多租户隔离、多对多全双工复用的 **WebSocke
    - 所有连接必须使用 `config.yaml` 中 `access.api-keys` 配置的密钥完成握手认证。
    - 与普通 AI 代理路由不同，当 `access.api-keys` 未配置（为空）时，`/v1/tunnel` **一律拒绝所有连接**（返回 HTTP `401 Unauthorized`），绝不匿名放行。
    - 不同 `access.api-keys` 下的客户端与服务端**完全互不可见**：不共享在线服务端列表、禁止跨密钥发包、也不共享设备 `uuid` 唯一性命名空间。
-2. **设备身份声明（`uuid` + `name`）与唯一性**：
-   - 客户端与服务端在连接时均必须声明 `role`、设备唯一标识 `uuid` 与设备名称 `name`。
+2. **设备身份声明（`uuid` + `name` + 服务端 `type`）与唯一性**：
+   - 客户端与服务端在连接时均必须声明 `role`、设备唯一标识 `uuid` 与设备名称 `name`；当 `role=server` 时，还必须声明非空的服务端类型 `type`（支持任意自定义输入，至少包含 1 个非空白字符）。
    - 在**同一个 `access.api-key`** 租户域内，同时在线的所有设备（跨 `client` 与 `server`）**不允许 `uuid` 重复**。若某 `uuid` 当前已在线，重复发起的新连接会在 HTTP 握手阶段直接收到 `409 Conflict` 拒绝响应（不会踢掉原有连接）；原连接断开后，相同 `uuid` 可立即重连。
-   - 不同设备允许使用相同的设备名称（`name` 可重复）。
+   - 不同设备允许使用相同的设备名称（`name` 可重复）与相同的服务端类型（`type` 可重复）。
 3. **单设备单 WebSocket 连接多路复用**：
    - 每个设备仅建立并复用一条 WebSocket 长连接，通过原生帧类型隔离控制面与数据面：
      - **文本帧（`TextMessage`，Opcode `0x1`）**：承载 UTF-8 JSON 控制信令（服务端列表同步、上下线通知及非致命错误反馈）。
@@ -74,6 +74,7 @@ CLIProxyAPI 按以下优先级顺序提取候选凭证，并将连接绑定到**
 | 连接角色 | `role` | `X-Tunnel-Role` | 必填。去除首尾空白后不区分大小写，仅允许 `"client"` 或 `"server"`。 |
 | 设备唯一标识 | `uuid` | `X-Tunnel-UUID` | 必填。去除首尾空白后字节长度为 `1..128`，且所有字节必须为可打印无空白 ASCII 字符（`0x21..0x7E`）。同一 `api-key` 下在线唯一。 |
 | 设备名称 | `name` | `X-Tunnel-Name` | 必填。去除首尾空白后 UTF-8 字节长度为 `1..256`，必须为合法 UTF-8 且不含 ASCII 控制字符（`0x00..0x1F` 或 `0x7F`）。允许重名。 |
+| 服务端类型 | `type` | `X-Tunnel-Type` | 当 `role=server` 时必填（去除首尾空白后至少 1 个字符）；当 `role=client` 时忽略。支持任意自定义输入，去除首尾空白后 UTF-8 字节长度为 `1..256`，必须为合法 UTF-8 且不含 ASCII 控制字符（`0x00..0x1F` 或 `0x7F`）。允许重复。 |
 
 **客户端连接 URL 示例**：
 
@@ -84,7 +85,7 @@ wss://proxy.example.com/v1/tunnel?role=client&uuid=550e8400-e29b-41d4-a716-44665
 **服务端连接 URL 示例**：
 
 ```text
-wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8&name=Build-Node-01
+wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8&name=Build-Node-01&type=build-agent
 ```
 
 ### 2.4 HTTP 握手阶段错误响应码
@@ -93,7 +94,7 @@ wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04
 
 | HTTP 状态码 | 触发场景 | 响应体示例 |
 | --- | --- | --- |
-| `400 Bad Request` | `role`、`uuid` 或 `name` 缺失或不符合格式限制 | `{"error":"invalid or missing role: must be client or server"}` / `{"error":"invalid or missing uuid"}` / `{"error":"invalid or missing name"}` |
+| `400 Bad Request` | `role`、`uuid`、`name` 缺失或不符合格式限制，或 `role=server` 时 `type` 缺失/不符合格式限制 | `{"error":"invalid or missing role: must be client or server"}` / `{"error":"invalid or missing uuid"}` / `{"error":"invalid or missing name"}` / `{"error":"invalid or missing type"}` |
 | `401 Unauthorized` | 系统未配置 `access.api-keys`、未传凭证或所有候选凭证均不匹配 | `{"error":"invalid or missing api key"}` |
 | `403 Forbidden` | `access.api-keys` 仍包含示例模板密钥触发系统 Safe-Mode 保护 | `{"error":"unsafe_example_api_key","message":"..."}` |
 | `405 Method Not Allowed` | `POST`、`PUT`、`PATCH`、`DELETE`、`HEAD`、`TRACE` 或 `CONNECT`（响应头附带 `Allow: GET`） | `{"error":"method not allowed"}` |
@@ -120,16 +121,19 @@ wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04
   "servers": [
     {
       "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-      "name": "Build-Node-01"
+      "name": "Build-Node-01",
+      "type": "build-agent"
     },
     {
       "uuid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "name": "Build-Node-02"
+      "name": "Build-Node-02",
+      "type": "build-agent"
     }
   ]
 }
 ```
 
+- `servers[].uuid`、`servers[].name`、`servers[].type`（字符串）：在线服务端的唯一标识、设备名称与握手声明的服务端类型。
 - `request_id`（可选字符串）：首连自动推送时不包含此字段；响应 `list_servers` 查询且请求带有非空 `request_id` 时原样回显。
 - **因果顺序保证**：首连 `server_list` 快照在租户写锁内生成并率先写入客户端发送队列槽位 `0` 后，该客户端才对后续广播可见，因此后续收到的任何 `server_online` / `server_offline` 均严格发生在首连快照之后，不会乱序。
 
@@ -156,7 +160,8 @@ wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04
   "type": "server_online",
   "server": {
     "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "name": "Build-Node-01"
+    "name": "Build-Node-01",
+    "type": "build-agent"
   }
 }
 ```
@@ -166,10 +171,13 @@ wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04
   "type": "server_offline",
   "server": {
     "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "name": "Build-Node-01"
+    "name": "Build-Node-01",
+    "type": "build-agent"
   }
 }
 ```
+
+- `server_online` 与 `server_offline` 均携带完整的 `server.uuid`、`server.name` 与 `server.type` 字段。
 
 ### 3.4 `error`：非致命控制与路由错误通知（CLIProxyAPI → 发送方 Peer）
 
@@ -280,8 +288,8 @@ wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04
 ### 客户端推荐对接状态机
 
 1. 使用 `role=client`、`uuid`、`name` 与 `api-key` 连接 `GET /v1/tunnel`。
-2. 连接打开后读取首条文本帧 `server_list`，用其初始化本地在线服务端路由表 `Map<uuid, name>`。
-3. 收到 `server_online` 时写入或更新 `server.uuid -> server.name`；收到 `server_offline` 时移除 `server.uuid` 并快速失败或切换正在等待该服务端的业务请求。
+2. 连接打开后读取首条文本帧 `server_list`，用其初始化本地在线服务端路由表 `Map<uuid, { name, type }>`。
+3. 收到 `server_online` 时写入或更新 `server.uuid -> { name: server.name, type: server.type }`；收到 `server_offline` 时移除 `server.uuid` 并快速失败或切换正在等待该服务端的业务请求。
 4. 连接断开时：
    - 若收到 WebSocket Close `1008` 且原因为 `"api key revoked"`，停止盲目重连并提示更换有效密钥；
    - 若握手返回 HTTP `409 Conflict`，检查是否存在相同 `uuid` 的重复进程实例，退避后重试；
@@ -370,7 +378,7 @@ export function connectTunnelClient(baseWsUrl: string, apiKey: string, clientUUI
   const ws = new WebSocket(`${baseWsUrl}/v1/tunnel?${params.toString()}`);
   ws.binaryType = "arraybuffer";
 
-  const servers = new Map<string, string>();
+  const servers = new Map<string, { name: string; type: string }>();
 
   ws.onmessage = (event) => {
     if (typeof event.data === "string") {
@@ -379,11 +387,11 @@ export function connectTunnelClient(baseWsUrl: string, apiKey: string, clientUUI
         case "server_list":
           servers.clear();
           for (const srv of ctrl.servers) {
-            servers.set(srv.uuid, srv.name);
+            servers.set(srv.uuid, { name: srv.name, type: srv.type });
           }
           break;
         case "server_online":
-          servers.set(ctrl.server.uuid, ctrl.server.name);
+          servers.set(ctrl.server.uuid, { name: ctrl.server.name, type: ctrl.server.type });
           break;
         case "server_offline":
           servers.delete(ctrl.server.uuid);
@@ -466,11 +474,12 @@ func DecodeFrame(raw []byte) (payloadType byte, srcUUID, dstUUID string, payload
 	return raw[1], string(raw[4 : 4+srcLen]), string(raw[4+srcLen : headerLen]), raw[headerLen:], nil
 }
 
-func RunEchoTunnelServer(proxyWSBaseURL, apiKey, serverUUID, serverName string) error {
+func RunEchoTunnelServer(proxyWSBaseURL, apiKey, serverUUID, serverName, serverType string) error {
 	q := url.Values{
 		"role": {"server"},
 		"uuid": {serverUUID},
 		"name": {serverName},
+		"type": {serverType},
 	}
 	headers := http.Header{
 		"Authorization": {"Bearer " + apiKey},

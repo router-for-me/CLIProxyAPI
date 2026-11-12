@@ -124,29 +124,29 @@ func TestHubAuth_MethodAndCredentials(t *testing.T) {
 			{
 				name:    "Authorization Bearer",
 				headers: http.Header{"Authorization": {"Bearer key-alpha"}},
-				query:   url.Values{"role": {"server"}, "uuid": {"u-auth-bearer"}, "name": {"S1"}},
+				query:   url.Values{"role": {"server"}, "uuid": {"u-auth-bearer"}, "name": {"S1"}, "type": {"s"}},
 				uuid:    "u-auth-bearer",
 			},
 			{
 				name:    "X-Goog-Api-Key",
 				headers: http.Header{"X-Goog-Api-Key": {"key-alpha"}},
-				query:   url.Values{"role": {"server"}, "uuid": {"u-goog"}, "name": {"S2"}},
+				query:   url.Values{"role": {"server"}, "uuid": {"u-goog"}, "name": {"S2"}, "type": {"type-2"}},
 				uuid:    "u-goog",
 			},
 			{
 				name:    "X-Api-Key",
 				headers: http.Header{"X-Api-Key": {"key-alpha"}},
-				query:   url.Values{"role": {"server"}, "uuid": {"u-xapi"}, "name": {"S3"}},
+				query:   url.Values{"role": {"server"}, "uuid": {"u-xapi"}, "name": {"S3"}, "type": {"type-3"}},
 				uuid:    "u-xapi",
 			},
 			{
 				name:  "query key",
-				query: url.Values{"key": {"key-alpha"}, "role": {"server"}, "uuid": {"u-qkey"}, "name": {"S4"}},
+				query: url.Values{"key": {"key-alpha"}, "role": {"server"}, "uuid": {"u-qkey"}, "name": {"S4"}, "type": {"type-4"}},
 				uuid:  "u-qkey",
 			},
 			{
 				name:  "query auth_token",
-				query: url.Values{"auth_token": {"key-alpha"}, "role": {"server"}, "uuid": {"u-qtoken"}, "name": {"S5"}},
+				query: url.Values{"auth_token": {"key-alpha"}, "role": {"server"}, "uuid": {"u-qtoken"}, "name": {"S5"}, "type": {"type-5"}},
 				uuid:  "u-qtoken",
 			},
 			{
@@ -175,32 +175,100 @@ func TestHubAuth_MethodAndCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("header fallback for role uuid name and 400 validation errors", func(t *testing.T) {
+	t.Run("header fallback for role uuid name type and 400 validation errors", func(t *testing.T) {
 		headers := http.Header{
 			"Authorization": {"Bearer key-beta"},
 			"X-Tunnel-Role": {"SERVER"},
 			"X-Tunnel-UUID": {"hdr-srv-1"},
 			"X-Tunnel-Name": {"Header Server"},
+			"X-Tunnel-Type": {"  Header-Type-01  "},
 		}
-		conn, resp, errDial := websocket.DefaultDialer.Dial(dialTunnelURL(srv.URL, nil), headers)
+		// Blank query type must fall back to X-Tunnel-Type; non-blank query type overrides header.
+		conn, resp, errDial := websocket.DefaultDialer.Dial(dialTunnelURL(srv.URL, url.Values{"type": {"   "}}), headers)
 		closeHTTPResponseBody(t, resp)
 		if errDial != nil {
 			t.Fatalf("Dial with X-Tunnel-* headers error = %v", errDial)
 		}
 		registerCleanupConn(t, conn)
 
-		badQueries := []url.Values{
-			{"role": {"invalid"}, "uuid": {"u1"}, "name": {"n1"}},
-			{"role": {"client"}, "uuid": {"bad uuid"}, "name": {"n1"}},
-			{"role": {"client"}, "uuid": {"u1"}, "name": {"   "}},
+		overrideConn, overResp, errOver := websocket.DefaultDialer.Dial(
+			dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"hdr-srv-2"}, "name": {"Override Server"}, "type": {"Query-Type"}}),
+			http.Header{"Authorization": {"Bearer key-beta"}, "X-Tunnel-Type": {"Ignored-Header-Type"}},
+		)
+		closeHTTPResponseBody(t, overResp)
+		if errOver != nil {
+			t.Fatalf("Dial with query type override error = %v", errOver)
 		}
-		for _, bq := range badQueries {
-			_, badResp, errBad := websocket.DefaultDialer.Dial(dialTunnelURL(srv.URL, bq), http.Header{"Authorization": {"Bearer key-beta"}})
+		registerCleanupConn(t, overrideConn)
+
+		// Client role ignores type (both omitted and blank/arbitrary values allowed).
+		cliCheck, cliResp, errCli := websocket.DefaultDialer.Dial(
+			dialTunnelURL(srv.URL, url.Values{"role": {"client"}, "uuid": {"hdr-cli-check"}, "name": {"Client Check"}}),
+			http.Header{"Authorization": {"Bearer key-beta"}},
+		)
+		closeHTTPResponseBody(t, cliResp)
+		if errCli != nil {
+			t.Fatalf("Dial client without type error = %v", errCli)
+		}
+		registerCleanupConn(t, cliCheck)
+		listFrame := readTextJSONFrame(t, cliCheck)
+		if listFrame.Get("servers.#").Int() != 2 ||
+			listFrame.Get("servers.0.uuid").String() != "hdr-srv-1" ||
+			listFrame.Get("servers.0.type").String() != "Header-Type-01" ||
+			listFrame.Get("servers.1.uuid").String() != "hdr-srv-2" ||
+			listFrame.Get("servers.1.type").String() != "Query-Type" {
+			t.Fatalf("unexpected server_list types: %s", listFrame.Raw)
+		}
+
+		cliWithBlankType, cliBlankResp, errCliBlank := websocket.DefaultDialer.Dial(
+			dialTunnelURL(srv.URL, url.Values{"role": {"client"}, "uuid": {"hdr-cli-blank-type"}, "name": {"Client Blank Type"}, "type": {""}}),
+			http.Header{"Authorization": {"Bearer key-beta"}},
+		)
+		closeHTTPResponseBody(t, cliBlankResp)
+		if errCliBlank != nil {
+			t.Fatalf("Dial client with empty type error = %v", errCliBlank)
+		}
+		registerCleanupConn(t, cliWithBlankType)
+		_ = readTextJSONFrame(t, cliWithBlankType)
+
+		badCases := []struct {
+			query   url.Values
+			wantErr string
+		}{
+			{url.Values{"role": {"invalid"}, "uuid": {"u1"}, "name": {"n1"}}, "invalid or missing role: must be client or server"},
+			{url.Values{"role": {"client"}, "uuid": {"bad uuid"}, "name": {"n1"}}, "invalid or missing uuid"},
+			{url.Values{"role": {"client"}, "uuid": {"u1"}, "name": {"   "}}, "invalid or missing name"},
+			{url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"n1"}}, "invalid or missing type"},
+			{url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"n1"}, "type": {""}}, "invalid or missing type"},
+			{url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"n1"}, "type": {"   "}}, "invalid or missing type"},
+			{url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"n1"}, "type": {"bad\ttype"}}, "invalid or missing type"},
+			{url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"n1"}, "type": {strings.Repeat("t", MaxServerTypeLen+1)}}, "invalid or missing type"},
+		}
+		for _, bc := range badCases {
+			_, badResp, errBad := websocket.DefaultDialer.Dial(dialTunnelURL(srv.URL, bc.query), http.Header{"Authorization": {"Bearer key-beta"}})
+			var errBody []byte
+			if badResp != nil && badResp.Body != nil {
+				errBody, _ = io.ReadAll(badResp.Body)
+			}
 			closeHTTPResponseBody(t, badResp)
 			if errBad == nil || badResp == nil || badResp.StatusCode != http.StatusBadRequest {
-				t.Fatalf("Dial(%v) = (%v, %v), want 400", bq, badResp, errBad)
+				t.Fatalf("Dial(%v) = (%v, %v), want 400", bc.query, badResp, errBad)
+			}
+			if gotErr := ojson.GetBytes(errBody, "error").String(); gotErr != bc.wantErr {
+				t.Fatalf("Dial(%v) error = %q, want %q", bc.query, gotErr, bc.wantErr)
 			}
 		}
+
+		// Failed server type validation must not reserve the UUID; single-character type succeeds.
+		afterRejectConn, afterRejectResp, errAfterReject := websocket.DefaultDialer.Dial(
+			dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"u-no-type"}, "name": {"Recovered"}, "type": {"x"}}),
+			http.Header{"Authorization": {"Bearer key-beta"}},
+		)
+		closeHTTPResponseBody(t, afterRejectResp)
+		if errAfterReject != nil {
+			t.Fatalf("Dial after 400 type rejection failed (UUID leaked?): %v", errAfterReject)
+		}
+		registerCleanupConn(t, afterRejectConn)
 	})
 }
 
@@ -222,7 +290,7 @@ func TestHubAuth_UUIDUniquenessConcurrencyAndDuplicateNames(t *testing.T) {
 
 	t.Run("cross-role and same-role duplicate uuid rejected with 409, reconnect allowed after disconnect", func(t *testing.T) {
 		srvConn, resp, errDial := websocket.DefaultDialer.Dial(
-			dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"dup-uuid"}, "name": {"Shared Name"}}),
+			dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"dup-uuid"}, "name": {"Shared Name"}, "type": {"shared-type"}}),
 			authHdr,
 		)
 		closeHTTPResponseBody(t, resp)
@@ -231,8 +299,12 @@ func TestHubAuth_UUIDUniquenessConcurrencyAndDuplicateNames(t *testing.T) {
 		}
 
 		for _, role := range []string{"server", "client"} {
+			dupQuery := url.Values{"role": {role}, "uuid": {"dup-uuid"}, "name": {"Another"}}
+			if role == "server" {
+				dupQuery.Set("type", "another-type")
+			}
 			_, dupResp, errDup := websocket.DefaultDialer.Dial(
-				dialTunnelURL(srv.URL, url.Values{"role": {role}, "uuid": {"dup-uuid"}, "name": {"Another"}}),
+				dialTunnelURL(srv.URL, dupQuery),
 				authHdr,
 			)
 			closeHTTPResponseBody(t, dupResp)
@@ -279,7 +351,7 @@ func TestHubAuth_UUIDUniquenessConcurrencyAndDuplicateNames(t *testing.T) {
 				defer wg.Done()
 				<-startGate
 				c, resp, errDial := websocket.DefaultDialer.Dial(
-					dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"race-uuid"}, "name": {"RaceNode"}}),
+					dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {"race-uuid"}, "name": {"RaceNode"}, "type": {"race-type"}}),
 					authHdr,
 				)
 				closeHTTPResponseBody(t, resp)
@@ -305,10 +377,10 @@ func TestHubAuth_UUIDUniquenessConcurrencyAndDuplicateNames(t *testing.T) {
 		}
 	})
 
-	t.Run("duplicate device names with distinct uuids coexist", func(t *testing.T) {
+	t.Run("duplicate device names and server types with distinct uuids coexist", func(t *testing.T) {
 		for _, id := range []string{"same-name-srv-1", "same-name-srv-2"} {
 			c, resp, errDial := websocket.DefaultDialer.Dial(
-				dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {id}, "name": {"Identical Name"}}),
+				dialTunnelURL(srv.URL, url.Values{"role": {"server"}, "uuid": {id}, "name": {"Identical Name"}, "type": {"Identical Type"}}),
 				authHdr,
 			)
 			closeHTTPResponseBody(t, resp)

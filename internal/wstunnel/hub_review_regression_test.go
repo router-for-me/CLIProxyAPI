@@ -325,7 +325,7 @@ func TestHubReview_ListServersLinearizableWithServerOffline(t *testing.T) {
 		t.Fatalf("expected initial empty server_list, got %s", initFrame.Raw)
 	}
 
-	localServers := make(map[string]string)
+	localServers := make(map[string]ServerInfo)
 	doneReading := make(chan struct{})
 	go func() {
 		defer close(doneReading)
@@ -341,10 +341,16 @@ func TestHubReview_ListServersLinearizableWithServerOffline(t *testing.T) {
 				for i := 0; i < count; i++ {
 					id := frame.Get(fmt.Sprintf("servers.%d.uuid", i)).String()
 					name := frame.Get(fmt.Sprintf("servers.%d.name", i)).String()
-					localServers[id] = name
+					srvType := frame.Get(fmt.Sprintf("servers.%d.type", i)).String()
+					localServers[id] = ServerInfo{UUID: id, Name: name, Type: srvType}
 				}
 			case ControlTypeServerOnline:
-				localServers[frame.Get("server.uuid").String()] = frame.Get("server.name").String()
+				id := frame.Get("server.uuid").String()
+				localServers[id] = ServerInfo{
+					UUID: id,
+					Name: frame.Get("server.name").String(),
+					Type: frame.Get("server.type").String(),
+				}
 			case ControlTypeServerOffline:
 				delete(localServers, frame.Get("server.uuid").String())
 			}

@@ -16,10 +16,22 @@ import (
 
 func dialRole(t *testing.T, serverURL, apiKey string, role Role, uuid, name string) *websocket.Conn {
 	t.Helper()
+	serverType := ""
+	if role == RoleServer {
+		serverType = "test-server"
+	}
+	return dialRoleWithType(t, serverURL, apiKey, role, uuid, name, serverType)
+}
+
+func dialRoleWithType(t *testing.T, serverURL, apiKey string, role Role, uuid, name, serverType string) *websocket.Conn {
+	t.Helper()
 	q := url.Values{
 		"role": {string(role)},
 		"uuid": {uuid},
 		"name": {name},
+	}
+	if serverType != "" {
+		q.Set("type", serverType)
 	}
 	conn, resp, errDial := websocket.DefaultDialer.Dial(
 		dialTunnelURL(serverURL, q),
@@ -108,23 +120,28 @@ func TestHubExchange_DiscoveryEventsAndControlCommands(t *testing.T) {
 	srv := httptest.NewServer(hub)
 	t.Cleanup(srv.Close)
 
-	// Connect servers out of lexicographical order to verify deterministic sorting.
-	srvB := dialRole(t, srv.URL, "key-disc", RoleServer, "srv-b", "Server B")
-	_ = dialRole(t, srv.URL, "key-disc", RoleServer, "srv-a", "Server A")
+	// Connect servers out of lexicographical order to verify deterministic sorting and custom types.
+	srvB := dialRoleWithType(t, srv.URL, "key-disc", RoleServer, "srv-b", "Server B", "linux-builder")
+	_ = dialRoleWithType(t, srv.URL, "key-disc", RoleServer, "srv-a", "Server A", "cpa-desktop")
 
 	cli := dialRole(t, srv.URL, "key-disc", RoleClient, "cli-1", "Client 1")
 	initial := readTextJSONFrame(t, cli)
 	if initial.Get("type").String() != ControlTypeServerList ||
 		initial.Get("servers.#").Int() != 2 ||
 		initial.Get("servers.0.uuid").String() != "srv-a" ||
-		initial.Get("servers.1.uuid").String() != "srv-b" {
+		initial.Get("servers.0.type").String() != "cpa-desktop" ||
+		initial.Get("servers.1.uuid").String() != "srv-b" ||
+		initial.Get("servers.1.type").String() != "linux-builder" {
 		t.Fatalf("unexpected initial server_list: %s", initial.Raw)
 	}
 
-	// Dynamic server_online push when srv-c joins.
-	srvC := dialRole(t, srv.URL, "key-disc", RoleServer, "srv-c", "Server C")
+	// Dynamic server_online push when srv-c joins with arbitrary custom type.
+	srvC := dialRoleWithType(t, srv.URL, "key-disc", RoleServer, "srv-c", "Server C", "GPU 节点 🚀")
 	online := readTextJSONFrame(t, cli)
-	if online.Get("type").String() != ControlTypeServerOnline || online.Get("server.uuid").String() != "srv-c" {
+	if online.Get("type").String() != ControlTypeServerOnline ||
+		online.Get("server.uuid").String() != "srv-c" ||
+		online.Get("server.name").String() != "Server C" ||
+		online.Get("server.type").String() != "GPU 节点 🚀" {
 		t.Fatalf("unexpected server_online: %s", online.Raw)
 	}
 
@@ -135,7 +152,9 @@ func TestHubExchange_DiscoveryEventsAndControlCommands(t *testing.T) {
 	refreshed := readTextJSONFrame(t, cli)
 	if refreshed.Get("type").String() != ControlTypeServerList ||
 		refreshed.Get("request_id").String() != "req-sync-1" ||
-		refreshed.Get("servers.#").Int() != 3 {
+		refreshed.Get("servers.#").Int() != 3 ||
+		refreshed.Get("servers.2.uuid").String() != "srv-c" ||
+		refreshed.Get("servers.2.type").String() != "GPU 节点 🚀" {
 		t.Fatalf("unexpected refreshed server_list: %s", refreshed.Raw)
 	}
 
@@ -151,7 +170,10 @@ func TestHubExchange_DiscoveryEventsAndControlCommands(t *testing.T) {
 	// Dynamic server_offline push when srv-c disconnects.
 	_ = srvC.Close()
 	offline := readTextJSONFrame(t, cli)
-	if offline.Get("type").String() != ControlTypeServerOffline || offline.Get("server.uuid").String() != "srv-c" {
+	if offline.Get("type").String() != ControlTypeServerOffline ||
+		offline.Get("server.uuid").String() != "srv-c" ||
+		offline.Get("server.name").String() != "Server C" ||
+		offline.Get("server.type").String() != "GPU 节点 🚀" {
 		t.Fatalf("unexpected server_offline: %s", offline.Raw)
 	}
 }

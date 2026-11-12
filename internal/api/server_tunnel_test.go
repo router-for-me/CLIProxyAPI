@@ -34,11 +34,24 @@ func newTestTunnelAPIServer(t *testing.T, cfg *config.Config, opts ...ServerOpti
 
 func dialServerTunnel(t *testing.T, baseURL, apiKey string, role wstunnel.Role, uuid, name string) *websocket.Conn {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/v1/tunnel?" + url.Values{
+	serverType := ""
+	if role == wstunnel.RoleServer {
+		serverType = "default-server"
+	}
+	return dialServerTunnelWithType(t, baseURL, apiKey, role, uuid, name, serverType)
+}
+
+func dialServerTunnelWithType(t *testing.T, baseURL, apiKey string, role wstunnel.Role, uuid, name, serverType string) *websocket.Conn {
+	t.Helper()
+	q := url.Values{
 		"role": {string(role)},
 		"uuid": {uuid},
 		"name": {name},
-	}.Encode()
+	}
+	if serverType != "" {
+		q.Set("type", serverType)
+	}
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/v1/tunnel?" + q.Encode()
 	headers := http.Header{}
 	if apiKey != "" {
 		headers.Set("Authorization", "Bearer "+apiKey)
@@ -119,20 +132,37 @@ func TestServerWebsocketTunnel_EndToEndAndTenantIsolation(t *testing.T) {
 	httpSrv := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(httpSrv.Close)
 
-	srvA1 := dialServerTunnel(t, httpSrv.URL, "tenant-a", wstunnel.RoleServer, "srv-a1", "Server A1")
-	_ = dialServerTunnel(t, httpSrv.URL, "tenant-b", wstunnel.RoleServer, "srv-b1", "Server B1")
+	// Server role without a valid type (>= 1 non-whitespace char) must fail with 400.
+	missingTypeURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/v1/tunnel?role=server&uuid=srv-missing-type&name=ServerMissingType"
+	_, badResp, errBadDial := websocket.DefaultDialer.Dial(missingTypeURL, http.Header{"Authorization": {"Bearer tenant-a"}})
+	var badBody []byte
+	if badResp != nil && badResp.Body != nil {
+		badBody, _ = io.ReadAll(badResp.Body)
+		if errClose := badResp.Body.Close(); errClose != nil {
+			t.Logf("response body close error: %v", errClose)
+		}
+	}
+	if errBadDial == nil || badResp == nil || badResp.StatusCode != http.StatusBadRequest || ojson.GetBytes(badBody, "error").String() != "invalid or missing type" {
+		t.Fatalf("Dial server without type = (%v, %v, %s), want 400 invalid or missing type", badResp, errBadDial, string(badBody))
+	}
+
+	srvA1 := dialServerTunnelWithType(t, httpSrv.URL, "tenant-a", wstunnel.RoleServer, "srv-a1", "Server A1", "cpa-desktop")
+	_ = dialServerTunnelWithType(t, httpSrv.URL, "tenant-b", wstunnel.RoleServer, "srv-b1", "Server B1", "cpa-cloud")
 
 	cliA := dialServerTunnel(t, httpSrv.URL, "tenant-a", wstunnel.RoleClient, "cli-a1", "Client A1")
 	initList := readServerTunnelJSON(t, cliA)
 	if initList.Get("type").String() != wstunnel.ControlTypeServerList ||
 		initList.Get("servers.#").Int() != 1 ||
-		initList.Get("servers.0.uuid").String() != "srv-a1" {
+		initList.Get("servers.0.uuid").String() != "srv-a1" ||
+		initList.Get("servers.0.type").String() != "cpa-desktop" {
 		t.Fatalf("unexpected initial server_list: %s", initList.Raw)
 	}
 
-	srvA2 := dialServerTunnel(t, httpSrv.URL, "tenant-a", wstunnel.RoleServer, "srv-a2", "Server A2")
+	srvA2 := dialServerTunnelWithType(t, httpSrv.URL, "tenant-a", wstunnel.RoleServer, "srv-a2", "Server A2", "build-runner")
 	online := readServerTunnelJSON(t, cliA)
-	if online.Get("type").String() != wstunnel.ControlTypeServerOnline || online.Get("server.uuid").String() != "srv-a2" {
+	if online.Get("type").String() != wstunnel.ControlTypeServerOnline ||
+		online.Get("server.uuid").String() != "srv-a2" ||
+		online.Get("server.type").String() != "build-runner" {
 		t.Fatalf("unexpected server_online event: %s", online.Raw)
 	}
 
@@ -161,6 +191,14 @@ func TestServerWebsocketTunnel_EndToEndAndTenantIsolation(t *testing.T) {
 	gotResp := readServerTunnelBinary(t, cliA)
 	if gotResp.SrcUUID != "srv-a2" || gotResp.DstUUID != "cli-a1" || string(gotResp.Payload) != "pong-from-a2" {
 		t.Fatalf("cliA received unexpected frame: %+v", gotResp)
+	}
+
+	_ = srvA2.Close()
+	offline := readServerTunnelJSON(t, cliA)
+	if offline.Get("type").String() != wstunnel.ControlTypeServerOffline ||
+		offline.Get("server.uuid").String() != "srv-a2" ||
+		offline.Get("server.type").String() != "build-runner" {
+		t.Fatalf("unexpected server_offline event: %s", offline.Raw)
 	}
 	_ = srvA1
 }

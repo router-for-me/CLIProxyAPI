@@ -26,12 +26,13 @@ type outboundFrame struct {
 }
 
 type peer struct {
-	hub    *Hub
-	tenant *realm
-	apiKey string
-	uuid   string
-	name   string
-	role   Role
+	hub        *Hub
+	tenant     *realm
+	apiKey     string
+	uuid       string
+	name       string
+	serverType string
+	role       Role
 
 	conn           *websocket.Conn
 	sendCh         chan outboundFrame
@@ -50,7 +51,7 @@ type peer struct {
 	queuedBytes    atomic.Int64
 }
 
-func newPeer(hub *Hub, apiKey, uuid, name string, role Role, conn *websocket.Conn, queueSize int, maxQueuedBytes int64) *peer {
+func newPeer(hub *Hub, apiKey, uuid, name, serverType string, role Role, conn *websocket.Conn, queueSize int, maxQueuedBytes int64) *peer {
 	if queueSize <= 0 {
 		queueSize = defaultSendQueueSize
 	}
@@ -62,6 +63,7 @@ func newPeer(hub *Hub, apiKey, uuid, name string, role Role, conn *websocket.Con
 		apiKey:         apiKey,
 		uuid:           uuid,
 		name:           name,
+		serverType:     serverType,
 		role:           role,
 		conn:           conn,
 		sendCh:         make(chan outboundFrame, queueSize),

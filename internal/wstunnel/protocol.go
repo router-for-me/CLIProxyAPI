@@ -37,6 +37,8 @@ const (
 	MaxUUIDLen = 128
 	// MaxDeviceNameLen is the maximum UTF-8 byte length of a device name.
 	MaxDeviceNameLen = 256
+	// MaxServerTypeLen is the maximum UTF-8 byte length of a server type.
+	MaxServerTypeLen = 256
 	// MaxControlFrameBytes caps inbound JSON text messages before allocation and parsing.
 	MaxControlFrameBytes = 4096
 	// MaxControlTypeLen caps the byte length of an inbound control type.
@@ -85,6 +87,7 @@ const (
 type ServerInfo struct {
 	UUID string
 	Name string
+	Type string
 }
 
 // ControlRequest represents a parsed inbound text control frame.
@@ -145,6 +148,19 @@ func NormalizeAndValidateName(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if len(trimmed) < 1 || len(trimmed) > MaxDeviceNameLen {
 		return "", errors.New("invalid or missing name")
+	}
+	return trimmed, nil
+}
+
+// NormalizeAndValidateType validates UTF-8 and control-character constraints on raw input,
+// then trims surrounding spaces and checks the 1..256 byte length bound.
+func NormalizeAndValidateType(raw string) (string, error) {
+	if !utf8.ValidString(raw) || hasASCIIControlChar(raw) {
+		return "", errors.New("invalid or missing type")
+	}
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 1 || len(trimmed) > MaxServerTypeLen {
+		return "", errors.New("invalid or missing type")
 	}
 	return trimmed, nil
 }
@@ -239,6 +255,9 @@ func EncodeServerListFrame(requestID string, servers []ServerInfo) ([]byte, erro
 		if errSet := doc.Set("servers."+idx+".name", srv.Name); errSet != nil {
 			return nil, errSet
 		}
+		if errSet := doc.Set("servers."+idx+".type", srv.Type); errSet != nil {
+			return nil, errSet
+		}
 	}
 	return doc.Bytes(), nil
 }
@@ -256,6 +275,9 @@ func EncodeServerEventFrame(eventType string, server ServerInfo) ([]byte, error)
 		return nil, errSet
 	}
 	if errSet := doc.Set("server.name", server.Name); errSet != nil {
+		return nil, errSet
+	}
+	if errSet := doc.Set("server.type", server.Type); errSet != nil {
 		return nil, errSet
 	}
 	return doc.Bytes(), nil

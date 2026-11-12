@@ -94,6 +94,50 @@ func TestValidateHandshakeParams(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("type validation", func(t *testing.T) {
+		validTypes := []string{
+			"a",
+			"测",
+			"  cpa-desktop  ",
+			"研发服务端类型-01 🚀",
+			`Custom "Type" \ v2`,
+			strings.Repeat("t", MaxServerTypeLen),
+			strings.Repeat("类", MaxServerTypeLen/3),
+		}
+		for _, raw := range validTypes {
+			got, errType := NormalizeAndValidateType(raw)
+			if errType != nil {
+				t.Fatalf("NormalizeAndValidateType(%q) error = %v", raw, errType)
+			}
+			if got != strings.TrimSpace(raw) {
+				t.Fatalf("NormalizeAndValidateType(%q) = %q, want %q", raw, got, strings.TrimSpace(raw))
+			}
+		}
+
+		invalidTypes := []string{
+			"",
+			" ",
+			"    ",
+			"\u00a0",
+			"\u3000",
+			"\nLeadingNewline",
+			"TrailingCR\r",
+			"\tTabWrapped\t",
+			"line1\nline2",
+			"line1\rline2",
+			"tab\there",
+			"null\x00byte",
+			"del\x7fbyte",
+			string([]byte{0xff, 0xfe, 0xfd}),
+			strings.Repeat("t", MaxServerTypeLen+1),
+		}
+		for _, raw := range invalidTypes {
+			if _, errBad := NormalizeAndValidateType(raw); errBad == nil || errBad.Error() != "invalid or missing type" {
+				t.Fatalf("NormalizeAndValidateType(%q) = %v, want error 'invalid or missing type'", raw, errBad)
+			}
+		}
+	})
 }
 
 func TestBinaryDataFrameCodec(t *testing.T) {
@@ -237,8 +281,8 @@ func TestControlFrameJSONCodec(t *testing.T) {
 
 	t.Run("server_list escapes special characters and preserves request_id", func(t *testing.T) {
 		servers := []ServerInfo{
-			{UUID: "srv-1", Name: `Node "Alpha" \ 节点`},
-			{UUID: "srv-2", Name: "Node Beta"},
+			{UUID: "srv-1", Name: `Node "Alpha" \ 节点`, Type: `Type "Alpha" \ 类型`},
+			{UUID: "srv-2", Name: "Node Beta", Type: "x"},
 		}
 		raw, errEncode := EncodeServerListFrame("req-42", servers)
 		if errEncode != nil {
@@ -260,23 +304,36 @@ func TestControlFrameJSONCodec(t *testing.T) {
 		if got := parsed.Get("servers.0.name").String(); got != `Node "Alpha" \ 节点` {
 			t.Fatalf("servers.0.name = %q, want %q", got, `Node "Alpha" \ 节点`)
 		}
+		if got := parsed.Get("servers.0.type").String(); got != `Type "Alpha" \ 类型` {
+			t.Fatalf("servers.0.type = %q, want %q", got, `Type "Alpha" \ 类型`)
+		}
+		if got := parsed.Get("servers.1.type").String(); got != "x" {
+			t.Fatalf("servers.1.type = %q, want x", got)
+		}
 	})
 
 	t.Run("server_online and server_offline events", func(t *testing.T) {
-		online, errOnline := EncodeServerEventFrame(ControlTypeServerOnline, ServerInfo{UUID: "s1", Name: "Server One"})
+		online, errOnline := EncodeServerEventFrame(ControlTypeServerOnline, ServerInfo{UUID: "s1", Name: "Server One", Type: "cpa-desktop"})
 		if errOnline != nil {
 			t.Fatalf("EncodeServerEventFrame(online) error = %v", errOnline)
 		}
 		pOnline := ojson.ParseBytes(online)
-		if pOnline.Get("type").String() != ControlTypeServerOnline || pOnline.Get("server.uuid").String() != "s1" || pOnline.Get("server.name").String() != "Server One" {
+		if pOnline.Get("type").String() != ControlTypeServerOnline ||
+			pOnline.Get("server.uuid").String() != "s1" ||
+			pOnline.Get("server.name").String() != "Server One" ||
+			pOnline.Get("server.type").String() != "cpa-desktop" {
 			t.Fatalf("unexpected online frame: %s", string(online))
 		}
 
-		offline, errOffline := EncodeServerEventFrame(ControlTypeServerOffline, ServerInfo{UUID: "s1", Name: "Server One"})
+		offline, errOffline := EncodeServerEventFrame(ControlTypeServerOffline, ServerInfo{UUID: "s1", Name: "Server One", Type: "cpa-desktop"})
 		if errOffline != nil {
 			t.Fatalf("EncodeServerEventFrame(offline) error = %v", errOffline)
 		}
-		if ojson.GetBytes(offline, "type").String() != ControlTypeServerOffline {
+		pOffline := ojson.ParseBytes(offline)
+		if pOffline.Get("type").String() != ControlTypeServerOffline ||
+			pOffline.Get("server.uuid").String() != "s1" ||
+			pOffline.Get("server.name").String() != "Server One" ||
+			pOffline.Get("server.type").String() != "cpa-desktop" {
 			t.Fatalf("unexpected offline frame: %s", string(offline))
 		}
 	})

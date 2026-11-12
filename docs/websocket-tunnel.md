@@ -23,10 +23,10 @@ CLIProxyAPI provides a built-in, multi-tenant, many-to-many **WebSocket Tunnel**
    - Every connection must authenticate against an entry configured under `access.api-keys` in `config.yaml`.
    - Unlike AI proxy endpoints that may allow unauthenticated access when `access.api-keys` is empty, `/v1/tunnel` **always rejects** connections (`401 Unauthorized`) if `access.api-keys` is empty or unmatched.
    - Peers authenticated under different `access.api-keys` are **completely invisible** to one another. They do not share server lists, cannot route packets across keys, and do not share UUID uniqueness namespaces.
-2. **Device Identity (`uuid` + `name`) & Uniqueness**:
-   - Every connecting peer (both `client` and `server`) must declare its `role`, `uuid`, and `name`.
+2. **Device Identity (`uuid` + `name` + Server `type`) & Uniqueness**:
+   - Every connecting peer (both `client` and `server`) must declare its `role`, `uuid`, and `name`. Connecting `server` peers must additionally declare a non-empty `type` (arbitrary free-form input, at least 1 non-whitespace character).
    - Within the same `access.api-key` realm, **`uuid` is strictly unique across all connected clients and servers**. Duplicate online UUIDs are rejected during the HTTP handshake with `409 Conflict` (existing connections are never kicked). Once the previous connection closes, the same `uuid` may reconnect immediately.
-   - **`name` may be duplicated** across multiple devices.
+   - **`name` and server `type` may be duplicated** across multiple devices.
 3. **Single Multiplexed WebSocket Connection per Device**:
    - Each device maintains exactly one WebSocket connection and multiplexes all control events and multi-peer data streams over it:
      - **Text frames (`Opcode 0x1`)** carry UTF-8 JSON control messages (discovery & non-fatal routing errors).
@@ -65,7 +65,7 @@ CLIProxyAPI inspects candidate credentials in the following priority order and b
 
 > **Security Note**: Query parameters `key` and `auth_token` are automatically masked in CLIProxyAPI access logs, but HTTP headers (`Authorization: Bearer ...` or `X-Api-Key`) remain preferred whenever the client WebSocket SDK supports custom handshake headers.
 
-### 2.3 Declaring Role, UUID, and Device Name
+### 2.3 Declaring Role, UUID, Device Name, and Server Type
 
 Each parameter is read from the **URL Query** first; if omitted or blank in the query string, CLIProxyAPI falls back to the corresponding **`X-Tunnel-*` HTTP header**:
 
@@ -74,6 +74,7 @@ Each parameter is read from the **URL Query** first; if omitted or blank in the 
 | Role | `role` | `X-Tunnel-Role` | Required. Case-insensitive `"client"` or `"server"` (surrounding whitespace trimmed). |
 | Device UUID | `uuid` | `X-Tunnel-UUID` | Required. `1..128` printable non-whitespace ASCII bytes (`0x21..0x7E`) after trimming surrounding whitespace. Must be unique among active connections under the same `api-key`. |
 | Device Name | `name` | `X-Tunnel-Name` | Required. `1..256` UTF-8 bytes after trimming surrounding whitespace. Must be valid UTF-8 and must not contain ASCII control characters (`0x00..0x1F` or `0x7F`). Duplicate names are allowed. |
+| Server Type | `type` | `X-Tunnel-Type` | Required when `role=server` (at least 1 non-whitespace character); ignored when `role=client`. Arbitrary free-form input, `1..256` UTF-8 bytes after trimming surrounding whitespace. Must be valid UTF-8 and must not contain ASCII control characters (`0x00..0x1F` or `0x7F`). Duplicate types are allowed. |
 
 **Example Handshake URL (Client)**:
 
@@ -84,7 +85,7 @@ wss://proxy.example.com/v1/tunnel?role=client&uuid=550e8400-e29b-41d4-a716-44665
 **Example Handshake URL (Server)**:
 
 ```text
-wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8&name=Build-Node-01
+wss://proxy.example.com/v1/tunnel?role=server&uuid=6ba7b810-9dad-11d1-80b4-00c04fd430c8&name=Build-Node-01&type=build-agent
 ```
 
 ### 2.4 HTTP Handshake Error Responses
@@ -93,7 +94,7 @@ All authentication, validation, and conflict checks run **before** upgrading the
 
 | HTTP Status | Condition | Response Body |
 | --- | --- | --- |
-| `400 Bad Request` | Invalid/missing `role`, `uuid`, or `name` | `{"error":"invalid or missing role: must be client or server"}` / `{"error":"invalid or missing uuid"}` / `{"error":"invalid or missing name"}` |
+| `400 Bad Request` | Invalid/missing `role`, `uuid`, `name`, or (when `role=server`) `type` | `{"error":"invalid or missing role: must be client or server"}` / `{"error":"invalid or missing uuid"}` / `{"error":"invalid or missing name"}` / `{"error":"invalid or missing type"}` |
 | `401 Unauthorized` | `access.api-keys` is empty, credential missing, or no candidate matches | `{"error":"invalid or missing api key"}` |
 | `403 Forbidden` | Safe-mode active because `access.api-keys` still contains template placeholder keys | `{"error":"unsafe_example_api_key","message":"..."}` |
 | `405 Method Not Allowed` | `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `TRACE`, or `CONNECT` (includes `Allow: GET` header) | `{"error":"method not allowed"}` |
@@ -120,16 +121,19 @@ Delivered **as the very first application message** when a `client` connects (if
   "servers": [
     {
       "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-      "name": "Build-Node-01"
+      "name": "Build-Node-01",
+      "type": "build-agent"
     },
     {
       "uuid": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-      "name": "Build-Node-02"
+      "name": "Build-Node-02",
+      "type": "build-agent"
     }
   ]
 }
 ```
 
+- `servers[].uuid`, `servers[].name`, `servers[].type` (`string`): Each online server's unique identifier, display name, and declared server type.
 - `request_id` (`string`, optional): Omitted on the automatic initial push; echoed verbatim when replying to `list_servers` if the request included a non-empty `request_id`.
 - **Causal Ordering Guarantee**: The initial `server_list` snapshot is enqueued atomically under the tenant lock before the client becomes visible to subsequent broadcasts. Any `server_online` or `server_offline` event received after the initial `server_list` strictly reflects state transitions occurring after that snapshot.
 
@@ -156,7 +160,8 @@ Broadcast in real time whenever a `server` connects to or disconnects from the s
   "type": "server_online",
   "server": {
     "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "name": "Build-Node-01"
+    "name": "Build-Node-01",
+    "type": "build-agent"
   }
 }
 ```
@@ -166,10 +171,13 @@ Broadcast in real time whenever a `server` connects to or disconnects from the s
   "type": "server_offline",
   "server": {
     "uuid": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "name": "Build-Node-01"
+    "name": "Build-Node-01",
+    "type": "build-agent"
   }
 }
 ```
+
+- Both `server_online` and `server_offline` carry `server.uuid`, `server.name`, and `server.type`.
 
 ### 3.4 `error` (CLIProxyAPI → Sender Peer)
 
@@ -280,8 +288,8 @@ Sizes refer to the reassembled WebSocket message body (the tunnel header and pay
 ### Recommended Client State Machine
 
 1. Connect to `GET /v1/tunnel` with `role=client`, `uuid`, `name`, and `api-key`.
-2. On open, wait for the first text frame (`type == "server_list"`) to initialize the local `Map<uuid, name>` of online servers.
-3. On `server_online`, insert `msg.server.uuid -> msg.server.name`.
+2. On open, wait for the first text frame (`type == "server_list"`) to initialize the local `Map<uuid, { name, type }>` of online servers.
+3. On `server_online`, insert `msg.server.uuid -> { name: msg.server.name, type: msg.server.type }`.
 4. On `server_offline`, remove `msg.server.uuid` and fail/retry any pending application requests targeting that server.
 5. On disconnect:
    - If close code is `1008` (`api key revoked`), stop retrying until credentials are updated;
@@ -371,7 +379,7 @@ export function connectTunnelClient(baseWsUrl: string, apiKey: string, clientUUI
   const ws = new WebSocket(`${baseWsUrl}/v1/tunnel?${params.toString()}`);
   ws.binaryType = "arraybuffer";
 
-  const servers = new Map<string, string>();
+  const servers = new Map<string, { name: string; type: string }>();
 
   ws.onmessage = (event) => {
     if (typeof event.data === "string") {
@@ -380,11 +388,11 @@ export function connectTunnelClient(baseWsUrl: string, apiKey: string, clientUUI
         case "server_list":
           servers.clear();
           for (const srv of ctrl.servers) {
-            servers.set(srv.uuid, srv.name);
+            servers.set(srv.uuid, { name: srv.name, type: srv.type });
           }
           break;
         case "server_online":
-          servers.set(ctrl.server.uuid, ctrl.server.name);
+          servers.set(ctrl.server.uuid, { name: ctrl.server.name, type: ctrl.server.type });
           break;
         case "server_offline":
           servers.delete(ctrl.server.uuid);
@@ -467,11 +475,12 @@ func DecodeFrame(raw []byte) (payloadType byte, srcUUID, dstUUID string, payload
 	return raw[1], string(raw[4 : 4+srcLen]), string(raw[4+srcLen : headerLen]), raw[headerLen:], nil
 }
 
-func RunEchoTunnelServer(proxyWSBaseURL, apiKey, serverUUID, serverName string) error {
+func RunEchoTunnelServer(proxyWSBaseURL, apiKey, serverUUID, serverName, serverType string) error {
 	q := url.Values{
 		"role": {"server"},
 		"uuid": {serverUUID},
 		"name": {serverName},
+		"type": {serverType},
 	}
 	headers := http.Header{
 		"Authorization": {"Bearer " + apiKey},

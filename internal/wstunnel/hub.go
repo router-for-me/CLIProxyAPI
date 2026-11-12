@@ -58,6 +58,7 @@ func (r *realm) sortedServers() []ServerInfo {
 			servers = append(servers, ServerInfo{
 				UUID: p.uuid,
 				Name: p.name,
+				Type: p.serverType,
 			})
 		}
 	}
@@ -324,6 +325,7 @@ func (h *Hub) commitPeer(p *peer, reservation *uuidReservation) bool {
 		rawOnline, errEncode := EncodeServerEventFrame(ControlTypeServerOnline, ServerInfo{
 			UUID: p.uuid,
 			Name: p.name,
+			Type: p.serverType,
 		})
 		if errEncode == nil {
 			frame := outboundFrame{
@@ -371,6 +373,7 @@ func (h *Hub) unregisterPeer(p *peer, notifyRealm bool) {
 				rawOffline, errEncode := EncodeServerEventFrame(ControlTypeServerOffline, ServerInfo{
 					UUID: p.uuid,
 					Name: p.name,
+					Type: p.serverType,
 				})
 				if errEncode == nil {
 					frame := outboundFrame{
