@@ -97,6 +97,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, errMutation
 	}
 	defer releaseMutation()
+	// Validate an unversioned file observation before assigning a new runtime
+	// generation. File I/O holds only this credential's mutation gate.
+	if auth.HasFileSnapshot() && !auth.FileSnapshotMatchesDisk() {
+		return nil, fmt.Errorf("register auth: stale file snapshot")
+	}
 	now := time.Now()
 	if auth.Generation == 0 {
 		auth.Generation = 1
