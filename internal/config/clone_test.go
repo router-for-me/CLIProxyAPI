@@ -418,3 +418,30 @@ api-keys:
 		t.Fatalf("ClaudeKey[0].Cloak = %#v", cfg.ClaudeKey)
 	}
 }
+
+func TestV8Validate_DevinModelLevelCooling(t *testing.T) {
+	v8YAML := []byte(`config-version: 8
+oauth:
+  providers:
+    devin:
+      model-level-cooling: true
+`)
+	if err := ValidateV8Config(v8YAML); err != nil {
+		t.Fatalf("ValidateV8Config() error = %v", err)
+	}
+	cfg, errParse := ParseConfigBytes(v8YAML)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if !cfg.Devin.ModelLevelCooling {
+		t.Fatal("Devin.ModelLevelCooling = false, want true")
+	}
+
+	cfgDefault, errDefault := ParseConfigBytes([]byte("config-version: 8\n"))
+	if errDefault != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errDefault)
+	}
+	if cfgDefault.Devin.ModelLevelCooling {
+		t.Fatal("Devin.ModelLevelCooling defaults to true, want false")
+	}
+}
