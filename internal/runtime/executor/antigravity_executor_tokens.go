@@ -159,5 +159,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			sErr.retryAfter = retryAfter
 		}
 	}
+	if helps.IsAntigravityAccountSuspended(httpResp.StatusCode, bodyBytes) {
+		return cliproxyexecutor.Response{}, antigravityAccountSuspendedError{statusErr: sErr}
+	}
 	return cliproxyexecutor.Response{}, sErr
 }

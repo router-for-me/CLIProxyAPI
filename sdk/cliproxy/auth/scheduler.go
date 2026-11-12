@@ -1033,6 +1033,9 @@ func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) boo
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true
 	}
+	if _, suspended := activeAccountSuspension(auth, now); suspended {
+		return true
+	}
 	if effectiveAuthForceUntil(auth).After(now) && auth.NextRetryAfter.After(now) {
 		return true
 	}

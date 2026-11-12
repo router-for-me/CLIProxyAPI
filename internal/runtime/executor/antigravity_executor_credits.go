@@ -355,12 +355,26 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+// antigravityAccountSuspendedError marks the 403 Cloud Code returns on every
+// call once Google suspends the account for a Terms of Service violation, so the
+// conductor cools the whole credential instead of retrying it every 30 minutes.
+type antigravityAccountSuspendedError struct {
+	statusErr
+}
+
+func (antigravityAccountSuspendedError) ErrorCode() string {
+	return cliproxyauth.ErrorCodeAccountSuspended
+}
+
+func newAntigravityStatusErr(statusCode int, body []byte) error {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+	}
+	if helps.IsAntigravityAccountSuspended(statusCode, body) {
+		return antigravityAccountSuspendedError{statusErr: err}
 	}
 	return err
 }
