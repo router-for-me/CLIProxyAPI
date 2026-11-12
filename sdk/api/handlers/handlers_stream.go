@@ -34,7 +34,9 @@ func (h *BaseAPIHandler) HasAlternativeExecutionTarget(ctx context.Context, hand
 		AllowSpeechModel: isModelExecutionSpeechProtocol(handlerType),
 	}
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, "")
-	if !preparedRoute {
+	if policy, matched := h.clientKeyRoute(ctx, modelName); matched {
+		routeDecision = policy
+	} else if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, execOptions)
 	}
 	if routeDecision.ExecutorPluginID != "" {
@@ -338,7 +340,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
-	if !preparedRoute {
+	if policy, matched := h.clientKeyRoute(ctx, modelName); matched {
+		routeDecision = policy
+	} else if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	}
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
@@ -409,7 +413,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
-	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	streamResult, err := h.executeStreamWithRouteFallbacks(ctx, providers, &normalizedModel, &req, opts, &routeDecision.FallbackModels)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)

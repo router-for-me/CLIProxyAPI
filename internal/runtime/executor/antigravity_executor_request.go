@@ -90,6 +90,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
+	helps.NormalizeAntigravityGeminiSDKIdentityDoc(modelName, doc)
 	helps.FinalizePayloadDoc(ctx, doc)
 	finalPayload := doc.Bytes()
 	var (
