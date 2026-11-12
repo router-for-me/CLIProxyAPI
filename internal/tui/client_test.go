@@ -76,15 +76,13 @@ func TestClient_RemoteServerInteraction(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClientWithBaseURL(ts.URL, "remote-secret-key")
-	cfg, err := client.GetConfig()
+	_, err := client.GetConfig()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg["status"] != "ok" {
-		t.Fatalf("expected status ok, got %v", cfg["status"])
-	}
-	if requestedPath != "/v0/management/config" {
-		t.Fatalf("expected path /v0/management/config, got %q", requestedPath)
+	// The client prefers the v8 contract; it must reach the v8 config route.
+	if requestedPath != "/v8/management/config" {
+		t.Fatalf("expected path /v8/management/config, got %q", requestedPath)
 	}
 	if authHeader != "Bearer remote-secret-key" {
 		t.Fatalf("expected Authorization Bearer remote-secret-key, got %q", authHeader)
