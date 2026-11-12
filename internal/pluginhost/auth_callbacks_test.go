@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1161,5 +1162,108 @@ func TestHostAuthModelsCallbackValidationAndEmptyManager(t *testing.T) {
 	reqUnknown, _ := json.Marshal(pluginapi.HostAuthModelsRequest{AuthIndex: "unknown-index"})
 	if _, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthModels, reqUnknown); errCall == nil {
 		t.Fatal("expected error for unknown auth_index, got nil")
+	}
+}
+
+func registerConfigAPIKeyAuth(t *testing.T, host *Host, nextRetry time.Time) *coreauth.Auth {
+	t.Helper()
+	auth := &coreauth.Auth{
+		ID:             "openai-compatibility:relay-a:48cd2098496c",
+		Provider:       "openai-compatible-relay-a",
+		Label:          "relay-a",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "quota exhausted",
+		Unavailable:    true,
+		NextRetryAfter: nextRetry,
+		Attributes: map[string]string{
+			"source":       "config:openai-compatibility[48cd2098496c]",
+			"config_index": "0",
+			"api_key":      "sk-relay-secret-1234567890",
+			"priority":     "10",
+		},
+	}
+	auth.EnsureIndex()
+	if _, errRegister := host.currentAuthManager().Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	return auth
+}
+
+func TestHostAuthListCallbackOmitsConfigAPIKeysByDefault(t *testing.T) {
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	registerConfigAPIKeyAuth(t, host, time.Now().Add(time.Minute))
+
+	for _, request := range [][]byte{nil, []byte(`{}`)} {
+		rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthList, request)
+		if errCall != nil {
+			t.Fatalf("callFromPlugin() error = %v", errCall)
+		}
+		resp, errDecode := decodeRPCEnvelope[rpcHostAuthListResponse](rawResp)
+		if errDecode != nil {
+			t.Fatalf("decode response: %v", errDecode)
+		}
+		if len(resp.Files) != 0 {
+			t.Fatalf("request %q: files = %#v, want config API keys omitted", request, resp.Files)
+		}
+	}
+}
+
+func TestHostAuthListCallbackIncludesMaskedConfigAPIKeysOnRequest(t *testing.T) {
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	nextRetry := time.Now().Add(time.Minute).UTC().Truncate(time.Second)
+	auth := registerConfigAPIKeyAuth(t, host, nextRetry)
+
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthList, []byte(`{"include_config_api_keys":true}`))
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if strings.Contains(string(rawResp), "sk-relay-secret-1234567890") {
+		t.Fatalf("response leaks the raw API key: %s", rawResp)
+	}
+	resp, errDecode := decodeRPCEnvelope[rpcHostAuthListResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("files = %#v, want one config API key entry", resp.Files)
+	}
+	entry := resp.Files[0]
+	if entry.AuthIndex != auth.Index || entry.Source != coreauth.AuthSourceConfig || entry.Path != "" {
+		t.Fatalf("entry = %#v, want config source without path", entry)
+	}
+	if entry.Status != string(coreauth.StatusError) || entry.StatusMessage != "quota exhausted" || !entry.Unavailable {
+		t.Fatalf("entry = %#v, want runtime status", entry)
+	}
+	if !entry.NextRetryAfter.Equal(nextRetry) || entry.Priority != 10 {
+		t.Fatalf("entry = %#v, want next retry %s and priority 10", entry, nextRetry)
+	}
+	if entry.AccountType != "api_key" || entry.Account != "sk-r...7890" {
+		t.Fatalf("account = %q/%q, want masked api key", entry.AccountType, entry.Account)
+	}
+}
+
+func TestHostAuthGetRuntimeCallbackReturnsConfigAPIKey(t *testing.T) {
+	host := New()
+	host.runtimeConfig = &config.Config{AuthDir: t.TempDir()}
+	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
+	auth := registerConfigAPIKeyAuth(t, host, time.Now().Add(time.Minute))
+
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, []byte(`{"auth_index":"`+auth.Index+`"}`))
+	if errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if strings.Contains(string(rawResp), "sk-relay-secret-1234567890") {
+		t.Fatalf("response leaks the raw API key: %s", rawResp)
+	}
+	resp, errDecode := decodeRPCEnvelope[pluginapi.HostAuthGetRuntimeResponse](rawResp)
+	if errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if resp.Auth.AuthIndex != auth.Index || resp.Auth.Source != coreauth.AuthSourceConfig {
+		t.Fatalf("auth = %#v, want config API key runtime entry", resp.Auth)
 	}
 }

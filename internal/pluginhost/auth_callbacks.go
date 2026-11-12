@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -54,13 +55,13 @@ func (h *Host) currentAuthManager() *coreauth.Manager {
 
 func (h *Host) callHostAuthList(ctx context.Context, request []byte) ([]byte, error) {
 	_ = ctx
+	var req pluginapi.HostAuthListRequest
 	if len(bytesTrimSpace(request)) > 0 {
-		var req map[string]any
 		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 			return nil, fmt.Errorf("decode host auth list request: %w", errUnmarshal)
 		}
 	}
-	entries, errList := h.listAuthFiles()
+	entries, errList := h.listAuthFiles(req.IncludeConfigAPIKeys)
 	if errList != nil {
 		return nil, errList
 	}
@@ -108,7 +109,7 @@ func (h *Host) callHostAuthGetRuntime(ctx context.Context, request []byte) ([]by
 	if errGet != nil {
 		return nil, errGet
 	}
-	entry := h.buildHostAuthFileEntry(auth)
+	entry := h.buildHostAuthEntry(auth, true)
 	if entry == nil {
 		return nil, fmt.Errorf("auth runtime info not found for auth_index %s", authIndex)
 	}
@@ -206,13 +207,13 @@ func buildHostAuthModels(auth *coreauth.Auth, reg *registry.ModelRegistry) plugi
 	}
 }
 
-func (h *Host) listAuthFiles() ([]pluginapi.HostAuthFileEntry, error) {
+func (h *Host) listAuthFiles(includeConfigAPIKeys bool) ([]pluginapi.HostAuthFileEntry, error) {
 	manager := h.currentAuthManager()
 	if manager != nil {
 		auths := manager.List()
 		entries := make([]pluginapi.HostAuthFileEntry, 0, len(auths))
 		for _, auth := range auths {
-			if entry := h.buildHostAuthFileEntry(auth); entry != nil {
+			if entry := h.buildHostAuthEntry(auth, includeConfigAPIKeys); entry != nil {
 				entries = append(entries, *entry)
 			}
 		}
@@ -693,6 +694,13 @@ func isUnsafeAuthFileName(name string) bool {
 }
 
 func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFileEntry {
+	return h.buildHostAuthEntry(auth, false)
+}
+
+// buildHostAuthEntry converts a credential into a host auth entry. When
+// includeConfigAPIKeys is true, API-key credentials declared in the config file
+// are returned too, with Source "config" and a masked Account.
+func (h *Host) buildHostAuthEntry(auth *coreauth.Auth, includeConfigAPIKeys bool) *pluginapi.HostAuthFileEntry {
 	if auth == nil {
 		return nil
 	}
@@ -702,7 +710,8 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 		return nil
 	}
 	path := strings.TrimSpace(authAttribute(auth, "path"))
-	if path == "" && !runtimeOnly {
+	configAPIKey := includeConfigAPIKeys && path == "" && !runtimeOnly && isConfigAPIKeyAuth(auth)
+	if path == "" && !runtimeOnly && !configAPIKey {
 		return nil
 	}
 	name := strings.TrimSpace(auth.FileName)
@@ -735,6 +744,12 @@ func (h *Host) buildHostAuthFileEntry(auth *coreauth.Auth) *pluginapi.HostAuthFi
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		entry.AccountType = accountType
 		entry.Account = account
+		if configAPIKey {
+			entry.Account = util.HideAPIKey(account)
+		}
+	}
+	if configAPIKey {
+		entry.Source = coreauth.AuthSourceConfig
 	}
 	if !auth.CreatedAt.IsZero() {
 		entry.CreatedAt = auth.CreatedAt
@@ -863,6 +878,10 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func isConfigAPIKeyAuth(auth *coreauth.Auth) bool {
+	return auth.AuthSourceKind() == coreauth.AuthSourceConfig && auth.AuthKind() == coreauth.AuthKindAPIKey
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
