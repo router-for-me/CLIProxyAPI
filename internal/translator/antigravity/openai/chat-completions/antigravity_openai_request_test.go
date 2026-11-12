@@ -688,7 +688,7 @@ func TestConvertOpenAIRequestToAntigravityPreservesToolResponseAsString(t *testi
 	}
 }
 
-func TestConvertOpenAIRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+func TestConvertOpenAIRequestToAntigravityToolChoiceNoneKeepsTools(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		toolChoice string
@@ -707,8 +707,8 @@ func TestConvertOpenAIRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T)
 			if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
 				t.Fatalf("expected mode NONE, got %q", got)
 			}
-			if gjson.GetBytes(out, "request.tools").Exists() {
-				t.Fatalf("expected request.tools to be omitted, got %s", gjson.GetBytes(out, "request.tools").Raw)
+			if got := gjson.GetBytes(out, "request.tools.0.functionDeclarations.0.name").String(); got != "get_weather" {
+				t.Fatalf("expected tool declaration get_weather with mode NONE, got %q", got)
 			}
 		})
 	}

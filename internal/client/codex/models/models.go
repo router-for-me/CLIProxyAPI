@@ -570,6 +570,9 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, provi
 // Codex requires these keys to be present; omitting them rejects the entire catalog.
 func nullCodexClientRequiredOptions(entry map[string]any) {
 	entry["apply_patch_tool_type"] = nil
+	entry["tool_mode"] = "direct"
+	entry["use_responses_lite"] = false
+	entry["supports_reasoning_effort_updates"] = false
 	entry["upgrade"] = nil
 	entry["availability_nux"] = nil
 }

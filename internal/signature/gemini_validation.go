@@ -218,9 +218,10 @@ func InspectGeminiThoughtSignature(rawSignature string, opts ...GeminiThoughtSig
 }
 
 // ValidateGeminiThoughtSignatures validates thoughtSignature fields in a Gemini
-// native payload. The first functionCall in each model Content must have a valid
-// provider signature or allowed synthetic sentinel. Later parallel sibling calls
-// may be unsigned, but any signature they do carry must still be valid.
+// native payload. The first functionCall in each parallel-call group of a model
+// Content must have a valid provider signature or allowed synthetic sentinel.
+// Later parallel sibling calls may be unsigned, but any signature they do carry
+// must still be valid.
 func ValidateGeminiThoughtSignatures(inputRawJSON []byte, opts ...GeminiThoughtSignatureValidationOptions) error {
 	contents, contentsPath := geminiContents(inputRawJSON)
 	if !contents.IsArray() {
@@ -242,8 +243,8 @@ func ValidateGeminiThoughtSignatures(inputRawJSON []byte, opts ...GeminiThoughtS
 			part := partResults[j]
 			hasFunctionCall := part.Get("functionCall").Exists()
 			isFirstFunctionCall := isModelTurn && hasFunctionCall && !firstFunctionCallSeen
-			if isModelTurn && hasFunctionCall {
-				firstFunctionCallSeen = true
+			if isModelTurn && (hasFunctionCall || !part.Get("thought").Bool()) {
+				firstFunctionCallSeen = hasFunctionCall
 			}
 			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if !hasFunctionCall && !hasSignature {

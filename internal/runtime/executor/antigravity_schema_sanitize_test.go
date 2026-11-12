@@ -2,6 +2,8 @@ package executor
 
 import (
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -903,4 +905,96 @@ func TestAntigravityBuildRequestFlattensToolUnionsForClaude_Issue3662Regression(
 			}
 		}
 	})
+}
+
+// TestSanitizeAntigravityRequestSchemasScalesLinearlyWithDeclarations is the
+// regression test for the quadratic tool sanitizing reported in Issue 6714:
+// sanitizing must not rewrite the whole tools document once per function
+// declaration. The allocation bound is asserted directly in the test (not via
+// a benchmark) so a return to per-declaration document rewrites fails loudly.
+func TestSanitizeAntigravityRequestSchemasScalesLinearlyWithDeclarations(t *testing.T) {
+	const declCount = 256
+
+	var input, want strings.Builder
+	input.WriteString(`{"request":{"tools":[{"functionDeclarations":[`)
+	want.WriteString(`{"request":{"tools":[{"functionDeclarations":[`)
+	for i := 0; i < declCount; i++ {
+		if i > 0 {
+			input.WriteByte(',')
+			want.WriteByte(',')
+		}
+		// parametersJsonSchema forces the rename onto parameters and $id forces
+		// a cleaner rewrite of the schema. The padded description sits on the
+		// declaration, outside the schema, so whole-document copies must pay for
+		// it while per-declaration edits do not; the bound below then measures
+		// document-rewrite cost only, not the cleaner's per-schema cost (Issue 6713).
+		fmt.Fprintf(&input, `{"name":"tool_%d","description":"%s","parametersJsonSchema":{"type":"object","$id":"drop","properties":{"q":{"type":"string"}}}}`, i, strings.Repeat("x", 4096))
+		// The schema has no required properties, so the Claude VALIDATED
+		// placeholder is inserted even on the Gemini path (antigravity=true).
+		fmt.Fprintf(&want, `{"name":"tool_%d","description":"%s","parameters":{"type":"object","properties":{"q":{"type":"string"},"_":{"type":"boolean"}},"required":["_"]}}`, i, strings.Repeat("x", 4096))
+	}
+	input.WriteString(`]}]}}`)
+	want.WriteString(`]}]}}`)
+
+	payload := input.String()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got := sanitizeAntigravityRequestSchemasForModel(payload, true, false)
+	runtime.ReadMemStats(&after)
+
+	if got != want.String() {
+		t.Fatalf("sanitized tools diverged from the expected bytes\nfirst declaration want: %s\nfirst declaration got:  %s",
+			gjson.Get(want.String(), "request.tools.0.functionDeclarations.0").Raw,
+			gjson.Get(got, "request.tools.0.functionDeclarations.0").Raw)
+	}
+
+	// Whole-document work is bounded by a constant number of passes: extracting
+	// request.tools, rebuilding it, and writing it back. Everything beyond a
+	// small multiple of the payload size means per-declaration document rewrites
+	// are back; the pre-fix implementation allocated O(declCount x payload).
+	const allowedCopies = 32
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > uint64(allowedCopies*len(payload)) {
+		t.Fatalf("sanitizing %d declarations allocated %d bytes for a %d byte payload, want at most %d (cost must be linear in the tools size, not per declaration)",
+			declCount, allocated, len(payload), allowedCopies*len(payload))
+	}
+}
+
+// TestSanitizeAntigravityRequestSchemasPreservesToolArrayWhitespace pins the
+// byte-equivalence claim of the per-declaration rewrite: rebuilding the tools
+// and declarations arrays must keep the whitespace around array elements, so
+// a pretty-printed payload only changes inside the cleaned declarations. The
+// expected value is the input with only the affected schema bytes replaced,
+// exactly what the previous whole-document sjson edits produced.
+func TestSanitizeAntigravityRequestSchemasPreservesToolArrayWhitespace(t *testing.T) {
+	input := "{\n" +
+		"  \"request\": {\n" +
+		"    \"tools\": [\n" +
+		"      {\"functionDeclarations\": [\n" +
+		"        {\"name\": \"a\", \"parametersJsonSchema\": {\"type\": \"object\", \"$id\": \"drop\", \"properties\": {\"q\": {\"type\": \"string\"}}}} ,\n" +
+		"        {\"name\": \"b\", \"parameters\": {\"type\": \"object\", \"required\": [\"q\"], \"properties\": {\"q\": {\"type\": \"string\"}}}} ,\n" +
+		"        {\"name\": \"c\"}\n" +
+		"      ]} ,\n" +
+		"      {\"googleSearch\": {}}\n" +
+		"    ]\n" +
+		"  }\n" +
+		"}\n"
+
+	// Declaration a is renamed and cleaned in place (sjson compacts the
+	// replacement gaps inside the edited node, as the whole-document edits
+	// did). Declaration b is already clean, and declarations b and c and
+	// the googleSearch tool are untouched, so every other byte (including the
+	// whitespace around commas and brackets) must survive verbatim. The odd
+	// "}} ," separator is the declaration's own closing bytes, one space of
+	// inter-element whitespace, the comma, and the newline.
+	want := strings.Replace(input,
+		`{"name": "a", "parametersJsonSchema": {"type": "object", "$id": "drop", "properties": {"q": {"type": "string"}}}}`,
+		`{"name": "a","parameters":{"type": "object", "properties": {"q": {"type": "string"},"_":{"type":"boolean"}},"required":["_"]}}`, 1)
+	if want == input {
+		t.Fatal("test fixture is broken: declaration a was not replaced in the expected value")
+	}
+
+	if got := sanitizeAntigravityRequestSchemasForModel(input, true, false); got != want {
+		t.Fatalf("pretty-printed tools lost whitespace outside the cleaned declaration\nwant:\n%s\ngot:\n%s", want, got)
+	}
 }

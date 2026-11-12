@@ -6,6 +6,7 @@
 package gemini
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -69,6 +70,8 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	// consume them in order when functionResponses arrive.
 	var pendingCallIDs []string
 	callCounter := 0
+	emittedThoughtSignatures := map[string]bool{}
+	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, inputRawJSON)
 
 	getGeminiCallID := func(value gjson.Result) string {
 		if callID := strings.TrimSpace(value.Get("id").String()); callID != "" {
@@ -138,8 +141,49 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			parr := parts.Array()
+			var pendingThoughtSummaryParts [][]byte
 			for j := 0; j < len(parr); j++ {
 				p := parr[j]
+
+				// A thoughtSignature is replayable reasoning state, not visible
+				// content. Restore it as a reasoning item only when its detected
+				// family matches this request's target model family, so a Muse
+				// (or GPT/Grok) signature can never be replayed to a wrong upstream
+				// through the Gemini ingress. Unmatched signatures fall through to
+				// the existing hidden-thought drop below.
+				if role == "assistant" {
+					if rawSignature := geminiPartThoughtSignature(p); rawSignature != "" {
+						if normalizedSignature, ok := normalizedGeminiThoughtSignatureForCodexTarget(signatureTargetModel, rawSignature); ok && !emittedThoughtSignatures[normalizedSignature] {
+							reasoningItem := []byte(`{"type":"reasoning","encrypted_content":"","summary":[]}`)
+							reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", normalizedSignature)
+							summaryParts := pendingThoughtSummaryParts
+							pendingThoughtSummaryParts = nil
+							if translatorcommon.IsGeminiThoughtPart(p) {
+								if thoughtText := p.Get("text").String(); thoughtText != "" {
+									summaryPart := []byte(`{"type":"summary_text","text":""}`)
+									summaryPart, _ = sjson.SetBytes(summaryPart, "text", thoughtText)
+									summaryParts = append(summaryParts, summaryPart)
+								}
+							}
+							if len(summaryParts) > 0 {
+								reasoningItem, _ = sjson.SetRawBytes(reasoningItem, "summary", translatorcommon.JoinRawArray(summaryParts))
+							}
+							inputItems = append(inputItems, reasoningItem)
+							emittedThoughtSignatures[normalizedSignature] = true
+						} else {
+							pendingThoughtSummaryParts = nil
+						}
+					} else if translatorcommon.IsGeminiThoughtPart(p) {
+						if thoughtText := p.Get("text").String(); thoughtText != "" {
+							summaryPart := []byte(`{"type":"summary_text","text":""}`)
+							summaryPart, _ = sjson.SetBytes(summaryPart, "text", thoughtText)
+							pendingThoughtSummaryParts = append(pendingThoughtSummaryParts, summaryPart)
+						}
+					} else {
+						pendingThoughtSummaryParts = nil
+					}
+				}
+
 				if translatorcommon.IsGeminiThoughtPart(p) {
 					continue
 				}
@@ -342,6 +386,37 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 
 	return out, nil
+}
+
+// geminiPartThoughtSignature extracts a part's thought signature under either
+// the camelCase or snake_case field spelling.
+func geminiPartThoughtSignature(part gjson.Result) string {
+	if signature := strings.TrimSpace(part.Get("thoughtSignature").String()); signature != "" {
+		return signature
+	}
+	return strings.TrimSpace(part.Get("thought_signature").String())
+}
+
+// decodeGeminiCodexThoughtSignature unwraps the carrier written by
+// encodeGeminiCodexThoughtSignature. Values without the carrier magic are
+// returned unchanged, preserving legacy raw-signature echoes.
+func decodeGeminiCodexThoughtSignature(value string) string {
+	value = strings.TrimSpace(value)
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || !strings.HasPrefix(string(decoded), geminiCodexThoughtSignatureCarrierMagic) {
+		return value
+	}
+	return strings.TrimSpace(strings.TrimPrefix(string(decoded), geminiCodexThoughtSignatureCarrierMagic))
+}
+
+// normalizedGeminiThoughtSignatureForCodexTarget unwraps and normalizes a
+// client-echoed thought signature for the Codex-format upstream serving
+// modelName, returning the exact value that may be written as reasoning
+// encrypted_content. The carrier magic written by
+// encodeGeminiCodexThoughtSignature is stripped first; the family match and
+// normalization rules live in translatorcommon.CodexReplaySignatureForTarget.
+func normalizedGeminiThoughtSignatureForCodexTarget(modelName, rawSignature string) (string, bool) {
+	return translatorcommon.CodexReplaySignatureForTarget(modelName, decodeGeminiCodexThoughtSignature(rawSignature))
 }
 
 func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gjson.Result) []byte {

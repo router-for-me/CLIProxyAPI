@@ -5263,3 +5263,80 @@ func TestConvertGeminiResponseToOpenAIResponsesStream_CitationAnnotationAddedTim
 		assertAnnotationMatches(t, eventTypes, byType, "https://weather.example.com/paris", "Paris Weather", 0, 5, true)
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_MixedWebSearchAndFunctions(t *testing.T) {
+	modelID := "gemini-search-mixed"
+	registerTestWebSearchModel(t, "client-mixed", "gemini", modelID, true)
+
+	req := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}
+		],
+		"tool_choice": "auto"
+	}`)
+
+	out, err := ConvertOpenAIResponsesRequestToGemini(modelID, req, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if !gjson.GetBytes(out, "toolConfig.includeServerSideToolInvocations").Bool() {
+		t.Fatalf("expected includeServerSideToolInvocations for mixed tools, got: %s", out)
+	}
+	if mode := gjson.GetBytes(out, "toolConfig.functionCallingConfig.mode").String(); mode != "AUTO" {
+		t.Fatalf("functionCallingConfig.mode = %q, want AUTO, got: %s", mode, out)
+	}
+	if !gjson.GetBytes(out, "tools.0.googleSearch").Exists() {
+		t.Fatalf("expected googleSearch tool, got: %s", out)
+	}
+	if !gjson.GetBytes(out, "tools.1.functionDeclarations.0.name").Exists() {
+		t.Fatalf("expected functionDeclarations, got: %s", out)
+	}
+
+	searchOnly := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [{"type": "web_search"}]
+	}`)
+	searchOnlyOut, err := ConvertOpenAIResponsesRequestToGemini(modelID, searchOnly, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(searchOnlyOut, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", searchOnlyOut)
+	}
+
+	functionsOnly := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [
+			{"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+		]
+	}`)
+	functionsOnlyOut, err := ConvertOpenAIResponsesRequestToGemini(modelID, functionsOnly, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(functionsOnlyOut, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", functionsOnlyOut)
+	}
+
+	choiceNone := []byte(`{
+		"model": "gemini-search-mixed",
+		"input": "weather in Paris",
+		"tools": [
+			{"type": "web_search"},
+			{"type": "function", "name": "get_weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+		],
+		"tool_choice": "none"
+	}`)
+	choiceNoneOut, err := ConvertOpenAIResponsesRequestToGemini(modelID, choiceNone, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(choiceNoneOut, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must not be set when googleSearch is suppressed by tool_choice=none, got: %s", choiceNoneOut)
+	}
+}

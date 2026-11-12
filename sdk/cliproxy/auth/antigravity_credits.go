@@ -26,6 +26,10 @@ func AntigravityCreditsRequested(ctx context.Context) bool {
 	return v
 }
 
+// AntigravityCreditsHintRefreshInterval defines how long a cached AI credits hint
+// remains fresh before it should be re-validated.
+const AntigravityCreditsHintRefreshInterval = 10 * time.Minute
+
 // AntigravityCreditsHint stores the latest known AI credits state for one auth.
 type AntigravityCreditsHint struct {
 	Known           bool
@@ -34,6 +38,12 @@ type AntigravityCreditsHint struct {
 	MinCreditAmount float64
 	PaidTierID      string
 	UpdatedAt       time.Time
+}
+
+// IsAntigravityCreditsHintFresh reports whether a known credits hint is still
+// within AntigravityCreditsHintRefreshInterval of now.
+func IsAntigravityCreditsHintFresh(hint AntigravityCreditsHint, now time.Time) bool {
+	return hint.Known && !hint.UpdatedAt.IsZero() && now.Sub(hint.UpdatedAt) < AntigravityCreditsHintRefreshInterval
 }
 
 var antigravityCreditsHintByAuth sync.Map

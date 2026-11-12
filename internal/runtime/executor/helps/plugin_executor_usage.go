@@ -184,6 +184,56 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	if merged.ResponseServiceTier == "" {
 		merged.ResponseServiceTier = existing.ResponseServiceTier
 	}
+
+	outputExcludesReasoning, knownOutput := detailOutputExcludesReasoning(update)
+	if !knownOutput {
+		outputExcludesReasoning, knownOutput = detailOutputExcludesReasoning(existing)
+	}
+	inputIncludesCache, knownInput := detailInputIncludesCache(update)
+	if !knownInput {
+		inputIncludesCache, knownInput = detailInputIncludesCache(existing)
+	}
+
+	if outputExcludesReasoning || (inputIncludesCache && !knownOutput) {
+		calculatedTotal, okTotal := safeUsageTokenSum(merged.InputTokens, merged.OutputTokens, merged.ReasoningTokens)
+		if !okTotal {
+			merged.TokenBreakdown = invalidUsageTokenBreakdown(merged.TotalTokens)
+			return merged
+		}
+		if merged.TotalTokens == 0 || merged.TotalTokens < calculatedTotal {
+			merged.TotalTokens = calculatedTotal
+		}
+		merged.TokenBreakdown = usage.NewSeparateReasoningTokenBreakdown(
+			merged.InputTokens,
+			merged.CacheReadTokens,
+			merged.CacheCreationTokens,
+			merged.OutputTokens,
+			merged.ReasoningTokens,
+			merged.TotalTokens,
+		)
+		return merged
+	}
+
+	if inputIncludesCache {
+		calculatedTotal, okTotal := safeUsageTokenSum(merged.InputTokens, merged.OutputTokens)
+		if !okTotal {
+			merged.TokenBreakdown = invalidUsageTokenBreakdown(merged.TotalTokens)
+			return merged
+		}
+		if merged.TotalTokens == 0 || merged.TotalTokens < calculatedTotal {
+			merged.TotalTokens = calculatedTotal
+		}
+		merged.TokenBreakdown = usage.NewSubsetTokenBreakdown(
+			merged.InputTokens,
+			merged.CacheReadTokens,
+			merged.CacheCreationTokens,
+			merged.OutputTokens,
+			merged.ReasoningTokens,
+			merged.TotalTokens,
+		)
+		return merged
+	}
+
 	cached := merged.CacheReadTokens + merged.CacheCreationTokens
 	if cached == 0 {
 		cached = merged.CachedTokens
@@ -205,6 +255,56 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 		merged.TotalTokens,
 	)
 	return merged
+}
+
+func detailInputIncludesCache(detail usage.Detail) (bool, bool) {
+	cache, okCache := safeUsageTokenSum(detail.CacheReadTokens, detail.CacheCreationTokens)
+	if !okCache || (cache == 0 && detail.CachedTokens < 0) {
+		return false, false
+	}
+	if cache == 0 {
+		cache = detail.CachedTokens
+	}
+	if cache <= 0 || !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		return false, false
+	}
+	if detail.TokenBreakdown.Input.TotalTokens == detail.InputTokens &&
+		detail.TokenBreakdown.Input.UncachedTokens == detail.InputTokens-cache {
+		return true, true
+	}
+	if independentTotal, okTotal := safeUsageTokenSum(detail.InputTokens, cache); okTotal &&
+		detail.TokenBreakdown.Input.TotalTokens == independentTotal &&
+		detail.TokenBreakdown.Input.UncachedTokens == detail.InputTokens {
+		return false, true
+	}
+	return false, false
+}
+
+func detailOutputExcludesReasoning(detail usage.Detail) (bool, bool) {
+	if detail.ReasoningTokens <= 0 || !detail.TokenBreakdown.Valid() {
+		return false, false
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
+		detail.TokenBreakdown.Output.ReasoningTokens != detail.ReasoningTokens {
+		return false, false
+	}
+	if detail.OutputTokens > 0 {
+		if separateTotal, okTotal := safeUsageTokenSum(detail.OutputTokens, detail.ReasoningTokens); okTotal &&
+			detail.TokenBreakdown.Output.TotalTokens == separateTotal &&
+			detail.TokenBreakdown.Output.NonReasoningTokens == detail.OutputTokens {
+			return true, true
+		}
+		if detail.TokenBreakdown.Output.TotalTokens == detail.OutputTokens &&
+			detail.TokenBreakdown.Output.NonReasoningTokens == detail.OutputTokens-detail.ReasoningTokens {
+			return false, true
+		}
+		return false, false
+	}
+	if detail.OutputTokens == 0 && detail.TokenBreakdown.Output.TotalTokens == detail.ReasoningTokens &&
+		detail.TokenBreakdown.Output.NonReasoningTokens == 0 && detail.TotalTokens == detail.TokenBreakdown.TotalTokens {
+		return true, true
+	}
+	return false, false
 }
 
 // IterateStreamLines splits payload by newline and invokes fn for non-empty lines.

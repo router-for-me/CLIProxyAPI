@@ -217,7 +217,7 @@ func resolveClaudeContinuityTags(
 	// The currentDate reminder is pinned to the session on its first request so
 	// a local-midnight flip between requests cannot rewrite it and invalidate
 	// the prompt-cache prefix in front of the whole conversation.
-	pinnedDate := helps.PinClaudeSessionDate(continuityKey, claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth)))
+	pinnedDate := resolveClaudeSessionPinnedDate(cfg, auth, payload, continuityKey, sessionID)
 
 	if existingPromptID != "" {
 		promptID = existingPromptID
@@ -368,7 +368,7 @@ func isValidClaudeCacheControl(cc gjson.Result) bool {
 func collectForwardedClaudeSystemPromptBlocksWithCache(system gjson.Result) []forwardedClaudeSystemPromptBlock {
 	var blocks []forwardedClaudeSystemPromptBlock
 	appendBlock := func(text string, cc *claudeCacheControl, rawCC string) {
-		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || text == claudeCodeCLIIdentity {
+		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || isClaudeCodeIdentitySystemText(text) {
 			return
 		}
 		blocks = append(blocks, forwardedClaudeSystemPromptBlock{Text: text, CacheControl: cc, RawCC: rawCC})
@@ -1301,8 +1301,121 @@ func isClaudeCodeContextReminder(text string) bool {
 	return strings.HasPrefix(text, "<system-reminder>") && strings.Contains(text, "</system-reminder>")
 }
 
+const claudeCodeCurrentDateReminderPrefix = "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is "
+
 func isClaudeCodeCurrentDateReminder(text string) bool {
-	return strings.HasPrefix(text, "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ")
+	return strings.HasPrefix(text, claudeCodeCurrentDateReminderPrefix)
+}
+
+// claudeCodeCurrentDateReminderDate extracts the YYYY-MM-DD date from a
+// currentDate reminder, or "" when the reminder date is not a valid date.
+func claudeCodeCurrentDateReminderDate(text string) string {
+	rest, found := strings.CutPrefix(text, claudeCodeCurrentDateReminderPrefix)
+	if !found || len(rest) < len("2006-01-02.") || rest[len("2006-01-02")] != '.' {
+		return ""
+	}
+	date := rest[:len("2006-01-02")]
+	if _, errParse := time.Parse("2006-01-02", date); errParse != nil {
+		return ""
+	}
+	return date
+}
+
+func claudeSessionDatePinRetention(cfg *config.Config) time.Duration {
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Claude.SessionDatePinRetention()
+}
+
+// claudeCallerCurrentDateReminderDate returns the date of the first valid
+// caller-supplied currentDate reminder in the first user message.
+func claudeCallerCurrentDateReminderDate(payload []byte) string {
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	if firstUserIdx < 0 {
+		return ""
+	}
+	content := gjson.GetBytes(payload, fmt.Sprintf("messages.%d.content", firstUserIdx))
+	if content.Type == gjson.String {
+		return claudeCodeCurrentDateReminderDate(content.String())
+	}
+	if !content.IsArray() {
+		return ""
+	}
+	for _, block := range content.Array() {
+		if block.Get("type").String() != "text" {
+			continue
+		}
+		if date := claudeCodeCurrentDateReminderDate(block.Get("text").String()); date != "" {
+			return date
+		}
+	}
+	return ""
+}
+
+// stripClaudeCodeCurrentDateReminder removes a leading caller currentDate
+// reminder from string content so the injection path replaces it with the
+// canonical reminder instead of duplicating it.
+func stripClaudeCodeCurrentDateReminder(text string) string {
+	if claudeCodeCurrentDateReminderDate(text) == "" {
+		return text
+	}
+	end := strings.Index(text, "</system-reminder>")
+	if end < 0 {
+		return text
+	}
+	return strings.TrimLeft(text[end+len("</system-reminder>"):], "\n")
+}
+
+// stripFirstUserClaudeCodeCurrentDateReminder strips a leading caller
+// currentDate reminder from a string-form first user message before the
+// cloaking pipeline converts the content into blocks, preserving user text.
+func stripFirstUserClaudeCodeCurrentDateReminder(payload []byte) []byte {
+	firstUserIdx := firstClaudeUserMessageIndex(payload)
+	if firstUserIdx < 0 {
+		return payload
+	}
+	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
+	content := gjson.GetBytes(payload, contentPath)
+	if content.Type != gjson.String {
+		return payload
+	}
+	stripped := stripClaudeCodeCurrentDateReminder(content.String())
+	if stripped == content.String() {
+		return payload
+	}
+	updated, errSet := sjson.SetBytes(payload, contentPath, stripped)
+	if errSet != nil {
+		return payload
+	}
+	return updated
+}
+
+// resolveClaudeSessionPinnedDate resolves the session date pin. With a
+// configured retention, an existing pin always wins; a caller-supplied
+// currentDate reminder only seeds the first anchor, so a later caller date
+// cannot rewrite the established conversation prefix.
+func resolveClaudeSessionPinnedDate(
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	payload []byte,
+	continuityKey string,
+	sessionID string,
+) string {
+	retention := claudeSessionDatePinRetention(cfg)
+	candidate := claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
+	if retention <= 0 {
+		return helps.PinClaudeSessionDate(continuityKey, sessionID, candidate, retention)
+	}
+	if existing := helps.LookupClaudeSessionDatePin(sessionID, retention); existing != "" {
+		// Re-pin the anchored date so the sliding retention refreshes
+		// without ever changing the established prefix.
+		return helps.PinClaudeSessionDate(continuityKey, sessionID, existing, retention)
+	}
+	if callerDate := claudeCallerCurrentDateReminderDate(payload); callerDate != "" {
+		candidate = callerDate
+	}
+	return helps.PinClaudeSessionDate(continuityKey, sessionID, candidate, retention)
 }
 
 // injectClaudeCodeCurrentDate stamps the currentDate reminder into the first
@@ -1326,7 +1439,7 @@ func injectClaudeCodeCurrentDateInternal(payload []byte, date string, isExplicit
 
 	if content.Type == gjson.String {
 		var userCC *claudeCacheControl = &claudeCodeCacheControl
-		if isExplicit {
+		if isExplicit || strings.TrimSpace(content.String()) == "" {
 			userCC = nil
 		}
 		userBlock := buildTextBlock(content.String(), userCC)
@@ -1347,7 +1460,7 @@ func injectClaudeCodeCurrentDateInternal(payload []byte, date string, isExplicit
 			if isClaudeCodeCurrentDateReminder(text) {
 				continue
 			}
-			if !actualTextCached && !isClaudeCodeContextReminder(text) {
+			if !actualTextCached && !isClaudeCodeContextReminder(text) && strings.TrimSpace(text) != "" {
 				if !isExplicit {
 					rawBlocks = append(rawBlocks, withEphemeralCacheControl(block.Raw))
 					actualTextCached = true
@@ -1471,12 +1584,98 @@ type claudeWirePolicy struct {
 	ProfileClaudeCodeCLI bool // request fingerprint looks like Claude Code CLI
 	ConfirmedClaudeCode  bool
 	Cloak                bool
+	Uncloak              bool
+	ExplicitNever        bool
 }
 
 type claudeCloakSettings struct {
 	strictMode     bool
 	sensitiveWords []string
 	cacheUserID    bool
+}
+
+func isClaudeCodeIdentitySystemText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return trimmed == claudeCodeCLIIdentity ||
+		trimmed == "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK." ||
+		trimmed == "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+}
+
+func isEffectiveConfirmedClaudeCode(detection helps.ClaudeCodeRequestDetection, policy claudeWirePolicy) bool {
+	if policy.Uncloak {
+		return false
+	}
+	if detection.Confirmed {
+		return true
+	}
+	return !policy.Cloak && policy.ExplicitNever && detection.ConfirmedShape
+}
+
+func stripClaudeCodeSystemBlocks(payload []byte) []byte {
+	payload = util.StripClaudeCodeAttributionSystem(payload)
+	system := gjson.GetBytes(payload, "system")
+	if !system.Exists() {
+		return payload
+	}
+	if system.Type == gjson.String {
+		if !isClaudeCodeIdentitySystemText(system.String()) {
+			return payload
+		}
+		if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+			return updated
+		}
+		return payload
+	}
+	if !system.IsArray() {
+		return payload
+	}
+	kept := make([]string, 0, len(system.Array()))
+	removed := false
+	system.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "text" && isClaudeCodeIdentitySystemText(block.Get("text").String()) {
+			removed = true
+			return true
+		}
+		if block.Raw != "" {
+			kept = append(kept, block.Raw)
+		}
+		return true
+	})
+	if !removed {
+		return payload
+	}
+	if len(kept) == 0 {
+		if updated, errDelete := sjson.DeleteBytes(payload, "system"); errDelete == nil {
+			return updated
+		}
+		return payload
+	}
+	if updated, errSet := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(kept, ",")+"]")); errSet == nil {
+		return updated
+	}
+	return payload
+}
+
+func uncloakClaudeCodePayload(payload []byte, confirmedClaudeCode bool) []byte {
+	payload = stripClaudeCodeSystemBlocks(payload)
+	if metadata := gjson.GetBytes(payload, "metadata"); metadata.Exists() && metadata.IsObject() {
+		if userID := metadata.Get("user_id"); userID.Exists() && (confirmedClaudeCode || helps.IsValidUserID(userID.String())) {
+			if updated, errDelete := sjson.DeleteBytes(payload, "metadata.user_id"); errDelete == nil {
+				payload = updated
+				if remaining := gjson.GetBytes(payload, "metadata"); remaining.Exists() && remaining.IsObject() && len(remaining.Map()) == 0 {
+					if updatedMeta, errDeleteMeta := sjson.DeleteBytes(payload, "metadata"); errDeleteMeta == nil {
+						payload = updatedMeta
+					}
+				}
+			}
+		}
+	}
+	if diag := gjson.GetBytes(payload, "diagnostics"); diag.Exists() && (confirmedClaudeCode || diag.Get("previous_message_id").Exists()) {
+		if updated, errDelete := sjson.DeleteBytes(payload, "diagnostics"); errDelete == nil {
+			payload = updated
+		}
+	}
+	return payload
 }
 
 func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey string, confirmedClaudeCode bool) (claudeWirePolicy, claudeCloakSettings) {
@@ -1495,12 +1694,14 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		sensitiveWords: attrWords,
 		cacheUserID:    attrCache,
 	}
+	explicitMode := strings.ToLower(strings.TrimSpace(attrMode))
 	if attrMode != "" {
 		cloakMode = attrMode
 	}
 	if cloakCfg != nil {
 		if mode := strings.TrimSpace(cloakCfg.Mode); mode != "" {
 			cloakMode = mode
+			explicitMode = strings.ToLower(mode)
 		}
 		if cloakCfg.StrictMode {
 			settings.strictMode = true
@@ -1515,23 +1716,27 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
 	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
+	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
+	explicitNever := trimmedMode == "never" && !uncloak
 	policy := claudeWirePolicy{
 		OAuth:                fp.AuthIsOAuthToken,
 		ProfileClaudeCodeCLI: fp.ProfileClaudeCodeCLI,
 		ConfirmedClaudeCode:  confirmedClaudeCode,
-		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode,
+		Cloak:                (fp.ProfileClaudeCodeCLI || cloakConfigured) && !confirmedClaudeCode && !uncloak,
+		Uncloak:              uncloak,
+		ExplicitNever:        explicitNever,
 	}
 	if confirmedClaudeCode {
-		// Native Claude Code is always a passthrough client. An operator-level
-		// "always" mode may cloak unknown callers, but must not overwrite a
-		// strongly confirmed CLI, sdk-cli, or claude-vscode fingerprint.
+		// Native Claude Code is always a passthrough client unless the
+		// credential explicitly opts out of Claude Code identity via never/uncloak.
 		policy.Cloak = false
 		return policy, settings
 	}
-	switch strings.ToLower(strings.TrimSpace(cloakMode)) {
+	switch trimmedMode {
 	case "always":
 		policy.Cloak = true
-	case "never":
+	case "never", "uncloak":
 		policy.Cloak = false
 	default:
 		// Auto applies the CLI cloak only to real Claude OAuth credentials,
@@ -1568,6 +1773,9 @@ func applyCloakingInternal(
 ) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
+		if policy.Uncloak {
+			payload = uncloakClaudeCodePayload(payload, confirmedClaudeCode)
+		}
 		return payload, false, nil
 	}
 	isExplicit := (len(explicitCacheMode) > 0 && explicitCacheMode[0]) || isExplicitPromptCacheModeContext(ctx)
@@ -1607,6 +1815,11 @@ func applyCloakingInternal(
 	// fall back to the per-request date, which is the pre-pinning behaviour.
 	if pinnedDate == "" {
 		pinnedDate = claudeCodeLocalDate(claudeCodeCurrentTime(cfg, auth))
+	}
+	if !isProbeOrHelper && claudeSessionDatePinRetention(cfg) > 0 {
+		// Strip a string-form caller reminder before the pipeline turns the
+		// content into blocks, so user text is never dropped with it.
+		payload = stripFirstUserClaudeCodeCurrentDateReminder(payload)
 	}
 
 	turnOrigin := ""
@@ -1728,19 +1941,44 @@ func ensureCacheControl(payload []byte) []byte {
 
 // claudePayloadHasCacheableSystem reports whether the payload has a system prompt
 // that injectSystemCacheControl can actually host a breakpoint on. An absent key, an
-// empty array and an empty string all leave the tools prefix uncovered.
+// empty array, an array of only empty/whitespace text blocks, and an empty string
+// all leave the tools prefix uncovered.
 func claudePayloadHasCacheableSystem(payload []byte) bool {
 	system := gjson.GetBytes(payload, "system")
 	switch {
 	case !system.Exists():
 		return false
 	case system.IsArray():
-		return system.Get("#").Int() > 0
+		return lastCacheableClaudeSystemIndex(system) >= 0
 	case system.Type == gjson.String:
 		return strings.TrimSpace(system.String()) != ""
 	default:
 		return false
 	}
+}
+
+func claudeSystemBlockCanHostCacheControl(item gjson.Result) bool {
+	if !item.IsObject() {
+		return false
+	}
+	if typ := item.Get("type").String(); typ != "" && typ != "text" {
+		return false
+	}
+	return strings.TrimSpace(item.Get("text").String()) != ""
+}
+
+func lastCacheableClaudeSystemIndex(system gjson.Result) int {
+	if !system.IsArray() {
+		return -1
+	}
+	lastEligible := -1
+	system.ForEach(func(index, item gjson.Result) bool {
+		if claudeSystemBlockCanHostCacheControl(item) {
+			lastEligible = int(index.Int())
+		}
+		return true
+	})
+	return lastEligible
 }
 
 // upgradeClaudeCacheControlTTL mirrors the native ttl upgrade helper, which only
@@ -2259,9 +2497,9 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	}
 
 	if content.IsArray() {
-		contentCount := int(content.Get("#").Int())
-		if contentCount > 0 {
-			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", lastEligibleIndex, contentCount-1)
+		targetBlockIndex := lastCacheableClaudeMessageContentBlockIndex(messages.Get(fmt.Sprintf("%d", lastEligibleIndex)))
+		if targetBlockIndex >= 0 {
+			cacheControlPath := fmt.Sprintf("messages.%d.content.%d.cache_control", lastEligibleIndex, targetBlockIndex)
 			result, err := sjson.SetBytes(payload, cacheControlPath, claudeCodeCacheControl)
 			if err != nil {
 				log.Warnf("failed to inject cache_control into messages: %v", err)
@@ -2269,7 +2507,7 @@ func injectMessagesCacheControl(payload []byte) []byte {
 			}
 			payload = result
 		}
-	} else if content.Type == gjson.String {
+	} else if content.Type == gjson.String && strings.TrimSpace(content.String()) != "" {
 		newContent := "[" + buildTextBlock(content.String(), &claudeCodeCacheControl) + "]"
 		result, err := sjson.SetRawBytes(payload, contentPath, []byte(newContent))
 		if err != nil {
@@ -2282,28 +2520,64 @@ func injectMessagesCacheControl(payload []byte) []byte {
 	return payload
 }
 
-// claudeMessageEligibleForRollingCache reports whether the native selector would
-// consider this user/assistant turn as a rolling breakpoint host. Native rejects
-// an assistant turn whose last content block is thinking-like, because a thinking
-// block cannot host the marker.
-func claudeMessageEligibleForRollingCache(message gjson.Result) bool {
-	content := message.Get("content")
-	if content.Type == gjson.String {
-		return true
-	}
-	if !content.IsArray() || content.Get("#").Int() == 0 {
+func isEmptyClaudeTextBlock(block gjson.Result) bool {
+	return block.IsObject() &&
+		block.Get("type").String() == "text" &&
+		strings.TrimSpace(block.Get("text").String()) == ""
+}
+
+func claudeContentBlockCanHostCacheControl(block gjson.Result) bool {
+	if !block.IsObject() {
 		return false
 	}
-	if message.Get("role").String() != "assistant" {
-		return true
-	}
-	lastBlock := content.Get(fmt.Sprintf("%d", content.Get("#").Int()-1))
-	switch lastBlock.Get("type").String() {
-	case "thinking", "redacted_thinking":
+	switch block.Get("type").String() {
+	case "", "thinking", "redacted_thinking":
 		return false
+	case "text":
+		return strings.TrimSpace(block.Get("text").String()) != ""
 	default:
 		return true
 	}
+}
+
+func lastCacheableClaudeMessageContentBlockIndex(message gjson.Result) int {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return -1
+	}
+	blocks := content.Array()
+	if len(blocks) == 0 {
+		return -1
+	}
+	isAssistant := message.Get("role").String() == "assistant"
+	for i := len(blocks) - 1; i >= 0; i-- {
+		block := blocks[i]
+		if isEmptyClaudeTextBlock(block) {
+			continue
+		}
+		if isAssistant {
+			switch block.Get("type").String() {
+			case "thinking", "redacted_thinking":
+				return -1
+			}
+		}
+		if claudeContentBlockCanHostCacheControl(block) {
+			return i
+		}
+	}
+	return -1
+}
+
+// claudeMessageEligibleForRollingCache reports whether the native selector would
+// consider this user/assistant turn as a rolling breakpoint host. Native rejects
+// an assistant turn whose last content block is thinking-like, because a thinking
+// block cannot host the marker, and Anthropic rejects cache_control on empty text blocks.
+func claudeMessageEligibleForRollingCache(message gjson.Result) bool {
+	content := message.Get("content")
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String()) != ""
+	}
+	return lastCacheableClaudeMessageContentBlockIndex(message) >= 0
 }
 
 // injectClaudeFinalSystemCacheControl reproduces the native final-system special
@@ -2385,21 +2659,25 @@ func injectSystemCacheControl(payload []byte) []byte {
 			return payload
 		}
 
-		// Check if ANY system element already has cache_control
+		// Check if ANY system element already has cache_control and find the last cacheable element.
 		hasCacheControlInSystem := false
-		system.ForEach(func(_, item gjson.Result) bool {
+		lastEligibleSystemIndex := -1
+		system.ForEach(func(index, item gjson.Result) bool {
 			if isValidClaudeCacheControl(item.Get("cache_control")) {
 				hasCacheControlInSystem = true
 				return false
 			}
+			if claudeSystemBlockCanHostCacheControl(item) {
+				lastEligibleSystemIndex = int(index.Int())
+			}
 			return true
 		})
-		if hasCacheControlInSystem {
+		if hasCacheControlInSystem || lastEligibleSystemIndex < 0 {
 			return payload
 		}
 
-		// Add cache_control to the last system element
-		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
+		// Add cache_control to the last cacheable system element
+		lastSystemPath := fmt.Sprintf("system.%d.cache_control", lastEligibleSystemIndex)
 		result, err := sjson.SetBytes(payload, lastSystemPath, claudeCodeCacheControl)
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)

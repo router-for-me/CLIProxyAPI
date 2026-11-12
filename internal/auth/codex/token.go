@@ -33,6 +33,11 @@ func canonicalLockPath(authFilePath string) string {
 	if abs, errAbs := filepath.Abs(cleaned); errAbs == nil && strings.TrimSpace(abs) != "" {
 		cleaned = filepath.Clean(abs)
 	}
+	if real, errEval := filepath.EvalSymlinks(cleaned); errEval == nil && strings.TrimSpace(real) != "" {
+		cleaned = filepath.Clean(real)
+	} else if parent, errParent := filepath.EvalSymlinks(filepath.Dir(cleaned)); errParent == nil && strings.TrimSpace(parent) != "" {
+		cleaned = filepath.Clean(filepath.Join(parent, filepath.Base(cleaned)))
+	}
 	return cleaned
 }
 

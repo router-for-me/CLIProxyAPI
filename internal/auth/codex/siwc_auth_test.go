@@ -170,6 +170,14 @@ func TestExchangeAndRefreshSIWCTokens(t *testing.T) {
 	if expTime.Before(before.Add(3415*time.Second)) || expTime.After(time.Now().Add(3425*time.Second)) {
 		t.Fatalf("unexpected expire time with 3m margin: %v (before=%v)", expTime, before)
 	}
+	realExpRaw, _ := tokenData.ToMap()["expires_at"].(string)
+	realExpTime, errRealExp := time.Parse(time.RFC3339, realExpRaw)
+	if errRealExp != nil {
+		t.Fatalf("expected real expires_at RFC3339 in ToMap(), got %q (err=%v)", realExpRaw, errRealExp)
+	}
+	if realExpTime.Before(before.Add(3595*time.Second)) || realExpTime.After(time.Now().Add(3605*time.Second)) {
+		t.Fatalf("unexpected real expires_at time (want ~3600s without margin): %v (before=%v)", realExpTime, before)
+	}
 
 	// Missing direct token scope must fail
 	responseBody = map[string]any{
@@ -203,6 +211,14 @@ func TestExchangeAndRefreshSIWCTokens(t *testing.T) {
 	}
 	if refreshed.AccessToken != "siwc-access-2" || refreshed.RefreshToken != "siwc-refresh-2" || refreshed.ClientID != "oaiapp_client1" || refreshed.DeviceID != deviceID {
 		t.Fatalf("unexpected refreshed data: %+v", refreshed)
+	}
+	refreshedRealExpRaw, _ := refreshed.ToMap()["expires_at"].(string)
+	refreshedRealExpTime, errRefreshedRealExp := time.Parse(time.RFC3339, refreshedRealExpRaw)
+	if errRefreshedRealExp != nil {
+		t.Fatalf("expected real expires_at RFC3339 in refreshed.ToMap(), got %q (err=%v)", refreshedRealExpRaw, errRefreshedRealExp)
+	}
+	if refreshedRealExpTime.Before(before.Add(3595*time.Second)) || refreshedRealExpTime.After(time.Now().Add(3605*time.Second)) {
+		t.Fatalf("unexpected refreshed real expires_at time: %v (before=%v)", refreshedRealExpTime, before)
 	}
 }
 

@@ -891,6 +891,12 @@ func isCredentialBlocked(auth *Auth, supportedModelCount int, now time.Time) boo
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true
 	}
+	if hasUnauthorizedAuthFailure(auth) {
+		return true
+	}
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return true
+	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true
 	}

@@ -94,8 +94,24 @@ func authIDForPath(path, authDir string) string {
 	}
 	id := path
 	if authDir = strings.TrimSpace(authDir); authDir != "" {
-		if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" && !strings.HasPrefix(rel, "..") {
+		cleanDir := filepath.Clean(authDir)
+		cleanPath := filepath.Clean(path)
+		if rel, errRel := filepath.Rel(cleanDir, cleanPath); isRelativeWithinAuthDir(rel, errRel) {
 			id = rel
+		} else {
+			if !filepath.IsAbs(cleanDir) {
+				if absDir, errAbs := filepath.Abs(cleanDir); errAbs == nil {
+					cleanDir = absDir
+				}
+			}
+			if !filepath.IsAbs(cleanPath) {
+				if absPath, errAbs := filepath.Abs(cleanPath); errAbs == nil {
+					cleanPath = absPath
+				}
+			}
+			if rel, errRel := filepath.Rel(cleanDir, cleanPath); isRelativeWithinAuthDir(rel, errRel) {
+				id = rel
+			}
 		}
 	}
 	id = filepath.ToSlash(filepath.Clean(id))
@@ -103,6 +119,13 @@ func authIDForPath(path, authDir string) string {
 		id = strings.ToLower(id)
 	}
 	return id
+}
+
+func isRelativeWithinAuthDir(rel string, errRel error) bool {
+	if errRel != nil || rel == "" || rel == "." || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (h *Host) AuthProviderIdentifiers() []string {

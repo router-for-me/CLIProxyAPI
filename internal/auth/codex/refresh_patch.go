@@ -4,7 +4,7 @@ import "reflect"
 
 var codexSIWCCredentialKeys = []string{
 	"access_token", "refresh_token", "id_token", "client_id", "device_id",
-	"expired", "last_refresh", "scope", "scopes",
+	"expired", "expires_at", "last_refresh", "scope", "scopes",
 }
 
 // CredentialRefreshPatch is an immutable, partition-specific refresh result.
@@ -88,6 +88,11 @@ func applyCredentialFields(disk, before, after map[string]any) {
 			disk[key] = value
 		}
 	}
+	if _, hadExpiresAt := before["expires_at"]; hadExpiresAt {
+		if _, hasExpiresAt := after["expires_at"]; !hasExpiresAt {
+			delete(disk, "expires_at")
+		}
+	}
 }
 
 // IsCodexCredentialKey reports whether key belongs to a Codex credential partition or switch
@@ -102,6 +107,16 @@ func IsCodexCredentialKey(key string) bool {
 		}
 	}
 	return false
+}
+
+// RefreshedOuter reports whether p carries a refreshed outer Codex credential partition.
+func (p *CredentialRefreshPatch) RefreshedOuter() bool {
+	return p != nil && p.outerAfter != nil
+}
+
+// RefreshedSIWC reports whether p carries a refreshed SIWC credential partition.
+func (p *CredentialRefreshPatch) RefreshedSIWC() bool {
+	return p != nil && p.siwcAfter != nil
 }
 
 // CanApplyTo reports whether at least one refreshed partition in p still matches disk's version.

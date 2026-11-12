@@ -150,6 +150,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool `json:"zero_allowed,omitempty" yaml:"zero-allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
 	DynamicAllowed bool `json:"dynamic_allowed,omitempty" yaml:"dynamic-allowed,omitempty"`
+	// DisableType is the Claude thinking.type sent when thinking is turned off.
+	// Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string `json:"disable_type,omitempty" yaml:"disable-type,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
@@ -1800,11 +1803,19 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Description != "" {
 			result["description"] = model.Description
 		}
-		if model.InputTokenLimit > 0 {
-			result["inputTokenLimit"] = model.InputTokenLimit
+		inputTokenLimit := model.InputTokenLimit
+		if inputTokenLimit <= 0 {
+			inputTokenLimit = model.ContextLength
 		}
-		if model.OutputTokenLimit > 0 {
-			result["outputTokenLimit"] = model.OutputTokenLimit
+		if inputTokenLimit > 0 {
+			result["inputTokenLimit"] = inputTokenLimit
+		}
+		outputTokenLimit := model.OutputTokenLimit
+		if outputTokenLimit <= 0 {
+			outputTokenLimit = model.MaxCompletionTokens
+		}
+		if outputTokenLimit > 0 {
+			result["outputTokenLimit"] = outputTokenLimit
 		}
 		if len(model.SupportedGenerationMethods) > 0 {
 			result["supportedGenerationMethods"] = append([]string(nil), model.SupportedGenerationMethods...)

@@ -523,3 +523,20 @@ func TestApplyClaudeHeaders_StructuredHelperBetaOrderPreservedWithAdvisor(t *tes
 		t.Fatalf("helper Anthropic-Beta =\n got:  %q\n want: %q", got, helperBeta)
 	}
 }
+
+// A body that carries thinking.block_binding is rejected upstream unless the
+// thinking-binding-controls beta travels with it, so even caller-owned
+// (default API-key) and confirmed-passthrough modes must emit that beta.
+func TestApplyClaudeHeaders_BlockBindingBodyAlwaysGetsBindingBeta(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-5-5","thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"drop_block"}},"messages":[{"role":"user","content":"hi"}]}`)
+	for _, confirmed := range []bool{false, true} {
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-binding-beta"}}
+		req := newClaudeHeaderTestRequest(t, nil)
+		if err := applyClaudeHeaders(req, auth, "key-binding-beta", false, nil, body, nil, nil, confirmed); err != nil {
+			t.Fatalf("confirmed=%v: applyClaudeHeaders() error = %v", confirmed, err)
+		}
+		if got := req.Header.Get("Anthropic-Beta"); !strings.Contains(got, claudeThinkingBindingBeta) {
+			t.Fatalf("confirmed=%v: Anthropic-Beta = %q, want %s for a block_binding body", confirmed, got, claudeThinkingBindingBeta)
+		}
+	}
+}

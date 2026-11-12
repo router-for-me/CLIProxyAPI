@@ -106,6 +106,7 @@ func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth)
 	} else {
 		req.Header.Del("Authorization")
 	}
+	ensureXAIUserAgent(req)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes

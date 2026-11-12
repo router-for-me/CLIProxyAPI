@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -65,6 +66,10 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
 			if errors.Is(errUpload, errAuthFileMustBeJSON) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
+				return
+			}
+			if errors.Is(errUpload, errInvalidAuthFile) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errUpload.Error()})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
@@ -123,7 +128,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, errInvalidAuthFile) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(200, gin.H{"status": "ok"})
@@ -157,13 +166,22 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					full = abs
 				}
 			}
-			if err = os.Remove(full); err == nil {
+			errDelete := func() error {
+				release := h.beginSIWCFileMutation(ctx, full)
+				defer release()
+				if errRemove := os.Remove(full); errRemove != nil {
+					return nil
+				}
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
-					c.JSON(500, gin.H{"error": errDel.Error()})
-					return
+					return errDel
 				}
 				deleted++
 				h.removeAuth(ctx, full)
+				return nil
+			}()
+			if errDelete != nil {
+				c.JSON(500, gin.H{"error": errDelete.Error()})
+				return
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
@@ -270,7 +288,9 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	if err != nil {
 		return err
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	release := h.beginSIWCFileMutation(ctx, dst)
+	defer release()
+	if errWrite := h.writeAuthFileBytes(dst, data, auth); errWrite != nil {
 		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
@@ -282,6 +302,27 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 		}
 	}
 	return nil
+}
+
+func (h *Handler) writeAuthFileBytes(dst string, data []byte, auth *coreauth.Auth) error {
+	if h.shouldLockCodexAuthFile(auth) {
+		return codex.WithFileLock(dst, func() error {
+			return os.WriteFile(dst, data, 0o600)
+		})
+	}
+	return os.WriteFile(dst, data, 0o600)
+}
+
+func (h *Handler) shouldLockCodexAuthFile(auth *coreauth.Auth) bool {
+	if coreauth.IsCodexAuthRecord(auth) {
+		return true
+	}
+	if h != nil && h.authManager != nil && auth != nil && auth.ID != "" {
+		if existing, ok := h.authManager.GetByID(auth.ID); ok && coreauth.IsCodexAuthRecord(existing) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
@@ -371,6 +412,8 @@ func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string
 			targetPath = abs
 		}
 	}
+	release := h.beginSIWCFileMutation(ctx, targetPath)
+	defer release()
 	if errRemove := os.Remove(targetPath); errRemove != nil {
 		if os.IsNotExist(errRemove) {
 			return filepath.Base(name), http.StatusNotFound, errAuthFileNotFound
@@ -484,9 +527,13 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 	}
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(data, &metadata); err != nil {
-		return nil, fmt.Errorf("invalid auth file: %w", err)
+		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, err)
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
+	// Loading tolerates invalid exclusion rules, so reject them here before anything is persisted.
+	if _, errExcluded := synthesizer.ExtractExcludedModelsFromMetadata(metadata); errExcluded != nil {
+		return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errExcluded)
+	}
 	provider, _ := metadata["type"].(string)
 	if provider == "" {
 		provider = "unknown"
@@ -511,7 +558,7 @@ func (h *Handler) buildAuthFromFileData(path string, data []byte) (*coreauth.Aut
 		}
 		generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
 		if errSynthesize != nil {
-			return nil, fmt.Errorf("invalid auth file: %w", errSynthesize)
+			return nil, fmt.Errorf("%w: %w", errInvalidAuthFile, errSynthesize)
 		}
 		if len(generated) > 0 && generated[0] != nil {
 			auth = generated[0].Clone()

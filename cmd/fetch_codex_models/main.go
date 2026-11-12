@@ -349,6 +349,19 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 				return nil, 0, fmt.Errorf("failed to set %s visibility on cloned model: %w", baselineModelSlug, errSet)
 			}
 		}
+		for _, reset := range []struct {
+			path  string
+			value any
+		}{
+			{path: "tool_mode", value: "direct"},
+			{path: "use_responses_lite", value: false},
+			{path: "supports_reasoning_effort_updates", value: false},
+		} {
+			cloned, errSet = sjson.SetBytes(cloned, reset.path, reset.value)
+			if errSet != nil {
+				return nil, 0, fmt.Errorf("failed to set %s %s on cloned model: %w", baselineModelSlug, reset.path, errSet)
+			}
+		}
 		raw, errSet = sjson.SetRawBytes(raw, "models.-1", cloned)
 		if errSet != nil {
 			return nil, 0, fmt.Errorf("failed to append %s model: %w", baselineModelSlug, errSet)

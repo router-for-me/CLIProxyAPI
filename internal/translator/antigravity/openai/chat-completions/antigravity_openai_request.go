@@ -529,9 +529,6 @@ func applyOpenAIToolChoiceToAntigravity(out, rawJSON []byte, functionNameMap map
 	}
 
 	out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", mode)
-	if mode == "NONE" {
-		out, _ = sjson.DeleteBytes(out, "request.tools")
-	}
 	if strings.TrimSpace(allowedName) != "" {
 		mappedName := util.MapSanitizedFunctionName(functionNameMap, allowedName)
 		out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{mappedName})
