@@ -40,6 +40,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		dispatchPersistedAuthWithRev: func(update *watcher.AuthUpdate) (bool, uint64) {
 			return w.DispatchPersistedAuthUpdateWithRevision(update)
 		},
+		rereadDiscardedFileSnapshot: func(auth *coreauth.Auth) {
+			w.RereadDiscardedFileSnapshot(auth)
+		},
 		setPluginAuthParser: func(parser PluginAuthParser) {
 			w.SetPluginAuthParser(parser)
 		},

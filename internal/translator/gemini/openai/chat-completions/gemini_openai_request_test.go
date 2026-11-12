@@ -1207,3 +1207,52 @@ func TestConvertOpenAIRequestToGemini_ParametersJsonSchema_PreservesAdditionalPr
 		t.Fatalf("pattern should not be converted to description hint. Schema: %s", schema.Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToGemini_MixedBuiltinToolsAndFunctions(t *testing.T) {
+	fnTool := `{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}`
+	builtins := []struct{ input, output string }{
+		{"google_search", "googleSearch"},
+		{"code_execution", "codeExecution"},
+		{"url_context", "urlContext"},
+	}
+	for _, builtin := range builtins {
+		t.Run(builtin.input, func(t *testing.T) {
+			req := `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"tools":[` +
+				fnTool + `,{"` + builtin.input + `":{}}],"tool_choice":"auto"}`
+			out, err := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(req), false)
+			if err != nil {
+				t.Fatalf("convert error: %v", err)
+			}
+			if !gjson.GetBytes(out, "toolConfig.includeServerSideToolInvocations").Bool() {
+				t.Fatalf("expected includeServerSideToolInvocations for mixed tools, got: %s", out)
+			}
+			if mode := gjson.GetBytes(out, "toolConfig.functionCallingConfig.mode").String(); mode != "AUTO" {
+				t.Fatalf("functionCallingConfig.mode = %q, want AUTO, got: %s", mode, out)
+			}
+			if !gjson.GetBytes(out, "tools.0.functionDeclarations.0.name").Exists() {
+				t.Fatalf("expected functionDeclarations, got: %s", out)
+			}
+			if !gjson.GetBytes(out, "tools.1."+builtin.output).Exists() {
+				t.Fatalf("expected built-in tool %s, got: %s", builtin.output, out)
+			}
+		})
+	}
+
+	builtinOnly := `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"google_search":{}}]}`
+	out, err := ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(builtinOnly), false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(out, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", out)
+	}
+
+	functionsOnly := `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"tools":[` + fnTool + `]}`
+	out, err = ConvertOpenAIRequestToGemini("gemini-3.8-flash", []byte(functionsOnly), false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if gjson.GetBytes(out, "toolConfig.includeServerSideToolInvocations").Exists() {
+		t.Fatalf("includeServerSideToolInvocations must only be set for mixed tools, got: %s", out)
+	}
+}

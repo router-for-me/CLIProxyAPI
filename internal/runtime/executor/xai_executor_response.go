@@ -678,6 +678,14 @@ func xaiFunctionParametersNeedSimplification(tool gjson.Result, namespaceName st
 }
 
 func sanitizeXAIInputEncryptedContent(body []byte) []byte {
+	return sanitizeXAIInputEncryptedContentWithOptions(body, false)
+}
+
+func sanitizeXAIInputEncryptedContentForBaseURL(body []byte, baseURL string) []byte {
+	return sanitizeXAIInputEncryptedContentWithOptions(body, isOpenRouterUpstreamURL(baseURL))
+}
+
+func sanitizeXAIInputEncryptedContentWithOptions(body []byte, allowRouterSuffix bool) []byte {
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body
@@ -699,10 +707,14 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			continue
 		}
 		reason := ""
+		rewrittenSig := ""
 		switch encryptedContent.Type {
 		case gjson.String:
-			if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
+			rawSig := encryptedContent.String()
+			if info, err := signature.InspectGrokEncryptedContent(rawSig); err != nil {
 				reason = err.Error()
+			} else if info.RouterSuffix != "" && !allowRouterSuffix {
+				rewrittenSig = stripRouterSuffix(rawSig, info.RouterSuffix)
 			}
 		case gjson.Null:
 			reason = "encrypted_content is null"
@@ -710,6 +722,13 @@ func sanitizeXAIInputEncryptedContent(body []byte) []byte {
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
+			if rewrittenSig != "" {
+				if next, errSet := sjson.SetBytes([]byte(item.Raw), "encrypted_content", rewrittenSig); errSet == nil {
+					items = append(items, json.RawMessage(next))
+					changed = true
+					continue
+				}
+			}
 			items = append(items, json.RawMessage(item.Raw))
 			continue
 		}

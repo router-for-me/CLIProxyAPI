@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -790,4 +792,723 @@ func TestPatchAuthFileFields_IDTokenMissingPlanTypeDefaultsToFree(t *testing.T) 
 	if got := auth.Attributes["plan_type"]; got != "free" {
 		t.Fatalf("auth plan_type attribute = %q, want free", got)
 	}
+}
+
+type patchRegressionTokenStorage struct {
+	AccessToken  string
+	RefreshToken string
+}
+
+func (s *patchRegressionTokenStorage) SaveTokenToFile(string) error { return nil }
+
+type blockingPatchAuthStore struct {
+	memoryAuthStore
+	entered     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	listEntered chan struct{}
+	listRelease chan struct{}
+	listOnce    sync.Once
+}
+
+func (s *blockingPatchAuthStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if s.listEntered != nil && s.listRelease != nil {
+		s.listOnce.Do(func() {
+			close(s.listEntered)
+			<-s.listRelease
+		})
+	}
+	return s.memoryAuthStore.List(ctx)
+}
+
+func (s *blockingPatchAuthStore) Save(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if s.entered != nil && s.release != nil {
+		s.once.Do(func() {
+			close(s.entered)
+			<-s.release
+		})
+	}
+	var cloned *coreauth.Auth
+	if auth != nil {
+		cloned = auth.Clone()
+	}
+	return s.memoryAuthStore.Save(ctx, cloned)
+}
+
+func (s *blockingPatchAuthStore) savedAuth(id string) *coreauth.Auth {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.items == nil {
+		return nil
+	}
+	if item := s.items[id]; item != nil {
+		return item.Clone()
+	}
+	return nil
+}
+
+func TestPatchAuthFileFields_KeepsCommitLandedDuringPatch(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	t.Run("concurrent_fields_patch", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			base, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":          "codex",
+					"access_token":  "tok-initial",
+					"refresh_token": "rt-initial",
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			_ = base
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			firstDone := make(chan int, 1)
+			go func() {
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","prefix":"p1"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				firstDone <- rec.Code
+			}()
+			<-store.entered
+
+			secondStarted := make(chan struct{})
+			secondDone := make(chan int, 1)
+			go func() {
+				close(secondStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","note":"second-note"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				secondDone <- rec.Code
+			}()
+			<-secondStarted
+			synctest.Wait()
+
+			close(store.release)
+			if code := <-firstDone; code != http.StatusOK {
+				t.Fatalf("first PATCH status = %d, want 200", code)
+			}
+			if code := <-secondDone; code != http.StatusOK {
+				t.Fatalf("second PATCH status = %d, want 200", code)
+			}
+
+			for label, got := range map[string]*coreauth.Auth{
+				"runtime": mustGetAuthByID(t, manager, "cred.json"),
+				"stored":  store.savedAuth("cred.json"),
+			} {
+				if got == nil {
+					t.Fatalf("%s auth is nil", label)
+				}
+				if got.Prefix != "p1" || got.Metadata["prefix"] != "p1" {
+					t.Fatalf("%s lost concurrent prefix: prefix=%q metadata.prefix=%#v", label, got.Prefix, got.Metadata["prefix"])
+				}
+				if got.Metadata["note"] != "second-note" || got.Attributes["note"] != "second-note" {
+					t.Fatalf("%s missing second patch note: metadata.note=%#v attr.note=%q", label, got.Metadata["note"], got.Attributes["note"])
+				}
+			}
+		})
+	})
+
+	t.Run("concurrent_refresh", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			initialStorage := &patchRegressionTokenStorage{AccessToken: "tok-initial", RefreshToken: "rt-initial"}
+			base, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Storage:  initialStorage,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":          "codex",
+					"access_token":  "tok-initial",
+					"refresh_token": "rt-initial",
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			refreshedStorage := &patchRegressionTokenStorage{AccessToken: "tok-refreshed", RefreshToken: "rt-refreshed"}
+			refreshed := base.Clone()
+			refreshed.Storage = refreshedStorage
+			refreshed.Metadata["access_token"] = "tok-refreshed"
+			refreshed.Metadata["refresh_token"] = "rt-refreshed"
+
+			refreshDone := make(chan error, 1)
+			go func() {
+				_, errRefresh := manager.UpdateRefreshedAuth(context.Background(), base, refreshed)
+				refreshDone <- errRefresh
+			}()
+			<-store.entered
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","prefix":"p1"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.release)
+			if errRefresh := <-refreshDone; errRefresh != nil {
+				t.Fatalf("UpdateRefreshedAuth() error = %v", errRefresh)
+			}
+			if code := <-patchDone; code != http.StatusOK {
+				t.Fatalf("PATCH status = %d, want 200", code)
+			}
+
+			for label, got := range map[string]*coreauth.Auth{
+				"runtime": mustGetAuthByID(t, manager, "cred.json"),
+				"stored":  store.savedAuth("cred.json"),
+			} {
+				if got == nil {
+					t.Fatalf("%s auth is nil", label)
+				}
+				if got.Prefix != "p1" || got.Metadata["prefix"] != "p1" {
+					t.Fatalf("%s missing patched prefix: prefix=%q metadata.prefix=%#v", label, got.Prefix, got.Metadata["prefix"])
+				}
+				if got.Metadata["access_token"] != "tok-refreshed" || got.Metadata["refresh_token"] != "rt-refreshed" {
+					t.Fatalf("%s rolled back refreshed tokens: access_token=%#v refresh_token=%#v", label, got.Metadata["access_token"], got.Metadata["refresh_token"])
+				}
+				gotStorage, okStorage := got.Storage.(*patchRegressionTokenStorage)
+				if !okStorage || gotStorage == nil || gotStorage.AccessToken != "tok-refreshed" || gotStorage.RefreshToken != "rt-refreshed" {
+					t.Fatalf("%s rolled back refreshed Storage: %#v", label, got.Storage)
+				}
+				if got.CredentialVersion != 2 {
+					t.Fatalf("%s CredentialVersion = %d, want 2", label, got.CredentialVersion)
+				}
+			}
+		})
+	})
+
+	t.Run("concurrent_remove_answers_404", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			base, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type": "codex",
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			hookCalled := false
+			h.SetPostAuthPersistHook(func(_ context.Context, _ *coreauth.Auth) error {
+				hookCalled = true
+				return nil
+			})
+
+			saveDone := make(chan error, 1)
+			go func() {
+				_, errUpdate := manager.Update(context.Background(), base.Clone())
+				saveDone <- errUpdate
+			}()
+			<-store.entered
+
+			removeStarted := make(chan struct{})
+			removeDone := make(chan struct{})
+			go func() {
+				close(removeStarted)
+				manager.Remove(context.Background(), "cred.json")
+				close(removeDone)
+			}()
+			<-removeStarted
+			synctest.Wait()
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","prefix":"p1"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.release)
+			if errUpdate := <-saveDone; errUpdate != nil {
+				t.Fatalf("Update() error = %v", errUpdate)
+			}
+			<-removeDone
+			if code := <-patchDone; code != http.StatusNotFound {
+				t.Fatalf("PATCH status after concurrent Remove = %d, want 404", code)
+			}
+			if hookCalled {
+				t.Fatal("postAuthPersistHook must not run when auth was removed before commit")
+			}
+			if _, ok := manager.GetByID("cred.json"); ok {
+				t.Fatal("removed auth must not be resurrected in manager")
+			}
+		})
+	})
+
+	t.Run("concurrent_reregister_preserves_epoch_check", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			_, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":         "codex",
+					"access_token": "tok-v1",
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			// Stage replacement credential in store for Load().
+			_, _ = store.memoryAuthStore.Save(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":         "codex",
+					"access_token": "tok-v2",
+				},
+			})
+			store.listEntered = make(chan struct{})
+			store.listRelease = make(chan struct{})
+
+			loadDone := make(chan error, 1)
+			go func() {
+				loadDone <- manager.Load(context.Background())
+			}()
+			<-store.listEntered
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","prefix":"stale-prefix"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.listRelease)
+			if errLoad := <-loadDone; errLoad != nil {
+				t.Fatalf("Load() error = %v", errLoad)
+			}
+			if code := <-patchDone; code == http.StatusOK {
+				t.Fatalf("expected stale-epoch PATCH to be rejected after replacement registration, got 200")
+			}
+
+			got := mustGetAuthByID(t, manager, "cred.json")
+			if got.Prefix != "" || got.Metadata["access_token"] != "tok-v2" {
+				t.Fatalf("stale PATCH landed on replacement registration: prefix=%q access_token=%#v", got.Prefix, got.Metadata["access_token"])
+			}
+		})
+	})
+}
+
+func TestPatchAuthFileStatus_KeepsCommitLandedDuringPatch(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	t.Run("concurrent_fields_patch", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			_, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":     "codex",
+					"disabled": false,
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			fieldsDone := make(chan int, 1)
+			go func() {
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(`{"name":"cred.json","prefix":"p1"}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileFields(ctx)
+				fieldsDone <- rec.Code
+			}()
+			<-store.entered
+
+			statusStarted := make(chan struct{})
+			statusDone := make(chan int, 1)
+			go func() {
+				close(statusStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/status", strings.NewReader(`{"name":"cred.json","disabled":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileStatus(ctx)
+				statusDone <- rec.Code
+			}()
+			<-statusStarted
+			synctest.Wait()
+
+			close(store.release)
+			if code := <-fieldsDone; code != http.StatusOK {
+				t.Fatalf("fields PATCH status = %d, want 200", code)
+			}
+			if code := <-statusDone; code != http.StatusOK {
+				t.Fatalf("status PATCH status = %d, want 200", code)
+			}
+
+			for label, got := range map[string]*coreauth.Auth{
+				"runtime": mustGetAuthByID(t, manager, "cred.json"),
+				"stored":  store.savedAuth("cred.json"),
+			} {
+				if got == nil {
+					t.Fatalf("%s auth is nil", label)
+				}
+				if got.Prefix != "p1" || got.Metadata["prefix"] != "p1" {
+					t.Fatalf("%s lost concurrent prefix: prefix=%q metadata.prefix=%#v", label, got.Prefix, got.Metadata["prefix"])
+				}
+				if !got.Disabled || got.Status != coreauth.StatusDisabled || got.Metadata["disabled"] != true {
+					t.Fatalf("%s missing disabled status: disabled=%v status=%v metadata.disabled=%#v", label, got.Disabled, got.Status, got.Metadata["disabled"])
+				}
+			}
+		})
+	})
+
+	t.Run("concurrent_refresh", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			initialStorage := &patchRegressionTokenStorage{AccessToken: "tok-initial", RefreshToken: "rt-initial"}
+			base, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Storage:  initialStorage,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":          "codex",
+					"access_token":  "tok-initial",
+					"refresh_token": "rt-initial",
+					"disabled":      false,
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			refreshedStorage := &patchRegressionTokenStorage{AccessToken: "tok-refreshed", RefreshToken: "rt-refreshed"}
+			refreshed := base.Clone()
+			refreshed.Storage = refreshedStorage
+			refreshed.Metadata["access_token"] = "tok-refreshed"
+			refreshed.Metadata["refresh_token"] = "rt-refreshed"
+
+			refreshDone := make(chan error, 1)
+			go func() {
+				_, errRefresh := manager.UpdateRefreshedAuth(context.Background(), base, refreshed)
+				refreshDone <- errRefresh
+			}()
+			<-store.entered
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/status", strings.NewReader(`{"name":"cred.json","disabled":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileStatus(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.release)
+			if errRefresh := <-refreshDone; errRefresh != nil {
+				t.Fatalf("UpdateRefreshedAuth() error = %v", errRefresh)
+			}
+			if code := <-patchDone; code != http.StatusOK {
+				t.Fatalf("PATCH status = %d, want 200", code)
+			}
+
+			for label, got := range map[string]*coreauth.Auth{
+				"runtime": mustGetAuthByID(t, manager, "cred.json"),
+				"stored":  store.savedAuth("cred.json"),
+			} {
+				if got == nil {
+					t.Fatalf("%s auth is nil", label)
+				}
+				if !got.Disabled || got.Status != coreauth.StatusDisabled || got.Metadata["disabled"] != true {
+					t.Fatalf("%s missing disabled status: disabled=%v status=%v metadata.disabled=%#v", label, got.Disabled, got.Status, got.Metadata["disabled"])
+				}
+				if got.Metadata["access_token"] != "tok-refreshed" || got.Metadata["refresh_token"] != "rt-refreshed" {
+					t.Fatalf("%s rolled back refreshed tokens: access_token=%#v refresh_token=%#v", label, got.Metadata["access_token"], got.Metadata["refresh_token"])
+				}
+				gotStorage, okStorage := got.Storage.(*patchRegressionTokenStorage)
+				if !okStorage || gotStorage == nil || gotStorage.AccessToken != "tok-refreshed" || gotStorage.RefreshToken != "rt-refreshed" {
+					t.Fatalf("%s rolled back refreshed Storage: %#v", label, got.Storage)
+				}
+				if got.CredentialVersion != 2 {
+					t.Fatalf("%s CredentialVersion = %d, want 2", label, got.CredentialVersion)
+				}
+			}
+		})
+	})
+
+	t.Run("concurrent_remove_answers_404", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			base, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type": "codex",
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			store.entered = make(chan struct{})
+			store.release = make(chan struct{})
+
+			hookCalled := false
+			h.SetPostAuthPersistHook(func(_ context.Context, _ *coreauth.Auth) error {
+				hookCalled = true
+				return nil
+			})
+
+			saveDone := make(chan error, 1)
+			go func() {
+				_, errUpdate := manager.Update(context.Background(), base.Clone())
+				saveDone <- errUpdate
+			}()
+			<-store.entered
+
+			removeStarted := make(chan struct{})
+			removeDone := make(chan struct{})
+			go func() {
+				close(removeStarted)
+				manager.Remove(context.Background(), "cred.json")
+				close(removeDone)
+			}()
+			<-removeStarted
+			synctest.Wait()
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/status", strings.NewReader(`{"name":"cred.json","disabled":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileStatus(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.release)
+			if errUpdate := <-saveDone; errUpdate != nil {
+				t.Fatalf("Update() error = %v", errUpdate)
+			}
+			<-removeDone
+			if code := <-patchDone; code != http.StatusNotFound {
+				t.Fatalf("PATCH status after concurrent Remove = %d, want 404", code)
+			}
+			if hookCalled {
+				t.Fatal("postAuthPersistHook must not run when auth was removed before commit")
+			}
+		})
+	})
+
+	t.Run("concurrent_reregister_preserves_epoch_check", func(t *testing.T) {
+		authDir := t.TempDir()
+		h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, nil)
+		synctest.Test(t, func(t *testing.T) {
+			store := &blockingPatchAuthStore{}
+			manager := coreauth.NewManager(store, nil, nil)
+			h.authManager = manager
+			_, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":         "codex",
+					"access_token": "tok-v1",
+					"disabled":     false,
+				},
+			})
+			if errRegister != nil {
+				t.Fatalf("Register() error = %v", errRegister)
+			}
+			_, _ = store.memoryAuthStore.Save(context.Background(), &coreauth.Auth{
+				ID:       "cred.json",
+				FileName: "cred.json",
+				Provider: "codex",
+				Status:   coreauth.StatusActive,
+				Attributes: map[string]string{
+					"path": "/tmp/cred.json",
+				},
+				Metadata: map[string]any{
+					"type":         "codex",
+					"access_token": "tok-v2",
+					"disabled":     false,
+				},
+			})
+			store.listEntered = make(chan struct{})
+			store.listRelease = make(chan struct{})
+
+			loadDone := make(chan error, 1)
+			go func() {
+				loadDone <- manager.Load(context.Background())
+			}()
+			<-store.listEntered
+
+			patchStarted := make(chan struct{})
+			patchDone := make(chan int, 1)
+			go func() {
+				close(patchStarted)
+				rec := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(rec)
+				req := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/status", strings.NewReader(`{"name":"cred.json","disabled":true}`))
+				req.Header.Set("Content-Type", "application/json")
+				ctx.Request = req
+				h.PatchAuthFileStatus(ctx)
+				patchDone <- rec.Code
+			}()
+			<-patchStarted
+			synctest.Wait()
+
+			close(store.listRelease)
+			if errLoad := <-loadDone; errLoad != nil {
+				t.Fatalf("Load() error = %v", errLoad)
+			}
+			if code := <-patchDone; code == http.StatusOK {
+				t.Fatalf("expected stale-epoch PATCH to be rejected after replacement registration, got 200")
+			}
+
+			got := mustGetAuthByID(t, manager, "cred.json")
+			if got.Disabled || got.Metadata["access_token"] != "tok-v2" {
+				t.Fatalf("stale PATCH landed on replacement registration: disabled=%v access_token=%#v", got.Disabled, got.Metadata["access_token"])
+			}
+		})
+	})
+}
+
+func mustGetAuthByID(t *testing.T, manager *coreauth.Manager, id string) *coreauth.Auth {
+	t.Helper()
+	got, ok := manager.GetByID(id)
+	if !ok || got == nil {
+		t.Fatalf("expected auth %q in manager", id)
+	}
+	return got
 }

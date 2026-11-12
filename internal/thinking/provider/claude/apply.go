@@ -40,7 +40,7 @@ func init() {
 //   - ModeBudget: manual thinking budget_tokens
 //   - ModeLevel: adaptive thinking effort (Claude 4.6)
 //   - ModeAuto: provider default adaptive/manual behavior
-//   - ModeNone: disabled
+//   - ModeNone: disabled, or the model's ThinkingSupport.DisableType (between_tools on claude-sonnet-5-5)
 //
 // Expected output format when enabled:
 //
@@ -85,15 +85,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 
 	switch config.Mode {
 	case thinking.ModeNone:
-		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
-		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		// Summary display only applies to an active thinking block.
-		result, _ = sjson.DeleteBytes(result, "thinking.display")
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			result, _ = sjson.DeleteBytes(result, "output_config")
-		}
-		return result, nil
+		return disableThinking(body, modelInfo), nil
 
 	case thinking.ModeLevel:
 		// Adaptive thinking effort is only valid when the model advertises discrete levels.
@@ -119,13 +111,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced).
 		// Decide enabled/disabled based on budget value.
 		if config.Budget == 0 {
-			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
-			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
-			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-				result, _ = sjson.DeleteBytes(result, "output_config")
-			}
-			return result, nil
+			return disableThinking(body, modelInfo), nil
 		}
 
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
@@ -164,6 +150,25 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	default:
 		return body, nil
 	}
+}
+
+// disableThinking turns thinking off with the type the model accepts. Most Claude
+// models take "disabled"; claude-sonnet-5-5 rejects it and needs "between_tools".
+// Neither type accepts extra thinking fields (budget_tokens, display, block_binding),
+// and between_tools only accepts effort high or below, so effort is left to the
+// model default in both cases.
+func disableThinking(body []byte, modelInfo *registry.ModelInfo) []byte {
+	disableType := "disabled"
+	if modelInfo != nil && modelInfo.Thinking != nil && modelInfo.Thinking.DisableType != "" {
+		disableType = modelInfo.Thinking.DisableType
+	}
+	result, _ := sjson.SetRawBytes(body, "thinking", []byte(`{}`))
+	result, _ = sjson.SetBytes(result, "thinking.type", disableType)
+	result, _ = sjson.DeleteBytes(result, "output_config.effort")
+	if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		result, _ = sjson.DeleteBytes(result, "output_config")
+	}
+	return result
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.
@@ -231,15 +236,7 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 
 	switch config.Mode {
 	case thinking.ModeNone:
-		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
-		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		// Summary display only applies to an active thinking block.
-		result, _ = sjson.DeleteBytes(result, "thinking.display")
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			result, _ = sjson.DeleteBytes(result, "output_config")
-		}
-		return result, nil
+		return disableThinking(body, nil), nil
 	case thinking.ModeAuto:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
@@ -259,6 +256,9 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
 		return result, nil
 	default:
+		if config.Budget == 0 {
+			return disableThinking(body, nil), nil
+		}
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
 		result, _ = sjson.DeleteBytes(result, "output_config.effort")

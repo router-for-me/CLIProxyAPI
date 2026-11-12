@@ -256,8 +256,6 @@ func (s *Service) homeLifetimeActive(homeCtx, lifetimeCtx context.Context, gener
 }
 
 func (s *Service) finalizeHomePluginWorkUntilDone(ctx, homeCtx context.Context, generation uint64, client *home.Client, work *homePluginFinalization, publish func() bool) error {
-	stopClose := closeHomeClientOnCancellation(ctx, client)
-	defer stopClose()
 	for {
 		if errContext := ctx.Err(); errContext != nil {
 			return errContext
@@ -287,21 +285,6 @@ func (s *Service) finalizeHomePluginWorkUntilDone(ctx, homeCtx context.Context, 
 		case <-timer.C:
 		}
 	}
-}
-
-func closeHomeClientOnCancellation(ctx context.Context, client *home.Client) func() {
-	if ctx == nil || client == nil {
-		return func() {}
-	}
-	stop := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			client.Close()
-		case <-stop:
-		}
-	}()
-	return func() { close(stop) }
 }
 
 func logHomeConfigChanges(oldCfg, newCfg *config.Config) {
@@ -576,6 +559,16 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 		}, func() {
 			readyOnce.Do(func() { close(ready) })
 		})
+		plannedRebalance := errors.Is(errRun, home.ErrRebalanceRequested)
+		settleBound := time.Duration(cancelBound.Load())
+		var errPending error
+		if plannedRebalance {
+			// Settle issued dispatches before deciding between target takeover and source drain/flush.
+			client.FenceDispatch()
+			settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
+			errPending = registry.WaitPending(settleCtx)
+			cancelSettle()
+		}
 		lifetimeCancel()
 		<-workerDone
 		if publisherDone := supervisor.publisherCompletion(); publisherDone != nil {
@@ -588,11 +581,11 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 			releaseCancel()
 			<-releaseDone
 			client.Close()
-
-			settleBound := time.Duration(cancelBound.Load())
-			settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
-			errPending := registry.WaitPending(settleCtx)
-			cancelSettle()
+			if !plannedRebalance {
+				settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(parentCtx), settleBound)
+				errPending = registry.WaitPending(settleCtx)
+				cancelSettle()
+			}
 			if errPending != nil {
 				log.WithError(errPending).Error("failed to settle pending Home dispatches before subscriber replacement")
 				s.cancelServiceRun()
@@ -617,7 +610,11 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 				releaseFlusher = home.NewReleaseFlusher(nil, nil)
 				registry.SetReleaseSink(releaseFlusher.MarkDirty)
 			}
-			log.WithError(errRun).Warn("home config subscription lifetime ended")
+			if errors.Is(errRun, home.ErrRebalanceRequested) {
+				log.Info("home config subscription reconnecting for load balance")
+			} else {
+				log.WithError(errRun).Warn("home config subscription lifetime ended")
+			}
 			if !published.Load() && !waitForHomeSubscriberRetry(homeCtx, homeSubscriberPreAckRetryBackoff) {
 				return
 			}

@@ -81,7 +81,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
-	if codexUseSIWC(auth) {
+	if codexUseSIWCForRequest(ctx, auth, clientHeaders...) {
 		deleteHeaderCaseInsensitive(headers, "conversation_id")
 		ensureCodexWebsocketSessionHeader(headers, ginHeaders, "")
 		if sessionID := codexSessionHeaderValue(headers); sessionID != "" {

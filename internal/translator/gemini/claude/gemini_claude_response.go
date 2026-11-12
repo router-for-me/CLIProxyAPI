@@ -37,6 +37,7 @@ type Params struct {
 	CurrentToolName            string // Client-facing name of the currently open tool_use block
 	CurrentToolIsParameterless bool   // Whether the open tool_use block was declared parameterless
 	CurrentToolInputEmitted    bool   // Whether cleaned input JSON was already emitted for the open tool_use block
+	CurrentToolPendingEmpty    bool   // Whether an empty "{}" input_json_delta is deferred awaiting tool_use completion
 }
 
 const geminiMalformedFunctionCallErrorPayload = `{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`
@@ -52,7 +53,7 @@ func resolveGeminiClaudeStopReason(finishReason string, sawToolCall bool) string
 	switch finishReason {
 	case "MAX_TOKENS":
 		return "max_tokens"
-	case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST", "IMAGE_SAFETY":
+	case "SAFETY", "RECITATION", "PROHIBITED_CONTENT", "SPII", "BLOCKLIST", "IMAGE_SAFETY", "MALFORMED_RESPONSE":
 		return "refusal"
 	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN", "":
 		return "end_turn"
@@ -87,7 +88,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
-			ToolNameMap:      util.ToolNameMapFromClaudeRequest(originalRequestRawJSON),
+			ToolNameMap:      util.UnambiguousToolNameMapFromClaudeRequest(originalRequestRawJSON),
 			SanitizedNameMap: util.SanitizedToolNameMap(originalRequestRawJSON),
 			SawToolCall:      false,
 		}
@@ -98,10 +99,19 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
 	}
 	p := (*param).(*Params)
+	flushPendingToolInput := func() {
+		if p.ResponseType == 3 && p.CurrentToolPendingEmpty && !p.CurrentToolInputEmitted {
+			data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, p.ResponseIndex)), "delta.partial_json", "{}")
+			appendEvent("content_block_delta", string(data))
+			p.CurrentToolInputEmitted = true
+			p.CurrentToolPendingEmpty = false
+		}
+	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		if isGeminiMalformedFunctionCall(p.FinishReason, p.SawToolCall) {
 			if p.ResponseType != 0 {
+				flushPendingToolInput()
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
 				p.ResponseType = 0
 			}
@@ -121,6 +131,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 		if p.HasContent {
 			if p.ResponseType != 0 {
+				flushPendingToolInput()
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
 				p.ResponseType = 0
 			}
@@ -160,6 +171,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 		p := (*param).(*Params)
 		if p.ResponseType != 0 {
+			flushPendingToolInput()
 			appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
 			p.ResponseIndex++
 			p.ResponseType = 0
@@ -240,6 +252,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					(*param).(*Params).HasContent = true
 				} else {
 					if (*param).(*Params).ResponseType != 0 {
+						flushPendingToolInput()
 						appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 						(*param).(*Params).ResponseIndex++
 					}
@@ -261,7 +274,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				(*param).(*Params).SawToolCall = true
 				upstreamToolName := functionCallResult.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName((*param).(*Params).SanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapClaudeToolName((*param).(*Params).ToolNameMap, originalRequestRawJSON, upstreamToolName)
+				clientToolName := util.MapToolName((*param).(*Params).ToolNameMap, upstreamToolName)
 
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -271,12 +284,21 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 								partialJSON = ""
 							} else {
 								(*param).(*Params).CurrentToolInputEmitted = true
+								(*param).(*Params).CurrentToolPendingEmpty = false
 							}
+						} else if partialJSON == "{}" {
+							if !(*param).(*Params).CurrentToolInputEmitted {
+								(*param).(*Params).CurrentToolPendingEmpty = true
+							}
+							partialJSON = ""
 						} else if partialJSON != "" {
 							(*param).(*Params).CurrentToolInputEmitted = true
+							(*param).(*Params).CurrentToolPendingEmpty = false
 						}
-						data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
-						appendEvent("content_block_delta", string(data))
+						if partialJSON != "" || !(*param).(*Params).CurrentToolPendingEmpty {
+							data, _ := sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
+							appendEvent("content_block_delta", string(data))
+						}
 					}
 					if hasThoughtSignature {
 						appendCarrierThinkingBlock(partSig)
@@ -289,11 +311,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				}
 
 				if (*param).(*Params).ResponseType == 3 {
+					flushPendingToolInput()
 					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 					(*param).(*Params).ResponseIndex++
 					(*param).(*Params).ResponseType = 0
 				}
 				if (*param).(*Params).ResponseType != 0 {
+					flushPendingToolInput()
 					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 					(*param).(*Params).ResponseIndex++
 				}
@@ -301,6 +325,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				(*param).(*Params).CurrentToolName = clientToolName
 				(*param).(*Params).CurrentToolIsParameterless = util.ClaudeToolIsParameterless(clientToolName, originalRequestRawJSON)
 				(*param).(*Params).CurrentToolInputEmitted = false
+				(*param).(*Params).CurrentToolPendingEmpty = false
 				data := []byte(fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`, (*param).(*Params).ResponseIndex))
 				data, _ = sjson.SetBytes(data, "content_block.id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				data, _ = sjson.SetBytes(data, "content_block.name", clientToolName)
@@ -314,11 +339,16 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						} else {
 							(*param).(*Params).CurrentToolInputEmitted = true
 						}
+					} else if partialJSON == "{}" {
+						(*param).(*Params).CurrentToolPendingEmpty = true
+						partialJSON = ""
 					} else if partialJSON != "" {
 						(*param).(*Params).CurrentToolInputEmitted = true
 					}
-					data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
-					appendEvent("content_block_delta", string(data))
+					if partialJSON != "" || !(*param).(*Params).CurrentToolPendingEmpty {
+						data, _ = sjson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, (*param).(*Params).ResponseIndex)), "delta.partial_json", partialJSON)
+						appendEvent("content_block_delta", string(data))
+					}
 				}
 				(*param).(*Params).ResponseType = 3
 				(*param).(*Params).HasContent = true
@@ -344,6 +374,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					(*param).(*Params).HasContent = true
 				} else {
 					if (*param).(*Params).ResponseType != 0 {
+						flushPendingToolInput()
 						appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 						(*param).(*Params).ResponseIndex++
 					}
@@ -365,6 +396,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() != "" {
 		(*param).(*Params).FinishReason = finish.String()
+		flushPendingToolInput()
 	}
 
 	usageResult := gjson.GetBytes(rawJSON, "usageMetadata")
@@ -388,6 +420,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 	if isGeminiMalformedFunctionCall((*param).(*Params).FinishReason, (*param).(*Params).SawToolCall) && !(*param).(*Params).HasFinalEvents {
 		if (*param).(*Params).ResponseType != 0 {
+			flushPendingToolInput()
 			appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 			(*param).(*Params).ResponseType = 0
 		}
@@ -405,6 +438,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 		if (*param).(*Params).HasContent {
 			if (*param).(*Params).ResponseType != 0 {
+				flushPendingToolInput()
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
 				(*param).(*Params).ResponseType = 0
 			}
@@ -439,7 +473,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	_ = requestRawJSON
 
 	root := gjson.ParseBytes(rawJSON)
-	toolNameMap := util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	toolNameMap := util.UnambiguousToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
@@ -552,7 +586,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
-				clientToolName := util.MapClaudeToolName(toolNameMap, originalRequestRawJSON, upstreamToolName)
+				clientToolName := util.MapToolName(toolNameMap, upstreamToolName)
 				toolBlock := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				toolBlock, _ = sjson.SetBytes(toolBlock, "id", util.SanitizeClaudeToolID(fmt.Sprintf("%s-%d", upstreamToolName, atomic.AddUint64(&toolUseIDCounter, 1))))
 				toolBlock, _ = sjson.SetBytes(toolBlock, "name", clientToolName)

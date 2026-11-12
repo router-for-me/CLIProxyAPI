@@ -400,6 +400,23 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
+	// Quota-exhausted Devin credentials revalidate upstream status so early
+	// restoration can be detected (issue #6690); their tokens never expire,
+	// so the generic expiry/lead schedule below would drop them entirely.
+	// A custom RefreshEvaluator keeps precedence (matching shouldRefresh),
+	// otherwise an evaluator veto would reschedule an immediately-due entry.
+	if _, hasEvaluator := auth.Runtime.(RefreshEvaluator); hasEvaluator {
+		// Fall through to the evaluator branch below.
+	} else if next, due := devinQuotaRevalidateAt(auth, now); due {
+		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(next) {
+			next = auth.NextRefreshAfter
+		}
+		if !next.After(now) {
+			return now, true
+		}
+		return next, true
+	}
+
 	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
 		return auth.NextRefreshAfter, true
 	}

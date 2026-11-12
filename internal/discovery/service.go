@@ -232,6 +232,9 @@ func BuildServiceSpec(cfg *config.Config, port int, tlsEnabled bool) (ServiceSpe
 				filtered = append(filtered, advertisedIP)
 			}
 		}
+		if len(filtered) == 0 {
+			filtered = append(filtered, bindIP.String())
+		}
 		advertisedIPs = filtered
 	}
 	if len(advertisedIPs) == 0 {

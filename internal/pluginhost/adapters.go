@@ -150,6 +150,7 @@ func pluginThinkingSupportToRegistryThinkingSupport(thinking *pluginapi.Thinking
 		Max:            thinking.Max,
 		ZeroAllowed:    thinking.ZeroAllowed,
 		DynamicAllowed: thinking.DynamicAllowed,
+		DisableType:    thinking.DisableType,
 		Levels:         cloneStringSlice(thinking.Levels),
 	}
 }
@@ -190,6 +191,7 @@ func registryThinkingSupportToPluginThinkingSupport(thinking *registry.ThinkingS
 		Max:            thinking.Max,
 		ZeroAllowed:    thinking.ZeroAllowed,
 		DynamicAllowed: thinking.DynamicAllowed,
+		DisableType:    thinking.DisableType,
 		Levels:         cloneStringSlice(thinking.Levels),
 	}
 }
@@ -225,6 +227,8 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 	return out
 }
 
+// RegisterModels collects static catalogs for executor and per-auth registration.
+// Catalog-only plugins must not advertise availability independently of credentials.
 func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) {
 	if h == nil || modelRegistry == nil {
 		return
@@ -232,8 +236,6 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 
 	snap := h.Snapshot()
 	records := h.activeRecordsFromSnapshot(snap)
-	registrations := make([]modelClientRegistration, 0)
-	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
 	for _, record := range records {
@@ -288,17 +290,14 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			hasExecutor: record.plugin.Capabilities.Executor != nil,
 		}
 		nextProviders[record.id] = provider
-		if record.plugin.Capabilities.Executor == nil {
-			clientID := "plugin:" + record.id + ":" + provider
-			registrations = append(registrations, modelClientRegistration{
-				clientID: clientID,
-				provider: provider,
-				models:   models,
-			})
-			nextClients[clientID] = struct{}{}
-		}
 	}
-	h.commitModelClients(snap, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Snapshot() != snap {
+		return
+	}
+	h.modelProviders = nextProviders
+	h.modelRegistrations = nextModelRegistrations
 }
 
 // HasAuthModelProvider reports whether an active plugin declares per-auth model

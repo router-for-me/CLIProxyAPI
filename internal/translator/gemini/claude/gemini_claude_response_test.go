@@ -582,6 +582,7 @@ func TestConvertGeminiResponseToClaudeNonStream_SafetyAndMalformedFunctionCallRe
 		{finishReason: "SPII", wantReason: "refusal"},
 		{finishReason: "BLOCKLIST", wantReason: "refusal"},
 		{finishReason: "IMAGE_SAFETY", wantReason: "refusal"},
+		{finishReason: "MALFORMED_RESPONSE", wantReason: "refusal"},
 		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
 		{finishReason: "STOP", wantReason: "end_turn"},
 	}
@@ -1178,5 +1179,34 @@ func TestConvertGeminiResponseToClaude_ParameterlessToolContinuationDoesNotDupli
 	streamBytes = append(streamBytes, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", origRequest, origRequest, continuationChunk, &param), nil)...)
 	if got := geminiClaudeInputJSONDeltas(t, string(streamBytes)); got != "{}" {
 		t.Fatalf("expected concatenated partial_json {}, got %q (stream: %s)", got, string(streamBytes))
+	}
+}
+
+func TestConvertGeminiResponseToClaude_ImplicitOpenToolContinuationOrdering(t *testing.T) {
+	origRequest := []byte(`{"model":"gemini-3-flash","tools":[{"name":"echo","input_schema":{"type":"object","properties":{}}}]}`)
+
+	for _, tc := range []struct {
+		name      string
+		firstArgs string
+		contArgs  string
+		want      string
+	}{
+		{"empty_then_real_args", `{}`, `{"user":"v"}`, `{"user":"v"}`},
+		{"placeholder_then_real_args", `{"reason":"thinking"}`, `{"user":"v"}`, `{"user":"v"}`},
+		{"real_args_then_empty", `{"user":"v"}`, `{}`, `{"user":"v"}`},
+		{"real_args_then_placeholder", `{"user":"v"}`, `{"reason":"done"}`, `{"user":"v"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			firstChunk := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":` + tc.firstArgs + `}}],"role":"model"}}],"modelVersion":"gemini-3-flash","responseId":"resp-echo"}`)
+			continuationChunk := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"args":` + tc.contArgs + `}}],"role":"model"},"finishReason":"STOP"}],"modelVersion":"gemini-3-flash","responseId":"resp-echo"}`)
+
+			ctx := context.Background()
+			var param any
+			streamBytes := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", origRequest, origRequest, firstChunk, &param), nil)
+			streamBytes = append(streamBytes, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-3-flash", origRequest, origRequest, continuationChunk, &param), nil)...)
+			if got := geminiClaudeInputJSONDeltas(t, string(streamBytes)); got != tc.want {
+				t.Fatalf("expected concatenated partial_json %s, got %q (stream: %s)", tc.want, got, string(streamBytes))
+			}
+		})
 	}
 }

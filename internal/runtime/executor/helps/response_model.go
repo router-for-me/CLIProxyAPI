@@ -104,6 +104,11 @@ func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) 
 	}
 	terminal = cand.Exists() && cand.String() != ""
 	if !terminal {
+		objectType := gjson.GetBytes(data, "object").String()
+		finishReason := gjson.GetBytes(data, "choices.0.finish_reason").String()
+		terminal = objectType == "chat.completion" || finishReason != ""
+	}
+	if !terminal {
 		eventType := gjson.GetBytes(data, "event_type").String()
 		if eventType == "" {
 			eventType = gjson.GetBytes(data, "type").String()

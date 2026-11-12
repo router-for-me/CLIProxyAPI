@@ -453,6 +453,9 @@ type RoutingConfig struct {
 // When Fork is true, the alias is added as an additional model in listings while
 // keeping the original model ID available.
 type OAuthModelAlias struct {
+	// OpenAPI overrides Vertex endpoint selection for this model.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
@@ -465,6 +468,9 @@ type OAuthModelAlias struct {
 
 // OAuthModelSetting defines provider/channel model settings (such as context window overrides) for OAuth credentials.
 type OAuthModelSetting struct {
+	// OpenAPI overrides Vertex endpoint selection for this model.
+	OpenAPI *bool `yaml:"openapi,omitempty" json:"openapi,omitempty"`
+
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias,omitempty" json:"alias,omitempty"`
 
@@ -564,11 +570,11 @@ type PayloadModelRule struct {
 // CloakConfig configures request cloaking for non-Claude-Code clients.
 // Cloaking disguises API requests to appear as originating from the official Claude Code CLI.
 type CloakConfig struct {
-	// Mode controls cloaking behavior: "auto" (default), "always", or "never".
+	// Mode controls cloaking behavior: "auto" (default), "always", "never", or "uncloak".
 	// Supplying this CloakConfig explicitly enables cloaking for an unprofiled API key.
 	// - "auto": cloak unless strong request signals identify a verified native entrypoint
 	// - "always": cloak every unconfirmed client; confirmed native Claude Code remains passthrough
-	// - "never": never apply cloaking
+	// - "never" / "uncloak": never apply cloaking; on non-CLI API keys, also strip incoming Claude Code identity and billing attribution
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// StrictMode controls how caller system prompts are handled when cloaking.

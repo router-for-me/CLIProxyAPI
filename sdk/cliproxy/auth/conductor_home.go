@@ -1309,6 +1309,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	m.mu.RUnlock()
 
+	now := time.Now()
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
 	for _, candidate := range candidates {
@@ -1318,6 +1319,10 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		}
 		if okHint && hint.Known {
 			if !hint.Available {
+				if IsAntigravityCreditsHintFresh(hint, now) {
+					continue
+				}
+				unknown = append(unknown, candidate)
 				continue
 			}
 			known = append(known, candidate)
