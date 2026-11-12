@@ -1651,7 +1651,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							NextRecoverAt: next,
 							BackoffLevel:  backoffLevel,
 						})
-					} else if isInvalidGrantResultError(result.Error) || isCreditBalanceTooLowResultError(result.Error) {
+					} else if isInvalidGrantResultError(result.Error) || isCreditBalanceTooLowResultError(result.Error) || isHardwareKeyReauthResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
 						} else {
@@ -3484,6 +3484,24 @@ func isCreditBalanceTooLowResultError(err *Error) bool {
 	return false
 }
 
+// isHardwareKeyReauthResultError reports the Daybreak hardware-key
+// reauthentication variant of cyber_policy (issue #7036): the credential's
+// OAuth session is dead until the account is re-authenticated with an approved
+// physical hardware key, so the credential cools down instead of the request
+// being faulted.
+func isHardwareKeyReauthResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if clienterror.IsCyberPolicyHardwareKeyReauth(err) {
+		return true
+	}
+	if err.Message != "" {
+		return clienterror.IsCyberPolicyHardwareKeyReauth(errors.New(err.Message))
+	}
+	return false
+}
+
 func isModelSupportResultError(err *Error) bool {
 	if err == nil {
 		return false
@@ -3959,6 +3977,16 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	} else if isCreditBalanceTooLowResultError(resultErr) {
 		auth.StatusMessage = "payment_required"
+		if disableCooling {
+			auth.NextRetryAfter = time.Time{}
+		} else {
+			auth.NextRetryAfter = now.Add(30 * time.Minute)
+		}
+	} else if isHardwareKeyReauthResultError(resultErr) {
+		// Daybreak hardware-key reauthentication (issue #7036): the session is
+		// dead until the account re-authenticates with the hardware key, so cool
+		// the credential like other terminal session failures.
+		auth.StatusMessage = "hardware key reauthentication required"
 		if disableCooling {
 			auth.NextRetryAfter = time.Time{}
 		} else {

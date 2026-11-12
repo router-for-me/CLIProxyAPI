@@ -388,3 +388,48 @@ func TestIsClientCancellation(t *testing.T) {
 		})
 	}
 }
+
+// issue7036HardwareKeyReauthBody replays the Daybreak hardware-key
+// reauthentication cyber_policy terminal error described in issue #7036.
+const issue7036HardwareKeyReauthBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"Your session must be reauthenticated with an approved physical hardware key to continue using Codex.","param":null}}`
+
+// issue7036ModerationBody replays the content-moderation cyber_policy sample
+// already used by this repository's response handler tests.
+const issue7036ModerationBody = `{"error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber","param":null}}`
+
+func TestIsCyberPolicyHardwareKeyReauth(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{name: "daybreak hardware key reauth", body: issue7036HardwareKeyReauthBody, want: true},
+		{name: "hardware security key wording", body: `{"error":{"code":"cyber_policy","message":"Re-authenticate your session with an approved physical hardware security key."}}`, want: true},
+		{name: "response.failed layout", body: `{"response":{"error":{"code":"cyber_policy","message":"session must be reauthenticated with an approved hardware key"}}}`, want: true},
+		{name: "content moderation variant", body: issue7036ModerationBody, want: false},
+		{name: "hardware key without cyber policy code", body: `{"error":{"code":"invalid_request","message":"session must be reauthenticated with an approved hardware key"}}`, want: false},
+		{name: "invalid json", body: `not json`, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CyberPolicyHardwareKeyReauthBody([]byte(tc.body)); got != tc.want {
+				t.Fatalf("CyberPolicyHardwareKeyReauthBody = %t, want %t", got, tc.want)
+			}
+			if got := IsCyberPolicyHardwareKeyReauth(errors.New(tc.body)); got != tc.want {
+				t.Fatalf("IsCyberPolicyHardwareKeyReauth = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	if !IsCyberPolicyHardwareKeyReauth(responseBodyError{status: http.StatusBadRequest, body: issue7036HardwareKeyReauthBody}) {
+		t.Fatal("IsCyberPolicyHardwareKeyReauth(responseBodyProvider) = false, want true")
+	}
+}
+
+func TestIsRequestFaultCyberPolicyHardwareKeyReauthStaysCredentialScoped(t *testing.T) {
+	if IsRequestFault(http.StatusBadRequest, errors.New(issue7036HardwareKeyReauthBody)) {
+		t.Fatal("IsRequestFault(daybreak hardware-key cyber_policy) = true, want false so the credential rotates and cools down")
+	}
+	if !IsRequestFault(http.StatusBadRequest, errors.New(issue7036ModerationBody)) {
+		t.Fatal("IsRequestFault(content-moderation cyber_policy) = false, want true to keep request-fault handling")
+	}
+}

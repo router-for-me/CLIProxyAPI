@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
@@ -337,6 +338,13 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
+	// The Daybreak hardware-key reauthentication variant of cyber_policy
+	// (issue #7036) is bound to the credential's OAuth session rather than the
+	// request, so sibling models must not be retried on the same credential and
+	// the conductor records the failure at credential scope.
+	if !credentialScoped && clienterror.CyberPolicyHardwareKeyReauthBody(body) {
+		credentialScoped = true
+	}
 	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
 	if transientCapacity || isUsageLimit {
 		errCode = http.StatusTooManyRequests
