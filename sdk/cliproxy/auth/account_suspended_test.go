@@ -279,3 +279,73 @@ func TestManager_AccountSuspensionClearedByDisableAndEnable(t *testing.T) {
 		}
 	}
 }
+
+func TestManager_MarkResult_AccountSuspendedCoolingDisabledIgnoresStaleResults(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, map[string]any{"disable_cooling": true}, "model-a", "model-b")
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true})
+	staleSeq := m.nextExecutionSeq()
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// Requests sent before the 403 finish after it.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: staleSeq})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", ExecutionSeq: staleSeq,
+		Error: &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "overloaded"}})
+
+	auth, _ := m.GetByID(id)
+	if auth.StatusMessage != "account suspended for a Terms of Service violation" || !isAccountSuspendedResultError(auth.LastError) ||
+		!isAccountSuspendedResultError(auth.ModelStates["model-b"].LastError) {
+		t.Fatalf("stale results changed the suspension: status %q, credential %v, model-b %v", auth.StatusMessage, auth.LastError, auth.ModelStates["model-b"].LastError)
+	}
+
+	// The account still answers 403 to a new request.
+	later := suspendedResult(id, "model-b")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 1 {
+		t.Fatalf("got %d suspension log lines, want 1", len(entries))
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionClearKeepsLongerModelCooldown(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b", "model-c")
+	long := 48 * time.Hour
+	// model-b cools for longer than the suspension will.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", RetryAfter: &long,
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	// model-c cools for 30 minutes.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-c",
+		Error: &Error{HTTPStatus: http.StatusForbidden, Message: `{"error":{"code":403,"message":"The caller does not have permission"}}`}})
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// The suspension outlasts model-c's own cooldown: move that kept deadline into the past.
+	m.mu.Lock()
+	kept := m.auths[id].ModelStates["model-c"].suspensionShadow
+	if kept != nil {
+		kept.NextRetryAfter = time.Now().Add(-time.Minute)
+	}
+	m.mu.Unlock()
+	if kept == nil {
+		t.Fatal("model-c's own cooldown was not kept under the suspension")
+	}
+
+	// After an appeal, a request succeeds.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+
+	now := time.Now()
+	auth, _ := m.GetByID(id)
+	for _, model := range []string{"model-a", "model-c"} {
+		if !IsAuthAvailableForModel(auth, model, now.Add(time.Second)) {
+			t.Fatalf("%s still blocked after the suspension cleared", model)
+		}
+	}
+	if IsAuthAvailableForModel(auth, "model-b", now.Add(30*time.Hour)) {
+		t.Fatal("model-b lost its own 48h cooldown when the suspension cleared")
+	}
+	if !IsAuthAvailableForModel(auth, "model-b", now.Add(49*time.Hour)) {
+		t.Fatal("model-b still blocked after its own cooldown")
+	}
+	if state := auth.ModelStates["model-b"]; state.LastError == nil || state.LastError.HTTPStatus != http.StatusNotFound || state.suspensionShadow != nil {
+		t.Fatalf("model-b state after clearing = %+v, want its own 404 back", state)
+	}
+}

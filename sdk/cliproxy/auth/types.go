@@ -422,6 +422,11 @@ type ModelState struct {
 	// CooldownStateRecord.CredentialQuotaPropagated across restarts,
 	// including for shadow-less reporting models.
 	credentialQuotaPropagated bool `toml:"credential_quota_propagated,omitempty"`
+	// suspensionShadow holds the model's own cooldown layer from before an
+	// account suspension covered it, in the same shape as credentialQuotaShadow,
+	// so clearing the suspension can reinstate a cooldown that outlives it.
+	// Runtime only: nil after a restart, where clearing resets the model.
+	suspensionShadow *ModelState `json:"-"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -776,6 +781,9 @@ func (m *ModelState) Clone() *ModelState {
 	if m.credentialQuotaShadow != nil {
 		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
 	}
+	if m.suspensionShadow != nil {
+		copyState.suspensionShadow = m.suspensionShadow.Clone()
+	}
 	return &copyState
 }
 
@@ -787,6 +795,7 @@ func (m *ModelState) cloneShallow() *ModelState {
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
 	copyState.credentialQuotaShadow = nil
+	copyState.suspensionShadow = nil
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,

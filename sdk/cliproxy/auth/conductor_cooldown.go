@@ -930,7 +930,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			}
 			continue
 		}
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated || !state.forceCooldownUntil.IsZero() {
+		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated || !state.forceCooldownUntil.IsZero() || state.suspensionShadow != nil {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
 			applyCooldownFields(&state.Quota, QuotaState{})
@@ -938,6 +938,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			state.forceCooldownUntil = time.Time{}
 			state.credentialQuotaShadow = nil
 			state.credentialQuotaPropagated = false
+			state.suspensionShadow = nil
 			state.UpdatedAt = now
 			changed = true
 		}
@@ -957,7 +958,8 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})
-		if !keepAuthLevelForce {
+		// A recorded suspension keeps its watermark so results sent before it stay stale.
+		if !keepAuthLevelForce && !accountSuspensionRecorded(auth) {
 			auth.cooldownRecordedSeq = 0
 		}
 		updateAggregatedAvailability(auth, now)
@@ -1005,6 +1007,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		}
 		state.forceCooldownUntil = time.Time{}
 		state.cooldownRecordedSeq = 0
+		state.suspensionShadow = nil
 		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
@@ -1543,8 +1546,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		// suspended, for any model, including one the credential never served. It
 		// can neither clear the suspension nor replace it on the credential or a
 		// model. A later suspension report still goes through.
-		_, suspensionActive := activeAccountSuspension(auth, now)
-		staleUnderSuspension := suspensionActive && !isAccountSuspendedResultError(result.Error) && result.ExecutionSeq > 0 &&
+		// The recorded status decides, not the deadline, so this also holds with
+		// cooling disabled, where no deadline is set.
+		staleUnderSuspension := accountSuspensionRecorded(auth) && !isAccountSuspendedResultError(result.Error) && result.ExecutionSeq > 0 &&
 			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
 		if staleUnderSuspension {
@@ -2035,7 +2039,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state = outerState
 						modelState = state
 					}
-					if !disableCooling && ((result.CredentialScope && statusCodeFromResult(result.Error) == 429) || isAccountSuspendedResultError(result.Error)) {
+					// A suspension stamps its watermark even with cooling disabled, so
+					// results sent before it stay stale.
+					if (!disableCooling && result.CredentialScope && statusCodeFromResult(result.Error) == 429) || isAccountSuspendedResultError(result.Error) {
 						auth.cooldownRecordedSeq = cooldownSeq
 						for _, otherState := range auth.ModelStates {
 							if otherState != nil && otherState != state {
@@ -2084,11 +2090,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 					auth.cooldownRecordedSeq = m.currentExecutionSeq()
 					if isAccountSuspendedResultError(result.Error) {
-						if !disableCooling {
-							for _, state := range auth.ModelStates {
-								if state != nil {
-									state.cooldownRecordedSeq = auth.cooldownRecordedSeq
-								}
+						for _, state := range auth.ModelStates {
+							if state != nil {
+								state.cooldownRecordedSeq = auth.cooldownRecordedSeq
 							}
 						}
 						accountSuspensionChanged = true
@@ -2469,6 +2473,14 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		}
 		merged.credentialQuotaPropagated = target.credentialQuotaPropagated || source.credentialQuotaPropagated
 	}
+	// Keep the layer a suspension covers while the merged state is still suspended.
+	if isAccountSuspendedResultError(merged.LastError) {
+		if preferred.suspensionShadow != nil {
+			merged.suspensionShadow = preferred.suspensionShadow.Clone()
+		} else if fallback.suspensionShadow != nil {
+			merged.suspensionShadow = fallback.suspensionShadow.Clone()
+		}
+	}
 	*target = merged
 	return target
 }
@@ -2487,6 +2499,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.forceCooldownUntil = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
+	state.suspensionShadow = nil
 	state.UpdatedAt = now
 }
 

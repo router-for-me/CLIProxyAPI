@@ -37,10 +37,16 @@ func hasAccountSuspension(auth *Auth) bool {
 	return false
 }
 
+// accountSuspensionRecorded reports whether the credential carries a
+// suspension no success has cleared yet, whether or not it is cooling.
+func accountSuspensionRecorded(auth *Auth) bool {
+	return auth != nil && isAccountSuspendedResultError(auth.LastError)
+}
+
 // activeAccountSuspension returns when a suspended credential may be tried
 // again. It reports false once that time has passed or cooling is off.
 func activeAccountSuspension(auth *Auth, now time.Time) (time.Time, bool) {
-	if auth == nil || !isAccountSuspendedResultError(auth.LastError) || !auth.NextRetryAfter.After(now) {
+	if !accountSuspensionRecorded(auth) || !auth.NextRetryAfter.After(now) {
 		return time.Time{}, false
 	}
 	return auth.NextRetryAfter, true
@@ -48,8 +54,10 @@ func activeAccountSuspension(auth *Auth, now time.Time) (time.Time, bool) {
 
 // applyAccountSuspension records a suspension on every model state of the
 // credential, and on the credential itself when recordOnAuth is set, because
-// the upstream refuses every model on the account alike. With cooling off it
-// records the status and leaves availability alone.
+// the upstream refuses every model on the account alike. A model that was
+// already cooling keeps that layer under the suspension, the way
+// credentialQuotaShadow keeps one under a credential quota. With cooling off
+// it records the status and leaves availability alone.
 func applyAccountSuspension(auth *Auth, resultErr *Error, now time.Time, disableCooling, recordOnAuth bool) {
 	if auth == nil {
 		return
@@ -62,6 +70,12 @@ func applyAccountSuspension(auth *Auth, resultErr *Error, now time.Time, disable
 	for _, state := range auth.ModelStates {
 		if state == nil || state.Status == StatusDisabled {
 			continue
+		}
+		if !isAccountSuspendedResultError(state.LastError) {
+			state.suspensionShadow = nil
+			if isModelStateActiveCooldown(state, now) {
+				state.suspensionShadow = state.Clone()
+			}
 		}
 		state.Status = StatusError
 		state.LastError = cloneError(resultErr)
@@ -89,21 +103,28 @@ func applyAccountSuspension(auth *Auth, resultErr *Error, now time.Time, disable
 	}
 }
 
-// clearAccountSuspension resets every model state a suspension cooled, and
-// the credential's suspension status, once a success shows the account works
-// again. It reports whether anything was cleared.
+// clearAccountSuspension lifts the suspension from every model state and the
+// credential once a success shows the account works again. A model whose own
+// earlier cooldown is still running gets that layer back; the rest reset. It
+// reports whether anything was cleared.
 func clearAccountSuspension(auth *Auth, now time.Time) bool {
 	if auth == nil {
 		return false
 	}
 	cleared := false
 	for _, state := range auth.ModelStates {
-		if state != nil && state.Status != StatusDisabled && isAccountSuspendedResultError(state.LastError) {
-			resetModelState(state, now)
-			cleared = true
+		if state == nil || state.Status == StatusDisabled || !isAccountSuspendedResultError(state.LastError) {
+			continue
 		}
+		if shadow := state.suspensionShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
+			*state = *shadow.Clone()
+			state.suspensionShadow = nil
+		} else {
+			resetModelState(state, now)
+		}
+		cleared = true
 	}
-	if isAccountSuspendedResultError(auth.LastError) {
+	if accountSuspensionRecorded(auth) {
 		auth.LastError = nil
 		auth.StatusMessage = ""
 		auth.Status = StatusActive
