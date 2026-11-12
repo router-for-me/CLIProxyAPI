@@ -65,7 +65,7 @@ ffplay -autoexit response.wav
 | `OPENAI_REALTIME_INPUT_WAV` | Yes | — | Input speech WAV file. It must be 24kHz, 16-bit, mono PCM. |
 | `OPENAI_REALTIME_OUTPUT_WAV` | No | `response.wav` | Destination for the spoken response. |
 | `OPENAI_BASE_URL` | No | `http://127.0.0.1:8317/v1` | CLIProxyAPI OpenAI-compatible base URL. `/v1` is added when the URL has no path. |
-| `OPENAI_REALTIME_MODEL` | No | `gpt-realtime-2.1` | Standard Realtime model name. CLIProxyAPI uses it for the upstream standard WebSocket while selecting a compatible Codex OAuth credential internally. |
+| `OPENAI_REALTIME_MODEL` | No | `gpt-realtime-2.1` | Standard Realtime model name. CLIProxyAPI uses it for the upstream standard WebSocket (and, for WebRTC `POST /v1/realtime` SDP bootstrap, forwards it to the OpenAI Realtime endpoint unchanged) while selecting a compatible Codex OAuth credential internally. |
 | `OPENAI_REALTIME_VOICE` | No | `marin` | Realtime output voice. Other common values include `cedar`, `alloy`, `ash`, `coral`, and `echo`. |
 | `OPENAI_REALTIME_INSTRUCTIONS` | No | Short spoken response instruction | Session instructions attached to the client secret. |
 | `OPENAI_REALTIME_DEBUG` | No | `false` | Print every received Realtime server event. |

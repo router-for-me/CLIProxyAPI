@@ -262,6 +262,7 @@ type fakeMediaSession struct {
 	callID         string
 	closeReason    string
 	closed         atomic.Bool
+	upstreamTexts  []string
 	err            error
 }
 
@@ -277,6 +278,11 @@ func (s *fakeMediaSession) SetCallID(callID string) {
 
 func (s *fakeMediaSession) SetCloseHandler(handler func(string)) {
 	s.closeHandler = handler
+}
+
+func (s *fakeMediaSession) SendUpstreamText(message string) error {
+	s.upstreamTexts = append(s.upstreamTexts, message)
+	return nil
 }
 
 func (s *fakeMediaSession) Close() error {
@@ -1136,8 +1142,8 @@ func TestPrepareCallRequestPreservesRawSDPWhenRelayDisabled(t *testing.T) {
 	if contentType != "application/sdp" {
 		t.Fatalf("content type = %q, want application/sdp", contentType)
 	}
-	if model != defaultLiveModel {
-		t.Fatalf("model = %q, want %q", model, defaultLiveModel)
+	if model != "" {
+		t.Fatalf("model = %q, want empty for a raw SDP body without a model", model)
 	}
 }
 

@@ -37,6 +37,7 @@ type mediaRelaySession interface {
 	AcceptUpstreamAnswer(context.Context, string) (string, error)
 	SetCallID(string)
 	SetCloseHandler(func(string))
+	SendUpstreamText(string) error
 	Close() error
 	CloseWithReason(string) error
 }
@@ -488,6 +489,22 @@ func (s *pionMediaSession) SetCallID(callID string) {
 	s.handlerMu.Lock()
 	s.callID = strings.TrimSpace(callID)
 	s.handlerMu.Unlock()
+}
+
+// SendUpstreamText queues a text message for delivery to the upstream peer. The
+// message is buffered until the upstream DataChannel opens and is sent before
+// any message relayed from the downstream DataChannel, because queueing happens
+// while the bootstrap response is still being produced.
+func (s *pionMediaSession) SendUpstreamText(message string) error {
+	if s == nil || s.bridge == nil {
+		return errors.New("Codex live media session unavailable")
+	}
+	select {
+	case s.bridge.downToUp.queue <- dataChannelMessage{data: []byte(message), isString: true}:
+		return nil
+	case <-s.done:
+		return errors.New("Codex live media session closed")
+	}
 }
 
 func (s *pionMediaSession) logFields(peer string) log.Fields {

@@ -76,15 +76,15 @@ func TestCreateClientSecretMapsStandardRealtimeModel(t *testing.T) {
 	if authorization.IssuerPrincipal != "issuer-key" || authorization.IssuerProvider != "static" {
 		t.Fatalf("issuer = %q/%q", authorization.IssuerProvider, authorization.IssuerPrincipal)
 	}
-	if got := modelFromJSON(authorization.Session); got != defaultLiveModel {
-		t.Fatalf("upstream session model = %q, want %q", got, defaultLiveModel)
+	if got := modelFromJSON(authorization.Session); got != "gpt-realtime" {
+		t.Fatalf("stored session model = %q, want gpt-realtime", got)
 	}
 }
 
-func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
+func TestStandardRealtimeCallUsesOpenAIRealtimeEndpoint(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := auth.NewManager(nil, nil, nil)
-	executor := &captureExecutor{responseBody: io.NopCloser(strings.NewReader("v=0\r\n"))}
+	executor := &captureExecutor{responseBody: io.NopCloser(strings.NewReader("v=0\r\na=answer\r\n"))}
 	manager.RegisterExecutor(executor)
 	if _, errRegister := manager.Register(context.Background(), &auth.Auth{
 		ID:       "codex-oauth",
@@ -107,11 +107,26 @@ func TestStandardRealtimeCallMapsModelAndLocation(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusCreated, recorder.Body.String())
 	}
-	if recorder.Header().Get("Location") != "/v1/realtime/calls/call-123" {
-		t.Fatalf("Location = %q", recorder.Header().Get("Location"))
+	if got := recorder.Header().Get("Location"); got != "" {
+		t.Fatalf("Location = %q, want none for standard Realtime WebRTC", got)
 	}
-	if got := modelFromJSON(executor.body); got != defaultLiveModel {
-		t.Fatalf("upstream model = %q, want %q; body=%s", got, defaultLiveModel, executor.body)
+	if executor.request == nil {
+		t.Fatal("Codex executor did not receive a realtime request")
+	}
+	if got := executor.request.URL.String(); got != "https://api.openai.com/v1/realtime?model=gpt-realtime" {
+		t.Fatalf("upstream URL = %q, want the standard Realtime endpoint with the requested model", got)
+	}
+	if got := executor.request.Header.Get("Content-Type"); got != "application/sdp" {
+		t.Fatalf("Content-Type = %q, want application/sdp", got)
+	}
+	if got := executor.request.Header.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want OAuth token", got)
+	}
+	if got := string(executor.body); got != "v=0\r\n" {
+		t.Fatalf("upstream body = %q, want the raw SDP offer", got)
+	}
+	if got := recorder.Body.String(); got != "v=0\r\na=answer\r\n" {
+		t.Fatalf("response body = %q", got)
 	}
 }
 
@@ -133,14 +148,14 @@ func TestClientSecretStoreRejectsExpiredToken(t *testing.T) {
 }
 
 func TestNormalizeClientSecretSessionHandlesWhitespaceNullAndRejectsArrays(t *testing.T) {
-	clientSession, upstreamSession, errNormalize := normalizeClientSecretSession(json.RawMessage("  null \n"))
+	clientSession, errNormalize := normalizeClientSecretSession(json.RawMessage("  null \n"))
 	if errNormalize != nil {
 		t.Fatalf("normalize whitespace null: %v", errNormalize)
 	}
-	if modelFromJSON(clientSession) != "gpt-realtime" || modelFromJSON(upstreamSession) != defaultLiveModel {
-		t.Fatalf("client=%s upstream=%s", clientSession, upstreamSession)
+	if modelFromJSON(clientSession) != "gpt-realtime" {
+		t.Fatalf("client=%s", clientSession)
 	}
-	if _, _, errNormalize = normalizeClientSecretSession(json.RawMessage(`[]`)); errNormalize == nil {
+	if _, errNormalize = normalizeClientSecretSession(json.RawMessage(`[]`)); errNormalize == nil {
 		t.Fatal("normalize accepted an array session")
 	}
 }

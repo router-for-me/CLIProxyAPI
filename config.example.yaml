@@ -1175,6 +1175,9 @@ oauth:
     # Codex provider behavior.
     codex:
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
+      # The relay also serves standard GPT Realtime models (gpt-realtime*, *realtime-preview*)
+      # over WebRTC on POST /v1/realtime, applying Realtime client-secret session config via
+      # a session.update event on the upstream DataChannel.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
       live-media-relay:
         enabled: false
