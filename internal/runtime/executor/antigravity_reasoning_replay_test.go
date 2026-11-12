@@ -8,14 +8,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
@@ -42,12 +43,12 @@ func TestAntigravityReasoningReplayAccumulatorMultiToolSSEChunks(t *testing.T) {
 	if !ok || len(items) != 2 {
 		t.Fatalf("cached items = %v ok=%v, want 2 items", len(items), ok)
 	}
-	pi0 := int(gjson.GetBytes(items[0], "partIndex").Int())
-	pi1 := int(gjson.GetBytes(items[1], "partIndex").Int())
+	pi0 := int(ojson.GetBytes(items[0], "partIndex").Int())
+	pi1 := int(ojson.GetBytes(items[1], "partIndex").Int())
 	if pi0 != 0 || pi1 != 1 {
 		t.Fatalf("partIndex = %d,%d, want 0,1", pi0, pi1)
 	}
-	if got := gjson.GetBytes(items[0], "thoughtSignature").String(); got != "sig-first" {
+	if got := ojson.GetBytes(items[0], "thoughtSignature").String(); got != "sig-first" {
 		t.Fatalf("first sig = %q", got)
 	}
 }
@@ -69,7 +70,7 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadToleratesHomeKVFailure(t 
 	if len(out) == 0 {
 		t.Fatal("prepare returned an empty payload")
 	}
-	if got := gjson.GetBytes(out, "sessionId").String(); got != "kv-failure" {
+	if got := ojson.GetBytes(out, "sessionId").String(); got != "kv-failure" {
 		t.Fatalf("payload sessionId = %q, want kv-failure", got)
 	}
 }
@@ -109,7 +110,7 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadKeepsCacheForClientMalfor
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 	const model, sessionKey = "gemini-3.6-flash-high", "session:client-malformed-history"
 	payload := []byte(`{"sessionId":"client-malformed-history","request":{"contents":[{"role":"model","parts":[{"text":"answer"}]},{"role":"model","parts":[{"functionResponse":{"id":"orphan","name":"run","response":{"result":"bad"}}}]}]}}`)
-	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"answer"}`))
+	kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"answer"}`))
 	item := buildAntigravityThoughtSignatureItem(0, 0, "valid-cache-signature-123456789", kind, fingerprint)
 	item = antigravityReplayItemContextHashForTest(item, payload, 0)
 	if !internalcache.CacheAntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
@@ -143,16 +144,16 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadInjectsCachedToolPart(t *
 	if !scope.valid() {
 		t.Fatal("scope invalid")
 	}
-	if gjson.GetBytes(out, "request.contents.1.role").String() != "model" {
+	if ojson.GetBytes(out, "request.contents.1.role").String() != "model" {
 		t.Fatalf("functionCall replay must be model role at [1], got %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
 		t.Fatalf("thoughtSignature = %q, want sig-first", got)
 	}
-	if !gjson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() {
+	if !ojson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() {
 		t.Fatalf("functionCall not injected: %s", string(out))
 	}
-	if !gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
+	if !ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
 		t.Fatalf("functionResponse should follow model functionCall at [2]: %s", string(out))
 	}
 }
@@ -172,10 +173,10 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadSanitizesInsertedUnsigned
 	if err != nil {
 		t.Fatalf("prepare error: %v", err)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "skip_thought_signature_validator" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "skip_thought_signature_validator" {
 		t.Fatalf("inserted first synthetic functionCall signature = %q, want bypass sentinel; output=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
+	if got := ojson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
 		t.Fatalf("replayed functionResponse role = %q, want native model role; output=%s", got, out)
 	}
 }
@@ -192,10 +193,10 @@ func TestPrepareAntigravityGeminiReasoningReplayInsertsBeforeModelFunctionRespon
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !gjson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() || gjson.GetBytes(out, "request.contents.1.role").String() != "model" {
+	if !ojson.GetBytes(out, "request.contents.1.parts.0.functionCall").Exists() || ojson.GetBytes(out, "request.contents.1.role").String() != "model" {
 		t.Fatalf("want model functionCall at [1]: %s", string(out))
 	}
-	if !gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
+	if !ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse").Exists() {
 		t.Fatalf("functionResponse should be at [2]: %s", string(out))
 	}
 }
@@ -212,7 +213,7 @@ func TestMergeAntigravityFunctionCallPartReplayMergesSignatureIntoExistingFuncti
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "sig-first" {
 		t.Fatalf("thoughtSignature = %q, want sig-first; body=%s", got, out)
 	}
 }
@@ -230,7 +231,7 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadDropsStaleThoughtSignatur
 		t.Fatal(err)
 	}
 
-	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	parts := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(parts) != 1 {
 		t.Fatalf("parts length = %d, want unchanged single text part; body=%s", len(parts), out)
 	}
@@ -266,10 +267,10 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 	if errPrepare2 != nil {
 		t.Fatal(errPrepare2)
 	}
-	if got := gjson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("turn 2 signature = %q, want %q; body=%s", got, sig1, prepared2)
 	}
-	if got := gjson.GetBytes(prepared2, "request.contents.1.parts.#").Int(); got != 1 {
+	if got := ojson.GetBytes(prepared2, "request.contents.1.parts.#").Int(); got != 1 {
 		t.Fatalf("turn 2 must attach signature in place, parts=%d; body=%s", got, prepared2)
 	}
 
@@ -288,13 +289,13 @@ func TestAntigravityReasoningReplayAccumulatesCompleteTextSignatureChain(t *test
 	if errPrepare3 != nil {
 		t.Fatal(errPrepare3)
 	}
-	if got := gjson.GetBytes(prepared3, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(prepared3, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("turn 3 first signature = %q, want %q; body=%s", got, sig1, prepared3)
 	}
-	if got := gjson.GetBytes(prepared3, "request.contents.3.parts.0.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(prepared3, "request.contents.3.parts.0.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("turn 3 second signature = %q, want %q; body=%s", got, sig2, prepared3)
 	}
-	if got := len(gjson.GetBytes(prepared3, "request.contents.1.parts").Array()) + len(gjson.GetBytes(prepared3, "request.contents.3.parts").Array()); got != 2 {
+	if got := len(ojson.GetBytes(prepared3, "request.contents.1.parts").Array()) + len(ojson.GetBytes(prepared3, "request.contents.3.parts").Array()); got != 2 {
 		t.Fatalf("signatures must remain attached to native text parts, total parts=%d; body=%s", got, prepared3)
 	}
 }
@@ -320,10 +321,10 @@ func TestAntigravityReasoningReplaySplitsConsecutiveSignedTextSegments(t *testin
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first consecutive text signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("second consecutive text signature = %q, want %q; body=%s", got, sig2, out)
 	}
 }
@@ -350,10 +351,10 @@ func TestAntigravityReasoningReplaySignatureOnlyCarrierEndsTextSegment(t *testin
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first trailing text signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("second trailing text signature = %q, want %q; body=%s", got, sig2, out)
 	}
 }
@@ -378,10 +379,10 @@ func TestAntigravityReasoningReplayDropsUnmatchedConsecutiveCarrier(t *testing.T
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig3 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig3 {
 		t.Fatalf("second signature = %q, want %q; body=%s", got, sig3, out)
 	}
 	if strings.Contains(string(out), sig2) {
@@ -408,10 +409,10 @@ func TestAntigravityReasoningReplayDuplicateCarrierDoesNotSplitSegment(t *testin
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first thought signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("second thought signature = %q, want %q; body=%s", got, sig2, out)
 	}
 }
@@ -435,7 +436,7 @@ func TestAntigravityReasoningReplayDirectTextSignatureWinsOverUnboundPrefix(t *t
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != directSig {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != directSig {
 		t.Fatalf("thought signature = %q, want direct signature %q; body=%s", got, directSig, out)
 	}
 	if strings.Contains(string(out), prefixSig) {
@@ -459,7 +460,7 @@ func TestAntigravityReasoningReplaySameDirectSignatureReplacesPrefix(t *testing.
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
 		t.Fatalf("thought signature = %q, want %q; body=%s", got, signature, out)
 	}
 }
@@ -483,10 +484,10 @@ func TestAntigravityReasoningReplayDirectToolSignatureWinsOverPrefix(t *testing.
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != directSig {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != directSig {
 		t.Fatalf("tool signature = %q, want %q; body=%s", got, directSig, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "" {
 		t.Fatalf("prefix signature retargeted to later text: %q; body=%s", got, out)
 	}
 }
@@ -507,7 +508,7 @@ func TestAntigravityReasoningReplayAttachesDetachedSignatureToFunctionCall(t *te
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
 		t.Fatalf("function signature = %q, want %q; body=%s", got, signature, out)
 	}
 }
@@ -534,7 +535,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelOmittedCalls(t *
 	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(out); errValidate != nil {
 		t.Fatalf("parallel replay is invalid: %v; body=%s", errValidate, out)
 	}
-	calls := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	calls := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "id1" || calls[1].Get("functionCall.id").String() != "id2" {
 		t.Fatalf("parallel calls were not restored together: %s", out)
 	}
@@ -561,11 +562,11 @@ func TestPrepareAntigravityGeminiReasoningReplayReordersResponsesAfterRestoringP
 	if errValidate := internalsignature.ValidateGeminiFunctionCallPairing(out); errValidate != nil {
 		t.Fatalf("restored reverse responses are invalid: %v; body=%s", errValidate, out)
 	}
-	responses := gjson.GetBytes(out, "request.contents.2.parts").Array()
+	responses := ojson.GetBytes(out, "request.contents.2.parts").Array()
 	if len(responses) != 2 || responses[0].Get("functionResponse.id").String() != "id1" || responses[1].Get("functionResponse.id").String() != "id2" {
 		t.Fatalf("restored responses were not reordered: %s", out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
+	if got := ojson.GetBytes(out, "request.contents.2.role").String(); got != "model" {
 		t.Fatalf("restored response role = %q, want model; body=%s", got, out)
 	}
 }
@@ -590,7 +591,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresSyntheticParallelCallsWi
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	calls := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	calls := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(calls) != 2 {
 		t.Fatalf("parallel synthetic calls = %d, want 2; body=%s", len(calls), out)
 	}
@@ -622,8 +623,8 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresSequentialOmittedCalls(t
 		t.Fatal(errPrepare)
 	}
 	var calls []string
-	gjson.GetBytes(out, "request.contents").ForEach(func(_, content gjson.Result) bool {
-		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+	ojson.GetBytes(out, "request.contents").ForEach(func(_, content ojson.Result) bool {
+		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
 			if callID := part.Get("functionCall.id").String(); callID != "" {
 				calls = append(calls, callID)
 			}
@@ -658,7 +659,7 @@ func TestAntigravityReasoningReplayAccumulatesCompleteToolSignatureChain(t *test
 	if errPrepare2 != nil {
 		t.Fatal(errPrepare2)
 	}
-	if got := gjson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("turn 2 tool signature = %q, want %q; body=%s", got, sig1, prepared2)
 	}
 
@@ -672,10 +673,10 @@ func TestAntigravityReasoningReplayAccumulatesCompleteToolSignatureChain(t *test
 	if errPrepare3 != nil {
 		t.Fatal(errPrepare3)
 	}
-	if got := gjson.GetBytes(prepared3, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(prepared3, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("turn 3 first tool signature = %q, want %q; body=%s", got, sig1, prepared3)
 	}
-	if got := gjson.GetBytes(prepared3, "request.contents.4.parts.0.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(prepared3, "request.contents.4.parts.0.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("turn 3 second tool signature = %q, want %q; body=%s", got, sig2, prepared3)
 	}
 }
@@ -697,7 +698,7 @@ func TestAntigravityReasoningReplayDirectSignatureClosesSegmentBeforeUnsignedTex
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	parts := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != signature || parts[1].Get("thoughtSignature").String() != "" {
 		t.Fatalf("direct signature crossed into unsigned text: %s", out)
 	}
@@ -726,10 +727,10 @@ func TestAntigravityReasoningReplayKeepsMixedTextToolTextFingerprintsSeparate(t 
 	if !ok || len(items) != 3 {
 		t.Fatalf("cached mixed items = %d ok=%v, want 3", len(items), ok)
 	}
-	if occurrence := gjson.GetBytes(items[0], "targetOccurrence"); !occurrence.Exists() || occurrence.Int() != 0 {
+	if occurrence := ojson.GetBytes(items[0], "targetOccurrence"); !occurrence.Exists() || occurrence.Int() != 0 {
 		t.Fatalf("first text targetOccurrence = %s, want 0; item=%s", occurrence.Raw, items[0])
 	}
-	if got := gjson.GetBytes(items[2], "targetOccurrence").Int(); got != 1 {
+	if got := ojson.GetBytes(items[2], "targetOccurrence").Int(); got != 1 {
 		t.Fatalf("second text targetOccurrence = %d, want 1; item=%s", got, items[2])
 	}
 
@@ -739,7 +740,7 @@ func TestAntigravityReasoningReplayKeepsMixedTextToolTextFingerprintsSeparate(t 
 		t.Fatal(errPrepare)
 	}
 	for partIndex, want := range []string{textSig1, toolSig, textSig2} {
-		if got := gjson.GetBytes(out, fmt.Sprintf("request.contents.1.parts.%d.thoughtSignature", partIndex)).String(); got != want {
+		if got := ojson.GetBytes(out, fmt.Sprintf("request.contents.1.parts.%d.thoughtSignature", partIndex)).String(); got != want {
 			t.Fatalf("part %d signature = %q, want %q; body=%s", partIndex, got, want, out)
 		}
 	}
@@ -757,7 +758,7 @@ func TestAntigravityReasoningReplayAccumulatorCountsExistingSegmentOccurrences(t
 		t.Fatalf("captured items = %d, want 2: %q", len(acc.items), acc.items)
 	}
 	for itemIndex, wantKind := range []string{"text", "thought"} {
-		item := gjson.ParseBytes(acc.items[itemIndex])
+		item := ojson.ParseBytes(acc.items[itemIndex])
 		if item.Get("targetKind").String() != wantKind || item.Get("targetOccurrence").Int() != 1 {
 			t.Fatalf("item %d kind/occurrence = %q/%d, want %q/1: %s", itemIndex, item.Get("targetKind").String(), item.Get("targetOccurrence").Int(), wantKind, item.Raw)
 		}
@@ -776,7 +777,7 @@ func TestAntigravityReasoningReplayAccumulatorCountsExistingFunctionOccurrenceTh
 	acc.Commit(context.Background())
 
 	items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
-	if !ok || len(items) != 2 || gjson.GetBytes(items[1], "targetOccurrence").Int() != 1 {
+	if !ok || len(items) != 2 || ojson.GetBytes(items[1], "targetOccurrence").Int() != 1 {
 		t.Fatalf("function occurrences were not committed: ok=%v items=%q", ok, items)
 	}
 	replayPayload := []byte(`{"sessionId":"existing-function","request":{"contents":[{"role":"model","parts":[{"functionCall":{"name":"run","args":{"value":"same"}}},{"functionCall":{"name":"run","args":{"value":"same"}}}]}]}}`)
@@ -786,7 +787,7 @@ func TestAntigravityReasoningReplayAccumulatorCountsExistingFunctionOccurrenceTh
 	}
 	// The leading call gets Gemini's bypass sentinel (it carries no native
 	// signature); only the second occurrence may receive the replayed one.
-	parts := gjson.GetBytes(prepared, "request.contents.0.parts").Array()
+	parts := ojson.GetBytes(prepared, "request.contents.0.parts").Array()
 	if len(parts) != 2 || antigravityHasNativeThoughtSignature(parts[0].Get("thoughtSignature").String()) || parts[1].Get("thoughtSignature").String() != signature {
 		t.Fatalf("function occurrence replay targeted the wrong call: %s", prepared)
 	}
@@ -809,7 +810,7 @@ func TestAntigravityReasoningReplayCapturesSignatureBeforeThoughtText(t *testing
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
 		t.Fatalf("thought-first signature = %q, want %q; body=%s", got, signature, out)
 	}
 }
@@ -825,7 +826,7 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesIDLessFunctionCallBypass
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "idless-native-signature-123456" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "idless-native-signature-123456" {
 		t.Fatalf("id-less function signature = %q, want native replay; body=%s", got, out)
 	}
 }
@@ -854,7 +855,7 @@ func TestPrepareAntigravityGeminiReasoningReplayMatchesRewrittenToolCallID(t *te
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "rewritten-id-signature-123456" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "rewritten-id-signature-123456" {
 		t.Fatalf("rewritten-ID function signature = %q, want native replay; body=%s", got, out)
 	}
 }
@@ -870,15 +871,15 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsReusedIDWithChangedCall(t
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); antigravityHasNativeThoughtSignature(got) {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); antigravityHasNativeThoughtSignature(got) {
 		t.Fatalf("changed call with reused ID received stale signature %q; body=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "" {
 		t.Fatalf("reused-ID signature fell through to another semantic match %q; body=%s", got, out)
 	}
 	callCount := 0
-	gjson.GetBytes(out, "request.contents").ForEach(func(_, content gjson.Result) bool {
-		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+	ojson.GetBytes(out, "request.contents").ForEach(func(_, content ojson.Result) bool {
+		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
 			if part.Get("functionCall.id").String() == "reused-id" {
 				callCount++
 			}
@@ -902,7 +903,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsChangedIDLessCallAtSamePo
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); antigravityHasNativeThoughtSignature(got) {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); antigravityHasNativeThoughtSignature(got) {
 		t.Fatalf("changed ID-less call received stale signature %q; body=%s", got, out)
 	}
 }
@@ -926,10 +927,10 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCalls(t *testing.T) {
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first repeated signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("second repeated signature = %q, want %q; body=%s", got, sig2, out)
 	}
 }
@@ -955,7 +956,7 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 		t.Fatalf("cached items = %d ok=%v, want 2", len(items), ok)
 	}
 	for index, item := range items {
-		if occurrence := gjson.GetBytes(item, "targetOccurrence"); !occurrence.Exists() || occurrence.Int() != int64(index) {
+		if occurrence := ojson.GetBytes(item, "targetOccurrence"); !occurrence.Exists() || occurrence.Int() != int64(index) {
 			t.Fatalf("item %d occurrence = %s, want %d; item=%s", index, occurrence.Raw, index, item)
 		}
 	}
@@ -965,15 +966,15 @@ func TestAntigravityReasoningReplayPreservesRepeatedIDLessCallsAcrossSplitSSEPar
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first split repeated signature = %q, want %q; body=%s", got, sig1, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("second split repeated signature = %q, want %q; body=%s", got, sig2, out)
 	}
 
 	rebuiltItems := antigravityReasoningReplayItemsFromRequest(out)
-	if len(rebuiltItems) != 2 || gjson.GetBytes(rebuiltItems[0], "targetOccurrence").Int() != 0 || gjson.GetBytes(rebuiltItems[1], "targetOccurrence").Int() != 1 {
+	if len(rebuiltItems) != 2 || ojson.GetBytes(rebuiltItems[0], "targetOccurrence").Int() != 0 || ojson.GetBytes(rebuiltItems[1], "targetOccurrence").Int() != 1 {
 		t.Fatalf("rebuilt occurrences were not preserved: %q", rebuiltItems)
 	}
 }
@@ -1004,7 +1005,7 @@ func TestAntigravityReasoningReplayAssociatesSignatureBeforeFunctionCall(t *test
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != signature {
 		t.Fatalf("signature-first tool signature = %q, want %q; body=%s", got, signature, out)
 	}
 }
@@ -1045,7 +1046,7 @@ func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"same answer"}`))
+	kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"same answer"}`))
 	item := buildAntigravityThoughtSignatureItem(1, 0, "fingerprinted-signature-123456", kind, fingerprint)
 	originalPayload := []byte(`{"sessionId":"rebuilt","request":{"contents":[{"role":"user","parts":[{"text":"old context"}]},{"role":"model","parts":[{"text":"same answer"}]},{"role":"user","parts":[{"text":"old next"}]}]}}`)
 	item = antigravityReplayItemContextHashForTest(item, originalPayload, 1)
@@ -1059,7 +1060,7 @@ func TestPrepareAntigravityGeminiReasoningReplayKeepsTextSignatureOnContextDrift
 	// The signed part itself is byte-identical, so the signature still describes
 	// it exactly. Only the surrounding turns drifted, which Gemini does not bind
 	// signatures to, so dropping it here would only force needless re-reasoning.
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "fingerprinted-signature-123456" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "fingerprinted-signature-123456" {
 		t.Fatalf("signature = %q, want the signature replayed even though the surrounding context drifted; body=%s", got, out)
 	}
 }
@@ -1068,7 +1069,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsFingerprintMismatch(t *te
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"original answer"}`))
+	kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"original answer"}`))
 	item := buildAntigravityThoughtSignatureItem(1, 0, "fingerprinted-signature-123456", kind, fingerprint)
 	internalcache.CacheAntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:edited", [][]byte{item})
 
@@ -1079,7 +1080,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsFingerprintMismatch(t *te
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "" {
 		t.Fatalf("edited part received stale signature %q; body=%s", got, out)
 	}
 }
@@ -1088,7 +1089,7 @@ func TestPrepareAntigravityGeminiReasoningReplayMovesClientSignatureToNativePart
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
 
-	kind, fingerprint := antigravityReplayPartFingerprint(gjson.Parse(`{"text":"visible answer"}`))
+	kind, fingerprint := antigravityReplayPartFingerprint(ojson.Parse(`{"text":"visible answer"}`))
 	item := buildAntigravityThoughtSignatureItem(1, 1, "client-carried-signature-123456", kind, fingerprint)
 	internalcache.CacheAntigravityReasoningReplayItems("gemini-3.6-flash-high", "session:client-carried", [][]byte{item})
 	payload := []byte(`{"sessionId":"client-carried","request":{"contents":[{"role":"user","parts":[{"text":"turn"}]},{"role":"model","parts":[{"text":"hidden","thought":true,"thoughtSignature":"client-carried-signature-123456"},{"text":"visible answer"}]},{"role":"user","parts":[{"text":"next"}]}]}}`)
@@ -1096,10 +1097,10 @@ func TestPrepareAntigravityGeminiReasoningReplayMovesClientSignatureToNativePart
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "" {
 		t.Fatalf("client-carried signature remained on non-native thought part: %q; body=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "client-carried-signature-123456" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.1.thoughtSignature").String(); got != "client-carried-signature-123456" {
 		t.Fatalf("client-carried signature = %q on visible part, want native placement; body=%s", got, out)
 	}
 }
@@ -1115,7 +1116,7 @@ func TestPrepareAntigravityGeminiReasoningReplayReplacesBypassSignature(t *testi
 	if errPrepare != nil {
 		t.Fatal(errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "native-real-signature-123456" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String(); got != "native-real-signature-123456" {
 		t.Fatalf("signature = %q, want native replay; body=%s", got, out)
 	}
 }
@@ -1221,7 +1222,7 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 	titleAccumulator.observeResponsePayload([]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"session title"},{"text":"","thoughtSignature":"claude-title-signature-123456"}]},"finishReason":"STOP"}]}}`))
 	titleAccumulator.Commit(context.Background())
 
-	if got := gjson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(prepared2, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("first main signature after title request = %q, want %q; body=%s", got, sig1, prepared2)
 	}
 	mainAccumulator2 := newAntigravityReasoningReplayAccumulator(scope2, prepared2)
@@ -1237,10 +1238,10 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 	if resumeScope.sessionKey != mainScope.sessionKey {
 		t.Fatalf("resumed replay scope = %q, want %q", resumeScope.sessionKey, mainScope.sessionKey)
 	}
-	if got := gjson.GetBytes(resumed, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+	if got := ojson.GetBytes(resumed, "request.contents.1.parts.0.thoughtSignature").String(); got != sig1 {
 		t.Fatalf("resumed first signature = %q, want %q; body=%s", got, sig1, resumed)
 	}
-	if got := gjson.GetBytes(resumed, "request.contents.3.parts.0.thoughtSignature").String(); got != sig2 {
+	if got := ojson.GetBytes(resumed, "request.contents.3.parts.0.thoughtSignature").String(); got != sig2 {
 		t.Fatalf("resumed second signature = %q, want %q; body=%s", got, sig2, resumed)
 	}
 }
@@ -1268,12 +1269,12 @@ func TestAntigravityReasoningReplayScopeUsesStableSessionWithoutSessionId(t *tes
 }
 
 func TestAntigravityReplayToolCallKeysUsesNativeFunctionCallID(t *testing.T) {
-	fc := gjson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native"}`)
+	fc := ojson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native"}`)
 	keys := antigravityReplayToolCallKeysFromPart(fc)
 	if len(keys) != 1 {
 		t.Fatalf("keys = %v", keys)
 	}
-	fc2 := gjson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native-2"}`)
+	fc2 := ojson.Parse(`{"name":"Read","args":{"file_path":"/a"},"id":"id-native-2"}`)
 	keys2 := antigravityReplayToolCallKeysFromPart(fc2)
 	if keys[0] == keys2[0] {
 		t.Fatalf("parallel tool calls should not share replay key: %v vs %v", keys, keys2)
@@ -1335,16 +1336,16 @@ func TestPrepareAntigravityGeminiReasoningReplayRepairsSequentialCompactedUnknow
 	}
 
 	// Verify restored model functionCall has name "Read" and thoughtSignature
-	fcName := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
-	fcID := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
-	fcSig := gjson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String()
+	fcName := ojson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
+	fcID := ojson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String()
+	fcSig := ojson.GetBytes(out, "request.contents.1.parts.0.thoughtSignature").String()
 	if fcName != "Read" || fcID != "call_seq_1" || fcSig != "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg" {
 		t.Fatalf("restored functionCall = name:%q id:%q sig:%q, want Read/call_seq_1/signature", fcName, fcID, fcSig)
 	}
 
 	// Verify user functionResponse.name was repaired from "unknown" to "Read"
-	frName := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
-	frID := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
+	frName := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
+	frID := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String()
 	if frName != "Read" || frID != "call_seq_1" {
 		t.Fatalf("repaired functionResponse = name:%q id:%q, want Read/call_seq_1", frName, frID)
 	}
@@ -1425,15 +1426,15 @@ func TestPrepareAntigravityGeminiReasoningReplayRepairsParallelCompactedUnknownR
 	}
 
 	// Verify parallel functionCall restoration
-	fc1Name := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
-	fc2Name := gjson.GetBytes(out, "request.contents.1.parts.1.functionCall.name").String()
+	fc1Name := ojson.GetBytes(out, "request.contents.1.parts.0.functionCall.name").String()
+	fc2Name := ojson.GetBytes(out, "request.contents.1.parts.1.functionCall.name").String()
 	if fc1Name != "Read" || fc2Name != "Grep" {
 		t.Fatalf("restored parallel functionCalls = %q, %q, want Read, Grep", fc1Name, fc2Name)
 	}
 
 	// Verify parallel functionResponse.name repair
-	fr1Name := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
-	fr2Name := gjson.GetBytes(out, "request.contents.2.parts.1.functionResponse.name").String()
+	fr1Name := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse.name").String()
+	fr2Name := ojson.GetBytes(out, "request.contents.2.parts.1.functionResponse.name").String()
 	if fr1Name != "Read" || fr2Name != "Grep" {
 		t.Fatalf("repaired parallel functionResponses = %q, %q, want Read, Grep", fr1Name, fr2Name)
 	}
@@ -1445,17 +1446,17 @@ func TestPrepareAntigravityGeminiReasoningReplayRepairsParallelCompactedUnknownR
 }
 
 func TestAntigravityFunctionCallMatchesReplayItemOnlyIgnoresDeclaredDefaults(t *testing.T) {
-	item := gjson.Parse(`{"name":"Edit","args":{"path":"/tmp/a"}}`)
+	item := ojson.Parse(`{"name":"Edit","args":{"path":"/tmp/a"}}`)
 	schemas := map[string]any{"Edit": map[string]any{"type": "object", "properties": map[string]any{"replace_all": map[string]any{"type": "boolean", "default": false}}}}
-	declaredDefault := gjson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","replace_all":false}}`)
+	declaredDefault := ojson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","replace_all":false}}`)
 	if !antigravityFunctionCallMatchesReplayItem(declaredDefault, item, schemas) {
 		t.Fatal("declared schema default should be semantically equivalent")
 	}
-	changedDefault := gjson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","replace_all":true}}`)
+	changedDefault := ojson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","replace_all":true}}`)
 	if antigravityFunctionCallMatchesReplayItem(changedDefault, item, schemas) {
 		t.Fatal("non-default value must not match native args")
 	}
-	undeclaredExtra := gjson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","force":false}}`)
+	undeclaredExtra := ojson.Parse(`{"name":"Edit","args":{"path":"/tmp/a","force":false}}`)
 	if antigravityFunctionCallMatchesReplayItem(undeclaredExtra, item, schemas) {
 		t.Fatal("undeclared client arg must not match native args")
 	}
@@ -1483,14 +1484,14 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresClaudeToolProvenanceWith
 	if errPrepare != nil {
 		t.Fatalf("prepare failed: %v", errPrepare)
 	}
-	call := gjson.GetBytes(out, "request.contents.1.parts.0")
+	call := ojson.GetBytes(out, "request.contents.1.parts.0")
 	if call.Get("functionCall.id").String() != nativeID || call.Get("functionCall.name").String() != "Edit" || call.Get("thoughtSignature").String() != signature {
 		t.Fatalf("native call provenance was not restored: %s", call.Raw)
 	}
 	if call.Get("functionCall.args.replace_all").Exists() {
 		t.Fatalf("client-inserted schema default leaked into restored native call: %s", call.Raw)
 	}
-	response := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
+	response := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse")
 	if response.Get("id").String() != nativeID || response.Get("name").String() != "Edit" {
 		t.Fatalf("function response provenance was not restored: %s", response.Raw)
 	}
@@ -1515,10 +1516,10 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresLegacyClaudeToolIDWithSc
 	if errPrepare != nil {
 		t.Fatalf("prepare failed: %v", errPrepare)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String(); got != "native-edit-legacy" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.functionCall.id").String(); got != "native-edit-legacy" {
 		t.Fatalf("legacy client ID was not restored: %q", got)
 	}
-	if got := gjson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String(); got != "native-edit-legacy" {
+	if got := ojson.GetBytes(out, "request.contents.2.parts.0.functionResponse.id").String(); got != "native-edit-legacy" {
 		t.Fatalf("legacy functionResponse ID was not restored: %q", got)
 	}
 }
@@ -1541,8 +1542,8 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWithoutClaudeToolProvena
 	if antigravityPayloadHasClaudeToolProvenanceID(out) {
 		t.Fatalf("reserved provenance IDs leaked upstream: %s", out)
 	}
-	call := gjson.GetBytes(out, "request.contents.0.parts.0")
-	response := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse")
+	call := ojson.GetBytes(out, "request.contents.0.parts.0")
+	response := ojson.GetBytes(out, "request.contents.1.parts.0.functionResponse")
 	callID := call.Get("functionCall.id").String()
 	if callID == "" || callID != response.Get("id").String() {
 		t.Fatalf("degraded call/response pairing broken: call=%q response=%q", callID, response.Get("id").String())
@@ -1580,21 +1581,21 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresParallelClaudeToolProven
 	if errPrepare != nil {
 		t.Fatalf("prepare failed: %v", errPrepare)
 	}
-	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	calls := ojson.GetBytes(out, "request.contents.0.parts").Array()
 	if len(calls) != 2 || calls[0].Get("functionCall.id").String() != "native-read-1" || calls[1].Get("functionCall.id").String() != "native-read-2" {
 		t.Fatalf("parallel calls were not restored in native order: %s", out)
 	}
 	if calls[0].Get("thoughtSignature").String() == "" || calls[1].Get("thoughtSignature").Exists() {
-		t.Fatalf("signed/unsigned parallel provenance changed: %s", gjson.GetBytes(out, "request.contents.0").Raw)
+		t.Fatalf("signed/unsigned parallel provenance changed: %s", ojson.GetBytes(out, "request.contents.0").Raw)
 	}
-	responses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	responses := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(responses) != 4 || responses[0].Get("functionResponse.id").String() != "native-read-1" || responses[1].Get("functionResponse.id").String() != "native-read-2" {
-		t.Fatalf("parallel responses were not normalized to native order: %s", gjson.GetBytes(out, "request.contents.1").Raw)
+		t.Fatalf("parallel responses were not normalized to native order: %s", ojson.GetBytes(out, "request.contents.1").Raw)
 	}
 	if responses[2].Get("text").String() != "results follow" || responses[3].Get("text").String() != "continue" {
-		t.Fatalf("mixed user parts were not retained after parallel responses: %s", gjson.GetBytes(out, "request.contents.1").Raw)
+		t.Fatalf("mixed user parts were not retained after parallel responses: %s", ojson.GetBytes(out, "request.contents.1").Raw)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.role").String(); got != "user" {
+	if got := ojson.GetBytes(out, "request.contents.1.role").String(); got != "user" {
 		t.Fatalf("mixed response role = %q, want user; output=%s", got, out)
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
@@ -1626,7 +1627,7 @@ func TestPrepareAntigravityGeminiReasoningReplayRejectsChangedClaudeToolArgument
 	if antigravityPayloadHasClaudeToolProvenanceID(out) {
 		t.Fatalf("reserved provenance IDs leaked upstream: %s", out)
 	}
-	call := gjson.GetBytes(out, "request.contents.0.parts.0")
+	call := ojson.GetBytes(out, "request.contents.0.parts.0")
 	if got := call.Get("functionCall.id").String(); got == "native-edit-changed" {
 		t.Fatalf("native call ID was restored onto changed arguments: %s", out)
 	}
@@ -1721,11 +1722,11 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresIdentityOnContextDrift(t
 	if antigravityPayloadHasClaudeToolProvenanceID(out) {
 		t.Fatalf("reserved provenance IDs leaked upstream: %s", out)
 	}
-	call := gjson.GetBytes(out, "request.contents.0.parts.0")
+	call := ojson.GetBytes(out, "request.contents.0.parts.0")
 	if got := call.Get("functionCall.id").String(); got != "native-drift" {
 		t.Fatalf("functionCall.id = %q, want native identity restored despite context drift", got)
 	}
-	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.id").String(); got != "native-drift" {
+	if got := ojson.GetBytes(out, "request.contents.1.parts.0.functionResponse.id").String(); got != "native-drift" {
 		t.Fatalf("functionResponse.id = %q, want native identity restored", got)
 	}
 	if got := call.Get("thoughtSignature").String(); !antigravityHasNativeThoughtSignature(got) {
@@ -1760,8 +1761,8 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 		t.Fatalf("reserved provenance IDs leaked upstream: %s", out)
 	}
 
-	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
-	responses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	calls := ojson.GetBytes(out, "request.contents.0.parts").Array()
+	responses := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(calls) != 3 || len(responses) != 3 {
 		t.Fatalf("part counts changed: %d calls, %d responses", len(calls), len(responses))
 	}
@@ -1810,7 +1811,7 @@ func TestDegradeAntigravityClaudeToolProvenanceIDs_AllCallsSigned_OnlyFirstGetsB
 		t.Fatalf("degraded = %d, want 6", degraded)
 	}
 
-	calls := gjson.GetBytes(out, "request.contents.0.parts").Array()
+	calls := ojson.GetBytes(out, "request.contents.0.parts").Array()
 	if len(calls) != 3 {
 		t.Fatalf("call count: %d", len(calls))
 	}
@@ -1924,8 +1925,8 @@ func TestPrepareAntigravityGeminiReasoningReplay_ReordersPermutedParallelToolRes
 		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v\noutput: %s", errPairing, out)
 	}
 
-	outCalls := gjson.GetBytes(out, "request.contents.0.parts").Array()
-	outResponses := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	outCalls := ojson.GetBytes(out, "request.contents.0.parts").Array()
+	outResponses := ojson.GetBytes(out, "request.contents.1.parts").Array()
 	if len(outCalls) != count || len(outResponses) != count {
 		t.Fatalf("part counts: %d calls, %d responses", len(outCalls), len(outResponses))
 	}
@@ -1955,6 +1956,155 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 	}
 }
 
+func TestAntigravityReasoningReplaySkipsSymmetricGeminiAndInteractionsButKeepsAsymmetricAlias(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3-flash"
+	payload := []byte(`{"sessionId":"sess-symmetry","request":{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]}]}}`)
+	responseSSE := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},"finishReason":"STOP"}]}}`)
+
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatGemini, sdktranslator.FormatInteractions} {
+		t.Run("symmetric_"+format.String(), func(t *testing.T) {
+			internalcache.ClearAntigravityReasoningReplayCache()
+			req := cliproxyexecutor.Request{Model: model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   format,
+				ResponseFormat: format,
+			}
+			_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+			if errPrepare != nil {
+				t.Fatalf("prepare error: %v", errPrepare)
+			}
+			if scope.valid() {
+				t.Fatalf("symmetric format %q must not allocate reasoning replay KV scope, got %+v", format, scope)
+			}
+			if acc := newAntigravityReasoningReplayAccumulator(scope, payload); acc != nil {
+				t.Fatalf("symmetric format %q must not create replay accumulator", format)
+			}
+		})
+	}
+
+	t.Run("asymmetric_claude_haiku_alias_to_gemini_3_flash", func(t *testing.T) {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		// Downstream client sends Claude /v1/messages with model="claude-haiku-4-5-20251001",
+		// which model-alias resolves to baseModel="gemini-3-flash" inside AntigravityExecutor.
+		req := cliproxyexecutor.Request{Model: model, Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatClaude,
+			ResponseFormat: sdktranslator.FormatClaude,
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestedModelMetadataKey: "claude-haiku-4-5-20251001",
+			},
+		}
+		_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+		if errPrepare != nil {
+			t.Fatalf("prepare error: %v", errPrepare)
+		}
+		if !scope.valid() {
+			t.Fatal("asymmetric Claude -> Gemini alias request must allocate reasoning replay KV scope")
+		}
+		acc := newAntigravityReasoningReplayAccumulator(scope, payload)
+		if acc == nil {
+			t.Fatal("expected non-nil accumulator for asymmetric Claude -> Gemini request")
+		}
+		acc.ObserveSSELine(responseSSE)
+		acc.Commit(context.Background())
+
+		items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
+		if !ok || len(items) == 0 {
+			t.Fatalf("expected asymmetric replay items to be persisted in KV, ok=%v len=%d", ok, len(items))
+		}
+	})
+
+	t.Run("top_level_gemini_doc_replays_asymmetric_and_skips_symmetric", func(t *testing.T) {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		topLevelTurn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]}]}`)
+		topLevelTurn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_1","response":{"result":"sunny"}}}]}]}`)
+		topLevelResponse := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},"finishReason":"STOP"}]}`)
+
+		symDoc := ojson.NewDoc(topLevelTurn1)
+		symScope, _, _, errSym := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn1},
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini},
+			symDoc,
+		)
+		if errSym != nil {
+			t.Fatalf("symmetric top-level prepare error: %v", errSym)
+		}
+		if symScope.valid() {
+			t.Fatalf("symmetric top-level Gemini must not allocate replay scope, got %+v", symScope)
+		}
+
+		headers := make(http.Header)
+		headers.Set("Session-Id", "sess-non-ag-gemini")
+		asymOpts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAIResponse,
+			ResponseFormat: sdktranslator.FormatOpenAIResponse,
+			Headers:        headers,
+		}
+		doc1 := ojson.NewDoc(topLevelTurn1)
+		scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn1},
+			asymOpts,
+			doc1,
+		)
+		if err1 != nil || !scope1.valid() {
+			t.Fatalf("asymmetric top-level prepare turn 1: scope=%+v err=%v", scope1, err1)
+		}
+		cacheAntigravityReasoningReplayFromResponse(context.Background(), scope1, replayReq1, topLevelResponse)
+
+		doc2 := ojson.NewDoc(topLevelTurn2)
+		scope2, replayReq2, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn2},
+			asymOpts,
+			doc2,
+		)
+		if err2 != nil || !changed2 {
+			t.Fatalf("asymmetric top-level prepare turn 2: changed=%v err=%v", changed2, err2)
+		}
+		if gotSig := doc2.Get("contents.1.parts.0.thoughtSignature").String(); gotSig != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+			t.Fatalf("replayed signature = %q, want native thoughtSignature", gotSig)
+		}
+		if gotRole := doc2.Get("contents.2.role").String(); gotRole != "user" {
+			t.Fatalf("non-Antigravity functionResponse role = %q, want user", gotRole)
+		}
+
+		// Turn 2 simulates Vertex stripping wire-only functionCall.id/functionResponse.id
+		// after prepareGeminiTopLevelReasoningReplayPayloadDoc; the captured replayRequestPayload
+		// from prepareGeminiTopLevelReasoningReplayPayloadDoc must still keep canonical call_id
+		// context so Turn 3 matches both call_1 and call_2 signatures.
+		helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc2, asymOpts.SourceFormat.String())
+		topLevelResponse2 := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","functionCall":{"name":"get_weather","args":{"city":"Shanghai"},"id":"call_2"}}]},"finishReason":"STOP"}]}`)
+		cacheAntigravityReasoningReplayFromResponse(context.Background(), scope2, replayReq2, topLevelResponse2)
+
+		topLevelTurn3 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_1","response":{"result":"sunny"}}}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Shanghai"},"id":"call_2"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_2","response":{"result":"cloudy"}}}]}]}`)
+		doc3 := ojson.NewDoc(topLevelTurn3)
+		_, _, changed3, err3 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn3},
+			asymOpts,
+			doc3,
+		)
+		if err3 != nil || !changed3 {
+			t.Fatalf("asymmetric top-level prepare turn 3: changed=%v err=%v", changed3, err3)
+		}
+		if gotSig1 := doc3.Get("contents.1.parts.0.thoughtSignature").String(); gotSig1 != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+			t.Fatalf("turn 3 call_1 signature = %q, want preserved signature", gotSig1)
+		}
+		if gotSig2 := doc3.Get("contents.3.parts.0.thoughtSignature").String(); gotSig2 != "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg" {
+			t.Fatalf("turn 3 call_2 signature = %q, want second signature", gotSig2)
+		}
+	})
+}
+
 func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
@@ -1980,5 +2130,176 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 	}
 	if !bytes.Equal(out, payload) {
 		t.Fatalf("out = %s, want original payload %s", out, payload)
+	}
+}
+
+func TestAntigravityStreamChunksHaveTerminalCommitEvent(t *testing.T) {
+	cases := []struct {
+		name   string
+		chunks [][]byte
+		want   bool
+	}{
+		{
+			name:   "openai responses completed",
+			chunks: [][]byte{[]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai responses incomplete",
+			chunks: [][]byte{[]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai chat finish_reason stop",
+			chunks: [][]byte{[]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai chat null finish_reason",
+			chunks: [][]byte{[]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")},
+			want:   false,
+		},
+		{
+			name:   "claude message_stop",
+			chunks: [][]byte{[]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "bare done frame only",
+			chunks: [][]byte{[]byte("data: [DONE]\n\n")},
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityStreamChunksHaveTerminalCommitEvent(tc.chunks); got != tc.want {
+				t.Fatalf("antigravityStreamChunksHaveTerminalCommitEvent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAntigravityReasoningReplayAccumulatorAssemblesVertexStreamingPartialArgs(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.8-flash"
+	asymOpts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-vertex-partial-args"}},
+	}
+
+	turn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Weather in New York?"}]}]}`)
+	doc1 := ojson.NewDoc(turn1)
+	scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1},
+		asymOpts,
+		doc1,
+	)
+	if err1 != nil || !scope1.valid() {
+		t.Fatalf("prepare turn 1: scope=%+v err=%v", scope1, err1)
+	}
+
+	acc := newAntigravityReasoningReplayAccumulator(scope1, replayReq1)
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_ny","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}]}`))
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"","thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX"}]}}]}`))
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":false}}]},"finishReason":"STOP"}]}`))
+	acc.Commit(context.Background())
+
+	turn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Weather in New York?"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"New York"},"id":"call_ny"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_ny","response":{"result":"sunny"}}}]}]}`)
+	doc2 := ojson.NewDoc(turn2)
+	_, _, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2},
+		asymOpts,
+		doc2,
+	)
+	if err2 != nil || !changed2 {
+		t.Fatalf("prepare turn 2 after partialArgs stream: changed=%v err=%v", changed2, err2)
+	}
+	if gotSig := doc2.Get("contents.1.parts.0.thoughtSignature").String(); gotSig != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+		t.Fatalf("replayed signature = %q, want native signature from partialArgs stream", gotSig)
+	}
+}
+
+func TestNonVertexSanitizesReplayedVertexBareTinkSignature(t *testing.T) {
+	// Verify that a Vertex bare-Tink thoughtSignature replayed from shared KV is
+	// downgraded to skip_thought_signature_validator when post-replay non-Vertex
+	// sanitization runs (as in GeminiExecutor and AIStudioExecutor).
+	const vertexBareTinkSig = "AY89a18f0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	internalcache.ClearAntigravityReasoningReplayCache()
+	const model = "gemini-3.8-flash"
+	asymOpts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-vertex-to-gemini"}},
+	}
+	turn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather"}]}]}`)
+	doc1 := ojson.NewDoc(turn1)
+	scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1},
+		asymOpts,
+		doc1,
+	)
+	if err1 != nil || !scope1.valid() {
+		t.Fatalf("prepare turn 1: scope=%+v err=%v", scope1, err1)
+	}
+	vertexResp := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + vertexBareTinkSig + `","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_tink"}}]},"finishReason":"STOP"}]}`)
+	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope1, replayReq1, vertexResp)
+
+	turn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_tink"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_tink","response":{"result":"clear"}}}]}]}`)
+	nonVertexDoc := ojson.NewDoc(turn2)
+	_, _, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2},
+		asymOpts,
+		nonVertexDoc,
+	)
+	if err2 != nil || !changed2 {
+		t.Fatalf("prepare turn 2: changed=%v err=%v", changed2, err2)
+	}
+	internalsignature.SanitizeNonVertexGeminiRequestThoughtSignaturesDoc(nonVertexDoc, "contents")
+	if got := nonVertexDoc.Get("contents.1.parts.0.thoughtSignature").String(); got != "skip_thought_signature_validator" {
+		t.Fatalf("non-Vertex post-replay sanitized signature = %q, want skip_thought_signature_validator", got)
+	}
+}
+
+func TestCountTokensReasoningReplayPeeksWithoutReservingTombstone(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.8-flash"
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-count-tokens-no-tombstone"}},
+	}
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Count tokens only"}]}]}`)
+	doc := ojson.NewDoc(payload)
+	req := cliproxyexecutor.Request{
+		Model:    model,
+		Payload:  payload,
+		Metadata: map[string]any{"action": "countTokens"},
+	}
+	scope, replayReq, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+	if err != nil || changed || len(replayReq) != 0 {
+		t.Fatalf("countTokens prepare = scope:%+v len(replayReq):%d changed:%v err:%v", scope, len(replayReq), changed, err)
+	}
+	// A subsequent real generation turn must still be able to cache best-effort
+	// without being blocked by an unclosed countTokens reservation.
+	item := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"targetOccurrence":0,"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX"}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, scope.sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache replay item after countTokens peek")
+	}
+	got, ok := internalcache.GetAntigravityReasoningReplayItems(model, scope.sessionKey)
+	if !ok || len(got) != 1 {
+		t.Fatalf("GetAntigravityReasoningReplayItems after countTokens peek = %v, ok=%v", got, ok)
 	}
 }

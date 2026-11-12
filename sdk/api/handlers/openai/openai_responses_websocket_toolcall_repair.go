@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -83,6 +83,9 @@ func (c *websocketToolOutputCache) record(sessionKey string, callID string, item
 	if _, exists := session.outputs[callID]; !exists {
 		session.order = append(session.order, callID)
 	}
+	// Do not sanitize here: client-originated items also reach this method
+	// (repair first pass, turn commit) and must round-trip unchanged.
+	// Upstream items are sanitized at their recording entry points.
 	session.outputs[callID] = append(json.RawMessage(nil), item...)
 
 	for len(session.order) > c.maxPerSession {
@@ -154,7 +157,7 @@ func websocketDownstreamSessionKey(req *http.Request) string {
 		return requestID
 	}
 	if raw := strings.TrimSpace(req.Header.Get("X-Codex-Turn-Metadata")); raw != "" {
-		if sessionID := strings.TrimSpace(gjson.Get(raw, "session_id").String()); sessionID != "" {
+		if sessionID := strings.TrimSpace(ojson.Get(raw, "session_id").String()); sessionID != "" {
 			return sessionID
 		}
 	}
@@ -254,7 +257,7 @@ func (t *responsesWebsocketToolCacheTurn) recordResponse(payload []byte) {
 		if !output.Exists() || !output.IsArray() {
 			return
 		}
-		output.ForEach(func(_, item gjson.Result) bool {
+		output.ForEach(func(_, item ojson.Result) bool {
 			if isCompleteResponsesWebsocketToolCall(item) {
 				t.recordItem(payload, item)
 			}
@@ -268,13 +271,18 @@ func (t *responsesWebsocketToolCacheTurn) recordResponse(payload []byte) {
 	}
 }
 
-func (t *responsesWebsocketToolCacheTurn) recordItem(payload []byte, item gjson.Result) {
+func (t *responsesWebsocketToolCacheTurn) recordItem(payload []byte, item ojson.Result) {
 	if t == nil || !item.Exists() {
 		return
 	}
 	rawItem, ok := responsesWebsocketRawMessageForResult(payload, item)
 	if !ok {
 		return
+	}
+	if rawItem != nil {
+		// Upstream response items are sanitized once here; recordRawItem
+		// still owns the single detached copy for turn storage.
+		rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 	}
 	t.recordRawItem(item.Get("type").String(), item.Get("call_id").String(), rawItem)
 }
@@ -406,20 +414,20 @@ func repairResponsesWebsocketToolCallsWithCachesMode(
 	return updated
 }
 
-func parseResponsesWebsocketRepairRequest(payload []byte) (gjson.Result, json.RawMessage, bool) {
+func parseResponsesWebsocketRepairRequest(payload []byte) (ojson.Result, json.RawMessage, bool) {
 	if !json.Valid(payload) {
-		return gjson.Result{}, nil, false
+		return ojson.Result{}, nil, false
 	}
 	root := util.ParseGJSONBytesNoCopy(payload)
 	if !root.IsObject() {
-		return gjson.Result{}, nil, false
+		return ojson.Result{}, nil, false
 	}
 
-	var input gjson.Result
+	var input ojson.Result
 	var previousResponseID json.RawMessage
 	inputFound := false
 	valid := true
-	root.ForEach(func(key, value gjson.Result) bool {
+	root.ForEach(func(key, value ojson.Result) bool {
 		switch {
 		case strings.EqualFold(key.String(), "input"):
 			if !value.IsArray() && strings.TrimSpace(value.Raw) != "null" {
@@ -439,12 +447,12 @@ func parseResponsesWebsocketRepairRequest(payload []byte) (gjson.Result, json.Ra
 		return true
 	})
 	if !valid || !inputFound || !input.IsArray() {
-		return gjson.Result{}, nil, false
+		return ojson.Result{}, nil, false
 	}
 	return input, previousResponseID, true
 }
 
-func replaceResponsesWebsocketRawResult(payload []byte, result gjson.Result, replacement []byte) ([]byte, bool) {
+func replaceResponsesWebsocketRawResult(payload []byte, result ojson.Result, replacement []byte) ([]byte, bool) {
 	if result.Index < 0 || result.Index > len(payload) || len(result.Raw) > len(payload)-result.Index {
 		return nil, false
 	}
@@ -455,11 +463,11 @@ func replaceResponsesWebsocketRawResult(payload []byte, result gjson.Result, rep
 	return updated, true
 }
 
-func parseResponsesWebsocketInputItemsNoCopy(payload []byte, input gjson.Result) ([]responsesWebsocketInputItem, []json.RawMessage, bool) {
+func parseResponsesWebsocketInputItemsNoCopy(payload []byte, input ojson.Result) ([]responsesWebsocketInputItem, []json.RawMessage, bool) {
 	var items []responsesWebsocketInputItem
 	var rawItems []json.RawMessage
 	valid := true
-	input.ForEach(func(_, itemResult gjson.Result) bool {
+	input.ForEach(func(_, itemResult ojson.Result) bool {
 		rawItem, ok := responsesWebsocketRawMessageForResult(payload, itemResult)
 		if !ok {
 			valid = false
@@ -480,7 +488,7 @@ func parseResponsesWebsocketInputItemsNoCopy(payload []byte, input gjson.Result)
 	return items, rawItems, true
 }
 
-func responsesWebsocketRawMessageForResult(payload []byte, result gjson.Result) (json.RawMessage, bool) {
+func responsesWebsocketRawMessageForResult(payload []byte, result ojson.Result) (json.RawMessage, bool) {
 	if result.Index < 0 || result.Index > len(payload) || len(result.Raw) > len(payload)-result.Index {
 		return nil, false
 	}
@@ -534,8 +542,8 @@ func repairResponsesToolCallItems(
 			if item.callID == "" {
 				// Codex sends standalone named results for heartbeat and delegation
 				// input. These intentionally have no preceding call or call_id.
-				name := gjson.GetBytes(item.raw, "name")
-				if item.itemType == "function_call_output" && name.Type == gjson.String && strings.TrimSpace(name.String()) != "" {
+				name := ojson.GetBytesNoCopy(item.raw, "name")
+				if item.itemType == "function_call_output" && name.Type == ojson.String && strings.TrimSpace(name.String()) != "" {
 					filtered = append(filtered, item)
 				}
 				continue
@@ -635,7 +643,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 		if !output.Exists() || !output.IsArray() {
 			return
 		}
-		output.ForEach(func(_, item gjson.Result) bool {
+		output.ForEach(func(_, item ojson.Result) bool {
 			if !isCompleteResponsesWebsocketToolCall(item) {
 				return true
 			}
@@ -643,6 +651,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 			if !ok {
 				return false
 			}
+			rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 			callID := strings.TrimSpace(item.Get("call_id").String())
 			cache.record(sessionKey, callID, rawItem)
 			return true
@@ -656,6 +665,7 @@ func recordResponsesWebsocketToolCallsFromPayloadWithCache(cache *websocketToolO
 		if !ok {
 			return
 		}
+		rawItem = responsesWebsocketReplaySanitizedBytes(rawItem)
 		callID := strings.TrimSpace(item.Get("call_id").String())
 		cache.record(sessionKey, callID, rawItem)
 	}

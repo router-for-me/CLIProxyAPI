@@ -10,13 +10,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const executorPatchRequest = `{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch a file"}`
@@ -25,14 +25,14 @@ const executorPatchInput = "  *** Begin Patch\n*** End Patch\n "
 
 func assertExecutorPatchDeclaration(t *testing.T, payload []byte) {
 	t.Helper()
-	declaration := gjson.GetBytes(payload, "tools.0.functionDeclarations.0")
+	declaration := ojson.GetBytes(payload, "tools.0.functionDeclarations.0")
 	if declaration.Get("name").String() != "functions__apply_patch" || !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || !strings.Contains(declaration.Get("description").String(), "start: patch") || declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
 		t.Fatalf("missing standard patch declaration: %s", payload)
 	}
 }
 func assertExecutorPatchOutput(t *testing.T, payload []byte) {
 	t.Helper()
-	item := gjson.GetBytes(payload, `output.#(type=="custom_tool_call")`)
+	item := ojson.GetBytes(payload, `output.#(type=="custom_tool_call")`)
 	if item.Get("type").String() != "custom_tool_call" || item.Get("input").String() != executorPatchInput || item.Get("name").String() != "apply_patch" || item.Get("namespace").String() != "functions" {
 		t.Fatalf("wrong patch output: %s", payload)
 	}
@@ -41,7 +41,7 @@ func assertExecutorPatchStream(t *testing.T, chunks <-chan cliproxyexecutor.Stre
 	t.Helper()
 	acknowledged := len(acknowledgeSnapshot) == 0
 	var delta strings.Builder
-	var done, item, final gjson.Result
+	var done, item, final ojson.Result
 	for chunk := range chunks {
 		if chunk.Err != nil {
 			t.Fatal(chunk.Err)
@@ -50,7 +50,7 @@ func assertExecutorPatchStream(t *testing.T, chunks <-chan cliproxyexecutor.Stre
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
-			ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			ev := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			switch ev.Get("type").String() {
 			case "response.output_text.delta":
 				if !acknowledged {
@@ -184,7 +184,7 @@ func TestGeminiVertexExecutorClaudeMalformedFunctionCallReturnsRetryableError(t 
 			if !okStatus || status.StatusCode() != http.StatusBadGateway {
 				t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
 			}
-			if got := gjson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
+			if got := ojson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
 				t.Fatalf("Execute() error.type = %q, want api_error. Error: %s", got, errExec.Error())
 			}
 			assertMalformedFunctionCallFailedUsage(t, capture.records)
@@ -519,7 +519,8 @@ func TestVertexBaseURL(t *testing.T) {
 		location string
 		want     string
 	}{
-		{"", "https://us-central1-aiplatform.googleapis.com"},
+		{"", "https://aiplatform.googleapis.com"},
+		{"   ", "https://aiplatform.googleapis.com"},
 		{"global", "https://aiplatform.googleapis.com"},
 		{"us-central1", "https://us-central1-aiplatform.googleapis.com"},
 		{"us", "https://aiplatform.us.rep.googleapis.com"},

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -23,8 +24,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const kimiReasoningUnavailable = "[reasoning unavailable]"
@@ -148,27 +147,26 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
-	body, err = sjson.SetBytes(body, "model", upstreamModel)
-	if err != nil {
+	doc := ojson.NewDoc(body)
+	if err = doc.Set("model", upstreamModel); err != nil {
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), "kimi", e.Identifier())
-	if err != nil {
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), "kimi", e.Identifier()); err != nil {
 		return resp, err
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body, err = normalizeKimiToolMessageLinks(body)
-	if err != nil {
+	if err = normalizeKimiToolMessageLinksDoc(doc); err != nil {
 		return resp, err
 	}
-	body = normalizeKimiTools(body)
-	body = normalizeKimiTemperature(body)
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiChatURL(auth)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -212,18 +210,21 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
@@ -286,31 +287,29 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	// Strip kimi- prefix and any [1m] suffix for upstream API
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
-	body, err = sjson.SetBytes(body, "model", upstreamModel)
-	if err != nil {
+	doc := ojson.NewDoc(body)
+	if err = doc.Set("model", upstreamModel); err != nil {
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
-	body, err = helps.ApplyRequestThinking(body, req, opts, from.String(), "kimi", e.Identifier())
-	if err != nil {
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), "kimi", e.Identifier()); err != nil {
 		return nil, err
 	}
 
-	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
-	if err != nil {
+	if err = doc.Set("stream_options.include_usage", true); err != nil {
 		return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
 	}
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body, err = normalizeKimiToolMessageLinks(body)
-	if err != nil {
+	if err = normalizeKimiToolMessageLinksDoc(doc); err != nil {
 		return nil, err
 	}
-	body = normalizeKimiTools(body)
-	body = normalizeKimiTemperature(body)
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiChatURL(auth)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	body = doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -349,8 +348,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
@@ -439,40 +441,33 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := bytes.Clone(req.Payload)
+	doc := ojson.NewDoc(req.Payload)
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
-	var errSet error
-	body, errSet = sjson.SetBytes(body, "model", upstreamModel)
-	if errSet != nil {
+	if errSet := doc.Set("model", upstreamModel); errSet != nil {
 		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", errSet)
 	}
 
-	body = helps.SetBoolIfDifferent(body, "stream", false)
+	helps.SetBoolIfDifferentDoc(doc, "stream", false)
 
-	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier())
-	if errThinking != nil {
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier()); errThinking != nil {
 		return resp, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	var errNormalizePatch error
-	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body)
-	if errNormalizePatch != nil {
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc); errNormalizePatch != nil {
 		return resp, errNormalizePatch
 	}
-	var errNormalizeInput error
-	body, errNormalizeInput = helps.NormalizeKimiResponsesInput(body)
-	if errNormalizeInput != nil {
+	if _, errNormalizeInput := helps.NormalizeKimiResponsesInputDoc(doc); errNormalizeInput != nil {
 		return resp, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInput)
 	}
-	body = normalizeKimiTools(body)
-	body = normalizeKimiTemperature(body)
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiResponsesURL(auth)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
+	body := doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewRequest != nil {
@@ -518,19 +513,22 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 
 	originalRequest := req.Payload
@@ -577,40 +575,33 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
-	body := bytes.Clone(req.Payload)
+	doc := ojson.NewDoc(req.Payload)
 	upstreamModel := normalizeKimiUpstreamModel(baseModel)
 	reporter.SetUpstreamModel(upstreamModel)
-	var errSet error
-	body, errSet = sjson.SetBytes(body, "model", upstreamModel)
-	if errSet != nil {
+	if errSet := doc.Set("model", upstreamModel); errSet != nil {
 		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", errSet)
 	}
 
-	body = helps.SetBoolIfDifferent(body, "stream", true)
+	helps.SetBoolIfDifferentDoc(doc, "stream", true)
 
-	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier())
-	if errThinking != nil {
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, opts.SourceFormat.String(), sdktranslator.FormatCodex.String(), e.Identifier()); errThinking != nil {
 		return nil, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	var errNormalizePatch error
-	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body)
-	if errNormalizePatch != nil {
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc); errNormalizePatch != nil {
 		return nil, errNormalizePatch
 	}
-	var errNormalizeInputStream error
-	body, errNormalizeInputStream = helps.NormalizeKimiResponsesInput(body)
-	if errNormalizeInputStream != nil {
+	if _, errNormalizeInputStream := helps.NormalizeKimiResponsesInputDoc(doc); errNormalizeInputStream != nil {
 		return nil, fmt.Errorf("kimi executor: failed to normalize responses input: %w", errNormalizeInputStream)
 	}
-	body = normalizeKimiTools(body)
-	body = normalizeKimiTemperature(body)
+	normalizeKimiToolsDoc(doc)
+	normalizeKimiTemperatureDoc(doc)
 
 	url := helps.ResolveKimiResponsesURL(auth)
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", body, req.Payload, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, "openai-response", opts.SourceFormat.String(), "", doc, req.Payload, requestedModel, requestPath, opts.Headers)
+	body := doc.Bytes()
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 	httpReq, errNewRequest := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewRequest != nil {
@@ -651,11 +642,14 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
@@ -724,7 +718,7 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 			if bytes.HasPrefix(line, dataTag) {
 				dataBytes := bytes.TrimSpace(line[len(dataTag):])
-				eventType := gjson.GetBytes(dataBytes, "type").String()
+				eventType := ojson.GetBytesNoCopy(dataBytes, "type").String()
 				if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" {
 					if usage, ok := helps.ParseCodexUsage(dataBytes); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {
 						streamUsage.Observe(usage, true)
@@ -852,13 +846,30 @@ func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return body, nil
 	}
+	doc := ojson.NewDoc(body)
+	changed, err := normalizeKimiToolMessageLinksChangedDoc(doc)
+	if err != nil || !changed {
+		return body, err
+	}
+	return doc.Bytes(), nil
+}
 
-	messages := util.GetGJSONBytesNoCopy(body, "messages")
+func normalizeKimiToolMessageLinksDoc(doc *ojson.Doc) error {
+	_, err := normalizeKimiToolMessageLinksChangedDoc(doc)
+	return err
+}
+
+func normalizeKimiToolMessageLinksChangedDoc(doc *ojson.Doc) (bool, error) {
+	if doc == nil || doc.Len() == 0 {
+		return false, nil
+	}
+
+	messages := doc.Get("messages")
 	if !messages.Exists() || !messages.IsArray() {
-		return body, nil
+		return false, nil
 	}
 
 	type messagePatch struct {
@@ -963,18 +974,15 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 				"pending_tool_calls":      len(pending),
 			}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
 		}
-		return body, nil
+		return false, nil
 	}
 
-	var out []byte
 	if dropped == 0 && len(patches) == 1 {
 		patch := patches[0]
 		path := fmt.Sprintf("messages.%d.%s", patch.index, patch.path)
-		updated, errSet := sjson.SetBytes(body, path, patch.value)
-		if errSet != nil {
-			return body, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
+		if errSet := doc.Set(path, patch.value); errSet != nil {
+			return false, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
 		}
-		out = updated
 	} else {
 		messageItems := make([]string, 0, len(msgs)-dropped)
 		patchIndex := 0
@@ -983,25 +991,25 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 				continue
 			}
 			messageJSON := msg.Raw
-			for patchIndex < len(patches) && patches[patchIndex].index == msgIndex {
-				patch := patches[patchIndex]
-				next, errSet := sjson.SetBytes([]byte(messageJSON), patch.path, patch.value)
-				if errSet != nil {
-					return body, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
+			if patchIndex < len(patches) && patches[patchIndex].index == msgIndex {
+				msgDoc := ojson.NewDocString(messageJSON)
+				for patchIndex < len(patches) && patches[patchIndex].index == msgIndex {
+					patch := patches[patchIndex]
+					if errSet := msgDoc.Set(patch.path, patch.value); errSet != nil {
+						return false, fmt.Errorf("kimi executor: %s: %w", patch.errorContext, errSet)
+					}
+					patchIndex++
 				}
-				messageJSON = string(next)
-				patchIndex++
+				messageJSON = msgDoc.String()
 			}
 			messageItems = append(messageItems, messageJSON)
 		}
-		updated, errSet := sjson.SetRawBytes(body, "messages", helps.JoinRawJSONStrings(messageItems))
-		if errSet != nil {
+		if errSet := doc.SetRawBytes("messages", helps.JoinRawJSONStrings(messageItems)); errSet != nil {
 			if dropped > 0 {
-				return body, fmt.Errorf("kimi executor: failed to drop empty assistant messages: %w", errSet)
+				return false, fmt.Errorf("kimi executor: failed to drop empty assistant messages: %w", errSet)
 			}
-			return body, fmt.Errorf("kimi executor: %s: %w", patches[0].errorContext, errSet)
+			return false, fmt.Errorf("kimi executor: %s: %w", patches[0].errorContext, errSet)
 		}
-		out = updated
 	}
 
 	if patched > 0 || patchedReasoning > 0 {
@@ -1016,10 +1024,10 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 			"pending_tool_calls":      len(pending),
 		}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
 	}
-	return out, nil
+	return true, nil
 }
 
-func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
+func shouldDropKimiAssistantMessage(msg ojson.Result) bool {
 	if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
 		return false
 	}
@@ -1029,14 +1037,14 @@ func shouldDropKimiAssistantMessage(msg gjson.Result) bool {
 	return isKimiAssistantContentEmpty(msg.Get("content"))
 }
 
-func hasKimiToolCalls(msg gjson.Result) bool {
+func hasKimiToolCalls(msg ojson.Result) bool {
 	toolCalls := msg.Get("tool_calls")
 	return toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0
 }
 
-func hasKimiLegacyFunctionCall(msg gjson.Result) bool {
+func hasKimiLegacyFunctionCall(msg ojson.Result) bool {
 	functionCall := msg.Get("function_call")
-	if !functionCall.Exists() || functionCall.Type == gjson.Null {
+	if !functionCall.Exists() || functionCall.Type == ojson.Null {
 		return false
 	}
 	if functionCall.IsObject() && strings.TrimSpace(functionCall.Raw) == "{}" {
@@ -1045,16 +1053,16 @@ func hasKimiLegacyFunctionCall(msg gjson.Result) bool {
 	return strings.TrimSpace(functionCall.Raw) != ""
 }
 
-func hasKimiAssistantReasoning(msg gjson.Result) bool {
+func hasKimiAssistantReasoning(msg ojson.Result) bool {
 	reasoning := msg.Get("reasoning_content")
 	return reasoning.Exists() && strings.TrimSpace(reasoning.String()) != ""
 }
 
-func isKimiAssistantContentEmpty(content gjson.Result) bool {
-	if !content.Exists() || content.Type == gjson.Null {
+func isKimiAssistantContentEmpty(content ojson.Result) bool {
+	if !content.Exists() || content.Type == ojson.Null {
 		return true
 	}
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		return strings.TrimSpace(content.String()) == ""
 	}
 	if !content.IsArray() {
@@ -1068,11 +1076,11 @@ func isKimiAssistantContentEmpty(content gjson.Result) bool {
 	return true
 }
 
-func isKimiAssistantContentPartEmpty(part gjson.Result) bool {
-	if !part.Exists() || part.Type == gjson.Null {
+func isKimiAssistantContentPartEmpty(part ojson.Result) bool {
+	if !part.Exists() || part.Type == ojson.Null {
 		return true
 	}
-	if part.Type == gjson.String {
+	if part.Type == ojson.String {
 		return strings.TrimSpace(part.String()) == ""
 	}
 	if !part.IsObject() {
@@ -1092,13 +1100,13 @@ func isUsableKimiReasoning(reasoning string) bool {
 	return trimmed != "" && trimmed != kimiReasoningUnavailable
 }
 
-func fallbackAssistantReasoning(msg gjson.Result, hasLatest bool, latest string) string {
+func fallbackAssistantReasoning(msg ojson.Result, hasLatest bool, latest string) string {
 	if hasLatest && isUsableKimiReasoning(latest) {
 		return latest
 	}
 
 	content := msg.Get("content")
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		if text := strings.TrimSpace(content.String()); text != "" {
 			return text
 		}
@@ -1370,34 +1378,55 @@ func normalizeKimiTools(body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	body = normalizeKimiToolList(body, "tools", true)
-	body = normalizeKimiToolList(body, "functions", false)
-	if input := gjson.GetBytes(body, "input"); input.Exists() && input.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiToolsDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func normalizeKimiToolsDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	changed := normalizeKimiToolListDoc(doc, "tools", true)
+	if normalizeKimiToolListDoc(doc, "functions", false) {
+		changed = true
+	}
+	if input := doc.Get("input"); input.Exists() && input.IsArray() {
 		for idx, item := range input.Array() {
 			switch strings.TrimSpace(item.Get("type").String()) {
 			case "additional_tools", "tool_search_output":
-				body = normalizeKimiToolList(body, fmt.Sprintf("input.%d.tools", idx), true)
+				if normalizeKimiToolListDoc(doc, fmt.Sprintf("input.%d.tools", idx), true) {
+					changed = true
+				}
 			}
 		}
 	}
-	return body
+	return changed
 }
 
 func normalizeKimiToolList(body []byte, arrayKey string, isTools bool) []byte {
-	items := gjson.GetBytes(body, arrayKey)
-	normalized, changed := normalizeKimiToolArray(items, isTools)
-	if !changed {
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiToolListDoc(doc, arrayKey, isTools) {
 		return body
 	}
-
-	out, errSetRaw := sjson.SetRawBytes(body, arrayKey, normalized)
-	if errSetRaw != nil {
-		return body
-	}
-	return out
+	return doc.Bytes()
 }
 
-func normalizeKimiToolArray(items gjson.Result, isTools bool) ([]byte, bool) {
+func normalizeKimiToolListDoc(doc *ojson.Doc, arrayKey string, isTools bool) bool {
+	if doc == nil {
+		return false
+	}
+	items := doc.Get(arrayKey)
+	normalized, changed := normalizeKimiToolArray(items, isTools)
+	if !changed {
+		return false
+	}
+	return doc.SetRawBytes(arrayKey, normalized) == nil
+}
+
+func normalizeKimiToolArray(items ojson.Result, isTools bool) ([]byte, bool) {
 	if !items.Exists() || !items.IsArray() {
 		return nil, false
 	}
@@ -1410,12 +1439,18 @@ func normalizeKimiToolArray(items gjson.Result, isTools bool) ([]byte, bool) {
 	updatedItems := make([]string, 0, len(arr))
 	for _, item := range arr {
 		itemRaw := item.Raw
+		var itemDoc *ojson.Doc
+		ensureItemDoc := func() *ojson.Doc {
+			if itemDoc == nil {
+				itemDoc = ojson.NewDocString(itemRaw)
+			}
+			return itemDoc
+		}
 		if isTools && strings.TrimSpace(item.Get("type").String()) == "namespace" {
 			for _, nestedKey := range []string{"tools", "children"} {
-				if nested := gjson.Get(itemRaw, nestedKey); nested.Exists() && nested.IsArray() {
+				if nested := item.Get(nestedKey); nested.Exists() && nested.IsArray() {
 					if normalizedNested, nestedChanged := normalizeKimiToolArray(nested, true); nestedChanged {
-						if updated, errSet := sjson.SetRawBytes([]byte(itemRaw), nestedKey, normalizedNested); errSet == nil {
-							itemRaw = string(updated)
+						if errSet := ensureItemDoc().SetRawBytes(nestedKey, normalizedNested); errSet == nil {
 							changed = true
 						}
 					}
@@ -1435,12 +1470,14 @@ func normalizeKimiToolArray(items gjson.Result, isTools bool) ([]byte, bool) {
 			if rawParams.IsObject() {
 				normalizedParams := normalizeKimiParametersSchema(rawParams.Raw)
 				if normalizedParams != rawParams.Raw {
-					if updated, errSet := sjson.SetRawBytes([]byte(itemRaw), paramPath, []byte(normalizedParams)); errSet == nil {
-						itemRaw = string(updated)
+					if errSet := ensureItemDoc().SetRawBytes(paramPath, []byte(normalizedParams)); errSet == nil {
 						changed = true
 					}
 				}
 			}
+		}
+		if itemDoc != nil {
+			itemRaw = itemDoc.String()
 		}
 		updatedItems = append(updatedItems, itemRaw)
 	}
@@ -1457,20 +1494,28 @@ func normalizeKimiParametersSchema(paramsRaw string) string {
 	}
 
 	inlined := util.InlineLocalRefs(paramsRaw)
-	paramBytes := []byte(inlined)
+	doc := ojson.NewDocString(inlined)
+	changed := inlined != paramsRaw
 
-	if inlinedDefs := gjson.GetBytes(paramBytes, "$defs"); inlinedDefs.Exists() {
-		paramBytes, _ = sjson.DeleteBytes(paramBytes, "$defs")
+	if doc.Get("$defs").Exists() {
+		if doc.Delete("$defs") == nil {
+			changed = true
+		}
 	}
-	if inlinedDefinitions := gjson.GetBytes(paramBytes, "definitions"); inlinedDefinitions.Exists() {
-		paramBytes, _ = sjson.DeleteBytes(paramBytes, "definitions")
+	if doc.Get("definitions").Exists() {
+		if doc.Delete("definitions") == nil {
+			changed = true
+		}
 	}
-
-	if rootType := gjson.GetBytes(paramBytes, "type"); !rootType.Exists() {
-		paramBytes, _ = sjson.SetBytes(paramBytes, "type", "object")
+	if !doc.Get("type").Exists() {
+		if doc.Set("type", "object") == nil {
+			changed = true
+		}
 	}
-
-	return string(paramBytes)
+	if !changed {
+		return paramsRaw
+	}
+	return doc.String()
 }
 
 // normalizeKimiTemperature normalizes or strips the temperature parameter for Kimi upstream.
@@ -1480,22 +1525,33 @@ func normalizeKimiParametersSchema(paramsRaw string) string {
 // If a client specifies an invalid temperature, stripping it allows the upstream
 // to apply its safe model default and avoids a 400 Bad Request error.
 func normalizeKimiTemperature(body []byte) []byte {
-	tempRes := gjson.GetBytes(body, "temperature")
-	if !tempRes.Exists() {
+	doc := ojson.NewDoc(body)
+	if !normalizeKimiTemperatureDoc(doc) {
 		return body
 	}
-	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	return doc.Bytes()
+}
+
+func normalizeKimiTemperatureDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tempRes := doc.Get("temperature")
+	if !tempRes.Exists() {
+		return false
+	}
+	thinkingType := doc.Get("thinking.type").String()
 	if strings.EqualFold(thinkingType, "disabled") {
 		if tempRes.Float() != 0.6 {
-			body, _ = sjson.DeleteBytes(body, "temperature")
+			return doc.Delete("temperature") == nil
 		}
-		return body
+		return false
 	}
 	// Default / enabled thinking requires temperature 1.0.
 	if tempRes.Float() != 1.0 {
-		body, _ = sjson.DeleteBytes(body, "temperature")
+		return doc.Delete("temperature") == nil
 	}
-	return body
+	return false
 }
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.

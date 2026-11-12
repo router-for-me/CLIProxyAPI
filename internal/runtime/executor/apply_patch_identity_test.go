@@ -8,13 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Check every lifecycle identity, not merely the final snapshot or event counts.
@@ -23,7 +22,7 @@ func assertApplyPatchIdentityLifecycle(t *testing.T, events [][]byte, id, call, 
 	counts := map[string]int{}
 	var actual []string
 	for _, event := range events {
-		root := gjson.ParseBytes(event)
+		root := ojson.ParseBytes(event)
 		kind := root.Get("type").String()
 		identity, idKey := root, "item_id"
 		switch kind {
@@ -239,14 +238,14 @@ func TestApplyPatchNamedLateIdentityActualFailures(t *testing.T) {
 					if mode == "call-conflict" {
 						key = ".call_id"
 					}
-					source[len(source)-2], _ = sjson.SetBytes(source[len(source)-2], itemPath+key, "changed")
-					source[len(source)-1], _ = sjson.SetBytes(source[len(source)-1], finalPath+key, "changed")
+					source[len(source)-2], _ = ojson.SetBytes(source[len(source)-2], itemPath+key, "changed")
+					source[len(source)-1], _ = ojson.SetBytes(source[len(source)-1], finalPath+key, "changed")
 				case "partial-snapshot", "invalid-snapshot":
 					args := `{"input":"p`
 					if mode == "invalid-snapshot" {
 						args = `{"input":"p","extra":"RAW_SECRET"}`
 					}
-					source[0], _ = sjson.SetBytes(source[0], itemPath+".arguments", args)
+					source[0], _ = ojson.SetBytes(source[0], itemPath+".arguments", args)
 				case "eof":
 					source = source[:len(source)-2]
 				}
@@ -271,7 +270,7 @@ func TestApplyPatchNamedLateIdentityActualFailures(t *testing.T) {
 						t.Fatalf("failure leaked/completed: %s", chunk.Payload)
 					}
 					for _, payload := range applyPatchTestPayloads(chunk.Payload) {
-						if gjson.GetBytes(payload, "type").String() == "response.failed" {
+						if ojson.GetBytes(payload, "type").String() == "response.failed" {
 							failed++
 						} else {
 							t.Fatalf("unresolved call published: %s", payload)
@@ -300,17 +299,17 @@ func TestApplyPatchNamedLateIdentityActualInterleaved(t *testing.T) {
 				if i == len(second)-1 {
 					continue
 				}
-				if gjson.GetBytes(event, indexKey).Exists() {
-					event, _ = sjson.SetBytes(event, indexKey, 1)
+				if ojson.GetBytes(event, indexKey).Exists() {
+					event, _ = ojson.SetBytes(event, indexKey, 1)
 				}
-				if gjson.GetBytes(event, itemPath+".id").String() == "a" {
-					event, _ = sjson.SetBytes(event, itemPath+".id", "b")
+				if ojson.GetBytes(event, itemPath+".id").String() == "a" {
+					event, _ = ojson.SetBytes(event, itemPath+".id", "b")
 				}
-				if gjson.GetBytes(event, itemPath+".call_id").String() == "c" {
-					event, _ = sjson.SetBytes(event, itemPath+".call_id", "d")
+				if ojson.GetBytes(event, itemPath+".call_id").String() == "c" {
+					event, _ = ojson.SetBytes(event, itemPath+".call_id", "d")
 				}
-				if interactions && gjson.GetBytes(event, "step.index").Exists() {
-					event, _ = sjson.SetBytes(event, "step.index", 1)
+				if interactions && ojson.GetBytes(event, "step.index").Exists() {
+					event, _ = ojson.SetBytes(event, "step.index", 1)
 				}
 				event = []byte(strings.ReplaceAll(string(event), "pq", "uv"))
 				if i == 1 || i == 2 {
@@ -321,13 +320,13 @@ func TestApplyPatchNamedLateIdentityActualInterleaved(t *testing.T) {
 					if i == 2 {
 						value = `v"}`
 					}
-					event, _ = sjson.SetBytes(event, path, value)
+					event, _ = ojson.SetBytes(event, path, value)
 				}
 				second[i] = event
 			}
 			terminal := first[len(first)-1]
-			item := gjson.GetBytes(second[len(second)-2], itemPath).Raw
-			terminal, _ = sjson.SetRawBytes(terminal, finalPath+".1", []byte(item))
+			item := ojson.GetBytes(second[len(second)-2], itemPath).Raw
+			terminal, _ = ojson.SetRawBytes(terminal, finalPath+".1", []byte(item))
 			source := [][]byte{first[0], second[0], first[1], second[1], second[2], first[2]}
 			source = append(source, second[3:len(second)-1]...)
 			source = append(source, first[3:len(first)-1]...)
@@ -347,17 +346,17 @@ func TestApplyPatchNamedLateIdentityActualInterleaved(t *testing.T) {
 					t.Fatal(chunk.Err)
 				}
 				for _, event := range applyPatchTestPayloads(chunk.Payload) {
-					if gjson.GetBytes(event, "type").String() == "response.completed" {
-						if len(gjson.GetBytes(event, "response.output").Array()) != 2 {
+					if ojson.GetBytes(event, "type").String() == "response.completed" {
+						if len(ojson.GetBytes(event, "response.output").Array()) != 2 {
 							t.Fatalf("lost final call: %s", event)
 						}
 						for index := range perCall {
-							item := gjson.GetBytes(event, fmt.Sprintf("response.output.%d", index))
-							final, _ := sjson.SetRawBytes(event, "response.output", []byte("["+item.Raw+"]"))
+							item := ojson.GetBytes(event, fmt.Sprintf("response.output.%d", index))
+							final, _ := ojson.SetRawBytes(event, "response.output", []byte("["+item.Raw+"]"))
 							perCall[index] = append(perCall[index], final)
 						}
 					} else {
-						index := int(gjson.GetBytes(event, "output_index").Int())
+						index := int(ojson.GetBytes(event, "output_index").Int())
 						if index < 0 || index > 1 {
 							t.Fatalf("unknown call index: %s", event)
 						}

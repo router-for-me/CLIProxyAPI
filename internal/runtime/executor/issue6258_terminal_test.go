@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const issue6258ExecutorContent = `{"responseId":"executor-6258","candidates":[{"content":{"parts":[{"text":"answer"}]}}]}`
@@ -92,11 +92,11 @@ func issue6258StartStream(t *testing.T, ctx context.Context, executor issue6258S
 	return stream.Chunks
 }
 
-func issue6258Events(payload []byte) []gjson.Result {
-	var events []gjson.Result
+func issue6258Events(payload []byte) []ojson.Result {
+	var events []ojson.Result
 	for _, line := range strings.Split(string(payload), "\n") {
 		if strings.HasPrefix(line, "data:") {
-			event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			event := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			if event.Get("type").Exists() {
 				events = append(events, event)
 			}
@@ -105,9 +105,9 @@ func issue6258Events(payload []byte) []gjson.Result {
 	return events
 }
 
-func issue6258ExecutorTerminal(t *testing.T, chunks <-chan cliproxyexecutor.StreamChunk) gjson.Result {
+func issue6258ExecutorTerminal(t *testing.T, chunks <-chan cliproxyexecutor.StreamChunk) ojson.Result {
 	t.Helper()
-	var response gjson.Result
+	var response ojson.Result
 	terminals := 0
 	done := map[string]int{}
 	for chunk := range chunks {

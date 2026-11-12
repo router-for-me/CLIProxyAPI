@@ -205,16 +205,14 @@ func TestAuthWeight_InvalidAndOverflowValuesAreExcluded(t *testing.T) {
 	}
 }
 
-func TestPickSmoothWeightedAuth_SaturatesCorruptState(t *testing.T) {
+func TestSmoothWeightedStateCharge_SaturatesAndClampsCorruptState(t *testing.T) {
 	t.Parallel()
 
-	current := map[string]int64{"a": math.MaxInt64, "b": math.MinInt64}
-	picked := pickSmoothWeightedAuth([]*Auth{{ID: "a"}, {ID: "b"}}, current)
-	if picked == nil {
-		t.Fatal("pickSmoothWeightedAuth() returned nil")
-	}
-	if current["a"] != math.MaxInt64-2 || current["b"] != math.MinInt64+1 {
-		t.Fatalf("current state = %#v, want saturated arithmetic", current)
+	state := weightedPoolForTest("route", map[string]int64{"a": 1, "b": 1}, map[string]int64{"a": math.MaxInt64, "b": math.MinInt64})
+	state.charge(0, false)
+	limit := maxSmoothWeightedCreditRounds * 2
+	if state.currentForTest()["a"] != limit || state.currentForTest()["b"] != -limit {
+		t.Fatalf("current state = %#v, want saturated and clamped arithmetic", state.currentForTest())
 	}
 }
 

@@ -1,6 +1,9 @@
 package pluginabi
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 const (
 	// ABIVersion tracks the native C ABI shape (native plugin exports).
@@ -17,7 +20,24 @@ const (
 	// Version 6 preserves raw JSON bodies for plugin management responses.
 	// Plugins that still require HTML entity escaping on JSON response strings
 	// should keep schema_version < 6.
-	SchemaVersion uint32 = 6
+	// Version 7 lets request interceptors opt out of receiving the request body
+	// per phase via request_interceptor_omit_body_before/after capabilities and
+	// lets frontend auth providers opt out via frontend_auth_provider_omit_body /
+	// frontend_auth_omit_body; the host then omits the request body instead of
+	// reading, cloning, and Base64-encoding the full payload. Plugins that declare
+	// the flags on schema_version < 7 (or do not declare them) still receive it.
+	// Version 8 lets request interceptors opt into raw request body delivery and
+	// localized byte-range patching per phase via request_interceptor_patch_body_before/after
+	// (or request_body_patcher_before/after) capabilities and the
+	// request.patch_body_before / request.patch_body_after methods; the host passes
+	// raw request body bytes directly across the C ABI without JSON/Base64 wrapping
+	// and splices validated byte-range edits in a single pass.
+	// Version 9 lets ModelRegistrar.RegisterModels and ModelProvider.StaticModels
+	// publish model catalogs for multiple providers in one response via Registrations.
+	// Version 10 lets a plugin expose multiple OAuth/auth provider identifiers and
+	// per-entry display metadata via auth.identifier (identifiers/entries) or
+	// Capabilities.AuthProviders / MultiAuthProvider / AuthProviderEntries.
+	SchemaVersion uint32 = 10
 	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
 	// request bodies on payload stream-chunk interceptor calls.
 	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
@@ -30,6 +50,21 @@ const (
 	// SchemaVersionRawManagementResponse is the first schema version where plugin
 	// management JSON responses are preserved without HTML-escaping strings.
 	SchemaVersionRawManagementResponse uint32 = 6
+	// SchemaVersionRequestInterceptorOmitBody is the first schema version where
+	// request interceptors may opt out of receiving the request body per phase.
+	SchemaVersionRequestInterceptorOmitBody uint32 = 7
+	// SchemaVersionFrontendAuthOmitBody is the first schema version where
+	// frontend auth providers may opt out of receiving the request body.
+	SchemaVersionFrontendAuthOmitBody uint32 = 7
+	// SchemaVersionRequestInterceptorBodyPatch is the first schema version where
+	// request interceptors may opt into raw request body delivery and byte-range patching.
+	SchemaVersionRequestInterceptorBodyPatch uint32 = 8
+	// SchemaVersionMultiProviderModels is the first schema version where model
+	// registration responses may publish models for multiple providers via Registrations.
+	SchemaVersionMultiProviderModels uint32 = 9
+	// SchemaVersionMultiAuthProviders is the first schema version where a plugin
+	// may register multiple auth provider identifiers.
+	SchemaVersionMultiAuthProviders uint32 = 10
 )
 
 const (
@@ -66,6 +101,8 @@ const (
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"
 	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodRequestPatchBodyBefore = "request.patch_body_before"
+	MethodRequestPatchBodyAfter  = "request.patch_body_after"
 	MethodRequestComplete        = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
@@ -115,12 +152,65 @@ const (
 	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
 )
 
+// ErrorCode constants define the machine-readable Error.Code values recognized
+// by CPA's routing and cooldown pipeline.
+const (
+	// ErrorCodeCredentialQuota marks a 429 refusal as exhausting or limiting the
+	// entire credential across all of its models (sets Result.CredentialScope and
+	// records quota reason "credential_quota"). Plugins may also set
+	// Error.CredentialScoped = true while keeping a provider-specific Code.
+	ErrorCodeCredentialQuota = "credential_quota"
+	// ErrorCodeTransientRateLimit marks a 429 refusal as a transient per-model
+	// capacity/admission limit that cools only the reporting model until
+	// RetryAfterSeconds without recording quota exhaustion or advancing backoff.
+	ErrorCodeTransientRateLimit = "transient_rate_limit"
+	// ErrorCodeRequestScoped marks a failure as caused by the request itself:
+	// CPA skips credential/model cooldown and stops credential rotation.
+	ErrorCodeRequestScoped = "request_scoped"
+	// ErrorCodeForceCooldown forces cooldown scheduling even when cooling is
+	// disabled for the credential, falling back to the default transient cooldown
+	// when no status-specific deadline applies.
+	ErrorCodeForceCooldown = "force_cooldown"
+	// ErrorCodeStreamTruncated marks an accepted upstream stream that terminated
+	// without a completion frame: CPA skips credential cooldown and does not
+	// replay the request on another credential.
+	ErrorCodeStreamTruncated = "stream_truncated"
+	// ErrorCodeConnectionLifecycle marks a client disconnect or session-close
+	// failure that must skip credential cooldown.
+	ErrorCodeConnectionLifecycle = "connection_lifecycle"
+	// ErrorCodeTransientTransport marks a pre-HTTP dial/TLS/DNS/reset failure
+	// that skips credential cooldown and remains eligible for request retries.
+	ErrorCodeTransientTransport = "transient_transport"
+	// ErrorCodeModelNotFound marks the requested model as unavailable on the
+	// selected credential so CPA cools only that model for 12h (or RetryAfterSeconds).
+	ErrorCodeModelNotFound = "model_not_found"
+	// ErrorCodeNotImplemented marks an optional capability (such as count_tokens)
+	// as unsupported so CPA keeps the credential and model available.
+	ErrorCodeNotImplemented = "not_implemented"
+)
+
 type Envelope struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  *Error          `json:"error,omitempty"`
 }
 
+// Error carries a structured plugin failure across RPC envelopes and stream
+// error_detail callbacks (host.stream.emit and host.stream.close).
+//
+// Routing and cooldown behavior is controlled by HTTPStatus, RetryAfterSeconds,
+// CredentialScoped, and the recognized ErrorCode* values in Code:
+//   - CredentialScoped: true (or Code: ErrorCodeCredentialQuota) on a 429 marks
+//     the entire credential as rate-limited across all of its models
+//     (reason "credential_quota") until RetryAfterSeconds or the quota backoff.
+//   - Code: ErrorCodeTransientRateLimit on a 429 cools only the reporting model
+//     until RetryAfterSeconds without marking quota exceeded.
+//   - Code: ErrorCodeRequestScoped, ErrorCodeStreamTruncated,
+//     ErrorCodeConnectionLifecycle, or ErrorCodeTransientTransport skips
+//     credential/model cooldown.
+//   - Code: ErrorCodeForceCooldown enforces cooldown even when cooling is disabled.
+//   - Code: ErrorCodeModelNotFound cools only the requested model as unsupported.
+//   - Code: ErrorCodeNotImplemented keeps count_tokens failures availability-neutral.
 type Error struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -128,6 +218,16 @@ type Error struct {
 	// HTTPStatus is the HTTP status code (e.g. 401, 403, 429) to surface to the client.
 	// When omitted or 0, CPA defaults to HTTP 500 (internal_server_error).
 	HTTPStatus int `json:"http_status,omitempty"`
+	// RetryAfterSeconds carries upstream retry guidance for cooldown and response headers.
+	// It is an optional hint. Schema-version agreement does not negotiate support for
+	// this field, and older hosts silently ignore it, so plugins must not depend on it
+	// for correctness. The same pair is accepted as error_detail on host.stream.emit
+	// and host.stream.close.
+	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// CredentialScoped reports whether the failure applies to the whole credential
+	// across all models (for example, an account-wide 429 quota or spend limit)
+	// rather than only the requested model.
+	CredentialScoped bool `json:"credential_scoped,omitempty"`
 }
 
 // Error implements the error interface for Error.
@@ -138,12 +238,52 @@ func (e *Error) Error() string {
 	return e.Message
 }
 
+// ErrorCode returns the machine-readable error code embedded in the Error.
+func (e *Error) ErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 // StatusCode returns the HTTP status code embedded in the Error, or 0 if unset.
 func (e *Error) StatusCode() int {
 	if e == nil {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// IsCredentialScoped reports whether the Error applies to the entire credential.
+func (e *Error) IsCredentialScoped() bool {
+	if e == nil {
+		return false
+	}
+	return e.CredentialScoped || strings.EqualFold(strings.TrimSpace(e.Code), ErrorCodeCredentialQuota)
+}
+
+// IsRequestScoped reports whether the Error is tied to the request rather than the credential.
+func (e *Error) IsRequestScoped() bool {
+	if e == nil || e.IsCredentialScoped() {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(e.Code), ErrorCodeRequestScoped)
+}
+
+// IsTransientRateLimit reports whether the Error is a transient per-model capacity 429.
+func (e *Error) IsTransientRateLimit() bool {
+	if e == nil || e.IsCredentialScoped() {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(e.Code), ErrorCodeTransientRateLimit)
+}
+
+// IsStreamTruncated reports whether the Error represents a truncated accepted upstream stream.
+func (e *Error) IsStreamTruncated() bool {
+	if e == nil || e.IsCredentialScoped() {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(e.Code), ErrorCodeStreamTruncated)
 }
 
 // NewError creates an Error instance with an optional HTTP status code.
