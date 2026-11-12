@@ -169,6 +169,134 @@ func TestCreateClientSecretRejectsUnsupportedSessionType(t *testing.T) {
 	}
 }
 
+func TestHandleTranscriptionSessionCreatesClientSecretWithAPIKeyUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNotImplemented)
+	}))
+	defer upstream.Close()
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{"api_key": "sk-upstream", "base_url": upstream.URL + "/v1"},
+	})
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/realtime/transcription_sessions", func(c *gin.Context) {
+		c.Set("userApiKey", "issuer-key")
+		c.Set("accessProvider", "static")
+		c.Next()
+	}, handler.HandleTranscriptionSession)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{
+		"session":{"language":"en","input_audio_format":"pcm16","input_audio_transcription":{"model":"whisper-1"}},
+		"expires_after":{"anchor":"created_at","seconds":60}
+	}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response struct {
+		ID           string `json:"id"`
+		Object       string `json:"object"`
+		Type         string `json:"type"`
+		Model        string `json:"model"`
+		Language     string `json:"language"`
+		ClientSecret struct {
+			Value     string `json:"value"`
+			ExpiresAt int64  `json:"expires_at"`
+		} `json:"client_secret"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if !strings.HasPrefix(response.ClientSecret.Value, clientSecretPrefix) {
+		t.Fatalf("client secret = %q", response.ClientSecret.Value)
+	}
+	if response.Object != transcriptionSessionObject || response.Type != sessionTypeTranscription {
+		t.Fatalf("session = %q/%q", response.Object, response.Type)
+	}
+	if response.ID == "" || response.Model != defaultTranscriptionModel || response.Language != "en" {
+		t.Fatalf("session = %+v", response)
+	}
+	if response.ClientSecret.ExpiresAt <= time.Now().Unix() {
+		t.Fatalf("client secret expires_at = %d", response.ClientSecret.ExpiresAt)
+	}
+
+	authRequest := httptest.NewRequest(http.MethodGet, "/v1/realtime?intent=transcription", nil)
+	authRequest.Header.Set("Authorization", "Bearer "+response.ClientSecret.Value)
+	authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(authRequest)
+	if errAuthenticate != nil || !matched {
+		t.Fatalf("AuthenticateClientSecret() matched=%t error=%v", matched, errAuthenticate)
+	}
+	if got := clientSecretSessionType(authorization.Session); got != sessionTypeTranscription {
+		t.Fatalf("stored session type = %q", got)
+	}
+	if got := modelFromJSON(authorization.Session); got != defaultTranscriptionModel {
+		t.Fatalf("stored session model = %q, want %q", got, defaultTranscriptionModel)
+	}
+	if !strings.Contains(string(authorization.Session), `"whisper-1"`) {
+		t.Fatalf("stored session = %s", authorization.Session)
+	}
+	if authorization.IssuerPrincipal != "issuer-key" || authorization.IssuerProvider != "static" {
+		t.Fatalf("issuer = %q/%q", authorization.IssuerProvider, authorization.IssuerPrincipal)
+	}
+}
+
+func TestHandleTranscriptionSessionRejectsRealtimeSessionType(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{"api_key": "sk-upstream"},
+	})
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/realtime/transcription_sessions", handler.HandleTranscriptionSession)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{"session":{"type":"realtime","model":"gpt-realtime"}}`))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"invalid_session"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
+func TestHandleRejectsTranscriptionClientSecretOnCallRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/realtime/calls", func(c *gin.Context) {
+		c.Set(ClientSecretSessionContextKey, json.RawMessage(`{"type":"transcription","model":"gpt-4o-transcribe"}`))
+		c.Set(ClientSecretPrincipalContextKey, "sess_123")
+		c.Next()
+	}, handler.Handle)
+	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/calls", strings.NewReader("v=0\r\n"))
+	request.Header.Set("Content-Type", "application/sdp")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusForbidden, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "realtime_client_secret_scope_mismatch") {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}
+
 func TestLiveSelectionHeadersRemoveLocalClientSecret(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())

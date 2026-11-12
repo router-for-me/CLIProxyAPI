@@ -903,6 +903,75 @@ func TestRealtimeStandardRoutesAndClientSecretAuth(t *testing.T) {
 	}
 }
 
+func TestRealtimeTranscriptionSessionsWithCodexAPIKey(t *testing.T) {
+	server := newTestServer(t)
+	credential := &auth.Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{"api_key": "sk-upstream", "base_url": "https://api.openai.com/v1"},
+	}
+	if _, errRegister := server.handlers.AuthManager.Register(context.Background(), credential); errRegister != nil {
+		t.Fatalf("register Codex API-key auth: %v", errRegister)
+	}
+
+	createRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{"session":{"language":"en"}}`))
+	createRequest.Header.Set("Authorization", "Bearer test-key")
+	createRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(createRecorder, createRequest)
+	if createRecorder.Code != http.StatusOK {
+		t.Fatalf("transcription_sessions status = %d, want %d; body=%s", createRecorder.Code, http.StatusOK, createRecorder.Body.String())
+	}
+	var created struct {
+		Object       string `json:"object"`
+		Type         string `json:"type"`
+		Model        string `json:"model"`
+		ClientSecret struct {
+			Value string `json:"value"`
+		} `json:"client_secret"`
+	}
+	if errUnmarshal := json.Unmarshal(createRecorder.Body.Bytes(), &created); errUnmarshal != nil {
+		t.Fatalf("unmarshal transcription session: %v", errUnmarshal)
+	}
+	if created.Object != "realtime.transcription_session" || created.Type != "transcription" || created.Model != "gpt-4o-transcribe" {
+		t.Fatalf("transcription session = %+v", created)
+	}
+	if created.ClientSecret.Value == "" {
+		t.Fatal("transcription client secret is empty")
+	}
+
+	for _, testCase := range []struct {
+		name    string
+		method  string
+		path    string
+		upgrade bool
+		status  int
+	}{
+		{name: "websocket upgrade required", method: http.MethodGet, path: "/v1/realtime?intent=transcription&model=gpt-4o-transcribe", status: http.StatusUpgradeRequired},
+		{name: "realtime model scope mismatch", method: http.MethodGet, path: "/v1/realtime?model=gpt-realtime", upgrade: true, status: http.StatusForbidden},
+		{name: "call requests rejected", method: http.MethodPost, path: "/v1/realtime/calls", status: http.StatusForbidden},
+	} {
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		request.Header.Set("Authorization", "Bearer "+created.ClientSecret.Value)
+		if testCase.upgrade {
+			request.Header.Set("Connection", "Upgrade")
+			request.Header.Set("Upgrade", "websocket")
+		}
+		recorder := httptest.NewRecorder()
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.status {
+			t.Errorf("%s: status = %d, want %d; body=%s", testCase.name, recorder.Code, testCase.status, recorder.Body.String())
+		}
+	}
+
+	plainRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{"session":{"language":"en"}}`))
+	plainRecorder := httptest.NewRecorder()
+	server.engine.ServeHTTP(plainRecorder, plainRequest)
+	if plainRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated transcription_sessions status = %d, want %d", plainRecorder.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestCodexAlphaSearchForwardsRequest(t *testing.T) {
 	server := newTestServer(t)
 	executor := &codexSearchCaptureExecutor{}

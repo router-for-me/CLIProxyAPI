@@ -29,7 +29,8 @@ func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
 	h.HandleDirectWebsocket(c)
 }
 
-// HandleDirectWebsocket relays a standard Realtime WebSocket through Codex OAuth.
+// HandleDirectWebsocket relays a standard Realtime WebSocket through Codex
+// OAuth, or a transcription-only session through a Codex API-key upstream.
 func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	if h == nil || h.authManager == nil {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable", "server_error", "codex_auth_unavailable")
@@ -42,13 +43,23 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 
 	requestedModel := strings.TrimSpace(c.Query("model"))
+	tokenSession := clientSecretSession(c)
+	transcription := transcriptionRealtimeRequest(c, tokenSession)
 	if requestedModel == "" {
 		requestedModel = defaultStandardRealtimeModel
+		if transcription {
+			requestedModel = defaultTranscriptionModel
+		}
 	}
-	selectionModel := codexRealtimeModel(requestedModel)
-	tokenSession := clientSecretSession(c)
+	selectionModel := requestedModel
+	if !transcription {
+		selectionModel = codexRealtimeModel(requestedModel)
+	}
 	if len(tokenSession) > 0 {
-		tokenModel := codexRealtimeModel(modelFromJSON(tokenSession))
+		tokenModel := modelFromJSON(tokenSession)
+		if !transcription {
+			tokenModel = codexRealtimeModel(tokenModel)
+		}
 		if selectionModel != tokenModel {
 			writeRealtimeError(c, http.StatusForbidden, "Realtime client secret is not valid for the requested model", "invalid_request_error", "realtime_client_secret_scope_mismatch")
 			return
@@ -58,7 +69,14 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
-	selection, selected, errSelect := h.selectOAuth(ctx, selectionModel, selectionOpts)
+	var selection *auth.HomeDispatchSelection
+	var selected *auth.Auth
+	var errSelect error
+	if transcription {
+		selection, selected, errSelect = h.selectAPIKey(ctx, selectionModel, selectionOpts)
+	} else {
+		selection, selected, errSelect = h.selectOAuth(ctx, selectionModel, selectionOpts)
+	}
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
 		return
@@ -97,13 +115,22 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
 
-	upstreamURL := h.directRealtimeURL(requestedModel)
+	upstreamURL := ""
+	if !transcription {
+		upstreamURL = h.directRealtimeURL(requestedModel)
+	}
 	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {
-		request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
+		targetURL := upstreamURL
+		requestHeaders := directRealtimeHeaders(c.Request.Header)
+		if transcription {
+			targetURL = apikeyTranscriptionURL(current, h.authManager.ResolveExecutionModel(current, requestedModel))
+			requestHeaders = apikeyRealtimeHeaders(c.Request.Header)
+		}
+		request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, websocketHTTPURL(targetURL), nil)
 		if errRequest != nil {
 			return nil, nil, errRequest
 		}
-		request.Header = directRealtimeHeaders(c.Request.Header)
+		request.Header = requestHeaders
 		setAccountHeader(request.Header, current)
 		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, request); errPrepare != nil {
 			return nil, nil, errPrepare
@@ -111,7 +138,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		authType, authValue := current.AccountInfo()
 		helpersConfig := h.currentConfig()
 		helps.RecordAPIWebsocketRequest(ctx, helpersConfig, helps.UpstreamRequestLog{
-			URL:       upstreamURL,
+			URL:       targetURL,
 			Method:    "WEBSOCKET",
 			Headers:   headersForLogging(request.Header),
 			Provider:  "codex",
@@ -122,7 +149,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		})
 		dialer := newProxyAwareSidebandDialer(helpersConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
-		return dialer.DialContext(ctx, upstreamURL, request.Header)
+		return dialer.DialContext(ctx, targetURL, request.Header)
 	}
 
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
@@ -169,6 +196,9 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		helpType := "api_error"
 		if status == http.StatusNotFound || status == http.StatusNotImplemented {
 			helpDetails = "Direct Realtime WebSocket is not supported by the Codex OAuth upstream"
+			if transcription {
+				helpDetails = "Transcription Realtime WebSocket is not supported by the selected Codex API-key upstream"
+			}
 			helpType = "not_supported_error"
 			status = http.StatusNotImplemented
 		}
@@ -195,7 +225,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		update, errMarshal := json.Marshal(struct {
 			Type    string          `json:"type"`
 			Session json.RawMessage `json:"session"`
-		}{Type: "session.update", Session: updateSession})
+		}{Type: realtimeSessionUpdateEvent(transcription), Session: updateSession})
 		if errMarshal != nil {
 			_ = closeUpstream()
 			writeRealtimeError(c, http.StatusInternalServerError, "Failed to apply Realtime client secret session", "server_error", "realtime_session_failed")
@@ -253,6 +283,60 @@ func (h *Handler) directRealtimeURL(model string) string {
 	values := make(url.Values)
 	values.Set("model", strings.TrimSpace(model))
 	return strings.TrimRight(h.sidebandAPIBaseURL, "/") + "/realtime?" + values.Encode()
+}
+
+// transcriptionRealtimeRequest reports whether the downstream WebSocket asks
+// for a transcription-only session, either through the intent query parameter
+// or through a transcription-scoped client secret.
+func transcriptionRealtimeRequest(c *gin.Context, session json.RawMessage) bool {
+	if c != nil && strings.EqualFold(strings.TrimSpace(c.Query("intent")), sessionTypeTranscription) {
+		return true
+	}
+	return clientSecretSessionType(session) == sessionTypeTranscription
+}
+
+func realtimeSessionUpdateEvent(transcription bool) string {
+	if transcription {
+		return "transcription_session.update"
+	}
+	return "session.update"
+}
+
+// apikeyTranscriptionURL builds the transcription-only Realtime WebSocket URL
+// for a Codex API-key credential, honoring its configured base URL.
+func apikeyTranscriptionURL(current *auth.Auth, model string) string {
+	base := defaultSidebandAPIBaseURL
+	if current != nil && current.Attributes != nil {
+		if configured := strings.TrimSpace(current.Attributes["base_url"]); configured != "" {
+			base = configured
+		}
+	}
+	values := make(url.Values)
+	values.Set("intent", sessionTypeTranscription)
+	values.Set("model", strings.TrimSpace(model))
+	return strings.TrimRight(websocketSchemeURL(base), "/") + "/realtime?" + values.Encode()
+}
+
+func websocketSchemeURL(rawURL string) string {
+	parsed, errParse := url.Parse(rawURL)
+	if errParse != nil {
+		return rawURL
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		parsed.Scheme = "ws"
+	case "https":
+		parsed.Scheme = "wss"
+	}
+	return parsed.String()
+}
+
+// apikeyRealtimeHeaders forwards protocol headers for API-key upstreams
+// without the ChatGPT/Codex OAuth originator defaults.
+func apikeyRealtimeHeaders(source http.Header) http.Header {
+	headers := protocolHeaders(source)
+	headers.Del("OpenAI-Alpha")
+	return headers
 }
 
 func directRealtimeHeaders(source http.Header) http.Header {
