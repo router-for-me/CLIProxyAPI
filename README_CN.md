@@ -118,6 +118,10 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
 <td>一站式接入 GPT、Claude、Gemini、DeepSeek 等领先 AI 模型。我们通过主流供应商的官方渠道接入，不使用共享账号池或逆向工程。相比官方价格，最高可节省 71%。实时追踪用量，计费透明，以更低成本使用 AI。<a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI">体验 DeepSider API</a>。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="DeepSider API" width="150"></a></td>
+<td>低延迟、高稳定、高并发的企业级 AI 网关**，**Claude Max 与 GPT Pro 号池全部自建自营，不降智池价格为官方的 3–4 折，池内降智状态实时公开可查**，一个入口接入 **GPT、Claude、Grok、Gemini-4-Carbon、DeepSeek 等国内外模型**，适配 **Claude Code** 等编程工具，多种渠道支持 **AI 对话、编程、生图与视频生成**，海外正规运营，自 **2025 年 8 月运营至今，已服务 1.5 万+ 客户**，费率公开、**无超额费、10 元起充**，后台 **7×24 小时监测、号池冗余、多节点自动切换**，保障高峰期访问稳定，<a href="https://origincoder.com/monitor">服务状态公开可查</a>，**不保存用户会话内容，保护隐私安全**，支持**对公支付与企业开票**，客服 **3 分钟内响应**、技术团队 **24 小时值守**，国内用户可通过<a href="https://cn.origincoder.com">国内加速入口</a>访问。</td>
+</tr>
 </tbody>
 </table>
 
