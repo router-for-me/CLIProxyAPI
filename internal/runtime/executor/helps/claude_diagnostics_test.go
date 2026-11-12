@@ -845,3 +845,68 @@ func TestPinClaudeSessionDateKVTransientFailureAndRecovery(t *testing.T) {
 		t.Fatalf("PinClaudeSessionDate during mid-session outage = %q, want 2026-08-10", got)
 	}
 }
+
+func TestClaudeContinuityKeyMatchesBeginClaudeContinuity(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	if got := ClaudeContinuityKey("", "session"); got != "" {
+		t.Fatalf("ClaudeContinuityKey(empty credential) = %q, want empty", got)
+	}
+	if got := ClaudeContinuityKey("credential", ""); got != "" {
+		t.Fatalf("ClaudeContinuityKey(empty session) = %q, want empty", got)
+	}
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	if key == "" {
+		t.Fatal("BeginClaudeDiagnostics returned an empty key")
+	}
+	if got := ClaudeContinuityKey("credential", "session"); got != key {
+		t.Fatalf("ClaudeContinuityKey = %q, want the BeginClaudeContinuity key %q", got, key)
+	}
+	if got := ClaudeContinuityKey(" credential ", " session "); got != key {
+		t.Fatalf("ClaudeContinuityKey with padding = %q, want %q", got, key)
+	}
+	if got := ClaudeContinuityKey("credential", "other-session"); got == key {
+		t.Fatal("different sessions resolved to the same continuity key")
+	}
+}
+
+func TestPinClaudeSessionBetaHeader(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	if got := PinClaudeSessionBetaHeader("", "a,b"); got != "a,b" {
+		t.Fatalf("empty key = %q, want betas unchanged", got)
+	}
+	if got := PinClaudeSessionBetaHeader("unknown-key", "a,b"); got != "a,b" {
+		t.Fatalf("unknown key = %q, want betas unchanged", got)
+	}
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionBetaHeader(key, "first-round-betas"); got != "first-round-betas" {
+		t.Fatalf("first pin = %q, want the first-round value recorded", got)
+	}
+	if got := PinClaudeSessionBetaHeader(key, "rebuilt-second-round-betas"); got != "first-round-betas" {
+		t.Fatalf("second pin = %q, want the pinned first-round value", got)
+	}
+
+	emptyKey, _, _ := BeginClaudeDiagnostics("credential", "empty-beta-session")
+	if got := PinClaudeSessionBetaHeader(emptyKey, ""); got != "" {
+		t.Fatalf("pinned empty value = %q, want empty", got)
+	}
+	if got := PinClaudeSessionBetaHeader(emptyKey, "rebuilt"); got != "" {
+		t.Fatalf("pin after an empty first round = %q, want the pinned empty value", got)
+	}
+
+	expiredKey, _, _ := BeginClaudeDiagnostics("credential", "expired-beta-session")
+	PinClaudeSessionBetaHeader(expiredKey, "expired-round-betas")
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[expiredKey]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[expiredKey] = entry
+	claudeDiagnosticsState.Unlock()
+	if got := PinClaudeSessionBetaHeader(expiredKey, "fresh-betas"); got != "fresh-betas" {
+		t.Fatalf("expired entry pin = %q, want betas unchanged", got)
+	}
+}

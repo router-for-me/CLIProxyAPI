@@ -128,6 +128,10 @@ type claudeDiagnosticsEntry struct {
 	committedSequence uint64
 	lastAccess        uint64
 	expiresAt         time.Time
+	// betaHeader is the Anthropic-Beta value the session's first round sent.
+	// betaHeaderPinned distinguishes a pinned empty value from no pin yet.
+	betaHeader       string
+	betaHeaderPinned bool
 }
 
 // claudeSessionDatePin retains a session date independently of continuity
@@ -281,6 +285,20 @@ func ClaudeDeterministicPromptID(seed string) string {
 	)
 }
 
+// ClaudeContinuityKey returns the continuity store key BeginClaudeContinuity
+// resolves for a credential identity and session ID, or "" when either part is
+// empty. Use it to address a session's continuity entry without starting a new
+// request generation.
+func ClaudeContinuityKey(credentialIdentity, sessionID string) string {
+	credentialIdentity = strings.TrimSpace(credentialIdentity)
+	sessionID = strings.TrimSpace(sessionID)
+	if credentialIdentity == "" || sessionID == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(credentialIdentity + "\x00" + sessionID))
+	return hex.EncodeToString(digest[:])
+}
+
 // BeginClaudeContinuity starts one request generation for a stable credential
 // identity and Claude conversation. It tracks the previous upstream message ID,
 // previous upstream request ID (cc_prev_req), and active prompt ID (cc_prompt_id).
@@ -292,8 +310,7 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	if credentialIdentity == "" || sessionID == "" {
 		return "", 0, "", "", ""
 	}
-	digest := sha256.Sum256([]byte(credentialIdentity + "\x00" + sessionID))
-	key = hex.EncodeToString(digest[:])
+	key = ClaudeContinuityKey(credentialIdentity, sessionID)
 	now := time.Now()
 
 	claudeDiagnosticsState.Lock()
@@ -499,6 +516,33 @@ func CommitClaudeContinuity(key string, sequence uint64, messageID, requestID st
 // newer committed generation, including after TTL expiry or capacity eviction.
 func CommitClaudeDiagnostics(key string, sequence uint64, messageID string) {
 	CommitClaudeContinuity(key, sequence, messageID, "")
+}
+
+// PinClaudeSessionBetaHeader returns the Anthropic-Beta value pinned for the
+// session, recording betas on the first call. Upstream scopes the declared
+// beta feature set to the whole conversation and rejects a later round whose
+// header differs from the first, so continuation rounds must reuse the
+// first-round value instead of the per-request rebuild (#7470). An empty,
+// unknown, or expired continuity key returns betas unchanged.
+func PinClaudeSessionBetaHeader(key, betas string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return betas
+	}
+	now := time.Now()
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, ok := claudeDiagnosticsState.entries[key]
+	if !ok || (!entry.expiresAt.IsZero() && now.After(entry.expiresAt)) {
+		return betas
+	}
+	if !entry.betaHeaderPinned {
+		entry.betaHeader = betas
+		entry.betaHeaderPinned = true
+		claudeDiagnosticsState.entries[key] = entry
+		return betas
+	}
+	return entry.betaHeader
 }
 
 func cleanupClaudeDiagnosticsLocked(now time.Time) {
