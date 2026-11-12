@@ -57,6 +57,14 @@ server:
   #   - 127.0.0.1
   #   - 192.0.2.0/24
 
+  # Graceful shutdown drain budget, in seconds. When the process receives SIGINT/SIGTERM,
+  # in-flight HTTP requests are allowed to finish for up to this many seconds before
+  # remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
+  # Default 0 keeps the legacy behavior: close immediately without draining.
+  # Note: hijacked connections (WebSocket sessions) are not drained; they are
+  # released by their own connection managers after the drain window.
+  shutdown-timeout: 0
+
   # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
   tls:
     enable: false
