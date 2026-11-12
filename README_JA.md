@@ -36,7 +36,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://dev.meta.ai/docs/overview"><img src="./assets/logo/meta.svg" alt="Meta" width="28" height="28" /></a></td>
-        <td>Meta Museシリーズモデル（Muse Wonder Full、Muse Wonder、Muse Spark 1.3など）。CLIProxyAPIはMetaログインによるMuse CodeアカウントとMeta Model APIキーに対応し、Muse Spark 1.3をコーディングやエージェントのワークフローに利用できます。MetaはMuse WonderをMeta Model APIとMuse Code向けに、Muse Wonder FullをMuse Codeのサブスクリプション利用者向けに発表しました。</td>
+        <td>Meta Museシリーズモデル（Muse Wonder Full、Muse Wonder、Muse Spark 1.3、Muse Emberなど）。CLIProxyAPIはMetaログインによるMuse CodeアカウントとMeta Model APIキーに対応し、Muse Spark 1.3をコーディングやエージェントのワークフローに利用できます。MetaはMuse WonderをMeta Model APIとMuse Code向けに、Muse Wonder FullをMuse Codeのサブスクリプション利用者向けに発表しました。</td>
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
