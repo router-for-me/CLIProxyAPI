@@ -150,8 +150,8 @@ func TestConvertGeminiResponseToClaude_VertexStreamingPartialArgs(t *testing.T) 
 		if got := block0JSON.String(); got != `{"city":"Berlin"}` {
 			t.Fatalf("block 0 JSON = %q, want %q", got, `{"city":"Berlin"}`)
 		}
-		if len(deferredSigs) != 2 || deferredSigs[0] != "sig-mid-1" || deferredSigs[1] != "sig-mid-2" {
-			t.Fatalf("expected deferred signatures [sig-mid-1 sig-mid-2], got %v", deferredSigs)
+		if len(deferredSigs) != 2 || deferredSigs[0] != "cpa-gemini-carrier-v1:previous:function:c2lnLW1pZC0x" || deferredSigs[1] != "cpa-gemini-carrier-v1:previous:function:c2lnLW1pZC0y" {
+			t.Fatalf("expected backward-bound deferred function signatures, got %v", deferredSigs)
 		}
 	})
 
@@ -355,8 +355,8 @@ func TestConvertGeminiResponseToClaudeNonStream_PartWithThoughtSignatureWithoutT
 	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	blocks := outputJSON.Get("content").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 content blocks (thinking + text), got %d: %s", len(blocks), string(output))
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 content blocks (carrier + signed text + unsigned text), got %d: %s", len(blocks), string(output))
 	}
 
 	thinkingBlock := blocks[0]
@@ -371,8 +371,11 @@ func TestConvertGeminiResponseToClaudeNonStream_PartWithThoughtSignatureWithoutT
 	}
 
 	textBlock := blocks[1]
-	if textBlock.Get("type").String() != "text" || textBlock.Get("text").String() != "inferred reasoningfinal answer" {
+	if textBlock.Get("type").String() != "text" || textBlock.Get("text").String() != "inferred reasoning" {
 		t.Fatalf("unexpected text block: %s", textBlock.Raw)
+	}
+	if blocks[2].Get("type").String() != "text" || blocks[2].Get("text").String() != "final answer" {
+		t.Fatalf("unsigned text must remain a separate block: %s", blocks[2].Raw)
 	}
 }
 
@@ -1093,7 +1096,7 @@ func TestConvertGeminiResponseToClaudeStream_Issue6409_SplitTrailingSignature(t 
 	if !strings.Contains(outputText, `{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`) {
 		t.Fatalf("expected block 1 trailing carrier thinking, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig-stream-trailing"}}`) {
+	if !strings.Contains(outputText, `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"cpa-gemini-carrier-v1:previous:text:c2lnLXN0cmVhbS10cmFpbGluZw"}}`) {
 		t.Fatalf("expected block 1 signature_delta, got: %s", outputText)
 	}
 	if !strings.Contains(outputText, `{"type":"content_block_stop","index":1}`) {
@@ -1182,8 +1185,8 @@ func TestConvertGeminiResponseToClaudeStream_Issue6409_FunctionCallContinuationS
 	if !strings.Contains(outputText, `"type":"input_json_delta"`) {
 		t.Fatalf("expected input_json_delta, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"signature":"sig-fc-cont-done"`) {
-		t.Fatalf("expected signature_delta with 'sig-fc-cont-done', got: %s", outputText)
+	if !strings.Contains(outputText, `"signature":"cpa-gemini-carrier-v1:previous:function:c2lnLWZjLWNvbnQtZG9uZQ"`) {
+		t.Fatalf("expected backward-bound signature_delta for the continued call, got: %s", outputText)
 	}
 }
 
