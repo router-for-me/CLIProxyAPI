@@ -513,7 +513,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			// Set finish reason.
 			if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() {
 				finishReason := strings.ToLower(finishReasonResult.String())
-				if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
+				if strings.EqualFold(strings.TrimSpace(finishReasonResult.String()), "MAX_TOKENS") {
+					finishReason = "length"
+				} else if isGeminiContentFilterFinishReason(finishReasonResult.String()) {
 					finishReason = "content_filter"
 				}
 				_ = choiceDoc.Set("finish_reason", finishReason)
@@ -639,7 +641,7 @@ func resolveGeminiOpenAIFinishReason(upstreamFinishReason string, sawToolCall bo
 	case sawToolCall:
 		finishReason = "tool_calls"
 	case upstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+		finishReason = "length"
 	case isGeminiContentFilterFinishReason(upstreamFinishReason):
 		finishReason = "content_filter"
 	default:
