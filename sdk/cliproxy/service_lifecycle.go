@@ -428,6 +428,9 @@ func (s *Service) ensureAuthDir() error {
 	return nil
 }
 
+// startXAIVersionUpdater is overridable in tests to avoid npm registry access.
+var startXAIVersionUpdater = executor.StartXAIVersionUpdater
+
 // startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
 func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 	s.cfgMu.RLock()
@@ -438,5 +441,8 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		registry.StartModelCatalogUpdaters(ctx, cfg.Models, cfg.Home.Enabled)
 		proxyURL = cfg.ProxyURL
 	}
-	executor.StartXAIVersionUpdater(ctx, proxyURL)
+	if cfg != nil && cfg.XAI.DisableVersionCheck {
+		return
+	}
+	startXAIVersionUpdater(ctx, proxyURL)
 }

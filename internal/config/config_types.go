@@ -206,6 +206,10 @@ type CodexHeaderDefaults struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+	// DisableVersionCheck stops the Grok CLI version lookup against the npm registry.
+	// When true, the built-in fallback client version is used and no npm request is
+	// made at startup or on the periodic refresh. Read once at service startup.
+	DisableVersionCheck bool `yaml:"disable-version-check" json:"disable-version-check"`
 }
 
 // DevinConfig configures provider-wide Devin request behavior.
