@@ -2,13 +2,13 @@ package helps
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"math"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -63,7 +63,7 @@ var devinPayloadFields = map[protowire.Number]devinPayloadField{
 // DevinPayloadDefaultsSource maps caller field presence to the native business
 // view so defaults can replace built-in values without replacing caller values.
 func DevinPayloadDefaultsSource(native, interactions []byte) []byte {
-	out := []byte(`{}`)
+	doc := ojson.NewDocString("{}")
 	for target, sources := range map[string][]string{
 		"model":                         {"model"},
 		"system_prompt":                 {"system_instruction", "systemInstruction"},
@@ -75,9 +75,9 @@ func DevinPayloadDefaultsSource(native, interactions []byte) []byte {
 		"completion_config.top_k":       {"generation_config.top_k", "generationConfig.top_k"},
 		"completion_config.top_p":       {"generation_config.top_p", "generationConfig.top_p"},
 	} {
-		var value gjson.Result
+		var value ojson.Result
 		for _, source := range sources {
-			value = gjson.GetBytes(interactions, source)
+			value = ojson.GetBytesNoCopy(interactions, source)
 			if value.Exists() {
 				break
 			}
@@ -86,13 +86,13 @@ func DevinPayloadDefaultsSource(native, interactions []byte) []byte {
 			continue
 		}
 		if target == "prompts" || target == "tools" {
-			value = gjson.GetBytes(native, target)
+			value = ojson.GetBytesNoCopy(native, target)
 		}
 		if value.Exists() {
-			out, _ = sjson.SetRawBytes(out, target, []byte(value.Raw))
+			_ = doc.SetRaw(target, value.Raw)
 		}
 	}
-	return out
+	return doc.Bytes()
 }
 
 // FinalizeDevinPayload projects the already-normalized protobuf business fields
@@ -106,12 +106,14 @@ func FinalizeDevinPayload(wire []byte, finalize PayloadFinalizer) ([]byte, []byt
 	if errMarshal != nil {
 		return nil, nil, errMarshal
 	}
-	configured := finalize(body)
+	doc := ojson.NewDoc(body)
+	finalize.FinalizeDoc(doc)
+	configured := doc.Bytes()
 	if bytes.Equal(configured, body) {
 		return wire, configured, nil
 	}
 	body = configured
-	out, errEncode := encodeDevinPayload(wire, gjson.ParseBytes(body), devinPayloadFields)
+	out, errEncode := encodeDevinPayload(wire, util.ParseGJSONBytesNoCopy(body), devinPayloadFields)
 	return out, body, errEncode
 }
 
@@ -165,7 +167,7 @@ func decodeDevinPayload(wire []byte, fields map[protowire.Number]devinPayloadFie
 	return out, nil
 }
 
-func encodeDevinPayload(original []byte, body gjson.Result, fields map[protowire.Number]devinPayloadField) ([]byte, error) {
+func encodeDevinPayload(original []byte, body ojson.Result, fields map[protowire.Number]devinPayloadField) ([]byte, error) {
 	var out []byte
 	// Credentials, device metadata, thread ordinals, and protocol flags stay opaque.
 	for len(original) > 0 {
@@ -188,10 +190,10 @@ func encodeDevinPayload(original []byte, body gjson.Result, fields map[protowire
 			continue
 		}
 		value := body.Get(field.name)
-		if !value.Exists() || value.Type == gjson.Null {
+		if !value.Exists() || value.Type == ojson.Null {
 			continue
 		}
-		values := []gjson.Result{value}
+		values := []ojson.Result{value}
 		if field.repeated {
 			values = value.Array()
 		}

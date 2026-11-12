@@ -3,9 +3,12 @@ package logging
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -72,6 +75,9 @@ type FileStreamingLogWriter struct {
 
 	// apiWebsocketTimeline stores the upstream websocket event timeline.
 	apiWebsocketTimeline []byte
+
+	// apiResponseErrors stores upstream API response error entries.
+	apiResponseErrors []*interfaces.ErrorMessage
 
 	// apiResponseTimestamp captures when the API response was received.
 	apiResponseTimestamp time.Time
@@ -187,6 +193,15 @@ func (w *FileStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+// WriteAPIResponseErrors buffers upstream API error entries for final writing.
+func (w *FileStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	if len(errors) == 0 {
+		return nil
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
+	return nil
+}
+
 func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if !timestamp.IsZero() {
 		w.apiResponseTimestamp = timestamp
@@ -221,6 +236,9 @@ func (w *FileStreamingLogWriter) Close() error {
 		w.cleanupTempFiles()
 		return nil
 	}
+	if w.responseStatus >= http.StatusBadRequest && w.responseStatus != 499 && !strings.HasPrefix(w.logFilename, "error-") {
+		w.logFilename = "error-" + w.logFilename
+	}
 
 	logFile, _, errOpen := createUniqueLogFile(w.logsDir, w.logFilename)
 	if errOpen != nil {
@@ -238,6 +256,15 @@ func (w *FileStreamingLogWriter) Close() error {
 
 	w.cleanupTempFiles()
 	return writeErr
+}
+
+// Discard stops the streaming writer and removes temporary files without creating a final log file.
+func (w *FileStreamingLogWriter) Discard() error {
+	if w == nil {
+		return nil
+	}
+	w.logFilename = ""
+	return w.Close()
 }
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
@@ -284,6 +311,9 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, w.apiRequestSource, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(logFile, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writePreformattedAPISectionWithSource(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseSource, w.apiResponseTimestamp); errWrite != nil {
@@ -371,6 +401,10 @@ func (w *NoOpStreamingLogWriter) WriteAPIResponse(_ []byte) error {
 // Returns:
 //   - error: Always returns nil
 func (w *NoOpStreamingLogWriter) WriteAPIWebsocketTimeline(_ []byte) error {
+	return nil
+}
+
+func (w *NoOpStreamingLogWriter) WriteAPIResponseErrors(_ []*interfaces.ErrorMessage) error {
 	return nil
 }
 

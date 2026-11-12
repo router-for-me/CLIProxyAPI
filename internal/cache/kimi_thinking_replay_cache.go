@@ -9,10 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -316,10 +317,10 @@ func marshalKimiThinkingReplayHomeValue(generation string, deleted bool, content
 }
 
 func decodeKimiThinkingReplayHomeValue(raw []byte) ([]byte, string, bool, bool) {
-	if len(raw) == 0 || len(raw) > kimiThinkingReplayCacheMaxSerializedBytes || !gjson.ValidBytes(raw) {
+	if len(raw) == 0 || len(raw) > kimiThinkingReplayCacheMaxSerializedBytes || !ojson.ValidBytes(raw) {
 		return nil, "", false, false
 	}
-	root := gjson.ParseBytes(raw)
+	root := util.ParseGJSONBytesNoCopy(raw)
 	if root.IsArray() {
 		if !validKimiThinkingReplayContent(raw) {
 			return nil, "", false, false
@@ -372,10 +373,10 @@ func kimiThinkingReplayKVKey(modelFamily, sessionKey string) string {
 }
 
 func validKimiThinkingReplayContent(content []byte) bool {
-	if len(content) == 0 || len(content) > KimiThinkingReplayCacheMaxBytesPerEntry || !gjson.ValidBytes(content) {
+	if len(content) == 0 || len(content) > KimiThinkingReplayCacheMaxBytesPerEntry || !ojson.ValidBytes(content) {
 		return false
 	}
-	root := gjson.ParseBytes(content)
+	root := util.ParseGJSONBytesNoCopy(content)
 	return root.IsArray() && len(root.Array()) > 0 && len(root.Array()) <= KimiThinkingReplayCacheMaxBlocksPerEntry
 }
 

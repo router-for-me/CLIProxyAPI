@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -14,12 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
@@ -38,14 +40,35 @@ type RoundRobinSelector struct {
 
 // WeightedRoundRobinSelector provides smooth weighted round-robin selection.
 type WeightedRoundRobinSelector struct {
-	mu      sync.Mutex
-	states  map[string]*smoothWeightedState
-	maxKeys int
+	mu         sync.Mutex
+	states     map[[32]byte]*weightedPoolState
+	stateCount int
+	maxKeys    int
+	// largeStates holds one shared dynamic accumulator per (route, priority, transport)
+	// bucket once a pool exceeds maxExactWeightedPoolMembers, preserving rotation credits
+	// across transient retry exclusions and cooldowns.
+	largeStates map[string]*weightedPoolState
+	largeOrder  []string
+}
+
+// UnwrapWeightedRoundRobinSelector extracts the underlying *WeightedRoundRobinSelector
+// from a bare selector or a SessionAffinitySelector wrapper.
+func UnwrapWeightedRoundRobinSelector(selector Selector) *WeightedRoundRobinSelector {
+	if weighted, ok := selector.(*WeightedRoundRobinSelector); ok {
+		return weighted
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		if weighted, okFallback := affinity.fallback.(*WeightedRoundRobinSelector); okFallback {
+			return weighted
+		}
+	}
+	return nil
 }
 
 type smoothWeightedState struct {
 	current map[string]int64
 	weights map[string]int64
+	peak    int
 }
 
 type weightedSelectorStateModelKey struct{}
@@ -81,10 +104,12 @@ const (
 )
 
 type modelCooldownError struct {
-	model    string
-	resetIn  time.Duration
-	provider string
-	cause    error
+	model          string
+	resetIn        time.Duration
+	provider       string
+	cause          error
+	claudeCooldown bool
+	claudeSignals  map[string]string
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
@@ -97,15 +122,25 @@ func newModelCooldownError(model, provider string, resetIn time.Duration) *model
 }
 
 func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duration, cause error) *modelCooldownError {
+	return newModelCooldownErrorForCandidates(model, provider, resetIn, cause, isClaudeCooldownProvider(provider), nil)
+}
+
+func newModelCooldownErrorForCandidates(model, provider string, resetIn time.Duration, cause error, claudeCooldown bool, claudeSignals map[string]string) *modelCooldownError {
 	if resetIn < 0 {
 		resetIn = 0
 	}
 	return &modelCooldownError{
-		model:    model,
-		provider: provider,
-		resetIn:  resetIn,
-		cause:    cause,
+		model:          model,
+		provider:       provider,
+		resetIn:        resetIn,
+		cause:          cause,
+		claudeCooldown: claudeCooldown,
+		claudeSignals:  maps.Clone(claudeSignals),
 	}
+}
+
+func isClaudeCooldownProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "claude")
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
@@ -195,8 +230,8 @@ func ExtractUpstreamErrorSummary(raw string) string {
 	if idx := strings.Index(raw, ": {"); idx != -1 && idx < 50 {
 		jsonPart = strings.TrimSpace(raw[idx+2:])
 	}
-	if gjson.Valid(jsonPart) {
-		parsed := gjson.Parse(jsonPart)
+	if ojson.Valid(jsonPart) {
+		parsed := ojson.Parse(jsonPart)
 		var code, message string
 		if errNode := parsed.Get("error"); errNode.Exists() {
 			if errNode.IsObject() {
@@ -205,7 +240,7 @@ func ExtractUpstreamErrorSummary(raw string) string {
 					code = strings.TrimSpace(errNode.Get("type").String())
 				}
 				message = strings.TrimSpace(errNode.Get("message").String())
-			} else if errNode.Type == gjson.String {
+			} else if errNode.Type == ojson.String {
 				message = strings.TrimSpace(errNode.String())
 			}
 		}
@@ -350,15 +385,417 @@ func (e *modelCooldownError) StatusCode() int {
 	return http.StatusTooManyRequests
 }
 
-func (e *modelCooldownError) Headers() http.Header {
+func (e *modelCooldownError) resetSeconds() int64 {
+	if e == nil || e.resetIn <= 0 {
+		return 0
+	}
+	seconds := int64(e.resetIn / time.Second)
+	if e.resetIn%time.Second > 0 {
+		seconds++
+	}
+	return seconds
+}
+
+// SafeResponseHeaders exposes only the locally trusted cooldown headers.
+func (e *modelCooldownError) SafeResponseHeaders() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	headers.Set("Retry-After", strconv.FormatInt(e.resetSeconds(), 10))
 	return headers
+}
+
+func (e *modelCooldownError) Headers() http.Header {
+	headers := e.SafeResponseHeaders()
+	if e != nil && e.claudeCooldown && e.resetIn > 0 {
+		e.appendClaudeUnifiedHeaders(headers)
+	}
+	return headers
+}
+
+func (e *modelCooldownError) appendClaudeUnifiedHeaders(headers http.Header) {
+	resetSeconds := e.resetSeconds()
+	if resetSeconds <= 0 {
+		return
+	}
+	resetAt := time.Now().Unix() + resetSeconds
+	resetStr := strconv.FormatInt(resetAt, 10)
+
+	if hasRejectedClaudeUnifiedSignals(e.claudeSignals) {
+		for key, value := range e.claudeSignals {
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "anthropic-ratelimit-unified-") {
+				headers.Set(key, value)
+			}
+		}
+		headers.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-Reset", resetStr)
+
+		rejWindows := rejectedClaudeUnifiedWindows(headers)
+		claim := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim")))
+		if len(rejWindows) == 0 && claim == "" && isClaudeOverageOnlyHeaders(headers) {
+			claim = "overage"
+			headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", claim)
+		}
+		if len(rejWindows) == 0 && claim != "overage" {
+			fallbackWindow := fallbackClaudeWindowForClaim(headers, claim, e.resetIn)
+			if fallbackWindow != "" {
+				statusHeader := claudeUnifiedWindowHeader(fallbackWindow, "Status")
+				if strings.TrimSpace(headers.Get(statusHeader)) == "" {
+					headers.Set(statusHeader, "rejected")
+					rejWindows = append(rejWindows, fallbackWindow)
+				}
+			}
+		}
+
+		if len(rejWindows) == 1 {
+			headers.Set(claudeUnifiedWindowHeader(rejWindows[0], "Reset"), resetStr)
+		} else if len(rejWindows) > 1 {
+			latestHeader := ""
+			var latestEpoch int64
+			for _, window := range rejWindows {
+				resetHeader := claudeUnifiedWindowHeader(window, "Reset")
+				raw := strings.TrimSpace(headers.Get(resetHeader))
+				if raw == "" {
+					headers.Set(resetHeader, resetStr)
+					continue
+				}
+				if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && (latestHeader == "" || parsed >= latestEpoch) {
+					latestHeader = resetHeader
+					latestEpoch = parsed
+				}
+			}
+			if latestHeader != "" {
+				headers.Set(latestHeader, resetStr)
+			}
+		}
+
+		if claim == "" {
+			if inferred := inferClaudeRepresentativeClaim(headers, rejWindows, e.resetIn); inferred != "" {
+				headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", inferred)
+			}
+		}
+		if strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")) == "" {
+			headers.Set("Anthropic-Ratelimit-Unified-Overage-Status", "rejected")
+		}
+		return
+	}
+
+	claim := "five_hour"
+	if e.resetIn > 5*time.Hour {
+		claim = "seven_day"
+	}
+	headers.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+	headers.Set("Anthropic-Ratelimit-Unified-Reset", resetStr)
+	headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", claim)
+	headers.Set("Anthropic-Ratelimit-Unified-Overage-Status", "rejected")
+	if claim == "five_hour" {
+		headers.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-5h-Reset", resetStr)
+	} else {
+		headers.Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-7d-Reset", resetStr)
+	}
+}
+
+func claudeUnifiedWindowName(headerKey string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(headerKey))
+	rest, hasPrefix := strings.CutPrefix(lower, "anthropic-ratelimit-unified-")
+	if !hasPrefix {
+		return "", false
+	}
+	window, hasSuffix := strings.CutSuffix(rest, "-status")
+	if !hasSuffix || window == "" || window == "overage" {
+		return "", false
+	}
+	return window, true
+}
+
+func claudeUnifiedWindowHeader(window, field string) string {
+	return http.CanonicalHeaderKey("Anthropic-Ratelimit-Unified-" + window + "-" + field)
+}
+
+func rejectedClaudeUnifiedWindows(headers http.Header) []string {
+	var windows []string
+	for key := range headers {
+		window, ok := claudeUnifiedWindowName(key)
+		if ok && strings.EqualFold(strings.TrimSpace(headers.Get(key)), "rejected") {
+			windows = append(windows, window)
+		}
+	}
+	sort.Strings(windows)
+	return windows
+}
+
+func isAllowedClaudeWindowStatus(status string) bool {
+	lower := strings.ToLower(strings.TrimSpace(status))
+	return lower == "allowed" || lower == "allowed_warning"
+}
+
+func isClaudeUtilizationBelowCap(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, errParse := strconv.ParseFloat(raw, 64)
+	if errParse != nil || math.IsNaN(u) || math.IsInf(u, 0) {
+		return false
+	}
+	return u >= 0 && u < 1.0
+}
+
+func isClaudeOverageOnlyHeaders(headers http.Header) bool {
+	overageRejected := strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")), "rejected") ||
+		strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason")) != ""
+	if !overageRejected {
+		return false
+	}
+	status5h := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+	status7d := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+	allowed5h := isAllowedClaudeWindowStatus(status5h)
+	allowed7d := isAllowedClaudeWindowStatus(status7d)
+	if allowed5h && allowed7d {
+		return true
+	}
+	if allowed7d && status5h == "" {
+		util5h := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-5h-Utilization"))
+		if util5h == "" || isClaudeUtilizationBelowCap(util5h) {
+			return true
+		}
+	}
+	if allowed5h && status7d == "" && isClaudeUtilizationBelowCap(headers.Get("Anthropic-Ratelimit-Unified-7d-Utilization")) {
+		return true
+	}
+	return false
+}
+
+func fallbackClaudeWindowForClaim(headers http.Header, claim string, resetIn time.Duration) string {
+	switch {
+	case claim == "seven_day_overage_included":
+		return "7d_oi"
+	case strings.HasPrefix(claim, "seven_day_"):
+		if suffix := strings.TrimPrefix(claim, "seven_day_"); suffix != "" {
+			return "7d_" + suffix
+		}
+	case claim == "seven_day":
+		return "7d"
+	case claim == "five_hour":
+		return "5h"
+	case claim == "":
+		allowed5h := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+		allowed7d := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+		switch {
+		case allowed5h && allowed7d:
+			return ""
+		case allowed5h:
+			return "7d"
+		case allowed7d:
+			return "5h"
+		case resetIn > 5*time.Hour:
+			return "7d"
+		default:
+			return "5h"
+		}
+	}
+	return ""
+}
+
+func inferClaudeRepresentativeClaim(headers http.Header, windows []string, resetIn time.Duration) string {
+	has5h := false
+	has7d := false
+	has7dOI := false
+	modelFamily7d := ""
+	otherWindow := ""
+	for _, window := range windows {
+		switch {
+		case window == "7d_oi":
+			has7dOI = true
+		case strings.HasPrefix(window, "7d_"):
+			if modelFamily7d == "" {
+				modelFamily7d = "seven_day_" + strings.TrimPrefix(window, "7d_")
+			}
+		case window == "7d":
+			has7d = true
+		case window == "5h":
+			has5h = true
+		default:
+			if otherWindow == "" {
+				otherWindow = window
+			}
+		}
+	}
+	switch {
+	case has7dOI:
+		return "seven_day_overage_included"
+	case modelFamily7d != "":
+		return modelFamily7d
+	case has7d:
+		return "seven_day"
+	case has5h:
+		return "five_hour"
+	case otherWindow != "":
+		return otherWindow
+	}
+	if strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")), "rejected") ||
+		strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason")) != "" {
+		return "overage"
+	}
+	allowed5h := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+	allowed7d := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+	switch {
+	case allowed5h && allowed7d:
+		return ""
+	case allowed5h:
+		return "seven_day"
+	case allowed7d:
+		return "five_hour"
+	case resetIn > 5*time.Hour:
+		return "seven_day"
+	default:
+		return "five_hour"
+	}
+}
+
+func hasRejectedClaudeUnifiedSignals(signals map[string]string) bool {
+	if len(signals) == 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(signals["Anthropic-Ratelimit-Unified-Status"]), "rejected") {
+		return true
+	}
+	for key, val := range signals {
+		if _, ok := claudeUnifiedWindowName(key); ok && strings.EqualFold(strings.TrimSpace(val), "rejected") {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeSignalsFromEvaluatedQuota(q QuotaState) (bool, map[string]string) {
+	if hasRejectedClaudeUnifiedSignals(q.cooldownSignals) {
+		return true, maps.Clone(q.cooldownSignals)
+	}
+	if q.cooldownEvaluated {
+		return false, nil
+	}
+	if hasRejectedClaudeUnifiedSignals(q.Signals) {
+		return true, maps.Clone(q.Signals)
+	}
+	return false, nil
+}
+
+func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool, map[string]string) {
+	if auth == nil || executorKeyFromAuth(auth) != "claude" {
+		return false, nil
+	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		state := existingModelState(auth, model)
+		if state != nil && state.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
+			if shadow := state.credentialQuotaShadow; shadow != nil {
+				if !shadow.Quota.Exceeded || !shadow.Quota.NextRecoverAt.After(now) || shadow.NextRetryAfter.After(shadow.Quota.NextRecoverAt) {
+					return false, nil
+				}
+				if strings.EqualFold(strings.TrimSpace(shadow.Quota.Reason), "cloudflare challenge") {
+					return false, nil
+				}
+				return claudeSignalsFromEvaluatedQuota(shadow.Quota)
+			}
+			return false, nil
+		}
+		if ok, signals := claudeSignalsFromEvaluatedQuota(auth.Quota); ok {
+			return true, signals
+		}
+		if state != nil && !state.Quota.NextRecoverAt.Before(auth.Quota.NextRecoverAt) {
+			if ok, signals := claudeSignalsFromEvaluatedQuota(state.Quota); ok {
+				return true, signals
+			}
+		}
+		return true, nil
+	}
+	if len(auth.ModelStates) > 0 {
+		if model == "" {
+			if !auth.Unavailable {
+				return false, nil
+			}
+			keys := make([]string, 0, len(auth.ModelStates))
+			for key := range auth.ModelStates {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			var earliestRecover time.Time
+			var earliestSignals map[string]string
+			found := false
+			for _, key := range keys {
+				st := auth.ModelStates[key]
+				if st != nil && (st.credentialQuotaPropagated || st.Quota.Reason == "credential_quota") {
+					st = st.credentialQuotaShadow
+				}
+				if st == nil || !st.Quota.Exceeded || !st.Quota.NextRecoverAt.After(now) || st.NextRetryAfter.After(st.Quota.NextRecoverAt) {
+					return false, nil
+				}
+				if strings.EqualFold(strings.TrimSpace(st.Quota.Reason), "cloudflare challenge") {
+					return false, nil
+				}
+				okSt, sig := claudeSignalsFromEvaluatedQuota(st.Quota)
+				if !okSt {
+					return false, nil
+				}
+				if !found || st.Quota.NextRecoverAt.Before(earliestRecover) {
+					found = true
+					earliestRecover = st.Quota.NextRecoverAt
+					earliestSignals = sig
+				}
+			}
+			return found, earliestSignals
+		}
+		state := existingModelState(auth, model)
+		if state != nil && (state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") {
+			state = state.credentialQuotaShadow
+		}
+		if state == nil || !state.Quota.Exceeded || !state.Quota.NextRecoverAt.After(now) || state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
+			return false, nil
+		}
+		if strings.EqualFold(strings.TrimSpace(state.Quota.Reason), "cloudflare challenge") {
+			return false, nil
+		}
+		return claudeSignalsFromEvaluatedQuota(state.Quota)
+	}
+	if !auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.After(now) || auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
+		return false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Quota.Reason), "cloudflare challenge") {
+		return false, nil
+	}
+	return claudeSignalsFromEvaluatedQuota(auth.Quota)
+}
+
+func claudeCooldownMetadataForAuths(ctx context.Context, auths []*Auth, modelForAuth func(*Auth) string, now time.Time, clientHeaders ...http.Header) (bool, map[string]string) {
+	if len(auths) == 0 {
+		return false, nil
+	}
+	var earliestAuth *Auth
+	var earliestSignals map[string]string
+	var earliestNext time.Time
+	for _, candidate := range auths {
+		checkModel := ""
+		if modelForAuth != nil {
+			checkModel = modelForAuth(candidate)
+		}
+		okClaude, signals := claudeUnifiedCooldownForAuth(candidate, checkModel, now)
+		if !okClaude {
+			return false, nil
+		}
+		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
+		if blocked && reason == blockReasonCooldown && next.After(now) {
+			if earliestAuth == nil || next.Before(earliestNext) || (next.Equal(earliestNext) && candidate.ID < earliestAuth.ID) {
+				earliestAuth = candidate
+				earliestSignals = signals
+				earliestNext = next
+			}
+		}
+	}
+	if earliestAuth == nil {
+		return false, nil
+	}
+	return true, earliestSignals
 }
 
 func authPriority(auth *Auth) int {
@@ -408,6 +845,18 @@ func canonicalModelKey(model string) string {
 		return model
 	}
 	return modelName
+}
+
+func canonicalModelLookupKey(model string) string {
+	return strings.ToLower(canonicalModelKey(model))
+}
+
+func sameCanonicalModelKey(left, right string) bool {
+	leftKey := canonicalModelLookupKey(left)
+	if leftKey == "" {
+		return false
+	}
+	return leftKey == canonicalModelLookupKey(right)
 }
 
 func authWebsocketsEnabled(auth *Auth) bool {
@@ -467,10 +916,14 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 }
 
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+	return collectAvailableByPriorityForRequest(nil, auths, model, now)
+}
+
+func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, model string, now time.Time, clientHeaders ...http.Header) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
-		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
+		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, model, now, clientHeaders...)
 		if !blocked {
 			priority := authPriority(candidate)
 			available[priority] = append(available[priority], candidate)
@@ -513,7 +966,7 @@ func getSelectorAvailableAuthsWithPriorityMode(ctx context.Context, auths []*Aut
 			return auths, nil
 		}
 	}
-	return getAvailableAuthsWithPriorityMode(auths, provider, model, now, allPriorities)
+	return getAvailableAuthsWithPriorityModeForRequest(ctx, auths, provider, model, now, allPriorities)
 }
 
 func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -521,11 +974,15 @@ func getAvailableAuthsAcrossPriorities(auths []*Auth, provider, model string, no
 }
 
 func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, now time.Time, allPriorities bool) ([]*Auth, error) {
+	return getAvailableAuthsWithPriorityModeForRequest(nil, auths, provider, model, now, allPriorities)
+}
+
+func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*Auth, provider, model string, now time.Time, allPriorities bool, clientHeaders ...http.Header) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriorityForRequest(ctx, auths, model, now, clientHeaders...)
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
@@ -536,7 +993,10 @@ func getAvailableAuthsWithPriorityMode(auths []*Auth, provider, model string, no
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(*Auth) string {
+				return model
+			}, now, clientHeaders...)
+			return nil, newModelCooldownErrorForCandidates(model, providerForError, resetIn, nil, claudeCooldown, claudeSignals)
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
@@ -619,7 +1079,7 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	key := provider + ":" + canonicalModelKey(model)
+	key := provider + ":" + canonicalModelLookupKey(model)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.lastPicked == nil {
@@ -671,44 +1131,18 @@ func positiveWeightAuths(auths []*Auth) []*Auth {
 
 // Pick selects the next available auth using smooth weighted round-robin.
 func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = opts
-	available, errAvailable := getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
-	if errAvailable != nil {
-		return nil, errAvailable
+	picked, reservation, errPick := s.reserveForRequest(ctx, provider, model, opts, auths, nil)
+	if errPick != nil {
+		return nil, errPick
 	}
-	available = preferCodexWebsocketAuths(ctx, provider, available)
-	stateModel := weightedSelectorStateModel(ctx, model)
-	key := provider + ":" + canonicalModelKey(stateModel)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.states == nil {
-		s.states = make(map[string]*smoothWeightedState)
-	}
-	limit := s.maxKeys
-	if limit <= 0 {
-		limit = 4096
-	}
-	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
-		s.states = make(map[string]*smoothWeightedState)
-	}
-	state := s.states[key]
-	if state == nil {
-		state = &smoothWeightedState{}
-		s.states[key] = state
-	}
-	weights := authWeightVector(available)
-	state.prepare(weights)
-	picked := pickSmoothWeightedAuth(available, state.current)
-	if picked == nil {
-		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
-	}
+	reservation.finish(true)
 	return picked, nil
 }
 
-// maxSmoothWeightedStateEntries bounds a single accumulator map so credentials that are
-// removed permanently cannot leak entries. Real pools stay far below this bound, so the
-// transient subsets produced by retry exclusions and cooldowns are never pruned.
+// maxSmoothWeightedStateEntries is the floor bound on a single accumulator map so
+// permanently removed credentials cannot leak entries on small pools. Larger pools scale
+// their prune bound with the historical peak size (2*peak) so transient retry exclusions
+// and cooldowns never wipe accumulated credits.
 const maxSmoothWeightedStateEntries = 1024
 
 // prepare syncs the configured weights into the state without discarding accumulated
@@ -717,6 +1151,9 @@ const maxSmoothWeightedStateEntries = 1024
 // affinity), because discarding credits there would collapse selection onto the first
 // candidate in slice order.
 func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if len(weights) > s.peak {
+		s.peak = len(weights)
+	}
 	if s.current == nil || weightsConfigChanged(s.weights, weights) {
 		s.current = make(map[string]int64, len(weights))
 	}
@@ -729,10 +1166,18 @@ func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	s.pruneStale(weights)
 }
 
+func (s *smoothWeightedState) pruneLimit() int {
+	if scaled := 2 * s.peak; scaled > maxSmoothWeightedStateEntries {
+		return scaled
+	}
+	return maxSmoothWeightedStateEntries
+}
+
 // pruneStale drops entries for credentials outside the current candidate set, but only
-// once a map exceeds the safety bound, so ordinary transient exclusions keep their credits.
+// once a map exceeds the scaled safety bound, so transient exclusions keep their credits.
 func (s *smoothWeightedState) pruneStale(weights map[string]int64) {
-	if len(s.current) <= maxSmoothWeightedStateEntries && len(s.weights) <= maxSmoothWeightedStateEntries {
+	limit := s.pruneLimit()
+	if len(s.current) <= limit && len(s.weights) <= limit {
 		return
 	}
 	for authID := range s.current {
@@ -775,29 +1220,6 @@ func authWeightVector(auths []*Auth) map[string]int64 {
 	return weights
 }
 
-func pickSmoothWeightedAuth(auths []*Auth, current map[string]int64) *Auth {
-	var picked *Auth
-	var pickedCurrent int64
-	var totalWeight int64
-	for _, auth := range auths {
-		weight := authWeight(auth)
-		if auth == nil || weight <= 0 {
-			continue
-		}
-		current[auth.ID] = saturatingAddInt64(current[auth.ID], weight)
-		totalWeight = saturatingAddInt64(totalWeight, weight)
-		if picked == nil || current[auth.ID] > pickedCurrent {
-			picked = auth
-			pickedCurrent = current[auth.ID]
-		}
-	}
-	if picked == nil {
-		return nil
-	}
-	current[picked.ID] = saturatingAddInt64(current[picked.ID], -totalWeight)
-	return picked
-}
-
 func saturatingAddInt64(value, delta int64) int64 {
 	if delta > 0 && value > math.MaxInt64-delta {
 		return math.MaxInt64
@@ -820,31 +1242,83 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// IsAuthAvailableForModel reports whether auth is eligible for selection on model at now.
+func IsAuthAvailableForModel(auth *Auth, model string, now time.Time) bool {
+	blocked, _, _ := isAuthBlockedForModel(auth, model, now)
+	return !blocked
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
+	return isAuthBlockedForModelForRequest(nil, auth, model, now)
+}
+
+func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if codexRefreshMissingAccessForRequest(ctx, auth, clientHeaders...) {
+		return true, blockReasonOther, time.Time{}
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
+	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
+		next := authForce
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(next) {
+			next = auth.Quota.NextRecoverAt
+		}
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, stateNext := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && stateNext.After(next) {
+					next = stateNext
+				}
+			}
+		}
+		return true, blockReasonCooldown, next
 	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		credNext := auth.Quota.NextRecoverAt
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && next.After(credNext) {
+					credNext = next
+				}
+			}
+		}
+		return true, blockReasonCooldown, credNext
+	}
+	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			modelKey := canonicalModelKey(model)
+			modelKey := canonicalModelLookupKey(model)
 			matched := false
 			blocked := false
 			blockedReason := blockReasonNone
 			nextRetry := time.Time{}
 			for stateModel, state := range auth.ModelStates {
-				if state == nil || canonicalModelKey(stateModel) != modelKey {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
 					continue
 				}
 				matched = true
@@ -869,17 +1343,17 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			}
 			return false, blockReasonNone, time.Time{}
 		}
-		return availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+		return availabilityBlock(unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
 	}
 	quotaExceeded := auth.Quota.Exceeded
 	// When model is empty and the credential has individual model states, auth.Quota.Exceeded
 	// is an aggregate of single-model quota cooldowns (reason "quota"). As long as the credential
 	// itself is not unavailable (not all models failed) and not under a credential-wide quota,
 	// do not treat individual model cooldowns as blocking the entire credential.
-	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !auth.Unavailable {
+	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !unavailable {
 		quotaExceeded = false
 	}
-	return availabilityBlock(auth.Unavailable, quotaExceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
+	return availabilityBlock(unavailable, quotaExceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now)
 }
 
 func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextRecoverAt, now time.Time) (bool, blockReason, time.Time) {
@@ -915,6 +1389,7 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+	rebindOnNever     bool
 }
 
 const (
@@ -923,12 +1398,17 @@ const (
 	// SessionAffinityRebindOnQuota preserves the existing session binding across transient failures
 	// and only rebinds on quota, auth, model-support, or permanent unavailability.
 	SessionAffinityRebindOnQuota = "quota"
+	// SessionAffinityRebindOnNever preserves the existing session binding across all failures
+	// and refuses to fail over a bound session to another credential.
+	SessionAffinityRebindOnNever = "never"
 )
 
 func normalizeSessionAffinityRebindOn(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case SessionAffinityRebindOnQuota:
 		return SessionAffinityRebindOnQuota
+	case SessionAffinityRebindOnNever:
+		return SessionAffinityRebindOnNever
 	default:
 		return SessionAffinityRebindOnAny
 	}
@@ -958,7 +1438,7 @@ func shouldRebindSessionAffinityOnError(err *Error) bool {
 	if err == nil || shouldSkipCredentialCooldown(err) {
 		return false
 	}
-	if isModelSupportResultError(err) || isCloudflareChallengeResultError(err) || isInvalidGrantResultError(err) {
+	if isModelSupportResultError(err) || isCloudflareChallengeResultError(err) || isInvalidGrantResultError(err) || isCreditBalanceTooLowResultError(err) {
 		return true
 	}
 	switch statusCodeFromResult(err) {
@@ -970,25 +1450,32 @@ func shouldRebindSessionAffinityOnError(err *Error) bool {
 }
 
 func isAuthBlockedByQuotaOrAuthForModel(auth *Auth, model string, now time.Time) bool {
+	return isAuthBlockedByQuotaOrAuthForModelForRequest(nil, auth, model, now)
+}
+
+func isAuthBlockedByQuotaOrAuthForModelForRequest(ctx context.Context, auth *Auth, model string, now time.Time, clientHeaders ...http.Header) bool {
 	if auth == nil {
 		return true
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true
 	}
+	if codexRefreshMissingAccessForRequest(ctx, auth, clientHeaders...) {
+		return true
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return true
 	}
-	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && (auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.After(now)) {
 		return true
 	}
 	if model != "" && len(auth.ModelStates) > 0 {
-		modelKey := canonicalModelKey(model)
+		modelKey := canonicalModelLookupKey(model)
 		for stateModel, state := range auth.ModelStates {
-			if state == nil || canonicalModelKey(stateModel) != modelKey {
+			if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
 				continue
 			}
 			if state.Status == StatusDisabled {
@@ -1001,10 +1488,11 @@ func isAuthBlockedByQuotaOrAuthForModel(auth *Auth, model string, now time.Time)
 		return false
 	}
 	quota := auth.Quota
-	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !auth.Unavailable {
+	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
+	if len(auth.ModelStates) > 0 && auth.Quota.Reason != "credential_quota" && !unavailable {
 		quota.Exceeded = false
 	}
-	return isStateBlockedByQuotaOrAuth(auth.Unavailable, quota, auth.NextRetryAfter, auth.LastError, now)
+	return isStateBlockedByQuotaOrAuth(unavailable, quota, auth.NextRetryAfter, auth.LastError, now)
 }
 
 func isStateBlockedByQuotaOrAuth(unavailable bool, quota QuotaState, nextRetryAfter time.Time, lastErr *Error, now time.Time) bool {
@@ -1022,7 +1510,7 @@ func isStateBlockedByQuotaOrAuth(unavailable bool, quota QuotaState, nextRetryAf
 }
 
 func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx context.Context, candidates []*Auth, model, authID string, now time.Time) bool {
-	if s == nil || !s.rebindOnQuotaOnly || authID == "" {
+	if s == nil || (!s.rebindOnQuotaOnly && !s.rebindOnNever) || authID == "" {
 		return false
 	}
 	if ctx != nil {
@@ -1034,10 +1522,27 @@ func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx conte
 	}
 	for _, candidate := range candidates {
 		if candidate != nil && candidate.ID == authID {
-			return !isAuthBlockedByQuotaOrAuthForModel(candidate, model, now)
+			return !isAuthBlockedByQuotaOrAuthForModelForRequest(ctx, candidate, model, now)
 		}
 	}
 	return false
+}
+
+func (s *SessionAffinitySelector) unavailableBoundAuthError(ctx context.Context, candidates []*Auth, model, authID string, now time.Time) *Error {
+	if s.shouldPreserveBindingWhenUnavailable(ctx, candidates, model, authID, now) {
+		return &Error{
+			Code:       "session_auth_retry",
+			Message:    "bound session credential is transiently unavailable",
+			Retryable:  true,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}
+	}
+	return &Error{
+		Code:       "session_auth_unavailable",
+		Message:    "bound session credential is unavailable",
+		Retryable:  false,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -1068,13 +1573,14 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 	if cfg.SubagentAffinity != nil {
 		subagentAffinity = *cfg.SubagentAffinity
 	}
-	rebindOnQuotaOnly := normalizeSessionAffinityRebindOn(cfg.RebindOn) == SessionAffinityRebindOnQuota
+	rebindMode := normalizeSessionAffinityRebindOn(cfg.RebindOn)
 	return &SessionAffinitySelector{
 		fallback:          cfg.Fallback,
 		cache:             NewSessionCache(cfg.TTL),
 		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
 		subagentAffinity:  subagentAffinity,
-		rebindOnQuotaOnly: rebindOnQuotaOnly,
+		rebindOnQuotaOnly: rebindMode == SessionAffinityRebindOnQuota,
+		rebindOnNever:     rebindMode == SessionAffinityRebindOnNever,
 	}
 }
 
@@ -1097,7 +1603,16 @@ func (s *SessionAffinitySelector) Trees() *cliproxysession.InMemorySessionTreeSt
 // Note: The cache key includes provider, session ID, and model to handle cases where
 // a session uses multiple models (e.g., gemini-2.5-pro and gemini-3-flash-preview)
 // that may be supported by different auth credentials, and to avoid cross-provider conflicts.
-func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (selected *Auth, errPick error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	var reservation *weightedReservation
+	// Local bindings complete inside Pick; failed selections release speculative credit.
+	defer func() { reservation.finish(selected != nil && errPick == nil) }()
 	entry := selectorLogEntry(ctx)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any)
@@ -1109,7 +1624,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// consulted when no header, body, or execution-session identity is present.
 	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
 	if explicitID == "" {
-		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry); handled || errLCP != nil {
+		if auth, handled, errLCP := s.pickLCP(ctx, provider, model, opts, auths, entry, &reservation); handled || errLCP != nil {
 			return auth, errLCP
 		}
 	} else if opts.Metadata != nil {
@@ -1151,13 +1666,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier, while the fallback selector keeps seeing only the highest tier.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
-	if err != nil {
+	if err != nil && !s.rebindOnNever {
 		return nil, err
 	}
 	fallbackAuths := highestPriorityAuths(available)
@@ -1201,11 +1716,20 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
-				return auth, nil
+				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
+		if s.rebindOnNever {
+			bind(cachedAuthID, false)
+			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
+			entry.Infof("session-affinity: cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, errBound.Code, provider, model)
+			return nil, errBound
+		}
+		if err != nil {
+			return nil, err
+		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 		if err != nil {
 			return nil, err
 		}
@@ -1239,7 +1763,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				if auth.ID == parentAuthID {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
-					return auth, nil
+					return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 				}
 			}
 		}
@@ -1256,12 +1780,18 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						} else {
 							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
-						return auth, nil
+						return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 					}
 				}
 			}
+			if !isSubagent && !isFork && s.rebindOnNever {
+				bind(cachedAuthID, false)
+				errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
+				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable, refusing failover | session=%s fallback=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, errBound.Code, provider, model)
+				return nil, errBound
+			}
 			if !isSubagent && !isFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
-				auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+				auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 				if err != nil {
 					return nil, err
 				}
@@ -1275,7 +1805,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	if err != nil {
+		return nil, err
+	}
+	auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 	if err != nil {
 		return nil, err
 	}
@@ -1291,7 +1824,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	return auth, nil
 }
 
-func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry) (*Auth, bool, error) {
+func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry, reservation **weightedReservation) (*Auth, bool, error) {
 	if s == nil || s.matcher == nil {
 		return nil, false, nil
 	}
@@ -1320,7 +1853,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 	now := time.Now()
 	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
-	if errAvailable != nil {
+	if errAvailable != nil && !s.rebindOnNever {
 		return nil, true, errAvailable
 	}
 
@@ -1364,15 +1897,47 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
-			return auth, true, nil
+			picked, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, reservation)
+			return picked, true, errPick
+		}
+		if !match.IsFork && s.rebindOnNever {
+			if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, match.AuthID); bindRes.SessionID != "" {
+				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
+				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
+				if bindRes.ParentSessionID != "" {
+					opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = bindRes.ParentSessionID
+				} else if opts.Metadata != nil {
+					delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+				}
+				if bindRes.AccessNumber > 0 && opts.Metadata != nil {
+					opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = bindRes.AccessNumber
+				}
+				if bindRes.IsCompaction {
+					if opts.Metadata != nil {
+						opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
+						delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
+						opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
+					}
+				} else if opts.Metadata != nil {
+					delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
+					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
+					delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
+				}
+			}
+			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, match.AuthID, now)
+			entry.Infof("session-affinity: LCP cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.AuthID, errBound.Code, provider, model)
+			return nil, true, errBound
 		}
 		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
 			preservedAuthID = match.AuthID
 		}
 	}
 
+	if errAvailable != nil {
+		return nil, true, errAvailable
+	}
 	fallbackAuths := highestPriorityAuths(available)
-	auth, errPick := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, reservation)
 	if errPick != nil {
 		return nil, true, errPick
 	}
@@ -1556,6 +2121,30 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 }
 
+// ForgetAuth forwards permanent credential removal to the fallback selector so
+// weighted round-robin accounting can prune deregistered credentials without
+// disturbing credits of transiently excluded credentials.
+func (s *SessionAffinitySelector) ForgetAuth(authID string) {
+	s.ForgetAuthUpTo(authID, ^uint64(0), ^uint64(0))
+}
+
+// ForgetAuthUpTo forwards epoch-gated permanent credential removal to the fallback selector
+// so delayed removals never evict a newly re-registered credential with the same ID.
+func (s *SessionAffinitySelector) ForgetAuthUpTo(authID string, maxEpoch, maxGen uint64) {
+	if s == nil || authID == "" {
+		return
+	}
+	if epochForgetter, ok := s.fallback.(interface {
+		ForgetAuthUpTo(string, uint64, uint64)
+	}); ok && epochForgetter != nil {
+		epochForgetter.ForgetAuthUpTo(authID, maxEpoch, maxGen)
+		return
+	}
+	if forgetter, ok := s.fallback.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
+	}
+}
+
 // LookupAffinity observes the current session affinity binding without side effects.
 // It never selects a credential, creates a binding, rebinds, or refreshes TTL.
 // Optional authFilters allow callers (such as Manager) to exclude credentials that do not match the requested provider.
@@ -1683,9 +2272,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// selected credential is unhealthy, so preserve both explicit and LCP bindings.
 		return
 	}
-	if !res.Success && s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error) {
-		// Under session-affinity-rebind-on: quota, transient failures fail over for
-		// the current request without unbinding the session from its bound credential.
+	if !res.Success && (s.rebindOnNever || (s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error))) {
+		// Under session-affinity-rebind-on: never (or quota on transient failures),
+		// keep the session bound to its original credential.
 		return
 	}
 
@@ -1765,6 +2354,75 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 	}
 }
 
+func (s *SessionAffinitySelector) boundAuthForRequest(providers []string, model string, opts cliproxyexecutor.Options) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	modelKey := canonicalModelKey(model)
+	candidateProviders := make([]string, 0, len(providers)+1)
+	candidateProviders = append(candidateProviders, "mixed")
+	for _, p := range providers {
+		p = strings.TrimSpace(p)
+		if p != "" && p != "mixed" {
+			candidateProviders = append(candidateProviders, p)
+		}
+	}
+
+	explicitID, explicitFallbackID := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if explicitID == "" && s.matcher != nil {
+		turns := cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest)
+		if len(turns) > 0 {
+			fingerprints, minPrefixLength, tailFingerprints, envDigest := s.matcher.PrepareExt(turns)
+			if len(fingerprints) > 0 && minPrefixLength > 0 && minPrefixLength <= len(fingerprints) {
+				for _, candProvider := range candidateProviders {
+					if namespace := lcpAffinityNamespace(candProvider, model, opts.Metadata); namespace != "" {
+						if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok && !match.IsFork && match.AuthID != "" {
+							return match.AuthID, true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if s.cache == nil {
+		return "", false
+	}
+	primaryID, fallbackID := explicitID, explicitFallbackID
+	if primaryID == "" {
+		primaryID, fallbackID = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	}
+	if primaryID != "" {
+		primaryID = cliproxysession.BoundSessionIdentity(primaryID)
+	}
+	if fallbackID != "" {
+		fallbackID = cliproxysession.BoundSessionIdentity(fallbackID)
+	}
+	isFork := false
+	if opts.Metadata != nil {
+		if forkFlag, ok := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); ok && forkFlag {
+			isFork = true
+		}
+	}
+	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
+
+	if primaryID != "" {
+		for _, candProvider := range candidateProviders {
+			if authID, ok := s.cache.Get(candProvider + "::" + primaryID + "::" + modelKey); ok && authID != "" {
+				return authID, true
+			}
+		}
+	}
+	if fallbackID != "" && fallbackID != primaryID && !isSubagent && !isFork {
+		for _, candProvider := range candidateProviders {
+			if authID, ok := s.cache.Get(candProvider + "::" + fallbackID + "::" + modelKey); ok && authID != "" {
+				return authID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // isGuardianRequest deliberately matches the header, not the configurable review model.
 func isGuardianRequest(headers http.Header) bool {
 	for key, values := range headers {
@@ -1832,7 +2490,7 @@ func extractConversationAlias(payload []byte) string {
 	if len(payload) == 0 {
 		return ""
 	}
-	root := gjson.ParseBytes(payload)
+	root := util.ParseGJSONBytesNoCopy(payload)
 	conversation := root.Get("conversation")
 	if !conversation.Exists() {
 		req := root.Get("request")
@@ -1842,7 +2500,7 @@ func extractConversationAlias(payload []byte) string {
 	}
 	if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
 		return "conv:" + sid
-	} else if conversation.Type == gjson.String {
+	} else if conversation.Type == ojson.String {
 		if sid := normalizedSessionCandidate(conversation.String()); sid != "" {
 			return "conv:" + sid
 		}
@@ -1892,9 +2550,9 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 	var systemPrompt, firstUserMsg, firstAssistantMsg string
 
 	// OpenAI/Claude messages format
-	messages := gjson.GetBytes(payload, "messages")
+	messages := ojson.GetBytesNoCopy(payload, "messages")
 	if messages.Exists() && messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			role := msg.Get("role").String()
 			content := extractMessageContent(msg.Get("content"))
 			if content == "" {
@@ -1925,17 +2583,17 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 
 	// Claude API: top-level "system" field (array or string)
 	if systemPrompt == "" {
-		topSystem := gjson.GetBytes(payload, "system")
+		topSystem := ojson.GetBytesNoCopy(payload, "system")
 		if topSystem.Exists() {
 			if topSystem.IsArray() {
-				topSystem.ForEach(func(_, part gjson.Result) bool {
+				topSystem.ForEach(func(_, part ojson.Result) bool {
 					if text := part.Get("text").String(); text != "" && systemPrompt == "" {
 						systemPrompt = truncateString(text, 100)
 						return false
 					}
 					return true
 				})
-			} else if topSystem.Type == gjson.String {
+			} else if topSystem.Type == ojson.String {
 				systemPrompt = truncateString(topSystem.String(), 100)
 			}
 		}
@@ -1943,9 +2601,9 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 
 	// Gemini format
 	if systemPrompt == "" && firstUserMsg == "" {
-		sysInstr := gjson.GetBytes(payload, "systemInstruction.parts")
+		sysInstr := ojson.GetBytesNoCopy(payload, "systemInstruction.parts")
 		if sysInstr.Exists() && sysInstr.IsArray() {
-			sysInstr.ForEach(func(_, part gjson.Result) bool {
+			sysInstr.ForEach(func(_, part ojson.Result) bool {
 				if text := part.Get("text").String(); text != "" && systemPrompt == "" {
 					systemPrompt = truncateString(text, 100)
 					return false
@@ -1954,11 +2612,11 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 			})
 		}
 
-		contents := gjson.GetBytes(payload, "contents")
+		contents := ojson.GetBytesNoCopy(payload, "contents")
 		if contents.Exists() && contents.IsArray() {
-			contents.ForEach(func(_, msg gjson.Result) bool {
+			contents.ForEach(func(_, msg ojson.Result) bool {
 				role := msg.Get("role").String()
-				msg.Get("parts").ForEach(func(_, part gjson.Result) bool {
+				msg.Get("parts").ForEach(func(_, part ojson.Result) bool {
 					text := part.Get("text").String()
 					if text == "" {
 						return true
@@ -1985,13 +2643,13 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 
 	// OpenAI Responses API format (v1/responses)
 	if systemPrompt == "" && firstUserMsg == "" {
-		if instr := gjson.GetBytes(payload, "instructions").String(); instr != "" {
+		if instr := ojson.GetBytesNoCopy(payload, "instructions").String(); instr != "" {
 			systemPrompt = truncateString(instr, 100)
 		}
 
-		input := gjson.GetBytes(payload, "input")
+		input := ojson.GetBytesNoCopy(payload, "input")
 		if input.Exists() && input.IsArray() {
-			input.ForEach(func(_, item gjson.Result) bool {
+			input.ForEach(func(_, item ojson.Result) bool {
 				itemType := item.Get("type").String()
 				if itemType == "reasoning" {
 					return true
@@ -2010,7 +2668,7 @@ func extractMessageHashIDs(payload []byte) (primaryID, fallbackID string) {
 				// Handle both string content and array content (multimodal).
 				content := item.Get("content")
 				var text string
-				if content.Type == gjson.String {
+				if content.Type == ojson.String {
 					text = content.String()
 				} else {
 					text = extractResponsesAPIContent(content)
@@ -2079,16 +2737,16 @@ func truncateString(s string, maxLen int) string {
 // extractMessageContent extracts text content from a message content field.
 // Handles both string content and array content (multimodal messages).
 // For array content, extracts text from all text-type elements.
-func extractMessageContent(content gjson.Result) string {
+func extractMessageContent(content ojson.Result) string {
 	// String content: "Hello world"
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		return content.String()
 	}
 
 	// Array content: [{"type":"text","text":"Hello"},{"type":"image",...}]
 	if content.IsArray() {
 		var texts []string
-		content.ForEach(func(_, part gjson.Result) bool {
+		content.ForEach(func(_, part ojson.Result) bool {
 			// Handle Claude format: {"type":"text","text":"content"}
 			if part.Get("type").String() == "text" {
 				if text := part.Get("text").String(); text != "" {
@@ -2107,12 +2765,12 @@ func extractMessageContent(content gjson.Result) string {
 	return ""
 }
 
-func extractResponsesAPIContent(content gjson.Result) string {
+func extractResponsesAPIContent(content ojson.Result) string {
 	if !content.IsArray() {
 		return ""
 	}
 	var texts []string
-	content.ForEach(func(_, part gjson.Result) bool {
+	content.ForEach(func(_, part ojson.Result) bool {
 		partType := part.Get("type").String()
 		if partType == "input_text" || partType == "output_text" || partType == "text" {
 			if text := part.Get("text").String(); text != "" {

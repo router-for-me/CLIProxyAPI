@@ -4,21 +4,150 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // NormalizeApplyPatchResponsesRequest opts a non-Codex executor into the patch contract.
 func NormalizeApplyPatchResponsesRequest(body []byte, original ...[]byte) ([]byte, error) {
-	if len(original) > 0 {
-		body = preferChatFunctionPatchTools(original[0], body)
+	if !ojson.ValidBytes(body) {
+		return body, errors.New("invalid Responses request JSON")
 	}
-	return translatorcommon.NormalizeApplyPatchResponsesRequest(body)
+	doc := ojson.NewDoc(body)
+	if errNorm := NormalizeApplyPatchResponsesRequestDoc(doc, original...); errNorm != nil {
+		return body, errNorm
+	}
+	return doc.Bytes(), nil
+}
+
+// NormalizeApplyPatchResponsesRequestDoc opts a non-Codex executor into the patch contract in place on doc.
+func NormalizeApplyPatchResponsesRequestDoc(doc *ojson.Doc, original ...[]byte) error {
+	if doc == nil || doc.Len() == 0 {
+		return errors.New("invalid Responses request JSON")
+	}
+	if len(original) > 0 {
+		preferChatFunctionPatchToolsDoc(original[0], doc)
+	}
+	descriptors := util.CollectResponsesToolDescriptorsDoc(doc)
+	winners := util.CollectResponsesToolWinnersDoc(doc)
+	affected := map[string]bool{}
+	for _, d := range descriptors {
+		if applypatch.IsCustomTool(d.Tool) {
+			affected[d.Name] = true
+		}
+	}
+	shouldDropTool := func(tool ojson.Result, namespace string) bool {
+		if tool.Get("type").String() == "namespace" {
+			return false
+		}
+		name := tool.Get("name").String()
+		if name == "" {
+			name = tool.Get("function.name").String()
+		}
+		qualified := util.QualifyResponsesNamespaceToolName(namespace, name)
+		winner, ok := winners[qualified]
+		return ok && affected[qualified] && winner.Tool.Index != tool.Index
+	}
+	var normalizeToolsDoc func(string, ojson.Result, string)
+	normalizeToolsDoc = func(toolsPath string, tools ojson.Result, namespace string) {
+		arr := tools.Array()
+		dropAny := false
+		for _, tool := range arr {
+			if shouldDropTool(tool, namespace) {
+				dropAny = true
+				break
+			}
+		}
+		survivors := arr
+		if dropAny {
+			keptRaw := make([][]byte, 0, len(arr))
+			survivors = make([]ojson.Result, 0, len(arr))
+			for _, tool := range arr {
+				if shouldDropTool(tool, namespace) {
+					continue
+				}
+				keptRaw = append(keptRaw, []byte(tool.Raw))
+				survivors = append(survivors, tool)
+			}
+			_ = doc.SetRawBytes(toolsPath, translatorcommon.JoinRawArray(keptRaw))
+		}
+		for idx, tool := range survivors {
+			toolPath := fmt.Sprintf("%s.%d", toolsPath, idx)
+			if tool.Get("type").String() == "namespace" {
+				for _, key := range []string{"tools", "children"} {
+					if children := tool.Get(key); children.IsArray() {
+						normalizeToolsDoc(toolPath+"."+key, children, tool.Get("name").String())
+						break
+					}
+				}
+				continue
+			}
+			name := tool.Get("name").String()
+			if name == "" {
+				name = tool.Get("function.name").String()
+			}
+			qualified := util.QualifyResponsesNamespaceToolName(namespace, name)
+			if winner, ok := winners[qualified]; ok && affected[qualified] && winner.Tool.Index == tool.Index && applypatch.IsCustomTool(tool) {
+				_ = doc.Set(toolPath+".type", "function")
+				_ = doc.Set(toolPath+".description", applypatch.Description(tool))
+				_ = doc.SetRawBytes(toolPath+".parameters", applypatch.Parameters())
+				_ = util.DeleteJSONDocIfExists(doc, toolPath+".format")
+			}
+		}
+	}
+	inputItems := doc.Get("input").Array()
+	patchHistory := map[string]bool{}
+	for _, item := range inputItems {
+		if item.Get("type").String() == "custom_tool_call" && strings.TrimSpace(item.Get("name").String()) == "apply_patch" {
+			if item.Get("input").Type != ojson.String {
+				return errors.New("apply_patch history input must be a string")
+			}
+			patchHistory[item.Get("call_id").String()] = true
+		}
+	}
+	if tools := doc.Get("tools"); tools.IsArray() {
+		normalizeToolsDoc("tools", tools, "")
+	}
+	for i, item := range inputItems {
+		path := fmt.Sprintf("input.%d", i)
+		switch item.Get("type").String() {
+		case "additional_tools":
+			if tools := item.Get("tools"); tools.IsArray() {
+				normalizeToolsDoc(path+".tools", tools, "")
+			}
+		case "custom_tool_call":
+			if strings.TrimSpace(item.Get("name").String()) != "apply_patch" {
+				continue
+			}
+			_ = doc.Set(path+".type", "function_call")
+			_ = doc.Set(path+".arguments", applypatch.WrapInput(item.Get("input").String()))
+			_ = doc.Delete(path + ".input")
+		case "custom_tool_call_output":
+			if patchHistory[item.Get("call_id").String()] {
+				_ = doc.Set(path+".type", "function_call_output")
+			}
+		}
+	}
+	var normalizeChoiceDoc func(string, ojson.Result)
+	normalizeChoiceDoc = func(choicePath string, choice ojson.Result) {
+		name := choice.Get("name").String()
+		namespace := choice.Get("namespace").String()
+		if d, ok := winners[util.QualifyResponsesNamespaceToolName(namespace, name)]; ok && applypatch.IsCustomTool(d.Tool) && choice.Get("type").String() == "custom" {
+			_ = doc.Set(choicePath+".type", "function")
+		}
+		for i, child := range choice.Get("tools").Array() {
+			normalizeChoiceDoc(fmt.Sprintf("%s.tools.%d", choicePath, i), child)
+		}
+	}
+	if choice := doc.Get("tool_choice"); choice.IsObject() {
+		normalizeChoiceDoc("tool_choice", choice)
+	}
+	return nil
 }
 
 // ApplyPatchResponsesState is owned explicitly by a non-native executor, never inferred
@@ -32,6 +161,7 @@ type ApplyPatchResponsesState struct {
 	upstream               []byte
 	eventLine              []byte
 	active, failed, closed bool
+	sawPatch               bool
 	transportDone          bool
 }
 
@@ -50,38 +180,57 @@ type patchDispatcherCall struct {
 
 // preferChatFunctionPatchTools preserves the Chat request converter's existing winner rule.
 func preferChatFunctionPatchTools(original, declarations []byte) []byte {
+	if len(declarations) == 0 {
+		return declarations
+	}
+	doc := ojson.NewDoc(declarations)
+	if !preferChatFunctionPatchToolsDoc(original, doc) {
+		return declarations
+	}
+	return doc.Bytes()
+}
+
+func preferChatFunctionPatchToolsDoc(original []byte, doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
 	ordinary := map[string]bool{}
-	for _, tool := range gjson.GetBytes(original, "tools").Array() {
+	for _, tool := range ojson.GetBytesNoCopy(original, "tools").Array() {
 		if tool.Get("type").String() == "function" {
 			ordinary[tool.Get("function.name").String()] = true
 		}
 	}
 	if len(ordinary) == 0 {
-		return declarations
+		return false
 	}
+	declTools := doc.Get("tools").Array()
 	available := map[string]bool{}
-	for _, tool := range gjson.GetBytes(declarations, "tools").Array() {
+	for _, tool := range declTools {
 		if tool.Get("type").String() == "function" {
 			available[tool.Get("name").String()] = true
 		}
 	}
 	var tools [][]byte
-	for _, tool := range gjson.GetBytes(declarations, "tools").Array() {
+	removed := false
+	for _, tool := range declTools {
 		name := tool.Get("name").String()
 		if applypatch.IsCustomTool(tool) && ordinary[name] && available[name] {
+			removed = true
 			continue
 		}
 		tools = append(tools, []byte(tool.Raw))
 	}
-	declarations, _ = sjson.SetRawBytes(declarations, "tools", translatorcommon.JoinRawArray(tools))
-	return declarations
+	if !removed {
+		return false
+	}
+	return doc.SetRawBytes("tools", translatorcommon.JoinRawArray(tools)) == nil
 }
 
 func NewApplyPatchResponsesState(source sdktranslator.Format, original, declarations []byte) *ApplyPatchResponsesState {
 	if source == sdktranslator.FormatOpenAI {
 		declarations = preferChatFunctionPatchTools(original, declarations)
 	}
-	s := &ApplyPatchResponsesState{Bridge: translatorcommon.NewApplyPatchResponsesBridge(declarations), tools: util.CollectResponsesToolWinners(gjson.ParseBytes(declarations)), dispatchers: map[string]string{}, byDispatcherKey: map[string]*patchDispatcherCall{}}
+	s := &ApplyPatchResponsesState{Bridge: translatorcommon.NewApplyPatchResponsesBridge(declarations), tools: util.CollectResponsesToolWinners(util.ParseGJSONBytesNoCopy(declarations)), dispatchers: map[string]string{}, byDispatcherKey: map[string]*patchDispatcherCall{}}
 	for _, d := range s.tools {
 		if applypatch.IsCustomTool(d.Tool) {
 			s.active = true
@@ -103,7 +252,7 @@ func (s *ApplyPatchResponsesState) AddDispatcher(name, namespace string) {
 	}
 }
 
-func dispatcherKeys(root gjson.Result) []string {
+func dispatcherKeys(root ojson.Result) []string {
 	var keys []string
 	for _, path := range []string{"item.id", "item_id"} {
 		if id := root.Get(path).String(); id != "" {
@@ -120,7 +269,7 @@ func dispatcherKeys(root gjson.Result) []string {
 	}
 	return keys
 }
-func (s *ApplyPatchResponsesState) dispatcher(root gjson.Result) *patchDispatcherCall {
+func (s *ApplyPatchResponsesState) dispatcher(root ojson.Result) *patchDispatcherCall {
 	matched := map[*patchDispatcherCall]bool{}
 	for _, key := range dispatcherKeys(root) {
 		if call := s.byDispatcherKey[key]; call != nil {
@@ -135,7 +284,7 @@ func (s *ApplyPatchResponsesState) dispatcher(root gjson.Result) *patchDispatche
 	return nil
 }
 
-func (s *ApplyPatchResponsesState) newDispatcherCandidate(root gjson.Result) *patchDispatcherCall {
+func (s *ApplyPatchResponsesState) newDispatcherCandidate(root ojson.Result) *patchDispatcherCall {
 	call := &patchDispatcherCall{index: -1}
 	s.records = append(s.records, call)
 	for _, key := range dispatcherKeys(root) {
@@ -159,11 +308,11 @@ func (s *ApplyPatchResponsesState) RememberDispatcherEvent(event []byte) {
 // RememberDispatcherArguments keeps full snapshots on every matched candidate, including
 // unnamed calls. The common bridge retains all identity/type contradictions until acquisition.
 func (s *ApplyPatchResponsesState) RememberDispatcherArguments(event []byte) {
-	if s.failed || s.closed || s.transportDone || len(s.dispatchers) == 0 || gjson.GetBytes(event, "type").String() != "response.function_call_arguments.done" {
+	if s.failed || s.closed || s.transportDone || len(s.dispatchers) == 0 || ojson.GetBytesNoCopy(event, "type").String() != "response.function_call_arguments.done" {
 		return
 	}
 	s.upstream = bytes.Clone(event)
-	root := gjson.ParseBytes(event)
+	root := util.ParseGJSONBytesNoCopy(event)
 	if s.dispatcher(root) == nil {
 		s.newDispatcherCandidate(root)
 	}
@@ -176,15 +325,15 @@ func (s *ApplyPatchResponsesState) RememberDispatcherArguments(event []byte) {
 	}
 }
 
-func patchDispatcherArguments(wrapper gjson.Result) string {
+func patchDispatcherArguments(wrapper ojson.Result) string {
 	arguments := wrapper.Get("arguments")
-	if arguments.Type == gjson.String {
+	if arguments.Type == ojson.String {
 		return arguments.String()
 	}
 	return arguments.Raw
 }
 
-func dispatcherEventName(root gjson.Result) string {
+func dispatcherEventName(root ojson.Result) string {
 	if root.Get("item").Exists() {
 		return root.Get("item.name").String()
 	}
@@ -192,8 +341,8 @@ func dispatcherEventName(root gjson.Result) string {
 }
 
 func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][]byte, error) {
-	root := gjson.ParseBytes(event)
-	raw := gjson.ParseBytes(original)
+	root := util.ParseGJSONBytesNoCopy(event)
+	raw := util.ParseGJSONBytesNoCopy(original)
 	kind := root.Get("type").String()
 	call := s.dispatcher(root)
 	name := dispatcherEventName(raw)
@@ -266,47 +415,48 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 		wrappers = append(wrappers, call.source)
 	}
 	for _, snapshot := range call.snapshots {
-		arguments := gjson.GetBytes(snapshot, "arguments").String()
-		if gjson.Get(arguments, "name").Exists() {
+		arguments := ojson.GetBytesNoCopy(snapshot, "arguments").String()
+		if ojson.Get(arguments, "name").Exists() {
 			wrappers = append(wrappers, arguments)
 		}
 	}
 	for _, pending := range call.originals {
-		p := gjson.ParseBytes(pending)
+		p := util.ParseGJSONBytesNoCopy(pending)
 		arguments := p.Get("item.arguments").String()
-		if (dispatcherEventName(p) == "" || s.dispatchers[dispatcherEventName(p)] == call.namespace) && gjson.Get(arguments, "name").Exists() {
+		if (dispatcherEventName(p) == "" || s.dispatchers[dispatcherEventName(p)] == call.namespace) && ojson.Get(arguments, "name").Exists() {
 			wrappers = append(wrappers, arguments)
 		}
 	}
 	// For callers without a pre-restoration copy, retain the original full-source contract.
 	if len(wrappers) == 0 {
 		for _, pending := range call.events {
-			if args := gjson.GetBytes(pending, "arguments"); gjson.Get(args.String(), "name").String() != "" {
+			if args := ojson.GetBytesNoCopy(pending, "arguments"); ojson.Get(args.String(), "name").String() != "" {
 				wrappers = append(wrappers, args.String())
 			}
 		}
 	}
-	source := gjson.Result{}
+	source := ojson.Result{}
 	for _, wrapper := range wrappers {
-		if gjson.Valid(wrapper) && gjson.Get(wrapper, "name").String() != "" {
-			source = gjson.Parse(wrapper)
+		if ojson.Valid(wrapper) && ojson.Get(wrapper, "name").String() != "" {
+			source = ojson.Parse(wrapper)
 		}
 	}
+	eventDoc := ojson.NewDoc(event)
 	name = root.Get(path + "name").String()
 	if name == "" || s.dispatchers[name] == call.namespace {
 		name = source.Get("name").String()
 		if name == "" {
 			name = call.name
 		}
-		event, _ = sjson.SetBytes(event, path+"name", name)
-		event, _ = sjson.SetBytes(event, path+"namespace", call.namespace)
+		_ = eventDoc.Set(path+"name", name)
+		_ = eventDoc.Set(path+"namespace", call.namespace)
 	}
 	if root.Get(path+"namespace").String() == "" {
-		event, _ = sjson.SetBytes(event, path+"namespace", call.namespace)
+		_ = eventDoc.Set(path+"namespace", call.namespace)
 	}
 	if declared || dispatcherEventName(raw) == "" || kind == "response.function_call_arguments.done" {
-		if wrapper := gjson.Parse(raw.Get(path + "arguments").String()); wrapper.Get("name").String() != "" {
-			event, _ = sjson.SetBytes(event, path+"arguments", patchDispatcherArguments(wrapper))
+		if wrapper := ojson.Parse(raw.Get(path + "arguments").String()); wrapper.Get("name").String() != "" {
+			_ = eventDoc.Set(path+"arguments", patchDispatcherArguments(wrapper))
 		}
 	}
 	if !root.Get(path + "arguments").Exists() {
@@ -315,10 +465,11 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 			encoded = call.arguments
 		}
 		if encoded != "" {
-			event, _ = sjson.SetBytes(event, path+"arguments", encoded)
+			_ = eventDoc.Set(path+"arguments", encoded)
 		}
 	}
-	root = gjson.ParseBytes(event)
+	event = eventDoc.Bytes()
+	root = util.ParseGJSONBytesNoCopy(event)
 	call.events[len(call.events)-1] = event
 	d := s.tools[util.QualifyResponsesNamespaceToolName(call.namespace, name)]
 	patch := applypatch.IsCustomTool(d.Tool)
@@ -328,20 +479,20 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 	}
 	if patch {
 		for _, snapshot := range call.snapshots {
-			if gjson.GetBytes(snapshot, "arguments").Type != gjson.String {
+			if ojson.GetBytesNoCopy(snapshot, "arguments").Type != ojson.String {
 				return nil, errors.New("apply_patch dispatcher arguments snapshot must be a string")
 			}
 		}
 	}
 	for _, wrapperRaw := range wrappers {
-		wrapper := gjson.Parse(wrapperRaw)
+		wrapper := ojson.Parse(wrapperRaw)
 		child := s.tools[util.QualifyResponsesNamespaceToolName(call.namespace, wrapper.Get("name").String())]
 		if !patch && !applypatch.IsCustomTool(child.Tool) {
 			continue
 		}
 		input, errUnwrap := applypatch.UnwrapInput(patchDispatcherArguments(wrapper))
 		final, errFinal := applypatch.UnwrapInput(finalArguments)
-		if !gjson.Valid(wrapperRaw) || wrapper.Get("name").String() != name || errUnwrap != nil || errFinal != nil || input != final {
+		if !ojson.Valid(wrapperRaw) || wrapper.Get("name").String() != name || errUnwrap != nil || errFinal != nil || input != final {
 			return nil, errors.New("conflicting apply_patch dispatcher arguments")
 		}
 	}
@@ -355,8 +506,8 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 	var out [][]byte
 	for i := start; i < len(call.events); i++ {
 		pending := call.events[i]
-		p := gjson.ParseBytes(pending)
-		originalRoot := gjson.ParseBytes(call.originals[i])
+		p := util.ParseGJSONBytesNoCopy(pending)
+		originalRoot := util.ParseGJSONBytesNoCopy(call.originals[i])
 		if patch {
 			for _, namespacePath := range []string{"namespace", "item.namespace"} {
 				if supplied := originalRoot.Get(namespacePath).String(); supplied != "" && supplied != call.namespace {
@@ -385,28 +536,30 @@ func (s *ApplyPatchResponsesState) expandDispatcher(event, original []byte) ([][
 			continue
 		}
 		if p.Get("type").String() != "response.function_call_arguments.delta" {
+			pendingDoc := ojson.NewDoc(pending)
 			pendingName := p.Get(pendingPath + "name").String()
 			if pendingName == "" || s.dispatchers[pendingName] == call.namespace {
-				pending, _ = sjson.SetBytes(pending, pendingPath+"name", name)
-				pending, _ = sjson.SetBytes(pending, pendingPath+"namespace", call.namespace)
+				_ = pendingDoc.Set(pendingPath+"name", name)
+				_ = pendingDoc.Set(pendingPath+"namespace", call.namespace)
 			}
 			if p.Get(pendingPath+"namespace").String() == "" {
-				pending, _ = sjson.SetBytes(pending, pendingPath+"namespace", call.namespace)
+				_ = pendingDoc.Set(pendingPath+"namespace", call.namespace)
 			}
 			// Only actual upstream wrappers are unwrapped, not restored child contents.
 			args := originalRoot.Get(pendingPath + "arguments")
-			if patch && args.Exists() && args.Type != gjson.String {
+			if patch && args.Exists() && args.Type != ojson.String {
 				return nil, errors.New("apply_patch dispatcher arguments snapshot must be a string")
 			}
 			if args.String() != "" && (dispatcherEventName(originalRoot) == "" || s.dispatchers[dispatcherEventName(originalRoot)] == call.namespace || pendingPath == "") {
-				wrapper := gjson.Parse(args.String())
+				wrapper := ojson.Parse(args.String())
 				if wrapper.Get("name").String() != "" {
 					if patch && wrapper.Get("name").String() != name {
 						return nil, errors.New("conflicting apply_patch dispatcher snapshot")
 					}
-					pending, _ = sjson.SetBytes(pending, pendingPath+"arguments", patchDispatcherArguments(wrapper))
+					_ = pendingDoc.Set(pendingPath+"arguments", patchDispatcherArguments(wrapper))
 				}
 			}
+			pending = pendingDoc.Bytes()
 		}
 		out = append(out, pending)
 	}
@@ -453,36 +606,44 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 		original = event
 	}
 	var preceding [][]byte
-	root := gjson.ParseBytes(event)
+	root := util.ParseGJSONBytesNoCopy(event)
 	kind := root.Get("type").String()
 	if kind == "response.completed" || kind == "response.incomplete" || kind == "response.done" {
-		originalItems := gjson.GetBytes(original, "response.output").Array()
+		originalItems := ojson.GetBytesNoCopy(original, "response.output").Array()
+		var eventDoc *ojson.Doc
 		for i, item := range root.Get("response.output").Array() {
-			done := []byte(`{"type":"response.output_item.done"}`)
-			done, _ = sjson.SetRawBytes(done, "item", []byte(item.Raw))
+			doneDoc := ojson.NewDocString(`{"type":"response.output_item.done"}`)
+			_ = doneDoc.SetRaw("item", item.Raw)
+			done := doneDoc.Bytes()
 			// Explicit IDs take priority over array position in a sparse terminal snapshot.
-			call := s.dispatcher(gjson.ParseBytes(done))
+			call := s.dispatcher(util.ParseGJSONBytesNoCopy(done))
 			if call == nil && item.Get("id").String() == "" && item.Get("call_id").String() == "" {
-				done, _ = sjson.SetBytes(done, "output_index", i)
-				call = s.dispatcher(gjson.ParseBytes(done))
+				_ = doneDoc.Set("output_index", i)
+				done = doneDoc.Bytes()
+				call = s.dispatcher(util.ParseGJSONBytesNoCopy(done))
 			}
 			if call != nil && !call.ordinary {
 				if call.index >= 0 {
-					done, _ = sjson.SetBytes(done, "output_index", call.index)
+					_ = doneDoc.Set("output_index", call.index)
 				} else {
-					done, _ = sjson.SetBytes(done, "output_index", i)
+					_ = doneDoc.Set("output_index", i)
 				}
+				done = doneDoc.Bytes()
 				originalDone := done
 				// Filtering may shift array positions, but restoration preserves both IDs.
-				matches := func(candidate gjson.Result) bool {
+				matches := func(candidate ojson.Result) bool {
 					return candidate.Get("id").String() == item.Get("id").String() && candidate.Get("call_id").String() == item.Get("call_id").String()
 				}
 				if i < len(originalItems) && matches(originalItems[i]) {
-					originalDone, _ = sjson.SetRawBytes(done, "item", []byte(originalItems[i].Raw))
+					origDoc := ojson.NewDoc(done)
+					_ = origDoc.SetRaw("item", originalItems[i].Raw)
+					originalDone = origDoc.Bytes()
 				} else if item.Get("id").String() != "" || item.Get("call_id").String() != "" {
 					for _, originalItem := range originalItems {
 						if matches(originalItem) {
-							originalDone, _ = sjson.SetRawBytes(done, "item", []byte(originalItem.Raw))
+							origDoc := ojson.NewDoc(done)
+							_ = origDoc.SetRaw("item", originalItem.Raw)
+							originalDone = origDoc.Bytes()
 							break
 						}
 					}
@@ -493,9 +654,15 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 				}
 				preceding = append(preceding, events...)
 				if len(events) > 0 {
-					event, _ = sjson.SetRawBytes(event, fmt.Sprintf("response.output.%d", i), []byte(gjson.GetBytes(events[len(events)-1], "item").Raw))
+					if eventDoc == nil {
+						eventDoc = ojson.NewDoc(event)
+					}
+					_ = eventDoc.SetRaw(fmt.Sprintf("response.output.%d", i), ojson.GetBytesNoCopy(events[len(events)-1], "item").Raw)
 				}
 			}
+		}
+		if eventDoc != nil {
+			event = eventDoc.Bytes()
 		}
 		if s.unfinishedDispatcher() {
 			return s.fail(errors.New("incomplete apply_patch namespace dispatcher received from upstream"))
@@ -515,10 +682,22 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 	}
 	var out [][]byte
 	for _, e := range events {
+		if s.isCustomPatchEvent(e) {
+			s.sawPatch = true
+		}
 		converted, errTransform := s.Bridge.Transform(e)
+		if !s.sawPatch && !strings.HasPrefix(ojson.GetBytesNoCopy(e, "type").String(), "response.custom_tool_call_input.") {
+			for _, c := range converted {
+				if strings.HasPrefix(ojson.GetBytesNoCopy(c, "type").String(), "response.custom_tool_call_input.") {
+					s.sawPatch = true
+					break
+				}
+			}
+		}
 		out = append(out, converted...)
 		if errTransform != nil {
 			s.failed = true
+			s.sawPatch = true
 			s.byDispatcherKey, s.records, s.upstream = nil, nil, nil
 			return out, errTransform
 		}
@@ -528,6 +707,37 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 		s.byDispatcherKey, s.records, s.upstream = nil, nil, nil
 	}
 	return out, nil
+}
+
+func (s *ApplyPatchResponsesState) isCustomPatchEvent(event []byte) bool {
+	if s == nil || !s.active {
+		return false
+	}
+	root := util.ParseGJSONBytesNoCopy(event)
+	if item := root.Get("item"); item.Exists() {
+		if item.Get("type").String() == "custom_tool_call" {
+			return false
+		}
+		d, ok := s.tools[util.QualifyResponsesNamespaceToolName(item.Get("namespace").String(), item.Get("name").String())]
+		return ok && applypatch.IsCustomTool(d.Tool)
+	}
+	if name := root.Get("name").String(); name != "" {
+		d, ok := s.tools[util.QualifyResponsesNamespaceToolName(root.Get("namespace").String(), name)]
+		return ok && applypatch.IsCustomTool(d.Tool)
+	}
+	return false
+}
+
+// HasPatchActivity reports whether upstream emitted any custom apply_patch call
+// or unfinished patch namespace dispatcher before closing the response.
+func (s *ApplyPatchResponsesState) HasPatchActivity() bool {
+	if s == nil || !s.active {
+		return false
+	}
+	if s.failed || s.sawPatch || s.unfinishedDispatcher() {
+		return true
+	}
+	return s.Bridge != nil && s.Bridge.Finish() != nil
 }
 
 // Finish validates source response closure independently of completed tool input.
@@ -591,7 +801,7 @@ func (s *ApplyPatchResponsesState) Stream(line []byte) ([][]byte, error) {
 			if bytes.Equal(event, payload) {
 				out = append(out, s.eventLine)
 			} else {
-				out = append(out, []byte("event: "+gjson.GetBytes(event, "type").String()))
+				out = append(out, []byte("event: "+ojson.GetBytesNoCopy(event, "type").String()))
 			}
 		}
 		data := append([]byte("data: "), event...)

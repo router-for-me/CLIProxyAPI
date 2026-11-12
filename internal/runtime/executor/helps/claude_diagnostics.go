@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
 
 const (
@@ -22,7 +22,18 @@ const (
 	claudeDiagnosticsCleanupPeriod  = 15 * time.Minute
 	claudeDiagnosticsMaxEntries     = 4096
 	claudeDiagnosticsEvictBatchSize = 256
+	claudeSessionDatePinKVPrefix    = "cpa:claude:session-date-pin:"
 )
+
+type claudeSessionDatePinKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSetNX(ctx context.Context, key string, value []byte, ttl time.Duration) (bool, error)
+	KVCompareAndSwap(ctx context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error)
+}
+
+var currentClaudeSessionDatePinKVClient = func() (claudeSessionDatePinKVClient, bool, error) {
+	return homekv.CurrentKVClient()
+}
 
 var (
 	claudeRequestIDPattern = regexp.MustCompile(`^req_[A-Za-z0-9_-]{1,36}$`)
@@ -146,24 +157,104 @@ func ClaudeSessionDatePinKey(sessionID string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-// LookupClaudeSessionDatePin returns the retained pinned date for a session
-// without creating or refreshing it. Non-positive retention returns "".
-func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
-	if retention <= 0 {
+func claudeSessionDatePinKVKey(pinKey string) string {
+	if pinKey == "" {
 		return ""
 	}
+	return claudeSessionDatePinKVPrefix + pinKey
+}
+
+func normalizeClaudePinnedDate(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) != len("2006-01-02") {
+		return ""
+	}
+	if _, errParse := time.Parse("2006-01-02", trimmed); errParse != nil {
+		return ""
+	}
+	return trimmed
+}
+
+func lookupClaudeSessionDatePinLocked(pinKey string, now time.Time) string {
+	if pinKey == "" {
+		return ""
+	}
+	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
+	if !okPin {
+		return ""
+	}
+	if !pin.expiresAt.IsZero() && now.After(pin.expiresAt) {
+		return ""
+	}
+	return normalizeClaudePinnedDate(pin.date)
+}
+
+func storePermanentClaudeSessionDatePinLocked(pinKey, date string, now time.Time) {
+	if pinKey == "" || date == "" {
+		return
+	}
+	cleanupClaudeDiagnosticsLocked(now)
+	if _, okPin := claudeDiagnosticsState.datePins[pinKey]; !okPin {
+		evictClaudeSessionDatePinsLocked()
+	}
+	claudeDiagnosticsState.datePins[pinKey] = claudeSessionDatePin{
+		date:      date,
+		expiresAt: time.Time{},
+	}
+}
+
+func storePermanentClaudeSessionDatePin(pinKey, date string) {
+	if pinKey == "" || date == "" {
+		return
+	}
+	now := time.Now()
+	claudeDiagnosticsState.Lock()
+	storePermanentClaudeSessionDatePinLocked(pinKey, date, now)
+	claudeDiagnosticsState.Unlock()
+}
+
+// IsClaudeSessionDatePinKVActive reports whether a persistent KV store (local
+// bbolt or Home KV) is configured as the backing store for Claude session date pins.
+func IsClaudeSessionDatePinKVActive() bool {
+	_, kvMode, _ := currentClaudeSessionDatePinKVClient()
+	return kvMode
+}
+
+// LookupClaudeSessionDatePin returns the retained pinned date for a session
+// without creating or refreshing it. When a KV store is active, pins are stored
+// permanently and retention is ignored; otherwise non-positive retention returns "".
+func LookupClaudeSessionDatePin(sessionID string, retention time.Duration) string {
 	pinKey := ClaudeSessionDatePinKey(sessionID)
 	if pinKey == "" {
+		return ""
+	}
+	client, kvMode, errClient := currentClaudeSessionDatePinKVClient()
+	if kvMode {
+		if errClient == nil && client != nil {
+			raw, found, errGet := client.KVGet(context.Background(), claudeSessionDatePinKVKey(pinKey))
+			if errGet == nil {
+				if !found {
+					return ""
+				}
+				pinned := normalizeClaudePinnedDate(string(raw))
+				if pinned != "" {
+					storePermanentClaudeSessionDatePin(pinKey, pinned)
+				}
+				return pinned
+			}
+		}
+		now := time.Now()
+		claudeDiagnosticsState.Lock()
+		defer claudeDiagnosticsState.Unlock()
+		return lookupClaudeSessionDatePinLocked(pinKey, now)
+	}
+	if retention <= 0 {
 		return ""
 	}
 	now := time.Now()
 	claudeDiagnosticsState.Lock()
 	defer claudeDiagnosticsState.Unlock()
-	pin, okPin := claudeDiagnosticsState.datePins[pinKey]
-	if !okPin || now.After(pin.expiresAt) {
-		return ""
-	}
-	return pin.date
+	return lookupClaudeSessionDatePinLocked(pinKey, now)
 }
 
 // IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
@@ -238,11 +329,12 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 
 // PinClaudeSessionDate returns the calendar date pinned for a session,
 // recording date on the first call and returning the pinned value on later
-// calls. A non-positive retention keeps the legacy continuity-scoped pin,
-// whose lifetime follows claudeDiagnosticsTTL. A positive retention stores
-// the pin separately under a session-only key, so continuity expiry or a
-// credential switch cannot re-anchor it before the retention expires. An
-// unknown continuity key returns date unchanged, matching per-request dates.
+// calls. When a KV store is active, the pin is persisted permanently under a
+// session-only KV key and retention is ignored. Otherwise, a non-positive
+// retention keeps the legacy continuity-scoped pin (whose lifetime follows
+// claudeDiagnosticsTTL) and a positive retention stores the pin in memory
+// under a session-only key for retention. An unknown continuity key returns
+// date unchanged, matching per-request dates.
 func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) string {
 	key = strings.TrimSpace(key)
 	sessionID = strings.TrimSpace(sessionID)
@@ -250,13 +342,90 @@ func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) 
 	if key == "" || date == "" {
 		return date
 	}
-	now := time.Now()
+	client, kvMode, errClient := currentClaudeSessionDatePinKVClient()
 	claudeDiagnosticsState.Lock()
-	defer claudeDiagnosticsState.Unlock()
 	entry, okEntry := claudeDiagnosticsState.entries[key]
 	if !okEntry {
+		claudeDiagnosticsState.Unlock()
 		return date
 	}
+	if sessionID != "" && kvMode {
+		pinKey := ClaudeSessionDatePinKey(sessionID)
+		now := time.Now()
+		targetDate := normalizeClaudePinnedDate(date)
+		if l1Date := lookupClaudeSessionDatePinLocked(pinKey, now); l1Date != "" {
+			targetDate = l1Date
+		}
+		if errClient == nil && client != nil {
+			claudeDiagnosticsState.Unlock()
+			ctx := context.Background()
+			kvKey := claudeSessionDatePinKVKey(pinKey)
+			raw, found, errGet := client.KVGet(ctx, kvKey)
+			if errGet == nil && found {
+				if pinned := normalizeClaudePinnedDate(string(raw)); pinned != "" {
+					storePermanentClaudeSessionDatePin(pinKey, pinned)
+					return pinned
+				}
+				if targetDate == "" {
+					return date
+				}
+				swapped, errCAS := client.KVCompareAndSwap(ctx, kvKey, raw, true, []byte(targetDate), 0)
+				if errCAS == nil && swapped {
+					storePermanentClaudeSessionDatePin(pinKey, targetDate)
+					return targetDate
+				}
+				if errCAS == nil && !swapped {
+					if rawRace, foundRace, errRace := client.KVGet(ctx, kvKey); errRace == nil && foundRace {
+						if pinned := normalizeClaudePinnedDate(string(rawRace)); pinned != "" {
+							storePermanentClaudeSessionDatePin(pinKey, pinned)
+							return pinned
+						}
+					}
+				}
+			} else if errGet == nil && !found {
+				if targetDate == "" {
+					return date
+				}
+				written, errSet := client.KVSetNX(ctx, kvKey, []byte(targetDate), 0)
+				if errSet == nil && written {
+					storePermanentClaudeSessionDatePin(pinKey, targetDate)
+					return targetDate
+				}
+				if errSet == nil && !written {
+					if rawRace, foundRace, errRace := client.KVGet(ctx, kvKey); errRace == nil && foundRace {
+						if pinned := normalizeClaudePinnedDate(string(rawRace)); pinned != "" {
+							storePermanentClaudeSessionDatePin(pinKey, pinned)
+							return pinned
+						}
+					}
+				}
+			}
+			claudeDiagnosticsState.Lock()
+			entry, okEntry = claudeDiagnosticsState.entries[key]
+			if !okEntry {
+				claudeDiagnosticsState.Unlock()
+				return date
+			}
+			now = time.Now()
+			if l1Date := lookupClaudeSessionDatePinLocked(pinKey, now); l1Date != "" {
+				targetDate = l1Date
+			}
+		}
+		if targetDate != "" {
+			storePermanentClaudeSessionDatePinLocked(pinKey, targetDate, now)
+			if entry.pinnedDate == "" {
+				entry.pinnedDate = targetDate
+				claudeDiagnosticsState.entries[key] = entry
+			}
+			claudeDiagnosticsState.Unlock()
+			return targetDate
+		}
+		claudeDiagnosticsState.Unlock()
+		return date
+	}
+	defer claudeDiagnosticsState.Unlock()
+
+	now := time.Now()
 	if retention <= 0 || sessionID == "" {
 		if entry.pinnedDate == "" {
 			entry.pinnedDate = date
@@ -271,7 +440,7 @@ func PinClaudeSessionDate(key, sessionID, date string, retention time.Duration) 
 	if !okPin {
 		evictClaudeSessionDatePinsLocked()
 	}
-	if !okPin || now.After(pin.expiresAt) {
+	if !okPin || (!pin.expiresAt.IsZero() && now.After(pin.expiresAt)) {
 		pin.date = date
 	}
 	pin.expiresAt = now.Add(retention)
@@ -342,7 +511,7 @@ func cleanupClaudeDiagnosticsLocked(now time.Time) {
 		}
 	}
 	for key, pin := range claudeDiagnosticsState.datePins {
-		if now.After(pin.expiresAt) {
+		if !pin.expiresAt.IsZero() && now.After(pin.expiresAt) {
 			delete(claudeDiagnosticsState.datePins, key)
 		}
 	}
@@ -364,6 +533,11 @@ func evictClaudeSessionDatePinsLocked() {
 		candidates = append(candidates, candidate{key: key, expiresAt: pin.expiresAt})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
+		iZero := candidates[i].expiresAt.IsZero()
+		jZero := candidates[j].expiresAt.IsZero()
+		if iZero != jZero {
+			return !iZero
+		}
 		return candidates[i].expiresAt.Before(candidates[j].expiresAt)
 	})
 	count := min(claudeDiagnosticsEvictBatchSize, len(candidates))
@@ -453,7 +627,7 @@ func IsClaudeNewPromptTurn(body []byte) bool {
 	if IsClaudeProbeOrHelperRequest(body) {
 		return false
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if !messages.IsArray() {
 		return true
 	}
@@ -483,15 +657,15 @@ var (
 )
 
 func isClaudeProbeRequest(body []byte) bool {
-	maxTokens := gjson.GetBytes(body, "max_tokens")
+	maxTokens := ojson.GetBytesNoCopy(body, "max_tokens")
 	if !maxTokens.Exists() || maxTokens.Int() != 1 {
 		return false
 	}
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if tools.Exists() && len(tools.Array()) > 0 {
 		return false
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
 		return true // headless preflight probe without messages
 	}
@@ -504,7 +678,7 @@ func isClaudeProbeRequest(body []byte) bool {
 		return false
 	}
 	content := firstMsg.Get("content")
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		str := strings.TrimSpace(content.String())
 		return str == "quota" || str == "test" || str == "." || str == "probe"
 	}
@@ -533,7 +707,7 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 			strings.Contains(t, "Write the title in the predominant language") ||
 			strings.Contains(t, "<session>")
 	}
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() {
 		for _, part := range system.Array() {
 			if matchesTitlePrompt(part.Get("text").String()) {
@@ -543,7 +717,7 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 	} else if matchesTitlePrompt(system.String()) {
 		return true
 	}
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
 			content := msg.Get("content")
@@ -568,7 +742,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 		"Write the title in the predominant language") {
 		return false
 	}
-	props := gjson.GetBytes(body, "output_config.format.schema.properties")
+	props := ojson.GetBytesNoCopy(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
 			return isClaudeTitleHelperInstruction(body)
@@ -584,7 +758,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 			strings.Contains(t, "Return a short title") ||
 			strings.Contains(t, "Write the title in the predominant language")
 	}
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() {
 		for _, part := range system.Array() {
 			if matchesSystemTitleInstruction(part.Get("text").String()) {
@@ -595,7 +769,7 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 		return true
 	}
 
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytesNoCopy(body, "messages")
 	if messages.IsArray() {
 		for _, msg := range messages.Array() {
 			if msg.Get("role").String() == "system" {
@@ -622,6 +796,12 @@ func IsClaudeProbeOrHelperRequest(body []byte) bool {
 	return isClaudeProbeRequest(body) || isClaudeTitleHelperRequest(body)
 }
 
+// IsClaudeQuotaProbeRequest reports the max_tokens=1 quota probe alone,
+// excluding the session-title helper that IsClaudeProbeOrHelperRequest also covers.
+func IsClaudeQuotaProbeRequest(body []byte) bool {
+	return isClaudeProbeRequest(body)
+}
+
 // IsClaudeSubagentRequest reports whether the incoming request originates from
 // or represents a Claude Code subagent.
 func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
@@ -631,21 +811,21 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 	if val := HeaderValueCaseInsensitive(headers, "X-Claude-Code-Parent-Agent-Id"); val != "" {
 		return true
 	}
-	if gjson.GetBytes(body, "metadata.user_id.parent_session_id").Exists() {
+	if ojson.GetBytesNoCopy(body, "metadata.user_id.parent_session_id").Exists() {
 		return true
 	}
-	if userID := gjson.GetBytes(body, "metadata.user_id").String(); userID != "" {
+	if userID := ojson.GetBytesNoCopy(body, "metadata.user_id").String(); userID != "" {
 		if strings.Contains(userID, `"parent_session_id"`) {
 			return true
 		}
 	}
 	// Only inspect system[0].text or billing header for cc_is_subagent, never raw user message content
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	if system.IsArray() && len(system.Array()) > 0 {
 		if strings.Contains(system.Array()[0].Get("text").String(), "cc_is_subagent=true") {
 			return true
 		}
-	} else if system.Type == gjson.String && strings.Contains(system.String(), "cc_is_subagent=true") {
+	} else if system.Type == ojson.String && strings.Contains(system.String(), "cc_is_subagent=true") {
 		return true
 	}
 	return false
@@ -656,11 +836,14 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 func ClaudePayloadHas1hTTL(payload []byte) bool {
 	// A ttl of "1h" is the JSON string "1h"; its quotes are structural and never
 	// escaped, so a payload without that token cannot match.
-	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !ojson.ValidBytes(payload) {
 		return false
 	}
+	if topCC := ojson.GetBytesNoCopy(payload, "cache_control"); topCC.IsObject() && topCC.Get("ttl").String() == "1h" {
+		return true
+	}
 	has1h := false
-	checkBlock := func(item gjson.Result) bool {
+	checkBlock := func(item ojson.Result) bool {
 		cc := item.Get("cache_control")
 		if cc.IsObject() && cc.Get("ttl").String() == "1h" {
 			has1h = true
@@ -668,27 +851,27 @@ func ClaudePayloadHas1hTTL(payload []byte) bool {
 		}
 		return true
 	}
-	if tools := gjson.GetBytes(payload, "tools"); tools.IsArray() {
-		tools.ForEach(func(_, item gjson.Result) bool {
+	if tools := ojson.GetBytesNoCopy(payload, "tools"); tools.IsArray() {
+		tools.ForEach(func(_, item ojson.Result) bool {
 			return checkBlock(item)
 		})
 		if has1h {
 			return true
 		}
 	}
-	if system := gjson.GetBytes(payload, "system"); system.IsArray() {
-		system.ForEach(func(_, item gjson.Result) bool {
+	if system := ojson.GetBytesNoCopy(payload, "system"); system.IsArray() {
+		system.ForEach(func(_, item ojson.Result) bool {
 			return checkBlock(item)
 		})
 		if has1h {
 			return true
 		}
 	}
-	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
+	if messages := ojson.GetBytesNoCopy(payload, "messages"); messages.IsArray() {
+		messages.ForEach(func(_, msg ojson.Result) bool {
 			content := msg.Get("content")
 			if content.IsArray() {
-				content.ForEach(func(_, item gjson.Result) bool {
+				content.ForEach(func(_, item ojson.Result) bool {
 					return checkBlock(item)
 				})
 			}
@@ -711,34 +894,61 @@ func ClaudeSubagentRequests1h(headers http.Header, body []byte) bool {
 
 // StripClaudeBillingTags removes cc_prev_req and cc_prompt_id from the billing header in body.
 func StripClaudeBillingTags(body []byte) []byte {
-	system := gjson.GetBytes(body, "system")
-	if !system.IsArray() || len(system.Array()) == 0 {
+	if len(body) == 0 {
 		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !StripClaudeBillingTagsDoc(doc) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+// StripClaudeBillingTagsDoc removes cc_prev_req and cc_prompt_id from the billing header in doc in place.
+func StripClaudeBillingTagsDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	system := doc.Get("system")
+	if !system.IsArray() || len(system.Array()) == 0 {
+		return false
 	}
 	billingText := system.Array()[0].Get("text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
-		return body
+		return false
 	}
 	cleaned := claudePrevReqBillingPattern.ReplaceAllString(billingText, "")
 	cleaned = claudePromptIDBillingPattern.ReplaceAllString(cleaned, "")
 	if cleaned != billingText {
-		updated, err := sjson.SetBytes(body, "system.0.text", cleaned)
-		if err == nil {
-			return updated
-		}
+		return doc.Set("system.0.text", cleaned) == nil
 	}
-	return body
+	return false
 }
 
 // InjectClaudeBillingTags appends cc_prev_req and cc_prompt_id to the billing header in body if present.
 func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
-	system := gjson.GetBytes(body, "system")
-	if !system.IsArray() || len(system.Array()) == 0 {
+	if len(body) == 0 {
 		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !InjectClaudeBillingTagsDoc(doc, prevReq, promptID) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+// InjectClaudeBillingTagsDoc appends cc_prev_req and cc_prompt_id to the billing header in doc in place.
+func InjectClaudeBillingTagsDoc(doc *ojson.Doc, prevReq, promptID string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	system := doc.Get("system")
+	if !system.IsArray() || len(system.Array()) == 0 {
+		return false
 	}
 	billingText := system.Array()[0].Get("text").String()
 	if !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
-		return body
+		return false
 	}
 	cleaned := claudePrevReqBillingPattern.ReplaceAllString(billingText, "")
 	cleaned = claudePromptIDBillingPattern.ReplaceAllString(cleaned, "")
@@ -752,21 +962,17 @@ func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
 	if promptID != "" {
 		cleaned += " cc_prompt_id=" + promptID + ";"
 	}
-	updated, err := sjson.SetBytes(body, "system.0.text", cleaned)
-	if err == nil {
-		return updated
-	}
-	return body
+	return doc.Set("system.0.text", cleaned) == nil
 }
 
 // ExtractClaudeBillingTags extracts existing cc_prev_req and cc_prompt_id values
 // from a billing header in system text, if present.
 func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
-	system := gjson.GetBytes(body, "system")
+	system := ojson.GetBytesNoCopy(body, "system")
 	var billingText string
 	if system.IsArray() && len(system.Array()) > 0 {
 		billingText = system.Array()[0].Get("text").String()
-	} else if system.Type == gjson.String {
+	} else if system.Type == ojson.String {
 		billingText = system.String()
 	}
 	if billingText == "" || !strings.HasPrefix(billingText, "x-anthropic-billing-header:") {
@@ -778,7 +984,7 @@ func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
 			val = val[:end]
 		}
 		if claudeRequestIDPattern.MatchString(val) {
-			prevReq = val
+			prevReq = strings.Clone(val)
 		}
 	}
 	if idx := strings.Index(billingText, "cc_prompt_id="); idx >= 0 {
@@ -787,7 +993,7 @@ func ExtractClaudeBillingTags(body []byte) (prevReq, promptID string) {
 			val = val[:end]
 		}
 		if IsValidClaudePromptID(val) {
-			promptID = strings.ToLower(val)
+			promptID = strings.Clone(strings.ToLower(val))
 		}
 	}
 	return prevReq, promptID

@@ -1,8 +1,8 @@
 package management
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"

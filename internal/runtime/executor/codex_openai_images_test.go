@@ -12,11 +12,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func newCodexOpenAIImageTestAuth(serverURL string) *cliproxyauth.Auth {
@@ -50,7 +51,7 @@ func TestCodexImagePayloadPreservesResolvedAlias(t *testing.T) {
 			if errPrepare != nil {
 				t.Fatal(errPrepare)
 			}
-			if got := gjson.GetBytes(body, "model").String(); got != "openai/gpt-image-2-cpr" {
+			if got := ojson.GetBytes(body, "model").String(); got != "openai/gpt-image-2-cpr" {
 				t.Fatalf("upstream model = %q, want %q", got, "openai/gpt-image-2-cpr")
 			}
 		})
@@ -177,26 +178,26 @@ func TestCodexImageResolvedModelOnWire(t *testing.T) {
 					if gotContentType != "application/json" || !json.Valid(gotBody) {
 						t.Fatalf("invalid upstream JSON: Content-Type=%q body=%s", gotContentType, gotBody)
 					}
-					if got := gjson.GetBytes(gotBody, "model").String(); got != tc.want {
+					if got := ojson.GetBytes(gotBody, "model").String(); got != tc.want {
 						t.Errorf("upstream model = %q, want %q; body=%s", got, tc.want, gotBody)
 					}
-					if tc.payloadRule == "override" && gjson.GetBytes(gotBody, "audit").Raw != `["once"]` {
+					if tc.payloadRule == "override" && ojson.GetBytes(gotBody, "audit").Raw != `["once"]` {
 						t.Errorf("payload override must run exactly once: %s", gotBody)
 					}
-					if tc.payloadRule == "filter" && gjson.GetBytes(gotBody, "model").Exists() {
+					if tc.payloadRule == "filter" && ojson.GetBytes(gotBody, "model").Exists() {
 						t.Errorf("filtered model must not be restored: %s", gotBody)
 					}
-					if got := gjson.GetBytes(gotBody, "prompt").String(); got != "diagnostic" {
+					if got := ojson.GetBytes(gotBody, "prompt").String(); got != "diagnostic" {
 						t.Errorf("prompt = %q, want diagnostic", got)
 					}
-					if flag := gjson.GetBytes(gotBody, "stream"); flag.Exists() != stream || flag.Bool() != stream {
+					if flag := ojson.GetBytes(gotBody, "stream"); flag.Exists() != stream || flag.Bool() != stream {
 						t.Errorf("unexpected stream flag: %s", gotBody)
 					}
 					if format == "edit multipart" {
-						if got := gjson.GetBytes(gotBody, "images.0.image_url").String(); got != "data:application/octet-stream;base64,cG5nLWRhdGE=" {
+						if got := ojson.GetBytes(gotBody, "images.0.image_url").String(); got != "data:application/octet-stream;base64,cG5nLWRhdGE=" {
 							t.Errorf("image URL = %q, want original file data URL", got)
 						}
-					} else if format == "edit JSON" && gjson.GetBytes(gotBody, "images.0.file_id").String() != "source-image" {
+					} else if format == "edit JSON" && ojson.GetBytes(gotBody, "images.0.file_id").String() != "source-image" {
 						t.Errorf("original image missing: %s", gotBody)
 					}
 				})
@@ -275,16 +276,16 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 	if gotOriginator != codexOriginator {
 		t.Fatalf("Originator = %q, want %q", gotOriginator, codexOriginator)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
 		t.Fatalf("model = %q, want gpt-image-1.5; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "extra.preserve").Bool(); !got {
+	if got := ojson.GetBytes(gotBody, "extra.preserve").Bool(); !got {
 		t.Fatalf("extra.preserve missing from body: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "output_compression").Int(); got != 70 {
+	if got := ojson.GetBytes(gotBody, "output_compression").Int(); got != 70 {
 		t.Fatalf("output_compression = %d, want 70; body=%s", got, string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "stream").Exists() {
+	if ojson.GetBytes(gotBody, "stream").Exists() {
 		t.Fatalf("stream should be removed for non-stream execution: %s", string(gotBody))
 	}
 	if !bytes.Equal(resp.Payload, upstreamBody) {
@@ -333,10 +334,10 @@ func TestCodexExecutorDirectOpenAIImageGenerationStreamsImagesEndpoint(t *testin
 	if gotAccept != "text/event-stream" {
 		t.Fatalf("Accept = %q, want text/event-stream", gotAccept)
 	}
-	if !gjson.GetBytes(gotBody, "stream").Bool() {
+	if !ojson.GetBytes(gotBody, "stream").Bool() {
 		t.Fatalf("stream flag missing from upstream body: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "partial_images").Int(); got != 2 {
+	if got := ojson.GetBytes(gotBody, "partial_images").Int(); got != 2 {
 		t.Fatalf("partial_images = %d, want 2; body=%s", got, string(gotBody))
 	}
 	out := combined.String()
@@ -372,16 +373,16 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForJSON(t *test
 	if gotPath != "/images/edits" {
 		t.Fatalf("path = %q, want /images/edits", gotPath)
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-2" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "gpt-image-2" {
 		t.Fatalf("model = %q, want gpt-image-2; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "images.0.file_id").String(); got != "file-abc123" {
+	if got := ojson.GetBytes(gotBody, "images.0.file_id").String(); got != "file-abc123" {
 		t.Fatalf("images.0.file_id = %q, want file-abc123; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "mask.file_id").String(); got != "file-mask123" {
+	if got := ojson.GetBytes(gotBody, "mask.file_id").String(); got != "file-mask123" {
 		t.Fatalf("mask.file_id = %q, want file-mask123; body=%s", got, string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "stream").Exists() {
+	if ojson.GetBytes(gotBody, "stream").Exists() {
 		t.Fatalf("stream should be removed for non-stream execution: %s", string(gotBody))
 	}
 }
@@ -458,41 +459,49 @@ func TestCodexExecutorDirectOpenAIImageEditUsesImagesEditEndpointForMultipart(t 
 	if !json.Valid(gotBody) {
 		t.Fatalf("body is not valid JSON: %s", string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "gpt-image-1.5" {
 		t.Fatalf("model = %q, want gpt-image-1.5; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "prompt").String(); got != "Create a lovely gift basket" {
+	if got := ojson.GetBytes(gotBody, "prompt").String(); got != "Create a lovely gift basket" {
 		t.Fatalf("prompt = %q", got)
 	}
-	if got := gjson.GetBytes(gotBody, "output_format").String(); got != "webp" {
+	if got := ojson.GetBytes(gotBody, "output_format").String(); got != "webp" {
 		t.Fatalf("output_format = %q, want webp; body=%s", got, string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "n").Int(); got != 2 {
+	if got := ojson.GetBytes(gotBody, "n").Int(); got != 2 {
 		t.Fatalf("n = %d, want 2; body=%s", got, string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "stream").Exists() {
+	if ojson.GetBytes(gotBody, "stream").Exists() {
 		t.Fatalf("stream should be removed for non-stream execution: %s", string(gotBody))
 	}
-	imageURL := gjson.GetBytes(gotBody, "images.0.image_url").String()
+	imageURL := ojson.GetBytes(gotBody, "images.0.image_url").String()
 	if !strings.Contains(imageURL, ";base64,cG5nLWRhdGE=") {
 		t.Fatalf("images.0.image_url = %q, want png-data data URL; body=%s", imageURL, string(gotBody))
 	}
-	maskURL := gjson.GetBytes(gotBody, "mask.image_url").String()
+	maskURL := ojson.GetBytes(gotBody, "mask.image_url").String()
 	if !strings.Contains(maskURL, ";base64,bWFzay1kYXRh") {
 		t.Fatalf("mask.image_url = %q, want mask-data data URL; body=%s", maskURL, string(gotBody))
 	}
 }
 
-func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
+func TestCodexExecutorDirectOpenAIImage25And26Models(t *testing.T) {
 	testModels := []string{
 		"gpt-image-2.5",
 		"gpt-image-2.5-flare",
 		"gpt-image-2.5-sunburst",
+		"gpt-image-2.6",
+		"gpt-image-2.6-flare",
+		"gpt-image-2.6-sunburst",
 		"codex/gpt-image-2.5",
 		"codex/gpt-image-2.5-flare",
 		"codex/gpt-image-2.5-sunburst",
+		"codex/gpt-image-2.6",
+		"codex/gpt-image-2.6-flare",
+		"codex/gpt-image-2.6-sunburst",
 		"GPT-Image-2.5(medium)",
 		"codex/GPT-Image-2.5-Flare(high)",
+		"GPT-Image-2.6(medium)",
+		"codex/GPT-Image-2.6-Flare(high)",
 	}
 
 	for _, model := range testModels {
@@ -528,7 +537,7 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/generations" {
 				t.Fatalf("path = %q, want /images/generations", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
+			if got := ojson.GetBytes(gotBody, "model").String(); got != baseModel {
 				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
 			}
 		})
@@ -561,7 +570,7 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/edits" {
 				t.Fatalf("path = %q, want /images/edits", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
+			if got := ojson.GetBytes(gotBody, "model").String(); got != baseModel {
 				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
 			}
 		})
@@ -599,8 +608,52 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 			if gotPath != "/images/generations" {
 				t.Fatalf("path = %q, want /images/generations", gotPath)
 			}
-			if got := gjson.GetBytes(gotBody, "model").String(); got != baseModel {
+			if got := ojson.GetBytes(gotBody, "model").String(); got != baseModel {
 				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
+			}
+		})
+	}
+}
+
+func TestCodexDirectOpenAIImageStreamAccountsLargeCompletedEvents(t *testing.T) {
+	for _, size := range []int{16, 100000} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			event := `data: {"type":"image_generation.completed","model":"gpt-image-2","b64_json":"` + strings.Repeat("A", size) + `","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}` + "\n\n"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				if _, err := fmt.Fprint(w, event); err != nil {
+					t.Errorf("write upstream event: %v", err)
+				}
+			}))
+			defer server.Close()
+
+			alias := t.Name()
+			capture := &multiProviderUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+			coreusage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				coreusage.RegisterNamedPlugin(t.Name(), multiProviderNoopUsagePlugin{})
+			})
+			ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+			res, err := NewCodexExecutor(&config.Config{}).ExecuteStream(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+				Model:   "gpt-image-2",
+				Payload: []byte(`{"model":"gpt-image-2","prompt":"test"}`),
+			}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got bytes.Buffer
+			for chunk := range res.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				got.Write(chunk.Payload)
+			}
+			if got.String() != event {
+				t.Fatal("forwarded image SSE bytes changed")
+			}
+			record := capture.await(t)
+			if record.Detail.TotalTokens != 30 || record.Detail.ImageCount == nil || *record.Detail.ImageCount != 1 {
+				t.Fatalf("image completion usage missing: %+v", record.Detail)
 			}
 		})
 	}

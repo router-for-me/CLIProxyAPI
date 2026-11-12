@@ -34,6 +34,24 @@ type CooldownStateRecord struct {
 	// CredentialQuotaPropagated preserves wrap provenance for models that
 	// carry no independent layer (e.g. the reporting model itself).
 	CredentialQuotaPropagated bool `json:"credential_quota_propagated,omitempty"`
+	// CooldownSignals persists bounded rejected quota headers captured when
+	// this cooldown was recorded without touching passive Quota.Signals watermarks.
+	CooldownSignals map[string]string `json:"cooldown_signals,omitempty"`
+	// IndependentCooldownSignals persists CooldownSignals for IndependentState.
+	IndependentCooldownSignals map[string]string `json:"independent_cooldown_signals,omitempty"`
+	// ForceCooldownUntil persists the exact outer ErrorCodeForceCooldown deadline
+	// (credQuotaForceUntil for wrapped model records, model/auth forceCooldownUntil otherwise),
+	// preventing longer ordinary extensions or sibling shadows from inflating it on restore.
+	ForceCooldownUntil time.Time `json:"force_cooldown_until,omitempty"`
+	// CredQuotaForceCooldownUntil persists auth-level credential_quota force provenance
+	// independently from model-less auth ForceCooldownUntil when both coexist on an auth.
+	CredQuotaForceCooldownUntil time.Time `json:"cred_quota_force_cooldown_until,omitempty"`
+	// IndependentForceCooldownUntil persists the exact ErrorCodeForceCooldown deadline
+	// for IndependentState beneath a credential_quota wrap.
+	IndependentForceCooldownUntil time.Time `json:"independent_force_cooldown_until,omitempty"`
+	// ForceCooldownEvaluated marks records produced by provenance-aware versions so
+	// a zero ForceCooldownUntil means "explicitly ordinary" rather than legacy unknown.
+	ForceCooldownEvaluated bool `json:"force_cooldown_evaluated,omitempty"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.
@@ -283,7 +301,7 @@ func (s *FileCooldownStateStore) statePath(record CooldownStateRecord) (string, 
 func (s *FileCooldownStateStore) stateRelativePath(record CooldownStateRecord) string {
 	authFile := strings.TrimSpace(record.AuthFile)
 	if authFile != "" {
-		if filepath.IsAbs(authFile) && strings.TrimSpace(s.authDir) != "" {
+		if strings.TrimSpace(s.authDir) != "" {
 			if rel, errRel := filepath.Rel(s.authDir, authFile); errRel == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".." {
 				return cdsPathForRel(rel)
 			}

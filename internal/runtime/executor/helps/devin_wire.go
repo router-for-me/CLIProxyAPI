@@ -5,11 +5,11 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"math"
 	"net/http"
@@ -617,7 +617,7 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 }
 
 // SanitizeDevinSystemPrompt strips Claude Code attribution and CLI identity headers
-// (referencing Antigravity conventions), and applies zero-width obfuscation for configured sensitive words.
+// (referencing Antigravity conventions), and applies configured sensitive-word replacements and obfuscation.
 func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) string {
 	if prompt == "" {
 		return ""
@@ -648,16 +648,13 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if strings.Contains(trimmed, "- Don’t output ANSI escape codes directly — the CLI renderer applies them.") {
 			continue
 		}
-		if matcher != nil && matcher.Matches(trimmed) {
-			continue
-		}
 		kept = append(kept, line)
 	}
-	res := strings.TrimSpace(strings.Join(kept, "\n"))
+	res := strings.Join(kept, "\n")
 	if matcher != nil && res != "" {
-		res = matcher.ObfuscateText(res)
+		return matcher.SanitizeDevinText(res)
 	}
-	return res
+	return strings.TrimSpace(res)
 }
 
 func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
@@ -1224,15 +1221,16 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
-	Status        string          `json:"status,omitempty"`
-	FramesCount   int             `json:"frames_count"`
-	Content       string          `json:"content,omitempty"`
-	Thinking      string          `json:"thinking,omitempty"`
-	Signature     string          `json:"signature,omitempty"`
-	SignatureType string          `json:"signature_type,omitempty"`
-	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
-	Usage         *DevinUsage     `json:"usage,omitempty"`
-	UnknownFields []int           `json:"unknown_fields,omitempty"`
+	Status                string                      `json:"status,omitempty"`
+	FramesCount           int                         `json:"frames_count"`
+	Content               string                      `json:"content,omitempty"`
+	Thinking              string                      `json:"thinking,omitempty"`
+	Signature             string                      `json:"signature,omitempty"`
+	SignatureType         string                      `json:"signature_type,omitempty"`
+	ToolCalls             []DevinToolCall             `json:"tool_calls,omitempty"`
+	Usage                 *DevinUsage                 `json:"usage,omitempty"`
+	UnknownFields         []int                       `json:"unknown_fields,omitempty"`
+	ApplyPatchDiagnostics *DevinApplyPatchDiagnostics `json:"-"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate
