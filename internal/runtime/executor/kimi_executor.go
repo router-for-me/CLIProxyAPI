@@ -42,6 +42,7 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 			requestLogProvider:      "kimi",
 			upstreamModelNormalizer: normalizeKimiUpstreamModel,
 			oauthToolAliases:        &claudeOAuthToolAliasStore{},
+			threadBetas:             &helps.ClaudeThreadBetaStore{},
 		},
 		cfg: cfg,
 	}
