@@ -354,6 +354,56 @@ func TestDevinSWE16Slow_Issue6111(t *testing.T) {
 	}
 }
 
+func TestEmbeddedDevinModels_Fable52AndKimiK31Pro_Issue7466(t *testing.T) {
+	models := GetDevinModels()
+	found := make(map[string]*ModelInfo)
+	for _, m := range models {
+		if m == nil {
+			continue
+		}
+		if m.ID == "devin/claude-fable-5-2" || m.ID == "devin/kimi-k3-1-pro" {
+			found[m.ID] = m
+		}
+	}
+	if len(found) != 2 {
+		t.Fatalf("expected devin/claude-fable-5-2 and devin/kimi-k3-1-pro in GetDevinModels(), got: %v", models)
+	}
+
+	fable := found["devin/claude-fable-5-2"]
+	if fable.DisplayName != "Claude Fable 5.2" {
+		t.Errorf("claude-fable-5-2 DisplayName = %q, want %q", fable.DisplayName, "Claude Fable 5.2")
+	}
+	if fable.OwnedBy != "anthropic" {
+		t.Errorf("claude-fable-5-2 OwnedBy = %q, want anthropic", fable.OwnedBy)
+	}
+	if fable.ContextLength != 1000000 {
+		t.Errorf("claude-fable-5-2 ContextLength = %d, want 1000000", fable.ContextLength)
+	}
+	if fable.Thinking == nil || !reflect.DeepEqual(fable.Thinking.Levels, []string{"low", "medium", "high", "xhigh", "max"}) {
+		t.Errorf("claude-fable-5-2 Thinking.Levels = %+v, want [low medium high xhigh max]", fable.Thinking)
+	}
+
+	kimi := found["devin/kimi-k3-1-pro"]
+	if kimi.DisplayName != "Kimi K3.1 Pro" {
+		t.Errorf("kimi-k3-1-pro DisplayName = %q, want %q", kimi.DisplayName, "Kimi K3.1 Pro")
+	}
+	if kimi.OwnedBy != "moonshot" {
+		t.Errorf("kimi-k3-1-pro OwnedBy = %q, want moonshot", kimi.OwnedBy)
+	}
+	if kimi.ContextLength != 1048576 {
+		t.Errorf("kimi-k3-1-pro ContextLength = %d, want 1048576", kimi.ContextLength)
+	}
+	if kimi.Thinking == nil || !reflect.DeepEqual(kimi.Thinking.Levels, []string{"low", "high", "max"}) {
+		t.Errorf("kimi-k3-1-pro Thinking.Levels = %+v, want [low high max]", kimi.Thinking)
+	}
+
+	for _, id := range []string{"devin/claude-fable-5-2", "claude-fable-5-2", "devin/kimi-k3-1-pro", "kimi-k3-1-pro"} {
+		if LookupDevinModel(id) == nil {
+			t.Errorf("LookupDevinModel(%q) returned nil", id)
+		}
+	}
+}
+
 func TestWithDevinBuiltins(t *testing.T) {
 	// Test WithDevinBuiltins with nil slice
 	builtins := WithDevinBuiltins(nil)

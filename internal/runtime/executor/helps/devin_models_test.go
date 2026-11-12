@@ -199,6 +199,18 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "claude-fable-5-1-medium",
 		},
 		{
+			name:          "devin prefix claude-fable-5-2 default maps to medium",
+			rawModel:      "devin/claude-fable-5-2",
+			thinkingLevel: "",
+			want:          "claude-fable-5-2-medium",
+		},
+		{
+			name:          "devin prefix claude-fable-5.2 with max suffix",
+			rawModel:      "devin/claude-fable-5.2(max)",
+			thinkingLevel: "",
+			want:          "claude-fable-5-2-max",
+		},
+		{
 			name:          "Devin prefix gpt-6-astra with suffix",
 			rawModel:      "Devin/gpt-6-astra(high)",
 			thinkingLevel: "",
@@ -449,6 +461,18 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			rawModel:      "devin/kimi-k3",
 			thinkingLevel: "",
 			want:          "kimi-k3-high",
+		},
+		{
+			name:          "kimi-k3.1-pro dot form default maps to high",
+			rawModel:      "devin/kimi-k3.1-pro",
+			thinkingLevel: "",
+			want:          "kimi-k3-1-pro-high",
+		},
+		{
+			name:          "kimi-k3-1-pro with max suffix",
+			rawModel:      "devin/kimi-k3-1-pro(max)",
+			thinkingLevel: "",
+			want:          "kimi-k3-1-pro-max",
 		},
 		{
 			name:          "nemotron-3-ultra default maps to high",

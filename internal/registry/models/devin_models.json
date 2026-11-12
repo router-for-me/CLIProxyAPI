@@ -71,6 +71,31 @@
       }
     },
     {
+      "id": "claude-fable-5-2",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "anthropic",
+      "display_name": "Claude Fable 5.2",
+      "context_length": 1000000,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      }
+    },
+    {
       "id": "claude-opus-5-5",
       "object": "model",
       "type": "devin",
@@ -201,6 +226,29 @@
       "type": "devin",
       "owned_by": "moonshot",
       "display_name": "Kimi K3",
+      "context_length": 1048576,
+      "max_completion_tokens": 64000,
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      }
+    },
+    {
+      "id": "kimi-k3-1-pro",
+      "object": "model",
+      "type": "devin",
+      "owned_by": "moonshot",
+      "display_name": "Kimi K3.1 Pro",
       "context_length": 1048576,
       "max_completion_tokens": 64000,
       "supportedInputModalities": [
