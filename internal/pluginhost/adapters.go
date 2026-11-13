@@ -69,6 +69,25 @@ func executorScopeAllowsOAuthModels(caps pluginapi.Capabilities) bool {
 	return scope == pluginapi.ExecutorModelScopeOAuth || scope == pluginapi.ExecutorModelScopeBoth
 }
 
+// executorScopePublishesStaticModels reports whether the executor may register a
+// synthetic static client in the model registry. OAuth-backed plugins publish
+// availability only through active credentials (ModelsForAuth), whose
+// registration enforces oauth-excluded-models, oauth-model-alias and credential
+// disabled state; a static client for them would bypass those filters.
+func executorScopePublishesStaticModels(caps pluginapi.Capabilities, hasAuthProvider bool) bool {
+	if caps.Executor == nil {
+		return true
+	}
+	scope := normalizedExecutorModelScope(caps)
+	if scope == pluginapi.ExecutorModelScopeOAuth {
+		return false
+	}
+	if hasAuthProvider && scope != pluginapi.ExecutorModelScopeStatic {
+		return false
+	}
+	return true
+}
+
 func normalizeExecutorFormats(raw []string) []sdktranslator.Format {
 	if len(raw) == 0 {
 		return nil
@@ -264,6 +283,10 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 		if modelProvider == nil && registrar == nil {
 			continue
 		}
+		// The static catalog is metadata for the management model-definitions
+		// endpoint and per-auth registration; it does not publish availability.
+		// Collect it even when the executor scope excludes static serving so
+		// OAuth-backed plugins keep their management catalog populated (#6736).
 		var resp pluginapi.ModelRegistrationResponse
 		var errRegisterModels error
 		if modelProvider != nil {
