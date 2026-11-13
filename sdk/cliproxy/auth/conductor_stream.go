@@ -346,7 +346,7 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 				continue
 			}
 			switch strings.ToUpper(strings.TrimSpace(fr)) {
-			case "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER":
+			case "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE":
 				incomplete = true
 			case "STOP":
 				completed = true

@@ -1432,3 +1432,86 @@ func TestConvertGeminiResponseToClaude_ImplicitOpenToolContinuationOrdering(t *t
 		})
 	}
 }
+
+func TestConvertGeminiResponseToClaude_PartialVisibleTextWithMalformedFunctionCallPreservesText(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
+	rawNonStream := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"text": "partial answer"}]},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 3, "totalTokenCount": 53},
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+
+	ctx := context.Background()
+	nonStream := ConvertGeminiResponseToClaudeNonStream(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawNonStream, nil)
+	nonStreamJSON := util.ParseGJSONBytesNoCopy(nonStream)
+	if got := nonStreamJSON.Get("type").String(); got != "message" {
+		t.Fatalf("non-stream type = %q, want message; output: %s", got, nonStream)
+	}
+	if got := nonStreamJSON.Get("content.0.text").String(); got != "partial answer" {
+		t.Fatalf("non-stream text = %q, want partial answer; output: %s", got, nonStream)
+	}
+	if got := nonStreamJSON.Get("stop_reason").String(); got != "end_turn" {
+		t.Fatalf("non-stream stop_reason = %q, want end_turn; output: %s", got, nonStream)
+	}
+
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"text": "partial answer"}]},
+			"index": 0
+		}],
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": []},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 3, "totalTokenCount": 53},
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+	var param any
+	streamOut := bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk1, &param), nil)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk2, &param), nil)...)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	streamText := string(streamOut)
+	if strings.Contains(streamText, "event: error\n") {
+		t.Fatalf("unexpected error event when partial text was already emitted:\n%s", streamText)
+	}
+	if !strings.Contains(streamText, "partial answer") || !strings.Contains(streamText, `"type":"message_stop"`) {
+		t.Fatalf("expected partial text and message_stop in stream output:\n%s", streamText)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_EmptyFunctionCallPlaceholderReturnsError(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
+	rawJSON := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"functionCall": {}}]},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 1, "totalTokenCount": 51},
+		"modelVersion": "m",
+		"responseId": "resp-empty-fc"
+	}`)
+
+	ctx := context.Background()
+	nonStream := ConvertGeminiResponseToClaudeNonStream(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawJSON, nil)
+	if got := util.ParseGJSONBytesNoCopy(nonStream).Get("type").String(); got != "error" {
+		t.Fatalf("non-stream type = %q, want error for empty functionCall placeholder; output: %s", got, nonStream)
+	}
+	var param any
+	streamOut := bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawJSON, &param), nil)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	if !strings.Contains(string(streamOut), "event: error\n") {
+		t.Fatalf("expected error event for empty functionCall placeholder:\n%s", streamOut)
+	}
+}
