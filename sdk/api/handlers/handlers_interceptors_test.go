@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -1692,6 +1693,32 @@ func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T
 	}
 	if apiResp, ok := ctx.Get("API_RESPONSE"); !ok || !strings.Contains(string(apiResp.([]byte)), "intercepted-model") {
 		t.Fatalf("API_RESPONSE not recorded properly: %#v", apiResp)
+	}
+}
+
+func TestWriteModelListResponseCallerScope(t *testing.T) {
+	for _, principal := range []string{"", "downstream-secret"} {
+		t.Run(fmt.Sprintf("authenticated=%t", principal != ""), func(t *testing.T) {
+			var metadata map[string]any
+			handler := &BaseAPIHandler{}
+			handler.SetPluginHost(&handlerInterceptorTestHost{interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				metadata = req.Metadata
+				return pluginapi.ResponseInterceptResponse{Body: req.Body}
+			}})
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models?key=downstream-secret", nil)
+			if principal != "" {
+				ctx.Set("userApiKey", principal)
+			}
+			handler.WriteModelListResponse(ctx, "gemini", gin.H{"models": []any{}})
+			got, exists := metadata[pluginapi.CallerScopeMetadataKey]
+			if principal == "" && exists {
+				t.Fatalf("unexpected caller scope: %v", got)
+			}
+			if principal != "" && got != coresession.CallerScope(principal) {
+				t.Fatalf("caller scope = %v, want %q", got, coresession.CallerScope(principal))
+			}
+		})
 	}
 }
 

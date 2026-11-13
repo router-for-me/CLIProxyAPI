@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -128,5 +131,78 @@ func TestIssue5190ModelDetailHomeVisibility(t *testing.T) {
 	}
 	if rr := get("local/only", true); rr.Code != 404 {
 		t.Fatalf("local registry leaked into Home: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGeminiModelDetailUsesFilteredCatalog(t *testing.T) {
+	for _, useHome := range []bool{false, true} {
+		t.Run(map[bool]string{false: "local", true: "home"}[useHome], func(t *testing.T) {
+			server := newTestServer(t)
+			modelRegistry := registry.GetGlobalRegistry()
+			modelRegistry.RegisterClient(t.Name(), "gemini", []*registry.ModelInfo{{ID: "visible", Name: "visible", DisplayName: "Visible"}, {ID: "hidden", Name: "hidden"}})
+			t.Cleanup(func() { modelRegistry.UnregisterClient(t.Name()) })
+			engine := server.engine
+			if useHome {
+				server.cfg.Home.Enabled = true
+				engine = gin.New()
+				engine.GET("/v1beta/models", server.geminiModelsHandler(nil))
+				engine.GET("/v1beta/models/*action", server.geminiGetHandler(nil))
+				previousHome := home.Current()
+				home.SetCurrent(newHomeCatalogClient(t, `{"gemini":[{"id":"visible","display_name":"Visible"},{"id":"hidden"}]}`))
+				t.Cleanup(func() { home.SetCurrent(previousHome) })
+			}
+			get := func(path string) *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.Header.Set("Authorization", "Bearer test-key")
+				rr := httptest.NewRecorder()
+				engine.ServeHTTP(rr, req)
+				return rr
+			}
+			before := get("/v1beta/models/visible")
+			if before.Code != http.StatusOK {
+				t.Fatalf("unfiltered detail: %d %s", before.Code, before.Body.String())
+			}
+			calls := 0
+			server.handlers.SetPluginHost(&mockModelListInterceptorHost{interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				calls++
+				var catalog struct {
+					Models []map[string]any `json:"models"`
+				}
+				if err := json.Unmarshal(req.Body, &catalog); err != nil {
+					t.Fatal(err)
+				}
+				filtered := make([]map[string]any, 0, len(catalog.Models))
+				for _, model := range catalog.Models {
+					if model["name"] != "models/hidden" {
+						filtered = append(filtered, model)
+					}
+				}
+				body, err := json.Marshal(gin.H{"models": filtered})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return pluginapi.ResponseInterceptResponse{Body: body}
+			}})
+			after := get("/v1beta/models/models/visible")
+			var beforeBody, afterBody map[string]any
+			if err := json.Unmarshal(before.Body.Bytes(), &beforeBody); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(after.Body.Bytes(), &afterBody); err != nil {
+				t.Fatal(err)
+			}
+			if after.Code != http.StatusOK || !reflect.DeepEqual(beforeBody, afterBody) {
+				t.Fatalf("visible detail changed: %d %s; before %s", after.Code, after.Body.String(), before.Body.String())
+			}
+			if rr := get("/v1beta/models/hidden"); rr.Code != http.StatusNotFound {
+				t.Fatalf("filtered detail: %d %s", rr.Code, rr.Body.String())
+			}
+			if rr := get("/v1beta/models"); rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "models/hidden") {
+				t.Fatalf("filtered list: %d %s", rr.Code, rr.Body.String())
+			}
+			if calls != 3 {
+				t.Fatalf("interceptor calls = %d, want 3", calls)
+			}
+		})
 	}
 }

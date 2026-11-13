@@ -1015,21 +1015,9 @@ func (s *Server) handleHomeGeminiModel(c *gin.Context) {
 		return
 	}
 
-	action := strings.TrimPrefix(c.Param("action"), "/")
-	action = strings.TrimSpace(action)
-	for _, entry := range entries {
-		if homeGeminiModelMatches(entry, action) {
-			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
-			return
-		}
-	}
-
-	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
-		Error: handlers.ErrorDetail{
-			Message: "Not Found",
-			Type:    "not_found",
-		},
-	})
+	action := strings.TrimSpace(strings.TrimPrefix(c.Param("action"), "/"))
+	c.Set(handlers.ModelDetailIDContextKey, action)
+	s.writeModelListResponse(c, "gemini", gin.H{"models": formatHomeGeminiModels(entries)})
 }
 
 func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
@@ -1112,16 +1100,6 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 		model["outputTokenLimit"] = entry.maxCompletionTokens
 	}
 	return model
-}
-
-func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
-	id := strings.TrimSpace(entry.id)
-	if id == "" || action == "" {
-		return false
-	}
-	normalizedAction := strings.TrimPrefix(action, "models/")
-	normalizedID := strings.TrimPrefix(id, "models/")
-	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
 // homeModelsAuthStatus inspects a home models response for an authentication/error envelope.
