@@ -508,7 +508,7 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 	if s == nil || s.pluginHost == nil {
 		return nil
 	}
-	return s.pluginHost.ModelsForProvider(providerKey)
+	return s.pluginHost.StaticAppendModelsForProvider(providerKey)
 }
 
 // appendPluginModels appends the provider's plugin static models that are not excluded.

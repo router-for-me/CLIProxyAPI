@@ -260,6 +260,14 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, err
 	}
 	if action != "countTokens" {
+		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
+			gemDetail := helps.ParseGeminiUsage(data)
+			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
+			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
+			return cliproxyexecutor.Response{}, err
+		}
 		cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, replayRequestPayload, data)
 	}
 	reporter.ObserveResponseModel(data)
@@ -447,6 +455,13 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		var pendingFilterPayload []byte
 		var pendingFilterMsg string
+		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
+		failZeroOutput := func(finishReason string) bool {
+			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
+			return false
+		}
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		emitTranslatedPayload := func(payload []byte) bool {
 			lines := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, bytes.Clone(payload), &param, claudeInputTokens)
@@ -460,6 +475,9 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			for i := range lines {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
+					if len(lines[i]) > 0 {
+						zeroOutputGuard.MarkEmitted()
+					}
 					if helps.IsGeminiTerminalStreamChunk(lines[i]) {
 						terminalDelivered = true
 					}
@@ -468,6 +486,39 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 			}
 			return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+		}
+		filterAndEmitPayload := func(raw []byte) bool {
+			filtered := helps.FilterSSEUsageMetadata(append([]byte("data: "), raw...))
+			payload := helps.JSONPayload(filtered)
+			if len(payload) == 0 {
+				return true
+			}
+			return emitTranslatedPayload(payload)
+		}
+		guardAndEmitPayload := func(raw []byte) bool {
+			shells, action, finishReason := zeroOutputGuard.Observe(raw)
+			switch action {
+			case helps.GeminiZeroOutputContinue:
+				return true
+			case helps.GeminiZeroOutputFailNow:
+				return failZeroOutput(finishReason)
+			case helps.GeminiZeroOutputEmitErrorThenFail:
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = raw
+				}
+				if !filterAndEmitPayload(errFrame) {
+					return false
+				}
+				return failZeroOutput(finishReason)
+			default:
+				for _, shell := range shells {
+					if !filterAndEmitPayload(shell) {
+						return false
+					}
+				}
+				return filterAndEmitPayload(raw)
+			}
 		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
@@ -481,7 +532,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				flushed := pendingFilterPayload
 				pendingFilterPayload = nil
 				pendingFilterMsg = ""
-				if !emitTranslatedPayload(flushed) {
+				if !guardAndEmitPayload(flushed) {
 					return
 				}
 			}
@@ -506,12 +557,10 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				pendingFilterMsg = filterMsg
 				continue
 			}
-			filtered := helps.FilterSSEUsageMetadata(line)
-			payload := helps.JSONPayload(filtered)
-			if len(payload) == 0 {
+			if len(rawPayload) == 0 {
 				continue
 			}
-			if !emitTranslatedPayload(payload) {
+			if !guardAndEmitPayload(rawPayload) {
 				return
 			}
 		}
@@ -528,11 +577,25 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return
 		}
 		if len(pendingFilterPayload) > 0 {
-			if !emitTranslatedPayload(pendingFilterPayload) {
+			if !guardAndEmitPayload(pendingFilterPayload) {
 				return
 			}
 			pendingFilterPayload = nil
 			pendingFilterMsg = ""
+		}
+		if scanner.Err() == nil && ctx.Err() == nil && zeroOutputGuard.HasAbnormalFinish() {
+			_, action, finishReason := zeroOutputGuard.Finalize()
+			if action == helps.GeminiZeroOutputEmitErrorThenFail {
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = []byte("[DONE]")
+				}
+				if !filterAndEmitPayload(errFrame) {
+					return
+				}
+			}
+			failZeroOutput(finishReason)
+			return
 		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
 			return
@@ -554,6 +617,28 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		if ctx.Err() != nil {
 			return
+		}
+		shells, action, finishReason := zeroOutputGuard.Finalize()
+		switch action {
+		case helps.GeminiZeroOutputFailNow:
+			failZeroOutput(finishReason)
+			return
+		case helps.GeminiZeroOutputEmitErrorThenFail:
+			errFrame := zeroOutputGuard.AbnormalFrame()
+			if len(errFrame) == 0 {
+				errFrame = []byte("[DONE]")
+			}
+			if !filterAndEmitPayload(errFrame) {
+				return
+			}
+			failZeroOutput(finishReason)
+			return
+		default:
+			for _, shell := range shells {
+				if !filterAndEmitPayload(shell) {
+					return
+				}
+			}
 		}
 		if (responseFormat == sdktranslator.FormatClaude || responseFormat == sdktranslator.FormatOpenAI) && !sawFinishReason {
 			truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finishReason", streamTruncated: true}

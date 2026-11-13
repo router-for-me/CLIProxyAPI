@@ -26,11 +26,13 @@ type modelProviderRegistry interface {
 }
 
 type pluginModelRegistration struct {
-	pluginID    string
-	provider    string
-	priority    int
-	models      []*registry.ModelInfo
-	hasExecutor bool
+	pluginID           string
+	provider           string
+	priority           int
+	models             []*registry.ModelInfo
+	hasExecutor        bool
+	allowsStaticClient bool
+	hasModelProvider   bool
 }
 
 func normalizedExecutorModelScope(caps pluginapi.Capabilities) pluginapi.ExecutorModelScope {
@@ -41,6 +43,9 @@ func normalizedExecutorModelScope(caps pluginapi.Capabilities) pluginapi.Executo
 	case pluginapi.ExecutorModelScopeStatic, pluginapi.ExecutorModelScopeOAuth, pluginapi.ExecutorModelScopeBoth:
 		return caps.ExecutorModelScope
 	default:
+		if hasAuthProviderCap(caps) {
+			return pluginapi.ExecutorModelScopeOAuth
+		}
 		return pluginapi.ExecutorModelScopeBoth
 	}
 }
@@ -50,6 +55,9 @@ func executorScopeAllowsStaticModels(caps pluginapi.Capabilities) bool {
 		return true
 	}
 	scope := normalizedExecutorModelScope(caps)
+	if hasAuthProviderCap(caps) {
+		return scope == pluginapi.ExecutorModelScopeStatic
+	}
 	return scope == pluginapi.ExecutorModelScopeStatic || scope == pluginapi.ExecutorModelScopeBoth
 }
 
@@ -256,9 +264,6 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 		if modelProvider == nil && registrar == nil {
 			continue
 		}
-		if !executorScopeAllowsStaticModels(record.plugin.Capabilities) {
-			continue
-		}
 		var resp pluginapi.ModelRegistrationResponse
 		var errRegisterModels error
 		if modelProvider != nil {
@@ -313,11 +318,13 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			}
 			regIndexByProvider[provider] = len(regsForPlugin)
 			regsForPlugin = append(regsForPlugin, pluginModelRegistration{
-				pluginID:    record.id,
-				provider:    provider,
-				priority:    record.priority,
-				models:      cloneRegistryModels(models),
-				hasExecutor: record.plugin.Capabilities.Executor != nil,
+				pluginID:           record.id,
+				provider:           provider,
+				priority:           record.priority,
+				models:             cloneRegistryModels(models),
+				hasExecutor:        record.plugin.Capabilities.Executor != nil,
+				allowsStaticClient: record.plugin.Capabilities.Executor != nil && executorScopeAllowsStaticModels(record.plugin.Capabilities),
+				hasModelProvider:   modelProvider != nil,
 			})
 		}
 		if len(regsForPlugin) == 0 {
@@ -373,11 +380,27 @@ func (h *Host) authModelProviderMatches(record capabilityRecord, provider string
 				return true
 			}
 		}
+		for _, prov := range recordAuthProviders(record) {
+			credIDs, okCredIDs := h.callAuthProviderCredentialProviders(record.id, prov)
+			if !okCredIDs {
+				return false
+			}
+			for _, credID := range credIDs {
+				if normalizeProviderID(credID) == provider {
+					return true
+				}
+			}
+		}
 	}
 	candidates := h.modelProvidersForPlugin(record.id)
 	if len(candidates) > 0 {
 		for _, candidate := range candidates {
 			if normalizeProviderID(candidate) == provider {
+				return true
+			}
+		}
+		if caps.Executor != nil {
+			if candidate, okExec := h.executorProvider(record, caps.Executor); okExec && candidate == provider {
 				return true
 			}
 		}
