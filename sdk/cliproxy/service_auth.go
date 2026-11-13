@@ -2,6 +2,7 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -470,6 +471,11 @@ func (s *Service) prepareCoreAuthForModelRegistration(ctx context.Context, auth 
 		}
 	}
 	if err != nil {
+		if errors.Is(err, coreauth.ErrStaleFileSnapshot) {
+			if w := s.currentWatcher(); w != nil {
+				w.RereadDiscardedFileSnapshot(auth)
+			}
+		}
 		log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
 		current, ok := s.coreManager.GetByID(auth.ID)
 		if !ok || current.Disabled {
