@@ -136,6 +136,11 @@ type geminiAppRequestError struct{ geminiAppError }
 
 func (geminiAppRequestError) IsRequestScoped() bool { return true }
 
+// An accepted generation must not be replayed or cool its credential on truncation.
+type geminiAppTruncatedError struct{ geminiAppError }
+
+func (geminiAppTruncatedError) IsStreamTruncated() bool { return true }
+
 // NewGeminiAppRequestError prevents unsupported inputs from cooling an account.
 func NewGeminiAppRequestError(code int, message string) error {
 	return geminiAppRequestError{geminiAppError{code, message}}
@@ -156,7 +161,7 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 			if err == io.EOF {
 				break
 			}
-			return text, geminiAppError{http.StatusBadGateway, "gemini-app: invalid or truncated upstream frame"}
+			return text, geminiAppTruncatedError{geminiAppError{http.StatusBadGateway, "gemini-app: invalid or truncated upstream frame"}}
 		}
 		if len(frame) > 0 && frame[0] != '[' {
 			if _, err := strconv.ParseUint(string(frame), 10, 64); err == nil {
@@ -202,7 +207,7 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 		}
 	}
 	if !completed || text == "" {
-		return text, geminiAppError{http.StatusBadGateway, "gemini-app: response ended without a complete text answer"}
+		return text, geminiAppTruncatedError{geminiAppError{http.StatusBadGateway, "gemini-app: response ended without a complete text answer"}}
 	}
 	return text, nil
 }

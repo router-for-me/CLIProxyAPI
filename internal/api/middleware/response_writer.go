@@ -40,20 +40,22 @@ type RequestInfo struct {
 // It is designed to handle both standard and streaming responses, ensuring that logging operations do not block the client response.
 type ResponseWriterWrapper struct {
 	gin.ResponseWriter
-	body                *bytes.Buffer              // body is a buffer to store the response body for non-streaming responses.
-	isStreaming         bool                       // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
-	streamWriter        logging.StreamingLogWriter // streamWriter is a writer for handling streaming log entries.
-	chunkChannel        chan []byte                // chunkChannel is a channel for asynchronously passing response chunks to the logger.
-	streamDone          chan struct{}              // streamDone signals when the streaming goroutine completes.
-	logger              logging.RequestLogger      // logger is the instance of the request logger service.
-	requestInfo         *RequestInfo               // requestInfo holds the details of the original request.
-	statusCode          int                        // statusCode stores the HTTP status code of the response.
-	headers             map[string][]string        // headers stores the response headers.
-	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
-	hijacked            bool                       // hijacked reports whether the underlying connection was hijacked.
-	panicked            bool                       // panicked records whether a handler panicked (even after committing a 2xx response).
-	finalized           bool                       // finalized prevents post-Finalize writes (e.g. outer recovery) from reopening stream writers.
-	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	body                *bytes.Buffer               // body is a buffer to store the response body for non-streaming responses.
+	isStreaming         bool                        // isStreaming indicates whether the response is a streaming type (e.g., text/event-stream).
+	streamWriter        logging.StreamingLogWriter  // streamWriter is a writer for handling streaming log entries.
+	chunkChannel        chan []byte                 // chunkChannel is a channel for asynchronously passing response chunks to the logger.
+	streamDone          chan struct{}               // streamDone signals when the streaming goroutine completes.
+	logger              logging.RequestLogger       // logger is the instance of the request logger service.
+	requestInfo         *RequestInfo                // requestInfo holds the details of the original request.
+	ginContext          *gin.Context                // ginContext holds the Gin request context for mid-stream error inspection.
+	statusCode          int                         // statusCode stores the HTTP status code of the response.
+	headers             map[string][]string         // headers stores the response headers.
+	logOnErrorOnly      bool                        // logOnErrorOnly enables logging only when an error response is detected.
+	deferredAPICapture  *logging.DeferredAPICapture // deferredAPICapture retains bounded upstream request/response attempts for error logs.
+	hijacked            bool                        // hijacked reports whether the underlying connection was hijacked.
+	panicked            bool                        // panicked records whether a handler panicked (even after committing a 2xx response).
+	finalized           bool                        // finalized prevents post-Finalize writes (e.g. outer recovery) from reopening stream writers.
+	firstChunkTimestamp time.Time                   // firstChunkTimestamp captures TTFB for streaming responses.
 }
 
 // NewResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -164,13 +166,22 @@ func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCod
 }
 
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
+	status := w.effectiveStatusCode()
+	apiErrors := extractAPIResponseErrors(w.ginContext)
+	if status < http.StatusBadRequest {
+		if apiErrStatus := actionableAPIResponseErrorStatus(apiErrors); apiErrStatus >= http.StatusBadRequest {
+			status = apiErrStatus
+		}
+	}
+	if !w.panicked && isUnroutedNotFound(w.ginContext, status, apiErrors) {
+		return false
+	}
 	if w.logger != nil && w.logger.IsEnabled() {
 		return true
 	}
 	if !w.logOnErrorOnly {
 		return false
 	}
-	status := w.effectiveStatusCode()
 	return status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest
 }
 
@@ -226,25 +237,29 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	// If streaming, initialize streaming log writer once and refresh uncommitted status updates.
 	if !w.finalized && w.isStreaming && w.logger != nil && w.logger.IsEnabled() {
 		if w.streamWriter == nil {
-			streamWriter, err := w.logger.LogStreamingRequest(
-				w.requestInfo.URL,
-				w.requestInfo.Method,
-				w.requestInfo.Headers,
-				w.currentCapturedRequestBody(),
-				w.requestInfo.RequestID,
-			)
-			if err == nil {
-				chunkChan := make(chan []byte, 100) // Buffered channel for async writes
-				doneChan := make(chan struct{})
-				w.streamWriter = streamWriter
-				w.chunkChannel = chunkChan
-				w.streamDone = doneChan
+			if !w.panicked && isUnroutedNotFound(w.ginContext, statusCode, extractAPIResponseErrors(w.ginContext)) {
+				w.isStreaming = false
+			} else {
+				streamWriter, err := w.logger.LogStreamingRequest(
+					w.requestInfo.URL,
+					w.requestInfo.Method,
+					w.requestInfo.Headers,
+					w.currentCapturedRequestBody(),
+					w.requestInfo.RequestID,
+				)
+				if err == nil {
+					chunkChan := make(chan []byte, 100) // Buffered channel for async writes
+					doneChan := make(chan struct{})
+					w.streamWriter = streamWriter
+					w.chunkChannel = chunkChan
+					w.streamDone = doneChan
 
-				// Start async chunk processor with captured locals so Finalize clearing fields cannot race.
-				go w.processStreamingChunks(doneChan, chunkChan, streamWriter)
+					// Start async chunk processor with captured locals so Finalize clearing fields cannot race.
+					go w.processStreamingChunks(doneChan, chunkChan, streamWriter)
 
-				// Write status immediately
-				_ = streamWriter.WriteStatus(statusCode, w.headers)
+					// Write status immediately
+					_ = streamWriter.WriteStatus(statusCode, w.headers)
+				}
 			}
 		} else {
 			_ = w.streamWriter.WriteStatus(statusCode, w.headers)
@@ -359,6 +374,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if w.requestInfo != nil && w.requestInfo.deferredBodyCapture != nil {
 		defer w.requestInfo.deferredBodyCapture.Cleanup()
 	}
+	defer w.closeDeferredAPICapture(c)
 	if w.logger == nil {
 		return nil
 	}
@@ -379,6 +395,11 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 			slicesAPIResponseError = apiErrors
 		}
 	}
+	if finalStatusCode < http.StatusBadRequest {
+		if errStatus := actionableAPIResponseErrorStatus(slicesAPIResponseError); errStatus >= http.StatusBadRequest {
+			finalStatusCode = errStatus
+		}
+	}
 
 	hasAPIError := w.panicked || hasActionableError(c, finalStatusCode, slicesAPIResponseError)
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.logger.IsEnabled()
@@ -386,9 +407,10 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
-	if !w.logger.IsEnabled() && !forceLog {
+	if (!w.logger.IsEnabled() && !forceLog) || (!w.panicked && isUnroutedNotFound(c, finalStatusCode, slicesAPIResponseError)) {
+		errDiscard := w.discardStreamingLogWriter()
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
-		return nil
+		return errDiscard
 	}
 
 	if w.isStreaming && w.streamWriter != nil {
@@ -452,6 +474,12 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
 		}
+		if finalStatusCode >= http.StatusBadRequest {
+			_ = w.streamWriter.WriteStatus(finalStatusCode, nil)
+		}
+		if len(slicesAPIResponseError) > 0 {
+			_ = w.streamWriter.WriteAPIResponseErrors(slicesAPIResponseError)
+		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
 			cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource)
@@ -466,7 +494,13 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	if forceLog && len(apiRequest) == 0 {
 		apiRequest = w.extractDeferredAPIRequest(c)
 	}
-	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
+	apiResponse := w.extractAPIResponse(c)
+	if forceLog {
+		if deferredResponse := w.extractDeferredAPIResponse(c); len(deferredResponse) > 0 {
+			apiResponse = deferredResponse
+		}
+	}
+	return w.logRequest(w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c), w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource, apiResponse, apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource, w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog)
 }
 
 func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
@@ -495,8 +529,16 @@ func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 }
 
 func (w *ResponseWriterWrapper) extractDeferredAPIRequest(c *gin.Context) []byte {
+	if w != nil && w.deferredAPICapture != nil && w.deferredAPICapture.HasRequests() {
+		return w.deferredAPICapture.RenderAPIRequests()
+	}
 	if c == nil {
 		return nil
+	}
+	if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
+		if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil && capture.HasRequests() {
+			return capture.RenderAPIRequests()
+		}
 	}
 	value, exists := c.Get(logging.DeferredAPIRequestContextKey)
 	if !exists {
@@ -514,6 +556,41 @@ func (w *ResponseWriterWrapper) extractDeferredAPIRequest(c *gin.Context) []byte
 		body.Write(buildRequest())
 	}
 	return body.Bytes()
+}
+
+func (w *ResponseWriterWrapper) extractDeferredAPIResponse(c *gin.Context) []byte {
+	if w != nil && w.deferredAPICapture != nil {
+		if !w.deferredAPICapture.HasPayload() {
+			return nil
+		}
+		return w.deferredAPICapture.RenderAPIResponse()
+	}
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(logging.DeferredAPIResponseContextKey)
+	if !exists {
+		return nil
+	}
+	deferred, ok := value.(logging.DeferredAPIResponse)
+	if !ok || deferred == nil || !deferred.HasPayload() {
+		return nil
+	}
+	return deferred.RenderAPIResponse()
+}
+
+func (w *ResponseWriterWrapper) closeDeferredAPICapture(c *gin.Context) {
+	if w != nil && w.deferredAPICapture != nil {
+		w.deferredAPICapture.Close()
+	}
+	if c == nil {
+		return
+	}
+	if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
+		if closer, ok := value.(interface{ Close() }); ok && closer != nil {
+			closer.Close()
+		}
+	}
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -806,6 +883,26 @@ func mergeFileBodySource(payload []byte, source *logging.FileBodySource) ([]byte
 	return buf.Bytes(), nil
 }
 
+func (w *ResponseWriterWrapper) discardStreamingLogWriter() error {
+	if w == nil || w.streamWriter == nil {
+		return nil
+	}
+	if w.chunkChannel != nil {
+		close(w.chunkChannel)
+		w.chunkChannel = nil
+	}
+	if w.streamDone != nil {
+		<-w.streamDone
+		w.streamDone = nil
+	}
+	streamWriter := w.streamWriter
+	w.streamWriter = nil
+	if discarder, ok := streamWriter.(interface{ Discard() error }); ok {
+		return discarder.Discard()
+	}
+	return streamWriter.Close()
+}
+
 func cleanupFileBodySources(sources ...*logging.FileBodySource) {
 	for _, source := range sources {
 		if source == nil {
@@ -833,6 +930,34 @@ func hasActionableAPIResponseErrors(apiErrors []*interfaces.ErrorMessage) bool {
 	return false
 }
 
+func extractAPIResponseErrors(c *gin.Context) []*interfaces.ErrorMessage {
+	if c == nil {
+		return nil
+	}
+	if apiResponseError, exists := c.Get("API_RESPONSE_ERROR"); exists {
+		if apiErrors, ok := apiResponseError.([]*interfaces.ErrorMessage); ok {
+			return apiErrors
+		}
+	}
+	return nil
+}
+
+func actionableAPIResponseErrorStatus(apiErrors []*interfaces.ErrorMessage) int {
+	for i := len(apiErrors) - 1; i >= 0; i-- {
+		errMsg := apiErrors[i]
+		if isClientCancellationErrorMessage(errMsg) {
+			continue
+		}
+		if errMsg.StatusCode >= http.StatusBadRequest && errMsg.StatusCode != clienterror.StatusClientClosedRequest {
+			return errMsg.StatusCode
+		}
+		if status := clienterror.HTTPStatusFromError(errMsg.Error); status >= http.StatusBadRequest && status != clienterror.StatusClientClosedRequest {
+			return status
+		}
+	}
+	return 0
+}
+
 func isContextCanceled(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
 		return false
@@ -841,11 +966,66 @@ func isContextCanceled(c *gin.Context) bool {
 	return ctx != nil && errors.Is(ctx.Err(), context.Canceled)
 }
 
+func isUnroutedNotFound(c *gin.Context, statusCode int, apiErrors []*interfaces.ErrorMessage) bool {
+	if statusCode != http.StatusNotFound {
+		return false
+	}
+	if hasActionableAPIResponseErrors(apiErrors) {
+		return false
+	}
+	if c == nil || c.FullPath() != "" {
+		return false
+	}
+	if hasRecordedUpstreamActivity(c) {
+		return false
+	}
+	return true
+}
+
+func hasRecordedUpstreamActivity(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	for _, key := range []string{"API_REQUEST", "API_RESPONSE", "API_WEBSOCKET_TIMELINE"} {
+		if value, exists := c.Get(key); exists {
+			if data, ok := value.([]byte); ok && len(data) > 0 {
+				return true
+			}
+		}
+	}
+	if value, exists := c.Get(logging.DeferredAPIRequestContextKey); exists {
+		if requests, ok := value.([]logging.DeferredAPIRequest); ok && len(requests) > 0 {
+			return true
+		}
+	}
+	if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
+		if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil && capture.HasRequests() {
+			return true
+		}
+		if response, ok := value.(logging.DeferredAPIResponse); ok && response != nil && response.HasPayload() {
+			return true
+		}
+	}
+	for _, key := range []string{
+		logging.APIRequestSourceContextKey,
+		logging.APIResponseSourceContextKey,
+		logging.APIWebsocketTimelineSourceContextKey,
+	} {
+		if source := extractFileBodySource(c, key); source != nil && source.HasPayload() {
+			return true
+		}
+	}
+	return false
+}
+
 func hasActionableError(c *gin.Context, statusCode int, apiErrors []*interfaces.ErrorMessage) bool {
 	if hasActionableAPIResponseErrors(apiErrors) {
 		return true
 	}
 	if statusCode == clienterror.StatusClientClosedRequest {
+		return false
+	}
+	if isUnroutedNotFound(c, statusCode, apiErrors) {
 		return false
 	}
 	if isContextCanceled(c) && statusCode < http.StatusBadRequest {

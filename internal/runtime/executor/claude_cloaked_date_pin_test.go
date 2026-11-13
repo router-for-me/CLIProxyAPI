@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -338,5 +341,195 @@ func TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate(t 
 	}
 	if got := extractClaudeCloakDate(t, capturedBodies[2]); got != "2026-08-02" {
 		t.Fatalf("configured ExecuteStream request date = %q, want original probe date 2026-08-02", got)
+	}
+}
+
+func TestClaudeCloakedDateReminderPersistsAcrossRestartWithLocalBBoltKV(t *testing.T) {
+	homekv.ClearCurrent()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+	}
+	helps.ResetClaudeDiagnosticsForTest()
+
+	// Cleanups run in LIFO order: close bbolt before TempDir removes its files.
+	dbPath := filepath.Join(t.TempDir(), "kv.db")
+	t.Cleanup(func() {
+		homekv.ClearCurrent()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+		}
+		helps.ResetClaudeDiagnosticsForTest()
+	})
+
+	if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
+		t.Fatalf("kvstore.ConfigureLocal(true, %q) error = %v", dbPath, errCfg)
+	}
+
+	var mockTime time.Time
+	claudeCodeCurrentTimeFunc = func(cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
+		return mockTime
+	}
+	t.Cleanup(func() {
+		claudeCodeCurrentTimeFunc = nil
+	})
+
+	var capturedBodies [][]byte
+	call := 0
+	transport := datePinRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := make([]byte, 0)
+		if req.Body != nil {
+			buf, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			body = buf
+		}
+		capturedBodies = append(capturedBodies, body)
+		call++
+		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(response)),
+			Request:    req,
+		}, nil
+	})
+
+	// Explicitly configure session-date-pin-days: 0 to verify KV mode ignores it
+	// and persists the session date pin permanently.
+	zero := 0
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{SessionDatePinDays: &zero},
+	}
+	authA := &cliproxyauth.Auth{
+		ID:         "test-date-pin-bbolt-oauth-a",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-a", "cloak_mode": "always", "timezone": "UTC"},
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+				"00000000000000000000000000000000000000000000000000000000000000d1",
+			},
+		},
+	}
+	authB := &cliproxyauth.Auth{
+		ID:         "test-date-pin-bbolt-oauth-b",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-b", "cloak_mode": "always", "timezone": "UTC"},
+		Metadata: map[string]any{
+			"account_uuid": "22222222-3333-4444-8555-666666666666",
+			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+				"00000000000000000000000000000000000000000000000000000000000000d2",
+			},
+		},
+	}
+
+	exec1 := NewClaudeExecutor(cfg)
+	payload := `{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": "You are an expert software engineer.", "cache_control": {"type": "ephemeral"}}],
+		"messages": [{"role": "user", "content": "Say OK."}],
+		"max_tokens": 100
+	}`
+	options := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      http.Header{"X-Session-ID": []string{"bbolt-restart-session-1"}},
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: []byte(payload)}
+
+	// 1. Send request 1 on day 1 (2026-08-01).
+	mockTime = time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	if _, err := exec1.Execute(ctx, authA, req, options); err != nil {
+		t.Fatalf("request 1 failed: %v", err)
+	}
+
+	// 2. Simulate a full CPA restart: close and reopen local bbolt at the same
+	// dbPath and wipe all in-memory continuity/date-pin state.
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() error = %v", errShutdown)
+	}
+	helps.ResetClaudeDiagnosticsForTest()
+	if errReopen := kvstore.ConfigureLocal(true, dbPath); errReopen != nil {
+		t.Fatalf("kvstore.ConfigureLocal(true, %q) reopen error = %v", dbPath, errReopen)
+	}
+	exec2 := NewClaudeExecutor(cfg)
+
+	// 3. Advance mockTime to 2026-09-15 (45 days later, well past the 7-day
+	// in-memory default and with session-date-pin-days: 0).
+	mockTime = time.Date(2026, 9, 15, 14, 30, 0, 0, time.UTC)
+
+	// 4. Send request 2 for the same session with a different credential.
+	if _, err := exec2.Execute(ctx, authB, req, options); err != nil {
+		t.Fatalf("request 2 after restart failed: %v", err)
+	}
+	if _, err := exec2.ExecuteStream(ctx, authB, req, options); err != nil {
+		t.Fatalf("request 2b (stream) after restart failed: %v", err)
+	}
+
+	if len(capturedBodies) != 3 {
+		t.Fatalf("expected 3 captured bodies, got %d", len(capturedBodies))
+	}
+
+	msg0First := ojson.GetBytes(capturedBodies[0], "messages.0").Raw
+	msg0AfterRestart := ojson.GetBytes(capturedBodies[1], "messages.0").Raw
+	msg0AfterRestartStream := ojson.GetBytes(capturedBodies[2], "messages.0").Raw
+	if msg0First != msg0AfterRestart {
+		t.Fatalf("messages[0] changed across CPA restart:\nbefore: %s\nafter:  %s", msg0First, msg0AfterRestart)
+	}
+	if msg0First != msg0AfterRestartStream {
+		t.Fatalf("messages[0] changed across CPA restart in stream:\nbefore: %s\nstream: %s", msg0First, msg0AfterRestartStream)
+	}
+	if got := extractClaudeCloakDate(t, capturedBodies[1]); got != "2026-08-01" {
+		t.Fatalf("session date after restart = %q, want anchored 2026-08-01", got)
+	}
+
+	// 5. Verify that a caller-supplied string-form currentDate reminder seeds the
+	// permanent KV anchor, strips the duplicate string reminder while preserving
+	// user text, and survives a restart + 45-day clock jump with session-date-pin-days: 0.
+	callerOptions := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      http.Header{"X-Session-ID": []string{"bbolt-restart-caller-session-2"}},
+	}
+	callerDoc1 := ojson.NewDocString(`{"model":"claude-opus-5","messages":[{"role":"user","content":""}],"max_tokens":100}`)
+	_ = callerDoc1.Set("messages.0.content", claudeCodeCurrentDateReminder("2026-07-20")+"Say OK.")
+	mockTime = time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+	if _, err := exec2.Execute(ctx, authA, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: callerDoc1.Bytes()}, callerOptions); err != nil {
+		t.Fatalf("caller reminder request 1 failed: %v", err)
+	}
+
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() second error = %v", errShutdown)
+	}
+	helps.ResetClaudeDiagnosticsForTest()
+	if errReopen := kvstore.ConfigureLocal(true, dbPath); errReopen != nil {
+		t.Fatalf("kvstore.ConfigureLocal(true, %q) second reopen error = %v", dbPath, errReopen)
+	}
+	exec3 := NewClaudeExecutor(cfg)
+
+	mockTime = time.Date(2026, 9, 15, 18, 0, 0, 0, time.UTC)
+	callerDoc2 := ojson.NewDocString(`{"model":"claude-opus-5","messages":[{"role":"user","content":""}],"max_tokens":100}`)
+	_ = callerDoc2.Set("messages.0.content", claudeCodeCurrentDateReminder("2026-09-15")+"Say OK.")
+	if _, err := exec3.Execute(ctx, authB, cliproxyexecutor.Request{Model: "claude-opus-5", Payload: callerDoc2.Bytes()}, callerOptions); err != nil {
+		t.Fatalf("caller reminder request 2 after restart failed: %v", err)
+	}
+
+	if len(capturedBodies) != 5 {
+		t.Fatalf("expected 5 captured bodies, got %d", len(capturedBodies))
+	}
+	callerMsg0Before := ojson.GetBytes(capturedBodies[3], "messages.0").Raw
+	callerMsg0After := ojson.GetBytes(capturedBodies[4], "messages.0").Raw
+	if callerMsg0Before != callerMsg0After {
+		t.Fatalf("caller-seeded messages[0] changed across restart:\nbefore: %s\nafter:  %s", callerMsg0Before, callerMsg0After)
+	}
+	if got := extractClaudeCloakDate(t, capturedBodies[4]); got != "2026-07-20" {
+		t.Fatalf("caller-seeded session date after restart = %q, want 2026-07-20", got)
+	}
+	if got := strings.Count(callerMsg0After, "Today's date is"); got != 1 {
+		t.Fatalf("caller-seeded messages[0] has %d date reminders, want 1: %s", got, callerMsg0After)
+	}
+	if !strings.Contains(callerMsg0After, "Say OK.") {
+		t.Fatalf("caller-seeded messages[0] lost user text 'Say OK.': %s", callerMsg0After)
 	}
 }

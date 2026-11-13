@@ -1,12 +1,49 @@
 package chat_completions
 
 import (
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
 )
+
+func TestConvertOpenAIRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"max_completion_tokens", `{"max_completion_tokens":2048}`, "2048"},
+		{"max_output_tokens fallback", `{"max_output_tokens":4096}`, "4096"},
+		{"completion limit takes precedence", `{"max_completion_tokens":1024,"max_tokens":2048,"max_output_tokens":4096}`, "1024"},
+		{"max_tokens takes precedence over output limit", `{"max_tokens":1024,"max_output_tokens":2048}`, "1024"},
+		{"invalid completion limit skipped", `{"max_completion_tokens":"1024","max_tokens":2048}`, "2048"},
+		{"null completion limit skipped", `{"max_completion_tokens":null,"max_tokens":2048}`, "2048"},
+		{"invalid legacy limits skipped", `{"max_completion_tokens":false,"max_tokens":{},"max_output_tokens":4096}`, "4096"},
+		{"zero takes precedence", `{"max_completion_tokens":0,"max_tokens":2048}`, "0"},
+		{"non-numeric limits ignored", `{"max_completion_tokens":"1024","max_tokens":null,"max_output_tokens":true}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertOpenAIRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertOpenAIRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+			for _, path := range []string{"max_completion_tokens", "max_tokens"} {
+				if ojson.GetBytesNoCopy(out, path).Exists() {
+					t.Fatalf("%s should not be forwarded; output=%s", path, out)
+				}
+			}
+		})
+	}
+}
 
 // Basic tool-call: system + user + assistant(tool_calls, no content) + tool result.
 // Expects developer msg + user msg + function_call + function_call_output.
@@ -809,6 +846,86 @@ func TestToolNameShortening(t *testing.T) {
 	}
 	if len(translatedName) > 64 {
 		t.Errorf("shortened name still > 64 chars: len=%d name='%s'", len(translatedName), translatedName)
+	}
+}
+
+func TestNestedCustomToolDeclaration(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		format string
+		want   string
+	}{
+		{"grammar", `,"format":{"type":"grammar","grammar":{"syntax":"lark","definition":"start: patch"}}`, `{"type":"grammar","syntax":"lark","definition":"start: patch"}`},
+		{"text", `,"format":{"type":"text"}`, `{"type":"text"}`},
+		{"default", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"messages":[
+					{"role":"assistant","tool_calls":[{"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":"{\"input\":\"patch\"}"}}]},
+					{"role":"tool","tool_call_id":"call_patch","content":"done"}
+				],
+				"tools":[
+					{"type":"function","function":{"name":"bash"}},
+					{"type":"function","function":{"name":"read_bash"}},
+					{"type":"function","function":{"name":"stop_bash"}},
+					{"type":"function","function":{"name":"list_bash"}},
+					{"type":"custom","custom":{"name":"apply_patch","description":"Edit files"` + tt.format + `}}
+				],
+				"tool_choice":{"type":"custom","custom":{"name":"apply_patch"}}
+			}`)
+			out, errConvert := ConvertOpenAIRequestToCodex("codex-test", input, true)
+			if errConvert != nil {
+				t.Fatal(errConvert)
+			}
+			tool := ojson.GetBytesNoCopy(out, "tools.4")
+			if tool.Get("custom").Exists() {
+				t.Fatalf("unknown parameter tools[4].custom would be sent upstream: %s", tool.Raw)
+			}
+			if tool.Get("type").String() != "custom" || tool.Get("name").String() != "apply_patch" || tool.Get("description").String() != "Edit files" {
+				t.Fatalf("unexpected custom declaration: %s", tool.Raw)
+			}
+			if got, want := tool.Get("format").Value(), ojson.Parse(tt.want).Value(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("format = %v, want %v", got, want)
+			}
+			if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != "apply_patch" {
+				t.Fatalf("tool_choice.name = %q, want apply_patch", got)
+			}
+			if got := ojson.GetBytesNoCopy(out, "input.0.type").String(); got != "custom_tool_call" {
+				t.Fatalf("history call type = %q, want custom_tool_call", got)
+			}
+			if got := ojson.GetBytesNoCopy(out, "input.0.input").String(); got != "patch" {
+				t.Fatalf("history input = %q, want patch", got)
+			}
+			if got := ojson.GetBytesNoCopy(out, "input.1.type").String(); got != "custom_tool_call_output" {
+				t.Fatalf("history output type = %q, want custom_tool_call_output", got)
+			}
+		})
+	}
+}
+
+func TestNestedCustomToolNameShortening(t *testing.T) {
+	name := strings.Repeat("custom_tool_", 7)
+	input := []byte(`{"messages":[{"role":"assistant","tool_calls":[{"id":"call_long","type":"function","function":{"name":"` + name + `","arguments":"raw"}}]},{"role":"tool","tool_call_id":"call_long","content":"ok"}],"tools":[{"type":"custom","custom":{"name":"` + name + `"}}],"tool_choice":{"type":"custom","custom":{"name":"` + name + `"}}}`)
+	out, errConvert := ConvertOpenAIRequestToCodex("codex-test", input, true)
+	if errConvert != nil {
+		t.Fatal(errConvert)
+	}
+	shortName := ojson.GetBytesNoCopy(out, "tools.0.name").String()
+	if shortName == "" || shortName == name || len(shortName) > 64 {
+		t.Fatalf("unexpected shortened custom name: %q", shortName)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.name").String(); got != shortName {
+		t.Fatalf("tool_choice.name = %q, want %q", got, shortName)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("input.0.type = %q, want custom_tool_call", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.0.name").String(); got != shortName {
+		t.Fatalf("input.0.name = %q, want %q", got, shortName)
+	}
+	if got := buildReverseMapFromOriginalOpenAI(input)[shortName]; got != name {
+		t.Fatalf("reverse mapping = %q, want %q", got, name)
 	}
 }
 

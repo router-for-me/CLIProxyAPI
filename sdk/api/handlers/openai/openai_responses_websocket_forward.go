@@ -28,7 +28,6 @@ type responsesWebsocketForwardOptions struct {
 	duplexStream             func() bool
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*interfaces.ErrorMessage) bool
-	keepAliveInterval        *time.Duration
 	localInterrupt           *responsesLocalInterrupt
 	// websocketOwned reports whether this turn runs on an upstream
 	// websocket. While true, no interrupt may claim the local HTTP path.
@@ -66,20 +65,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
 	}
 
-	var keepAliveTicker *time.Ticker
-	var keepAliveC <-chan time.Time
-	keepAliveInterval := time.Duration(0)
-	if h != nil {
-		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.CurrentConfig())
-	}
-	if opts.keepAliveInterval != nil {
-		keepAliveInterval = *opts.keepAliveInterval
-	}
-	if keepAliveInterval > 0 {
-		keepAliveTicker = time.NewTicker(keepAliveInterval)
-		defer keepAliveTicker.Stop()
-		keepAliveC = keepAliveTicker.C
-	}
 	if opts.localInterrupt != nil {
 		websocketOwned := opts.websocketOwned != nil && opts.websocketOwned()
 		opts.localInterrupt.begin(websocketOwned)
@@ -155,13 +140,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
-			cancel(c.Request.Context().Err())
-			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
-		case <-keepAliveC:
-			if errPing := writer.writePing(); errPing != nil {
-				cancel(errPing)
-				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errPing
-			}
+			cause := context.Cause(c.Request.Context())
+			cancel(cause)
+			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, cause
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -211,9 +192,6 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				cancel(nil)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
-			}
-			if keepAliveTicker != nil && keepAliveInterval > 0 {
-				keepAliveTicker.Reset(keepAliveInterval)
 			}
 
 			// A queued local interrupt belongs to an in-flight HTTP turn:
@@ -269,7 +247,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
 				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
-				if eventType == wsEventTypeError && !preserveErrorEvent {
+				if eventType == wsEventTypeError && preserveErrorEvent {
+					turnEnded = true
+					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
+						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+					}
+				} else if eventType == wsEventTypeError && !preserveErrorEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
@@ -364,11 +347,10 @@ func completeResponsesWebsocketLocalInterrupt(
 		cancel(errSet)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errSet
 	}
+	cancel(context.Canceled)
 	if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, incompleteDoc.Bytes(), time.Now()); errWrite != nil {
-		cancel(errWrite)
 		return output, responseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 	}
-	cancel(context.Canceled)
 	return output, responseID, sortedStringSet(pendingToolCallIDs), nil, nil
 }
 
@@ -385,11 +367,11 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
-// a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// Request-shape failures, permanent auth failures, and terminal 429 quota or
+// model-cooldown failures (where credential failover has already exhausted all
+// eligible candidates) are exposed so the client can surface the final error
+// instead of reconnecting in a loop. Transient credential and transport failures
+// stay silent so the client reconnects with a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
 		return false
@@ -397,7 +379,52 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
-	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
+	status := responsesWebsocketErrorStatus(errMsg)
+	if status == http.StatusTooManyRequests || isResponsesWebsocketQuotaOrCooldownError(errMsg.Error) {
+		return true
+	}
+	return clienterror.IsRequestFault(status, errMsg.Error)
+}
+
+func isResponsesWebsocketQuotaOrCooldownError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type modelCooldownMarker interface {
+		IsModelCooldown() bool
+	}
+	var mcm modelCooldownMarker
+	if errors.As(err, &mcm) && mcm != nil && mcm.IsModelCooldown() {
+		return true
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil && strings.EqualFold(strings.TrimSpace(authErr.Code), "model_cooldown") {
+		return true
+	}
+	body := strings.TrimSpace(err.Error())
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())) {
+		case "usage_limit_reached", "model_cooldown":
+			return true
+		}
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		switch strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())) {
+		case "usage_limit_reached", "model_cooldown":
+			return true
+		}
+	}
+	return false
 }
 
 func writeResponsesWebsocketTerminalError(
@@ -724,8 +751,12 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if errMsg != nil {
-		if errMsg.StatusCode > 0 {
-			status = errMsg.StatusCode
+		if code := responsesWebsocketErrorStatus(errMsg); code > 0 {
+			status = code
+			errText = http.StatusText(status)
+		}
+		if isResponsesWebsocketQuotaOrCooldownError(errMsg.Error) && (status <= 0 || status >= http.StatusInternalServerError) {
+			status = http.StatusTooManyRequests
 			errText = http.StatusText(status)
 		}
 		if errMsg.Error != nil && strings.TrimSpace(errMsg.Error.Error()) != "" {
@@ -746,11 +777,25 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		return nil, errSet
 	}
 
-	if errMsg != nil && errMsg.Addon != nil {
+	if errMsg != nil {
 		headersDoc := ojson.NewDoc([]byte(`{}`))
 		hasHeaders := false
+		trustedDeadline := coreauth.HasTrustedRetryDeadline(errMsg.Error)
+		for key, values := range coreauth.SafeResponseHeaders(errMsg.Error) {
+			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+				continue
+			}
+			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)
+			if errSet := headersDoc.Set(headerPath, values[0]); errSet != nil {
+				return nil, errSet
+			}
+			hasHeaders = true
+		}
 		for key, values := range errMsg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+				continue
+			}
+			if trustedDeadline && http.CanonicalHeaderKey(key) == "Retry-After" {
 				continue
 			}
 			headerPath := strings.ReplaceAll(strings.ReplaceAll(key, `\\`, `\\\\`), ".", `\\.`)

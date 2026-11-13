@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 func appFrame(text string, done bool) string {
@@ -65,6 +67,11 @@ func TestReadGeminiAppStreamErrors(t *testing.T) {
 			_, err := ReadGeminiAppStream(strings.NewReader(input), func(string) error { return nil })
 			if err == nil {
 				t.Fatal("expected upstream failure")
+			}
+			var truncated cliproxyexecutor.StreamTruncatedError
+			wantTruncated := name == "empty" || name == "truncated answer" || name == "malformed"
+			if got := errors.As(err, &truncated) && truncated.IsStreamTruncated(); got != wantTruncated {
+				t.Fatalf("truncation classification = %t, want %t: %v", got, wantTruncated, err)
 			}
 			if name == "quota" {
 				var status interface{ StatusCode() int }

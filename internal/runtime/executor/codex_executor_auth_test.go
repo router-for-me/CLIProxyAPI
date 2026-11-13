@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,27 +60,34 @@ func startCodexMockOAuthServers(t *testing.T, idToken string) (proxyURL string, 
 
 	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
-			destConn, errDial := net.Dial("tcp", mockAuthServer.Listener.Addr().String())
-			if errDial != nil {
-				http.Error(w, errDial.Error(), http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
 			hijacker, ok := w.(http.Hijacker)
 			if !ok {
-				_ = destConn.Close()
 				http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 				return
 			}
-			clientConn, _, errHijack := hijacker.Hijack()
+			clientConn, clientBuf, errHijack := hijacker.Hijack()
 			if errHijack != nil {
-				_ = destConn.Close()
 				return
+			}
+			destConn, errDial := net.Dial("tcp", mockAuthServer.Listener.Addr().String())
+			if errDial != nil {
+				_, _ = clientConn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
+				_ = clientConn.Close()
+				return
+			}
+			if _, errWrite := clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); errWrite != nil {
+				_ = destConn.Close()
+				_ = clientConn.Close()
+				return
+			}
+			var clientReader io.Reader = clientConn
+			if clientBuf != nil && clientBuf.Reader != nil {
+				clientReader = clientBuf.Reader
 			}
 			go func() {
 				defer func() { _ = destConn.Close() }()
 				defer func() { _ = clientConn.Close() }()
-				_, _ = io.Copy(destConn, clientConn)
+				_, _ = io.Copy(destConn, clientReader)
 			}()
 			go func() {
 				defer func() { _ = destConn.Close() }()
@@ -110,7 +119,7 @@ func TestCodexExecutorRefresh_MissingPlanTypeDefaultsToFree(t *testing.T) {
 	proxyURL, teardown := startCodexMockOAuthServers(t, idTokenWithoutPlan)
 	defer teardown()
 
-	cfg := &config.Config{}
+	cfg := &config.Config{AuthDir: t.TempDir()}
 	executor := NewCodexExecutor(cfg)
 
 	storage := &codexauth.CodexTokenStorage{
@@ -186,7 +195,7 @@ func TestCodexExecutorRefresh_ExtractsPlanTypeWhenPresent(t *testing.T) {
 	proxyURL, teardown := startCodexMockOAuthServers(t, idTokenWithPlan)
 	defer teardown()
 
-	cfg := &config.Config{}
+	cfg := &config.Config{AuthDir: t.TempDir()}
 	executor := NewCodexExecutor(cfg)
 
 	storage := &codexauth.CodexTokenStorage{
@@ -262,7 +271,7 @@ func TestCodexExecutorRefresh_EmptyAttributesSnapshotIsolation(t *testing.T) {
 	proxyURL, teardown := startCodexMockOAuthServers(t, idTokenWithoutPlan)
 	defer teardown()
 
-	cfg := &config.Config{}
+	cfg := &config.Config{AuthDir: t.TempDir()}
 	executor := NewCodexExecutor(cfg)
 
 	emptyAttrs := map[string]string{}
@@ -279,7 +288,7 @@ func TestCodexExecutorRefresh_EmptyAttributesSnapshotIsolation(t *testing.T) {
 		ProxyURL:   proxyURL,
 		Attributes: emptyAttrs,
 		Metadata: map[string]any{
-			"refresh_token": "valid-refresh-token",
+			"refresh_token": "valid-refresh-token-empty-attrs",
 		},
 	}
 
@@ -293,6 +302,9 @@ func TestCodexExecutorRefresh_EmptyAttributesSnapshotIsolation(t *testing.T) {
 
 	if got := refreshed.Attributes["plan_type"]; got != "free" {
 		t.Errorf("refreshed.Attributes[plan_type] = %q, want free", got)
+	}
+	if got := refreshed.Metadata["account_id"]; got != "acc-codex-empty-attrs" {
+		t.Errorf("refreshed.Metadata[account_id] = %v, want acc-codex-empty-attrs", got)
 	}
 	// Verify original empty map was not modified
 	if _, exists := emptyAttrs["plan_type"]; exists {
@@ -340,26 +352,34 @@ func startDualCodexAndSIWCMockOAuthServer(t *testing.T, idToken string, failSIWC
 
 	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
-			destConn, errDial := net.Dial("tcp", mockAuthServer.Listener.Addr().String())
-			if errDial != nil {
-				http.Error(w, errDial.Error(), http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
 			hijacker, ok := w.(http.Hijacker)
 			if !ok {
-				_ = destConn.Close()
+				http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
 				return
 			}
-			clientConn, _, errHijack := hijacker.Hijack()
+			clientConn, clientBuf, errHijack := hijacker.Hijack()
 			if errHijack != nil {
-				_ = destConn.Close()
 				return
+			}
+			destConn, errDial := net.Dial("tcp", mockAuthServer.Listener.Addr().String())
+			if errDial != nil {
+				_, _ = clientConn.Write([]byte("HTTP/1.1 503 Service Unavailable\r\n\r\n"))
+				_ = clientConn.Close()
+				return
+			}
+			if _, errWrite := clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); errWrite != nil {
+				_ = destConn.Close()
+				_ = clientConn.Close()
+				return
+			}
+			var clientReader io.Reader = clientConn
+			if clientBuf != nil && clientBuf.Reader != nil {
+				clientReader = clientBuf.Reader
 			}
 			go func() {
 				defer func() { _ = destConn.Close() }()
 				defer func() { _ = clientConn.Close() }()
-				_, _ = io.Copy(destConn, clientConn)
+				_, _ = io.Copy(destConn, clientReader)
 			}()
 			go func() {
 				defer func() { _ = destConn.Close() }()
@@ -389,7 +409,7 @@ func TestCodexExecutorRefreshSelectiveAndDual(t *testing.T) {
 	proxyURL, outerCount, siwcCount, teardown := startDualCodexAndSIWCMockOAuthServer(t, idToken, &failSIWC)
 	defer teardown()
 
-	executor := NewCodexExecutor(&config.Config{})
+	executor := NewCodexExecutor(&config.Config{AuthDir: t.TempDir()})
 	now := time.Now()
 
 	// 1. Only SIWC needs refresh (outer expires in 5 days, SIWC expires in 2 minutes)
@@ -746,7 +766,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if got := gotHeaders.Get("User-Agent"); got != codexSIWCUserAgent(&customCfg) {
 		t.Fatalf("custom User-Agent = %q, want %q", got, codexSIWCUserAgent(&customCfg))
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -781,7 +804,10 @@ func TestCodexExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotBody["service_tier"] != "priority" {
 		t.Fatalf("expected user payload rule to set service_tier=priority after SIWC body cleanup, got %v", gotBody["service_tier"])
 	}
-	for _, forbidden := range []string{"max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotBody["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotBody[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC mode, got %#v", forbidden, gotBody[forbidden])
 		}
@@ -905,7 +931,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
@@ -928,7 +957,10 @@ func TestCodexWebsocketsExecutorUseSIWCExecuteAndStream(t *testing.T) {
 	if gotFrame["type"] != "response.create" || gotFrame["store"] != false || gotFrame["service_tier"] != "priority" {
 		t.Fatalf("unexpected SIWC WebSocket stream frame: %#v", gotFrame)
 	}
-	for _, forbidden := range []string{"stream", "background", "max_output_tokens", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
+	if got := gotFrame["max_output_tokens"]; got != float64(1024) {
+		t.Fatalf("WebSocket ExecuteStream max_output_tokens = %v, want 1024", got)
+	}
+	for _, forbidden := range []string{"stream", "background", "temperature", "prompt_cache_retention", "prompt_cache_options", "instructions", "tools"} {
 		if _, exists := gotFrame[forbidden]; exists {
 			t.Fatalf("ExecuteStream field %q should be omitted in SIWC WebSocket frame: %#v", forbidden, gotFrame)
 		}
@@ -991,17 +1023,19 @@ func TestCodexExecutorUseSIWCFailsClosedWhenMissingSIWCToken(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T) {
+func TestCodexExecutorUseSIWCImageRequestsBypassSIWCAndUseDirectImagesEndpoint(t *testing.T) {
 	var gotPath string
 	var gotHeaders http.Header
-	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotHeaders = r.Header.Clone()
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &gotBody)
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_img\",\"created_at\":1700000000,\"output\":[{\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\",\"output_format\":\"png\"}]}}\n\n"))
+		if r.Header.Get("Accept") == "text/event-stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"aGVsbG8=\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1700000000,"data":[{"b64_json":"aGVsbG8="}],"usage":{"total_tokens":10}}`))
 	}))
 	defer srv.Close()
 
@@ -1010,13 +1044,15 @@ func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T)
 		ID:       "codex-siwc-img",
 		Provider: "codex",
 		Attributes: map[string]string{
-			"base_url": srv.URL + "/v1",
+			"base_url": srv.URL,
 		},
 		Metadata: map[string]any{
-			"type":     "codex",
-			"use_siwc": true,
+			"type":         "codex",
+			"access_token": "outer-img-token",
+			"account_id":   "acct-img-1",
+			"use_siwc":     true,
 			"siwc": map[string]any{
-				"access_token": "siwc-img-token",
+				"access_token": "siwc-img-token-must-not-be-used",
 				"client_id":    "oaiapp_img",
 			},
 		},
@@ -1024,47 +1060,71 @@ func TestCodexExecutorUseSIWCImageRequestsRouteThroughResponsesSSE(t *testing.T)
 
 	imgOpts := cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"User-Agent": []string{"Python-urllib/3.14"}},
 		Metadata:     map[string]any{"request_path": "/v1/images/generations"},
 	}
-	// Even with gpt-image-1.5 (which normally uses direct /images/generations), use_siwc=true must route via /v1/responses SSE
+	// Image requests must never use SIWC even for non-Codex client User-Agents; they must use the outer token and direct /images/generations endpoint.
 	_, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat"}`),
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat"}`),
 	}, imgOpts)
 	if errExec != nil {
 		t.Fatalf("Execute image with use_siwc error: %v", errExec)
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("image request path = %q, want /v1/responses", gotPath)
+	if gotPath != "/images/generations" {
+		t.Fatalf("image request path = %q, want /images/generations", gotPath)
 	}
-	if gotHeaders.Get("Authorization") != "Bearer siwc-img-token" {
-		t.Fatalf("Authorization = %q, want Bearer siwc-img-token", gotHeaders.Get("Authorization"))
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
 	}
-	if _, hasInst := gotBody["instructions"]; hasInst {
-		t.Fatalf("empty instructions should be stripped on SIWC image request: %#v", gotBody)
+	if gotHeaders.Get("Chatgpt-Account-Id") != "acct-img-1" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want acct-img-1", gotHeaders.Get("Chatgpt-Account-Id"))
 	}
 
 	sr, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat","stream":true}`),
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat","stream":true}`),
 	}, imgOpts)
 	if errStream != nil {
 		t.Fatalf("ExecuteStream image with use_siwc error: %v", errStream)
 	}
 	for range sr.Chunks {
 	}
-	if gotPath != "/v1/responses" {
-		t.Fatalf("image stream request path = %q, want /v1/responses", gotPath)
+	if gotPath != "/images/generations" {
+		t.Fatalf("image stream request path = %q, want /images/generations", gotPath)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("stream Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
 	}
 
-	// Missing SIWC token must fail closed on image requests too
-	authNoSIWCToken := auth.Clone()
-	delete(authNoSIWCToken.Metadata, "siwc")
-	if _, errMissing := executor.Execute(context.Background(), authNoSIWCToken, cliproxyexecutor.Request{
-		Model:   "gpt-image-1.5",
-		Payload: []byte(`{"model":"gpt-image-1.5","prompt":"a cute cat"}`),
+	// /v1/images/edits with non-Codex UA must also bypass SIWC and hit /images/edits with outer token.
+	editOpts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-image"),
+		Headers:      http.Header{"User-Agent": []string{"Python-urllib/3.14"}, "Content-Type": []string{"application/json"}},
+		Metadata:     map[string]any{"request_path": "/v1/images/edits"},
+	}
+	_, errEdit := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"edit cat","images":[{"image_url":"https://example.com/cat.png"}]}`),
+	}, editOpts)
+	if errEdit != nil {
+		t.Fatalf("Execute image edit with use_siwc error: %v", errEdit)
+	}
+	if gotPath != "/images/edits" {
+		t.Fatalf("image edit request path = %q, want /images/edits", gotPath)
+	}
+	if gotHeaders.Get("Authorization") != "Bearer outer-img-token" {
+		t.Fatalf("edit Authorization = %q, want Bearer outer-img-token", gotHeaders.Get("Authorization"))
+	}
+
+	// Missing outer token must fail closed on image requests even if SIWC token is present
+	authNoOuterToken := auth.Clone()
+	delete(authNoOuterToken.Metadata, "access_token")
+	if _, errMissing := executor.Execute(context.Background(), authNoOuterToken, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.6-sunburst",
+		Payload: []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"a cute cat"}`),
 	}, imgOpts); errMissing == nil {
-		t.Fatal("expected image Execute to fail when use_siwc=true and siwc token is missing")
+		t.Fatal("expected image Execute to fail when outer access_token is missing")
 	}
 }
 
@@ -1075,7 +1135,7 @@ func TestCodexExecutorRefreshHomeModeRefreshesSIWCWhenOnlySIWCDue(t *testing.T) 
 	defer teardown()
 
 	now := time.Now().UTC()
-	cfg := &config.Config{}
+	cfg := &config.Config{AuthDir: t.TempDir()}
 	cfg.Home.Enabled = true
 	executor := NewCodexExecutor(cfg)
 
@@ -1657,4 +1717,121 @@ func TestCodexExecutorForceRefreshRejectedRefreshTokenWithoutDiskRotation_Issue7
 	if errRefresh == nil {
 		t.Fatal("expected forced Refresh on unchanged rejected refresh_token without disk rotation to return an error, got nil")
 	}
+}
+
+type bufferedConnectClientHelloConn struct {
+	net.Conn
+	mu           sync.Mutex
+	connectBuf   []byte
+	realRespRead bool
+	synthResp    bytes.Reader
+}
+
+func (c *bufferedConnectClientHelloConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	if !c.realRespRead && (len(c.connectBuf) == 0 && strings.HasPrefix(string(p), "CONNECT ") || len(c.connectBuf) > 0 && !bytes.HasSuffix(c.connectBuf, []byte("\r\n\r\n"))) {
+		c.connectBuf = append(c.connectBuf, p...)
+		if bytes.HasSuffix(c.connectBuf, []byte("\r\n\r\n")) {
+			c.synthResp.Reset([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		}
+		c.mu.Unlock()
+		return len(p), nil
+	}
+	if len(c.connectBuf) > 0 && !c.realRespRead && len(p) > 0 {
+		c.realRespRead = true
+		combined := append(append([]byte(nil), c.connectBuf...), p[0])
+		c.mu.Unlock()
+		if _, errWriteFirst := c.Conn.Write(combined); errWriteFirst != nil {
+			return 0, errWriteFirst
+		}
+		var window [4]byte
+		for {
+			copy(window[:3], window[1:4])
+			if _, errRead := io.ReadFull(c.Conn, window[3:4]); errRead != nil {
+				return 1, errRead
+			}
+			if string(window[:]) == "\r\n\r\n" {
+				break
+			}
+		}
+		if len(p) == 1 {
+			return 1, nil
+		}
+		n, errWriteRest := c.Conn.Write(p[1:])
+		return n + 1, errWriteRest
+	}
+	c.mu.Unlock()
+	return c.Conn.Write(p)
+}
+
+func (c *bufferedConnectClientHelloConn) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	if c.synthResp.Len() > 0 {
+		n, errRead := c.synthResp.Read(p)
+		c.mu.Unlock()
+		return n, errRead
+	}
+	c.mu.Unlock()
+	return c.Conn.Read(p)
+}
+
+func TestCodexMockOAuthProxyPreservesBufferedClientHello(t *testing.T) {
+	idToken := makeTestCodexRefreshJWT("plus", "acc-buffered-hello")
+	installBufferedDial := func(t *testing.T) {
+		t.Helper()
+		baseTransport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok || baseTransport == nil {
+			t.Fatal("expected *http.Transport as DefaultTransport")
+		}
+		baseTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			rawConn, errDial := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if errDial != nil {
+				return nil, errDial
+			}
+			return &bufferedConnectClientHelloConn{Conn: rawConn}, nil
+		}
+	}
+
+	t.Run("single", func(t *testing.T) {
+		proxyURL, teardown := startCodexMockOAuthServers(t, idToken)
+		defer teardown()
+		installBufferedDial(t)
+
+		executor := NewCodexExecutor(&config.Config{AuthDir: t.TempDir()})
+		auth := &cliproxyauth.Auth{
+			ID:       "codex-buffered-hello-single",
+			Provider: "codex",
+			ProxyURL: proxyURL,
+			Metadata: map[string]any{
+				"type":          "codex",
+				"access_token":  "old-access",
+				"refresh_token": "valid-refresh-buffered-hello-single",
+			},
+		}
+		if _, errRefresh := executor.Refresh(context.Background(), auth); errRefresh != nil {
+			t.Fatalf("executor.Refresh error = %v", errRefresh)
+		}
+	})
+
+	t.Run("dual", func(t *testing.T) {
+		failSIWC := false
+		proxyURL, _, _, teardown := startDualCodexAndSIWCMockOAuthServer(t, idToken, &failSIWC)
+		defer teardown()
+		installBufferedDial(t)
+
+		executor := NewCodexExecutor(&config.Config{AuthDir: t.TempDir()})
+		auth := &cliproxyauth.Auth{
+			ID:       "codex-buffered-hello-dual",
+			Provider: "codex",
+			ProxyURL: proxyURL,
+			Metadata: map[string]any{
+				"type":          "codex",
+				"access_token":  "old-access",
+				"refresh_token": "valid-refresh-buffered-hello-dual",
+			},
+		}
+		if _, errRefresh := executor.Refresh(context.Background(), auth); errRefresh != nil {
+			t.Fatalf("executor.Refresh error = %v", errRefresh)
+		}
+	})
 }

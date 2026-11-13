@@ -77,10 +77,15 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "max_tokens"
+	// Verify finish_reason is "length" (the OpenAI value for an output token limit)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
-	if fr != "max_tokens" {
-		t.Errorf("Expected finish_reason 'max_tokens', got: %s", fr)
+	if fr != "length" {
+		t.Errorf("Expected finish_reason 'length', got: %s", fr)
+	}
+	// Verify native_finish_reason preserves the upstream value
+	nfr := ojson.GetBytesNoCopy(result2[0], "choices.0.native_finish_reason").String()
+	if nfr != "max_tokens" {
+		t.Errorf("Expected native_finish_reason 'max_tokens', got: %s", nfr)
 	}
 }
 
@@ -96,7 +101,7 @@ func TestToolCallTakesPriorityOverMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "tool_calls" (takes priority over max_tokens)
+	// Verify finish_reason is "tool_calls" (takes priority over upstream MAX_TOKENS)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
 	if fr != "tool_calls" {
 		t.Errorf("Expected finish_reason 'tool_calls', got: %s", fr)
@@ -433,4 +438,71 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 			t.Fatalf("choices.0.delta.tool_calls must not exist in synthesized DONE chunk, got: %s (type: %s)", tcDone.Raw, tcDone.Type)
 		}
 	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_MultiPartThoughtAndTrailingSignature(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("thought followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"thought":true,"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+		if role := ojson.GetBytesNoCopy(out[0], "choices.0.delta.role").String(); role != "assistant" {
+			t.Fatalf("delta.role = %q, want assistant; payload=%s", role, out[0])
+		}
+	})
+
+	t.Run("thought followed by non-thought empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+	})
+
+	t.Run("visible text followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Final answer"},{"text":"","thoughtSignature":"EjQK..."}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Final answer" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Final answer", out[0])
+		}
+		if reasoning := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content"); reasoning.Type != ojson.Null {
+			t.Fatalf("delta.reasoning_content = %s (type %v), want null; payload=%s", reasoning.Raw, reasoning.Type, out[0])
+		}
+	})
+
+	t.Run("multiple thought parts and multiple text parts in same chunk", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Step 1. "},{"thought":true,"text":"Step 2."},{"text":"Hello "},{"text":"world"}]}}]}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.1-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Step 1. Step 2." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Step 1. Step 2.", out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Hello world" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Hello world", out[0])
+		}
+	})
 }

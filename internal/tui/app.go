@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,11 @@ type App struct {
 
 	client *Client
 
+	// fatalErr records a non-recoverable startup failure (e.g. the target does
+	// not expose a supported management API) so Run can exit non-zero after the
+	// Bubble Tea program ends.
+	fatalErr error
+
 	width  int
 	height int
 	ready  bool
@@ -52,8 +58,9 @@ type App struct {
 }
 
 type authConnectMsg struct {
-	cfg map[string]any
-	err error
+	cfg   map[string]any
+	err   error
+	fatal error // non-nil when the server cannot serve the management API at all
 }
 
 // NewApp creates the root TUI application model targeting localhost on the given port.
@@ -101,6 +108,9 @@ func NewAppWithBaseURL(baseURL string, secretKey string, hook *LogHook) App {
 }
 
 func (a App) Init() tea.Cmd {
+	if a.fatalErr != nil {
+		return tea.Quit
+	}
 	if !a.authenticated {
 		return textinput.Blink
 	}
@@ -135,6 +145,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case authConnectMsg:
 		a.authConnecting = false
+		if msg.fatal != nil {
+			a.fatalErr = msg.fatal
+			return a, tea.Quit
+		}
 		if msg.err != nil {
 			a.authError = fmt.Sprintf(T("auth_gate_connect_fail"), msg.err.Error())
 			return a, nil
@@ -484,7 +498,16 @@ func (a App) connectWithPassword(password string) tea.Cmd {
 	return func() tea.Msg {
 		a.client.SetSecretKey(password)
 		cfg, errGetConfig := a.client.GetConfig()
-		return authConnectMsg{cfg: cfg, err: errGetConfig}
+		if errGetConfig == nil {
+			return authConnectMsg{cfg: cfg}
+		}
+		// A definitive unsupported server (both contracts absent) is fatal, not
+		// a retryable auth failure. Transient probe failures (503/429/network)
+		// are NOT fatal: they keep the previous retry behavior.
+		if errSupport := a.client.CheckManagementSupport(); errors.Is(errSupport, ErrManagementUnsupported) {
+			return authConnectMsg{err: errGetConfig, fatal: errSupport}
+		}
+		return authConnectMsg{err: errGetConfig}
 	}
 }
 
@@ -501,9 +524,24 @@ func RunWithBaseURL(baseURL string, secretKey string, hook *LogHook, output io.W
 		output = os.Stdout
 	}
 	app := NewAppWithBaseURL(baseURL, secretKey, hook)
+	// Pre-flight the management contract in client mode so a target that
+	// definitively exposes neither v8 nor v0 fails fast with a non-zero exit.
+	// Transient probe failures (503/429/network) are not fatal here: they enter
+	// the normal auth-gate flow where the user can retry.
+	if hook == nil {
+		if err := app.client.CheckManagementSupport(); errors.Is(err, ErrManagementUnsupported) {
+			return err
+		}
+	}
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
-	_, err := p.Run()
-	return err
+	final, err := p.Run()
+	if err != nil {
+		return err
+	}
+	if app2, ok := final.(App); ok {
+		return app2.fatalErr
+	}
+	return app.fatalErr
 }
 
 func (a App) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {

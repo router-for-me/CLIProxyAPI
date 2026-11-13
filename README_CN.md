@@ -40,7 +40,7 @@ CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API �
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devin 提供的模型（SWE-2、GPT-6 Astra、Claude Fable 5.1 等）。使用 <code>--devin-login</code> 连接 Devin 账户，即可路由该账户可用的模型。</td>
+        <td>Devin 提供的模型（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.1 等）。使用 <code>--devin-login</code> 连接 Devin 账户，即可路由该账户可用的模型。</td>
     </tr>
 </tbody>
 </table>
@@ -113,6 +113,18 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="陈局" width="150"></a></td>
 <td>感谢 <a href="https://x.com/chenju_ai">陈局</a> 赞助了本项目！这大概是本栏唯一一个不打站点广告的。好的开源项目值得被付费，陈局来随个份子，敬作者一杯。X 上找 <a href="https://x.com/chenju_ai">陈局</a> 吹吹水。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI"><img src="./assets/deepsiderapi.png" alt="DeepSider API" width="150"></a></td>
+<td>一站式接入 GPT、Claude、Gemini、DeepSeek 等领先 AI 模型。我们通过主流供应商的官方渠道接入，不使用共享账号池或逆向工程。相比官方价格，最高可节省 71%。实时追踪用量，计费透明，以更低成本使用 AI。<a href="https://www.deepsiderapi.com/?utm_source=CLIProxyAPI">体验 DeepSider API</a>。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="DeepSider API" width="150"></a></td>
+<td><strong><a href="https://origincoder.com">OriginCoder</a>｜低延迟、高稳定、高并发的企业级 AI 网关</strong>，<strong>Claude Max 与 GPT Pro 号池全部自建自营，不降智池价格为官方的 3–4 折，池内降智状态实时公开可查</strong>，支持 <strong>GPT、Claude、Grok、Gemini-4-Carbon、DeepSeek 等国内外主流模型</strong>，可直接用于 <strong>Claude Code、Codex</strong> 等编程工具，支持 <strong>AI 对话、编程辅助、图像生成和视频生成</strong>，海外正规运营，自 <strong>2025 年 8 月运营至今，已服务 1.5 万+ 客户</strong>，费率公开、<strong>无超额费、10 元起充</strong>，后台 <strong>7×24 小时监测、号池冗余、多节点自动切换</strong>，保障高峰期访问稳定，<a href="https://origincoder.com/monitor">服务状态公开可查</a>，<strong>不保存用户会话内容，保护隐私安全</strong>，支持<strong>对公支付与企业开票</strong>，客服 <strong>3 分钟内响应</strong>、技术团队 <strong>24 小时值守</strong>，国内用户可通过<a href="https://cn.origincoder.com">国内加速入口</a>访问。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
+<td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜国内版 OpenRouter，一个 API 接入国内外主流大模型。</strong> 覆盖 <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong>，多供应商智能选路、故障自动切换，<strong>失败请求不收费，价格公开、账单可复算</strong>。适配 Claude Code、Codex 等编程工具，支持 <strong><a href="https://visioncoder.cn/me/keys">CC Switch 和 WorkBuddy 一键导入</a></strong>。企业统一采购，按席位下发订阅套餐、收回再分配，支持对公转账与开票。<strong>供应商入驻开放：上架线路，按质量拿流量；月结对公、用量可查，用户侧计费开票交给平台。</strong> 更有 <a href="https://visioncoder.cn/challenge">VibeCoding 挑战赛</a>，每期奖励合计 <strong>2,350 元加油包</strong>，一等奖 <strong>1,000 元加油包</strong>。</td>
 </tr>
 </tbody>
 </table>
@@ -302,7 +314,7 @@ Claude Code 状态栏，按当前 CPA 实例展示 Codex / Grok / Antigravity / 
 
 ### [Hermes CLIProxyAPI Provider](https://github.com/duu261/hermes-cliproxyapi-provider)
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) 的模型提供方插件：为每个 CLIProxyAPI 提供方注册一个 Hermes 提供方，各自使用其执行器接受的协议（Anthropic Messages、Responses 或 Chat Completions），上下文窗口与推理等级读取自 CLIProxyAPI。可选只读 Management API 查询，用于精确的提供方分组。已收录于 [Hermes 插件目录](https://hermes-agent.nousresearch.com/docs/plugins/cliproxyapi-provider)：`hermes plugins install cliproxyapi-provider`。
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) 的模型提供方插件：为每个 CLIProxyAPI 提供方注册一个 Hermes 提供方，各自使用其执行器接受的协议（Anthropic Messages、Responses 或 Chat Completions），上下文窗口与推理等级读取自 CLIProxyAPI。可选只读 Management API 查询，用于精确的提供方分组。配套插件提供 `/cpa` 聊天命令，可查看每个号池的账号状态，并可按需查看每个账号的实时额度。已收录于 [Hermes 插件目录](https://hermes-agent.nousresearch.com/docs/plugins)：`hermes plugins install cliproxyapi-provider` 与 `hermes plugins install cpa-status`。
 
 ### [Ebb](https://github.com/lucasnsaraujo/ebb)
 

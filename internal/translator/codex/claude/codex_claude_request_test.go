@@ -2,13 +2,48 @@ package claude
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
+
+func TestConvertClaudeRequestToCodex_MaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no limit", `{}`, ""},
+		{"max_tokens", `{"max_tokens":1024}`, "1024"},
+		{"max_output_tokens fallback", `{"max_output_tokens":2048}`, "2048"},
+		{"max_tokens takes precedence", `{"max_tokens":1024,"max_output_tokens":2048}`, "1024"},
+		{"zero takes precedence", `{"max_tokens":0,"max_output_tokens":2048}`, "0"},
+		{"string ignored", `{"max_tokens":"1024"}`, ""},
+		{"null ignored", `{"max_tokens":null}`, ""},
+		{"boolean ignored", `{"max_tokens":true}`, ""},
+		{"object ignored", `{"max_tokens":{}}`, ""},
+		{"invalid primary does not use fallback", `{"max_tokens":"1024","max_output_tokens":2048}`, ""},
+		{"null primary does not use fallback", `{"max_tokens":null,"max_output_tokens":2048}`, ""},
+		{"invalid fallback ignored", `{"max_output_tokens":"2048"}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, errConvert := ConvertClaudeRequestToCodex("codex-test", []byte(tt.input), false)
+			if errConvert != nil {
+				t.Fatalf("ConvertClaudeRequestToCodex() error = %v", errConvert)
+			}
+			if got := ojson.GetBytesNoCopy(out, "max_output_tokens").Raw; got != tt.want {
+				t.Fatalf("max_output_tokens = %q, want %q; output=%s", got, tt.want, out)
+			}
+			if ojson.GetBytesNoCopy(out, "max_tokens").Exists() {
+				t.Fatalf("max_tokens should not be forwarded; output=%s", out)
+			}
+		})
+	}
+}
 
 func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	tests := []struct {
@@ -1494,13 +1529,13 @@ func TestConvertClaudeRequestToCodex_MidConversationToolAdditions(t *testing.T) 
 		t.Fatalf("ConvertClaudeRequestToCodex returned error: %v", err)
 	}
 
-	// Top-level tools[] must remain untouched (2 tools: Read and deferred_lookup) to preserve the prompt cache prefix.
+	// Top-level tools[] must include only non-deferred tools (Read) to preserve the prompt cache prefix.
 	topTools := ojson.GetBytesNoCopy(translated, "tools").Array()
-	if len(topTools) != 2 {
-		t.Fatalf("expected 2 top-level tools, got %d: %s", len(topTools), ojson.GetBytesNoCopy(translated, "tools").Raw)
+	if len(topTools) != 1 {
+		t.Fatalf("expected 1 top-level tool, got %d: %s", len(topTools), ojson.GetBytesNoCopy(translated, "tools").Raw)
 	}
-	if topTools[0].Get("name").String() != "Read" || topTools[1].Get("name").String() != "deferred_lookup" {
-		t.Fatalf("unexpected top-level tool names: %q, %q", topTools[0].Get("name").String(), topTools[1].Get("name").String())
+	if topTools[0].Get("name").String() != "Read" {
+		t.Fatalf("unexpected top-level tool name: %q", topTools[0].Get("name").String())
 	}
 
 	// Expected input items:
@@ -1556,5 +1591,503 @@ func TestConvertClaudeRequestToCodex_MidConversationToolAdditions(t *testing.T) 
 	shortLongName := addTools2.Get("tools.0.name").String()
 	if shortLongName == "" || shortLongName == longMCPTool || len(shortLongName) > 64 {
 		t.Fatalf("expected shortened MCP tool name <= 64 chars, got %q (len=%d)", shortLongName, len(shortLongName))
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolSearchDeferredLoadingPreservesPromptCachePrefix(t *testing.T) {
+	beforeDiscoveryJSON := `{
+		"model": "gpt-6-astra",
+		"system": "You are Claude Code.",
+		"tools": [
+			{
+				"name": "ToolSearch",
+				"description": "Search deferred tools",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"query": {"type": "string"},
+						"max_results": {"type": "number"}
+					},
+					"required": ["query"]
+				}
+			},
+			{
+				"name": "Workflow",
+				"description": "Run workflow",
+				"input_schema": {"type": "object", "properties": {"name": {"type": "string"}}}
+			},
+			{
+				"name": "DeferredToolPlaceholder",
+				"description": "Placeholder for deferred tools",
+				"defer_loading": true,
+				"input_schema": {"type": "object", "properties": {}}
+			},
+			{
+				"name": "Write",
+				"description": "Write file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "Load WebSearch and WebFetch"},
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "toolu_search_1",
+						"name": "ToolSearch",
+						"input": {"query": "select:WebSearch,WebFetch", "max_results": 2}
+					}
+				]
+			}
+		]
+	}`
+
+	afterDiscoveryJSON := `{
+		"model": "gpt-6-astra",
+		"system": "You are Claude Code.",
+		"tools": [
+			{
+				"name": "ToolSearch",
+				"description": "Search deferred tools",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"query": {"type": "string"},
+						"max_results": {"type": "number"}
+					},
+					"required": ["query"]
+				}
+			},
+			{
+				"name": "WebFetch",
+				"description": "Fetch a URL",
+				"defer_loading": true,
+				"input_schema": {
+					"$schema": "https://json-schema.org/draft/2020-12/schema",
+					"type": "object",
+					"properties": {"url": {"type": "string"}},
+					"required": ["url"]
+				}
+			},
+			{
+				"name": "WebSearch",
+				"description": "Search the web",
+				"defer_loading": true,
+				"input_schema": {
+					"$schema": "https://json-schema.org/draft/2020-12/schema",
+					"type": "object",
+					"properties": {"query": {"type": "string"}},
+					"required": ["query"]
+				}
+			},
+			{
+				"name": "Workflow",
+				"description": "Run workflow",
+				"input_schema": {"type": "object", "properties": {"name": {"type": "string"}}}
+			},
+			{
+				"name": "DeferredToolPlaceholder",
+				"description": "Placeholder for deferred tools",
+				"defer_loading": true,
+				"input_schema": {"type": "object", "properties": {}}
+			},
+			{
+				"name": "Write",
+				"description": "Write file",
+				"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}
+			}
+		],
+		"messages": [
+			{"role": "user", "content": "Load WebSearch and WebFetch"},
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "tool_use",
+						"id": "toolu_search_1",
+						"name": "ToolSearch",
+						"input": {"query": "select:WebSearch,WebFetch", "max_results": 2}
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_search_1",
+						"content": [
+							{"type": "tool_reference", "tool_name": "WebSearch"},
+							{"type": "tool_reference", "tool_name": "WebFetch"},
+							{"type": "tool_reference", "tool_name": "WebSearch"}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	beforeOut, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(beforeDiscoveryJSON), false)
+	if err != nil {
+		t.Fatalf("beforeDiscovery ConvertClaudeRequestToCodex error: %v", err)
+	}
+	afterOut, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(afterDiscoveryJSON), false)
+	if err != nil {
+		t.Fatalf("afterDiscovery ConvertClaudeRequestToCodex error: %v", err)
+	}
+
+	beforeToolsRaw := ojson.GetBytesNoCopy(beforeOut, "tools").Raw
+	afterToolsRaw := ojson.GetBytesNoCopy(afterOut, "tools").Raw
+	if beforeToolsRaw != afterToolsRaw {
+		t.Fatalf("top-level tools[] changed after ToolSearch discovery:\nbefore: %s\nafter:  %s", beforeToolsRaw, afterToolsRaw)
+	}
+
+	topTools := ojson.GetBytesNoCopy(afterOut, "tools").Array()
+	if len(topTools) != 3 {
+		t.Fatalf("expected 3 non-deferred top-level tools (ToolSearch, Workflow, Write), got %d: %s", len(topTools), afterToolsRaw)
+	}
+	wantTopNames := []string{"ToolSearch", "Workflow", "Write"}
+	for i, wantName := range wantTopNames {
+		if got := topTools[i].Get("name").String(); got != wantName {
+			t.Fatalf("topTools[%d].name = %q, want %q", i, got, wantName)
+		}
+	}
+
+	beforeInputs := ojson.GetBytesNoCopy(beforeOut, "input").Array()
+	afterInputs := ojson.GetBytesNoCopy(afterOut, "input").Array()
+	if len(beforeInputs) != 3 {
+		t.Fatalf("expected 3 input items before discovery, got %d: %s", len(beforeInputs), ojson.GetBytesNoCopy(beforeOut, "input").Raw)
+	}
+	if len(afterInputs) != 5 {
+		t.Fatalf("expected 5 input items after discovery (developer, user, function_call, function_call_output, additional_tools), got %d: %s", len(afterInputs), ojson.GetBytesNoCopy(afterOut, "input").Raw)
+	}
+	for i := 0; i < len(beforeInputs); i++ {
+		if beforeInputs[i].Raw != afterInputs[i].Raw {
+			t.Fatalf("input[%d] prefix changed after discovery:\nbefore: %s\nafter:  %s", i, beforeInputs[i].Raw, afterInputs[i].Raw)
+		}
+	}
+
+	if got := afterInputs[3].Get("type").String(); got != "function_call_output" {
+		t.Fatalf("afterInputs[3].type = %q, want function_call_output", got)
+	}
+	addTools := afterInputs[4]
+	if got := addTools.Get("type").String(); got != "additional_tools" {
+		t.Fatalf("afterInputs[4].type = %q, want additional_tools: %s", got, addTools.Raw)
+	}
+	if got := addTools.Get("role").String(); got != "developer" {
+		t.Fatalf("afterInputs[4].role = %q, want developer: %s", got, addTools.Raw)
+	}
+	discovered := addTools.Get("tools").Array()
+	if len(discovered) != 2 {
+		t.Fatalf("expected 2 deduplicated discovered tools in additional_tools, got %d: %s", len(discovered), addTools.Raw)
+	}
+	if got := discovered[0].Get("name").String(); got != "WebSearch" {
+		t.Fatalf("discovered[0].name = %q, want WebSearch (preserving reference order)", got)
+	}
+	if got := discovered[1].Get("name").String(); got != "WebFetch" {
+		t.Fatalf("discovered[1].name = %q, want WebFetch (preserving reference order)", got)
+	}
+	for i, tool := range discovered {
+		if tool.Get("defer_loading").Exists() {
+			t.Fatalf("discovered[%d] still has defer_loading: %s", i, tool.Raw)
+		}
+		if tool.Get("input_schema").Exists() || tool.Get("parameters.$schema").Exists() {
+			t.Fatalf("discovered[%d] still has unnormalized schema fields: %s", i, tool.Raw)
+		}
+		if tool.Get("strict").Type != ojson.False {
+			t.Fatalf("discovered[%d] expected strict=false: %s", i, tool.Raw)
+		}
+	}
+}
+
+func TestConvertClaudeRequestToCodex_RepeatedToolSearchAndLongMCPToolMapping(t *testing.T) {
+	// Two >64-char MCP tools that collide under shortenNameIfNeeded ("mcp__shared-long-server_deliver_final_subagent_handback_report"):
+	// eagerLongTool is non-deferred; deferredLongTool is deferred and inserted earlier in tools[] after discovery.
+	eagerLongTool := "mcp__shared-long-server-11111111-2222-3333-4444-555555555555_deliver_final_subagent_handback_report"
+	deferredLongTool := "mcp__shared-long-server-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_deliver_final_subagent_handback_report"
+
+	beforeJSON := fmt.Sprintf(`{
+		"model": "gpt-6-astra",
+		"tools": [
+			{"name": "ToolSearch", "input_schema": {"type": "object"}},
+			{"name": %q, "description": "Eager MCP tool", "input_schema": {"type": "object"}}
+		],
+		"messages": [
+			{"role": "user", "content": "Search tools"}
+		]
+	}`, eagerLongTool)
+
+	afterJSON := fmt.Sprintf(`{
+		"model": "gpt-6-astra",
+		"tools": [
+			{"name": "ToolSearch", "input_schema": {"type": "object"}},
+			{"name": %q, "description": "Deferred MCP tool inserted before eager tool", "defer_loading": true, "input_schema": {"type": "object"}},
+			{"name": %q, "description": "Eager MCP tool", "input_schema": {"type": "object"}}
+		],
+		"messages": [
+			{"role": "user", "content": "Search tools"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_ts_1", "name": "ToolSearch", "input": {"query": "action"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_ts_1",
+						"content": [
+							{"type": "tool_reference", "tool_name": %q}
+						]
+					}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_ts_2", "name": "ToolSearch", "input": {"query": "action again"}},
+					{"type": "tool_use", "id": "call_mcp_1", "name": %q, "input": {}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_ts_2",
+						"content": [
+							{"type": "tool_reference", "tool_name": %q}
+						]
+					},
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_mcp_1",
+						"content": "done"
+					}
+				]
+			}
+		]
+	}`, deferredLongTool, eagerLongTool, deferredLongTool, deferredLongTool, deferredLongTool)
+
+	beforeOut, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(beforeJSON), false)
+	if err != nil {
+		t.Fatalf("before ConvertClaudeRequestToCodex error: %v", err)
+	}
+	afterOut, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(afterJSON), false)
+	if err != nil {
+		t.Fatalf("after ConvertClaudeRequestToCodex error: %v", err)
+	}
+
+	// Top-level tools[] must stay byte-identical even when a colliding deferred tool is inserted earlier in tools[].
+	if gotBefore, gotAfter := ojson.GetBytesNoCopy(beforeOut, "tools").Raw, ojson.GetBytesNoCopy(afterOut, "tools").Raw; gotBefore != gotAfter {
+		t.Fatalf("top-level tools[] changed when colliding deferred tool was inserted:\nbefore: %s\nafter:  %s", gotBefore, gotAfter)
+	}
+
+	inputs := ojson.GetBytesNoCopy(afterOut, "input").Array()
+	// Count additional_tools items: only the first ToolSearch result should emit additional_tools;
+	// the second ToolSearch result references the same already-loaded tool and must not emit a duplicate additional_tools item.
+	var addToolsItems []ojson.Result
+	for _, item := range inputs {
+		if item.Get("type").String() == "additional_tools" {
+			addToolsItems = append(addToolsItems, item)
+		}
+	}
+	if len(addToolsItems) != 1 {
+		t.Fatalf("expected exactly 1 additional_tools item across repeated references, got %d: %s", len(addToolsItems), ojson.GetBytesNoCopy(afterOut, "input").Raw)
+	}
+
+	deferredShortName := addToolsItems[0].Get("tools.0.name").String()
+	eagerShortName := ojson.GetBytesNoCopy(afterOut, "tools.1.name").String()
+	if deferredShortName == "" || deferredShortName == deferredLongTool || len(deferredShortName) > 64 {
+		t.Fatalf("expected shortened deferred tool name <= 64 chars, got %q", deferredShortName)
+	}
+	if deferredShortName == eagerShortName {
+		t.Fatalf("expected colliding deferred and eager tools to have distinct short names, both got %q", deferredShortName)
+	}
+
+	if !strings.HasSuffix(deferredShortName, "_1") {
+		t.Fatalf("expected deferred colliding tool to receive _1 suffix so eager tool keeps base name, got eager=%q deferred=%q", eagerShortName, deferredShortName)
+	}
+
+	// Verify the assistant tool_use for deferredLongTool and the response reverse map use the same shortened name.
+	if gotCallName := ojson.GetBytesNoCopy(afterOut, `input.#(call_id=="call_mcp_1").name`).String(); gotCallName != deferredShortName {
+		t.Fatalf("function_call name = %q, want %q", gotCallName, deferredShortName)
+	}
+	revMap := buildReverseMapFromClaudeOriginalShortToOriginal([]byte(afterJSON))
+	if gotOrig := revMap[deferredShortName]; gotOrig != deferredLongTool {
+		t.Fatalf("reverse map[%q] = %q, want %q", deferredShortName, gotOrig, deferredLongTool)
+	}
+	if gotOrig := revMap[eagerShortName]; gotOrig != eagerLongTool {
+		t.Fatalf("reverse map[%q] = %q, want %q", eagerShortName, gotOrig, eagerLongTool)
+	}
+	// Verify function_call_output.output also rewrote tool_reference.tool_name to the shortened name.
+	var ts1Output string
+	for _, item := range inputs {
+		if item.Get("type").String() == "function_call_output" && item.Get("call_id").String() == "call_ts_1" {
+			ts1Output = item.Get("output").String()
+			break
+		}
+	}
+	if !strings.Contains(ts1Output, deferredShortName) {
+		t.Fatalf("expected function_call_output.output to use shortened tool_name %q, got %s", deferredShortName, ts1Output)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_ToolResultMixedContentAndUnknownToolReference(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-6-astra",
+		"tools": [
+			{"name": "ToolSearch", "input_schema": {"type": "object"}},
+			{"name": "WebSearch", "defer_loading": true, "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}}
+		],
+		"messages": [
+			{"role": "user", "content": "Find tools"},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "ToolSearch", "input": {"query": "web"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_1",
+						"content": [
+							{"type": "text", "text": "Matched tools:"},
+							{"type": "tool_reference", "tool_name": "WebSearch"},
+							{"type": "tool_reference", "tool_name": "NonExistentTool"}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	out, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToCodex error: %v", err)
+	}
+
+	outputParts := ojson.GetBytesNoCopy(out, `input.#(type=="function_call_output").output`).Array()
+	if len(outputParts) != 3 {
+		t.Fatalf("expected 3 output parts in mixed tool_result, got %d: %s", len(outputParts), ojson.GetBytesNoCopy(out, `input.#(call_id=="call_1").output`).Raw)
+	}
+	if outputParts[0].Get("text").String() != "Matched tools:" {
+		t.Fatalf("unexpected outputParts[0]: %s", outputParts[0].Raw)
+	}
+	if !strings.Contains(outputParts[1].Get("text").String(), "WebSearch") {
+		t.Fatalf("expected WebSearch tool_reference in outputParts[1], got: %s", outputParts[1].Raw)
+	}
+
+	addTools := ojson.GetBytesNoCopy(out, `input.#(type=="additional_tools").tools`).Array()
+	if len(addTools) != 1 || addTools[0].Get("name").String() != "WebSearch" {
+		t.Fatalf("expected only known WebSearch in additional_tools, got: %s", ojson.GetBytesNoCopy(out, `input.#(type=="additional_tools")`).Raw)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_StandaloneToolReferenceAndSearchResultOrdering(t *testing.T) {
+	longDeferredTool := "mcp__shared-long-server-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_deliver_final_subagent_handback_report"
+	inputJSON := fmt.Sprintf(`{
+		"model": "gpt-6-astra",
+		"tools": [
+			{"name": "ToolSearch", "input_schema": {"type": "object"}},
+			{"name": "WebSearch", "defer_loading": true, "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+			{"name": "WebFetch", "defer_loading": true, "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}}},
+			{"name": %q, "defer_loading": true, "input_schema": {"type": "object"}}
+		],
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "before standalone ref"},
+					{"type": "tool_reference", "tool_name": "WebSearch"},
+					{"type": "text", "text": "between ref and search result"},
+					{
+						"type": "tool_search_tool_result",
+						"tool_use_id": "srvtoolu_1",
+						"content": {
+							"type": "tool_search_tool_search_result",
+							"tool_references": [
+								{"type": "tool_reference", "tool_name": "WebFetch"}
+							]
+						}
+					},
+					{"type": "text", "text": "after search result"}
+				]
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_img_ref", "name": "ToolSearch", "input": {"query": "long"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "call_img_ref",
+						"content": [
+							{
+								"type": "image",
+								"source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}
+							},
+							{"type": "tool_reference", "tool_name": %q}
+						]
+					}
+				]
+			}
+		]
+	}`, longDeferredTool, longDeferredTool)
+
+	out, err := ConvertClaudeRequestToCodex("gpt-6-astra", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToCodex error: %v", err)
+	}
+
+	inputs := ojson.GetBytesNoCopy(out, "input").Array()
+	// Expected input sequence:
+	// 0: message ("before standalone ref")
+	// 1: additional_tools (WebSearch)
+	// 2: message ("between ref and search result")
+	// 3: additional_tools (WebFetch)
+	// 4: message ("after search result")
+	// 5: function_call (call_img_ref)
+	// 6: function_call_output (call_img_ref with input_image + shortened tool_reference input_text)
+	// 7: additional_tools (shortened longDeferredTool)
+	if len(inputs) != 8 {
+		t.Fatalf("expected 8 input items, got %d: %s", len(inputs), ojson.GetBytesNoCopy(out, "input").Raw)
+	}
+	if inputs[0].Get("type").String() != "message" || inputs[0].Get("content.0.text").String() != "before standalone ref" {
+		t.Fatalf("inputs[0] = %s, want message 'before standalone ref'", inputs[0].Raw)
+	}
+	if inputs[1].Get("type").String() != "additional_tools" || inputs[1].Get("tools.0.name").String() != "WebSearch" {
+		t.Fatalf("inputs[1] = %s, want additional_tools(WebSearch)", inputs[1].Raw)
+	}
+	if inputs[2].Get("type").String() != "message" || inputs[2].Get("content.0.text").String() != "between ref and search result" {
+		t.Fatalf("inputs[2] = %s, want message 'between ref and search result'", inputs[2].Raw)
+	}
+	if inputs[3].Get("type").String() != "additional_tools" || inputs[3].Get("tools.0.name").String() != "WebFetch" {
+		t.Fatalf("inputs[3] = %s, want additional_tools(WebFetch)", inputs[3].Raw)
+	}
+	if inputs[4].Get("type").String() != "message" || inputs[4].Get("content.0.text").String() != "after search result" {
+		t.Fatalf("inputs[4] = %s, want message 'after search result'", inputs[4].Raw)
+	}
+	if inputs[6].Get("type").String() != "function_call_output" {
+		t.Fatalf("inputs[6] = %s, want function_call_output", inputs[6].Raw)
+	}
+	outArr := inputs[6].Get("output").Array()
+	if len(outArr) != 2 || outArr[0].Get("type").String() != "input_image" || outArr[1].Get("type").String() != "input_text" {
+		t.Fatalf("expected [input_image, input_text] in mixed tool_result output, got: %s", inputs[6].Get("output").Raw)
+	}
+	shortLong := inputs[7].Get("tools.0.name").String()
+	if shortLong == "" || shortLong == longDeferredTool || !strings.Contains(outArr[1].Get("text").String(), shortLong) {
+		t.Fatalf("expected shortened tool name %q in mixed tool_result input_text, got: %s", shortLong, outArr[1].Raw)
 	}
 }

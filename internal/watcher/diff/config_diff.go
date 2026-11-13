@@ -37,6 +37,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if strings.TrimSpace(oldCfg.Pprof.Addr) != strings.TrimSpace(newCfg.Pprof.Addr) {
 		changes = append(changes, fmt.Sprintf("pprof.addr: %s -> %s", strings.TrimSpace(oldCfg.Pprof.Addr), strings.TrimSpace(newCfg.Pprof.Addr)))
 	}
+	if oldCfg.KVStore.Disabled != newCfg.KVStore.Disabled {
+		changes = append(changes, fmt.Sprintf("kv-store.disabled: %t -> %t", oldCfg.KVStore.Disabled, newCfg.KVStore.Disabled))
+	}
+	if oldCfg.EffectiveKVStorePath() != newCfg.EffectiveKVStorePath() {
+		changes = append(changes, fmt.Sprintf("kv-store.path: %s -> %s", oldCfg.EffectiveKVStorePath(), newCfg.EffectiveKVStorePath()))
+	}
 	if oldCfg.LoggingToFile != newCfg.LoggingToFile {
 		changes = append(changes, fmt.Sprintf("logging-to-file: %t -> %t", oldCfg.LoggingToFile, newCfg.LoggingToFile))
 	}
@@ -111,8 +117,14 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	if !equalStringMap(oldCfg.Antigravity.SensitiveWordsReplace, newCfg.Antigravity.SensitiveWordsReplace) {
+		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words-replace: %d -> %d", len(oldCfg.Antigravity.SensitiveWordsReplace), len(newCfg.Antigravity.SensitiveWordsReplace)))
+	}
 	if !reflect.DeepEqual(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("devin.sensitive-words: %d -> %d", len(oldCfg.Devin.SensitiveWords), len(newCfg.Devin.SensitiveWords)))
+	}
+	if !equalStringMap(oldCfg.Devin.SensitiveWordsReplace, newCfg.Devin.SensitiveWordsReplace) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-words-replace: %d -> %d", len(oldCfg.Devin.SensitiveWordsReplace), len(newCfg.Devin.SensitiveWordsReplace)))
 	}
 	oldEnabled := "<nil>"
 	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
@@ -166,6 +178,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if oldCfg.Claude.ToolSearch != newCfg.Claude.ToolSearch {
 		changes = append(changes, fmt.Sprintf("claude.tool-search: %t -> %t", oldCfg.Claude.ToolSearch, newCfg.Claude.ToolSearch))
+	}
+	if oldCfg.Claude.ServerSideFallback != newCfg.Claude.ServerSideFallback {
+		changes = append(changes, fmt.Sprintf("claude.server-side-fallback: %t -> %t", oldCfg.Claude.ServerSideFallback, newCfg.Claude.ServerSideFallback))
 	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
@@ -324,16 +339,25 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("claude[%d].fingerprint-profile: %s -> %s", i, strings.TrimSpace(o.FingerprintProfile), strings.TrimSpace(n.FingerprintProfile)))
 			}
 			changes = appendOptionalIntChange(changes, fmt.Sprintf("claude[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
-			if o.Cloak != nil && n.Cloak != nil {
+			switch {
+			case o.Cloak == nil && n.Cloak != nil:
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: added", i))
+			case o.Cloak != nil && n.Cloak == nil:
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: removed", i))
+			case o.Cloak != nil && n.Cloak != nil:
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.mode: %s -> %s", i, o.Cloak.Mode, n.Cloak.Mode))
 				}
 				if o.Cloak.StrictMode != n.Cloak.StrictMode {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.strict-mode: %t -> %t", i, o.Cloak.StrictMode, n.Cloak.StrictMode))
 				}
-				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
+				if !reflect.DeepEqual(o.Cloak.SensitiveWords, n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))
 				}
+				if !equalStringMap(o.Cloak.SensitiveWordsReplace, n.Cloak.SensitiveWordsReplace) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words-replace: %d -> %d", i, len(o.Cloak.SensitiveWordsReplace), len(n.Cloak.SensitiveWordsReplace)))
+				}
+				changes = appendOptionalBoolChange(changes, fmt.Sprintf("claude[%d].cloak.cache-user-id", i), o.Cloak.CacheUserID, n.Cloak.CacheUserID)
 			}
 		}
 	}
@@ -682,7 +706,7 @@ func equalStringMap(a, b map[string]string) bool {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if bv, ok := b[k]; !ok || bv != v {
 			return false
 		}
 	}

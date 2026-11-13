@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -121,10 +122,19 @@ type ClaudeConfig struct {
 	// translation elsewhere, and per-credential search advertising in the Codex
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+	// ServerSideFallback opts cloaked Claude requests into Anthropic server-side
+	// refusal fallback injection (claude-opus-5-5 -> claude-opus-4-8 and
+	// claude-fable-5-1 -> claude-opus-5) when the request body does not already
+	// specify fallbacks. Default false leaves cross-model fallbacks omitted unless
+	// explicitly configured by the caller or payload rules.
+	ServerSideFallback bool `yaml:"server-side-fallback" json:"server-side-fallback"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
-	// this many days, independently of continuity expiry and credential
-	// switches. A nil value (unset) defaults to 7 days; an explicit 0 keeps
-	// the continuity-scoped pin (1h lifetime).
+	// this many days in in-memory mode (server.kv-store.disabled: true without
+	// Home), independently of continuity expiry and credential switches. A nil
+	// value (unset) defaults to 7 days; an explicit 0 keeps the
+	// continuity-scoped pin (1h lifetime). When a KV store (local bbolt or Home
+	// KV) is active, session date pins are persisted permanently and
+	// session-date-pin-days is ignored.
 	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
 }
 
@@ -156,6 +166,7 @@ func (c ClaudeConfig) SessionDatePinRetention() time.Duration {
 // Claude Code, package, and runtime versions exactly match this baseline; unmeasured
 // versions use the configured values. Timeout remains a fallback. Stabilized profiles
 // also pin OS and Arch and never learn newer software versions automatically.
+// NativeEntrypoints extends the built-in native Claude Code entrypoint allowlist.
 // AnthropicBetaStrip and AnthropicBetaAppend are exact-name operator overrides applied
 // to the final Anthropic-Beta set; InjectDiagnostics and ClientRequestID tune the
 // first-party Claude Code CLI request shape.
@@ -168,6 +179,7 @@ type ClaudeHeaderDefaults struct {
 	Timeout                string   `yaml:"timeout" json:"timeout"`
 	Timezone               string   `yaml:"timezone" json:"timezone"`
 	StabilizeDeviceProfile *bool    `yaml:"stabilize-device-profile,omitempty" json:"stabilize-device-profile,omitempty"`
+	NativeEntrypoints      []string `yaml:"native-entrypoints,omitempty" json:"native-entrypoints,omitempty"`
 	AnthropicBetaStrip     []string `yaml:"anthropic-beta-strip,omitempty" json:"anthropic-beta-strip,omitempty"`
 	AnthropicBetaAppend    []string `yaml:"anthropic-beta-append,omitempty" json:"anthropic-beta-append,omitempty"`
 	InjectDiagnostics      *bool    `yaml:"inject-diagnostics,omitempty" json:"inject-diagnostics,omitempty"`
@@ -200,6 +212,9 @@ type XAIConfig struct {
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system prompts.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
 }
 
 // ProxyConnectionPoolConfig configures upstream connection reuse for one api-key
@@ -231,8 +246,11 @@ type ProxyConnectionPoolConfig struct {
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
-	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
+	// SensitiveWords is a list of words to obfuscate with invisible combining grapheme joiners in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system instructions.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
@@ -423,6 +441,47 @@ type DiscoveryInterfacesConfig struct {
 	Exclude []string `yaml:"exclude" json:"exclude"`
 }
 
+// KVStoreConfig holds configuration for the local persistent bbolt KV store.
+type KVStoreConfig struct {
+	// Disabled turns off the local bbolt KV store when true (fallback to in-memory).
+	// Defaults to false (bbolt enabled by default in non-Home mode).
+	Disabled bool `yaml:"disabled" json:"disabled"`
+
+	// Path is the file system path to the bbolt database file.
+	// When empty, it defaults to "<auth-dir>/kv.db".
+	Path string `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+// EffectivePath returns the trimmed Path or DefaultKVStorePath ("kv.db") when empty.
+func (c KVStoreConfig) EffectivePath() string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	return DefaultKVStorePath
+}
+
+// EffectivePathForAuthDir returns the trimmed Path when explicitly configured,
+// or joins the given authDir (falling back to DefaultAuthDir when authDir is empty)
+// with DefaultKVStorePath ("<auth-dir>/kv.db").
+func (c KVStoreConfig) EffectivePathForAuthDir(authDir string) string {
+	if trimmed := strings.TrimSpace(c.Path); trimmed != "" {
+		return trimmed
+	}
+	baseDir := strings.TrimSpace(authDir)
+	if baseDir == "" {
+		baseDir = DefaultAuthDir
+	}
+	return filepath.Join(baseDir, DefaultKVStorePath)
+}
+
+// EffectiveKVStorePath returns the configured KVStore.Path or "<auth-dir>/kv.db" when empty.
+func (cfg *Config) EffectiveKVStorePath() string {
+	if cfg == nil {
+		return filepath.Join(DefaultAuthDir, DefaultKVStorePath)
+	}
+	return cfg.KVStore.EffectivePathForAuthDir(cfg.AuthDir)
+}
+
 // DiscoveryConfig controls local network mDNS / DNS-SD service advertising.
 type DiscoveryConfig struct {
 	// Enabled toggles mDNS service advertising on the local network (default: false).
@@ -488,9 +547,13 @@ type RoutingConfig struct {
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
-	// Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
-	// followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
-	// execution or derived session identity, and the existing message-content hash fallback.
+	// Explicit Claude Code, Codex, OpenCode, pi, and generic (X-Session-ID) session headers
+	// are preferred, followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
+	// execution session identity, Merkle LCP prefix/compaction matching, derived session
+	// identity, and the existing message-content hash fallback.
+	// LCP compaction matching requires at least 2 shared trailing turns; clients whose
+	// compaction replaces all earlier turns with a summary should send X-Session-ID (or
+	// another explicit session ID), or affinity starts a new binding at every compaction.
 	// Automatic failover is always enabled when bound auth becomes unavailable.
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
@@ -512,6 +575,8 @@ type RoutingConfig struct {
 	//   - "quota": transient errors (408, 5xx, empty stream, buffer limit) fail over for that
 	//     request only while keeping the session bound to its original credential; quota and
 	//     auth errors (429, 401/402/403, 404/model support, invalid_grant) rebind as normal.
+	//   - "never": never move or fail over an established session to another credential;
+	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
 }
@@ -653,6 +718,9 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
 
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
@@ -874,6 +942,7 @@ type CodexModel struct {
 	// Use this for third-party Responses-compatible endpoints that do not accept
 	// native agent_message items or empty-signature thinking blocks. Default false
 	// keeps the native behavior unchanged.
+	// When enabled, compaction_trigger items also use local summary compaction.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
 	// SupportConfigurationUpdate enables configuration_update for this API-key model.

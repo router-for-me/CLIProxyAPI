@@ -2793,6 +2793,130 @@ func TestUsageAdapterPropagatesRequestIDAndTraceID(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterPropagatesModalityTokenDetails(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-modality-details",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-modality-details",
+		plugin:   plugin,
+	}
+
+	textIn := int64(30)
+	imageIn := int64(50)
+	audioIn := int64(0)
+	videoIn := int64(18)
+	fileIn := int64(12)
+	cachedText := int64(25)
+	cachedImage := int64(15)
+	cachedAudio := int64(0)
+	textOut := int64(0)
+	imageOut := int64(1056)
+	audioOut := int64(42)
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: coreusage.Detail{
+			InputTokens:         110,
+			OutputTokens:        1098,
+			ReasoningTokens:     10,
+			CachedTokens:        40,
+			CacheReadTokens:     40,
+			CacheCreationTokens: 5,
+			TotalTokens:         1208,
+			TextInputTokens:     &textIn,
+			ImageInputTokens:    &imageIn,
+			AudioInputTokens:    &audioIn,
+			VideoInputTokens:    &videoIn,
+			FileInputTokens:     &fileIn,
+			CachedTextTokens:    &cachedText,
+			CachedImageTokens:   &cachedImage,
+			CachedAudioTokens:   &cachedAudio,
+			TextOutputTokens:    &textOut,
+			ImageOutputTokens:   &imageOut,
+			AudioOutputTokens:   &audioOut,
+		},
+	})
+
+	// Mutate caller-owned source values after HandleUsage to verify independent pointer copies.
+	textIn = 999
+	imageIn = 999
+	audioIn = 999
+	videoIn = 999
+	fileIn = 999
+	cachedText = 999
+	cachedImage = 999
+	cachedAudio = 999
+	textOut = 999
+	imageOut = 999
+	audioOut = 999
+
+	got := gotRecord.Detail
+	if got.InputTokens != 110 || got.OutputTokens != 1098 || got.ReasoningTokens != 10 ||
+		got.CachedTokens != 40 || got.CacheReadTokens != 40 || got.CacheCreationTokens != 5 || got.TotalTokens != 1208 {
+		t.Fatalf("aggregate Detail = %+v", got)
+	}
+	assertInt64Ptr := func(name string, ptr *int64, src *int64, want int64) {
+		t.Helper()
+		if ptr == nil {
+			t.Fatalf("%s = nil, want %d", name, want)
+		}
+		if ptr == src {
+			t.Fatalf("%s shares pointer %p with source record", name, ptr)
+		}
+		if *ptr != want {
+			t.Fatalf("%s = %d, want %d", name, *ptr, want)
+		}
+	}
+	assertInt64Ptr("TextInputTokens", got.TextInputTokens, &textIn, 30)
+	assertInt64Ptr("ImageInputTokens", got.ImageInputTokens, &imageIn, 50)
+	assertInt64Ptr("AudioInputTokens", got.AudioInputTokens, &audioIn, 0)
+	assertInt64Ptr("VideoInputTokens", got.VideoInputTokens, &videoIn, 18)
+	assertInt64Ptr("FileInputTokens", got.FileInputTokens, &fileIn, 12)
+	assertInt64Ptr("CachedTextTokens", got.CachedTextTokens, &cachedText, 25)
+	assertInt64Ptr("CachedImageTokens", got.CachedImageTokens, &cachedImage, 15)
+	assertInt64Ptr("CachedAudioTokens", got.CachedAudioTokens, &cachedAudio, 0)
+	assertInt64Ptr("TextOutputTokens", got.TextOutputTokens, &textOut, 0)
+	assertInt64Ptr("ImageOutputTokens", got.ImageOutputTokens, &imageOut, 1056)
+	assertInt64Ptr("AudioOutputTokens", got.AudioOutputTokens, &audioOut, 42)
+
+	// Verify absent counters remain nil and distinct from explicit zero.
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: coreusage.Detail{
+			InputTokens:      80,
+			TextInputTokens:  coreusage.Int64Ptr(30),
+			ImageInputTokens: coreusage.Int64Ptr(50),
+			TextOutputTokens: coreusage.Int64Ptr(0),
+		},
+	})
+	got = gotRecord.Detail
+	if got.TextInputTokens == nil || *got.TextInputTokens != 30 {
+		t.Fatalf("TextInputTokens = %v, want 30", got.TextInputTokens)
+	}
+	if got.ImageInputTokens == nil || *got.ImageInputTokens != 50 {
+		t.Fatalf("ImageInputTokens = %v, want 50", got.ImageInputTokens)
+	}
+	if got.TextOutputTokens == nil || *got.TextOutputTokens != 0 {
+		t.Fatalf("TextOutputTokens = %v, want explicit 0", got.TextOutputTokens)
+	}
+	if got.AudioInputTokens != nil || got.VideoInputTokens != nil || got.FileInputTokens != nil ||
+		got.CachedTextTokens != nil || got.CachedImageTokens != nil || got.CachedAudioTokens != nil ||
+		got.ImageOutputTokens != nil || got.AudioOutputTokens != nil {
+		t.Fatalf("expected absent modality counters to remain nil, got %+v", got)
+	}
+}
+
 func TestUsageAdapterPreservesExplicitGenerateFalse(t *testing.T) {
 	var gotGenerate bool
 	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
@@ -4492,6 +4616,59 @@ func TestExecutorAdapterRefresh_MergesAttributesAndPreservesPath_Issue6119(t *te
 	}
 	if got := refreshed.Attributes["priority"]; got != "2" {
 		t.Errorf("refreshed priority attribute = %q, want 2", got)
+	}
+}
+
+func TestExecutorAdapterRefresh_PreservesDisabledState_Issue7225(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(ctx context.Context, req pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{
+					Metadata: map[string]any{"token": "new"},
+				},
+			}, nil
+		},
+	}
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin"})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: authProvider,
+				},
+			},
+		},
+		executorRecord,
+	)
+
+	exec := &fakeExecutor{identifier: "ignored-by-adapter"}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	auth := &coreauth.Auth{
+		ID:       "auth-1",
+		Provider: "plugin-provider",
+		Disabled: true,
+		Status:   coreauth.StatusDisabled,
+		Metadata: map[string]any{"token": "old"},
+	}
+
+	refreshed, errRefresh := adapter.Refresh(context.Background(), auth)
+	if errRefresh != nil {
+		t.Fatalf("Refresh() error = %v", errRefresh)
+	}
+	if refreshed == nil {
+		t.Fatal("Refresh() = nil, want refreshed auth")
+	}
+	if !refreshed.Disabled || refreshed.Status != coreauth.StatusDisabled {
+		t.Fatalf("Refresh() disabled=%t status=%q, want disabled auth to stay disabled", refreshed.Disabled, refreshed.Status)
+	}
+	if got := refreshed.Metadata["token"]; got != "new" {
+		t.Fatalf("Refresh() token = %q, want new", got)
 	}
 }
 

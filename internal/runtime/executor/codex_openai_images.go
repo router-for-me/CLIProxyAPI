@@ -37,6 +37,9 @@ const (
 	codexGPTImage25FlareModel    = "gpt-image-2.5-flare"
 	codexGPTImage25SunburstModel = "gpt-image-2.5-sunburst"
 	codexGPTImage25Model         = "gpt-image-2.5"
+	codexGPTImage26FlareModel    = "gpt-image-2.6-flare"
+	codexGPTImage26SunburstModel = "gpt-image-2.6-sunburst"
+	codexGPTImage26Model         = "gpt-image-2.6"
 	codexOpenAIImagesMainModel   = "gpt-5.4-mini"
 )
 
@@ -71,28 +74,20 @@ func codexIsImagesEndpointPath(path string) bool {
 }
 
 func (e *CodexExecutor) resolveGPTImage2BaseModel() string {
-	if e == nil || e.cfg == nil {
+	if e == nil {
 		return codexOpenAIImagesMainModel
 	}
-	model := strings.TrimSpace(e.cfg.GPTImage2BaseModel)
-	if model == "" {
-		return codexOpenAIImagesMainModel
-	}
-	if strings.HasPrefix(strings.ToLower(model), "gpt-") {
-		return model
-	}
-	return codexOpenAIImagesMainModel
+	return resolveCodexGPTImage2BaseModel(e.cfg)
 }
 
 func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	apiKey, baseURL := codexCredsForRequest(ctx, auth, opts.Headers)
-	if errSIWC := ensureCodexSIWCCredentialsForRequest(ctx, auth, apiKey, opts.Headers); errSIWC != nil {
+	ctx = cliproxyauth.WithCodexClientRequest(ctx, true)
+	apiKey, baseURL := codexCredsForRequest(ctx, auth)
+	if errSIWC := ensureCodexSIWCCredentialsForRequest(ctx, auth, apiKey); errSIWC != nil {
 		return resp, errSIWC
 	}
-	if !codexUseSIWCForRequest(ctx, auth, opts.Headers) {
-		if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
-			return e.executeDirectOpenAIImage(ctx, auth, req, opts, directEndpoint)
-		}
+	if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
+		return e.executeDirectOpenAIImage(ctx, auth, req, opts, directEndpoint)
 	}
 
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
@@ -145,11 +140,11 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErrWithHeadersAndCooling(httpResp.StatusCode, httpResp.Header, data, e.modelLevelCooling())
@@ -164,6 +159,10 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		}
 		eventData := bytes.TrimSpace(line[len(dataTag):])
 		reporter.ObserveResponseModel(eventData)
+		if errEvent, _, ok := codexTerminalFailureErrWithCooling(eventData, e.modelLevelCooling()); ok {
+			err = errEvent
+			return resp, err
+		}
 		switch ojson.GetBytesNoCopy(eventData, "type").String() {
 		case "response.output_item.done":
 			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -192,14 +191,13 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 }
 
 func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
-	apiKey, baseURL := codexCredsForRequest(ctx, auth, opts.Headers)
-	if errSIWC := ensureCodexSIWCCredentialsForRequest(ctx, auth, apiKey, opts.Headers); errSIWC != nil {
+	ctx = cliproxyauth.WithCodexClientRequest(ctx, true)
+	apiKey, baseURL := codexCredsForRequest(ctx, auth)
+	if errSIWC := ensureCodexSIWCCredentialsForRequest(ctx, auth, apiKey); errSIWC != nil {
 		return nil, errSIWC
 	}
-	if !codexUseSIWCForRequest(ctx, auth, opts.Headers) {
-		if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
-			return e.executeDirectOpenAIImageStream(ctx, auth, req, opts, directEndpoint)
-		}
+	if directEndpoint := codexDirectOpenAIImageEndpoint(req, opts); directEndpoint != "" {
+		return e.executeDirectOpenAIImageStream(ctx, auth, req, opts, directEndpoint)
 	}
 
 	prepared, errPrepare := codexPrepareOpenAIImageRequest(req, opts)
@@ -250,11 +248,11 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErrWithHeadersAndCooling(httpResp.StatusCode, httpResp.Header, data, e.modelLevelCooling())
 		return nil, err
@@ -298,6 +296,12 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 			}
 			eventData := bytes.TrimSpace(line[len(dataTag):])
 			reporter.ObserveResponseModel(eventData)
+			if errEvent, _, ok := codexTerminalFailureErrWithCooling(eventData, e.modelLevelCooling()); ok {
+				helps.RecordAPIResponseError(ctx, e.cfg, errEvent)
+				reporter.PublishFailure(ctx, errEvent)
+				sendError(errEvent)
+				return
+			}
 			switch ojson.GetBytesNoCopy(eventData, "type").String() {
 			case "response.output_item.done":
 				collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -339,12 +343,13 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 }
 
 func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
+	ctx = cliproxyauth.WithCodexClientRequest(ctx, true)
 	body, contentType, model, errPrepare := e.prepareDirectOpenAIImageBody(auth, req, opts, false)
 	if errPrepare != nil {
 		return resp, errPrepare
 	}
 
-	apiKey, baseURL := codexCredsForRequest(ctx, auth, opts.Headers)
+	apiKey, baseURL := codexCredsForRequest(ctx, auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -394,11 +399,11 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErrWithHeadersAndCooling(httpResp.StatusCode, httpResp.Header, data, e.modelLevelCooling())
@@ -411,12 +416,13 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 }
 
 func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
+	ctx = cliproxyauth.WithCodexClientRequest(ctx, true)
 	body, contentType, model, errPrepare := e.prepareDirectOpenAIImageBody(auth, req, opts, true)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
 
-	apiKey, baseURL := codexCredsForRequest(ctx, auth, opts.Headers)
+	apiKey, baseURL := codexCredsForRequest(ctx, auth)
 	if baseURL == "" {
 		baseURL = "https://chatgpt.com/backend-api/codex"
 	}
@@ -464,11 +470,11 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		err = newCodexStatusErrWithHeadersAndCooling(httpResp.StatusCode, httpResp.Header, data, e.modelLevelCooling())
 		return nil, err
@@ -757,7 +763,7 @@ func codexOpenAIImageBaseModel(model string) string {
 
 func codexIsDirectOpenAIImageModel(model string) bool {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case codexGPTImage15Model, codexDefaultImageToolModel, codexGPTImage25FlareModel, codexGPTImage25SunburstModel, codexGPTImage25Model:
+	case codexGPTImage15Model, codexDefaultImageToolModel, codexGPTImage25FlareModel, codexGPTImage25SunburstModel, codexGPTImage25Model, codexGPTImage26FlareModel, codexGPTImage26SunburstModel, codexGPTImage26Model:
 		return true
 	default:
 		return false
@@ -788,10 +794,6 @@ func (e *CodexExecutor) prepareCodexOpenAIImageDoc(ctx context.Context, auth *cl
 	_ = doc.Delete("prompt_cache_retention")
 	_ = doc.Delete("safety_identifier")
 	_ = doc.Delete("stream_options")
-	if codexUseSIWCForRequest(ctx, auth, opts.Headers) {
-		applyCodexSIWCRequestBodyRulesDoc(doc, false)
-		return doc, nil
-	}
 	normalizeCodexInstructionsDoc(doc)
 	return doc, nil
 }

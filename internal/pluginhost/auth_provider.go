@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -207,6 +208,20 @@ func (h *Host) AuthProviderIdentifiers() []string {
 
 func (h *Host) HasAuthProvider(provider string) bool {
 	return h.authProviderRecord(provider) != nil
+}
+
+// HasMultipleAuthProviders reports whether the active owning plugin declares multiple OAuth entries.
+func (h *Host) HasMultipleAuthProviders(provider string) bool {
+	record := h.authProviderRecord(provider)
+	return record != nil && h.recordHasMultipleAuthProviders(*record)
+}
+
+func (h *Host) recordHasMultipleAuthProviders(record capabilityRecord) bool {
+	if h == nil || !h.recordCurrent(record) {
+		return false
+	}
+	identifiers, okIdentifiers := h.callRecordAuthProviderIdentifiers(record)
+	return okIdentifiers && len(identifiers) > 1
 }
 
 // SameAuthProvider reports whether providerA and providerB belong to the same active plugin auth provider.
@@ -500,16 +515,12 @@ func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*
 }
 
 func extractRawJSONOAuthProviderHint(raw []byte) string {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return ""
-	}
-	var payload map[string]any
-	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil || payload == nil {
+	if !ojson.ValidBytes(raw) {
 		return ""
 	}
 	for _, key := range []string{"oauth_provider", "portal"} {
-		if value, ok := payload[key].(string); ok {
-			if normalized := normalizeProviderID(value); normalized != "" {
+		if value := ojson.GetBytes(raw, key); value.Type == ojson.String {
+			if normalized := normalizeProviderID(value.String()); normalized != "" {
 				return normalized
 			}
 		}
@@ -618,6 +629,7 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 		return nil, false, nil
 	}
 	datas := pluginAuthParseResponseAuths(resp)
+	multiEntry := h.recordHasMultipleAuthProviders(record)
 	auths = make([]*coreauth.Auth, 0, len(datas))
 	for _, data := range datas {
 		if strings.TrimSpace(data.Provider) == "" {
@@ -629,8 +641,11 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 		if normalizeProviderID(data.Provider) == "" {
 			return nil, true, fmt.Errorf("auth provider %s returned auth without provider", record.id)
 		}
-		effectivePortal := firstNonEmpty(authDataPortalHint(&data), portalIdentifier)
-		stampAuthDataOAuthProvider(&data, effectivePortal)
+		explicitHint := firstNonEmpty(authDataPortalHint(&data), extractRawJSONOAuthProviderHint(req.RawJSON))
+		effectivePortal := firstNonEmpty(explicitHint, portalIdentifier)
+		if explicitHint != "" || multiEntry || normalizeProviderID(data.Provider) != effectivePortal {
+			stampAuthDataOAuthProvider(&data, effectivePortal)
+		}
 		parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
 		if parsed == nil {
 			return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
@@ -825,12 +840,21 @@ func (h *Host) callPollLogin(ctx context.Context, record capabilityRecord, provi
 		return pluginapi.AuthLoginPollResponse{}, true, errPoll
 	}
 	if resp.Status == pluginapi.AuthLoginStatusSuccess {
+		multiEntry := h.recordHasMultipleAuthProviders(record)
 		for index := range resp.Auths {
-			stampAuthDataOAuthProvider(&resp.Auths[index], matchedPortal)
-			h.recordCredentialProvider(record.id, resp.Auths[index].Provider, matchedPortal)
+			explicitHint := authDataPortalHint(&resp.Auths[index])
+			effectivePortal := firstNonEmpty(explicitHint, matchedPortal)
+			if multiEntry || explicitHint != "" || normalizeProviderID(resp.Auths[index].Provider) != effectivePortal {
+				stampAuthDataOAuthProvider(&resp.Auths[index], effectivePortal)
+			}
+			h.recordCredentialProvider(record.id, resp.Auths[index].Provider, effectivePortal)
 		}
-		stampAuthDataOAuthProvider(&resp.Auth, matchedPortal)
-		h.recordCredentialProvider(record.id, resp.Auth.Provider, matchedPortal)
+		explicitHint := authDataPortalHint(&resp.Auth)
+		effectivePortal := firstNonEmpty(explicitHint, matchedPortal)
+		if multiEntry || explicitHint != "" || normalizeProviderID(resp.Auth.Provider) != effectivePortal {
+			stampAuthDataOAuthProvider(&resp.Auth, effectivePortal)
+		}
+		h.recordCredentialProvider(record.id, resp.Auth.Provider, effectivePortal)
 	}
 	return resp, true, nil
 }
@@ -853,7 +877,7 @@ func authDataPortalHint(data *pluginapi.AuthData) string {
 			}
 		}
 	}
-	return ""
+	return extractRawJSONOAuthProviderHint(data.StorageJSON)
 }
 
 func stampAuthDataOAuthProvider(data *pluginapi.AuthData, portalIdentifier string) {
@@ -864,22 +888,17 @@ func stampAuthDataOAuthProvider(data *pluginapi.AuthData, portalIdentifier strin
 	if portalIdentifier == "" {
 		return
 	}
-	credProvider := normalizeProviderID(data.Provider)
-	if credProvider == "" || credProvider == portalIdentifier {
+	if normalizeProviderID(data.Provider) == "" {
 		return
 	}
 	if data.Metadata == nil {
 		data.Metadata = make(map[string]any)
 	}
-	if _, exists := data.Metadata["oauth_provider"]; !exists {
-		data.Metadata["oauth_provider"] = portalIdentifier
-	}
+	data.Metadata["oauth_provider"] = portalIdentifier
 	if data.Attributes == nil {
 		data.Attributes = make(map[string]string)
 	}
-	if strings.TrimSpace(data.Attributes["oauth_provider"]) == "" {
-		data.Attributes["oauth_provider"] = portalIdentifier
-	}
+	data.Attributes["oauth_provider"] = portalIdentifier
 }
 
 func authPortalHints(auth *coreauth.Auth) []string {
@@ -972,6 +991,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		return nil, true, errRefresh
 	}
 	data := pluginResp.Auth
+	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
 	}
@@ -1006,8 +1026,9 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		}
 		data.Attributes = attributes
 	}
-	preserveAuthOAuthProviderMetadata(&data, auth)
+	preserveAuthOAuthProviderMetadata(&data, auth, explicitPortalHint)
 	preserveFileAuthPriority(&data, auth)
+	preserveAuthDisabledState(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -1030,9 +1051,18 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	return next, true, nil
 }
 
-func preserveAuthOAuthProviderMetadata(data *pluginapi.AuthData, auth *coreauth.Auth) {
-	if data == nil || auth == nil || len(auth.Metadata) == 0 {
+// explicitPortalHint must be resolved before merging existing auth fields.
+func preserveAuthOAuthProviderMetadata(data *pluginapi.AuthData, auth *coreauth.Auth, explicitPortalHint string) {
+	if data == nil || auth == nil {
 		return
+	}
+	hint := explicitPortalHint
+	if hint == "" {
+		hint = authDataPortalHint(&pluginapi.AuthData{
+			Attributes:  auth.Attributes,
+			Metadata:    auth.Metadata,
+			StorageJSON: storageJSONFromAuth(auth),
+		})
 	}
 	for _, key := range []string{"oauth_provider", "portal"} {
 		raw, ok := auth.Metadata[key].(string)
@@ -1045,6 +1075,26 @@ func preserveAuthOAuthProviderMetadata(data *pluginapi.AuthData, auth *coreauth.
 		if _, exists := data.Metadata[key]; !exists {
 			data.Metadata[key] = raw
 		}
+	}
+	if hint == "" {
+		return
+	}
+	if data.Metadata == nil {
+		data.Metadata = make(map[string]any)
+	}
+	data.Metadata["oauth_provider"] = hint
+	if data.Attributes == nil {
+		data.Attributes = make(map[string]string)
+	}
+	data.Attributes["oauth_provider"] = hint
+}
+
+func preserveAuthDisabledState(data *pluginapi.AuthData, auth *coreauth.Auth) {
+	if data == nil || auth == nil {
+		return
+	}
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		data.Disabled = true
 	}
 }
 
@@ -1237,6 +1287,10 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	attributes := cloneStringMap(data.Attributes)
 	if attributes == nil {
 		attributes = make(map[string]string)
+	}
+	if hint := authDataPortalHint(&data); hint != "" {
+		metadata["oauth_provider"] = hint
+		attributes["oauth_provider"] = hint
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {

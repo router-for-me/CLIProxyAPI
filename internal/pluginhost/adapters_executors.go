@@ -1142,6 +1142,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
 	}
@@ -1176,8 +1177,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		}
 		data.Attributes = attributes
 	}
-	preserveAuthOAuthProviderMetadata(&data, auth)
+	preserveAuthOAuthProviderMetadata(&data, auth, explicitPortalHint)
 	preserveFileAuthPriority(&data, auth)
+	preserveAuthDisabledState(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}

@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
@@ -76,6 +78,9 @@ type Service struct {
 	// discoveryManager manages local network mDNS / DNS-SD service advertising.
 	discoveryManager *discoveryAdvertiserManager
 
+	// kvStoreManaged tracks whether this service instance owns local KVStore lifecycle.
+	kvStoreManaged atomic.Bool
+
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
 
@@ -105,6 +110,10 @@ type Service struct {
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// pluginInterceptorHost optionally overrides the PluginInterceptorHost
+	// installed on request handlers. Nil means the internal pluginHost is used.
+	pluginInterceptorHost handlers.PluginInterceptorHost
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once

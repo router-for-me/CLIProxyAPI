@@ -26,11 +26,7 @@ const (
 	claudeDefaultStainlessTimeout = "600"
 )
 
-var (
-	claudeCodeUserAgentPattern        = regexp.MustCompile(`(?i)^claude-cli/`)
-	claudeCodeUserAgentDetailsPattern = regexp.MustCompile(`(?i)^claude-cli/\S+\s+\(external,\s*([^,)]+)(?:,\s*agent-sdk/([^,)]+))?`)
-	claudeCodeNativeUserAgentPattern  = regexp.MustCompile(`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/[0-9]+\.[0-9]+\.[0-9]+)?\)$`)
-)
+var claudeCodeUserAgentPattern = regexp.MustCompile(`(?i)^claude-cli/`)
 
 var claudeCodeSubclientByEntrypoint = map[string]string{
 	"cli":                       "claude-code-cli",
@@ -61,13 +57,44 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 }
 
 // Only product surfaces with verified 2.1.220+ wire behavior are eligible for
-// pass-through. Other first-party-looking entrypoints are cloaked until their
-// CPA-reachable request shape has been captured and reviewed.
+// pass-through by default. Other first-party-looking entrypoints are cloaked
+// until their CPA-reachable request shape has been captured and reviewed, or
+// until they are allowlisted in header-defaults.native-entrypoints.
 var nativeClaudeEntrypoints = map[string]bool{
 	"cli":           true,
 	"sdk-cli":       true,
 	"sdk-ts":        true,
 	"claude-vscode": true,
+}
+
+func isNativeClaudeEntrypoint(entrypoint string, cfg *config.Config) bool {
+	entrypoint = strings.ToLower(strings.TrimSpace(entrypoint))
+	if entrypoint == "" {
+		return false
+	}
+	if nativeClaudeEntrypoints[entrypoint] {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	for _, candidate := range cfg.ClaudeHeaderDefaults.NativeEntrypoints {
+		if strings.EqualFold(strings.TrimSpace(candidate), entrypoint) {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeSubclientForEntrypoint(entrypoint string, cfg *config.Config) string {
+	entrypoint = strings.ToLower(strings.TrimSpace(entrypoint))
+	if subclient := claudeCodeSubclientByEntrypoint[entrypoint]; subclient != "" {
+		return subclient
+	}
+	if isNativeClaudeEntrypoint(entrypoint, cfg) {
+		return "claude-code-" + entrypoint
+	}
+	return ""
 }
 
 type claudeCodeHelperShape uint8
@@ -136,36 +163,47 @@ type ClaudeCodeRequestDetection struct {
 // four strong signals; count_tokens omits metadata.user_id. A separate narrow
 // profile recognizes measured native Haiku helper requests that intentionally
 // omit claude-code-20250219. Unverified entrypoints (such as generic sdk-py)
-// remain unconfirmed by default and receive CLI cloaking unless cloak_mode is never.
+// remain unconfirmed by default and receive CLI cloaking unless cloak_mode is
+// never or the entrypoint is allowlisted in header-defaults.native-entrypoints.
 func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bool, configs ...*config.Config) ClaudeCodeRequestDetection {
 	var cfg *config.Config
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
-	userAgent := headerValue(headers, "User-Agent")
-	entrypoint, agentSDKVersion := parseClaudeCodeUserAgentDetails(userAgent)
+	userAgent, validUserAgent := parseClaudeCodeUserAgent(headerValue(headers, "User-Agent"))
+	entrypoint := userAgent.entrypoint
+	subclient := claudeSubclientForEntrypoint(entrypoint, cfg)
 	detection := ClaudeCodeRequestDetection{
-		XAppCLI:         headerValue(headers, "X-App") == "cli",
-		UserAgent:       plausibleClaudeCodeUserAgent(userAgent, cfg),
+		XAppCLI:         isNativeClaudeXApp(headerValue(headers, "X-App")),
+		UserAgent:       validUserAgent && plausibleClaudeCodeVersion(userAgent.version, cfg),
 		BetasPresent:    headerContainsClaudeCodeBeta(headers),
 		Entrypoint:      entrypoint,
-		Subclient:       claudeCodeSubclientByEntrypoint[entrypoint],
-		AgentSDKVersion: agentSDKVersion,
+		Subclient:       subclient,
+		AgentSDKVersion: userAgent.agentSDKVersion,
 	}
 
 	metadataUserID := ojson.GetBytesNoCopy(payload, "metadata.user_id")
 	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == ojson.String && isValidUserID(metadataUserID.String())
-	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
+	detection.NativeClient = isNativeClaudeEntrypoint(entrypoint, cfg)
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent && (countTokens || detection.MetadataUserID)
 	detection.HelperProfile = detection.NativeClient && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
 	detection.StrongSignals = standardSignals || detection.HelperProfile
 	detection.Confirmed = detection.StrongSignals && detection.NativeClient
 	detection.ConfirmedShape = detection.StrongSignals ||
 		(!countTokens && detection.XAppCLI && detection.UserAgent && detection.MetadataUserID &&
-			claudeCodeSubclientByEntrypoint[entrypoint] != "" &&
+			subclient != "" &&
 			measuredClaudeCodeHaiku55HelperSessionMatches(headers, payload) &&
 			measuredClaudeCodeBillingAndIdentityMatch(payload, entrypoint))
 	return detection
+}
+
+func isNativeClaudeXApp(value string) bool {
+	switch value {
+	case "cli", "cli-bg":
+		return true
+	default:
+		return false
+	}
 }
 
 func claudeCodeHelperBetaProfile(redactThinking bool, trailing ...string) string {
@@ -657,26 +695,19 @@ func IsClaudeCodeUserAgent(userAgent string) bool {
 }
 
 func plausibleClaudeCodeUserAgent(userAgent string, cfg *config.Config) bool {
-	userAgent = strings.TrimSpace(userAgent)
-	if !claudeCodeUserAgentPattern.MatchString(userAgent) || !claudeCodeNativeUserAgentPattern.MatchString(userAgent) {
-		return false
-	}
-	candidate, okCandidate := parseClaudeCLIVersion(userAgent)
+	parsed, ok := parseClaudeCodeUserAgent(userAgent)
+	return ok && plausibleClaudeCodeVersion(parsed.version, cfg)
+}
+
+func plausibleClaudeCodeVersion(candidate claudeCLIVersion, cfg *config.Config) bool {
 	baseline, okBaseline := parseClaudeCLIVersion(defaultClaudeDeviceProfile(cfg).UserAgent)
 	// Patch releases (>= baseline.patch) within the release line preserve native passthrough.
-	return okCandidate && okBaseline && plausibleClaudeCLIVersion(candidate, baseline)
+	return okBaseline && plausibleClaudeCLIVersion(candidate, baseline)
 }
 
 func parseClaudeCodeUserAgentDetails(userAgent string) (entrypoint, agentSDKVersion string) {
-	matches := claudeCodeUserAgentDetailsPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
-	if len(matches) < 2 {
-		return "", ""
-	}
-	entrypoint = strings.ToLower(strings.TrimSpace(matches[1]))
-	if len(matches) >= 3 {
-		agentSDKVersion = strings.TrimSpace(matches[2])
-	}
-	return entrypoint, agentSDKVersion
+	parsed, _ := parseClaudeCodeUserAgent(userAgent)
+	return parsed.entrypoint, parsed.agentSDKVersion
 }
 
 func headerValue(headers http.Header, name string) string {

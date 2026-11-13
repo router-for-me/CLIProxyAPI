@@ -51,7 +51,8 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
-		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
+		hasMatchedRoute := c.FullPath() != ""
+		captureBody := hasMatchedRoute && shouldCaptureRequestBody(loggerEnabled, c.Request)
 
 		// Capture request metadata before authentication without reading the request body.
 		requestInfo, err := captureRequestInfo(c, false)
@@ -62,11 +63,16 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
+			deferredAPICapture := logging.NewDeferredAPICapture()
+			wrapper.deferredAPICapture = deferredAPICapture
+			c.Request = c.Request.WithContext(logging.WithDeferredAPICapture(c.Request.Context(), deferredAPICapture))
+			c.Set(logging.DeferredAPIResponseContextKey, deferredAPICapture)
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled)
+		attachRequestLogSources(c, logger, loggerEnabled && hasMatchedRoute)
 		deferredCapture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, false, false)
 		if captureBody {
 			c.Set(authenticatedRequestBodyCapturerContextKey, func() {

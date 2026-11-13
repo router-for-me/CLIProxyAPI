@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,6 +74,74 @@ type geminiAppCookieTransport func(*http.Request) (*http.Response, error)
 
 func (f geminiAppCookieTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestGeminiAppServiceTruncationDoesNotReplayOrCoolCredentials(t *testing.T) {
+	candidate := make([]any, 9)
+	candidate[1], candidate[8] = []any{"partial"}, []any{1}
+	inner, _ := json.Marshal([]any{nil, nil, nil, nil, []any{candidate}})
+	frame, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(inner)}})
+	for _, stream := range []bool{false, true} {
+		for name, wire := range map[string]string{"empty": "", "partial": string(frame), "cut frame": "[["} {
+			t.Run(fmt.Sprintf("stream=%t/%s", stream, name), func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.SetRetryConfig(2, 0, 2)
+				svc := &Service{cfg: &config.Config{}, coreManager: manager}
+				ids := []string{t.Name() + "-first", t.Name() + "-second"}
+				for _, id := range ids {
+					auth, err := manager.Register(t.Context(), &coreauth.Auth{
+						ID: id, Provider: "gemini-app", Status: coreauth.StatusActive,
+						Metadata: map[string]any{"cookies": map[string]any{"__Secure-1PSID": "test-session"}},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					svc.ensureExecutorsForAuth(auth)
+					svc.registerModelsForAuth(t.Context(), auth)
+					t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(id) })
+				}
+				attempts := 0
+				ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(geminiAppCookieTransport(func(req *http.Request) (*http.Response, error) {
+					body := `{"SNlM0e":"csrf"}`
+					if req.URL.Path != "/app" {
+						attempts++
+						body = wire
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				})))
+				req := coreexecutor.Request{Model: "gemini-app", Payload: []byte(`{"contents":[{"parts":[{"text":"Hello"}]}]}`)}
+				opts := coreexecutor.Options{SourceFormat: translator.FormatGemini}
+				var err error
+				if stream {
+					var result *coreexecutor.StreamResult
+					result, err = manager.ExecuteStream(ctx, []string{"gemini-app"}, req, opts)
+					if err == nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
+						}
+					}
+				} else {
+					_, err = manager.Execute(ctx, []string{"gemini-app"}, req, opts)
+				}
+				var truncated coreexecutor.StreamTruncatedError
+				if !errors.As(err, &truncated) || !truncated.IsStreamTruncated() {
+					t.Errorf("expected truncated accepted response, got %v", err)
+				}
+				if attempts != 1 {
+					t.Errorf("accepted generation replayed: %d attempts", attempts)
+				}
+				for _, id := range ids {
+					current, _ := manager.GetByID(id)
+					state := current.ModelStates["gemini-app"]
+					if current.Unavailable || (state != nil && state.Unavailable) {
+						t.Errorf("truncation cooled credential %s", id)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestGeminiAppServicePersistsCookieRotations(t *testing.T) {

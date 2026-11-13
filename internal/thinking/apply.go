@@ -316,12 +316,19 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	if nativeResponses {
+		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
+		modified = modified || normalized
+		if errNormalize != nil {
+			return modified, errNormalize
+		}
+	}
 	if !suffixResult.HasSuffix && len(sourceBody) > 0 && isResponsesFormat(fromFormat) && !docValid && hasThinkingConfig(extractConfigurationUpdateConfig(sourceBody)) {
 		// Do not rebuild a malformed target from a separate source update.
 		return modified, nil
 	}
 	if nativeResponses && !suffixResult.HasSuffix {
-		// Native Responses keeps the top-level baseline and in-turn updates as-is.
+		// Native Responses preserves the baseline and update timeline after validation.
 		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
 			if config := extractCodexUsageConfigDoc(doc, docValid); hasThinkingConfig(config) {
 				fields := log.Fields{
@@ -777,7 +784,15 @@ func extractThinkingConfigForUsage(body []byte, provider string) ThinkingConfig 
 		if ojson.GetBytesNoCopy(body, "thinking.type").String() == "between_tools" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
-		return extractThinkingConfig(body, provider)
+		config := extractThinkingConfig(body, provider)
+		if config.Mode == ModeNone && hasThinkingConfig(config) {
+			return config
+		}
+		// The last effort directive, not the cached top-level placeholder, is the turn's effort.
+		if directive := extractClaudeEffortDirectiveConfig(body); hasThinkingConfig(directive) {
+			return directive
+		}
+		return config
 	default:
 		return extractThinkingConfig(body, provider)
 	}

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -396,5 +398,431 @@ func TestStreamCallbacksKeepPlainErrorStrings(t *testing.T) {
 	chunk := <-chunks
 	if chunk.Err == nil || chunk.Err.Error() != "boom" {
 		t.Fatalf("plain stream error = %v, want boom", chunk.Err)
+	}
+}
+
+func TestPluginCountTokensNotImplementedDoesNotTriggerCooldown(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+
+	_, errDecode := decodeEnvelopeResult[pluginapi.ExecutorResponse](pluginabi.Envelope{
+		OK: false,
+		Error: &pluginabi.Error{
+			Code:       "not_implemented",
+			Message:    "count-tokens/http-request are not implemented yet",
+			HTTPStatus: http.StatusNotImplemented,
+		},
+	})
+	if errDecode == nil {
+		t.Fatal("decodeEnvelopeResult returned nil error")
+	}
+
+	const (
+		provider = "kiro-plugin-count-tokens-501"
+		model    = "claude-opus-5.5"
+		authID   = "kiro-auth-count-tokens-501"
+	)
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "kiro-plugin-count-tokens-501"})
+	host := newHostWithRecords(executorRecord)
+	exec := &fakeExecutor{
+		identifier: provider,
+		countTokens: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{}, errDecode
+		},
+		execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"id":"msg_1","type":"message","content":[{"type":"text","text":"ok"}]}`)}, nil
+		},
+	}
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatClaude},
+		[]sdktranslator.Format{sdktranslator.FormatClaude},
+	)
+	adapter.provider = provider
+
+	authMgr := coreauth.NewManager(nil, nil, nil)
+	authMgr.RegisterExecutor(adapter)
+	auth := &coreauth.Auth{
+		ID:         authID,
+		Provider:   provider,
+		Status:     coreauth.StatusActive,
+		FileName:   "kiro-auth-count-tokens-501.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+	if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register auth: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	req := coreexecutor.Request{
+		Model:   model,
+		Payload: []byte(`{"model":"claude-opus-5.5","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatClaude,
+		ResponseFormat: sdktranslator.FormatClaude,
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, errCount := authMgr.ExecuteCount(context.Background(), []string{provider}, req, opts)
+		if errCount == nil {
+			t.Fatalf("attempt %d: ExecuteCount returned nil error, want 501", attempt)
+		}
+		var sc interface{ StatusCode() int }
+		if !errors.As(errCount, &sc) || sc.StatusCode() != http.StatusNotImplemented {
+			t.Fatalf("attempt %d: ExecuteCount status = %v, want 501 (%v)", attempt, sc, errCount)
+		}
+	}
+
+	updated, okAuth := authMgr.GetByID(authID)
+	if !okAuth || updated == nil {
+		t.Fatalf("GetByID(%q) missing", authID)
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth marked unavailable after count_tokens 501: %+v", updated)
+	}
+	if state := updated.ModelStates[model]; state != nil {
+		t.Fatalf("model state after count_tokens 501 = %+v, want nil", state)
+	}
+
+	resp, errExec := authMgr.Execute(context.Background(), []string{provider}, req, opts)
+	if errExec != nil {
+		t.Fatalf("Execute after count_tokens 501 failed: %v", errExec)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("Execute returned empty payload")
+	}
+}
+
+type resultCapturingHook struct {
+	results []coreauth.Result
+}
+
+func (h *resultCapturingHook) OnAuthRegistered(context.Context, *coreauth.Auth) {}
+func (h *resultCapturingHook) OnAuthUpdated(context.Context, *coreauth.Auth)    {}
+func (h *resultCapturingHook) OnResult(_ context.Context, result coreauth.Result) {
+	h.results = append(h.results, result)
+}
+
+func TestPluginExecutor429CredentialScopedCoolsEntireCredentialAndSiblingModels(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+
+	prevQueueEnabled := redisqueue.Enabled()
+	redisqueue.SetEnabled(false)
+	redisqueue.SetEnabled(true)
+	t.Cleanup(func() {
+		redisqueue.SetEnabled(false)
+		redisqueue.SetEnabled(prevQueueEnabled)
+	})
+
+	for _, tc := range []struct {
+		name         string
+		envelopeJSON string
+		wantCode     string
+	}{
+		{
+			name:         "credential_scoped flag",
+			envelopeJSON: `{"ok":false,"error":{"code":"rate_limited","message":"account limited, resets at 2026-01-01T00:00:00Z","http_status":429,"retry_after_seconds":120,"credential_scoped":true}}`,
+			wantCode:     "rate_limited",
+		},
+		{
+			name:         "credential_quota error code",
+			envelopeJSON: `{"ok":false,"error":{"code":"credential_quota","message":"account limited, resets at 2026-01-01T00:00:00Z","http_status":429,"retry_after_seconds":120}}`,
+			wantCode:     "credential_quota",
+		},
+		{
+			name:         "credential_scoped overrides transient_rate_limit code",
+			envelopeJSON: `{"ok":false,"error":{"code":"transient_rate_limit","message":"account limited, resets at 2026-01-01T00:00:00Z","http_status":429,"retry_after_seconds":120,"credential_scoped":true}}`,
+			wantCode:     "credential_quota",
+		},
+		{
+			name:         "credential_scoped overrides request_scoped code",
+			envelopeJSON: `{"ok":false,"error":{"code":"request_scoped","message":"account limited, resets at 2026-01-01T00:00:00Z","http_status":429,"retry_after_seconds":120,"credential_scoped":true}}`,
+			wantCode:     "credential_quota",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subscriber, unsubscribe := redisqueue.SubscribeErrors()
+			defer unsubscribe()
+
+			_, errDecode := decodeRPCEnvelope[pluginapi.ExecutorResponse]([]byte(tc.envelopeJSON))
+			if errDecode == nil {
+				t.Fatal("decodeRPCEnvelope returned nil error")
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			if !errors.As(errDecode, &scoped) || !scoped.IsCredentialScoped() {
+				t.Fatalf("decoded plugin error %T does not report IsCredentialScoped() = true", errDecode)
+			}
+
+			var (
+				provider   = "plugin-provider-cred-scope-" + tc.name
+				modelA     = "plugin-model-a-" + tc.name
+				modelB     = "plugin-model-b-" + tc.name
+				modelC     = "plugin-model-c-" + tc.name
+				authID     = "auth-cred-scope-" + tc.name
+				execCalled int
+			)
+			executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-cred-scope-" + tc.name})
+			host := newHostWithRecords(executorRecord)
+			exec := &fakeExecutor{
+				identifier: provider,
+				execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+					execCalled++
+					return pluginapi.ExecutorResponse{}, errDecode
+				},
+			}
+			adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+			)
+			adapter.provider = provider
+
+			hook := &resultCapturingHook{}
+			authMgr := coreauth.NewManager(nil, nil, hook)
+			authMgr.SetRetryConfig(0, 0, 0)
+			authMgr.RegisterExecutor(adapter)
+			auth := &coreauth.Auth{
+				ID:         authID,
+				Provider:   provider,
+				Status:     coreauth.StatusActive,
+				FileName:   authID + ".json",
+				Attributes: map[string]string{"type": "oauth"},
+				ModelStates: map[string]*coreauth.ModelState{
+					modelB: {Status: coreauth.StatusActive},
+				},
+			}
+			if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+				t.Fatalf("Register auth: %v", errReg)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+				{ID: modelA},
+				{ID: modelB},
+				{ID: modelC},
+			})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
+
+			opts := coreexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAI,
+				ResponseFormat: sdktranslator.FormatOpenAI,
+			}
+
+			before := time.Now()
+			_, errExecA := authMgr.Execute(context.Background(), []string{provider}, coreexecutor.Request{
+				Model:   modelA,
+				Payload: []byte(`{"model":"` + modelA + `"}`),
+			}, opts)
+			if errExecA == nil {
+				t.Fatal("Execute(modelA) returned nil error, want 429")
+			}
+			if execCalled != 1 {
+				t.Fatalf("execCalled after modelA = %d, want 1", execCalled)
+			}
+			if len(hook.results) != 1 || !hook.results[0].CredentialScope {
+				t.Fatalf("recorded result = %+v, want CredentialScope=true", hook.results)
+			}
+
+			var eventPayload []byte
+			select {
+			case eventPayload = <-subscriber:
+			case <-time.After(time.Second):
+				t.Fatal("timeout waiting for published error event")
+			}
+			statusCode := int(ojson.GetBytes(eventPayload, "status_code").Int())
+			eventCode := ojson.GetBytes(eventPayload, "code").String()
+			if statusCode != http.StatusTooManyRequests || eventCode != tc.wantCode {
+				t.Fatalf("error event status=%d code=%q, want 429 %q", statusCode, eventCode, tc.wantCode)
+			}
+			unavailable := ojson.GetBytes(eventPayload, "auth_status.unavailable").Bool()
+			quotaExceeded := ojson.GetBytes(eventPayload, "auth_status.quota.exceeded").Bool()
+			quotaReason := ojson.GetBytes(eventPayload, "auth_status.quota.reason").String()
+			if !unavailable || !quotaExceeded || quotaReason != "credential_quota" {
+				t.Fatalf("error event auth_status = %s, want unavailable with quota.reason=credential_quota", string(eventPayload))
+			}
+
+			updated, okAuth := authMgr.GetByID(authID)
+			if !okAuth || updated == nil {
+				t.Fatalf("GetByID(%q) missing", authID)
+			}
+			if !updated.Unavailable || !updated.Quota.Exceeded || updated.Quota.Reason != "credential_quota" {
+				t.Fatalf("updated auth quota = %+v (unavailable=%v), want unavailable with reason=credential_quota", updated.Quota, updated.Unavailable)
+			}
+			if !updated.Quota.NextRecoverAt.After(before.Add(110 * time.Second)) {
+				t.Fatalf("updated auth NextRecoverAt = %v, want > %v", updated.Quota.NextRecoverAt, before.Add(110*time.Second))
+			}
+			stateB := updated.ModelStates[modelB]
+			if stateB == nil || !stateB.Unavailable || !stateB.Quota.Exceeded || stateB.Quota.Reason != "credential_quota" {
+				t.Fatalf("sibling modelB state = %+v, want unavailable with reason=credential_quota", stateB)
+			}
+
+			// Sending requests for sibling modelB (pre-existing ModelState) and modelC (unvisited model)
+			// must NOT select the cooled credential again.
+			for _, siblingModel := range []string{modelB, modelC} {
+				_, errSibling := authMgr.Execute(context.Background(), []string{provider}, coreexecutor.Request{
+					Model:   siblingModel,
+					Payload: []byte(`{"model":"` + siblingModel + `"}`),
+				}, opts)
+				if errSibling == nil {
+					t.Fatalf("Execute(%s) returned nil error, want cooldown rejection", siblingModel)
+				}
+				if execCalled != 1 {
+					t.Fatalf("execCalled after %s = %d, want 1 (credential must not be selected again for sibling model)", siblingModel, execCalled)
+				}
+			}
+		})
+	}
+}
+
+func TestStreamCallbacksPreserveCredentialScopedPluginErrors(t *testing.T) {
+	detail := `{"code":"rate_limited","message":"account limited","http_status":429,"retry_after_seconds":60,"credential_scoped":true}`
+	for _, tc := range []struct {
+		name string
+		send func(host *Host, streamID string) error
+	}{
+		{"emit", func(host *Host, streamID string) error {
+			_, err := host.callHostStreamEmit(context.Background(), []byte(`{"stream_id":"`+streamID+`","error_detail":`+detail+`}`))
+			return err
+		}},
+		{"close", func(host *Host, streamID string) error {
+			_, err := host.callHostStreamClose([]byte(`{"stream_id":"` + streamID + `","error_detail":` + detail + `}`))
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New()
+			streamID, chunks, cleanup := host.streams.open(context.Background())
+			t.Cleanup(cleanup)
+			if err := tc.send(host, streamID); err != nil {
+				t.Fatalf("stream %s callback error = %v", tc.name, err)
+			}
+			chunk := <-chunks
+			if chunk.Err == nil {
+				t.Fatal("stream error was dropped")
+			}
+			var scoped interface{ IsCredentialScoped() bool }
+			if !errors.As(chunk.Err, &scoped) || !scoped.IsCredentialScoped() {
+				t.Fatalf("stream error %T does not report IsCredentialScoped() = true", chunk.Err)
+			}
+		})
+	}
+}
+
+func TestPluginExecutorStream429CredentialScopedCoolsEntireCredential(t *testing.T) {
+	coreauth.SetQuotaCooldownDisabled(false)
+
+	for _, tc := range []struct {
+		name   string
+		detail string
+	}{
+		{
+			name:   "rate_limited with credential_scoped",
+			detail: `{"code":"rate_limited","message":"account limited","http_status":429,"retry_after_seconds":90,"credential_scoped":true}`,
+		},
+		{
+			name:   "transient_rate_limit overridden by credential_scoped",
+			detail: `{"code":"transient_rate_limit","message":"account limited","http_status":429,"retry_after_seconds":90,"credential_scoped":true}`,
+		},
+		{
+			name:   "request_scoped overridden by credential_scoped",
+			detail: `{"code":"request_scoped","message":"account limited","http_status":429,"retry_after_seconds":90,"credential_scoped":true}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				provider = "plugin-provider-stream-cred-scope-" + tc.name
+				modelA   = "plugin-stream-model-a-" + tc.name
+				modelB   = "plugin-stream-model-b-" + tc.name
+				authID   = "auth-stream-cred-scope-" + tc.name
+			)
+			executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-stream-cred-scope-" + tc.name})
+			host := newHostWithRecords(executorRecord)
+
+			var streamCalls int
+			exec := &fakeExecutor{
+				identifier: provider,
+				executeStream: func(ctx context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+					streamCalls++
+					streamID, chunks, cleanup := host.streams.open(ctx)
+					if _, errClose := host.callHostStreamClose([]byte(`{"stream_id":"` + streamID + `","error_detail":` + tc.detail + `}`)); errClose != nil {
+						cleanup()
+						return pluginapi.ExecutorStreamResponse{}, errClose
+					}
+					return pluginapi.ExecutorStreamResponse{
+						Chunks: cleanupWhenStreamDone(ctx, chunks, cleanup),
+					}, nil
+				},
+			}
+			adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+				[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+			)
+			adapter.provider = provider
+
+			authMgr := coreauth.NewManager(nil, nil, nil)
+			authMgr.SetRetryConfig(0, 0, 0)
+			authMgr.RegisterExecutor(adapter)
+			auth := &coreauth.Auth{
+				ID:         authID,
+				Provider:   provider,
+				Status:     coreauth.StatusActive,
+				FileName:   authID + ".json",
+				Attributes: map[string]string{"type": "oauth"},
+			}
+			if _, errReg := authMgr.Register(context.Background(), auth); errReg != nil {
+				t.Fatalf("Register auth: %v", errReg)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+				{ID: modelA},
+				{ID: modelB},
+			})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
+
+			opts := coreexecutor.Options{
+				Stream:         true,
+				SourceFormat:   sdktranslator.FormatOpenAI,
+				ResponseFormat: sdktranslator.FormatOpenAI,
+			}
+
+			resStreamA, errStreamA := authMgr.ExecuteStream(context.Background(), []string{provider}, coreexecutor.Request{
+				Model:   modelA,
+				Payload: []byte(`{"model":"` + modelA + `","stream":true}`),
+			}, opts)
+			if errStreamA == nil {
+				if resStreamA == nil || resStreamA.Chunks == nil {
+					t.Fatal("ExecuteStream(modelA) returned nil error and nil chunks")
+				}
+				chunk := <-resStreamA.Chunks
+				errStreamA = chunk.Err
+			}
+			if errStreamA == nil {
+				t.Fatal("ExecuteStream(modelA) returned nil stream error, want 429")
+			}
+			if streamCalls != 1 {
+				t.Fatalf("streamCalls after modelA = %d, want 1", streamCalls)
+			}
+
+			updated, okAuth := authMgr.GetByID(authID)
+			if !okAuth || updated == nil {
+				t.Fatalf("GetByID(%q) missing", authID)
+			}
+			if !updated.Unavailable || !updated.Quota.Exceeded || updated.Quota.Reason != "credential_quota" {
+				t.Fatalf("updated auth quota = %+v (unavailable=%v), want unavailable with reason=credential_quota", updated.Quota, updated.Unavailable)
+			}
+
+			_, errStreamB := authMgr.ExecuteStream(context.Background(), []string{provider}, coreexecutor.Request{
+				Model:   modelB,
+				Payload: []byte(`{"model":"` + modelB + `","stream":true}`),
+			}, opts)
+			if errStreamB == nil {
+				t.Fatal("ExecuteStream(modelB) returned nil error, want cooldown rejection")
+			}
+			if streamCalls != 1 {
+				t.Fatalf("streamCalls after modelB = %d, want 1 (credential must not be selected again for sibling model)", streamCalls)
+			}
+		})
 	}
 }

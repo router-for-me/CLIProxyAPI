@@ -89,7 +89,55 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 	if table == nil {
 		table = &oauthModelAliasTable{}
 	}
-	m.oauthModelAlias.Store(table)
+	m.publishOAuthModelAliasAndReconcileStates(nil, table)
+}
+
+type oauthResolvedAliasRoute struct {
+	aliasKey  string
+	targetKey string
+}
+
+func (m *Manager) configuredOAuthAliasRoutes(auth *Auth) []oauthResolvedAliasRoute {
+	if m == nil || auth == nil {
+		return nil
+	}
+	channel := modelAliasChannel(auth)
+	if channel == "" {
+		return nil
+	}
+	seenAliases := make(map[string]struct{})
+	var routes []oauthResolvedAliasRoute
+	addAlias := func(alias string) {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			return
+		}
+		aliasLookup := canonicalModelLookupKey(alias)
+		if aliasLookup == "" {
+			return
+		}
+		if _, exists := seenAliases[aliasLookup]; exists {
+			return
+		}
+		seenAliases[aliasLookup] = struct{}{}
+		aliasKey := canonicalModelKey(alias)
+		if targetKey := m.selectionModelKeyForAuth(auth, alias); targetKey != "" && !sameCanonicalModelKey(aliasKey, targetKey) {
+			routes = append(routes, oauthResolvedAliasRoute{
+				aliasKey:  aliasKey,
+				targetKey: targetKey,
+			})
+		}
+	}
+	for _, entry := range OAuthModelAliasesFromAttributes(authAttributes(auth)) {
+		addAlias(entry.Alias)
+	}
+	raw := m.oauthModelAlias.Load()
+	if table, _ := raw.(*oauthModelAliasTable); table != nil && table.reverse != nil {
+		for _, entry := range table.reverse[channel] {
+			addAlias(entry.configAlias)
+		}
+	}
+	return routes
 }
 
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.

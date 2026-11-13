@@ -782,14 +782,22 @@ func generateSessionID() string {
 }
 
 func generateStableSessionID(payload []byte) string {
-	return generateStableSessionIDFromContents(util.GetGJSONBytesNoCopy(payload, "request.contents"))
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
+	if !contents.IsArray() {
+		contents = util.GetGJSONBytesNoCopy(payload, "contents")
+	}
+	return generateStableSessionIDFromContents(contents)
 }
 
 func generateStableSessionIDDoc(doc *ojson.Doc) string {
 	if doc == nil {
 		return generateSessionID()
 	}
-	return generateStableSessionIDFromContents(doc.Get("request.contents"))
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		contents = doc.Get("contents")
+	}
+	return generateStableSessionIDFromContents(contents)
 }
 
 func generateStableSessionIDFromContents(contents ojson.Result) string {

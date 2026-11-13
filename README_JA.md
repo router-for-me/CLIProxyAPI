@@ -40,7 +40,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://devin.ai/cli">Devin</a></td>
-        <td>Devinのモデル（SWE-2、GPT-6 Astra、Claude Fable 5.1など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
+        <td>Devinのモデル（SWE-2、SWE-2 Flash、GPT-6 Astra、Claude Fable 5.1など）。<code>--devin-login</code>でDevinアカウントに接続し、そのアカウントで利用可能なモデルにリクエストを送れます。</td>
     </tr>
 </tbody>
 </table>
@@ -113,6 +113,14 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <tr>
 <td width="180"><a href="https://x.com/chenju_ai"><img src="./assets/chenju.png" alt="Chenju" width="150"></a></td>
 <td><a href="https://x.com/chenju_ai">陈局 (Chenju)</a> による本プロジェクトへのご支援に感謝します！おそらくこの欄で唯一、登録リンクもプロモーションコードもない枠です。優れたオープンソースプロジェクトには対価が支払われるべきという想いから、メンテナーに敬意を表して一杯おごります。X の <a href="https://x.com/chenju_ai">@chenju_ai</a> で気軽に雑談しましょう。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://origincoder.com/"><img src="./assets/origincoder.png" alt="OriginCoder" width="150"></a></td>
+<td><strong><a href="https://origincoder.com">OriginCoder</a>は、低遅延で安定した接続を提供し、大量の同時リクエストにも対応する企業向けAIゲートウェイです。</strong><strong>Claude MaxとGPT Proのアカウントプールは、構築から運用まですべて自社で管理。モデル本来の性能で利用できるプールを公式料金の30〜40％で提供し、各プールの性能低下の有無もリアルタイムで公開しています。</strong><strong>GPT、Claude、Grok、Gemini-4-Carbon、DeepSeekなど、世界各国の主要AIモデル</strong>に対応し、<strong>Claude CodeやCodex</strong>などの開発ツールからも利用できます。<strong>AIチャット、コーディング支援、画像生成、動画生成</strong>にも対応しています。海外を拠点に現地の法令に従ってサービスを運営しており、<strong>2025年8月のサービス開始以来、15,000を超えるお客様にご利用いただいています</strong>。料金はすべて公開しており、<strong>超過料金はかかりません。10人民元からチャージできます</strong>。<strong>24時間365日の監視、アカウントプールの冗長化、複数ノード間の自動切り替え</strong>により、アクセスが集中する時間帯も安定した接続を維持します。<a href="https://origincoder.com/monitor">サービスの稼働状況はステータスページで公開しています</a>。<strong>会話の内容は保存せず、お客様のプライバシーを守ります</strong>。<strong>法人名義でのお支払いと請求書の発行</strong>にも対応しています。カスタマーサポートへのお問い合わせには<strong>3分以内に返信</strong>し、技術チームは<strong>24時間体制で対応</strong>します。中国本土からご利用の方には、<a href="https://cn.origincoder.com">アクセスを高速化した専用サイト</a>をご用意しています。</td>
+</tr>
+<tr>
+<td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
+<td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜中国発の OpenRouter 型サービス。中国・海外の主要 AI モデルを、1つの API で。</strong> <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong> に対応。複数サプライヤーから接続先を自動選択し、障害時は別の接続先へ切り替えます。<strong>失敗したリクエストは課金なし。料金を公開し、請求額の計算も確認できます。</strong> Claude Code、Codex などの開発ツールに対応し、<strong><a href="https://visioncoder.cn/me/keys">CC Switch と WorkBuddy へワンクリックでインポート</a></strong>。企業は一括購入したサブスクリプションをメンバーごとに割り当て、回収・再割り当ても可能。法人名義の銀行振込と請求書発行にも対応します。<strong>サプライヤー募集中：モデルの接続先を登録し、品質に応じてトラフィックを獲得。法人向け月次精算・利用明細の確認に対応し、ユーザーへの課金・請求書発行は VisionCoder が担当します。</strong> <a href="https://visioncoder.cn/challenge">VibeCoding チャレンジ</a>も開催。各回の賞品は <strong>合計2,350元相当の追加利用クレジット</strong>、最優秀賞は <strong>1,000元相当の追加利用クレジット</strong>。</td>
 </tr>
 </tbody>
 </table>
@@ -300,7 +308,7 @@ Cloudflare ベースの LLM ゲートウェイ兼プロキシサーバー。CLIP
 
 ### [Hermes CLIProxyAPI Provider](https://github.com/duu261/hermes-cliproxyapi-provider)
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) 向けのモデルプロバイダープラグイン。CLIProxyAPI のプロバイダーごとに Hermes プロバイダーを 1 つ登録し、それぞれの executor が受け付けるプロトコル（Anthropic Messages、Responses、Chat Completions）を使います。コンテキストウィンドウと推論レベルは CLIProxyAPI から取得します。正確なプロバイダーグループ分けのための読み取り専用 Management API 照会はオプションです。[Hermes プラグインカタログ](https://hermes-agent.nousresearch.com/docs/plugins/cliproxyapi-provider)に掲載されています：`hermes plugins install cliproxyapi-provider`。
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) 向けのモデルプロバイダープラグイン。CLIProxyAPI のプロバイダーごとに Hermes プロバイダーを 1 つ登録し、それぞれの executor が受け付けるプロトコル（Anthropic Messages、Responses、Chat Completions）を使います。コンテキストウィンドウと推論レベルは CLIProxyAPI から取得します。正確なプロバイダーグループ分けのための読み取り専用 Management API 照会はオプションです。コンパニオンプラグインの `/cpa` チャットコマンドで、各プールのアカウント状態と、必要に応じて各アカウントのリアルタイムのクォータを確認できます。[Hermes プラグインカタログ](https://hermes-agent.nousresearch.com/docs/plugins)に掲載されています：`hermes plugins install cliproxyapi-provider` および `hermes plugins install cpa-status`。
 
 ### [Ebb](https://github.com/lucasnsaraujo/ebb)
 
