@@ -110,7 +110,11 @@ func TestHTTPSubmissionClaudeAcceptedErrorAndMalformedStart(t *testing.T) {
 			if errResponse != nil {
 				t.Fatal(errResponse)
 			}
-			defer response.Body.Close()
+			defer func() {
+				if errClose := response.Body.Close(); errClose != nil {
+					t.Errorf("response body close: %v", errClose)
+				}
+			}()
 			body, errRead := io.ReadAll(response.Body)
 			if errRead != nil {
 				t.Fatal(errRead)
