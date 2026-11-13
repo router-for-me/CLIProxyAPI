@@ -93,22 +93,8 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 		})
 		return
 	}
-	action := strings.TrimPrefix(request.Action, "/")
-
-	availableModels := h.Models()
-	models := make([]map[string]any, 0, len(availableModels))
-	for _, model := range availableModels {
-		copyModel := make(map[string]any, len(model))
-		for key, value := range model {
-			copyModel[key] = value
-		}
-		if name, ok := copyModel["name"].(string); ok && name != "" && !strings.HasPrefix(name, "models/") {
-			copyModel["name"] = "models/" + name
-		}
-		models = append(models, copyModel)
-	}
-	c.Set(handlers.ModelDetailIDContextKey, action)
-	h.WriteModelListResponse(c, h.HandlerType(), gin.H{"models": models})
+	c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(request.Action, "/"))
+	h.GeminiModels(c)
 }
 
 // GeminiHandler handles POST requests for Gemini API operations.
