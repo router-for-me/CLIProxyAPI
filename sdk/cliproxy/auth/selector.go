@@ -1268,10 +1268,6 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
-	// A suspended account refuses every model, including ones it has no state for yet.
-	if until, suspended := activeAccountSuspension(auth, now); suspended {
-		return true, blockReasonCooldown, until
-	}
 	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
 		next := authForce
 		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(next) {

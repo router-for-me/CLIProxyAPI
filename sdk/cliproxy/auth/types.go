@@ -155,14 +155,6 @@ type Auth struct {
 	forceCooldownUntil  time.Time `json:"-"`
 	credQuotaForceUntil time.Time `json:"-"`
 	forceCooldownSeeded bool      `json:"-"`
-	// accountSuspension marks an account the upstream suspended, apart from
-	// LastError and model states, which other errors overwrite. Persisted via
-	// CooldownStateRecord.AccountSuspension.
-	accountSuspension *AccountSuspensionRecord `json:"-"`
-	// accountSuspensionClearedSeq is the request-order watermark of the success
-	// that last cleared a suspension; older suspension responses are stale.
-	// Runtime only.
-	accountSuspensionClearedSeq uint64 `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -430,11 +422,6 @@ type ModelState struct {
 	// CooldownStateRecord.CredentialQuotaPropagated across restarts,
 	// including for shadow-less reporting models.
 	credentialQuotaPropagated bool `toml:"credential_quota_propagated,omitempty"`
-	// suspensionShadow holds the model's own cooldown layer from before an
-	// account suspension covered it, in the same shape as credentialQuotaShadow,
-	// so clearing the suspension can reinstate a cooldown that outlives it.
-	// Persisted via CooldownStateRecord.SuspensionShadow.
-	suspensionShadow *ModelState `json:"-"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -508,7 +495,6 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
-	copyAuth.accountSuspension = a.accountSuspension.clone()
 	if a.LastError != nil {
 		copyErr := *a.LastError
 		copyAuth.LastError = &copyErr
@@ -790,9 +776,6 @@ func (m *ModelState) Clone() *ModelState {
 	if m.credentialQuotaShadow != nil {
 		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
 	}
-	if m.suspensionShadow != nil {
-		copyState.suspensionShadow = m.suspensionShadow.Clone()
-	}
 	return &copyState
 }
 
@@ -804,7 +787,6 @@ func (m *ModelState) cloneShallow() *ModelState {
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
 	copyState.credentialQuotaShadow = nil
-	copyState.suspensionShadow = nil
 	if m.LastError != nil {
 		copyState.LastError = &Error{
 			Code:       m.LastError.Code,

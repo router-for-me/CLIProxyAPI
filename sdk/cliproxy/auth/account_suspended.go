@@ -2,7 +2,6 @@ package auth
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -10,293 +9,33 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-// accountSuspendedCooldown replaces the 30 minute 403 cooldown for a suspended
-// account. The upstream refuses every call until the owner acts, so a shorter
-// retry only adds failed calls and log noise.
-const accountSuspendedCooldown = 24 * time.Hour
-
 const accountSuspendedMessage = "account suspended for a Terms of Service violation"
 
 func isAccountSuspendedResultError(err *Error) bool {
 	return err != nil && err.Code == ErrorCodeAccountSuspended
 }
 
-// AccountSuspensionRecord marks a credential whose account the upstream has
-// suspended. Every suspension response sets it, other errors never touch it,
-// and only a success, disabling the credential, or the cooldown reset
-// (POST /v8/management/routing/cooldown/reset, also open to plugins) clears
-// it. It is persisted with the auth-level cooldown record.
-type AccountSuspensionRecord struct {
-	// RecordedAt is when the first suspension response arrived.
-	RecordedAt time.Time `json:"recorded_at"`
-	// Until is when the credential may be tried again; zero with cooling off.
-	Until time.Time `json:"until,omitempty"`
-	// AppealURL is the checked appeal link from the response, if any.
-	AppealURL string `json:"appeal_url,omitempty"`
-	// seq is the request-order watermark: results of requests dispatched at
-	// or before it predate the suspension. Runtime only, zero after a restart.
-	seq uint64
-}
-
-func (r *AccountSuspensionRecord) clone() *AccountSuspensionRecord {
-	if r == nil {
-		return nil
-	}
-	copyRecord := *r
-	return &copyRecord
-}
-
-// accountSuspensionRuntimeEqual also compares the runtime watermark.
-func accountSuspensionRuntimeEqual(a, b *AccountSuspensionRecord) bool {
-	return accountSuspensionRecordEqual(a, b) && (a == nil || a.seq == b.seq)
-}
-
-// hasAccountSuspension reports whether the credential carries a suspension
-// no success has cleared yet, whether or not it is cooling.
-func hasAccountSuspension(auth *Auth) bool {
-	return auth != nil && auth.accountSuspension != nil
-}
-
-// activeAccountSuspension returns when a suspended credential may be tried
-// again. It reports false once that time has passed or cooling is off.
-func activeAccountSuspension(auth *Auth, now time.Time) (time.Time, bool) {
-	if !hasAccountSuspension(auth) || !auth.accountSuspension.Until.After(now) {
-		return time.Time{}, false
-	}
-	return auth.accountSuspension.Until, true
-}
-
-// staleAccountSuspensionResult reports whether a result comes from a request
-// dispatched before the last suspension change, so it proves nothing about the
-// account: any other result sent before the suspension was recorded, or a
-// suspension sent before the success that cleared the last one.
-func staleAccountSuspensionResult(auth *Auth, result Result) bool {
-	if auth == nil || result.ExecutionSeq == 0 {
-		return false
-	}
-	if isAccountSuspendedResultError(result.Error) {
-		return result.ExecutionSeq <= auth.accountSuspensionClearedSeq
-	}
-	return hasAccountSuspension(auth) && auth.accountSuspension.seq > 0 && result.ExecutionSeq <= auth.accountSuspension.seq
-}
-
-// recordAccountSuspension sets or refreshes the credential's suspension
-// record. It reports whether the record is new, so the warning logs once.
-func recordAccountSuspension(auth *Auth, resultErr *Error, seq uint64, now time.Time, disableCooling bool) bool {
-	record := auth.accountSuspension
-	created := record == nil
-	if created {
-		record = &AccountSuspensionRecord{RecordedAt: now}
-		auth.accountSuspension = record
-	}
-	if seq > record.seq {
-		record.seq = seq
-	}
-	if disableCooling {
-		record.Until = time.Time{}
-	} else if next := now.Add(accountSuspendedCooldown); next.After(record.Until) {
-		record.Until = next
-	}
-	if appealURL := accountSuspendedAppealURL(resultErr.Message); appealURL != "" {
-		record.AppealURL = appealURL
-	}
-	return created
-}
-
-// showAccountSuspension puts the suspension back on the credential's visible
-// status when a reset or recovery path cleared it while the record stands. A
-// terminal 401 keeps showing, since it needs the owner too. It reports
-// whether anything changed.
-func showAccountSuspension(auth *Auth, now time.Time) bool {
-	if !hasAccountSuspension(auth) || hasUnauthorizedAuthFailure(auth) {
-		return false
-	}
-	if auth.LastError != nil && !isAccountSuspendedResultError(auth.LastError) {
-		return false
-	}
-	changed := false
-	if auth.LastError == nil {
-		auth.LastError = &Error{Code: ErrorCodeAccountSuspended, HTTPStatus: http.StatusForbidden, Message: accountSuspendedMessage}
-		changed = true
-	}
-	if message := accountSuspendedStatusMessage(auth.accountSuspension.Until.IsZero()); auth.StatusMessage != message || auth.Status != StatusError {
-		auth.StatusMessage = message
-		auth.Status = StatusError
-		changed = true
-	}
-	if until, active := activeAccountSuspension(auth, now); active && (!auth.Unavailable || auth.NextRetryAfter.Before(until)) {
-		auth.Unavailable = true
-		auth.NextRetryAfter = until
-		changed = true
-	}
-	return changed
-}
-
-// restoreAccountSuspension brings a saved suspension record back. It runs
-// ahead of the ordinary cooldown guards, so a credential that is terminally
-// unauthorized or not cooling still gets it. It reports whether it did.
-func restoreAccountSuspension(auth *Auth, saved *AccountSuspensionRecord, now time.Time) bool {
-	if auth == nil || saved == nil || !saved.Until.After(now) {
-		return false
-	}
-	if auth.accountSuspension != nil && !saved.Until.After(auth.accountSuspension.Until) {
-		return false
-	}
-	restored := saved.clone()
-	if auth.accountSuspension != nil {
-		restored.seq = auth.accountSuspension.seq
-	}
-	auth.accountSuspension = restored
-	return true
-}
-
-// liftAccountSuspension drops the suspension record when the credential is
-// disabled or reset by hand. It reports whether there was one.
-func liftAccountSuspension(auth *Auth) bool {
-	if !hasAccountSuspension(auth) {
-		return false
-	}
-	auth.accountSuspension = nil
-	return true
-}
-
-// dropAccountSuspensionCooldown keeps a recorded suspension once cooling is
-// switched off, but drops its deadline and the retry time from the status. It
-// reports whether a deadline was dropped.
-func dropAccountSuspensionCooldown(auth *Auth) bool {
-	if !hasAccountSuspension(auth) {
-		return false
-	}
-	dropped := !auth.accountSuspension.Until.IsZero()
-	auth.accountSuspension.Until = time.Time{}
-	message := accountSuspendedStatusMessage(true)
-	if isAccountSuspendedResultError(auth.LastError) {
-		auth.StatusMessage = message
-	}
-	for _, state := range auth.ModelStates {
-		if state != nil && isAccountSuspendedResultError(state.LastError) {
-			state.StatusMessage = message
-		}
-	}
-	return dropped
-}
-
-// applyAccountSuspension records a suspension on every model state of the
-// credential, and on the credential itself when recordOnAuth is set, because
-// the upstream refuses every model on the account alike. A model that was
-// already cooling keeps that layer under the suspension, the way
-// credentialQuotaShadow keeps one under a credential quota. With cooling off
-// it records the status and leaves availability alone.
-func applyAccountSuspension(auth *Auth, resultErr *Error, now time.Time, disableCooling, recordOnAuth bool) {
-	if auth == nil {
-		return
-	}
-	message := accountSuspendedStatusMessage(disableCooling)
-	var next time.Time
-	if !disableCooling {
-		next = now.Add(accountSuspendedCooldown)
-	}
-	for _, state := range auth.ModelStates {
-		if state == nil || state.Status == StatusDisabled {
-			continue
-		}
-		if !isAccountSuspendedResultError(state.LastError) {
-			state.suspensionShadow = nil
-			if isModelStateActiveCooldown(state, now) {
-				state.suspensionShadow = state.Clone()
-			}
-		}
-		state.Status = StatusError
-		state.LastError = cloneError(resultErr)
-		state.StatusMessage = message
-		state.UpdatedAt = now
-		if !disableCooling {
-			state.Unavailable = true
-			if next.After(state.NextRetryAfter) {
-				state.NextRetryAfter = next
-			}
-		}
-	}
-	if !recordOnAuth {
-		return
-	}
-	auth.Status = StatusError
-	auth.LastError = cloneError(resultErr)
-	auth.StatusMessage = message
-	auth.UpdatedAt = now
-	if !disableCooling {
-		auth.Unavailable = true
-		if next.After(auth.NextRetryAfter) {
-			auth.NextRetryAfter = next
-		}
-	}
-}
-
-// clearAccountSuspension lifts the suspension from the credential and every
-// model state once a success shows the account works again. A model whose own
-// earlier cooldown is still running gets that exact stack back; the rest
-// reset. A suspension from a request sent at or before successSeq is then
-// stale. It reports whether anything was cleared.
-func clearAccountSuspension(auth *Auth, successSeq uint64, now time.Time) bool {
-	if auth == nil {
-		return false
-	}
-	cleared := liftAccountSuspension(auth)
-	if cleared && successSeq > auth.accountSuspensionClearedSeq {
-		auth.accountSuspensionClearedSeq = successSeq
-	}
-	for _, state := range auth.ModelStates {
-		if state == nil || state.Status == StatusDisabled {
-			continue
-		}
-		if !isAccountSuspendedResultError(state.LastError) {
-			// A newer failure already replaced the suspension on this model.
-			if state.suspensionShadow != nil {
-				state.suspensionShadow = nil
-				cleared = true
-			}
-			continue
-		}
-		if shadow := state.suspensionShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
-			*state = *shadow.Clone()
-			state.suspensionShadow = nil
-			state.UpdatedAt = now
-		} else {
-			resetModelState(state, now)
-		}
-		cleared = true
-	}
-	if isAccountSuspendedResultError(auth.LastError) {
-		auth.LastError = nil
-		auth.StatusMessage = ""
-		auth.Status = StatusActive
-		auth.Unavailable = false
-		auth.NextRetryAfter = time.Time{}
-		auth.UpdatedAt = now
-		cleared = true
-	}
-	if cleared && len(auth.ModelStates) > 0 {
-		updateAggregatedAvailability(auth, now)
-	}
-	return cleared
-}
-
 // accountSuspendedStatusMessage describes the suspension for the status
-// message. The appeal link stays out of it: the management API redacts URLs in
-// status messages, so the link goes to the log instead.
-func accountSuspendedStatusMessage(disableCooling bool) string {
-	if disableCooling {
+// message, with the retry the executor attached when the credential cools. The
+// appeal link stays out of it: the management API redacts URLs in status
+// messages, so the link goes to the log instead.
+func accountSuspendedStatusMessage(retryAfter *time.Duration, cooling bool) string {
+	if !cooling || retryAfter == nil || *retryAfter <= 0 {
 		return accountSuspendedMessage
 	}
-	return fmt.Sprintf("%s; retrying after %dh", accountSuspendedMessage, int(accountSuspendedCooldown/time.Hour))
+	wait := retryAfter.Round(time.Second).String()
+	if *retryAfter%time.Hour == 0 {
+		wait = fmt.Sprintf("%dh", int(*retryAfter/time.Hour))
+	}
+	return accountSuspendedMessage + "; retrying after " + wait
 }
 
-// accountSuspendedLogMessage is the one warning a new suspension record logs.
-// The log formatter prints only known fields, so the appeal link goes in the message.
-func accountSuspendedLogMessage(record *AccountSuspensionRecord) string {
-	message := accountSuspendedStatusMessage(record.Until.IsZero())
-	if record.AppealURL != "" {
-		message += "; appeal: " + record.AppealURL
+// accountSuspendedLogMessage is the one warning a new suspension logs. The log
+// formatter prints only known fields, so the appeal link goes in the message.
+func accountSuspendedLogMessage(retryAfter *time.Duration, cooling bool, upstreamMessage string) string {
+	message := accountSuspendedStatusMessage(retryAfter, cooling)
+	if appealURL := accountSuspendedAppealURL(upstreamMessage); appealURL != "" {
+		message += "; appeal: " + appealURL
 	}
 	return message
 }

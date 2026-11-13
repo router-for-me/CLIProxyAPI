@@ -114,7 +114,6 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	cooldownStateChanged := normalizeModelStates(auth)
 	seedInitialForceCooldownDeadlines(auth)
 	if auth.Disabled || auth.Status == StatusDisabled {
-		cooldownStateChanged = liftAccountSuspension(auth) || cooldownStateChanged
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	} else if m.cooldownDisabledForAuth(auth) {
 		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
@@ -134,17 +133,6 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.RegistrationEpoch = m.authEpochs[auth.ID]
 	if existing, exists := m.auths[auth.ID]; exists && existing != nil {
 		auth.CredentialVersion = max(auth.CredentialVersion, existing.CredentialVersion) + 1
-		// Registering a live credential again does not lift its account suspension.
-		if auth.accountSuspension == nil && existing.accountSuspension != nil &&
-			!auth.Disabled && auth.Status != StatusDisabled && !existing.Disabled && existing.Status != StatusDisabled {
-			auth.accountSuspension = existing.accountSuspension.clone()
-			if m.cooldownDisabledForAuth(auth) {
-				dropAccountSuspensionCooldown(auth)
-			}
-			showAccountSuspension(auth, now)
-			cooldownStateChanged = true
-		}
-		auth.accountSuspensionClearedSeq = max(auth.accountSuspensionClearedSeq, existing.accountSuspensionClearedSeq)
 	} else if auth.CredentialVersion == 0 {
 		auth.CredentialVersion = 1
 	}
@@ -413,10 +401,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	cooldownStateChanged := false
 	now := time.Now()
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-		// The suspension record is runtime state: the live auth holds the
-		// current one, whatever object a refresh or file reload hands in.
-		auth.accountSuspension = existing.accountSuspension.clone()
-		auth.accountSuspensionClearedSeq = existing.accountSuspensionClearedSeq
 		if isFileSnapshot {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -557,10 +541,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 				auth.Status = existing.Status
 			}
 		}
-		// A token refresh or recovery above may have cleared the visible status.
-		if showAccountSuspension(auth, now) {
-			cooldownStateChanged = true
-		}
 	} else {
 		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 		applyPreservedRenewalState(existing, auth, mode, now)
@@ -583,7 +563,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged
 	seedInitialForceCooldownDeadlines(auth)
 	if auth.Disabled || auth.Status == StatusDisabled {
-		cooldownStateChanged = liftAccountSuspension(auth) || cooldownStateChanged
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	} else if m.cooldownDisabledForAuth(auth) {
 		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
@@ -616,13 +595,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
-	// A change made to the live record during the save must not bring the
-	// suspension back onto a credential this update disables.
-	if auth.Disabled || auth.Status == StatusDisabled {
-		if liftAccountSuspension(auth) {
-			cooldownStateChanged = true
-		}
-	}
 	if m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) {
 		cooldownStateChanged = true
 		updateAggregatedAvailability(auth, now)

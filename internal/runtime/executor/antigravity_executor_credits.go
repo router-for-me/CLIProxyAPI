@@ -355,15 +355,28 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
+// antigravityAccountSuspendedRetry is how long a suspended account cools. Cloud
+// Code refuses every call until the owner acts, so a shorter retry only adds
+// failed calls and log noise.
+const antigravityAccountSuspendedRetry = 24 * time.Hour
+
 // antigravityAccountSuspendedError marks the 403 Cloud Code returns on every
-// call once Google suspends the account for a Terms of Service violation, so the
-// conductor cools the whole credential instead of retrying it every 30 minutes.
+// call once Google suspends the account for a Terms of Service violation. It is
+// credential scoped with a 24h retry, so the conductor cools the whole
+// credential the way it does for a credential quota.
 type antigravityAccountSuspendedError struct {
 	statusErr
 }
 
 func (antigravityAccountSuspendedError) ErrorCode() string {
 	return cliproxyauth.ErrorCodeAccountSuspended
+}
+
+func newAntigravityAccountSuspendedError(err statusErr) antigravityAccountSuspendedError {
+	retry := antigravityAccountSuspendedRetry
+	err.retryAfter = &retry
+	err.credentialScoped = true
+	return antigravityAccountSuspendedError{statusErr: err}
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) error {
@@ -374,7 +387,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) error {
 		}
 	}
 	if helps.IsAntigravityAccountSuspended(statusCode, body) {
-		return antigravityAccountSuspendedError{statusErr: err}
+		return newAntigravityAccountSuspendedError(err)
 	}
 	return err
 }

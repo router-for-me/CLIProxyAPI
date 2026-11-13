@@ -288,10 +288,6 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 				if isModelStateActiveCooldown(state, now) {
 					continue
 				}
-				// A suspension stays until a success clears it, cooling or not.
-				if hasAccountSuspension(auth) && isAccountSuspendedResultError(state.LastError) {
-					continue
-				}
 				clonedState := state.Clone()
 				resetModelState(clonedState, now)
 				candidateAuth.ModelStates[modelKey] = clonedState
@@ -310,7 +306,6 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 						auth.StatusMessage = ""
 						auth.Status = StatusActive
 					}
-					showAccountSuspension(auth, now)
 					auth.Generation++
 					auth.UpdatedAt = now
 					if errPersist := m.persistLocked(context.Background(), auth); errPersist != nil {

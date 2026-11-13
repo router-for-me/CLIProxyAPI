@@ -24,7 +24,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	log "github.com/sirupsen/logrus"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -299,8 +298,7 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 		}
 		var cleared bool
 		if isDisabled {
-			lifted := liftAccountSuspension(auth)
-			cleared = clearCooldownStateForAuth(auth, now) || lifted
+			cleared = clearCooldownStateForAuth(auth, now)
 		} else {
 			cleared = clearDisabledCooldownStateForAuth(auth, now)
 		}
@@ -387,18 +385,8 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		return false
 	}
 	auth := m.auths[authID]
-	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || (m.cooldownDisabledForAuth(auth) && !isForceCooldownRecordAt(record, now)) || hasUnauthorizedAuthFailure(auth) {
 		return false
-	}
-	// The account suspension comes back whatever else the credential is
-	// going through, so a later save never drops it.
-	suspensionRestored := strings.TrimSpace(record.Model) == "" && restoreAccountSuspension(auth, record.AccountSuspension, now)
-	if (m.cooldownDisabledForAuth(auth) && !isForceCooldownRecordAt(record, now)) || hasUnauthorizedAuthFailure(auth) {
-		if suspensionRestored {
-			showAccountSuspension(auth, now)
-			auth.Generation++
-		}
-		return suspensionRestored
 	}
 	updatedAt := record.UpdatedAt
 	if updatedAt.IsZero() {
@@ -505,7 +493,6 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			}
 			auth.LastError = cloneError(record.LastError)
 		}
-		showAccountSuspension(auth, now)
 		return true
 	}
 
@@ -606,17 +593,6 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		if state.credentialQuotaShadow != nil && state.credentialQuotaShadow.NextRetryAfter.After(state.NextRetryAfter) {
 			state.NextRetryAfter = state.credentialQuotaShadow.NextRetryAfter
 		}
-	}
-	// The model's own cooldown beneath an account suspension comes back with it.
-	if layer := record.SuspensionShadow; layer != nil && layer.State != nil && isAccountSuspendedResultError(state.LastError) {
-		restored := layer.State.cloneShallow()
-		restored.Quota.cooldownEvaluated = restored.Quota.Exceeded
-		restored.credentialQuotaPropagated = layer.CredentialQuotaPropagated
-		if layer.IndependentState != nil {
-			restored.credentialQuotaShadow = layer.IndependentState.cloneShallow()
-			restored.credentialQuotaShadow.Quota.cooldownEvaluated = restored.credentialQuotaShadow.Quota.Exceeded
-		}
-		state.suspensionShadow = mergeModelState(state.suspensionShadow.Clone(), restored)
 	}
 	auth.forceCooldownSeeded = true
 	auth.Generation++
@@ -821,8 +797,6 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if auth == nil || hasUnauthorizedAuthFailure(auth) {
 		return false
 	}
-	// Switching cooling off keeps a recorded suspension but drops its deadline.
-	suspensionDropped := dropAccountSuspensionCooldown(auth)
 	seedInitialForceCooldownDeadlines(auth)
 
 	keepCredQuotaForce := auth.Quota.Exceeded &&
@@ -871,9 +845,9 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 				auth.Generation++
 				auth.UpdatedAt = now
 			}
-			return changed || suspensionDropped
+			return changed
 		}
-		return clearCooldownStateForAuth(auth, now) || suspensionDropped
+		return clearCooldownStateForAuth(auth, now)
 	}
 
 	savedAuthNextRetry := combinedAuthForceUntil
@@ -955,7 +929,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			}
 			continue
 		}
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated || !state.forceCooldownUntil.IsZero() || state.suspensionShadow != nil {
+		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated || !state.forceCooldownUntil.IsZero() {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
 			applyCooldownFields(&state.Quota, QuotaState{})
@@ -963,7 +937,6 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			state.forceCooldownUntil = time.Time{}
 			state.credentialQuotaShadow = nil
 			state.credentialQuotaPropagated = false
-			state.suspensionShadow = nil
 			state.UpdatedAt = now
 			changed = true
 		}
@@ -1004,7 +977,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		auth.Generation++
 		auth.UpdatedAt = now
 	}
-	return changed || suspensionDropped
+	return changed
 }
 
 func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
@@ -1031,7 +1004,6 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		}
 		state.forceCooldownUntil = time.Time{}
 		state.cooldownRecordedSeq = 0
-		state.suspensionShadow = nil
 		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
@@ -1112,8 +1084,7 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 			resetModelState(state, now)
 		}
 	}
-	lifted := liftAccountSuspension(auth)
-	if clearCooldownStateForAuth(auth, now) || lifted {
+	if clearCooldownStateForAuth(auth, now) {
 		if len(models) == 0 {
 			models = append(models, registeredModels...)
 		}
@@ -1250,30 +1221,8 @@ func (m *Manager) cooldownStateRecordsForAuthLocked(auth *Auth, now time.Time) [
 	}
 	coolingDisabled := m.cooldownDisabledForAuth(auth)
 	records := make([]CooldownStateRecord, 0, 1+len(auth.ModelStates))
-	authRecord, hasAuthRecord := authCooldownStateRecord(auth, now)
-	hasAuthRecord = hasAuthRecord && (!coolingDisabled || isForceCooldownRecordAt(authRecord, now))
-	// An active suspension always has an auth-level record to ride on.
-	if until, suspended := activeAccountSuspension(auth, now); suspended && !coolingDisabled {
-		if !hasAuthRecord {
-			authRecord = CooldownStateRecord{
-				Provider:               strings.TrimSpace(auth.Provider),
-				AuthID:                 auth.ID,
-				AuthFile:               cooldownAuthFile(auth),
-				Status:                 "cooling",
-				NextRetryAfter:         until,
-				Reason:                 accountSuspendedStatusMessage(false),
-				UpdatedAt:              auth.accountSuspension.RecordedAt,
-				ForceCooldownEvaluated: true,
-			}
-			hasAuthRecord = true
-		}
-		authRecord.AccountSuspension = auth.accountSuspension.clone()
-		if until.After(authRecord.NextRetryAfter) {
-			authRecord.NextRetryAfter = until
-		}
-	}
-	if hasAuthRecord {
-		records = append(records, authRecord)
+	if record, ok := authCooldownStateRecord(auth, now); ok && (!coolingDisabled || isForceCooldownRecordAt(record, now)) {
+		records = append(records, record)
 	}
 	for model, state := range auth.ModelStates {
 		if record, ok := modelCooldownStateRecord(auth, model, state, now); ok && (!coolingDisabled || isForceCooldownRecordAt(record, now)) {
@@ -1325,25 +1274,7 @@ func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
 	if !maps.Equal(a.CooldownSignals, b.CooldownSignals) || !maps.Equal(a.IndependentCooldownSignals, b.IndependentCooldownSignals) {
 		return false
 	}
-	return cooldownIndependentStateEqual(a.IndependentState, b.IndependentState) &&
-		suspendedModelLayerEqual(a.SuspensionShadow, b.SuspensionShadow) &&
-		accountSuspensionRecordEqual(a.AccountSuspension, b.AccountSuspension)
-}
-
-func suspendedModelLayerEqual(a, b *SuspendedModelLayer) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.CredentialQuotaPropagated == b.CredentialQuotaPropagated &&
-		cooldownIndependentStateEqual(a.State, b.State) &&
-		cooldownIndependentStateEqual(a.IndependentState, b.IndependentState)
-}
-
-func accountSuspensionRecordEqual(a, b *AccountSuspensionRecord) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return a.RecordedAt.Equal(b.RecordedAt) && a.Until.Equal(b.Until) && a.AppealURL == b.AppealURL
+	return cooldownIndependentStateEqual(a.IndependentState, b.IndependentState)
 }
 
 func cooldownIndependentStateEqual(a, b *ModelState) bool {
@@ -1457,12 +1388,6 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		}
 	}
 	record.CredentialQuotaPropagated = state.credentialQuotaPropagated
-	if shadow := state.suspensionShadow; shadow != nil {
-		record.SuspensionShadow = &SuspendedModelLayer{State: shadow.cloneShallow(), CredentialQuotaPropagated: shadow.credentialQuotaPropagated}
-		if shadow.credentialQuotaShadow != nil {
-			record.SuspensionShadow.IndependentState = shadow.credentialQuotaShadow.cloneShallow()
-		}
-	}
 	return record, true
 }
 
@@ -1543,7 +1468,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
 	accountSuspensionLog := ""
-	accountSuspensionChanged := false
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
 	rejectsToken := !result.Success && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error))
@@ -1595,6 +1519,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Failed++
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+		// One warning per suspension: later reports, until something else
+		// replaces it, find the suspension already recorded.
+		if !result.Success && isAccountSuspendedResultError(result.Error) && !isAccountSuspendedResultError(auth.LastError) &&
+			(modelState == nil || !isAccountSuspendedResultError(modelState.LastError)) {
+			accountSuspensionLog = accountSuspendedLogMessage(result.RetryAfter, !m.cooldownDisabledForAuth(auth), result.Error.Message)
+		}
 
 		// retainModelCooldown pins a still-live model cooldown against a success
 		// from an execution dispatched before that cooldown was recorded. Such a
@@ -1611,14 +1541,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		retainAuthCooldown := modelKey == "" && !wasTerminalUnauthorized && result.ExecutionSeq > 0 &&
 			isAuthActiveCooldown(auth, now) && auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
-		// A result dispatched before the account was suspended, for any model,
-		// changes nothing while the suspension record stands. A later
-		// suspension report still goes through.
-		if staleAccountSuspensionResult(auth, result) {
-			// Keep the suspension recorded after this execution was dispatched.
-		} else if result.Success {
-			// Any success the guard lets through shows the account works again.
-			accountSuspensionChanged = clearAccountSuspension(auth, result.ExecutionSeq, now)
+
+		if result.Success {
 			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown {
 				auth.InferenceVerified = true
 				auth.LastInferenceVerifiedAt = now
@@ -1647,14 +1571,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
-			if isAccountSuspendedResultError(result.Error) {
-				// Recorded at account scope whatever else the credential is
-				// going through, such as a terminal 401 or a credential quota.
-				if recordAccountSuspension(auth, result.Error, m.currentExecutionSeq(), now, m.cooldownDisabledForAuth(auth)) {
-					accountSuspensionLog = accountSuspendedLogMessage(auth.accountSuspension)
-				}
-				accountSuspensionChanged = true
-			}
 			if modelKey != "" {
 				if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
@@ -1686,14 +1602,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					// layer and are never independent.
 					outerState := state
 					savedOuterState := state.cloneShallow()
-					// A suspension keeps this model's whole pre-suspension stack,
-					// credential quota layer included, beneath it.
-					var suspensionShadow *ModelState
-					replaceSuspensionShadow := isAccountSuspendedResultError(result.Error) && !isAccountSuspendedResultError(state.LastError)
-					if replaceSuspensionShadow && isModelStateActiveCooldown(state, now) {
-						suspensionShadow = state.Clone()
-						suspensionShadow.suspensionShadow = nil
-					}
 					ownLayerPending := !result.CredentialScope &&
 						auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
 					if ownLayerPending {
@@ -1728,6 +1636,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					// A suspended account cools like a credential quota: every
+					// model, to the retry the executor attached.
+					if result.CredentialScope && isAccountSuspendedResultError(result.Error) {
+						statusCode = http.StatusTooManyRequests
+					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -1755,13 +1668,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							state.NextRetryAfter = time.Time{}
 						} else {
 							state.NextRetryAfter = now.Add(30 * time.Minute)
-						}
-					} else if isAccountSuspendedResultError(result.Error) {
-						// The upstream refuses every model on a suspended account,
-						// so every model shows it, not just this one.
-						applyAccountSuspension(auth, result.Error, now, disableCooling, !wasTerminalUnauthorized)
-						if disableCooling {
-							state.NextRetryAfter = time.Time{}
 						}
 					} else if !result.CredentialScope && isTransientRateLimitResultError(result.Error) && statusCode == http.StatusTooManyRequests {
 						// Transient per-turn capacity rejection (issue 7017): cool
@@ -2113,15 +2019,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state = outerState
 						modelState = state
 					}
-					if replaceSuspensionShadow {
-						state.suspensionShadow = suspensionShadow
-					}
-					if result.CredentialScope && !disableCooling && statusCodeFromResult(result.Error) == 429 {
+					if result.CredentialScope && !disableCooling && statusCode == http.StatusTooManyRequests {
 						auth.cooldownRecordedSeq = cooldownSeq
 						for _, otherState := range auth.ModelStates {
 							if otherState != nil && otherState != state {
 								otherState.cooldownRecordedSeq = cooldownSeq
 							}
+						}
+					}
+					if isAccountSuspendedResultError(result.Error) {
+						state.StatusMessage = accountSuspendedStatusMessage(result.RetryAfter, !disableCooling)
+						if !wasTerminalUnauthorized {
+							auth.StatusMessage = state.StatusMessage
 						}
 					}
 					auth.Status = StatusError
@@ -2151,6 +2060,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					if isAccountSuspendedResultError(result.Error) {
+						auth.StatusMessage = accountSuspendedStatusMessage(result.RetryAfter, !disableCooling)
+					}
 					if !disableCooling && statusCodeFromResult(result.Error) == 429 && auth.Quota.Exceeded {
 						auth.Quota.cooldownEvaluated = true
 						if keptPriorAuthQuota {
@@ -2211,10 +2123,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	if accountSuspensionLog != "" && authSnapshot != nil {
-		logEntryWithRequestID(ctx).WithFields(log.Fields{"auth_id": authSnapshot.ID, "provider": authSnapshot.Provider}).Warn(accountSuspensionLog)
+		logEntryWithRequestID(ctx).WithField("auth_id", authSnapshot.ID).WithField("provider", authSnapshot.Provider).Warn(accountSuspensionLog)
 	}
 	if m.scheduler != nil && authSnapshot != nil {
-		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh || accountSuspensionChanged
+		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh
 		var targetModels []string
 		if !credentialScopedResult && modelKey != "" {
 			targetModels = append(targetModels, modelKey)
@@ -2532,14 +2444,6 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		}
 		merged.credentialQuotaPropagated = target.credentialQuotaPropagated || source.credentialQuotaPropagated
 	}
-	// Keep the layer a suspension covers while the merged state is still suspended.
-	if isAccountSuspendedResultError(merged.LastError) {
-		if preferred.suspensionShadow != nil {
-			merged.suspensionShadow = preferred.suspensionShadow.Clone()
-		} else if fallback.suspensionShadow != nil {
-			merged.suspensionShadow = fallback.suspensionShadow.Clone()
-		}
-	}
 	*target = merged
 	return target
 }
@@ -2558,7 +2462,6 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.forceCooldownUntil = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
-	state.suspensionShadow = nil
 	state.UpdatedAt = now
 }
 
@@ -4046,6 +3949,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if isAccountSuspendedResultError(resultErr) {
+		statusCode = http.StatusTooManyRequests
+	}
 	if isTransientRateLimitResultError(resultErr) && statusCode == http.StatusTooManyRequests {
 		// Without a model key the transient capacity rejection degrades to an
 		// auth-level transient cooldown (issue 7017), never quota exhaustion.
@@ -4071,11 +3977,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			BackoffLevel:  backoffLevel,
 		})
 		auth.NextRetryAfter = next
-	} else if isAccountSuspendedResultError(resultErr) {
-		applyAccountSuspension(auth, resultErr, now, disableCooling, true)
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		}
 	} else if isInvalidGrantResultError(resultErr) {
 		auth.StatusMessage = "invalid_grant"
 		if disableCooling {

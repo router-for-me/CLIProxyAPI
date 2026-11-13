@@ -46,6 +46,15 @@ func TestNewAntigravityStatusErr_AccountSuspended(t *testing.T) {
 			if status := err.(interface{ StatusCode() int }).StatusCode(); status != tc.status || err.Error() != tc.body {
 				t.Fatalf("status %d, message %q changed", status, err.Error())
 			}
+			// A suspension is credential scoped with a 24h retry, like a credential quota.
+			scoped := err.(interface{ IsCredentialScoped() bool }).IsCredentialScoped()
+			retryAfter := err.(interface{ RetryAfter() *time.Duration }).RetryAfter()
+			if tc.want && (!scoped || retryAfter == nil || *retryAfter != 24*time.Hour) {
+				t.Fatalf("credential scoped %v, retry %v, want true and 24h", scoped, retryAfter)
+			}
+			if !tc.want && scoped {
+				t.Fatal("an ordinary error became credential scoped")
+			}
 		})
 	}
 }
