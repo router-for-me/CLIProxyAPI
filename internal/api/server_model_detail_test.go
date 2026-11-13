@@ -2,10 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -165,33 +163,39 @@ func TestGeminiModelDetailUsesFilteredCatalog(t *testing.T) {
 			calls := 0
 			server.handlers.SetPluginHost(&mockModelListInterceptorHost{interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
 				calls++
-				var catalog struct {
-					Models []map[string]any `json:"models"`
+				models := ojson.GetBytesNoCopy(req.Body, "models")
+				if !ojson.ValidBytes(req.Body) || !models.IsArray() {
+					t.Fatalf("invalid model catalog: %s", req.Body)
 				}
-				if err := json.Unmarshal(req.Body, &catalog); err != nil {
-					t.Fatal(err)
-				}
-				filtered := make([]map[string]any, 0, len(catalog.Models))
-				for _, model := range catalog.Models {
-					if model["name"] != "models/hidden" {
-						filtered = append(filtered, model)
+				doc := ojson.NewDocString(`{"models":[]}`)
+				for _, model := range models.Array() {
+					if model.Get("name").String() != "models/hidden" {
+						if err := doc.SetRaw("models.-1", model.Raw); err != nil {
+							t.Fatalf("append model: %v", err)
+						}
 					}
 				}
-				body, err := json.Marshal(gin.H{"models": filtered})
-				if err != nil {
-					t.Fatal(err)
-				}
-				return pluginapi.ResponseInterceptResponse{Body: body}
+				return pluginapi.ResponseInterceptResponse{Body: doc.Bytes()}
 			}})
 			after := get("/v1beta/models/models/visible")
-			var beforeBody, afterBody map[string]any
-			if err := json.Unmarshal(before.Body.Bytes(), &beforeBody); err != nil {
-				t.Fatal(err)
+			beforeBody := ojson.ParseBytes(before.Body.Bytes())
+			afterBody := ojson.ParseBytes(after.Body.Bytes())
+			if after.Code != http.StatusOK || !ojson.ValidBytes(before.Body.Bytes()) || !ojson.ValidBytes(after.Body.Bytes()) || !beforeBody.IsObject() || !afterBody.IsObject() {
+				t.Fatalf("invalid visible detail: %d %s; before %s", after.Code, after.Body.String(), before.Body.String())
 			}
-			if err := json.Unmarshal(after.Body.Bytes(), &afterBody); err != nil {
-				t.Fatal(err)
-			}
-			if after.Code != http.StatusOK || !reflect.DeepEqual(beforeBody, afterBody) {
+			beforeFields, afterFields := 0, 0
+			beforeBody.ForEach(func(key, value ojson.Result) bool {
+				beforeFields++
+				if got := afterBody.Get(key.String()); !got.Exists() || got.Raw != value.Raw {
+					t.Errorf("visible detail field %s = %s, want %s", key.String(), got.Raw, value.Raw)
+				}
+				return true
+			})
+			afterBody.ForEach(func(_, _ ojson.Result) bool {
+				afterFields++
+				return true
+			})
+			if beforeFields != afterFields {
 				t.Fatalf("visible detail changed: %d %s; before %s", after.Code, after.Body.String(), before.Body.String())
 			}
 			if rr := get("/v1beta/models/hidden"); rr.Code != http.StatusNotFound {
