@@ -189,6 +189,9 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 			log.WithError(errUpdate).Error("failed to update Codex Live media relay configuration")
 		}
 	}
+	if s.museCodeHandler != nil {
+		s.museCodeHandler.UpdateConfig(cfg)
+	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
