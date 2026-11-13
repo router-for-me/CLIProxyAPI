@@ -411,6 +411,14 @@ func (h *Host) callQuotaFetch(ctx context.Context, record capabilityRecord, prov
 			}
 		}
 	}
+	// Debounce identical requests arriving in quick succession: they share one in-flight
+	// call and reuse a recent successful result instead of hitting the provider again.
+	return h.quotaFetches.fetch(ctx, quotaFetchCacheKey(record, req), func(loadCtx context.Context) (pluginapi.QuotaFetchResponse, bool, error) {
+		return h.loadQuotaFetch(loadCtx, record, provider, authRecord, req)
+	})
+}
+
+func (h *Host) loadQuotaFetch(ctx context.Context, record capabilityRecord, provider pluginapi.QuotaProvider, authRecord *coreauth.Auth, req pluginapi.QuotaFetchRequest) (resp pluginapi.QuotaFetchResponse, handled bool, err error) {
 	if req.HTTPClient == nil {
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
@@ -459,6 +467,9 @@ func (h *Host) callQuotaReset(ctx context.Context, record capabilityRecord, prov
 		req.HTTPClient = h.newHTTPClient(authRecord, req.Provider)
 	}
 	req.Host = h.hostConfigSummary()
+	// Drop debounced quota results once the reset attempt finishes, so subsequent fetches
+	// (including ones that overlapped the reset) observe post-reset state.
+	defer h.quotaFetches.invalidate()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.fusePlugin(record.id, "QuotaProvider.ResetQuota", recovered)
