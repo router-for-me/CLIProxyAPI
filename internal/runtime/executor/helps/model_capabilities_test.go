@@ -462,6 +462,163 @@ func TestApplyRequestThinkingReconcilesClaudeOpenAICompatToolCallReasoning(t *te
 			},
 			wantExists: false,
 		},
+		{
+			name:       "openai ingress without effort injects placeholder",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+			wantExists:    true,
+			wantReasoning: " ",
+		},
+		{
+			name:       "openai ingress preserves real reasoning",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","reasoning_content":"actual thought","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","reasoning_content":"actual thought","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+			wantExists:    true,
+			wantReasoning: "actual thought",
+		},
+		{
+			name:       "openai ingress reasoning none keeps passthrough value",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","reasoning_effort":"none","messages":[{"role":"assistant","content":"","reasoning_content":" ","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","reasoning_effort":"none","messages":[{"role":"assistant","content":"","reasoning_content":" ","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels:      []string{"none", "low", "medium", "high"},
+					ZeroAllowed: true,
+				},
+			},
+			wantExists:    true,
+			wantReasoning: " ",
+		},
+		{
+			name:       "openai ingress empty tool_calls is not a tool turn",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+			wantExists: false,
+		},
+		{
+			name:       "openai ingress model without thinking support is untouched",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: nil,
+			},
+			wantExists: false,
+		},
+		{
+			name:       "openai ingress non-compat model untouched",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: false,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+			wantExists: false,
+		},
+		{
+			name:       "openai ingress keeps empty string as sent",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[{"role":"assistant","content":"","reasoning_content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[{"role":"assistant","content":"","reasoning_content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+			wantExists:    true,
+			wantReasoning: "",
+		},
+		{
+			name:       "openai ingress fills null value",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[{"role":"assistant","content":"","reasoning_content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[{"role":"assistant","content":"","reasoning_content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+			wantExists:    true,
+			wantReasoning: " ",
+		},
+		{
+			name:       "claude ingress still fills whitespace thinking",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","thinking":{"type":"enabled","budget_tokens":1024}}`,
+			translated: `{"model":"deepseek-v4-flash","reasoning_effort":"high","messages":[{"role":"assistant","content":"","reasoning_content":"\n","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "claude",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+			wantExists:    true,
+			wantReasoning: " ",
+		},
+		{
+			name:       "openai ingress targeting a non-openai format is untouched",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			translated: `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`,
+			fromFormat: "openai",
+			toFormat:   "gemini",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+			wantExists: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := cliproxyexecutor.Request{
@@ -499,5 +656,68 @@ func TestApplyRequestThinkingReconcilesClaudeOpenAICompatToolCallReasoning(t *te
 				t.Fatalf("ApplyRequestThinkingDoc() reasoning_content = %q, want %q; out=%s", gotDoc.String(), tc.wantReasoning, doc.String())
 			}
 		})
+	}
+}
+
+func TestApplyRequestThinkingDocOpenAICompatMixedTurns(t *testing.T) {
+	const translated = `{"model":"deepseek-v4-flash","messages":[` +
+		`{"role":"user","content":"check the file"},` +
+		`{"role":"assistant","content":"checking","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"call_1","content":"ok"},` +
+		`{"role":"assistant","content":"done"}]}`
+
+	req := cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek-v4-flash"}`),
+		Metadata: map[string]any{
+			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+			},
+		},
+	}
+	opts := cliproxyexecutor.Options{OriginalRequest: req.Payload}
+
+	doc := ojson.NewDocString(translated)
+	if err := helps.ApplyRequestThinkingDoc(doc, req, opts, "openai", "openai", "openai-compatibility"); err != nil {
+		t.Fatalf("ApplyRequestThinkingDoc() error = %v", err)
+	}
+
+	if got := doc.Get("messages.1.reasoning_content").String(); got != " " {
+		t.Fatalf("tool-call turn reasoning_content = %q, want 1-char placeholder; out=%s", got, doc.String())
+	}
+	if doc.Get("messages.0.reasoning_content").Exists() {
+		t.Fatalf("user message received reasoning_content; out=%s", doc.String())
+	}
+	if doc.Get("messages.3.reasoning_content").Exists() {
+		t.Fatalf("text-only assistant message received reasoning_content; out=%s", doc.String())
+	}
+}
+
+func TestApplyRequestThinkingDocOpenAICompatReconcileIsIdempotent(t *testing.T) {
+	const translated = `{"model":"deepseek-v4-flash","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`
+
+	req := cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: []byte(`{"model":"deepseek-v4-flash"}`),
+		Metadata: map[string]any{
+			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+		},
+	}
+	opts := cliproxyexecutor.Options{OriginalRequest: req.Payload}
+
+	doc := ojson.NewDocString(translated)
+	for i := 0; i < 3; i++ {
+		if err := helps.ApplyRequestThinkingDoc(doc, req, opts, "openai", "openai", "openai-compatibility"); err != nil {
+			t.Fatalf("ApplyRequestThinkingDoc() pass %d error = %v", i, err)
+		}
+		if got := doc.Get("messages.0.reasoning_content").String(); got != " " {
+			t.Fatalf("pass %d reasoning_content = %q, want 1-char placeholder; out=%s", i, got, doc.String())
+		}
 	}
 }
