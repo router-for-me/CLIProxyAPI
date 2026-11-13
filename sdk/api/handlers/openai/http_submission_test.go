@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
@@ -27,14 +28,19 @@ func submissionRequest(t *testing.T, upstream string, stream bool, transport htt
 }
 
 func submissionRequestPath(t *testing.T, upstream string, stream bool, transport http.RoundTripper, path string) *httptest.ResponseRecorder {
+	return submissionRequestWithHook(t, upstream, stream, transport, path, nil, false)
+}
+
+func submissionRequestWithHook(t *testing.T, upstream string, stream bool, transport http.RoundTripper, path string, hook coreauth.Hook, homeMode bool) *httptest.ResponseRecorder {
 	t.Helper()
 	const provider = "submission-test"
 	model := "submission-" + strings.ReplaceAll(t.Name(), "/", "-")
-	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, hook)
 	manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor(provider, &config.Config{}))
 	if transport != nil {
 		manager.SetRoundTripperProvider(submissionTransport{transport})
 	}
+	var auths []*coreauth.Auth
 	for _, suffix := range []string{"a", "b"} {
 		auth := &coreauth.Auth{ID: model + suffix, Provider: provider, Status: coreauth.StatusActive,
 			ProxyURL: "direct", Attributes: map[string]string{"base_url": upstream, "api_key": "synthetic"}}
@@ -45,8 +51,13 @@ func submissionRequestPath(t *testing.T, upstream string, stream bool, transport
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 			t.Fatal(errRegister)
 		}
+		auths = append(auths, auth)
 		registry.GetGlobalRegistry().RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}})
 		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+	if homeMode {
+		manager.SetConfig(&config.Config{Home: config.HomeConfig{Enabled: true}})
+		manager.PublishHomeDispatch(&submissionHomeDispatcher{auths: auths}, executionregistry.New(), 1)
 	}
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	router := gin.New()

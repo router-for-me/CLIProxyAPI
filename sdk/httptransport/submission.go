@@ -8,6 +8,8 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
+
+	"github.com/MoeForge/moego/ojson"
 )
 
 type submissionKey struct{}
@@ -32,12 +34,26 @@ func WithSubmissionTracking(ctx context.Context) context.Context {
 	return context.WithValue(ctx, submissionKey{}, &submissionState{})
 }
 
+// WithoutSubmissionTracking keeps side-effect-free operations replayable even
+// when their context came from a generation attempt.
+func WithoutSubmissionTracking(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, submissionKey{}, (*submissionState)(nil))
+}
+
 // OutcomeUnknownError means the provider may have executed the request. Its
 // transport cause is available to operators, never included in the public body.
 type OutcomeUnknownError struct{ Cause error }
 
 func (*OutcomeUnknownError) Error() string {
-	return `{"error":{"message":"Upstream disconnected after submission. The request was not replayed and its outcome is unknown.","type":"server_error","code":"upstream_outcome_unknown","retryable":false}}`
+	doc := ojson.NewDoc([]byte(`{}`))
+	_ = doc.Set("error.message", "Upstream disconnected after submission. The request was not replayed and its outcome is unknown.")
+	_ = doc.Set("error.type", "server_error")
+	_ = doc.Set("error.code", "upstream_outcome_unknown")
+	_ = doc.Set("error.retryable", false)
+	return doc.String()
 }
 func (e *OutcomeUnknownError) Unwrap() error       { return e.Cause }
 func (*OutcomeUnknownError) StatusCode() int       { return http.StatusBadGateway }
