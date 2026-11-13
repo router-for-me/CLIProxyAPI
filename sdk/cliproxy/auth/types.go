@@ -159,6 +159,10 @@ type Auth struct {
 	// LastError and model states, which other errors overwrite. Persisted via
 	// CooldownStateRecord.AccountSuspension.
 	accountSuspension *AccountSuspensionRecord `json:"-"`
+	// accountSuspensionClearedSeq is the request-order watermark of the success
+	// that last cleared a suspension; older suspension responses are stale.
+	// Runtime only.
+	accountSuspensionClearedSeq uint64 `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`

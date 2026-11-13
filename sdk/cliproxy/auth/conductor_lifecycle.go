@@ -405,6 +405,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		// The suspension record is runtime state: the live auth holds the
 		// current one, whatever object a refresh or file reload hands in.
 		auth.accountSuspension = existing.accountSuspension.clone()
+		auth.accountSuspensionClearedSeq = existing.accountSuspensionClearedSeq
 		if isFileSnapshot {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt

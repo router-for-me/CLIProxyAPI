@@ -311,6 +311,14 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 	if after.cooldownRecordedSeq != before.cooldownRecordedSeq && (!preserveConcurrent || target.cooldownRecordedSeq == before.cooldownRecordedSeq) {
 		target.cooldownRecordedSeq = after.cooldownRecordedSeq
 	}
+	if !accountSuspensionRuntimeEqual(after.accountSuspension, before.accountSuspension) &&
+		(!preserveConcurrent || accountSuspensionRuntimeEqual(target.accountSuspension, before.accountSuspension)) {
+		target.accountSuspension = after.accountSuspension.clone()
+	}
+	if after.accountSuspensionClearedSeq != before.accountSuspensionClearedSeq &&
+		(!preserveConcurrent || target.accountSuspensionClearedSeq == before.accountSuspensionClearedSeq) {
+		target.accountSuspensionClearedSeq = after.accountSuspensionClearedSeq
+	}
 	if !maps.Equal(after.Quota.cooldownSignals, before.Quota.cooldownSignals) && (!preserveConcurrent || maps.Equal(target.Quota.cooldownSignals, before.Quota.cooldownSignals)) {
 		target.Quota.cooldownSignals = maps.Clone(after.Quota.cooldownSignals)
 	}

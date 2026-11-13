@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
@@ -590,5 +592,165 @@ func TestManager_MarkResult_AccountSuspensionSurvivesTokenRecovery(t *testing.T)
 		if IsAuthAvailableForModel(auth, model, time.Now().Add(6*time.Hour)) {
 			t.Fatalf("%s selectable 6h after the suspension once the 401 cleared", model)
 		}
+	}
+}
+
+func TestManager_Update_KeepsSuspensionCoolingDroppedDuringSave(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	store := &blockingTestAuthStore{}
+	m := NewManager(store, nil, nil)
+	id := "ag-suspended-save-window"
+	registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: "model-a"}, {ID: "model-b"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	// Metadata makes the credential one the store saves.
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "antigravity", Metadata: map[string]any{"type": "antigravity"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	saveStarted, releaseSave := make(chan struct{}, 1), make(chan struct{})
+	var blockSave atomic.Bool
+	store.onSave = func() {
+		if blockSave.Load() {
+			saveStarted <- struct{}{}
+			<-releaseSave
+		}
+	}
+	blockSave.Store(true)
+	current, _ := m.GetByID(id)
+	done := make(chan error, 1)
+	go func() {
+		refreshed := current.Clone()
+		refreshed.Label = "refreshed"
+		_, errUpdate := m.Update(context.Background(), refreshed)
+		done <- errUpdate
+	}()
+	select {
+	case <-saveStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the update never reached its save")
+	}
+	// Cooling is switched off while the update is saving.
+	blockSave.Store(false)
+	cfg := &internalconfig.Config{DisableCooling: true}
+	m.runtimeConfig.Store(cfg)
+	m.clearDisabledCooldownStates(cfg)
+	close(releaseSave)
+	if errUpdate := <-done; errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+
+	auth, _ := m.GetByID(id)
+	if until, active := activeAccountSuspension(auth, time.Now()); active || !hasAccountSuspension(auth) {
+		t.Fatalf("after the update the suspension blocks until %v with cooling off, recorded %v", until, hasAccountSuspension(auth))
+	}
+}
+
+func TestManager_RestoreCooldownStates_KeepsSuspensionPastShorterAuthCooldown(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b", "model-c")
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+	// A 500 on another model pulls the credential's own retry time down to a minute.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-c", ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusInternalServerError, Message: "boom"}})
+	raw, errMarshal := json.Marshal(m.cooldownStateRecordsSnapshot())
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var records []CooldownStateRecord
+	if errUnmarshal := json.Unmarshal(raw, &records); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+
+	// The process comes back an hour later.
+	later := time.Now().Add(time.Hour)
+	restarted := NewManager(nil, nil, nil)
+	if _, errRegister := restarted.Register(context.Background(), &Auth{ID: id, Provider: "antigravity"}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	restarted.mu.Lock()
+	for _, record := range records {
+		restarted.restoreCooldownRecordLocked(record, later)
+	}
+	auth := restarted.auths[id].Clone()
+	restarted.mu.Unlock()
+	if _, active := activeAccountSuspension(auth, later); !active || IsAuthAvailableForModel(auth, "a-model-it-never-served", later) {
+		t.Fatal("the suspension was dropped on restore because the credential's own cooldown was shorter")
+	}
+}
+
+func TestManager_MarkResult_StaleSuspensionAfterClearIsIgnored(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	olderSeq := m.nextExecutionSeq()
+	first := suspendedResult(id, "model-a")
+	first.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), first)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+
+	// A 403 from a request sent before the success that cleared the suspension.
+	late := suspendedResult(id, "model-b")
+	late.ExecutionSeq = olderSeq
+	m.MarkResult(context.Background(), late)
+
+	auth, _ := m.GetByID(id)
+	if hasAccountSuspension(auth) || !IsAuthAvailableForModel(auth, "model-b", time.Now().Add(time.Second)) {
+		t.Fatal("a 403 sent before the clearing success suspended the account again")
+	}
+	if entries := suspensionWarnings(hook); len(entries) != 1 {
+		t.Fatalf("got %d suspension log lines, want 1", len(entries))
+	}
+}
+
+func TestManager_RestoreCooldownStates_KeepsWrappedReportingModelCooldown(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	inFlight := m.nextExecutionSeq()
+	long, hour := 48*time.Hour, time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", RetryAfter: &long, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", RetryAfter: &hour, CredentialScope: true, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"}})
+	report := suspendedResult(id, "model-a")
+	report.ExecutionSeq = inFlight
+	m.MarkResult(context.Background(), report)
+
+	raw, errMarshal := json.Marshal(m.cooldownStateRecordsSnapshot())
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var records []CooldownStateRecord
+	if errUnmarshal := json.Unmarshal(raw, &records); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	restarted := NewManager(nil, nil, nil)
+	if _, errRegister := restarted.Register(context.Background(), &Auth{ID: id, Provider: "antigravity"}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	restarted.SetCooldownStateStore(&mockCooldownStateStore{records: records})
+	if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatal(errRestore)
+	}
+	restarted.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: restarted.nextExecutionSeq()})
+
+	auth, _ := restarted.GetByID(id)
+	if state := auth.ModelStates["model-a"]; state == nil || state.credentialQuotaShadow == nil || state.credentialQuotaShadow.LastError == nil ||
+		state.credentialQuotaShadow.LastError.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("after a restart model-a's own layer beneath the credential quota did not come back: %+v", state)
+	}
+	if IsAuthAvailableForModel(auth, "model-a", time.Now().Add(30*time.Hour)) {
+		t.Fatal("after a restart model-a lost its own 48h cooldown")
+	}
+}
+
+func TestClearDisabledCooldownStateForAuth_CountsDroppedSuspensionDeadline(t *testing.T) {
+	now := time.Now()
+	auth := &Auth{ID: "ag-suspended-only", Provider: "antigravity",
+		accountSuspension: &AccountSuspensionRecord{RecordedAt: now, Until: now.Add(accountSuspendedCooldown)}}
+	if !clearDisabledCooldownStateForAuth(auth, now) {
+		t.Fatal("switching cooling off dropped the suspension deadline without reporting a change")
+	}
+	if !hasAccountSuspension(auth) || !auth.accountSuspension.Until.IsZero() {
+		t.Fatalf("suspension record = %+v, want it kept without a deadline", auth.accountSuspension)
 	}
 }

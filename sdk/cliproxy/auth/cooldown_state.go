@@ -37,7 +37,7 @@ type CooldownStateRecord struct {
 	// SuspensionShadow preserves a model's own cooldown beneath an account
 	// suspension, so clearing the suspension after a restart can still
 	// reinstate a cooldown that outlives it.
-	SuspensionShadow *ModelState `json:"suspension_shadow,omitempty"`
+	SuspensionShadow *SuspendedModelLayer `json:"suspension_shadow,omitempty"`
 	// AccountSuspension preserves the account-wide suspension record on the
 	// auth-level record.
 	AccountSuspension *AccountSuspensionRecord `json:"account_suspension,omitempty"`
@@ -59,6 +59,15 @@ type CooldownStateRecord struct {
 	// ForceCooldownEvaluated marks records produced by provenance-aware versions so
 	// a zero ForceCooldownUntil means "explicitly ordinary" rather than legacy unknown.
 	ForceCooldownEvaluated bool `json:"force_cooldown_evaluated,omitempty"`
+}
+
+// SuspendedModelLayer is a model's own cooldown stack saved beneath an account
+// suspension. IndependentState and CredentialQuotaPropagated keep the
+// credential quota layer the state carried, the way a record's own fields do.
+type SuspendedModelLayer struct {
+	State                     *ModelState `json:"state"`
+	IndependentState          *ModelState `json:"independent_state,omitempty"`
+	CredentialQuotaPropagated bool        `json:"credential_quota_propagated,omitempty"`
 }
 
 // CooldownStateStore persists runtime cooldown state independently from auth tokens.

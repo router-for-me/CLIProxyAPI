@@ -22,8 +22,9 @@ func isAccountSuspendedResultError(err *Error) bool {
 
 // AccountSuspensionRecord marks a credential whose account the upstream has
 // suspended. Every suspension response sets it, other errors never touch it,
-// and only a success or disabling the credential (or a manual quota reset)
-// clears it. It is persisted with the auth-level cooldown record.
+// and only a success, disabling the credential, or the cooldown reset
+// (POST /v8/management/routing/cooldown/reset, also open to plugins) clears
+// it. It is persisted with the auth-level cooldown record.
 type AccountSuspensionRecord struct {
 	// RecordedAt is when the first suspension response arrived.
 	RecordedAt time.Time `json:"recorded_at"`
@@ -44,6 +45,11 @@ func (r *AccountSuspensionRecord) clone() *AccountSuspensionRecord {
 	return &copyRecord
 }
 
+// accountSuspensionRuntimeEqual also compares the runtime watermark.
+func accountSuspensionRuntimeEqual(a, b *AccountSuspensionRecord) bool {
+	return accountSuspensionRecordEqual(a, b) && (a == nil || a.seq == b.seq)
+}
+
 // hasAccountSuspension reports whether the credential carries a suspension
 // no success has cleared yet, whether or not it is cooling.
 func hasAccountSuspension(auth *Auth) bool {
@@ -59,15 +65,18 @@ func activeAccountSuspension(auth *Auth, now time.Time) (time.Time, bool) {
 	return auth.accountSuspension.Until, true
 }
 
-// staleUnderAccountSuspension reports whether a result, other than another
-// suspension, comes from a request dispatched before the suspension was
-// recorded. Such a result proves nothing about the account.
-func staleUnderAccountSuspension(auth *Auth, result Result) bool {
-	if !hasAccountSuspension(auth) || isAccountSuspendedResultError(result.Error) {
+// staleAccountSuspensionResult reports whether a result comes from a request
+// dispatched before the last suspension change, so it proves nothing about the
+// account: any other result sent before the suspension was recorded, or a
+// suspension sent before the success that cleared the last one.
+func staleAccountSuspensionResult(auth *Auth, result Result) bool {
+	if auth == nil || result.ExecutionSeq == 0 {
 		return false
 	}
-	seq := auth.accountSuspension.seq
-	return result.ExecutionSeq > 0 && seq > 0 && result.ExecutionSeq <= seq
+	if isAccountSuspendedResultError(result.Error) {
+		return result.ExecutionSeq <= auth.accountSuspensionClearedSeq
+	}
+	return hasAccountSuspension(auth) && auth.accountSuspension.seq > 0 && result.ExecutionSeq <= auth.accountSuspension.seq
 }
 
 // recordAccountSuspension sets or refreshes the credential's suspension
@@ -104,11 +113,13 @@ func liftAccountSuspension(auth *Auth) bool {
 }
 
 // dropAccountSuspensionCooldown keeps a recorded suspension once cooling is
-// switched off, but drops its deadline and the retry time from the status.
-func dropAccountSuspensionCooldown(auth *Auth) {
+// switched off, but drops its deadline and the retry time from the status. It
+// reports whether a deadline was dropped.
+func dropAccountSuspensionCooldown(auth *Auth) bool {
 	if !hasAccountSuspension(auth) {
-		return
+		return false
 	}
+	dropped := !auth.accountSuspension.Until.IsZero()
 	auth.accountSuspension.Until = time.Time{}
 	message := accountSuspendedStatusMessage(true)
 	if isAccountSuspendedResultError(auth.LastError) {
@@ -119,6 +130,7 @@ func dropAccountSuspensionCooldown(auth *Auth) {
 			state.StatusMessage = message
 		}
 	}
+	return dropped
 }
 
 // applyAccountSuspension records a suspension on every model state of the
@@ -175,12 +187,16 @@ func applyAccountSuspension(auth *Auth, resultErr *Error, now time.Time, disable
 // clearAccountSuspension lifts the suspension from the credential and every
 // model state once a success shows the account works again. A model whose own
 // earlier cooldown is still running gets that exact stack back; the rest
-// reset. It reports whether anything was cleared.
-func clearAccountSuspension(auth *Auth, now time.Time) bool {
+// reset. A suspension from a request sent at or before successSeq is then
+// stale. It reports whether anything was cleared.
+func clearAccountSuspension(auth *Auth, successSeq uint64, now time.Time) bool {
 	if auth == nil {
 		return false
 	}
 	cleared := liftAccountSuspension(auth)
+	if cleared && successSeq > auth.accountSuspensionClearedSeq {
+		auth.accountSuspensionClearedSeq = successSeq
+	}
 	for _, state := range auth.ModelStates {
 		if state == nil || state.Status == StatusDisabled {
 			continue
