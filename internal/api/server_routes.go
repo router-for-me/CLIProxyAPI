@@ -1010,14 +1010,8 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 }
 
 func (s *Server) handleHomeGeminiModel(c *gin.Context) {
-	entries, ok := s.loadHomeModelEntries(c)
-	if !ok {
-		return
-	}
-
-	action := strings.TrimSpace(strings.TrimPrefix(c.Param("action"), "/"))
-	c.Set(handlers.ModelDetailIDContextKey, action)
-	s.writeModelListResponse(c, "gemini", gin.H{"models": formatHomeGeminiModels(entries)})
+	c.Set(handlers.ModelDetailIDContextKey, strings.TrimSpace(strings.TrimPrefix(c.Param("action"), "/")))
+	s.handleHomeGeminiModels(c)
 }
 
 func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
