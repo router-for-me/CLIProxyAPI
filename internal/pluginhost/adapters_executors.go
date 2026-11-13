@@ -124,23 +124,9 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			continue
 		}
 
-<<<<<<< HEAD
 		provider, okProvider := h.executorProvider(record, executor)
 		if h.isPluginFused(record.id) {
 			continue
-=======
-		nextProviders[provider] = struct{}{}
-		executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, provider, executor))
-		appendModelsForProvider(providerModels, provider, selectedModels[record.id])
-		if len(selectedModels[record.id]) > 0 && executorScopePublishesStaticModels(record.plugin.Capabilities, hasRecordAuthProvider(record)) {
-			clientID := pluginExecutorModelClientID(record.id, provider)
-			modelClientRegistrations = append(modelClientRegistrations, modelClientRegistration{
-				clientID: clientID,
-				provider: provider,
-				models:   selectedModels[record.id],
-			})
-			nextModelClients[clientID] = struct{}{}
->>>>>>> 429ed14c (fix(pluginhost): skip static model client registration for OAuth-backed plugins)
 		}
 		if okProvider {
 			if _, seenProvider := seenProviders[provider]; !seenProvider {
@@ -151,7 +137,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 					if allowsStatic {
 						appendModelsForProvider(providerModels, provider, selectedModels[record.id])
 						appendModelsForProvider(staticAppendProviderModels, provider, selectedModels[record.id])
-						if len(selectedModels[record.id]) > 0 {
+						if len(selectedModels[record.id]) > 0 && executorScopePublishesStaticModels(record.plugin.Capabilities, hasRecordAuthProvider(record)) {
 							clientID := pluginExecutorModelClientID(record.id, provider)
 							modelClientRegistrations = append(modelClientRegistrations, modelClientRegistration{
 								clientID: clientID,
