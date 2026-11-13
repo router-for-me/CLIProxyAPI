@@ -66,15 +66,10 @@ func IsOutcomeUnknown(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// ClassifySubmissionError preserves observed transport failures and classifies
-// incomplete responses. A definitive provider error can still allow failover.
+// ClassifySubmissionError treats every failure after acceptance as ambiguous
+// unless the executor positively parsed a provider error payload.
 func ClassifySubmissionError(ctx context.Context, err error) error {
-	var truncated interface{ IsStreamTruncated() bool }
-	var malformed interface{ IsResponseIncomplete() bool }
-	incomplete := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		(errors.As(err, &truncated) && truncated.IsStreamTruncated()) ||
-		(errors.As(err, &malformed) && malformed.IsResponseIncomplete())
-	return classifySubmissionError(ctx, err, incomplete)
+	return classifySubmissionError(ctx, err, false)
 }
 
 // ClassifyIncompleteResponse marks a protocol failure that left an accepted
@@ -94,7 +89,11 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	if terminal := state.terminal.Load(); terminal != nil {
 		return terminal
 	}
-	if !state.accepted.Load() || (!incomplete && !state.redirected.Load()) {
+	if !state.accepted.Load() {
+		return err
+	}
+	var provider interface{ IsProviderErrorPayload() bool }
+	if !incomplete && !state.redirected.Load() && errors.As(err, &provider) && provider.IsProviderErrorPayload() {
 		return err
 	}
 	return state.fail(err)

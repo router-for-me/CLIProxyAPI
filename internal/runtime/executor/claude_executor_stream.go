@@ -619,7 +619,7 @@ func validateClaudeStreamingResponse(data []byte) error {
 			if message == "" {
 				message = "unknown upstream error"
 			}
-			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned error event: " + message}
+			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned error event: " + message, providerErrorPayload: helps.IsProviderErrorPayload(payload)}
 		case "message_start":
 			message := root.Get("message")
 			if strings.TrimSpace(message.Get("id").String()) == "" || strings.TrimSpace(message.Get("model").String()) == "" {

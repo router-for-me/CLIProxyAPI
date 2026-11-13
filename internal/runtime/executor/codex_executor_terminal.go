@@ -161,7 +161,9 @@ func codexTerminalStreamErrWithCooling(eventData []byte, modelLevelCooling bool)
 	if !ok || !codexTerminalStreamErrShouldHandle(body) {
 		return statusErr{}, nil, false
 	}
-	return newCodexStatusErrWithCooling(http.StatusBadRequest, body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithCooling(http.StatusBadRequest, body, modelLevelCooling)
+	err.providerErrorPayload = helps.IsProviderErrorPayload(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
@@ -176,7 +178,9 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 	if !ok {
 		return statusErr{}, nil, false
 	}
-	return newCodexStatusErrWithCooling(codexTerminalFailureStatus(body), body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithCooling(codexTerminalFailureStatus(body), body, modelLevelCooling)
+	err.providerErrorPayload = helps.IsProviderErrorPayload(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -334,6 +338,7 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 }
 
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
+	providerErrorPayload := helps.IsProviderErrorPayload(body)
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
@@ -342,7 +347,7 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
+	err := statusErr{code: errCode, msg: string(body), providerErrorPayload: providerErrorPayload, credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
 	// the generic Retry-After header. Every other 429 honours the upstream
 	// header so per-turn admission limits cool until their real deadline.

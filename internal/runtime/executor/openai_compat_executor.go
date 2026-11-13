@@ -615,7 +615,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				continue
 			}
 			if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}, true)
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmedLine), providerErrorPayload: helps.IsProviderErrorPayload(trimmedLine)}, true)
 				break
 			}
 		}
@@ -1272,16 +1272,17 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	return statusErr{code: status, msg: string(payload), providerErrorPayload: helps.IsProviderErrorPayload(payload)}, true
 }
 
 type statusErr struct {
-	code               int
-	msg                string
-	retryAfter         *time.Duration
-	credentialScoped   bool
-	streamTruncated    bool
-	transientRateLimit bool
+	code                 int
+	msg                  string
+	retryAfter           *time.Duration
+	credentialScoped     bool
+	streamTruncated      bool
+	providerErrorPayload bool
+	transientRateLimit   bool
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1303,6 +1304,9 @@ func (e statusErr) LogDiagnostic() string { return e.diagnostic }
 // upstream stream that ended without its terminal frame.
 func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 
+// IsProviderErrorPayload distinguishes a parsed upstream refusal from local failures.
+func (e statusErr) IsProviderErrorPayload() bool { return e.providerErrorPayload }
+
 // IsTransientRateLimit marks a transient per-model capacity/admission 429
 // that must not be recorded as credential quota exhaustion.
 func (e statusErr) IsTransientRateLimit() bool { return e.transientRateLimit }
@@ -1311,9 +1315,10 @@ const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:                 status,
+		msg:                  string(body),
+		providerErrorPayload: helps.IsProviderErrorPayload(body),
+		retryAfter:           openAICompatRetryAfter(status, headers, body, time.Now()),
 	}
 }
 

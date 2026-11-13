@@ -198,7 +198,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
 		antiDetail := helps.ParseAntigravityUsage(bodyBytes)
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
-		err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
@@ -479,7 +479,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, scanErr
 	}
 	if pendingFilterMsg != "" {
-		filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+		filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
 		reporter.PublishFailure(ctx, filterErr)
 		return resp, filterErr
@@ -489,7 +489,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, aggregatedPayload, true); zeroOutput {
 		antiDetail := helps.ParseAntigravityUsage(aggregatedPayload)
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
-		err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+		err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
