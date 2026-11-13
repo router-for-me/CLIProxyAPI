@@ -1168,26 +1168,8 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 }
 
 func (s *Server) handleHomeGeminiModel(c *gin.Context) {
-	entries, ok := s.loadHomeModelEntries(c)
-	if !ok {
-		return
-	}
-
-	action := strings.TrimPrefix(c.Param("action"), "/")
-	action = strings.TrimSpace(action)
-	for _, entry := range entries {
-		if homeGeminiModelMatches(entry, action) {
-			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
-			return
-		}
-	}
-
-	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
-		Error: handlers.ErrorDetail{
-			Message: "Not Found",
-			Type:    "not_found",
-		},
-	})
+	c.Set(handlers.ModelDetailIDContextKey, strings.TrimSpace(strings.TrimPrefix(c.Param("action"), "/")))
+	s.handleHomeGeminiModels(c)
 }
 
 func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
@@ -1270,16 +1252,6 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 		model["outputTokenLimit"] = entry.maxCompletionTokens
 	}
 	return model
-}
-
-func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
-	id := strings.TrimSpace(entry.id)
-	if id == "" || action == "" {
-		return false
-	}
-	normalizedAction := strings.TrimPrefix(action, "models/")
-	normalizedID := strings.TrimPrefix(id, "models/")
-	return action == id || action == "models/"+id || normalizedAction == normalizedID
 }
 
 // homeModelsAuthStatus inspects a home models response for an authentication/error envelope.
