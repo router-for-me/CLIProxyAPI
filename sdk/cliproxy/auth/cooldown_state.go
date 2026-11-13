@@ -38,6 +38,9 @@ type CooldownStateRecord struct {
 	// suspension, so clearing the suspension after a restart can still
 	// reinstate a cooldown that outlives it.
 	SuspensionShadow *ModelState `json:"suspension_shadow,omitempty"`
+	// AccountSuspension preserves the account-wide suspension record on the
+	// auth-level record.
+	AccountSuspension *AccountSuspensionRecord `json:"account_suspension,omitempty"`
 	// CooldownSignals persists bounded rejected quota headers captured when
 	// this cooldown was recorded without touching passive Quota.Signals watermarks.
 	CooldownSignals map[string]string `json:"cooldown_signals,omitempty"`

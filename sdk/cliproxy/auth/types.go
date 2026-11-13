@@ -155,6 +155,10 @@ type Auth struct {
 	forceCooldownUntil  time.Time `json:"-"`
 	credQuotaForceUntil time.Time `json:"-"`
 	forceCooldownSeeded bool      `json:"-"`
+	// accountSuspension marks an account the upstream suspended, apart from
+	// LastError and model states, which other errors overwrite. Persisted via
+	// CooldownStateRecord.AccountSuspension.
+	accountSuspension *AccountSuspensionRecord `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -500,6 +504,7 @@ func (a *Auth) Clone() *Auth {
 	}
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
+	copyAuth.accountSuspension = a.accountSuspension.clone()
 	if a.LastError != nil {
 		copyErr := *a.LastError
 		copyAuth.LastError = &copyErr

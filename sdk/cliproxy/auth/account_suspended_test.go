@@ -421,6 +421,10 @@ func TestManager_RestoreCooldownStates_KeepsModelCooldownUnderSuspension(t *test
 	if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
 		t.Fatal(errRestore)
 	}
+	reloaded, _ := restarted.GetByID(id)
+	if _, active := activeAccountSuspension(reloaded, time.Now()); !active || IsAuthAvailableForModel(reloaded, "a-model-it-never-served", time.Now().Add(6*time.Hour)) {
+		t.Fatal("the account suspension did not come back with the saved cooldowns")
+	}
 
 	restarted.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", Success: true, ExecutionSeq: restarted.nextExecutionSeq()})
 	auth, _ := restarted.GetByID(id)
@@ -454,7 +458,7 @@ func TestManager_ClearDisabledCooldownStates_KeepsAccountSuspension(t *testing.T
 
 	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: staleSeq})
 	auth, _ = m.GetByID(id)
-	if !accountSuspensionRecorded(auth) {
+	if !hasAccountSuspension(auth) {
 		t.Fatal("stale success cleared the suspension after cooling was switched off")
 	}
 	later := suspendedResult(id, "model-a")
@@ -478,7 +482,7 @@ func TestManager_Update_KeepsModelLessSuspensionWatermark(t *testing.T) {
 	}
 	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Success: true, ExecutionSeq: staleSeq})
 	auth, _ = m.GetByID(id)
-	if !accountSuspensionRecorded(auth) {
+	if !hasAccountSuspension(auth) {
 		t.Fatal("stale success cleared a suspension recorded without a model after an update")
 	}
 }
@@ -495,5 +499,96 @@ func TestManager_MarkResult_SuccessOnModelUnderSuspensionFreesIt(t *testing.T) {
 	auth, _ := m.GetByID(id)
 	if !IsAuthAvailableForModel(auth, "model-b", time.Now().Add(time.Second)) || auth.ModelStates["model-b"].suspensionShadow != nil {
 		t.Fatal("a success on model-b brought back its old cooldown")
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionKeepsWrappedReportingModelCooldown(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	inFlight := m.nextExecutionSeq()
+	long, hour := 48*time.Hour, time.Hour
+	// model-a has its own cooldown that outlives the suspension, then a
+	// credential quota wraps every model.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", RetryAfter: &long, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", RetryAfter: &hour, CredentialScope: true, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "credential quota"}})
+	// A request sent to model-a earlier comes back with the 403.
+	report := suspendedResult(id, "model-a")
+	report.ExecutionSeq = inFlight
+	m.MarkResult(context.Background(), report)
+
+	// The credential quota window ends, then after an appeal a request succeeds.
+	m.mu.Lock()
+	m.auths[id].Quota.NextRecoverAt = time.Now().Add(-time.Minute)
+	m.mu.Unlock()
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+
+	auth, _ := m.GetByID(id)
+	if IsAuthAvailableForModel(auth, "model-a", time.Now().Add(30*time.Hour)) {
+		t.Fatal("model-a lost its own 48h cooldown from beneath the credential quota when the suspension cleared")
+	}
+	if !IsAuthAvailableForModel(auth, "model-a", time.Now().Add(49*time.Hour)) {
+		t.Fatal("model-a still blocked after its own cooldown")
+	}
+	if state := auth.ModelStates["model-a"]; state.credentialQuotaShadow == nil || state.credentialQuotaShadow.LastError == nil ||
+		state.credentialQuotaShadow.LastError.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("model-a's own layer beneath the credential quota did not come back: %+v", state)
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionSurvivesLaterFailure(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, map[string]any{"disable_cooling": true}, "model-a")
+	staleSeq := m.nextExecutionSeq()
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+	// A fresh failure on the only model replaces its last error and the credential's.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"}})
+	// A request sent before the 403 finishes now.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", Success: true, ExecutionSeq: staleSeq})
+
+	auth, _ := m.GetByID(id)
+	if !hasAccountSuspension(auth) {
+		t.Fatal("suspension gone after a later failure and a stale success")
+	}
+	later := suspendedResult(id, "model-a")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 1 {
+		t.Fatalf("got %d suspension log lines, want 1", len(entries))
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionSurvivesTokenRecovery(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b", "model-c")
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true})
+	// Another request already left the credential terminally unauthorized.
+	m.mu.Lock()
+	terminal := m.auths[id]
+	terminal.LastError = &Error{Code: "unauthorized", HTTPStatus: http.StatusUnauthorized, Message: "access token rejected"}
+	terminal.Unavailable, terminal.Status = true, StatusError
+	terminal.NextRetryAfter, terminal.NextRefreshAfter = time.Time{}, time.Time{}
+	m.mu.Unlock()
+
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// The queued token refresh succeeds and clears the 401.
+	refreshed, _ := m.GetByID(id)
+	if refreshed.Metadata == nil {
+		refreshed.Metadata = map[string]any{}
+	}
+	refreshed.Metadata["access_token"] = "fresh-token"
+	if _, errUpdate := m.Update(context.Background(), refreshed); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+
+	auth, _ := m.GetByID(id)
+	if hasUnauthorizedAuthFailure(auth) {
+		t.Fatal("precondition: the refresh did not clear the 401")
+	}
+	for _, model := range []string{"model-a", "model-b", "model-c"} {
+		if IsAuthAvailableForModel(auth, model, time.Now().Add(6*time.Hour)) {
+			t.Fatalf("%s selectable 6h after the suspension once the 401 cleared", model)
+		}
 	}
 }

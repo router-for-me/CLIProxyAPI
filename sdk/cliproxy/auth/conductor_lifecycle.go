@@ -114,6 +114,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	cooldownStateChanged := normalizeModelStates(auth)
 	seedInitialForceCooldownDeadlines(auth)
 	if auth.Disabled || auth.Status == StatusDisabled {
+		cooldownStateChanged = liftAccountSuspension(auth) || cooldownStateChanged
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	} else if m.cooldownDisabledForAuth(auth) {
 		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
@@ -401,6 +402,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	cooldownStateChanged := false
 	now := time.Now()
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
+		// The suspension record is runtime state: the live auth holds the
+		// current one, whatever object a refresh or file reload hands in.
+		auth.accountSuspension = existing.accountSuspension.clone()
 		if isFileSnapshot {
 			auth.ModelStates = existing.ModelStates
 			auth.LastRefreshedAt = existing.LastRefreshedAt
@@ -563,6 +567,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged
 	seedInitialForceCooldownDeadlines(auth)
 	if auth.Disabled || auth.Status == StatusDisabled {
+		cooldownStateChanged = liftAccountSuspension(auth) || cooldownStateChanged
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
 	} else if m.cooldownDisabledForAuth(auth) {
 		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
