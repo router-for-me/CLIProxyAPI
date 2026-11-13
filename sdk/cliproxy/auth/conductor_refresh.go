@@ -1156,10 +1156,19 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if m == nil || auth == nil || execErr == nil {
 		return auth, false
 	}
-	// Request-scoped failures describe this request, not stale credentials.
-	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
+	if !isUnauthorizedError(execErr) {
 		return auth, false
+	}
+	// Request scope still forbids fallback. A native executor can explicitly
+	// permit only this existing selected-auth refresh path before output.
+	if isRequestScopedError(execErr) {
+		var permission cliproxyexecutor.SameAuthRefreshError
+		if statusCodeFromError(execErr) != http.StatusUnauthorized ||
+			!errors.As(execErr, &permission) || permission == nil || !permission.AllowSameAuthRefresh() ||
+			isRequestStopError(execErr) || isRequestTerminatedError(execErr) ||
+			(ctx != nil && ctx.Err() != nil) || errors.Is(execErr, context.Canceled) || errors.Is(execErr, context.DeadlineExceeded) {
+			return auth, false
+		}
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
 	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.requestScopedErrorConfig(ctx)); ruleMatched {
