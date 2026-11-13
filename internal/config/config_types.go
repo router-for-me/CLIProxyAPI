@@ -254,6 +254,12 @@ type AntigravityConfig struct {
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
+	// TOSPauseWindow controls the pool-wide protective pause armed after the first
+	// 403 TOS_VIOLATION. Accepts a Go duration string (default "6h"). Set to "0",
+	// "off", "false", "none", or "disabled" to disable the pause entirely; the
+	// credential itself is always deactivated regardless of this setting.
+	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

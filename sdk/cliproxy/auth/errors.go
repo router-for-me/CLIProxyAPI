@@ -63,6 +63,26 @@ type Error struct {
 	Retryable bool `json:"retryable"`
 	// HTTPStatus optionally records an HTTP-like status code for the error.
 	HTTPStatus int `json:"http_status,omitempty"`
+	// Metadata carries optional provider-specific detail extracted from the
+	// upstream failure (for example an Antigravity TOS appeal URL) so the
+	// conductor can persist it on the credential record for operator tooling.
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// Clone returns an independent copy of the error, deep-copying the Metadata
+// map so snapshots cannot share mutable state with the original.
+func (e *Error) Clone() *Error {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	if e.Metadata != nil {
+		out.Metadata = make(map[string]string, len(e.Metadata))
+		for key, value := range e.Metadata {
+			out.Metadata[key] = value
+		}
+	}
+	return &out
 }
 
 // IsTerminalAuthError checks if err or any error in its chain represents a permanent upstream auth failure.

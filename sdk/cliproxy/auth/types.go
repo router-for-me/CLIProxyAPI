@@ -497,12 +497,10 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
-		copyErr := *a.LastError
-		copyAuth.LastError = &copyErr
+		copyAuth.LastError = a.LastError.Clone()
 	}
 	if a.RefreshError != nil {
-		copyErr := *a.RefreshError
-		copyAuth.RefreshError = &copyErr
+		copyAuth.RefreshError = a.RefreshError.Clone()
 	}
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
@@ -767,12 +765,7 @@ func (m *ModelState) Clone() *ModelState {
 	copyState := *m
 	copyState.Quota = m.Quota.Clone()
 	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
-		}
+		copyState.LastError = m.LastError.Clone()
 	}
 	if m.credentialQuotaShadow != nil {
 		copyState.credentialQuotaShadow = m.credentialQuotaShadow.cloneShallow()
@@ -789,12 +782,7 @@ func (m *ModelState) cloneShallow() *ModelState {
 	copyState.Quota = m.Quota.Clone()
 	copyState.credentialQuotaShadow = nil
 	if m.LastError != nil {
-		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
-		}
+		copyState.LastError = m.LastError.Clone()
 	}
 	return &copyState
 }
