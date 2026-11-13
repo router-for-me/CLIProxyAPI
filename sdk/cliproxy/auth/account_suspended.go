@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -100,6 +101,53 @@ func recordAccountSuspension(auth *Auth, resultErr *Error, seq uint64, now time.
 		record.AppealURL = appealURL
 	}
 	return created
+}
+
+// showAccountSuspension puts the suspension back on the credential's visible
+// status when a reset or recovery path cleared it while the record stands. A
+// terminal 401 keeps showing, since it needs the owner too. It reports
+// whether anything changed.
+func showAccountSuspension(auth *Auth, now time.Time) bool {
+	if !hasAccountSuspension(auth) || hasUnauthorizedAuthFailure(auth) {
+		return false
+	}
+	if auth.LastError != nil && !isAccountSuspendedResultError(auth.LastError) {
+		return false
+	}
+	changed := false
+	if auth.LastError == nil {
+		auth.LastError = &Error{Code: ErrorCodeAccountSuspended, HTTPStatus: http.StatusForbidden, Message: accountSuspendedMessage}
+		changed = true
+	}
+	if message := accountSuspendedStatusMessage(auth.accountSuspension.Until.IsZero()); auth.StatusMessage != message || auth.Status != StatusError {
+		auth.StatusMessage = message
+		auth.Status = StatusError
+		changed = true
+	}
+	if until, active := activeAccountSuspension(auth, now); active && (!auth.Unavailable || auth.NextRetryAfter.Before(until)) {
+		auth.Unavailable = true
+		auth.NextRetryAfter = until
+		changed = true
+	}
+	return changed
+}
+
+// restoreAccountSuspension brings a saved suspension record back. It runs
+// ahead of the ordinary cooldown guards, so a credential that is terminally
+// unauthorized or not cooling still gets it. It reports whether it did.
+func restoreAccountSuspension(auth *Auth, saved *AccountSuspensionRecord, now time.Time) bool {
+	if auth == nil || saved == nil || !saved.Until.After(now) {
+		return false
+	}
+	if auth.accountSuspension != nil && !saved.Until.After(auth.accountSuspension.Until) {
+		return false
+	}
+	restored := saved.clone()
+	if auth.accountSuspension != nil {
+		restored.seq = auth.accountSuspension.seq
+	}
+	auth.accountSuspension = restored
+	return true
 }
 
 // liftAccountSuspension drops the suspension record when the credential is

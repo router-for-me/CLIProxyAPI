@@ -387,8 +387,18 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		return false
 	}
 	auth := m.auths[authID]
-	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || (m.cooldownDisabledForAuth(auth) && !isForceCooldownRecordAt(record, now)) || hasUnauthorizedAuthFailure(auth) {
+	if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 		return false
+	}
+	// The account suspension comes back whatever else the credential is
+	// going through, so a later save never drops it.
+	suspensionRestored := strings.TrimSpace(record.Model) == "" && restoreAccountSuspension(auth, record.AccountSuspension, now)
+	if (m.cooldownDisabledForAuth(auth) && !isForceCooldownRecordAt(record, now)) || hasUnauthorizedAuthFailure(auth) {
+		if suspensionRestored {
+			showAccountSuspension(auth, now)
+			auth.Generation++
+		}
+		return suspensionRestored
 	}
 	updatedAt := record.UpdatedAt
 	if updatedAt.IsZero() {
@@ -408,15 +418,6 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	seedInitialForceCooldownDeadlines(auth)
 	outerForceUntil := recordOuterForceUntil(record)
 	indepForceUntil := recordIndependentForceUntil(record)
-	if model == "" && record.AccountSuspension != nil && record.AccountSuspension.Until.After(now) {
-		if auth.accountSuspension == nil || record.AccountSuspension.Until.After(auth.accountSuspension.Until) {
-			restored := record.AccountSuspension.clone()
-			if auth.accountSuspension != nil {
-				restored.seq = auth.accountSuspension.seq
-			}
-			auth.accountSuspension = restored
-		}
-	}
 	if model == "" {
 		prevNextRetry := auth.NextRetryAfter
 		prevQuota := auth.Quota.Clone()
@@ -504,6 +505,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			}
 			auth.LastError = cloneError(record.LastError)
 		}
+		showAccountSuspension(auth, now)
 		return true
 	}
 
