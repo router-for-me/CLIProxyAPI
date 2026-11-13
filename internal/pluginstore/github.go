@@ -17,6 +17,7 @@ import (
 
 const userAgent = "CLIProxyAPI"
 const maxPluginStoreRedirects = 10
+const maxPluginStoreArtifactAttempts = 3
 
 // HTTPDoer abstracts the HTTP client used to execute requests.
 type HTTPDoer = httpfetch.Doer
@@ -24,10 +25,13 @@ type HTTPDoer = httpfetch.Doer
 type Client struct {
 	HTTPClient HTTPDoer
 	// NetworkScope distinguishes request state for different proxy/egress configurations.
-	NetworkScope          string
-	RateLimiter           *GitHubRateLimiter
-	RegistryURL           string
-	UserAgent             string
+	NetworkScope string
+	RateLimiter  *GitHubRateLimiter
+	RegistryURL  string
+	UserAgent    string
+	// AcceleratorBase, when set, rewrites GitHub resource URLs as base + original URL
+	// (web download accelerator). It is independent from HTTPClient proxy transport.
+	AcceleratorBase       string
 	Auth                  []AuthConfig
 	ResolvedAuth          []ResolvedAuthConfig
 	ResolvedAuthExpiresAt time.Time
@@ -151,11 +155,45 @@ func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
 }
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
+	attempts := 1
+	if kind == RequestKindArtifact {
+		attempts = maxPluginStoreArtifactAttempts
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		data, errGet := c.getOnce(ctx, requestURL, accept, kind, maxSize)
+		if errGet == nil {
+			return data, nil
+		}
+		lastErr = errGet
+		if ctx.Err() != nil || attempt == attempts || !retryablePluginStoreArtifactError(errGet) {
+			return nil, errGet
+		}
+		log.WithError(errGet).WithFields(log.Fields{
+			"kind":    kind,
+			"attempt": attempt,
+		}).Warn("plugin store artifact download interrupted, retrying")
+	}
+	return nil, lastErr
+}
+
+func (c Client) getOnce(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
 	currentURL := strings.TrimSpace(requestURL)
 	limiter := c.githubRateLimiter()
 	for redirects := 0; ; redirects++ {
 		if errContext := ctx.Err(); errContext != nil {
 			return nil, errContext
+		}
+		// Accelerators are for downloadable GitHub artifact resources
+		// (releases/raw/CDN). Never rewrite registry, metadata, or API
+		// requests: public accelerators share egress IPs and frequently
+		// return GitHub 403 secondary rate limits for non-CDN endpoints.
+		if base := strings.TrimSpace(c.AcceleratorBase); base != "" && kind == RequestKindArtifact {
+			rewritten, errRewrite := ApplyAcceleratorBase(base, currentURL)
+			if errRewrite != nil {
+				return nil, errRewrite
+			}
+			currentURL = rewritten
 		}
 		headers, authenticated, errAuth := c.authHeaders(currentURL, kind)
 		if errAuth != nil {
@@ -171,6 +209,17 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 		if headers.Get("User-Agent") == "" {
 			headers.Set("User-Agent", c.userAgent())
 		}
+		acceleratorHost := ""
+		if parsedURL, errParse := url.Parse(currentURL); errParse == nil {
+			acceleratorHost = parsedURL.Host
+		}
+		log.WithFields(log.Fields{
+			"kind":          kind,
+			"host":          acceleratorHost,
+			"accelerated":   strings.TrimSpace(c.AcceleratorBase) != "" && strings.HasPrefix(currentURL, strings.TrimSpace(c.AcceleratorBase)),
+			"authenticated": authenticated,
+			"redirect":      redirects,
+		}).Debug("plugin store request")
 		resp, errDo := pluginStoreGetNoRedirect(ctx, c.httpClient(), currentURL, headers)
 		if authenticated {
 			for name := range headers {
@@ -200,6 +249,19 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 		}
 		return readPluginStoreResponse(resp, maxSize, authenticated, limiter, rateKey)
 	}
+}
+
+func retryablePluginStoreArtifactError(err error) bool {
+	// Only DeadlineExceeded is immediately fatal; context.Canceled from
+	// mid-read interruptions should still be retried because get() already
+	// checks ctx.Err() before entering the retry loop.
+	if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "context canceled")
 }
 
 func (c Client) httpClient() HTTPDoer {
