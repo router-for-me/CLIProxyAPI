@@ -519,7 +519,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			}
 			state.ensureSSEEventBoundary(c.Writer)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes := claudeErrorDocument(h.toClaudeError(errMsg)).Bytes()
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 		CloseError: func() *interfaces.ErrorMessage {
@@ -631,12 +631,10 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 		body := bytes.Clone(msg.Body)
 		if clienterror.IsClaudeThreadNotFound(status, errors.New(string(body))) {
-			if markedBody, errMarshal := json.Marshal(h.toClaudeError(&interfaces.ErrorMessage{
+			body = claudeErrorDocument(h.toClaudeError(&interfaces.ErrorMessage{
 				StatusCode: status,
 				Error:      errors.New(string(body)),
-			})); errMarshal == nil {
-				body = markedBody
-			}
+			})).Bytes()
 		}
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
@@ -674,10 +672,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
 		c.Writer.Header().Set("x-should-retry", "false")
 	}
-	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
-	if err != nil {
-		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
-	}
+	body := claudeErrorDocument(h.toClaudeErrorWithRetryAfter(msg, retryAfter)).Bytes()
 	appendClaudeAPIResponse(c, body)
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")

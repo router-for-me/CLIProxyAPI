@@ -490,9 +490,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
-			if isRequestTerminatedError(errStream) && !httptransport.IsOutcomeUnknown(errStream) {
-				return nil, errStream
-			}
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(ctx))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
@@ -502,6 +499,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if isRequestTerminatedError(errStream) {
+				return nil, errStream
+			}
 			errStream = annotateTrustedRetryAfterByHint(errStream)
 			syncPreferredUpstreamError(&upstreamErr, errStream)
 			if okAction {
@@ -583,7 +583,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
-			if isRequestTerminatedError(bootstrapErr) && !httptransport.IsOutcomeUnknown(bootstrapErr) {
+			if isRequestTerminatedError(bootstrapErr) {
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(bootstrapErr), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				result.CredentialScope = isCredentialScopedError(bootstrapErr)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.requestScopedErrorConfig(ctx))
